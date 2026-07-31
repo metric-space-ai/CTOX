@@ -1,20 +1,21 @@
 // Ticket cases: dry runs, approvals, close/create/state core transitions,
 // clarification plumbing, executability guards and failed writebacks.
 
+use super::approval_mode::ControlApprovalMode;
 use super::case_state::TicketCaseState;
 use super::{
     action_rationale, canonical_approval_status, canonical_autonomy_level,
     canonical_learning_candidate_status, canonical_verification_status, collapse_inline,
-    create_ticket_knowledge_load, default_execution_actions, enforce_core_transition,
-    initial_case_state_for_approval_mode, load_ticket, map_audit_row, map_case_row,
-    map_learning_candidate_row, map_ticket_clarification_row, mark_remote_events_outbound,
-    now_iso_string, open_ticket_db, parse_domain_csv, parse_json_column, parse_json_or_empty,
-    record_audit, record_ticket_sync_failure, required_evidence_for_bundle, resolve_ticket_control,
-    stable_digest, sync_ticket_system, ControlBundleView, CoreEntityType, CoreEvent,
-    CoreEvidenceRefs, CoreState, CoreTransitionRequest, DryRunRecordView,
-    EffectiveControlResolution, LearningCandidateView, RuntimeLane, TicketAuditRecord,
-    TicketCaseView, TicketClarificationRequestInput, TicketClarificationRequestView,
-    TicketItemView, TicketKnowledgeLoadView, TicketLabelAssignmentView,
+    create_ticket_knowledge_load, default_execution_actions, enforce_core_transition, load_ticket,
+    map_audit_row, map_case_row, map_learning_candidate_row, map_ticket_clarification_row,
+    mark_remote_events_outbound, now_iso_string, open_ticket_db, parse_domain_csv,
+    parse_json_column, parse_json_or_empty, record_audit, record_ticket_sync_failure,
+    required_evidence_for_bundle, resolve_ticket_control, stable_digest, sync_ticket_system,
+    ControlBundleView, CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState,
+    CoreTransitionRequest, DryRunRecordView, EffectiveControlResolution, LearningCandidateView,
+    RuntimeLane, TicketAuditRecord, TicketCaseView, TicketClarificationRequestInput,
+    TicketClarificationRequestView, TicketItemView, TicketKnowledgeLoadView,
+    TicketLabelAssignmentView,
 };
 use crate::mission::ticket_adapters;
 use crate::mission::ticket_protocol;
@@ -44,9 +45,7 @@ pub(super) fn create_dry_run(
     let (label_assignment, bundle, effective_control) = resolve_ticket_control(root, ticket_key)?;
     let now = now_iso_string();
     let case_id = format!("case:{}:{}", ticket_key, stable_digest(&now));
-    let state = TicketCaseState::parse(initial_case_state_for_approval_mode(
-        &effective_control.approval_mode,
-    ))?;
+    let state = ControlApprovalMode::parse(&effective_control.approval_mode)?.initial_case_state();
     let risk_level = risk_level_override
         .map(str::trim)
         .filter(|value| !value.is_empty())

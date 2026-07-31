@@ -18,6 +18,81 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn control_approval_mode_canonical_values_round_trip_and_unknown_fails() -> Result<()> {
+    for mode in approval_mode::ControlApprovalMode::ALL {
+        assert_eq!(
+            approval_mode::ControlApprovalMode::parse(mode.as_str())?,
+            mode
+        );
+    }
+
+    let error = approval_mode::ControlApprovalMode::parse("future_mode")
+        .expect_err("unknown control approval modes must fail closed");
+    assert!(error.to_string().contains("future_mode"));
+    Ok(())
+}
+
+#[test]
+fn dry_run_only_approval_contract_stays_paired() {
+    let mode = approval_mode::ControlApprovalMode::DryRunOnly;
+    assert_eq!(mode.rank(), 0);
+    assert_eq!(
+        mode.missing_approvals(),
+        vec!["execution is disabled for this bundle".to_string()]
+    );
+    assert_eq!(
+        mode.initial_case_state(),
+        case_state::TicketCaseState::Blocked
+    );
+}
+
+#[test]
+fn human_approval_required_contract_stays_paired() {
+    let mode = approval_mode::ControlApprovalMode::HumanApprovalRequired;
+    assert_eq!(mode.rank(), 1);
+    assert_eq!(
+        mode.missing_approvals(),
+        vec!["owner or designated approver".to_string()]
+    );
+    assert_eq!(
+        mode.initial_case_state(),
+        case_state::TicketCaseState::ApprovalPending
+    );
+}
+
+#[test]
+fn bounded_auto_execute_approval_contract_stays_paired() {
+    let mode = approval_mode::ControlApprovalMode::BoundedAutoExecute;
+    assert_eq!(mode.rank(), 2);
+    assert!(mode.missing_approvals().is_empty());
+    assert_eq!(
+        mode.initial_case_state(),
+        case_state::TicketCaseState::Executable
+    );
+}
+
+#[test]
+fn direct_execute_allowed_approval_contract_stays_paired() {
+    let mode = approval_mode::ControlApprovalMode::DirectExecuteAllowed;
+    assert_eq!(mode.rank(), 3);
+    assert!(mode.missing_approvals().is_empty());
+    assert_eq!(
+        mode.initial_case_state(),
+        case_state::TicketCaseState::Executable
+    );
+}
+
+#[test]
+fn unknown_control_approval_mode_does_not_become_approval_pending() {
+    let state = approval_mode::ControlApprovalMode::parse("future_mode")
+        .map(approval_mode::ControlApprovalMode::initial_case_state);
+    assert!(
+        state.is_err(),
+        "unknown approval mode must not silently become approval_pending"
+    );
+}
+
+#[test]
 fn ticket_case_state_canonical_values_round_trip() -> Result<()> {
     for state in case_state::TicketCaseState::ALL {
         assert_eq!(case_state::TicketCaseState::parse(state.as_str())?, state);

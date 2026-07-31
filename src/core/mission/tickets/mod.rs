@@ -9,6 +9,8 @@ pub(crate) use source_skills::{
 };
 use source_skills::{default_skill_for_self_work_kind, resolve_skill_bundle_dir_hint};
 
+mod approval_mode;
+use approval_mode::ControlApprovalMode;
 mod case_state;
 mod event_route_status;
 use event_route_status::TicketEventRouteStatus;
@@ -4170,7 +4172,7 @@ fn put_autonomy_grant(root: &Path, input: AutonomyGrantInput) -> Result<Autonomy
         }
     }
 
-    let approval_mode = canonical_control_approval_mode(&input.approval_mode)?;
+    let approval_mode = ControlApprovalMode::parse(&input.approval_mode)?;
     let autonomy_level = canonical_autonomy_level(&input.autonomy_level)?;
     let now = now_iso_string();
     let grant_version = conn
@@ -4202,7 +4204,7 @@ fn put_autonomy_grant(root: &Path, input: AutonomyGrantInput) -> Result<Autonomy
             input.label,
             grant_version,
             bundle_version,
-            approval_mode,
+            approval_mode.as_str(),
             autonomy_level,
             input.approved_by.trim(),
             input.source_candidate_id,
@@ -4222,7 +4224,7 @@ fn put_autonomy_grant(root: &Path, input: AutonomyGrantInput) -> Result<Autonomy
             bundle_version: Some(bundle_version),
             details: json!({
                 "grant_version": grant_version,
-                "approval_mode": approval_mode,
+                "approval_mode": approval_mode.as_str(),
                 "autonomy_level": autonomy_level,
                 "approved_by": input.approved_by.trim(),
                 "source_candidate_id": input.source_candidate_id,
@@ -4277,13 +4279,13 @@ fn resolve_effective_control(
     bundle: &ControlBundleView,
     grant: Option<AutonomyGrantView>,
 ) -> Result<EffectiveControlResolution> {
-    let requested_approval_mode = canonical_control_approval_mode(&bundle.approval_mode)?;
+    let requested_approval_mode = ControlApprovalMode::parse(&bundle.approval_mode)?;
     let requested_autonomy_level = canonical_autonomy_level(&bundle.autonomy_level)?;
     let allowed_approval_mode = grant
         .as_ref()
-        .map(|item| canonical_control_approval_mode(&item.approval_mode))
+        .map(|item| ControlApprovalMode::parse(&item.approval_mode))
         .transpose()?
-        .unwrap_or(DEFAULT_APPROVAL_MODE);
+        .unwrap_or(ControlApprovalMode::HumanApprovalRequired);
     let allowed_autonomy_level = grant
         .as_ref()
         .map(|item| canonical_autonomy_level(&item.autonomy_level))
@@ -4291,13 +4293,14 @@ fn resolve_effective_control(
         .unwrap_or(DEFAULT_AUTONOMY_LEVEL);
 
     let approval_mode =
-        more_restrictive_approval_mode(requested_approval_mode, allowed_approval_mode).to_string();
+        more_restrictive_approval_mode(requested_approval_mode, allowed_approval_mode);
     let autonomy_level =
         more_restrictive_autonomy_level(requested_autonomy_level, allowed_autonomy_level)
             .to_string();
-    let mut missing_approvals = missing_approvals_for_mode(&approval_mode);
+    let mut missing_approvals = approval_mode.missing_approvals();
     if grant.is_none()
-        && (approval_mode != bundle.approval_mode || autonomy_level != bundle.autonomy_level)
+        && (approval_mode.as_str() != bundle.approval_mode.as_str()
+            || autonomy_level != bundle.autonomy_level)
     {
         missing_approvals.push(
             "no active autonomy grant for the current label bundle; using safe default controls"
@@ -4306,7 +4309,7 @@ fn resolve_effective_control(
     }
 
     Ok(EffectiveControlResolution {
-        approval_mode,
+        approval_mode: approval_mode.as_str().to_string(),
         autonomy_level,
         missing_approvals,
         grant,
@@ -5511,30 +5514,11 @@ fn canonical_ticket_event_route_status(raw: &str) -> Result<&'static str> {
     Ok(TicketEventRouteStatus::parse(raw)?.as_str())
 }
 
-fn canonical_control_approval_mode(raw: &str) -> Result<&'static str> {
-    match raw.trim() {
-        "dry_run_only" => Ok("dry_run_only"),
-        "human_approval_required" => Ok("human_approval_required"),
-        "bounded_auto_execute" => Ok("bounded_auto_execute"),
-        "direct_execute_allowed" => Ok("direct_execute_allowed"),
-        other => anyhow::bail!("unsupported approval mode: {other}"),
-    }
-}
-
-fn approval_mode_rank(mode: &str) -> Result<u8> {
-    match canonical_control_approval_mode(mode)? {
-        "dry_run_only" => Ok(0),
-        "human_approval_required" => Ok(1),
-        "bounded_auto_execute" => Ok(2),
-        "direct_execute_allowed" => Ok(3),
-        _ => unreachable!(),
-    }
-}
-
-fn more_restrictive_approval_mode<'a>(left: &'a str, right: &'a str) -> &'a str {
-    let left_rank = approval_mode_rank(left).unwrap_or(0);
-    let right_rank = approval_mode_rank(right).unwrap_or(0);
-    if left_rank <= right_rank {
+fn more_restrictive_approval_mode(
+    left: ControlApprovalMode,
+    right: ControlApprovalMode,
+) -> ControlApprovalMode {
+    if left.rank() <= right.rank() {
         left
     } else {
         right
@@ -5693,30 +5677,12 @@ fn action_rationale(action: &str) -> &'static str {
     }
 }
 
-fn missing_approvals_for_mode(mode: &str) -> Vec<String> {
-    match mode {
-        "dry_run_only" => vec!["execution is disabled for this bundle".to_string()],
-        "human_approval_required" => vec!["owner or designated approver".to_string()],
-        "bounded_auto_execute" | "direct_execute_allowed" => Vec::new(),
-        _ => vec!["approval mode not recognized; require manual confirmation".to_string()],
-    }
-}
-
 fn required_evidence_for_bundle(bundle: &ControlBundleView) -> Vec<String> {
     vec![
         format!("verification profile: {}", bundle.verification_profile_id),
         format!("writeback profile: {}", bundle.writeback_profile_id),
         format!("policy: {} {}", bundle.policy_id, bundle.policy_version),
     ]
-}
-
-fn initial_case_state_for_approval_mode(mode: &str) -> &'static str {
-    match mode {
-        "dry_run_only" => "blocked",
-        "human_approval_required" => "approval_pending",
-        "bounded_auto_execute" | "direct_execute_allowed" => "executable",
-        _ => "approval_pending",
-    }
 }
 
 fn canonical_approval_status(raw: &str) -> Result<&'static str> {
