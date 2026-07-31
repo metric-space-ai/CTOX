@@ -99,6 +99,7 @@ use crate::inference::runtime_state;
 #[cfg(test)]
 #[path = "model_catalog_boundary_tests.rs"]
 mod model_catalog_boundary_tests;
+mod module_boundary_tests;
 
 fn print_help() {
     let version = env!("CTOX_BUILD_VERSION");

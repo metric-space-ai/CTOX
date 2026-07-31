@@ -1,0 +1,47 @@
+# CTOX module boundaries — the single source for the import guard.
+#
+# Each line is `<from> -> <to> = <max>`, counting occurrences of `crate::<to>`
+# anywhere under `src/core/<from>`. The guard in
+# src/core/module_boundary_tests.rs reads this file and fails when a count
+# exceeds its budget.
+#
+# `= 0` is an enforced boundary: that edge does not exist and must not appear.
+# Any other number is a ratchet — the edge exists today, the number is what it
+# costs right now, and it may only go down. Lowering a ratchet means editing
+# this file in the same commit, which is the point: the number is visible in
+# review instead of drifting quietly.
+#
+# Direction matters. `mission -> service` means code under src/core/mission
+# reaching into src/core/service.
+
+# --- Enforced: these edges do not exist ---------------------------------
+# The capability, communication and context cores are below Business OS and
+# below the service loop. They are driven, they do not reach upward.
+capabilities -> business_os = 0
+capabilities -> mission = 0
+communication -> business_os = 0
+communication -> service = 0
+context -> business_os = 0
+context -> service = 0
+mission -> capabilities = 0
+
+# --- Ratchets: existing edges, allowed to shrink only -------------------
+# mission reaches into service for the core state machine, the transition
+# guard and harness flow. Those types arguably belong below both; until they
+# move, this is the honest count.
+mission -> service = 12
+# mission projects channel state into Business OS shapes
+# (channels/business_os_projection.rs). A projection is a legitimate seam,
+# but it points the wrong way and should become a Business OS-side pull.
+mission -> business_os = 7
+# communication reaches into mission mostly for the queue vocabulary. Since
+# QueueRouteStatus exists this could become a narrow typed import.
+communication -> mission = 18
+# mission drives communication adapters directly.
+mission -> communication = 10
+# Business OS uses the service-side core state machine and governance.
+business_os -> service = 12
+# One capability reaches the service layer.
+capabilities -> service = 1
+# Context reads one mission type.
+context -> mission = 1
