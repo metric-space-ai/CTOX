@@ -659,3 +659,45 @@ mod tests {
         assert!(!read_denial.requires_approval);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Policy overlays lifted out of store.rs (S-CUT5). Pure evaluation: they
+// decide from a session and its role and never reach for the store. This move
+// only became possible once BusinessOsSession moved below both modules —
+// before that it would have created policy -> store.
+//
+// The overlays that stayed in store.rs are thin wrappers over store-bound
+// lookups (scoped_policy_decision and friends); moving those would relocate
+// the seam, not remove it.
+
+use super::session::{session_role, session_user_id, BusinessOsSession};
+use serde_json::Value;
+
+pub(super) fn policy_actor_from_session(session: &BusinessOsSession) -> BusinessOsActor {
+    BusinessOsActor::new(
+        session_user_id(session).map(str::to_owned),
+        session_role(session),
+    )
+}
+
+pub(super) fn policy_decision_payload(decision: &PolicyDecision) -> Value {
+    serde_json::json!({
+        "allowed": decision.allowed,
+        "permission": decision.permission,
+        "scope_type": decision.scope_type,
+        "scope_id": decision.scope_id,
+        "reason_code": decision.reason_code,
+        "display_reason": decision.display_reason,
+        "requires_approval": decision.requires_approval,
+        "audit_level": decision.audit_level
+    })
+}
+
+pub(super) fn owner_transfer_policy_decision(session: &BusinessOsSession) -> PolicyDecision {
+    let actor = policy_actor_from_session(session);
+    evaluate(
+        &actor,
+        BusinessOsPermission::WorkspaceManage,
+        &BusinessOsScope::workspace(),
+    )
+}

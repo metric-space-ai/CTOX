@@ -17,6 +17,7 @@ mod person_research_command;
 pub mod policy;
 mod rxdb_peer;
 pub mod server;
+mod session;
 pub mod store;
 mod support;
 mod threads;

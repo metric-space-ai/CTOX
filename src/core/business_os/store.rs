@@ -6,6 +6,9 @@ use super::policy::{
     self, BusinessOsActor, BusinessOsPermission, BusinessOsScope, BusinessOsScopeType,
     PolicyDecision,
 };
+use super::policy::{
+    owner_transfer_policy_decision, policy_actor_from_session, policy_decision_payload,
+};
 use crate::capabilities::scrape;
 use crate::mission::channels;
 use anyhow::Context;
@@ -48,6 +51,33 @@ use std::time::UNIX_EPOCH;
 use tiny_http::{Header, Request, Response, Server};
 use url::Url;
 use uuid::Uuid;
+fn module_version_timeline_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    module_id: &str,
+) -> anyhow::Result<PolicyDecision> {
+    let permissions = [
+        BusinessOsPermission::AppsSourceView,
+        BusinessOsPermission::AppsRelease,
+        BusinessOsPermission::AppsRollback,
+    ];
+    let mut denied: Option<PolicyDecision> = None;
+    for permission in permissions {
+        let decision = module_policy_decision(root, session, permission, module_id)?;
+        if decision.allowed {
+            return Ok(decision);
+        }
+        denied.get_or_insert(decision);
+    }
+    denied.context("failed to evaluate module version timeline policy")
+}
+
+fn should_record_allowed_policy_decision(command: &BusinessCommand) -> bool {
+    !matches!(command.command_type.as_str(), "ctox.business_os.audit.list")
+}
+
+use super::session::{session_role, session_user_id};
+pub use super::session::{BusinessOsSession, BusinessOsSessionUser};
 
 const STORE_FILE: &str = "business-os.sqlite3";
 const RXDB_STORE_FILE: &str = "business-os-rxdb.sqlite3";
@@ -408,27 +438,6 @@ pub(crate) struct BusinessOsSyncConnectionConfig {
     pub(crate) signaling_room_password: String,
     pub(crate) signaling_urls: Vec<String>,
     pub(crate) signaling_urls_source: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BusinessOsSession {
-    pub ok: bool,
-    pub authenticated: bool,
-    pub auth_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<BusinessOsSessionUser>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BusinessOsSessionUser {
-    pub id: String,
-    pub display_name: String,
-    pub role: String,
-    pub is_admin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2481,25 +2490,6 @@ fn normalize_business_role(role: &str) -> String {
 
 fn role_can_manage(role: &str) -> bool {
     policy::role_can_manage(role)
-}
-
-fn session_user_id(session: &BusinessOsSession) -> Option<&str> {
-    session.user.as_ref().map(|user| user.id.as_str())
-}
-
-fn session_role(session: &BusinessOsSession) -> &str {
-    session
-        .user
-        .as_ref()
-        .map(|user| user.role.as_str())
-        .unwrap_or("user")
-}
-
-fn policy_actor_from_session(session: &BusinessOsSession) -> BusinessOsActor {
-    BusinessOsActor::new(
-        session_user_id(session).map(str::to_owned),
-        session_role(session),
-    )
 }
 
 pub(super) fn module_policy_decision(
@@ -14689,40 +14679,6 @@ pub(super) fn write_rxdb_failed_control_command_outcome(
     Ok(outcome)
 }
 
-fn module_version_timeline_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    module_id: &str,
-) -> anyhow::Result<PolicyDecision> {
-    let permissions = [
-        BusinessOsPermission::AppsSourceView,
-        BusinessOsPermission::AppsRelease,
-        BusinessOsPermission::AppsRollback,
-    ];
-    let mut denied: Option<PolicyDecision> = None;
-    for permission in permissions {
-        let decision = module_policy_decision(root, session, permission, module_id)?;
-        if decision.allowed {
-            return Ok(decision);
-        }
-        denied.get_or_insert(decision);
-    }
-    denied.context("failed to evaluate module version timeline policy")
-}
-
-fn policy_decision_payload(decision: &PolicyDecision) -> Value {
-    serde_json::json!({
-        "allowed": decision.allowed,
-        "permission": decision.permission,
-        "scope_type": decision.scope_type,
-        "scope_id": decision.scope_id,
-        "reason_code": decision.reason_code,
-        "display_reason": decision.display_reason,
-        "requires_approval": decision.requires_approval,
-        "audit_level": decision.audit_level
-    })
-}
-
 fn record_business_policy_decision_event(
     root: &Path,
     command: &BusinessCommand,
@@ -18655,25 +18611,12 @@ fn reject_command_if_policy_denied(
     )?))
 }
 
-fn should_record_allowed_policy_decision(command: &BusinessCommand) -> bool {
-    !matches!(command.command_type.as_str(), "ctox.business_os.audit.list")
-}
-
 fn workspace_policy_decision(
     root: &Path,
     session: &BusinessOsSession,
     permission: BusinessOsPermission,
 ) -> anyhow::Result<PolicyDecision> {
     scoped_policy_decision(root, session, permission, BusinessOsScope::workspace())
-}
-
-fn owner_transfer_policy_decision(session: &BusinessOsSession) -> PolicyDecision {
-    let actor = policy_actor_from_session(session);
-    policy::evaluate(
-        &actor,
-        BusinessOsPermission::WorkspaceManage,
-        &BusinessOsScope::workspace(),
-    )
 }
 
 /// Roles that can grant their holder authority over the workspace itself.
