@@ -1711,6 +1711,29 @@
   table-layout: fixed;
 }
 
+/* The table is wider than a narrow module window, so it scrolls sideways. The
+   title column has to stay put — otherwise it slides out of view and the rows
+   become unreadable stumps ("…tric") with no way to tell which source a score
+   belongs to. */
+.research-source-table th:first-child,
+.research-source-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--research-surface);
+}
+
+.research-source-table thead th:first-child {
+  z-index: 3;
+}
+
+/* Header labels wrap instead of being cut mid-word ("EVIDENCE STREI…"). */
+.research-source-table th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: bottom;
+}
+
 .research-source-col-title {
   width: 390px;
 }
