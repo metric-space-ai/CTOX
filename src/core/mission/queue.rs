@@ -21,7 +21,6 @@ use std::time::Duration;
 use crate::channels;
 use crate::execution::agent::direct_session::PersistentSession;
 use crate::inference::runtime_env;
-use crate::plan;
 use crate::service::harness_flow::{
     record_harness_flow_event_lossy, RecordHarnessFlowEventRequest,
 };
@@ -169,7 +168,6 @@ struct QueueSpillCandidateView {
 
 #[derive(Debug, Clone, Serialize)]
 struct QueueRepairView {
-    stale_plan_routes_repaired: usize,
     open_queue_count: usize,
     open_queue_preview: Vec<channels::QueueTaskView>,
     agentic: Option<AgenticQueueRepairView>,
@@ -572,7 +570,6 @@ fn repair_queue_state(
     mechanical_only: bool,
     dry_run: bool,
 ) -> Result<QueueRepairView> {
-    let stale_plan_routes_repaired = plan::repair_stale_step_routing_state(root)?;
     let agentic = if mechanical_only {
         None
     } else {
@@ -586,7 +583,6 @@ fn repair_queue_state(
     let open_queue_preview = channels::list_queue_tasks(root, &open_statuses, 20)?;
     let open_queue_count = open_queue_preview.len();
     Ok(QueueRepairView {
-        stale_plan_routes_repaired,
         open_queue_count,
         open_queue_preview,
         agentic,
@@ -3100,47 +3096,6 @@ mod tests {
                 .map(|item| item.route_status.as_str()),
             Some("blocked")
         );
-
-        let _ = std::fs::remove_dir_all(&root);
-        Ok(())
-    }
-
-    #[test]
-    fn queue_repair_releases_historical_plan_routes() -> Result<()> {
-        let root = temp_root("queue-repair");
-        std::fs::create_dir_all(&root)?;
-
-        let created = plan::ingest_goal(
-            &root,
-            plan::PlanIngestRequest {
-                title: "Repair stale queue route".to_string(),
-                prompt: "- inspect runtime\n- verify route".to_string(),
-                thread_key: Some("example-supervisor".to_string()),
-                skill: Some("follow-up-orchestrator".to_string()),
-                auto_advance: true,
-                emit_now: true,
-                wait_for: None,
-            },
-        )?;
-        let emitted = format!(
-            "plan:system::{}::{}",
-            created.goal.goal_id, created.steps[0].step_id
-        );
-        let conn = Connection::open(crate::paths::core_db(&root))?;
-        conn.execute(
-            "UPDATE communication_routing_state SET route_status = 'leased', lease_owner = 'test-reviewer', leased_at = ?2 WHERE message_key = ?1",
-            params![emitted, chrono::Utc::now().to_rfc3339()],
-        )?;
-        conn.execute(
-            "UPDATE planned_steps SET status = 'completed' WHERE step_id = ?1",
-            params![created.steps[0].step_id.clone()],
-        )?;
-        drop(conn);
-
-        let repaired = repair_queue_state(&root, true, false)?;
-        assert_eq!(repaired.stale_plan_routes_repaired, 1);
-        assert!(repaired.open_queue_preview.is_empty());
-        assert!(repaired.agentic.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())

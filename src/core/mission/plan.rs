@@ -428,7 +428,6 @@ pub fn complete_step_by_message_key(
     tx.commit()?;
     if updated > 0 {
         touch_plan_state_stamp(root)?;
-        settle_plan_queue_message(root, Some(message_key), "handled")?;
     }
     Ok(updated)
 }
@@ -867,7 +866,6 @@ fn prepare_next_step_emission(
 fn mark_step_completed(root: &Path, step_id: &str, result_text: &str) -> Result<usize> {
     let conn = open_plan_db(root)?;
     let tx = conn.unchecked_transaction()?;
-    let message_key = load_last_message_key_for_step_tx(&tx, step_id)?;
     let updated = mark_step_completed_tx(&tx, step_id, result_text)?;
     if let Some(goal_id) = load_goal_id_for_step_tx(&tx, step_id)? {
         refresh_goal_status_tx(&tx, &goal_id)?;
@@ -875,15 +873,15 @@ fn mark_step_completed(root: &Path, step_id: &str, result_text: &str) -> Result<
     tx.commit()?;
     if updated > 0 {
         touch_plan_state_stamp(root)?;
-        settle_plan_queue_message(root, message_key.as_deref(), "handled")?;
     }
     let _ = emit_due_steps(root)?;
     Ok(updated)
 }
 
 fn mark_step_completed_tx(tx: &Transaction<'_>, step_id: &str, result_text: &str) -> Result<usize> {
+    let message_key = load_last_message_key_for_step_tx(tx, step_id)?;
     let now = now_iso_string();
-    Ok(tx.execute(
+    let updated = tx.execute(
         r#"
         UPDATE planned_steps
         SET status = ?2,
@@ -900,13 +898,16 @@ fn mark_step_completed_tx(tx: &Transaction<'_>, step_id: &str, result_text: &str
             clip_text(result_text, DEFAULT_RESULT_EXCERPT_CHARS),
             now
         ],
-    )?)
+    )?;
+    if updated > 0 {
+        settle_plan_queue_message_tx(tx, message_key.as_deref(), QueueRouteStatus::Handled, &now)?;
+    }
+    Ok(updated)
 }
 
 fn mark_step_failed(root: &Path, step_id: &str, reason: &str) -> Result<usize> {
     let conn = open_plan_db(root)?;
     let tx = conn.unchecked_transaction()?;
-    let message_key = load_last_message_key_for_step_tx(&tx, step_id)?;
     let updated = mark_step_failed_tx(&tx, step_id, reason)?;
     if let Some(goal_id) = load_goal_id_for_step_tx(&tx, step_id)? {
         refresh_goal_status_tx(&tx, &goal_id)?;
@@ -914,14 +915,14 @@ fn mark_step_failed(root: &Path, step_id: &str, reason: &str) -> Result<usize> {
     tx.commit()?;
     if updated > 0 {
         touch_plan_state_stamp(root)?;
-        settle_plan_queue_message(root, message_key.as_deref(), "failed")?;
     }
     Ok(updated)
 }
 
 fn mark_step_failed_tx(tx: &Transaction<'_>, step_id: &str, reason: &str) -> Result<usize> {
+    let message_key = load_last_message_key_for_step_tx(tx, step_id)?;
     let now = now_iso_string();
-    Ok(tx.execute(
+    let updated = tx.execute(
         r#"
         UPDATE planned_steps
         SET status = ?2,
@@ -939,7 +940,11 @@ fn mark_step_failed_tx(tx: &Transaction<'_>, step_id: &str, reason: &str) -> Res
             now,
             STEP_STATUS_COMPLETED
         ],
-    )?)
+    )?;
+    if updated > 0 {
+        settle_plan_queue_message_tx(tx, message_key.as_deref(), QueueRouteStatus::Failed, &now)?;
+    }
+    Ok(updated)
 }
 
 fn mark_step_blocked(root: &Path, step_id: &str, reason: &str) -> Result<usize> {
@@ -965,13 +970,15 @@ fn mark_step_blocked(root: &Path, step_id: &str, reason: &str) -> Result<usize> 
             STEP_STATUS_COMPLETED
         ],
     )?;
+    if updated > 0 {
+        settle_plan_queue_message_tx(&tx, message_key.as_deref(), QueueRouteStatus::Blocked, &now)?;
+    }
     if let Some(goal_id) = load_goal_id_for_step_tx(&tx, step_id)? {
         refresh_goal_status_tx(&tx, &goal_id)?;
     }
     tx.commit()?;
     if updated > 0 {
         touch_plan_state_stamp(root)?;
-        settle_plan_queue_message(root, message_key.as_deref(), "blocked")?;
     }
     Ok(updated)
 }
@@ -1000,64 +1007,22 @@ fn reset_step_to_pending(root: &Path, step_id: &str, defer_until: Option<String>
             STEP_STATUS_COMPLETED
         ],
     )?;
+    if updated > 0 {
+        settle_plan_queue_message_tx(
+            &tx,
+            message_key.as_deref(),
+            QueueRouteStatus::Cancelled,
+            &now,
+        )?;
+    }
     if let Some(goal_id) = load_goal_id_for_step_tx(&tx, step_id)? {
         refresh_goal_status_tx(&tx, &goal_id)?;
     }
     tx.commit()?;
     if updated > 0 {
         touch_plan_state_stamp(root)?;
-        settle_plan_queue_message(root, message_key.as_deref(), "cancelled")?;
     }
     Ok(updated)
-}
-
-pub fn repair_stale_step_routing_state(root: &Path) -> Result<usize> {
-    let conn = open_plan_db(root)?;
-    let tx = conn.unchecked_transaction()?;
-    let mut stmt = tx.prepare(
-        r#"
-        SELECT step_id, status, last_message_key
-        FROM planned_steps
-        WHERE last_message_key IS NOT NULL
-          AND TRIM(last_message_key) <> ''
-          AND status != ?1
-        "#,
-    )?;
-    let rows = stmt
-        .query_map(params![STEP_STATUS_QUEUED], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    let mut repaired = 0usize;
-    let now = now_iso_string();
-    for (step_id, status, message_key) in rows {
-        let route_status = match status.as_str() {
-            STEP_STATUS_COMPLETED => "handled",
-            STEP_STATUS_FAILED => "failed",
-            STEP_STATUS_BLOCKED => "blocked",
-            STEP_STATUS_PENDING => "cancelled",
-            _ => continue,
-        };
-        set_queue_routing_status_tx(&tx, &message_key, route_status, &now)?;
-        if status != STEP_STATUS_COMPLETED {
-            tx.execute(
-                "UPDATE planned_steps SET last_message_key = NULL, updated_at = ?2 WHERE step_id = ?1",
-                params![step_id, now],
-            )?;
-        }
-        repaired += 1;
-    }
-    tx.commit()?;
-    if repaired > 0 {
-        touch_plan_state_stamp(root)?;
-    }
-    Ok(repaired)
 }
 
 fn render_step_prompt(
@@ -1776,18 +1741,40 @@ fn satisfy_wait_for_work_item_tx(
             |row| row.get(0),
         )?;
         if remaining == 0 {
-            tx.execute(
-                r#"
-                UPDATE planned_steps
-                SET status='pending', blocked_reason=NULL, updated_at=?2
-                WHERE step_id = (
-                    SELECT step_id FROM planned_steps
-                    WHERE goal_id=?1 AND status='blocked'
-                    ORDER BY step_order ASC LIMIT 1
+            let blocked_step = tx
+                .query_row(
+                    r#"
+                    SELECT step_id, last_message_key
+                    FROM planned_steps
+                    WHERE goal_id = ?1 AND status = 'blocked'
+                    ORDER BY step_order ASC
+                    LIMIT 1
+                    "#,
+                    params![goal_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
                 )
-                "#,
-                params![goal_id, now],
-            )?;
+                .optional()?;
+            if let Some((step_id, message_key)) = blocked_step {
+                let step_updated = tx.execute(
+                    r#"
+                    UPDATE planned_steps
+                    SET status = ?2,
+                        blocked_reason = NULL,
+                        last_message_key = NULL,
+                        updated_at = ?3
+                    WHERE step_id = ?1 AND status = ?4
+                    "#,
+                    params![step_id, STEP_STATUS_PENDING, now, STEP_STATUS_BLOCKED],
+                )?;
+                if step_updated > 0 {
+                    settle_plan_queue_message_tx(
+                        tx,
+                        message_key.as_deref(),
+                        QueueRouteStatus::Cancelled,
+                        &now,
+                    )?;
+                }
+            }
             tx.execute(
                 "UPDATE planned_goals SET status='active', updated_at=?2 WHERE goal_id=?1 AND status='blocked'",
                 params![goal_id, now],
@@ -1909,30 +1896,24 @@ fn load_last_message_key_for_step_tx(
     .map_err(anyhow::Error::from)
 }
 
-fn settle_plan_queue_message(
-    root: &Path,
+fn settle_plan_queue_message_tx(
+    tx: &Transaction<'_>,
     message_key: Option<&str>,
-    route_status: &str,
+    route_status: QueueRouteStatus,
+    now: &str,
 ) -> Result<()> {
     let Some(message_key) = message_key.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    let conn = open_plan_db(root)?;
-    let tx = conn.unchecked_transaction()?;
-    let now = now_iso_string();
-    set_queue_routing_status_tx(&tx, message_key, route_status, &now)?;
-    tx.commit()?;
-    Ok(())
+    set_queue_routing_status_tx(tx, message_key, route_status, now)
 }
 
 fn set_queue_routing_status_tx(
     tx: &Transaction<'_>,
     message_key: &str,
-    route_status: &str,
+    route_status: QueueRouteStatus,
     now: &str,
 ) -> Result<()> {
-    let route_status = QueueRouteStatus::parse(route_status)
-        .with_context(|| format!("unsupported queue route status '{route_status}'"))?;
     anyhow::ensure!(
         matches!(
             route_status,
@@ -2102,7 +2083,10 @@ fn open_plan_db(root: &Path) -> Result<Connection> {
         .with_context(|| format!("failed to open plan db {}", path.display()))?;
     conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
         .context("failed to configure SQLite busy_timeout for plans")?;
-    ensure_plan_schema_once(&path, &conn)?;
+    let migrated = ensure_plan_schema_once(&path, &conn)?;
+    if migrated > 0 {
+        touch_plan_state_stamp(root)?;
+    }
     Ok(conn)
 }
 
@@ -2140,18 +2124,76 @@ fn plan_db_open_count_for_tests(root: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn ensure_plan_schema_once(path: &Path, conn: &Connection) -> Result<()> {
+#[cfg(test)]
+fn reset_plan_schema_ready_for_tests(root: &Path) {
+    let path = resolve_db_path(root);
+    let key = plan_db_key(&path);
+    if let Some(ready) = PLAN_SCHEMA_READY.get() {
+        ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+}
+
+fn ensure_plan_schema_once(path: &Path, conn: &Connection) -> Result<usize> {
     let key = plan_db_key(path);
     let ready = PLAN_SCHEMA_READY.get_or_init(|| Mutex::new(HashSet::new()));
     let mut ready = ready
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if ready.contains(&key) {
-        return Ok(());
+        return Ok(0);
     }
     ensure_plan_schema(conn)?;
+    let migrated = migrate_legacy_step_routing_state(conn)?;
     ready.insert(key);
-    Ok(())
+    Ok(migrated)
+}
+
+fn migrate_legacy_step_routing_state(conn: &Connection) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT step_id, status, last_message_key
+        FROM planned_steps
+        WHERE last_message_key IS NOT NULL
+          AND TRIM(last_message_key) <> ''
+          AND status != ?1
+        "#,
+    )?;
+    let rows = stmt
+        .query_map(params![STEP_STATUS_QUEUED], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut migrated = 0usize;
+    let now = now_iso_string();
+    for (step_id, status, message_key) in rows {
+        let route_status = match status.as_str() {
+            STEP_STATUS_COMPLETED => QueueRouteStatus::Handled,
+            STEP_STATUS_FAILED => QueueRouteStatus::Failed,
+            STEP_STATUS_BLOCKED => QueueRouteStatus::Blocked,
+            STEP_STATUS_PENDING => QueueRouteStatus::Cancelled,
+            _ => continue,
+        };
+        set_queue_routing_status_tx(&tx, &message_key, route_status, &now)?;
+        if status != STEP_STATUS_COMPLETED {
+            tx.execute(
+                "UPDATE planned_steps SET last_message_key = NULL, updated_at = ?2 WHERE step_id = ?1",
+                params![step_id, now],
+            )?;
+        }
+        migrated += 1;
+    }
+    tx.commit()?;
+    Ok(migrated)
 }
 
 #[cfg(unix)]
@@ -2486,6 +2528,30 @@ mod tests {
             |row| row.get(0),
         )
         .expect("expected routing status")
+    }
+
+    fn emitted_step_fixture(root: &Path) -> Result<(String, String, String)> {
+        let created = ingest_goal(
+            root,
+            PlanIngestRequest {
+                title: "Transactional plan route".to_string(),
+                prompt: "- inspect runtime".to_string(),
+                thread_key: Some("transactional-plan-route".to_string()),
+                skill: Some("follow-up-orchestrator".to_string()),
+                auto_advance: false,
+                emit_now: true,
+                wait_for: None,
+            },
+        )?;
+        let goal_id = created.goal.goal_id;
+        let step_id = created.steps[0].step_id.clone();
+        let message_key = format!("plan:system::{goal_id}::{step_id}");
+        let conn = open_plan_db(root)?;
+        conn.execute(
+            "UPDATE communication_routing_state SET route_status = 'leased', lease_owner = 'test-reviewer', leased_at = ?2 WHERE message_key = ?1",
+            params![message_key, now_iso_string()],
+        )?;
+        Ok((goal_id, step_id, message_key))
     }
 
     #[test]
@@ -2993,41 +3059,109 @@ mod tests {
     }
 
     #[test]
-    fn repair_stale_step_routing_state_releases_historical_leases() -> Result<()> {
-        let root = temp_plan_root("repair-stale-routing");
-        let created = ingest_goal(
-            &root,
-            PlanIngestRequest {
-                title: "Historical stale route".to_string(),
-                prompt: "- inspect runtime\n- verify route".to_string(),
-                thread_key: Some("example-supervisor".to_string()),
-                skill: Some("follow-up-orchestrator".to_string()),
-                auto_advance: true,
-                emit_now: true,
-                wait_for: None,
-            },
-        )?;
-        let emitted = format!(
-            "plan:system::{}::{}",
-            created.goal.goal_id, created.steps[0].step_id
-        );
-        let conn = open_plan_db(&root)?;
+    fn completing_step_updates_step_and_routing_state_immediately() -> Result<()> {
+        let root = temp_plan_root("complete-routing-transaction");
+        let (goal_id, step_id, message_key) = emitted_step_fixture(&root)?;
+
+        assert_eq!(mark_step_completed(&root, &step_id, "done")?, 1);
+        assert_eq!(routing_status_for_message(&root, &message_key), "handled");
+        let view = load_goal_with_steps(&root, &goal_id)?.expect("completed goal should reload");
+        let step = view
+            .steps
+            .into_iter()
+            .find(|step| step.step_id == step_id)
+            .expect("completed step should reload");
+        assert_eq!(step.status, STEP_STATUS_COMPLETED);
+        assert_eq!(step.last_message_key.as_deref(), Some(message_key.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn failing_step_updates_step_and_routing_state_immediately() -> Result<()> {
+        let root = temp_plan_root("fail-routing-transaction");
+        let (goal_id, step_id, message_key) = emitted_step_fixture(&root)?;
+
+        assert_eq!(mark_step_failed(&root, &step_id, "failed")?, 1);
+        assert_eq!(routing_status_for_message(&root, &message_key), "failed");
+        let view = load_goal_with_steps(&root, &goal_id)?.expect("failed goal should reload");
+        let step = view
+            .steps
+            .into_iter()
+            .find(|step| step.step_id == step_id)
+            .expect("failed step should reload");
+        assert_eq!(step.status, STEP_STATUS_FAILED);
+        assert!(step.last_message_key.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_step_updates_step_and_routing_state_immediately() -> Result<()> {
+        let root = temp_plan_root("blocked-routing-transaction");
+        let (goal_id, step_id, message_key) = emitted_step_fixture(&root)?;
+
+        assert_eq!(mark_step_blocked(&root, &step_id, "blocked")?, 1);
+        assert_eq!(routing_status_for_message(&root, &message_key), "blocked");
+        let view = load_goal_with_steps(&root, &goal_id)?.expect("blocked goal should reload");
+        let step = view
+            .steps
+            .into_iter()
+            .find(|step| step.step_id == step_id)
+            .expect("blocked step should reload");
+        assert_eq!(step.status, STEP_STATUS_BLOCKED);
+        assert!(step.last_message_key.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn resetting_step_updates_step_and_routing_state_immediately() -> Result<()> {
+        let root = temp_plan_root("pending-routing-transaction");
+        let (goal_id, step_id, message_key) = emitted_step_fixture(&root)?;
+
+        assert_eq!(reset_step_to_pending(&root, &step_id, None)?, 1);
+        assert_eq!(routing_status_for_message(&root, &message_key), "cancelled");
+        let view = load_goal_with_steps(&root, &goal_id)?.expect("pending goal should reload");
+        let step = view
+            .steps
+            .into_iter()
+            .find(|step| step.step_id == step_id)
+            .expect("pending step should reload");
+        assert_eq!(step.status, STEP_STATUS_PENDING);
+        assert!(step.last_message_key.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_routing_drift_migrates_only_on_first_plan_db_open() -> Result<()> {
+        let root = temp_plan_root("legacy-routing-migration-once");
+        let (_goal_id, step_id, message_key) = emitted_step_fixture(&root)?;
+        let conn = Connection::open(resolve_db_path(&root))?;
         conn.execute(
+            "UPDATE planned_steps SET status = ?2 WHERE step_id = ?1",
+            params![step_id, STEP_STATUS_COMPLETED],
+        )?;
+        drop(conn);
+        reset_plan_schema_ready_for_tests(&root);
+
+        let first_open = open_plan_db(&root)?;
+        let migrated_status: String = first_open.query_row(
+            "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+            params![message_key],
+            |row| row.get(0),
+        )?;
+        assert_eq!(migrated_status, "handled");
+        first_open.execute(
             "UPDATE communication_routing_state SET route_status = 'leased', lease_owner = 'test-reviewer', leased_at = ?2 WHERE message_key = ?1",
-            params![emitted, now_iso_string()],
+            params![message_key, now_iso_string()],
         )?;
-        drop(conn);
+        drop(first_open);
 
-        let conn = open_plan_db(&root)?;
-        conn.execute(
-            "UPDATE planned_steps SET status = 'completed' WHERE step_id = ?1",
-            params![created.steps[0].step_id.clone()],
+        let second_open = open_plan_db(&root)?;
+        let unchanged_status: String = second_open.query_row(
+            "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+            params![message_key],
+            |row| row.get(0),
         )?;
-        drop(conn);
-
-        let repaired = repair_stale_step_routing_state(&root)?;
-        assert_eq!(repaired, 1);
-        assert_eq!(routing_status_for_message(&root, &emitted), "handled");
+        assert_eq!(unchanged_status, "leased");
         Ok(())
     }
 

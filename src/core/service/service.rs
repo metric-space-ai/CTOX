@@ -1396,7 +1396,6 @@ pub fn run_foreground(root: &Path) -> Result<()> {
 }
 
 fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) {
-    run_plan_routing_repair(root, state, "boot");
     // P2 — flush any mission_state field-clobber attempts that the guard
     // suppressed during pre-boot writes (the previous run may have
     // ended without flushing if it crashed before the turn-end pass).
@@ -1688,7 +1687,6 @@ fn run_turn_end_state_invariant_check(
     state: &Arc<Mutex<SharedState>>,
     conversation_id: i64,
 ) -> Option<lcm::MissionStateRecord> {
-    run_plan_routing_repair(root, state, "turn");
     // P2 — flush any mission_state field-clobber attempts that the guard
     // suppressed during the just-finished turn. Done at turn-end (and at
     // boot) so the audit trail catches them on the same DB connection
@@ -2245,45 +2243,6 @@ impl Drop for AppsecPipelineWorkerActivity {
             }
         }
         shared.last_progress_epoch_secs = current_epoch_secs();
-    }
-}
-
-fn run_plan_routing_repair(root: &Path, state: &Arc<Mutex<SharedState>>, phase: &str) {
-    match plan::repair_stale_step_routing_state(root) {
-        Ok(repaired) if repaired > 0 => {
-            push_event(
-                state,
-                format!(
-                    "Repaired {repaired} stale plan routing {} at {phase}",
-                    if repaired == 1 { "entry" } else { "entries" }
-                ),
-            );
-            governance::record_event_or_count(
-                root,
-                governance::GovernanceEventRequest {
-                    mechanism_id: "plan_routing_repair",
-                    conversation_id: Some(turn_loop::CHAT_CONVERSATION_ID),
-                    severity: "info",
-                    reason: "stale_plan_routing_repaired",
-                    action_taken: "released_or_closed_stale_plan_queue_routes",
-                    details: serde_json::json!({
-                        "phase": phase,
-                        "repaired_count": repaired,
-                    }),
-                    idempotence_key: None,
-                },
-            );
-        }
-        Ok(_) => {}
-        Err(err) => {
-            push_event(
-                state,
-                format!(
-                    "Plan routing repair skipped at {phase}: {}",
-                    clip_text(&err.to_string(), 180)
-                ),
-            );
-        }
     }
 }
 
