@@ -35,9 +35,25 @@ etablierte Temp-Index/CAS-Weg.
 4. **S-CUT4** `command_plane.rs` — Acceptance/Routing/Outcomes/Outbox
    inkl. der 2.654-Zeilen-Funktion ALS GANZES (Zerlegung ist S-FIX;
    move-only heißt: auch Monster ziehen unzerlegt um).
-5. **S-CUT5** Policy-Anteile (Enforcement-Call-Sites bleiben; Bewertungs-/
-   Grant-/Token-Overlays wandern zu `policy.rs`/`capability.rs`, wo sie
-   hingehören — kleinste Welle, aber meiste Nähte: Karte zuerst).
+5. **S-CUT5** Policy-Anteile — **Karte erstellt 01.08., Schnitt VERTAGT.**
+   Gemessen: 16 Policy-Overlays in store.rs. Sechs davon greifen direkt auf
+   den Store zu (Enforcement, bleibt per Ticket). Von den zehn übrigen sind
+   vier transitiv an `scoped_policy_decision` gebunden, zwei an allgemeine
+   Store-Helfer (`source_sanitize_slug`, `support_string`). Die letzten vier
+   plus `policy_actor_from_session` liessen sich technisch verschieben —
+   aber sie brauchen `BusinessOsSession` und die Session-Helfer, die store.rs
+   besitzt. Ein Umzug nach policy.rs erzeugte damit **policy → store** und
+   drehte genau die Schichtung um, die dieses Ticket herstellen soll.
+   Sieben der 16 Overlays sind session-gekoppelt.
+
+   **Vorbedingung für S-CUT5:** `BusinessOsSession` samt `session_user_id`/
+   `session_role` muss zuerst unter store.rs und policy.rs wandern (Muster:
+   `core_state`, `command_lifecycle`, `communication_store` — dort hat genau
+   dieser Schritt die vermeintlich grossen Ziele klein gemacht). Erst danach
+   ist der Policy-Schnitt ein Move und keine Zyklus-Erzeugung.
+   Ein Probeumzug wurde ausgeführt und wieder zurückgenommen; der
+   Compiler-Fehler (BusinessOsSession/session_user_id/session_role nicht in
+   policy.rs sichtbar) ist der Beleg.
 
 Erwartung danach: store.rs ≈ Restkern (Öffnung/Verwaltung/Verkabelung).
 Escape-Hatch je Schnitt: Nähte > 20 pub(crate)-Einstiege ⇒ STOPP + Karte.
