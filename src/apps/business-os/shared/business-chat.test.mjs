@@ -1,11 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   __businessChatTestInternals,
   chatAgentScopeViewFromMeta,
   renderChatAgentScopeHtml,
 } from './business-chat.js';
+
+const businessChatSource = readFileSync(new URL('./business-chat.js', import.meta.url), 'utf8');
+
+test('external chat submit confirms queue acceptance before remote chat persistence', () => {
+  const resolveIndex = businessChatSource.indexOf('detail.resolveSubmission?.(submission)');
+  const persistIndex = businessChatSource.indexOf('await persistChatState({ state, db });', resolveIndex);
+  assert.ok(resolveIndex >= 0);
+  assert.ok(persistIndex > resolveIndex);
+});
 
 const visibleScope = {
   rows: [
@@ -109,11 +119,11 @@ test('business chat task submission returns the real queue id after rendering pe
     const submission = await __businessChatTestInternals.submitChatMessage({
       state,
       chat,
-      text: 'Recherchiere WITTENSTEIN SE.',
+      text: 'Recherchiere Example Industries GmbH.',
       commandBus: {
         async dispatch(command) {
           assert.equal(pendingRendered, true);
-          assert.equal(command.payload.prompt, 'Recherchiere WITTENSTEIN SE.');
+          assert.equal(command.payload.prompt, 'Recherchiere Example Industries GmbH.');
           return { status: 'queued', command_id: command.id, task_id: 'queue-real-42' };
         },
       },
@@ -130,7 +140,7 @@ test('business chat task submission returns the real queue id after rendering pe
       queue_id: 'queue-real-42',
     });
     assert.equal(chat.messages[0].role, 'user');
-    assert.equal(chat.messages[0].text, 'Recherchiere WITTENSTEIN SE.');
+    assert.equal(chat.messages[0].text, 'Recherchiere Example Industries GmbH.');
     assert.equal(chat.messages[1].taskId, 'queue-real-42');
   } finally {
     globalThis.document = previousDocument;
@@ -149,7 +159,7 @@ test('business chat tracks a terminal native control command without inventing a
     const submission = await __businessChatTestInternals.submitChatMessage({
       state,
       chat,
-      text: 'Recherchiere WITTENSTEIN SE.',
+      text: 'Recherchiere Example Industries GmbH.',
       commandBus: {
         async dispatch(command) {
           assert.equal(command.type, 'web_stack.person_research');
@@ -197,7 +207,7 @@ test('business chat acknowledges a declared long-running control command locally
     const submission = await __businessChatTestInternals.submitChatMessage({
       state,
       chat,
-      text: 'Recherchiere WITTENSTEIN SE.',
+      text: 'Recherchiere Example Industries GmbH.',
       commandBus: {
         async dispatch(command, options) {
           assert.equal(command.type, 'web_stack.person_research');
@@ -235,6 +245,56 @@ test('business chat resolves a queue id that is projected after command dispatch
     raw: { business_commands: commands, ctox_queue_tasks: queue },
   }, 'cmd-delayed', { timeoutMs: 0 });
   assert.equal(taskId, 'queue-delayed');
+});
+
+test('business chat starts command and queue replication before dispatch', async () => {
+  const previousDocument = globalThis.document;
+  const previousLocation = globalThis.location;
+  globalThis.document = { documentElement: { lang: 'de' } };
+  globalThis.location = { href: 'https://customer.example.test/#desktop' };
+  const events = [];
+  const state = { ownerUserId: 'user-1', chats: [] };
+  const chat = { id: 'chat-tracked', title: 'Recherche', messages: [], contextMeta: {} };
+  const commands = makeBatchCollection([{ id: 'cmd-tracked', task_id: 'queue-tracked' }]);
+  const queue = makeBatchCollection([
+    { id: 'queue-tracked', command_id: 'cmd-tracked', status: 'queued' },
+  ]);
+  try {
+    const submission = await __businessChatTestInternals.submitChatMessage({
+      state,
+      chat,
+      text: 'Recherchiere Example Industries GmbH.',
+      commandBus: {
+        async dispatch(command) {
+          events.push(`dispatch:${command.id}`);
+          return { status: 'queued', command_id: command.id };
+        },
+      },
+      db: { raw: { business_commands: commands, ctox_queue_tasks: queue } },
+      sync: {
+        async startCollection(name) {
+          events.push(`sync:${name}`);
+          return { ready: Promise.resolve() };
+        },
+      },
+      getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+      meta: {
+        command_id: 'cmd-tracked',
+        command_type: 'web_stack.person_research',
+      },
+    });
+
+    assert.deepEqual(events, [
+      'sync:business_commands',
+      'sync:ctox_queue_tasks',
+      'dispatch:cmd-tracked',
+    ]);
+    assert.equal(submission.task_id, 'queue-tracked');
+    assert.equal(chat.messages[1].trackable, undefined);
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.location = previousLocation;
+  }
 });
 
 test('business chat renders business-facing visible scope rows from client context', () => {
@@ -981,16 +1041,16 @@ test('remote reply from an old task cannot steal focus from a newly submitted ch
     }],
   };
   const historicalLocal = {
-    id: 'chat-wittenstein-old-task',
+    id: 'chat-example-old-task',
     owner_user_id: 'user-1',
     createdAt: now - 60_000,
     updated_at_ms: now - 60_000,
     open: true,
     minimized: true,
     messages: [{
-      id: 'status-wittenstein-old-task',
+      id: 'status-example-old-task',
       role: 'ctox',
-      commandId: 'cmd-wittenstein-old-task',
+      commandId: 'cmd-example-old-task',
       status: 'queued',
       createdAt: now - 60_000,
     }],
@@ -1001,10 +1061,10 @@ test('remote reply from an old task cannot steal focus from a newly submitted ch
     messages: [
       ...historicalLocal.messages,
       {
-        id: 'reply-wittenstein-old-task',
+        id: 'reply-example-old-task',
         role: 'ctox',
         text: 'Der alte Task ist fehlgeschlagen.',
-        commandId: 'cmd-wittenstein-old-task',
+        commandId: 'cmd-example-old-task',
         status: 'failed',
         createdAt: now,
       },
@@ -1618,4 +1678,56 @@ function makeTimerWindow(timers) {
       if (timer) timer.cleared = true;
     },
   };
+}
+
+// REGRESSION: blocked work must not read as failed work.
+//
+// `blocked` and `stale_missing_native` mean "waiting" — for an approval, or
+// for the native peer to come back. Every other Business OS surface reports
+// them as their own state; the chat folded them into failure, so a command
+// that was still alive showed a red failure badge, pushed a "CTOX konnte die
+// Aufgabe nicht ausführen" message, and — because failure counted as
+// terminal — stopped being tracked, so the correction never arrived.
+{
+  const {
+    isBlockedTrackingStatus,
+    isFailureStatus,
+    isTerminalTrackingStatus,
+    isActiveTrackingStatus,
+    getTaskState,
+  } = __businessChatTestInternals;
+
+  test('blocked statuses are their own state, not failures', () => {
+    for (const status of ['blocked', 'stale_missing_native']) {
+      assert.equal(isBlockedTrackingStatus(status), true, status);
+      assert.equal(isFailureStatus(status), false, `${status} must not count as failure`);
+    }
+    for (const status of ['failed', 'error']) {
+      assert.equal(isFailureStatus(status), true, status);
+      assert.equal(isBlockedTrackingStatus(status), false, `${status} is a failure, not a block`);
+    }
+  });
+
+  test('blocked work stays tracked instead of being closed out as terminal', () => {
+    for (const status of ['blocked', 'stale_missing_native']) {
+      assert.equal(isTerminalTrackingStatus(status), false, `${status} must stay trackable`);
+      assert.equal(isActiveTrackingStatus(status), true, `${status} must keep polling alive`);
+    }
+    // Real terminals are unaffected.
+    for (const status of ['completed', 'failed', 'cancelled', 'error']) {
+      assert.equal(isTerminalTrackingStatus(status), true, status);
+    }
+  });
+
+  test('a blocked command renders as blocked, not as failed', () => {
+    const chatWith = (status) => ({
+      id: 'chat_1',
+      lastTrackingId: 'cmd_1',
+      messages: [{ role: 'user', commandId: 'cmd_1', status }],
+    });
+    assert.equal(getTaskState(chatWith('blocked')), 'blocked');
+    assert.equal(getTaskState(chatWith('stale_missing_native')), 'blocked');
+    assert.equal(getTaskState(chatWith('failed')), 'failed');
+    assert.equal(getTaskState(chatWith('completed')), 'success');
+  });
 }

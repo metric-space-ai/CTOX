@@ -1464,7 +1464,8 @@ function getTaskState(chat) {
   if (status === 'scheduled') return 'scheduled';
   if (!status) return 'idle';
   if (status === 'success' || status === 'completed' || status === 'handled' || status === 'done' || status === 'erledigt') return 'success';
-  if (['failed', 'blocked', 'stale_missing_native', 'error'].includes(status)) return 'failed';
+  if (isBlockedTrackingStatus(status)) return 'blocked';
+  if (['failed', 'error'].includes(status)) return 'failed';
   if (['queued', 'pending', 'pending_sync', 'waiting'].includes(status)) return 'queued';
   if (['running', 'processing', 'executing', 'active'].includes(status)) return 'running';
   return 'idle';
@@ -1683,11 +1684,18 @@ function chatWindow(chat, activeId, relation = 'center') {
         <span>Erledigt</span>
       </span>
     `;
+  } else if (taskState === 'blocked') {
+    statusBadgeHtml = `
+      <span class="ctox-chat-status-badge is-blocked" title="Wartet — blockiert, läuft weiter sobald der Block fällt">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+        <span>Blockiert</span>
+      </span>
+    `;
   } else if (taskState === 'failed') {
     statusBadgeHtml = `
-      <span class="ctox-chat-status-badge is-failed" title="Blocked/Fehlgeschlagen">
+      <span class="ctox-chat-status-badge is-failed" title="Fehlgeschlagen">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>
-        <span>Blocked</span>
+        <span>Fehlgeschlagen</span>
       </span>
     `;
   } else if (taskState === 'scheduled') {
@@ -1723,8 +1731,9 @@ function chatWindow(chat, activeId, relation = 'center') {
         </button>
       </div>
     `;
-  } else if (taskState === 'queued' || taskState === 'running') {
-    // Hide input, show active progress card
+  } else if (taskState === 'queued' || taskState === 'running' || taskState === 'blocked') {
+    // Hide input, show active progress card — blocked work is still tracked,
+    // so the user keeps the progress view rather than a dead-end follow-up form.
     const trackingMsg = [...chat.messages].reverse().find(m => 
       (m.commandId && m.commandId === chat.lastTrackingId) || 
       (m.taskId && m.taskId === chat.lastTrackingId)
@@ -2252,6 +2261,8 @@ function chatDockItem(chat, activeId) {
         <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </span>
     `;
+  } else if (taskState === 'blocked') {
+    markHtml = `<span class="ctox-chat-chip-mark is-blocked" aria-hidden="true"></span>`;
   } else if (taskState === 'failed') {
     markHtml = `
       <span class="ctox-chat-chip-mark is-failed" aria-hidden="true">
@@ -2284,7 +2295,8 @@ function chatDockStatusText(chat, taskState = getTaskState(chat)) {
     running: 'Aktiv',
     queued: 'Queue',
     success: 'Erledigt',
-    failed: 'Blocked',
+    blocked: 'Blockiert',
+    failed: 'Fehler',
     scheduled: 'Geplant',
   };
   if (labels[taskState]) return labels[taskState];
@@ -2731,6 +2743,20 @@ async function syncTrackedMessages({ state, db, sync = null }) {
         chatChanged = true;
         shouldFocusChat = true;
       }
+      if (isBlockedTrackingStatus(nextStatus) && !chat.messages.some((item) => item.blockedFor === (message.taskId || message.commandId))) {
+        chat.messages.push({
+          id: `blocked_${crypto.randomUUID()}`,
+          role: 'ctox',
+          text: blockedText(commandDoc, taskDoc),
+          blockedFor: message.taskId || message.commandId,
+          commandId: message.commandId || '',
+          taskId: message.taskId || '',
+          status: nextStatus,
+          createdAt: Date.now(),
+        });
+        changed = true;
+        chatChanged = true;
+      }
       if (isFailureStatus(nextStatus) && !chat.messages.some((item) => item.failureFor === (message.taskId || message.commandId))) {
         chat.messages.push({
           id: `failure_${crypto.randomUUID()}`,
@@ -2911,9 +2937,15 @@ function canonicalTrackingStatus(status) {
   return value;
 }
 
+// `blocked` and `stale_missing_native` are deliberately NOT terminal: a
+// blocked command is waiting (approval, a missing native peer), and it
+// resumes on its own once the block clears. Treating them as terminal made
+// the chat stop tracking work that was still alive, so the last thing the
+// user saw was a failure that never got corrected. Orphaned tracking is
+// still closed out by the 10-minute rule in reconcileTrackedMessages.
 function isTerminalTrackingStatus(status) {
   const value = canonicalTrackingStatus(status);
-  return ['completed', 'failed', 'blocked', 'cancelled', 'canceled', 'stale_missing_native', 'error'].includes(value);
+  return ['completed', 'failed', 'cancelled', 'canceled', 'error'].includes(value);
 }
 
 function extractOutboundText(doc) {
@@ -2937,11 +2969,20 @@ function extractOutboundText(doc) {
 }
 
 function isFailureStatus(status) {
-  return ['failed', 'blocked', 'stale_missing_native'].includes(String(status || '').toLowerCase());
+  return ['failed', 'error'].includes(String(status || '').toLowerCase());
+}
+
+// Every other Business OS surface (ctox, conversations, outbound) reports
+// these as their own "blocked" state. The chat used to fold them into
+// failure, which is how a waiting command came to read as a dead one.
+function isBlockedTrackingStatus(status) {
+  return ['blocked', 'stale_missing_native'].includes(String(status || '').toLowerCase());
 }
 
 function isActiveTrackingStatus(status) {
-  return ['accepted', 'queued', 'pending', 'pending_sync', 'waiting', 'retry_wait', 'retry-wait', 'review_rework', 'review-rework', 'running', 'processing', 'executing', 'active'].includes(String(status || '').toLowerCase());
+  const value = String(status || '').toLowerCase();
+  if (isBlockedTrackingStatus(value)) return true;
+  return ['accepted', 'queued', 'pending', 'pending_sync', 'waiting', 'retry_wait', 'retry-wait', 'review_rework', 'review-rework', 'running', 'processing', 'executing', 'active'].includes(value);
 }
 
 function trackingMessageAgeMs(message) {
@@ -2962,6 +3003,19 @@ function failureText(commandDoc, taskDoc) {
     || '';
   if (error) return `CTOX konnte die Aufgabe nicht ausführen: ${error}`;
   return 'CTOX konnte die Aufgabe nicht ausführen. Der Task ist in der CTOX Queue fehlgeschlagen.';
+}
+
+function blockedText(commandDoc, taskDoc) {
+  const reason = taskDoc?.status_note
+    || taskDoc?.blocked_reason
+    || commandDoc?.blocked_reason
+    || '';
+  const status = String(taskDoc?.status || commandDoc?.status || '').toLowerCase();
+  if (status === 'stale_missing_native') {
+    return 'CTOX ist gerade nicht erreichbar. Die Aufgabe bleibt in der Queue und läuft weiter, sobald die Verbindung steht.';
+  }
+  if (reason) return `Die Aufgabe wartet: ${reason}`;
+  return 'Die Aufgabe ist blockiert und wartet. Sie läuft weiter, sobald der Block aufgelöst ist.';
 }
 
 async function openCtoxTask(taskId, commandId, taskStatus) {
@@ -4458,6 +4512,10 @@ function installChatStyles() {
       box-shadow: 0 0 6px #ef4444;
       animation: ctoxPulseFailedDot 1.5s infinite ease-in-out;
     }
+    .ctox-chat-chip-mark.is-blocked {
+      background: #f59e0b !important;
+      box-shadow: 0 0 6px #f59e0b;
+    }
     .ctox-chat-chip-mark.is-scheduled {
       background: #38bdf8 !important;
       box-shadow: 0 0 6px #38bdf8;
@@ -5333,6 +5391,12 @@ function installChatStyles() {
       border: 1px solid rgba(239, 68, 68, 0.3);
       background: rgba(239, 68, 68, 0.1);
       color: #ef4444;
+    }
+    /* Amber, not red: blocked work is waiting, not dead. */
+    .ctox-chat-status-badge.is-blocked {
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      background: rgba(245, 158, 11, 0.1);
+      color: #f59e0b;
     }
 
     @media (max-height: 680px) {
@@ -6327,4 +6391,9 @@ export const __businessChatTestInternals = Object.freeze({
   syncTrackedMessages,
   isTransientCommandTrackingError,
   withChatPersistenceTimeout,
+  isBlockedTrackingStatus,
+  isFailureStatus,
+  isTerminalTrackingStatus,
+  isActiveTrackingStatus,
+  getTaskState,
 });
