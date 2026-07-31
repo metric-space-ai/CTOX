@@ -26081,6 +26081,12 @@ mod tests {
 
     static CHANNEL_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static TICKET_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// The channel-router preflight gate is process-global, so two tests that
+    /// drive it clobber each other's state when they run in parallel — each
+    /// passes alone and they fail together. Same treatment as the sync gates
+    /// above.
+    static CHANNEL_ROUTER_PREFLIGHT_GATE_TEST_LOCK: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
     static DURABLE_STATUS_SNAPSHOT_CACHE_TEST_LOCK: std::sync::Mutex<()> =
         std::sync::Mutex::new(());
 
@@ -26198,6 +26204,12 @@ mod tests {
 
     fn channel_sync_due_gate_test_lock() -> std::sync::MutexGuard<'static, ()> {
         CHANNEL_SYNC_DUE_GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn channel_router_preflight_gate_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        CHANNEL_ROUTER_PREFLIGHT_GATE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -28132,6 +28144,7 @@ mod tests {
 
     #[test]
     fn channel_router_preflight_gate_ignores_metadata_churn_and_reopens_on_queue_work() {
+        let _gate_lock = channel_router_preflight_gate_test_lock();
         clear_channel_router_preflight_idle_gate_for_tests();
         let root = temp_root("channel-router-preflight-gate");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
@@ -28214,6 +28227,7 @@ mod tests {
 
     #[test]
     fn channel_router_preflight_safety_poll_detects_pending_queue_with_unchanged_stamp() {
+        let _gate_lock = channel_router_preflight_gate_test_lock();
         clear_channel_router_preflight_idle_gate_for_tests();
         let root = temp_root("channel-router-preflight-pending-safety-poll");
         std::fs::create_dir_all(root.join("runtime")).expect("create runtime directory");
