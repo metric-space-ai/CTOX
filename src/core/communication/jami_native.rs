@@ -10,17 +10,20 @@ use std::thread;
 use std::time::Duration;
 use zbus::blocking::{Connection, Proxy};
 
+use crate::channels::{
+    ensure_account, ensure_routing_rows_for_inbound, record_communication_sync_run, stable_digest,
+    CommunicationSyncRun,
+};
 use crate::communication::adapters::{
     AdapterSyncCommandRequest, JamiResolveAccountCommandRequest, JamiSendCommandRequest,
     JamiTestCommandRequest,
 };
 use crate::communication::runtime as communication_runtime;
-use crate::inference::engine;
-use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+use crate::communication_store::{
+    now_iso_string, open_channel_db, preview_text, refresh_thread, upsert_communication_message,
+    UpsertMessage,
 };
+use crate::inference::engine;
 
 const DEFAULT_TRANSCRIPTION_MODEL: &str = "engineai/Voxtral-Mini-4B-Realtime-2602";
 
@@ -2477,7 +2480,9 @@ mod tests {
     use super::thread_key_for_conversation;
     use super::JamiInboundMessage;
     use super::JamiOptions;
-    use crate::mission::channels::{open_channel_db, upsert_communication_message, UpsertMessage};
+    use crate::communication_store::{
+        open_channel_db, upsert_communication_message, UpsertMessage,
+    };
     use serde_json::json;
     use std::path::PathBuf;
 

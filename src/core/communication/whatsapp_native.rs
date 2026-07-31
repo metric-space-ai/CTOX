@@ -12,15 +12,18 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
+use crate::channels::{
+    ensure_account, ensure_routing_rows_for_inbound, record_communication_sync_run, stable_digest,
+    CommunicationSyncRun,
+};
 use crate::communication::adapters::{
     AdapterSyncCommandRequest, WhatsappSendCommandRequest, WhatsappTestCommandRequest,
 };
 use crate::communication::attachments::{content_type_for_path, refs_for_paths};
 use crate::communication::runtime as communication_runtime;
-use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+use crate::communication_store::{
+    now_iso_string, open_channel_db, preview_text, refresh_thread, upsert_communication_message,
+    UpsertMessage,
 };
 
 use whatsapp::client::{pair, Client, Event as LowEvent};

@@ -1,4 +1,9 @@
 mod outbound_review;
+use crate::communication_store::parse_string_json_array;
+pub(crate) use crate::communication_store::{
+    now_iso_string, open_channel_db, preview_text, refresh_thread, refresh_thread_tx,
+    upsert_communication_message, upsert_communication_message_tx, UpsertMessage,
+};
 use outbound_review::{
     cached_queue_task_count, cached_queue_task_list, channel_projection_tables_exist,
     empty_business_os_projection, enforce_external_chat_send_is_reviewed,
@@ -15,7 +20,8 @@ use outbound_review::{
 };
 #[cfg(test)]
 pub(crate) use outbound_review::{
-    channel_db_open_count_for_tests, reset_channel_db_open_count_for_tests,
+    channel_db_open_count_for_tests, record_channel_db_open_for_tests,
+    reset_channel_db_open_count_for_tests,
 };
 #[cfg(test)]
 use outbound_review::{
@@ -35,7 +41,7 @@ use outbound_review::{
 };
 pub(crate) use outbound_review::{
     default_email_account_key, ensure_founder_outbound_body_text_clean,
-    ensure_founder_reply_deliverables_present, is_reviewed_external_chat_channel, open_channel_db,
+    ensure_founder_reply_deliverables_present, is_reviewed_external_chat_channel,
     prepare_reviewed_external_chat_reply, prepare_reviewed_founder_reply,
     record_and_send_external_chat_escalation_reply, record_and_send_founder_escalation_reply,
     record_external_chat_review_approval, record_founder_outbound_review_approval,
@@ -43,6 +49,7 @@ pub(crate) use outbound_review::{
     reviewed_send_result_has_durable_outbound_artifact, send_reviewed_external_chat_action,
     send_reviewed_founder_outbound_action, terminal_founder_outbound_artifact_count,
 };
+pub(crate) use outbound_review::{ensure_open_routing_rows_once, ensure_schema_once};
 pub use outbound_review::{
     inbound_message_has_terminal_no_send, inbound_message_is_auto_submitted,
     record_terminal_no_send_verdict, send_reviewed_founder_reply,
@@ -6527,33 +6534,6 @@ fn queue_sort_at(priority: &str, now: &str) -> Result<String> {
     Ok(shifted.to_rfc3339())
 }
 
-pub(crate) struct UpsertMessage<'a> {
-    pub message_key: &'a str,
-    pub channel: &'a str,
-    pub account_key: &'a str,
-    pub thread_key: &'a str,
-    pub remote_id: &'a str,
-    pub direction: &'a str,
-    pub folder_hint: &'a str,
-    pub sender_display: &'a str,
-    pub sender_address: &'a str,
-    pub recipient_addresses_json: &'a str,
-    pub cc_addresses_json: &'a str,
-    pub bcc_addresses_json: &'a str,
-    pub subject: &'a str,
-    pub preview: &'a str,
-    pub body_text: &'a str,
-    pub body_html: &'a str,
-    pub raw_payload_ref: &'a str,
-    pub trust_level: &'a str,
-    pub status: &'a str,
-    pub seen: bool,
-    pub has_attachments: bool,
-    pub external_created_at: &'a str,
-    pub observed_at: &'a str,
-    pub metadata_json: &'a str,
-}
-
 pub(crate) struct CommunicationSyncRun<'a> {
     pub run_key: &'a str,
     pub channel: &'a str,
@@ -6566,85 +6546,6 @@ pub(crate) struct CommunicationSyncRun<'a> {
     pub stored_count: i64,
     pub error_text: &'a str,
     pub metadata_json: &'a str,
-}
-
-pub(crate) fn upsert_communication_message(
-    conn: &mut Connection,
-    message: UpsertMessage<'_>,
-) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    upsert_communication_message_tx(&tx, message)?;
-    tx.commit()?;
-    Ok(())
-}
-
-fn upsert_communication_message_tx(tx: &Transaction<'_>, message: UpsertMessage<'_>) -> Result<()> {
-    tx.execute(
-        r#"
-        INSERT INTO communication_messages (
-            message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
-            sender_display, sender_address, recipient_addresses_json, cc_addresses_json, bcc_addresses_json,
-            subject, preview, body_text, body_html, raw_payload_ref, trust_level, status, seen,
-            has_attachments, external_created_at, observed_at, metadata_json
-        ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-            ?8, ?9, ?10, ?11, ?12,
-            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-            ?21, ?22, ?23, ?24
-        )
-        ON CONFLICT(message_key) DO UPDATE SET
-            channel=excluded.channel,
-            account_key=excluded.account_key,
-            thread_key=excluded.thread_key,
-            remote_id=excluded.remote_id,
-            direction=excluded.direction,
-            folder_hint=excluded.folder_hint,
-            sender_display=excluded.sender_display,
-            sender_address=excluded.sender_address,
-            recipient_addresses_json=excluded.recipient_addresses_json,
-            cc_addresses_json=excluded.cc_addresses_json,
-            bcc_addresses_json=excluded.bcc_addresses_json,
-            subject=excluded.subject,
-            preview=excluded.preview,
-            body_text=excluded.body_text,
-            body_html=excluded.body_html,
-            raw_payload_ref=excluded.raw_payload_ref,
-            trust_level=excluded.trust_level,
-            status=excluded.status,
-            seen=excluded.seen,
-            has_attachments=excluded.has_attachments,
-            external_created_at=excluded.external_created_at,
-            observed_at=excluded.observed_at,
-            metadata_json=excluded.metadata_json
-        "#,
-        params![
-            message.message_key,
-            message.channel,
-            message.account_key,
-            message.thread_key,
-            message.remote_id,
-            message.direction,
-            message.folder_hint,
-            message.sender_display,
-            message.sender_address,
-            message.recipient_addresses_json,
-            message.cc_addresses_json,
-            message.bcc_addresses_json,
-            message.subject,
-            message.preview,
-            message.body_text,
-            message.body_html,
-            message.raw_payload_ref,
-            message.trust_level,
-            message.status,
-            if message.seen { 1 } else { 0 },
-            if message.has_attachments { 1 } else { 0 },
-            message.external_created_at,
-            message.observed_at,
-            message.metadata_json,
-        ],
-    )?;
-    Ok(())
 }
 
 pub(crate) fn ensure_account(
@@ -6959,13 +6860,6 @@ fn ensure_account_tx(
     Ok(())
 }
 
-pub(crate) fn refresh_thread(conn: &mut Connection, thread_key: &str) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    refresh_thread_tx(&tx, thread_key)?;
-    tx.commit()?;
-    Ok(())
-}
-
 pub(crate) fn upsert_communication_account(
     conn: &mut Connection,
     account_key: &str,
@@ -7009,124 +6903,6 @@ pub(crate) fn record_communication_sync_run(
         ],
     )?;
     Ok(())
-}
-
-fn refresh_thread_tx(tx: &Transaction<'_>, thread_key: &str) -> Result<()> {
-    let summary = tx
-        .query_row(
-            r#"
-            SELECT
-                channel,
-                account_key,
-                subject,
-                message_key,
-                external_created_at
-            FROM communication_messages
-            WHERE thread_key = ?1
-            ORDER BY external_created_at DESC, observed_at DESC
-            LIMIT 1
-            "#,
-            params![thread_key],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((channel, account_key, subject, last_message_key, last_message_at)) = summary else {
-        return Ok(());
-    };
-
-    let message_count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM communication_messages WHERE thread_key = ?1",
-        params![thread_key],
-        |row| row.get(0),
-    )?;
-    let unread_count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM communication_messages WHERE thread_key = ?1 AND direction = 'inbound' AND seen = 0",
-        params![thread_key],
-        |row| row.get(0),
-    )?;
-    let mut participants = BTreeSet::new();
-    let mut participant_stmt = tx.prepare(
-        r#"
-        SELECT sender_address, recipient_addresses_json, cc_addresses_json
-        FROM communication_messages
-        WHERE thread_key = ?1
-        "#,
-    )?;
-    let participant_rows = participant_stmt.query_map(params![thread_key], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in participant_rows {
-        let (sender, recipients_json, cc_json) = row?;
-        if !sender.trim().is_empty() {
-            participants.insert(sender);
-        }
-        for value in parse_string_json_array(&recipients_json) {
-            participants.insert(value);
-        }
-        for value in parse_string_json_array(&cc_json) {
-            participants.insert(value);
-        }
-    }
-
-    tx.execute(
-        r#"
-        INSERT INTO communication_threads (
-            thread_key, channel, account_key, subject, participant_keys_json, last_message_key,
-            last_message_at, message_count, unread_count, metadata_json, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-        ON CONFLICT(thread_key) DO UPDATE SET
-            channel=excluded.channel,
-            account_key=excluded.account_key,
-            subject=excluded.subject,
-            participant_keys_json=excluded.participant_keys_json,
-            last_message_key=excluded.last_message_key,
-            last_message_at=excluded.last_message_at,
-            message_count=excluded.message_count,
-            unread_count=excluded.unread_count,
-            metadata_json=excluded.metadata_json,
-            updated_at=excluded.updated_at
-        "#,
-        params![
-            thread_key,
-            channel,
-            account_key,
-            subject,
-            serde_json::to_string(&participants.into_iter().collect::<Vec<_>>())?,
-            last_message_key,
-            last_message_at,
-            message_count,
-            unread_count,
-            r#"{"refreshed_by":"ctox-channel-router"}"#,
-            now_iso_string(),
-        ],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn preview_text(body: &str, subject: &str) -> String {
-    let source = if body.trim().is_empty() {
-        subject
-    } else {
-        body
-    };
-    let collapsed = source.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.chars().take(280).collect()
-}
-
-fn parse_string_json_array(raw: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
 pub(crate) fn stable_digest(input: &str) -> String {
@@ -7269,49 +7045,6 @@ fn positional_after_flags(args: &[String]) -> Vec<String> {
 fn print_json(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
-}
-
-pub(crate) fn now_iso_string() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    chrono_like_iso(now)
-}
-
-fn chrono_like_iso(epoch_seconds: u64) -> String {
-    // Minimal UTC ISO-8601 formatter without adding a new dependency to the top-level crate.
-    use std::fmt::Write as _;
-
-    let seconds_per_day = 86_400u64;
-    let days = epoch_seconds / seconds_per_day;
-    let seconds_of_day = epoch_seconds % seconds_per_day;
-
-    let (year, month, day) = civil_from_days(days as i64);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-
-    let mut output = String::with_capacity(20);
-    let _ = write!(
-        output,
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
-    );
-    output
-}
-
-fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-    (year, m, d)
 }
 
 #[cfg(test)]

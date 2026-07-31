@@ -4,6 +4,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use url::Url;
 
+use crate::channels::{
+    ensure_account, ensure_routing_rows_for_inbound, record_communication_sync_run, stable_digest,
+    CommunicationSyncRun,
+};
 use crate::communication::adapters::{
     AdapterSyncCommandRequest, TeamsSendCommandRequest, TeamsTestCommandRequest,
 };
@@ -18,10 +22,9 @@ use crate::communication::email_native as communication_email_native;
 use crate::communication::microsoft_graph_auth::{
     acquire_app_token, acquire_ropc_token, urlencoding_encode, ROPC_PUBLIC_CLIENT_ID,
 };
-use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+use crate::communication_store::{
+    now_iso_string, open_channel_db, preview_text, refresh_thread, upsert_communication_message,
+    UpsertMessage,
 };
 
 const GRAPH_DEFAULT_BASE_URL: &str = "https://graph.microsoft.com/v1.0";

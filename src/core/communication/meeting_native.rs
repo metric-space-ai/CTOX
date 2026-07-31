@@ -20,13 +20,13 @@ use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension;
 
+use crate::channels::ensure_routing_rows_for_inbound;
 use crate::communication::adapters::{AdapterSyncCommandRequest, MeetingSendCommandRequest};
 use crate::communication::runtime as communication_runtime;
-use crate::inference::{engine, native_stt, runtime_env, supervisor};
-use crate::mission::channels::{
-    ensure_routing_rows_for_inbound, open_channel_db, refresh_thread, upsert_communication_message,
-    UpsertMessage,
+use crate::communication_store::{
+    open_channel_db, refresh_thread, upsert_communication_message, UpsertMessage,
 };
+use crate::inference::{engine, native_stt, runtime_env, supervisor};
 
 const DEFAULT_MEETING_STT_MODEL: &str = "engineai/Voxtral-Mini-4B-Realtime-2602";
 const MEETING_XVFB_SERVER_ARGS: &str = "-screen 0 1920x1080x24 -ac +extension RANDR";
@@ -2541,7 +2541,7 @@ fn finalize_meeting(
         },
     );
 
-    let post_meeting_ticket = crate::mission::ticket_local_native::create_local_ticket(
+    let post_meeting_ticket = crate::ticket_local_native::create_local_ticket(
         root,
         &format!("Meeting Nachbereitung: {}", session.provider),
         &format!(
@@ -4642,14 +4642,14 @@ fn schedule_meeting_join_with_metadata(
         bot_name = bot_name,
     );
 
-    let request = crate::mission::schedule::ScheduleEnsureRequest {
+    let request = crate::schedule::ScheduleEnsureRequest {
         name: schedule_name.clone(),
         cron_expr,
         prompt,
         thread_key,
         skill: Some("system-onboarding".to_string()),
     };
-    let task = crate::mission::schedule::ensure_task(root, request)?;
+    let task = crate::schedule::ensure_task(root, request)?;
 
     // Also persist the meeting details for the join logic
     let sessions_dir = meeting_sessions_dir(root);
@@ -4701,14 +4701,14 @@ fn cancel_meeting_join_with_uid(
 
     // Remove matching scheduled tasks by persisted metadata instead of relying
     // on reconstructing the schedule module's task-id derivation.
-    if let Ok(tasks) = crate::mission::schedule::list_tasks(root) {
+    if let Ok(tasks) = crate::schedule::list_tasks(root) {
         for task in tasks {
             let provider_matches = provider_thread_key
                 .as_deref()
                 .map(|thread_key| task.thread_key == thread_key)
                 .unwrap_or(true);
             if task.name == schedule_name && provider_matches {
-                if let Err(err) = crate::mission::schedule::remove_task(root, &task.task_id) {
+                if let Err(err) = crate::schedule::remove_task(root, &task.task_id) {
                     eprintln!(
                         "note: could not remove scheduled task {}: {err}",
                         task.task_id
@@ -5508,7 +5508,7 @@ mod tests {
         assert_eq!(result["results"][0]["action"], "scheduled");
         assert_eq!(result["results"][0]["uid"], "uid-request-1@example.com");
 
-        let tasks = crate::mission::schedule::list_tasks(&root).expect("scheduled tasks");
+        let tasks = crate::schedule::list_tasks(&root).expect("scheduled tasks");
         assert_eq!(tasks.len(), 1);
         assert!(tasks[0].prompt.starts_with("CTOX_MEETING_JOIN:"));
         assert!(tasks[0]
@@ -5534,7 +5534,7 @@ mod tests {
         )
         .expect("schedule result");
         assert_eq!(
-            crate::mission::schedule::list_tasks(&root)
+            crate::schedule::list_tasks(&root)
                 .expect("scheduled tasks")
                 .len(),
             1
@@ -5550,7 +5550,7 @@ mod tests {
         .expect("cancel result");
         assert_eq!(cancel["action"], "processed");
         assert_eq!(cancel["results"][0]["action"], "cancelled");
-        assert!(crate::mission::schedule::list_tasks(&root)
+        assert!(crate::schedule::list_tasks(&root)
             .expect("scheduled tasks")
             .is_empty());
         let _ = std::fs::remove_dir_all(&root);

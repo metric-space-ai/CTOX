@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-use crate::mission::channels::{now_iso_string, open_channel_db, refresh_thread, UpsertMessage};
+use crate::communication_store::{now_iso_string, open_channel_db, refresh_thread, UpsertMessage};
 
 const OUTBOX_MAX_ATTEMPTS: u32 = 5;
 const OUTBOX_BATCH_LIMIT: usize = 100;
@@ -734,7 +734,7 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: UpsertMessage<'_>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mission::channels::{open_channel_db, preview_text};
+    use crate::communication_store::{open_channel_db, preview_text};
 
     fn queue_test_message(
         conn: &mut Connection,

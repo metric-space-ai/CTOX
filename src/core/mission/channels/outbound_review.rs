@@ -11,8 +11,8 @@ use super::{
     ensure_routing_state_hardening_columns, ensure_terminal_no_send_column, find_flag_value,
     has_flag, jami_address_from_account_key, load_account_config, map_channel_message_row,
     metadata_marks_auto_submitted, non_negative_i64_to_usize, normalize_email_address,
-    now_iso_string, parse_string_json_array, preview_text, record_harness_flow_event_lossy,
-    required_flag_value, resolve_account_key, resolve_db_path,
+    now_iso_string, open_channel_db, parse_string_json_array, preview_text,
+    record_harness_flow_event_lossy, required_flag_value, resolve_account_key, resolve_db_path,
     runtime_settings_with_owner_profiles, send_message, stable_digest, sync_prompt_identity,
     ChannelFileChangeStamp, ChannelMessageView, ChannelRoutingCacheStamp, ChannelSchemaCacheKey,
     ChannelSendRequest, CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState,
@@ -3189,23 +3189,7 @@ pub(super) fn parse_tui_ingest_request(args: &[String]) -> Result<TuiIngestReque
     })
 }
 
-pub(crate) fn open_channel_db(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create db parent {}", parent.display()))?;
-    }
-    #[cfg(test)]
-    record_channel_db_open_for_tests(path);
-    let conn = Connection::open(path)
-        .with_context(|| format!("failed to open channel db {}", path.display()))?;
-    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
-        .context("failed to configure SQLite busy_timeout for channels")?;
-    ensure_schema_once(path, &conn)?;
-    ensure_open_routing_rows_once(path, &conn)?;
-    Ok(conn)
-}
-
-pub(super) fn ensure_schema_once(path: &Path, conn: &Connection) -> Result<()> {
+pub(crate) fn ensure_schema_once(path: &Path, conn: &Connection) -> Result<()> {
     let key = channel_schema_cache_key(path);
     let ready = CHANNEL_SCHEMA_READY.get_or_init(|| Mutex::new(HashSet::new()));
     let mut ready = ready
@@ -3221,7 +3205,7 @@ pub(super) fn ensure_schema_once(path: &Path, conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn ensure_open_routing_rows_once(path: &Path, conn: &Connection) -> Result<()> {
+pub(crate) fn ensure_open_routing_rows_once(path: &Path, conn: &Connection) -> Result<()> {
     let key = channel_schema_cache_key(path);
     let ready = CHANNEL_OPEN_ROUTING_READY.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut ready = ready
@@ -3479,7 +3463,7 @@ pub(super) fn channel_open_routing_ensure_count_for_tests(path: &Path) -> usize 
 }
 
 #[cfg(test)]
-pub(super) fn record_channel_db_open_for_tests(path: &Path) {
+pub(crate) fn record_channel_db_open_for_tests(path: &Path) {
     let counts = CHANNEL_DB_OPEN_CALL_COUNTS.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut counts = counts
         .lock()

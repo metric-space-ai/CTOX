@@ -11,6 +11,10 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use url::Url;
 
+use crate::channels::{
+    ensure_account, ensure_routing_rows_for_inbound, record_communication_sync_run, stable_digest,
+    CommunicationSyncRun,
+};
 use crate::communication::adapters::{
     AdapterSyncCommandRequest, ChatSendCommandRequest, ChatTestCommandRequest,
 };
@@ -20,10 +24,9 @@ use crate::communication::chat_outbox::{
 use crate::communication::email_native as communication_email_native;
 use crate::communication::microsoft_graph_auth::urlencoding_encode;
 use crate::communication::runtime as communication_runtime;
-use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+use crate::communication_store::{
+    now_iso_string, open_channel_db, preview_text, refresh_thread, upsert_communication_message,
+    UpsertMessage,
 };
 
 const DEFAULT_LIMIT: usize = 50;

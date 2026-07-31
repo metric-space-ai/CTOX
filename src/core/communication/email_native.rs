@@ -14,6 +14,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
+use crate::channels::{
+    ensure_account, ensure_routing_rows_for_inbound, record_communication_sync_run, stable_digest,
+    CommunicationSyncRun,
+};
 use crate::communication::adapters::{
     AdapterSyncCommandRequest, EmailSendCommandRequest, EmailTestCommandRequest,
 };
@@ -22,10 +26,9 @@ use crate::communication::microsoft_graph_auth::{
     acquire_app_token, acquire_ropc_token, ROPC_PUBLIC_CLIENT_ID,
 };
 use crate::communication::runtime as communication_runtime;
-use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+use crate::communication_store::{
+    now_iso_string, open_channel_db, preview_text, refresh_thread, upsert_communication_message,
+    UpsertMessage,
 };
 
 const DEFAULT_IMAP_HOST: &str = "imap.one.com";
@@ -3833,7 +3836,9 @@ mod tests {
         parse_rfc822_headers, require_provider_credentials, synced_message_direction, EmailOptions,
         LATEST_KNOWN_IMAP_UID_SQL,
     };
-    use crate::mission::channels::{open_channel_db, upsert_communication_message, UpsertMessage};
+    use crate::communication_store::{
+        open_channel_db, upsert_communication_message, UpsertMessage,
+    };
     use std::io::Write;
     use std::path::PathBuf;
 
