@@ -2665,6 +2665,16 @@ pub fn session_can_manage_all(session: &BusinessOsSession) -> bool {
     .allowed
 }
 
+pub fn session_can_manage_workspace_branding(
+    root: &Path,
+    session: &BusinessOsSession,
+) -> anyhow::Result<bool> {
+    Ok(
+        workspace_policy_decision(root, session, BusinessOsPermission::WorkspaceBrandingManage)?
+            .allowed,
+    )
+}
+
 pub fn session_can_modify_module(
     root: &Path,
     session: &BusinessOsSession,
@@ -5274,6 +5284,36 @@ fn record_workspace_branding_change_event(
             "event_type": "business_os.workspace_branding.changed",
             "actor": session_audit_actor_context(session),
             "current": current,
+            "observed_at_ms": observed_at_ms
+        }),
+        observed_at_ms,
+    )
+}
+
+pub fn record_design_template_change_event(
+    root: &Path,
+    session: &BusinessOsSession,
+    template_id: &str,
+    action: &str,
+) -> anyhow::Result<()> {
+    let action = match action {
+        "saved" => "saved",
+        "deleted" => "deleted",
+        _ => anyhow::bail!("unsupported design template audit action"),
+    };
+    let event_type = format!("business_os.design_template.{action}");
+    let observed_at_ms = now_ms() as i64;
+    let conn = open_store(root)?;
+    insert_business_event(
+        &conn,
+        "business_os_design_templates",
+        template_id,
+        &event_type,
+        serde_json::json!({
+            "event_type": event_type,
+            "template_id": template_id,
+            "action": action,
+            "actor": session_audit_actor_context(session),
             "observed_at_ms": observed_at_ms
         }),
         observed_at_ms,
@@ -14914,6 +14954,8 @@ fn list_business_activity_events(
             'business_os.module.release.failed',
             'business_os.module.rollback.succeeded',
             'business_os.module.rollback.failed',
+            'business_os.design_template.saved',
+            'business_os.design_template.deleted',
             'business_os.ats.candidate_presented',
             'business_os.ats.candidate_present_denied',
             'business_os.ats.placement_created',
@@ -56927,9 +56969,13 @@ mod tests {
             |row| row.get(0),
         )?;
         conn.execute(
-            "INSERT INTO ctox_business_os__desktop_files__v0 (id, data) VALUES (?1, ?2)",
+            "INSERT INTO ctox_business_os__desktop_files__v0
+                (id, revision, deleted, lastWriteTime, data)
+             VALUES (?1, ?2, 0, ?3, ?4)",
             params![
                 target_file_id,
+                format!("rev_seed_{target_file_id}"),
+                now_ms() as f64,
                 serde_json::json!({
                     "id": target_file_id,
                     "parent_id": "fs_business_os_chat_attachments",
@@ -56959,9 +57005,13 @@ mod tests {
         target_chunk["file_id"] = Value::String(target_file_id.to_string());
         target_chunk["generation_id"] = Value::String(target_generation_id.to_string());
         conn.execute(
-            "INSERT INTO ctox_business_os__desktop_file_chunks__v0 (id, data) VALUES (?1, ?2)",
+            "INSERT INTO ctox_business_os__desktop_file_chunks__v0
+                (id, revision, deleted, lastWriteTime, data)
+             VALUES (?1, ?2, 0, ?3, ?4)",
             params![
                 format!("{target_file_id}_{target_generation_id}_0"),
+                format!("rev_seed_{target_file_id}_{target_generation_id}_0"),
+                now_ms() as f64,
                 target_chunk.to_string()
             ],
         )?;
@@ -57139,13 +57189,13 @@ mod tests {
     ) -> anyhow::Result<(String, String)> {
         fs::create_dir_all(root.join("runtime"))?;
         let conn = Connection::open(rxdb_store_path(root))?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__desktop_files__v0 (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
-            [],
+        rxdb::storage::sqlite::sql::ensure_collection_table(
+            &conn,
+            "ctox_business_os__desktop_files__v0",
         )?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__desktop_file_chunks__v0 (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
-            [],
+        rxdb::storage::sqlite::sql::ensure_collection_table(
+            &conn,
+            "ctox_business_os__desktop_file_chunks__v0",
         )?;
         let now = now_ms() as i64;
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -57156,9 +57206,13 @@ mod tests {
             (encoded.len() as u64).div_ceil(BUSINESS_OS_CHAT_ATTACHMENT_CHUNK_SIZE as u64),
         ) as usize;
         conn.execute(
-            "INSERT INTO ctox_business_os__desktop_files__v0 (id, data) VALUES (?1, ?2)",
+            "INSERT INTO ctox_business_os__desktop_files__v0
+                (id, revision, deleted, lastWriteTime, data)
+             VALUES (?1, ?2, 0, ?3, ?4)",
             params![
                 file_id,
+                format!("rev_seed_{file_id}_{now}"),
+                now as f64,
                 serde_json::json!({
                     "id": file_id,
                     "parent_id": "fs_business_os_chat_attachments",
@@ -57196,9 +57250,13 @@ mod tests {
                 hex_sha256(data.as_bytes())
             };
             conn.execute(
-                "INSERT INTO ctox_business_os__desktop_file_chunks__v0 (id, data) VALUES (?1, ?2)",
+                "INSERT INTO ctox_business_os__desktop_file_chunks__v0
+                    (id, revision, deleted, lastWriteTime, data)
+                 VALUES (?1, ?2, 0, ?3, ?4)",
                 params![
                     format!("{file_id}_{generation_id}_{idx}"),
+                    format!("rev_seed_{file_id}_{generation_id}_{idx}"),
+                    now as f64,
                     serde_json::json!({
                         "id": format!("{file_id}_{generation_id}_{idx}"),
                         "file_id": file_id,
@@ -57264,9 +57322,15 @@ mod tests {
             let legacy_id = format!("{file_id}_{idx}");
             chunk["id"] = Value::String(legacy_id.clone());
             conn.execute(
-                "INSERT OR REPLACE INTO ctox_business_os__desktop_file_chunks__v0 (id, data)
-                 VALUES (?1, ?2)",
-                params![legacy_id, chunk.to_string()],
+                "INSERT OR REPLACE INTO ctox_business_os__desktop_file_chunks__v0
+                    (id, revision, deleted, lastWriteTime, data)
+                 VALUES (?1, ?2, 0, ?3, ?4)",
+                params![
+                    legacy_id,
+                    format!("rev_seed_{file_id}_{generation_id}_{idx}"),
+                    now_ms() as f64,
+                    chunk.to_string()
+                ],
             )?;
         }
         Ok(())
@@ -57326,8 +57390,15 @@ mod tests {
         padding["size_bytes"] = Value::from(0_u64);
         padding["chunk_hash"] = Value::String(hex_sha256(b""));
         conn.execute(
-            "INSERT INTO ctox_business_os__desktop_file_chunks__v0 (id, data) VALUES (?1, ?2)",
-            params![padding_id, padding.to_string()],
+            "INSERT INTO ctox_business_os__desktop_file_chunks__v0
+                (id, revision, deleted, lastWriteTime, data)
+             VALUES (?1, ?2, 0, ?3, ?4)",
+            params![
+                padding_id,
+                format!("rev_seed_{file_id}_{generation_id}_{previous_total}"),
+                now_ms() as f64,
+                padding.to_string()
+            ],
         )?;
         Ok(())
     }
@@ -57369,9 +57440,13 @@ mod tests {
         last["size_bytes"] = Value::from(0_u64);
         last["chunk_hash"] = Value::String(hex_sha256(b""));
         conn.execute(
-            "INSERT INTO ctox_business_os__desktop_file_chunks__v0 (id, data) VALUES (?1, ?2)",
+            "INSERT INTO ctox_business_os__desktop_file_chunks__v0
+                (id, revision, deleted, lastWriteTime, data)
+             VALUES (?1, ?2, 0, ?3, ?4)",
             params![
                 format!("{file_id}_{generation_id}_{previous_total}"),
+                format!("rev_seed_{file_id}_{generation_id}_{previous_total}"),
+                now_ms() as f64,
                 last.to_string()
             ],
         )?;
