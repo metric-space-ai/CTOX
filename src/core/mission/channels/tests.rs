@@ -5887,34 +5887,39 @@ fn waiting_dependency_command_promotes_once_to_one_queue_task() {
 }
 
 #[test]
-fn command_reconciler_repairs_only_missing_current_outbox() {
-    let root = business_command_test_root("ctox-business-command-reconcile");
+fn business_command_audit_does_not_recreate_retained_outbox_rows() {
+    let root = business_command_test_root("ctox-business-command-retained-outbox");
     claim_business_control_command(
         &root,
-        business_command_claim("command-reconcile", "sha256:reconcile"),
+        business_command_claim("command-retained-outbox", "sha256:retained-outbox"),
     )
     .expect("claim control command");
     let db_path = resolve_db_path(&root, None);
     let conn = open_channel_db(&db_path).expect("open core db");
     conn.execute(
-        "DELETE FROM business_command_outbox
-         WHERE command_id = 'command-reconcile' AND destination = 'rxdb'",
+        "UPDATE business_command_outbox
+         SET status = 'delivered', delivered_at_ms = 1
+         WHERE command_id = 'command-retained-outbox'",
         [],
     )
-    .expect("remove one outbox row");
+    .expect("age delivered outbox rows");
     drop(conn);
-    let report = reconcile_business_command_invariants(&root, false).expect("report drift");
-    assert_eq!(
-        report["missing_current_outbox"].as_array().map(Vec::len),
-        Some(1)
-    );
-    let applied = reconcile_business_command_invariants(&root, true).expect("repair drift");
-    assert_eq!(applied["repaired_outbox_commands"], 1);
-    let clean = reconcile_business_command_invariants(&root, false).expect("verify repair");
-    assert_eq!(
-        clean["missing_current_outbox"].as_array().map(Vec::len),
-        Some(0)
-    );
+
+    let retention = business_command_retention_maintenance(&root, true).expect("prune outbox");
+    assert_eq!(retention["pruned_delivered_outbox"], 2);
+    let audited = audit_and_migrate_business_command_storage(&root, true).expect("audit storage");
+    assert!(audited.get("missing_current_outbox").is_none());
+
+    let conn = open_channel_db(&db_path).expect("reopen core db");
+    let outbox_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM business_command_outbox
+             WHERE command_id = 'command-retained-outbox'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count retained outbox rows");
+    assert_eq!(outbox_count, 0);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5978,7 +5983,67 @@ fn cancelling_linked_queue_task_terminalizes_business_command() {
 }
 
 #[test]
-fn command_reconciler_repairs_cancelled_queue_command_drift() {
+fn cancelled_ack_terminalizes_linked_business_command_atomically() {
+    let root = business_command_test_root("ctox-business-command-cancel-ack");
+    let claimed = claim_business_command_with_queue(
+        &root,
+        business_command_claim("command-cancel-ack", "sha256:cancel-ack"),
+        QueueTaskCreateRequest {
+            title: "Cancel acknowledged work".to_string(),
+            prompt: "This linked task will be cancelled through the ack path.".to_string(),
+            thread_key: "business-os/tests/cancel-ack".to_string(),
+            workspace_root: Some(root.display().to_string()),
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+            extra_metadata: Some(json!({"idempotency_key": "command-cancel-ack"})),
+        },
+    )
+    .expect("claim command");
+    let task_id = claimed.task.message_key;
+    lease_queue_task(&root, &task_id, "ctox-test").expect("lease queue task");
+    transition_business_command_for_task(
+        &root,
+        &task_id,
+        "leased",
+        None,
+        None,
+        None,
+        "initial lease",
+    )
+    .expect("lease command");
+    transition_business_command_for_task(
+        &root,
+        &task_id,
+        "running",
+        None,
+        None,
+        None,
+        "initial execution",
+    )
+    .expect("run command");
+
+    assert_eq!(
+        ack_leased_messages(&root, std::slice::from_ref(&task_id), "cancelled")
+            .expect("cancel through ack path"),
+        1
+    );
+    let projection =
+        business_command_projection(&root, "command-cancel-ack").expect("load projection");
+    assert_eq!(projection["execution_phase"], "terminal");
+    assert_eq!(projection["terminal_status"], "cancelled");
+    assert_eq!(
+        load_queue_task(&root, &task_id)
+            .expect("load cancelled task")
+            .expect("cancelled task exists")
+            .route_status,
+        "cancelled"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_cancelled_queue_command_migration_runs_once_per_database() {
     let root = business_command_test_root("ctox-business-command-reconcile-cancel");
     let claimed = claim_business_command_with_queue(
         &root,
@@ -6028,28 +6093,47 @@ fn command_reconciler_repairs_cancelled_queue_command_drift() {
     .expect("seed legacy cancelled route");
     drop(conn);
 
-    let report =
-        reconcile_business_command_invariants(&root, false).expect("report cancelled drift");
+    let report = audit_and_migrate_business_command_storage(&root, false)
+        .expect("report legacy cancelled rows");
     assert_eq!(
         report["cancelled_queue_command_drift"]
             .as_array()
             .map(Vec::len),
         Some(1)
     );
-    let applied =
-        reconcile_business_command_invariants(&root, true).expect("repair cancelled drift");
+    let applied = audit_and_migrate_business_command_storage(&root, true)
+        .expect("migrate legacy cancelled rows");
     assert_eq!(applied["repaired_cancelled_queue_commands"], 1);
+    assert_eq!(
+        applied["legacy_cancelled_queue_command_migration"]["applied_now"],
+        true
+    );
     let projection = business_command_projection(&root, "command-reconcile-cancel")
         .expect("load reconciled projection");
     assert_eq!(projection["execution_phase"], "terminal");
     assert_eq!(projection["terminal_status"], "cancelled");
     let clean =
-        reconcile_business_command_invariants(&root, false).expect("verify cancelled repair");
+        audit_and_migrate_business_command_storage(&root, false).expect("verify migration marker");
     assert_eq!(
         clean["cancelled_queue_command_drift"]
             .as_array()
             .map(Vec::len),
         Some(0)
+    );
+    assert_eq!(
+        clean["legacy_cancelled_queue_command_migration"]["already_applied"],
+        true
+    );
+    let second_apply =
+        audit_and_migrate_business_command_storage(&root, true).expect("skip completed migration");
+    assert_eq!(second_apply["repaired_cancelled_queue_commands"], 0);
+    assert_eq!(
+        second_apply["legacy_cancelled_queue_command_migration"]["already_applied"],
+        true
+    );
+    assert_eq!(
+        second_apply["legacy_cancelled_queue_command_migration"]["applied_now"],
+        false
     );
     let _ = fs::remove_dir_all(root);
 }

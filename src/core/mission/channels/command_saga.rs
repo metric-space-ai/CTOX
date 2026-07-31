@@ -1,7 +1,7 @@
 // The business-command plane inside mission: claim/complete/progress of
 // control commands, the saga step machinery, worker results, reviews,
 // outbox rows, projections, diagnostics, intake failures, retention and
-// the (to-be-deleted) invariant reconciler.
+// storage audits and one-time legacy-data migrations.
 
 use super::{
     canonical_queue_route_status, create_queue_task_with_metadata_tx, current_queue_route_status,
@@ -2152,13 +2152,68 @@ pub(crate) fn business_command_retention_maintenance(root: &Path, apply: bool) -
     }))
 }
 
-pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) -> Result<Value> {
+const LEGACY_CANCELLED_QUEUE_COMMAND_MIGRATION: &str = "2026-07-31-legacy-cancelled-queue-command";
+
+fn business_command_data_migration_applied(conn: &Connection, migration_id: &str) -> Result<bool> {
+    let table_exists = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'business_command_data_migrations'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !table_exists {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM business_command_data_migrations WHERE migration_id = ?1
+         )",
+        params![migration_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(Into::into)
+}
+
+fn cancelled_queue_command_rows(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+    let mut rows = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT link.command_id, link.task_id, aggregate_row.execution_phase
+         FROM business_command_task_links link
+         JOIN business_command_aggregates aggregate_row
+           ON aggregate_row.command_id = link.command_id
+         JOIN communication_routing_state route
+           ON route.message_key = link.task_id
+         WHERE aggregate_row.execution_mode = 'queue'
+           AND aggregate_row.execution_phase != 'terminal'
+           AND route.route_status = 'cancelled'",
+    )?;
+    for row in stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        rows.push(row?);
+    }
+    Ok(rows)
+}
+
+/// Audits the two storage inconsistencies for which no repository writer could
+/// be identified (`missing_task_links` and `task_links_to_missing_tasks`). It
+/// deliberately does not guess repairs for either class. With `apply`, it also
+/// repairs rows left by legacy route-only cancellation writers exactly once per
+/// database and records a durable migration marker.
+pub(crate) fn audit_and_migrate_business_command_storage(
+    root: &Path,
+    apply: bool,
+) -> Result<Value> {
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     let mut missing_links = Vec::new();
     let mut missing_tasks = Vec::new();
-    let mut missing_outbox = Vec::new();
-    let mut cancelled_queue_command_drift = Vec::new();
     {
         let mut stmt = conn.prepare(
             "SELECT aggregate_row.command_id, aggregate_row.execution_phase
@@ -2188,96 +2243,68 @@ pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) ->
             missing_tasks.push(json!({"command_id": command_id, "execution_task_id": task_id}));
         }
     }
-    {
-        let mut stmt = conn.prepare(
-            "SELECT aggregate_row.command_id, aggregate_row.projection_version
-             FROM business_command_aggregates aggregate_row
-             WHERE EXISTS (
-                SELECT 1 FROM (SELECT 'business-os' AS destination UNION ALL SELECT 'rxdb') expected
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM business_command_outbox outbox
-                    WHERE outbox.command_id = aggregate_row.command_id
-                      AND outbox.projection_version = aggregate_row.projection_version
-                      AND outbox.destination = expected.destination
-                )
-             )",
-        )?;
-        for row in stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })? {
-            let (command_id, version) = row?;
-            missing_outbox.push((command_id, version));
-        }
-    }
-    {
-        let mut stmt = conn.prepare(
-            "SELECT link.command_id, link.task_id, aggregate_row.execution_phase
-             FROM business_command_task_links link
-             JOIN business_command_aggregates aggregate_row
-               ON aggregate_row.command_id = link.command_id
-             JOIN communication_routing_state route
-               ON route.message_key = link.task_id
-             WHERE aggregate_row.execution_mode = 'queue'
-               AND aggregate_row.execution_phase != 'terminal'
-               AND route.route_status = 'cancelled'",
-        )?;
-        for row in stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })? {
-            cancelled_queue_command_drift.push(row?);
-        }
-    }
+
+    let mut migration_already_applied =
+        business_command_data_migration_applied(&conn, LEGACY_CANCELLED_QUEUE_COMMAND_MIGRATION)?;
+    let mut migration_applied_now = false;
+    let mut cancelled_queue_command_drift = Vec::new();
     let mut repaired_cancelled_queue_commands = 0_u64;
-    if apply && !cancelled_queue_command_drift.is_empty() {
+    if apply && !migration_already_applied {
         let tx = conn.transaction()?;
-        for (_, task_id, _) in &cancelled_queue_command_drift {
-            if transition_business_command_for_task_in_transaction(
-                &tx,
-                task_id,
-                "cancelled",
-                None,
-                None,
-                Some("queue task was already cancelled"),
-                "reconciled cancelled queue task",
-            )? {
-                repaired_cancelled_queue_commands =
-                    repaired_cancelled_queue_commands.saturating_add(1);
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS business_command_data_migrations (
+                migration_id TEXT PRIMARY KEY,
+                applied_at_ms INTEGER NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}'
+             );",
+        )?;
+        migration_already_applied = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM business_command_data_migrations WHERE migration_id = ?1
+             )",
+            params![LEGACY_CANCELLED_QUEUE_COMMAND_MIGRATION],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !migration_already_applied {
+            cancelled_queue_command_drift = cancelled_queue_command_rows(&tx)?;
+            for (_, task_id, _) in &cancelled_queue_command_drift {
+                if transition_business_command_for_task_in_transaction(
+                    &tx,
+                    task_id,
+                    "cancelled",
+                    None,
+                    None,
+                    Some("queue task was already cancelled"),
+                    "migrated legacy cancelled queue task",
+                )? {
+                    repaired_cancelled_queue_commands =
+                        repaired_cancelled_queue_commands.saturating_add(1);
+                }
             }
-        }
-        tx.commit()?;
-    }
-    let mut repaired_outbox = 0_u64;
-    if apply && !missing_outbox.is_empty() {
-        let tx = conn.transaction()?;
-        for (command_id, version) in &missing_outbox {
-            insert_business_command_outbox_rows(
-                &tx,
-                command_id,
-                *version,
-                "command.reconciled",
-                &json!({
-                    "command_id": command_id,
-                    "projection_version": version,
-                    "reason": "missing current-version outbox repaired",
-                }),
-                epoch_millis(),
+            tx.execute(
+                "INSERT INTO business_command_data_migrations
+                    (migration_id, applied_at_ms, details_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    LEGACY_CANCELLED_QUEUE_COMMAND_MIGRATION,
+                    epoch_millis(),
+                    serde_json::to_string(&json!({
+                        "candidate_count": cancelled_queue_command_drift.len(),
+                        "repaired_count": repaired_cancelled_queue_commands,
+                    }))?,
+                ],
             )?;
-            repaired_outbox = repaired_outbox.saturating_add(1);
+            migration_applied_now = true;
         }
         tx.commit()?;
+    } else if !migration_already_applied {
+        cancelled_queue_command_drift = cancelled_queue_command_rows(&conn)?;
     }
+
     Ok(json!({
         "apply": apply,
         "missing_task_links": missing_links,
         "task_links_to_missing_tasks": missing_tasks,
-        "missing_current_outbox": missing_outbox.iter().map(|(command_id, version)| json!({
-            "command_id": command_id,
-            "projection_version": version,
-        })).collect::<Vec<_>>(),
         "cancelled_queue_command_drift": cancelled_queue_command_drift.iter().map(
             |(command_id, task_id, execution_phase)| json!({
                 "command_id": command_id,
@@ -2286,8 +2313,18 @@ pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) ->
                 "queue_route_status": "cancelled",
             })
         ).collect::<Vec<_>>(),
-        "repaired_outbox_commands": repaired_outbox,
+        "legacy_cancelled_queue_command_migration": {
+            "migration_id": LEGACY_CANCELLED_QUEUE_COMMAND_MIGRATION,
+            "already_applied": migration_already_applied,
+            "applied_now": migration_applied_now,
+        },
         "repaired_cancelled_queue_commands": repaired_cancelled_queue_commands,
         "unsafe_repairs_applied": 0,
     }))
+}
+
+/// Compatibility entry point for the Business OS `commands reconcile` CLI.
+/// New internal callers should use [`audit_and_migrate_business_command_storage`].
+pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) -> Result<Value> {
+    audit_and_migrate_business_command_storage(root, apply)
 }

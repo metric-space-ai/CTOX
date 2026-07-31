@@ -52,20 +52,21 @@ mod command_saga;
 use command_saga::transition_business_command_for_task_in_transaction;
 mod route_status;
 pub(crate) use command_saga::{
-    business_command_core_diagnostics, business_command_projection,
-    business_command_retention_maintenance, business_command_saga_pending_compensation_steps,
-    business_command_saga_status, business_command_saga_step_evidence,
-    claim_business_command_saga_step, claim_business_command_waiting_dependencies,
-    claim_business_command_with_queue, claim_business_control_command,
-    complete_business_command_saga_step, complete_business_control_command,
-    fail_business_command_saga_step, inspect_business_command, inspect_business_command_for_task,
-    mark_business_command_outbox_delivered, mark_business_command_outbox_failed,
-    pending_business_command_outbox, persist_business_command_worker_result,
-    progress_business_control_command, reconcile_business_command_invariants,
-    record_business_command_intake_failure, record_business_command_review,
-    record_business_command_saga_step_evidence, resolve_business_command_intake_failures,
-    runtime_business_command_action_snapshot, start_business_command_saga,
-    start_runtime_business_command_saga, transition_business_command_for_task,
+    audit_and_migrate_business_command_storage, business_command_core_diagnostics,
+    business_command_projection, business_command_retention_maintenance,
+    business_command_saga_pending_compensation_steps, business_command_saga_status,
+    business_command_saga_step_evidence, claim_business_command_saga_step,
+    claim_business_command_waiting_dependencies, claim_business_command_with_queue,
+    claim_business_control_command, complete_business_command_saga_step,
+    complete_business_control_command, fail_business_command_saga_step, inspect_business_command,
+    inspect_business_command_for_task, mark_business_command_outbox_delivered,
+    mark_business_command_outbox_failed, pending_business_command_outbox,
+    persist_business_command_worker_result, progress_business_control_command,
+    reconcile_business_command_invariants, record_business_command_intake_failure,
+    record_business_command_review, record_business_command_saga_step_evidence,
+    resolve_business_command_intake_failures, runtime_business_command_action_snapshot,
+    start_business_command_saga, start_runtime_business_command_saga,
+    transition_business_command_for_task,
 };
 pub(crate) use route_status::QueueRouteStatus;
 
@@ -5319,6 +5320,25 @@ fn ack_messages_in_transaction(
     };
     let mut updated = 0usize;
     for message_key in message_keys {
+        let transition_reason = ack_reason.or(failure_note).unwrap_or("ack_messages");
+        if status == QueueRouteStatus::Cancelled
+            && transition_business_command_for_task_in_transaction(
+                tx,
+                message_key,
+                status.as_str(),
+                None,
+                None,
+                None,
+                transition_reason,
+            )?
+        {
+            updated = updated.saturating_add(1);
+            tx.execute(
+                "UPDATE communication_messages SET seen = 1 WHERE message_key = ?1",
+                params![message_key],
+            )?;
+            continue;
+        }
         let previous_route_status = current_queue_route_status(&tx, message_key)?;
         enforce_queue_route_status_transition_with_grant(
             &tx,
