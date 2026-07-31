@@ -1,6 +1,6 @@
 // impressum — solo live probe (plain Playwright, no CTOX stack).
 //
-// Usage: node scrape-targets/impressum/solo/probe.mjs <domain-or-url>
+// Usage: node scrape-targets/impressum/solo/probe.mjs <domain-or-url | company name>
 //
 // Drives the LIVE company site headless, locates its legal notice page
 // (Impressum / Imprint) and extracts the prospect.v1 contact fields the
@@ -10,8 +10,13 @@
 // plus the legally required representatives (§ 5 DDG/TMG), one record set
 // per named person:
 //   person_vorname, person_nachname, person_funktion, person_titel
+//
+// When the input is a company name rather than a domain, the probe derives
+// candidate hosts from the name (same derivation as scripts/v1.js) and keeps
+// the first candidate whose own legal notice passes the same identity +
+// legal-form gate the adapter applies. A wrong guess is discarded silently.
 // Prints ONE JSON object:
-//   {target, input, fetched_at, fields: {<field_key>: {value, source_url}},
+//   {target, input, fetched_at, verified_host?, fields: {<field_key>: {value, source_url}},
 //    persons: [{person_vorname, person_nachname, person_funktion,
 //               person_titel?, source_url}]}
 // Exit 0 only when a real address (anschrift + plz + ort) plus a name were
@@ -36,7 +41,7 @@ function fail(reason, fields) {
   process.exit(reason.startsWith("usage") ? 2 : 1);
 }
 
-if (!rawInput) fail("usage: probe.mjs <domain-or-url>");
+if (!rawInput) fail("usage: probe.mjs <domain-or-url | company name>");
 
 function toOrigin(value) {
   const withScheme = /^https?:\/\//i.test(value) ? value : "https://" + value;
@@ -49,8 +54,79 @@ function toOrigin(value) {
   }
 }
 
+// A domain/URL input drives one origin; anything else is treated as a
+// company name and goes through domain discovery.
 const origin = toOrigin(rawInput);
-if (!origin) fail("cannot derive an https origin from " + JSON.stringify(rawInput));
+
+// ---------------------------------------------------------------------------
+// Identity gate + candidate derivation — identical to scripts/v1.js. A
+// guessed candidate host verifies only through its own legal notice: the
+// notice must name the company (identity) with the same legal form. A wrong
+// guess (a parent group's domain, a namesake) is discarded silently.
+// ---------------------------------------------------------------------------
+
+function normalized(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("de-DE")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+const LEGAL_TOKENS = new Set(["ag", "gmbh", "kg", "mbh", "se", "und"]);
+
+function identityTokens(company) {
+  return normalized(company).split(/\s+/).filter((token) => token.length >= 3 && !LEGAL_TOKENS.has(token));
+}
+
+function identityMatches(company, corpus) {
+  const tokens = identityTokens(company);
+  const haystack = normalized(corpus);
+  if (tokens.length === 0 || !haystack) return false;
+  return tokens.filter((token) => haystack.includes(token)).length >= Math.max(1, Math.ceil(tokens.length * 0.75));
+}
+
+function legalForm(value) {
+  const tokens = new Set(normalized(value).split(/\s+/));
+  if (tokens.has("gmbh") && tokens.has("kg")) return "gmbh-kg";
+  for (const form of ["kgaa", "gmbh", "se", "ag", "kg", "og"]) {
+    if (tokens.has(form)) return form;
+  }
+  return null;
+}
+
+function legalFormMatches(company, candidate) {
+  const expected = legalForm(company);
+  return expected === null || legalForm(candidate) === expected;
+}
+
+const MAX_CANDIDATE_HOSTS = 6;
+const CANDIDATE_POLITENESS_MS = 1500;
+
+function candidateHostsFromCompany(company) {
+  const withoutLegalForm = String(company || "")
+    .replace(/&\s*Co\.?/gi, " ")
+    .replace(/\b(?:gmbh|mbh|kgaa|ag|se|kg|ohg|gbr|ug|ltd|llc|inc|co)\b\.?/gi, " ");
+  const transliterated = withoutLegalForm
+    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue")
+    .replace(/Ä/g, "Ae").replace(/Ö/g, "Oe").replace(/Ü/g, "Ue")
+    .replace(/ß/g, "ss");
+  const words = transliterated.toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return [];
+  const hosts = [words.join("") + ".de", words.join("") + ".com"];
+  if (words.length > 1) {
+    hosts.push(words[0] + ".de", words[0] + ".com");
+    const initials = words.map((word) => word[0]).join("");
+    if (initials.length >= 2) hosts.push(initials + ".de", initials + ".com");
+  }
+  return [...new Set(hosts)].slice(0, MAX_CANDIDATE_HOSTS);
+}
 
 // ---------------------------------------------------------------------------
 // Extraction — pure functions over HTML. scripts/v1.js reuses them verbatim.
@@ -443,66 +519,53 @@ function looksLikeImpressumHtml(html) {
   return /impressum|imprint|angaben gemäß|anbieterkennzeichnung/i.test(text) || PLZ_RE.test(text);
 }
 
-try {
-  const candidatePaths = ["/impressum", "/de/impressum", "/impressum.html"];
-  let impressumUrl = null;
-  let html = null;
+const candidatePaths = ["/impressum", "/de/impressum", "/impressum.html"];
 
+// Returns { url, html } for the notice page of an origin, or { reason }.
+// A reason means the origin is unreachable or shows no notice — callers
+// doing domain discovery skip such a candidate, never retry it.
+async function locateImpressum(originUrl) {
   for (const candidate of candidatePaths) {
-    const response = await goto(origin + candidate);
+    const response = await goto(originUrl + candidate);
     await sleep(2000); // politeness between navigations
     if (!response || !response.ok()) continue;
     const content = await page.content();
     if (looksLikeImpressumHtml(content)) {
-      impressumUrl = page.url();
-      html = content;
-      break;
+      return { url: page.url(), html: content };
     }
   }
 
-  if (!html) {
-    // Fall back to the start page and follow an Impressum/Imprint link.
-    const response = await goto(origin + "/");
-    await sleep(2000);
-    if (!response || !response.ok()) {
-      fail("start page unreachable from " + origin);
-    }
-    await clickConsent();
-    const link = await page.evaluate(() => {
-      const anchors = Array.from(document.querySelectorAll("a[href]"));
-      const match = anchors.find((anchor) =>
-        /impressum|imprint/i.test(anchor.textContent || "")
-          || /impressum|imprint/i.test(anchor.getAttribute("href") || ""));
-      return match ? match.href : null;
-    }).catch(() => null);
-    if (!link) fail("no Impressum link found on " + origin);
-    const target = new URL(link, origin);
-    const sameOrigin = target.hostname.replace(/^www\./, "") === new URL(origin).hostname.replace(/^www\./, "");
-    if (!sameOrigin) fail("impressum link points off-origin: " + target.href);
-    const linked = await goto(target.href);
-    await sleep(2000);
-    if (!linked || !linked.ok()) fail("impressum link unreachable: " + target.href);
-    impressumUrl = page.url();
-    html = await page.content();
+  // Fall back to the start page and follow an Impressum/Imprint link.
+  const response = await goto(originUrl + "/");
+  await sleep(2000);
+  if (!response || !response.ok()) {
+    return { reason: "start page unreachable from " + originUrl };
   }
-
   await clickConsent();
+  const link = await page.evaluate(() => {
+    const anchors = Array.from(document.querySelectorAll("a[href]"));
+    const match = anchors.find((anchor) =>
+      /impressum|imprint/i.test(anchor.textContent || "")
+        || /impressum|imprint/i.test(anchor.getAttribute("href") || ""));
+    return match ? match.href : null;
+  }).catch(() => null);
+  if (!link) return { reason: "no Impressum link found on " + originUrl };
+  const target = new URL(link, originUrl);
+  const sameOrigin = target.hostname.replace(/^www\./, "") === new URL(originUrl).hostname.replace(/^www\./, "");
+  if (!sameOrigin) return { reason: "impressum link points off-origin: " + target.href };
+  const linked = await goto(target.href);
+  await sleep(2000);
+  if (!linked || !linked.ok()) return { reason: "impressum link unreachable: " + target.href };
+  return { url: page.url(), html: await page.content() };
+}
 
-  const result = extractImpressum(html, impressumUrl || page.url());
-  if (result.blocked) fail("blocked: anti-bot page detected");
-  const fields = result.fields;
-  const hasAddress = fields.firma_anschrift && fields.firma_plz && fields.firma_ort;
-  if (!hasAddress) {
-    fail("no full address extracted (title: " + JSON.stringify(result.title || "") + ")", fields);
-  }
-  if (!fields.firma_name) {
-    fail("no company name extracted (title: " + JSON.stringify(result.title || "") + ")", fields);
-  }
+function printSuccess(result, extra) {
   console.log(JSON.stringify({
     target: TARGET,
     input: rawInput,
     fetched_at: new Date().toISOString(),
-    fields,
+    ...(extra || {}),
+    fields: result.fields,
     persons: (result.persons || []).map((person) => ({
       person_vorname: person.vorname,
       person_nachname: person.nachname,
@@ -512,6 +575,65 @@ try {
     })),
   }, null, 2));
   process.exit(0);
+}
+
+try {
+  if (origin) {
+    const found = await locateImpressum(origin);
+    if (found.reason) fail(found.reason);
+
+    await clickConsent();
+
+    const result = extractImpressum(found.html, found.url);
+    if (result.blocked) fail("blocked: anti-bot page detected");
+    const fields = result.fields;
+    const hasAddress = fields.firma_anschrift && fields.firma_plz && fields.firma_ort;
+    if (!hasAddress) {
+      fail("no full address extracted (title: " + JSON.stringify(result.title || "") + ")", fields);
+    }
+    if (!fields.firma_name) {
+      fail("no company name extracted (title: " + JSON.stringify(result.title || "") + ")", fields);
+    }
+    printSuccess(result);
+  }
+
+  // Company name only — domain discovery: derive candidate hosts from the
+  // name and keep the first whose own legal notice verifies the company.
+  const company = rawInput;
+  const candidates = candidateHostsFromCompany(company);
+  if (candidates.length === 0) {
+    fail("cannot derive candidate hosts from " + JSON.stringify(rawInput));
+  }
+  const tried = [];
+  for (const candidateHost of candidates) {
+    if (tried.length > 0) await sleep(CANDIDATE_POLITENESS_MS); // politeness between candidate hosts
+    tried.push(candidateHost);
+    const candidateOrigin = "https://" + candidateHost;
+    // DNS/connection failure or no notice on this host: skip the candidate,
+    // never retry it.
+    const found = await locateImpressum(candidateOrigin);
+    if (found.reason) continue;
+
+    await clickConsent();
+
+    const result = extractImpressum(found.html, found.url);
+    if (result.blocked) continue;
+    const fields = result.fields || {};
+    const hasAddress = fields.firma_anschrift && fields.firma_plz && fields.firma_ort;
+    if (!hasAddress || !fields.firma_name) continue;
+    // Verification is unchanged from the adapter's gate: the notice on this
+    // host must name the company with the same legal form. No "close
+    // enough" — a wrong guess reports no domain rather than a plausible one.
+    if (!(
+      identityMatches(company, fields.firma_name.value)
+        && legalFormMatches(company, fields.firma_name.value)
+    )) {
+      continue;
+    }
+    printSuccess(result, { verified_host: candidateHost });
+  }
+  fail("domain discovery found no host whose impressum verifies "
+    + JSON.stringify(company) + " (tried: " + tried.join(", ") + ")");
 } finally {
   await browser.close().catch(() => null);
 }

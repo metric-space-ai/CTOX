@@ -2,8 +2,12 @@
 //
 // First-party source: the company legal notice page (Impressum/Imprint)
 // that every German company must publish. The target is INPUT-DRIVEN:
-// CTOX_SCRAPE_INPUT_JSON must carry the company URL/domain (url, website
-// or domain key); there is no fixed portal host.
+// CTOX_SCRAPE_INPUT_JSON normally carries the company URL/domain (url,
+// website or domain key); there is no fixed portal host. When the input
+// carries a company name only, the adapter derives candidate hosts from
+// the name and keeps the first one whose own legal notice passes the
+// existing identity + legal-form gate — guessing is safe BECAUSE
+// verification already exists; a wrong guess is discarded silently.
 //
 // Live-verified with scrape-targets/impressum/solo/probe.mjs on 2026-07-31
 // against destilla.com, bnt-chemicals.de and akemi.de: all seven policy
@@ -156,6 +160,44 @@ function originFromInput(input) {
   } catch (_err) {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Domain discovery — the import often carries a company name only, and no
+// other source may have found the website first. Guessing is safe here
+// BECAUSE verification already exists: a candidate host is kept only when
+// its own legal notice passes the same identity + legal-form gate that
+// rejects a wrong domain (a parent group's, a namesake's). A wrong guess is
+// discarded silently; nothing is inferred from the name alone.
+// ---------------------------------------------------------------------------
+
+const MAX_CANDIDATE_HOSTS = 6;
+// Politeness between candidate hosts (each host may see several reads from
+// the consider flow itself; the gap keeps one host's traffic bursty-but-local
+// and different hosts clearly separated).
+const CANDIDATE_POLITENESS_MS = 1_500;
+
+function candidateHostsFromCompany(company) {
+  const withoutLegalForm = String(company || "")
+    .replace(/&\s*Co\.?/gi, " ")
+    .replace(/\b(?:gmbh|mbh|kgaa|ag|se|kg|ohg|gbr|ug|ltd|llc|inc|co)\b\.?/gi, " ");
+  const transliterated = withoutLegalForm
+    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue")
+    .replace(/Ä/g, "Ae").replace(/Ö/g, "Oe").replace(/Ü/g, "Ue")
+    .replace(/ß/g, "ss");
+  const words = transliterated.toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return [];
+  const hosts = [words.join("") + ".de", words.join("") + ".com"];
+  if (words.length > 1) {
+    hosts.push(words[0] + ".de", words[0] + ".com");
+    const initials = words.map((word) => word[0]).join("");
+    if (initials.length >= 2) hosts.push(initials + ".de", initials + ".com");
+  }
+  return [...new Set(hosts)].slice(0, MAX_CANDIDATE_HOSTS);
 }
 
 // ---------------------------------------------------------------------------
@@ -763,12 +805,19 @@ function recordsFromFields(fields, host, persons) {
       ["person_funktion", person.funktion],
       ["person_titel", person.titel],
     ];
+    // Every field of every representative would otherwise collide on
+    // (field, source_url): three managing directors on one notice page
+    // collapsed to whichever was written last. `person_key` is the per-person
+    // discriminator and is part of the record key (see target.json), so the
+    // people stay distinct and their fields stay attributable to one another.
+    const personKey = representativeKey(person);
     for (const [field, value] of pairs) {
       const clean = String(value || "").replace(/\s+/g, " ").trim();
       if (!clean) continue;
       records.push({
         field,
         value: clean,
+        person_key: personKey,
         confidence: "high",
         source_url: sourceUrl,
         note: RECORD_NOTES[field],
@@ -778,23 +827,26 @@ function recordsFromFields(fields, host, persons) {
   return records;
 }
 
+// A stable identity for one representative on one notice page. Derived from the
+// stated name so a re-run of the same page produces the same key, and so the
+// order in which people appear cannot change their identity.
+function representativeKey(person) {
+  const name = normalized([person && person.vorname, person && person.nachname].filter(Boolean).join(" "));
+  return name ? name.replace(/\s+/g, "-") : "unbekannt";
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function main() {
   const input = readInput();
   const company = String(input.company || "").trim();
-  const origin = originFromInput(input);
-  if (!origin) {
-    process.stdout.write(JSON.stringify({
-      records: [],
-      failure_mode: "portal_drift",
-      detail: "impressum target is input-driven: url/website/domain input required",
-    }));
-    return;
-  }
-  const host = new URL(origin).hostname.replace(/^www\./, "").toLowerCase();
+  const inputOrigin = originFromInput(input);
 
   let blocked = false;
   let identityMismatch = false;
@@ -842,7 +894,9 @@ function main() {
     return { fields, persons: result.persons || [] };
   };
 
-  for (let attempt = 0; attempt < MAX_LOAD_ATTEMPTS; attempt += 1) {
+  // One full attempt against an origin: the known notice paths, then the
+  // start-page fallback that follows an Impressum/Imprint link.
+  const attemptOrigin = (origin) => {
     const loadedRef = { loaded: false };
     let outcome = null;
     for (const candidate of CANDIDATE_PATHS) {
@@ -861,29 +915,119 @@ function main() {
         if (link) outcome = consider(link, loadedRef);
       }
     }
-    if (outcome) {
-      process.stdout.write(JSON.stringify({
-        records: recordsFromFields(outcome.fields, host, outcome.persons),
-      }));
-      return;
+    return { outcome, loaded: loadedRef.loaded };
+  };
+
+  const emit = (origin, outcome) => {
+    const host = new URL(origin).hostname.replace(/^www\./, "").toLowerCase();
+    process.stdout.write(JSON.stringify({
+      records: recordsFromFields(outcome.fields, host, outcome.persons),
+    }));
+  };
+
+  if (inputOrigin) {
+    for (let attempt = 0; attempt < MAX_LOAD_ATTEMPTS; attempt += 1) {
+      const { outcome, loaded } = attemptOrigin(inputOrigin);
+      if (outcome) {
+        emit(inputOrigin, outcome);
+        return;
+      }
+      if (loaded || blocked || identityMismatch) break;
+      // Nothing loaded at all (transient failure): one second chance.
+      if (attempt + 1 < MAX_LOAD_ATTEMPTS) sleepMs(2_000);
     }
-    if (loadedRef.loaded || blocked || identityMismatch) break;
-    // Nothing loaded at all (transient failure): one second chance.
-    if (attempt + 1 < MAX_LOAD_ATTEMPTS) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000);
-    }
+
+    if (blocked) recordUnlockSignal(inputOrigin, ["access_challenge"]);
+
+    process.stdout.write(JSON.stringify({
+      records: [],
+      failure_mode: blocked ? "blocked" : "portal_drift",
+      detail: blocked
+        ? "access challenge on the company site recorded for web-unlock"
+        : identityMismatch
+          ? "an impressum-like page loaded but its company identity does not match the input"
+          : "no impressum page with extractable prospect fields (loaded pages yield empty records, never fabricated ones)",
+    }));
+    return;
   }
 
-  if (blocked) recordUnlockSignal(origin, ["access_challenge"]);
+  if (!company) {
+    process.stdout.write(JSON.stringify({
+      records: [],
+      failure_mode: "portal_drift",
+      detail: "impressum target is input-driven: url/website/domain input required",
+    }));
+    return;
+  }
+
+  // No url/website/domain in the input: derive candidate hosts from the
+  // company name and let each candidate prove itself through its own legal
+  // notice — the identity + legal-form gate in `consider` is applied
+  // unchanged. Stop at the first verified host; a candidate that cannot
+  // prove itself is discarded silently and the run reports no domain
+  // rather than a plausible one.
+  const candidates = candidateHostsFromCompany(company);
+  if (candidates.length === 0) {
+    process.stdout.write(JSON.stringify({
+      records: [],
+      failure_mode: "portal_drift",
+      detail: "cannot derive candidate hosts from company name " + JSON.stringify(company),
+    }));
+    return;
+  }
+  const tried = [];
+  let sawBlocked = false;
+  let sawMismatch = false;
+  for (const candidateHost of candidates) {
+    if (tried.length > 0) sleepMs(CANDIDATE_POLITENESS_MS);
+    tried.push(candidateHost);
+    const candidateOrigin = "https://" + candidateHost;
+    // A candidate whose DNS/connection fails is skipped, never retried:
+    // one cheap reachability read instead of a browser launch per dead path.
+    const reach = plainHttpPage(candidateOrigin + "/");
+    if (reach && isBlockedPage(reach)) {
+      sawBlocked = true;
+      recordUnlockSignal(candidateOrigin, ["access_challenge"]);
+      continue;
+    }
+    if (!reach) {
+      const probe = browserCapturePage(candidateOrigin + "/");
+      const probePage = probe.commandUnavailable ? browserAutomationPage(candidateOrigin + "/") : probe.page;
+      if (!probePage || !probePage.ok) {
+        if (probePage && isBlockedPage(probePage)) {
+          sawBlocked = true;
+          recordUnlockSignal(candidateOrigin, ["access_challenge"]);
+        }
+        continue;
+      }
+    }
+    blocked = false;
+    identityMismatch = false;
+    const { outcome } = attemptOrigin(candidateOrigin);
+    if (outcome) {
+      // Verified: the notice on this host names the company. firma_domain
+      // (with the notice URL as its source) is part of the records, so the
+      // operator can see which domain was verified and how.
+      emit(candidateOrigin, outcome);
+      return;
+    }
+    if (blocked) {
+      sawBlocked = true;
+      recordUnlockSignal(candidateOrigin, ["access_challenge"]);
+    }
+    if (identityMismatch) sawMismatch = true;
+    blocked = false;
+    identityMismatch = false;
+  }
 
   process.stdout.write(JSON.stringify({
     records: [],
-    failure_mode: blocked ? "blocked" : "portal_drift",
-    detail: blocked
-      ? "access challenge on the company site recorded for web-unlock"
-      : identityMismatch
-        ? "an impressum-like page loaded but its company identity does not match the input"
-        : "no impressum page with extractable prospect fields (loaded pages yield empty records, never fabricated ones)",
+    failure_mode: sawBlocked ? "blocked" : "portal_drift",
+    detail: sawBlocked
+      ? "access challenge on a discovered candidate domain recorded for web-unlock (tried: " + tried.join(", ") + ")"
+      : "domain discovery for " + JSON.stringify(company) + " found no host whose impressum verifies the company identity"
+        + (sawMismatch ? " (at least one candidate was rejected by the identity gate and discarded)" : "")
+        + " (tried: " + tried.join(", ") + ")",
   }));
 }
 
@@ -894,6 +1038,7 @@ if (require.main === module) {
 module.exports = {
   browserAutomationPage,
   browserCapturePage,
+  candidateHostsFromCompany,
   discoverImpressumLink,
   extractImpressum,
   extractPersons,
