@@ -41529,6 +41529,16 @@ Use shell tools to create or update these files."
         )
         .expect("failed to seed queued rework");
 
+        // Red since before the A-grade campaign. Ruled out so far, so nobody
+        // repeats the search: the route is seeded 'handled'; the reply review
+        // carries a non-synthetic sent_at, so founder_reply_sent_after_review
+        // is satisfied; the item seeds parent_message_key, which is the key
+        // close_stale_founder_communication_self_work_after_reviewed_reply
+        // reads; and its kind and state are both inside the accepted sets.
+        // The close therefore ought to run — where it does not is still open.
+        // Note while looking: that state filter is a raw string set for a
+        // vocabulary WorkItemStatus already types, and its membership matches
+        // none of the existing predicates, so it wants its own.
         let state = Arc::new(Mutex::new(SharedState::default()));
         let repaired = repair_stalled_founder_communications(&root, &state, &settings)
             .expect("stale founder cleanup should succeed");
