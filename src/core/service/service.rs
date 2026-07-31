@@ -29543,7 +29543,7 @@ Business OS command:
     }
 
     #[test]
-    fn web_extraction_teams_message_suggests_universal_scraping_skill() {
+    fn web_extraction_teams_message_suggests_the_matching_source_skill() {
         let mut message = routed_teams_message();
         message.preview = "Aussteller aus Webseite in Excel uebertragen".to_string();
         message.body_text = "https://www.intersolar.de/ausstellerliste\nDie Webseite laedt erst nach wenn man scrollt. Bitte lese alle Aussteller aus Deutschland aus und uebertrage diese in eine Excel.".to_string();
@@ -29615,7 +29615,7 @@ Business OS command:
     }
 
     #[test]
-    fn boot_state_invariant_check_records_visible_violation_event() {
+    fn boot_state_invariant_check_repairs_split_brain_and_records_it() {
         let root = temp_root("boot-state-invariants");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
         let db_path = crate::paths::core_db(&root);
@@ -34833,7 +34833,7 @@ Business OS command:
     }
 
     #[test]
-    fn status_snapshot_recovery_reworks_fresh_red_app_lease_with_idle_pending_shadow() {
+    fn status_snapshot_recovery_leaves_a_locally_owned_app_lease_alone() {
         let root = temp_root("status-snapshot-red-app-idle-shadow");
         let script_dir = root.join("src/apps/business-os/scripts");
         std::fs::create_dir_all(&script_dir).expect("create validator script dir");
@@ -37773,7 +37773,7 @@ Business OS command:
     }
 
     #[test]
-    fn published_watchdog_mission_follow_up_is_closed_when_direct_reset_exists() {
+    fn published_watchdog_mission_follow_up_is_superseded_when_direct_reset_exists() {
         let root = temp_root("ctox-mission-follow-up-route-suppressed");
         channels::create_queue_task(
             &root,
