@@ -2083,7 +2083,26 @@ fn fake_sync_messages(
     }])
 }
 
+/// The fake provider answers in the shape of a real provider response, so a
+/// send that never left the process is otherwise indistinguishable from one
+/// that did — and fake mode is entered by a magic credential value, which an
+/// operator can set by accident. Every fake response therefore carries a
+/// marker that travels into the stored providerResponse, so the evidence
+/// says plainly that nothing was delivered.
 fn fake_send_result(
+    options: &ChatOptions,
+    request: &ChatSendCommandRequest<'_>,
+    destination: &str,
+    send_token: &str,
+) -> Value {
+    let mut value = fake_send_provider_payload(options, request, destination, send_token);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("ctox_fake_provider".to_string(), Value::Bool(true));
+    }
+    value
+}
+
+fn fake_send_provider_payload(
     options: &ChatOptions,
     request: &ChatSendCommandRequest<'_>,
     destination: &str,
@@ -6658,6 +6677,22 @@ mod tests {
                 .and_then(|status| status.get("fake_provider"))
                 .and_then(Value::as_bool),
             Some(true)
+        );
+
+        // The stored evidence of the outbound message must say on its own that
+        // nothing was delivered. Fake mode is entered by a magic credential
+        // value, so an operator can land in it by accident; without this the
+        // persisted provider response is shaped exactly like a real delivery.
+        let disclosed: Option<i64> = conn.query_row(
+            "SELECT json_extract(metadata_json, '$.providerResponse.ctox_fake_provider')
+             FROM communication_messages WHERE direction = 'outbound' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            disclosed,
+            Some(1),
+            "a fake send must disclose itself in the stored provider response"
         );
 
         Ok(())
