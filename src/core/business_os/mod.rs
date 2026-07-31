@@ -3,6 +3,7 @@
 
 mod app_runtime;
 mod ats_gates;
+mod backup_restore;
 mod browser_control;
 mod browser_runtime;
 mod capability;
