@@ -186,6 +186,10 @@ pub fn write_secret_record(
     put_secret(root, scope, name, value, description, metadata)
 }
 
+pub fn delete_secret_record(root: &Path, scope: &str, name: &str) -> Result<()> {
+    delete_secret(root, scope, name)
+}
+
 #[derive(Debug, Clone)]
 struct DetectedPromptSecret {
     scope: String,

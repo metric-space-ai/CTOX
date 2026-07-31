@@ -91,6 +91,7 @@ const BUSINESS_OS_TURN_TTL_SECS: i64 = 3600;
 const BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME: &str = "backup_manifest_signing_key_v1";
 const BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME: &str =
     "portable_backup_encryption_key_v1";
+const BUSINESS_OS_BACKUP_KEY_STORE_DIR: &str = ".ctox-backup-key-stores";
 const BUSINESS_OS_BACKUP_MANIFEST_SCHEMA_VERSION: i64 = 1;
 const BUSINESS_OS_BACKUP_RAW_RETENTION_DAYS: i64 = 14;
 const BUSINESS_OS_BACKUP_PORTABLE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -15820,7 +15821,8 @@ fn business_os_backup_restore_drill_export(
                 None,
                 None,
                 None,
-                module_scope
+                module_scope,
+                None
             )
         }
     });
@@ -15910,6 +15912,88 @@ struct BusinessOsPortableEncryptedSummary {
     nonce_base_b64: String,
 }
 
+fn business_os_backup_key_store_root(root: &Path) -> anyhow::Result<PathBuf> {
+    let canonical_root = fs::canonicalize(root)
+        .with_context(|| format!("failed to resolve Business OS root {}", root.display()))?;
+    let parent = canonical_root.parent().with_context(|| {
+        format!(
+            "Business OS root {} has no parent for an external backup key store",
+            canonical_root.display()
+        )
+    })?;
+    let root_fingerprint = hex_sha256(canonical_root.to_string_lossy().as_bytes());
+    let key_store_root = parent
+        .join(BUSINESS_OS_BACKUP_KEY_STORE_DIR)
+        .join(&root_fingerprint[..24]);
+    anyhow::ensure!(
+        !key_store_root.starts_with(&canonical_root),
+        "backup key store must be outside the backed-up Business OS root"
+    );
+    Ok(key_store_root)
+}
+
+fn business_os_read_or_migrate_backup_secret(
+    root: &Path,
+    name: &str,
+    description: &str,
+    metadata: Value,
+) -> anyhow::Result<Option<(String, &'static str)>> {
+    let key_store_root = business_os_backup_key_store_root(root)?;
+    if crate::secrets::secret_exists(&key_store_root, BUSINESS_OS_SECRET_SCOPE, name)? {
+        let raw =
+            crate::secrets::read_secret_value(&key_store_root, BUSINESS_OS_SECRET_SCOPE, name)?;
+        if crate::secrets::secret_exists(root, BUSINESS_OS_SECRET_SCOPE, name)? {
+            let legacy = crate::secrets::read_secret_value(root, BUSINESS_OS_SECRET_SCOPE, name)?;
+            anyhow::ensure!(
+                legacy == raw,
+                "backup key exists with different values in legacy and dedicated stores for {name}"
+            );
+            crate::secrets::delete_secret_record(root, BUSINESS_OS_SECRET_SCOPE, name)?;
+        }
+        return Ok(Some((raw, "dedicated_backup_key_store")));
+    }
+    if !crate::secrets::secret_exists(root, BUSINESS_OS_SECRET_SCOPE, name)? {
+        return Ok(None);
+    }
+
+    let legacy = crate::secrets::read_secret_value(root, BUSINESS_OS_SECRET_SCOPE, name)?;
+    crate::secrets::write_secret_record(
+        &key_store_root,
+        BUSINESS_OS_SECRET_SCOPE,
+        name,
+        &legacy,
+        Some(description.to_owned()),
+        metadata,
+    )?;
+    let migrated =
+        crate::secrets::read_secret_value(&key_store_root, BUSINESS_OS_SECRET_SCOPE, name)?;
+    anyhow::ensure!(
+        migrated == legacy,
+        "backup key migration verification failed for {name}"
+    );
+    crate::secrets::delete_secret_record(root, BUSINESS_OS_SECRET_SCOPE, name)?;
+    Ok(Some((migrated, "migrated_dedicated_backup_key_store")))
+}
+
+fn business_os_write_backup_secret(
+    root: &Path,
+    name: &str,
+    value: &str,
+    description: &str,
+    metadata: Value,
+) -> anyhow::Result<()> {
+    let key_store_root = business_os_backup_key_store_root(root)?;
+    crate::secrets::write_secret_record(
+        &key_store_root,
+        BUSINESS_OS_SECRET_SCOPE,
+        name,
+        value,
+        Some(description.to_owned()),
+        metadata,
+    )?;
+    Ok(())
+}
+
 fn business_os_backup_manifest_signing_key(
     root: &Path,
 ) -> anyhow::Result<BusinessOsBackupManifestSigningKey> {
@@ -15922,33 +16006,40 @@ fn business_os_backup_manifest_signing_key(
         .fill(&mut bytes)
         .map_err(|_| anyhow::anyhow!("failed to generate backup manifest signing key"))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    crate::secrets::write_secret_record(
+    business_os_write_backup_secret(
         root,
-        BUSINESS_OS_SECRET_SCOPE,
         BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
         &encoded,
-        Some("Business OS backup manifest signing key".to_owned()),
+        "Business OS backup manifest signing key",
         serde_json::json!({
             "source": "business_os_backup_restore_drill",
             "algorithm": "HMAC-SHA256",
-            "secret_value_in_manifest": false
+            "secret_value_in_manifest": false,
+            "storage": "dedicated_backup_key_store_outside_backup_root"
         }),
     )?;
     Ok(BusinessOsBackupManifestSigningKey {
         bytes,
         key_id: short_hash(&encoded),
-        source: "generated_secret_store",
+        source: "generated_dedicated_backup_key_store",
     })
 }
 
 fn business_os_read_backup_manifest_signing_key(
     root: &Path,
 ) -> anyhow::Result<Option<BusinessOsBackupManifestSigningKey>> {
-    let Ok(raw) = crate::secrets::read_secret_value(
+    let Some((raw, source)) = business_os_read_or_migrate_backup_secret(
         root,
-        BUSINESS_OS_SECRET_SCOPE,
         BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
-    ) else {
+        "Business OS backup manifest signing key",
+        serde_json::json!({
+            "source": "business_os_backup_key_migration",
+            "algorithm": "HMAC-SHA256",
+            "secret_value_in_manifest": false,
+            "storage": "dedicated_backup_key_store_outside_backup_root"
+        }),
+    )?
+    else {
         return Ok(None);
     };
     let trimmed = raw.trim();
@@ -15965,7 +16056,7 @@ fn business_os_read_backup_manifest_signing_key(
     Ok(Some(BusinessOsBackupManifestSigningKey {
         bytes,
         key_id: short_hash(trimmed),
-        source: "secret_store",
+        source,
     }))
 }
 
@@ -15981,34 +16072,42 @@ fn business_os_backup_portable_encryption_key(
         .fill(&mut bytes)
         .map_err(|_| anyhow::anyhow!("failed to generate portable backup encryption key"))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    crate::secrets::write_secret_record(
+    business_os_write_backup_secret(
         root,
-        BUSINESS_OS_SECRET_SCOPE,
         BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME,
         &encoded,
-        Some("Business OS portable backup encryption key".to_owned()),
+        "Business OS portable backup encryption key",
         serde_json::json!({
             "source": "business_os_backup_restore_drill",
             "algorithm": "AES-256-GCM",
             "secret_value_in_manifest": false,
-            "escrow_required_for_disaster_restore": true
+            "escrow_required_for_disaster_restore": true,
+            "storage": "dedicated_backup_key_store_outside_backup_root"
         }),
     )?;
     Ok(BusinessOsBackupPortableEncryptionKey {
         bytes,
         key_id: short_hash(&encoded),
-        source: "generated_secret_store",
+        source: "generated_dedicated_backup_key_store",
     })
 }
 
 fn business_os_read_backup_portable_encryption_key(
     root: &Path,
 ) -> anyhow::Result<Option<BusinessOsBackupPortableEncryptionKey>> {
-    let Ok(raw) = crate::secrets::read_secret_value(
+    let Some((raw, source)) = business_os_read_or_migrate_backup_secret(
         root,
-        BUSINESS_OS_SECRET_SCOPE,
         BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME,
-    ) else {
+        "Business OS portable backup encryption key",
+        serde_json::json!({
+            "source": "business_os_backup_key_migration",
+            "algorithm": "AES-256-GCM",
+            "secret_value_in_manifest": false,
+            "escrow_required_for_disaster_restore": true,
+            "storage": "dedicated_backup_key_store_outside_backup_root"
+        }),
+    )?
+    else {
         return Ok(None);
     };
     let trimmed = raw.trim();
@@ -16025,7 +16124,7 @@ fn business_os_read_backup_portable_encryption_key(
     Ok(Some(BusinessOsBackupPortableEncryptionKey {
         bytes,
         key_id: short_hash(trimmed),
-        source: "secret_store",
+        source,
     }))
 }
 
@@ -16047,6 +16146,7 @@ fn business_os_backup_manifest_integrity(
             "name": BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
             "key_id": signing_key.key_id,
             "source": signing_key.source,
+            "storage": "dedicated_backup_key_store_outside_backup_root",
             "secret_value_in_manifest": false
         }
     })
@@ -16069,7 +16169,200 @@ fn business_os_backup_restore_compatibility() -> Value {
     })
 }
 
-fn business_os_raw_backup_security(now_ms: i64, portable_export: Option<&Value>) -> Value {
+fn business_os_backup_key_needles(
+    signing_key: &BusinessOsBackupManifestSigningKey,
+    portable_key: &BusinessOsBackupPortableEncryptionKey,
+) -> Vec<Vec<u8>> {
+    vec![
+        signing_key.bytes.clone(),
+        portable_key.bytes.clone(),
+        base64::engine::general_purpose::STANDARD
+            .encode(&signing_key.bytes)
+            .into_bytes(),
+        base64::engine::general_purpose::STANDARD
+            .encode(&portable_key.bytes)
+            .into_bytes(),
+    ]
+}
+
+fn reader_contains_any_sequence<R: Read>(
+    mut reader: R,
+    needles: &[Vec<u8>],
+) -> anyhow::Result<bool> {
+    let overlap = needles
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let mut carry = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        let mut window = Vec::with_capacity(carry.len() + read);
+        window.extend_from_slice(&carry);
+        window.extend_from_slice(&buffer[..read]);
+        if needles.iter().any(|needle| {
+            !needle.is_empty()
+                && window
+                    .windows(needle.len())
+                    .any(|candidate| candidate == needle.as_slice())
+        }) {
+            return Ok(true);
+        }
+        let keep = overlap.min(window.len());
+        carry.clear();
+        carry.extend_from_slice(&window[window.len() - keep..]);
+    }
+}
+
+fn sqlite_backup_key_records(path: &Path) -> anyhow::Result<Vec<String>> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to inspect backup sqlite content {}", path.display()))?;
+    let has_secret_table = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ctox_secret_records')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? != 0;
+    if !has_secret_table {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare(
+        "SELECT secret_name FROM ctox_secret_records WHERE scope = ?1 AND secret_name IN (?2, ?3) ORDER BY secret_name",
+    )?;
+    let records = statement
+        .query_map(
+            params![
+                BUSINESS_OS_SECRET_SCOPE,
+                BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
+                BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn file_has_sqlite_header(path: &Path) -> anyhow::Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut header = [0u8; 16];
+    Ok(file.read(&mut header)? == header.len() && &header == b"SQLite format 3\0")
+}
+
+fn business_os_snapshot_backup_key_separation(
+    snapshot_root: &Path,
+    files: &[Value],
+    signing_key: &BusinessOsBackupManifestSigningKey,
+    portable_key: &BusinessOsBackupPortableEncryptionKey,
+) -> anyhow::Result<Value> {
+    let needles = business_os_backup_key_needles(signing_key, portable_key);
+    let mut plaintext_key_material_paths = Vec::new();
+    let mut forbidden_secret_records = Vec::new();
+    let mut sqlite_files_inspected = 0usize;
+    for relative in backup_file_manifest_paths(files) {
+        let path = snapshot_root.join(&relative);
+        if reader_contains_any_sequence(fs::File::open(&path)?, &needles)? {
+            plaintext_key_material_paths.push(relative.clone());
+        }
+        if file_has_sqlite_header(&path)? {
+            sqlite_files_inspected += 1;
+            for secret_name in sqlite_backup_key_records(&path)? {
+                forbidden_secret_records.push(serde_json::json!({
+                    "path": relative,
+                    "scope": BUSINESS_OS_SECRET_SCOPE,
+                    "name": secret_name
+                }));
+            }
+        }
+    }
+    let passed = plaintext_key_material_paths.is_empty() && forbidden_secret_records.is_empty();
+    Ok(serde_json::json!({
+        "passed": passed,
+        "verification": "snapshot_file_content_and_sqlite_secret_records",
+        "files_inspected": backup_file_manifest_paths(files).len(),
+        "sqlite_files_inspected": sqlite_files_inspected,
+        "plaintext_key_material_paths": plaintext_key_material_paths,
+        "forbidden_secret_records": forbidden_secret_records,
+        "signing_key_absent": passed,
+        "portable_encryption_key_absent": passed
+    }))
+}
+
+fn business_os_portable_zip_backup_key_separation(
+    verify_zip_path: &Path,
+    signing_key: &BusinessOsBackupManifestSigningKey,
+    portable_key: &BusinessOsBackupPortableEncryptionKey,
+) -> anyhow::Result<Value> {
+    let needles = business_os_backup_key_needles(signing_key, portable_key);
+    let mut archive = zip::ZipArchive::new(fs::File::open(verify_zip_path)?)
+        .context("failed to inspect decrypted portable backup zip for key material")?;
+    let mut plaintext_key_material_entries = Vec::new();
+    let mut forbidden_secret_records = Vec::new();
+    let mut sqlite_entries_inspected = 0usize;
+    let mut files_inspected = 0usize;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if !entry.is_file() {
+            continue;
+        }
+        files_inspected += 1;
+        let entry_name = entry.name().replace('\\', "/");
+        let mut header = [0u8; 16];
+        let header_len = entry.read(&mut header)?;
+        let is_sqlite = header_len == header.len() && &header == b"SQLite format 3\0";
+        if is_sqlite {
+            sqlite_entries_inspected += 1;
+            let temp_path = verify_zip_path.with_extension(format!("entry-{index}.sqlite3.tmp"));
+            let inspection = (|| -> anyhow::Result<(bool, Vec<String>)> {
+                let mut temp = fs::File::create(&temp_path)?;
+                temp.write_all(&header)?;
+                io::copy(&mut entry, &mut temp)?;
+                temp.flush()?;
+                let contains_key =
+                    reader_contains_any_sequence(fs::File::open(&temp_path)?, &needles)?;
+                let records = sqlite_backup_key_records(&temp_path)?;
+                Ok((contains_key, records))
+            })();
+            let _ = remove_file_if_present(&temp_path);
+            let (contains_key, records) = inspection?;
+            if contains_key {
+                plaintext_key_material_entries.push(entry_name.clone());
+            }
+            for secret_name in records {
+                forbidden_secret_records.push(serde_json::json!({
+                    "entry": entry_name,
+                    "scope": BUSINESS_OS_SECRET_SCOPE,
+                    "name": secret_name
+                }));
+            }
+        } else {
+            let reader = io::Cursor::new(header[..header_len].to_vec()).chain(entry);
+            if reader_contains_any_sequence(reader, &needles)? {
+                plaintext_key_material_entries.push(entry_name);
+            }
+        }
+    }
+    let passed = plaintext_key_material_entries.is_empty() && forbidden_secret_records.is_empty();
+    Ok(serde_json::json!({
+        "passed": passed,
+        "verification": "decrypted_portable_zip_entry_content_and_sqlite_secret_records",
+        "files_inspected": files_inspected,
+        "sqlite_entries_inspected": sqlite_entries_inspected,
+        "plaintext_key_material_entries": plaintext_key_material_entries,
+        "forbidden_secret_records": forbidden_secret_records,
+        "signing_key_absent": passed,
+        "portable_encryption_key_absent": passed
+    }))
+}
+
+fn business_os_raw_backup_security(
+    now_ms: i64,
+    portable_export: Option<&Value>,
+    key_separation: Option<&Value>,
+) -> Value {
     let retention_ms = BUSINESS_OS_BACKUP_RAW_RETENTION_DAYS * 24 * 60 * 60 * 1_000;
     let portable_export_created = portable_export
         .and_then(|export| export.get("encrypted"))
@@ -16081,6 +16374,10 @@ fn business_os_raw_backup_security(now_ms: i64, portable_export: Option<&Value>)
     let portable_export_sha256 = portable_export
         .and_then(|export| export.pointer("/ciphertext/sha256"))
         .and_then(Value::as_str);
+    let key_separation_passed = key_separation
+        .and_then(|evidence| evidence.get("passed"))
+        .and_then(Value::as_bool)
+        == Some(true);
     let encryption = if portable_export_created {
         serde_json::json!({
             "status": "portable_encrypted_export_created",
@@ -16107,6 +16404,13 @@ fn business_os_raw_backup_security(now_ms: i64, portable_export: Option<&Value>)
         "contains_sensitive_data": true,
         "support_attachment_allowed": false,
         "plaintext_restore_workspace": true,
+        "backup_key_separation": {
+            "verified": key_separation.is_some(),
+            "passed": key_separation_passed,
+            "portable_key_must_not_travel_with_artifact": key_separation_passed,
+            "manifest_signing_key_must_not_travel_with_artifact": key_separation_passed,
+            "evidence": key_separation.cloned().unwrap_or(Value::Null)
+        },
         "encryption": encryption,
         "retention": {
             "policy": "ctox.business_os.local_raw_backup_retention.v1",
@@ -16127,6 +16431,9 @@ fn business_os_create_portable_backup_export(
     snapshot_root: &Path,
     drill_id: &str,
     files: &[Value],
+    signing_key: &BusinessOsBackupManifestSigningKey,
+    encryption_key: &BusinessOsBackupPortableEncryptionKey,
+    snapshot_key_separation: &Value,
 ) -> anyhow::Result<Value> {
     let portable_dir = backup_root.join("portable");
     fs::create_dir_all(&portable_dir)?;
@@ -16137,7 +16444,6 @@ fn business_os_create_portable_backup_export(
         let zip_summary =
             business_os_write_snapshot_zip(snapshot_root, &plaintext_zip_path, files)?;
         let expected_entries = backup_file_manifest_paths(files);
-        let encryption_key = business_os_backup_portable_encryption_key(root)?;
         let mut nonce_base = [0u8; 12];
         SystemRandom::new()
             .fill(&mut nonce_base)
@@ -16146,20 +16452,42 @@ fn business_os_create_portable_backup_export(
             &plaintext_zip_path,
             &ciphertext_path,
             drill_id,
-            &encryption_key,
+            encryption_key,
             nonce_base,
         )?;
         let verification = business_os_verify_portable_backup_export(
             &ciphertext_path,
             &verify_zip_path,
             drill_id,
-            &encryption_key,
+            encryption_key,
             nonce_base,
             encrypted_summary.chunk_count,
             zip_summary.size_bytes,
             &zip_summary.sha256,
             &expected_entries,
+            signing_key,
         )?;
+        let snapshot_key_separation_passed = snapshot_key_separation
+            .get("passed")
+            .and_then(Value::as_bool)
+            == Some(true);
+        let portable_key_separation_passed = verification
+            .pointer("/backup_key_separation/passed")
+            .and_then(Value::as_bool)
+            == Some(true);
+        anyhow::ensure!(
+            snapshot_key_separation_passed && portable_key_separation_passed,
+            "backup key material was detected in the snapshot or decrypted portable artifact"
+        );
+        let key_separation = serde_json::json!({
+            "passed": true,
+            "key_store_outside_backup_root": true,
+            "snapshot": snapshot_key_separation,
+            "decrypted_portable_artifact": verification
+                .get("backup_key_separation")
+                .cloned()
+                .unwrap_or(Value::Null)
+        });
         Ok(serde_json::json!({
             "ok": true,
             "schema_version": 1,
@@ -16177,6 +16505,7 @@ fn business_os_create_portable_backup_export(
                 "name": BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME,
                 "key_id": encryption_key.key_id,
                 "source": encryption_key.source,
+                "storage": "dedicated_backup_key_store_outside_backup_root",
                 "secret_value_in_manifest": false,
                 "escrow_required_for_disaster_restore": true
             },
@@ -16198,10 +16527,11 @@ fn business_os_create_portable_backup_export(
                 "chunk_count": encrypted_summary.chunk_count
             },
             "verification": verification,
+            "backup_key_separation": key_separation,
             "off_machine_transfer": {
                 "allowed_when_encrypted": true,
                 "raw_snapshot_transfer_allowed": false,
-                "key_must_not_travel_with_artifact": true,
+                "key_must_not_travel_with_artifact": portable_key_separation_passed,
                 "requires_incident_owner_approval": true,
                 "requires_separate_key_escrow": true
             }
@@ -16356,6 +16686,7 @@ fn business_os_verify_portable_backup_export(
     expected_plaintext_size_bytes: u64,
     expected_plaintext_sha256: &str,
     expected_entries: &BTreeSet<String>,
+    signing_key: &BusinessOsBackupManifestSigningKey,
 ) -> anyhow::Result<Value> {
     if let Some(parent) = verify_zip_path.parent() {
         fs::create_dir_all(parent)?;
@@ -16427,6 +16758,12 @@ fn business_os_verify_portable_backup_export(
             zip_entries.insert(entry.name().replace('\\', "/"));
         }
     }
+    drop(archive);
+    let backup_key_separation = business_os_portable_zip_backup_key_separation(
+        verify_zip_path,
+        signing_key,
+        encryption_key,
+    )?;
     let missing_entries = expected_entries
         .difference(&zip_entries)
         .cloned()
@@ -16441,7 +16778,8 @@ fn business_os_verify_portable_backup_export(
         "zip_entry_count": zip_entries.len(),
         "expected_zip_entry_count": expected_entries.len(),
         "zip_entries_match_manifest": missing_entries.is_empty() && zip_entries.len() == expected_entries.len(),
-        "missing_entries": missing_entries
+        "missing_entries": missing_entries,
+        "backup_key_separation": backup_key_separation
     }))
 }
 
@@ -16478,6 +16816,7 @@ pub fn run_business_os_backup_restore_drill(
 ) -> anyhow::Result<Value> {
     let now = now_ms() as i64;
     let signing_key = business_os_backup_manifest_signing_key(root)?;
+    let portable_encryption_key = business_os_backup_portable_encryption_key(root)?;
     let drill_id = format!("business-os-drill-{}-{}", now, Uuid::new_v4());
     let backup_root = crate::paths::backup_dir(root).join(&drill_id);
     let snapshot_root = backup_root.join("snapshot");
@@ -16564,15 +16903,47 @@ pub fn run_business_os_backup_restore_drill(
     }
 
     let files = backup_file_manifest(&snapshot_root)?;
-    let portable_encrypted_export = business_os_create_portable_backup_export(
+    let snapshot_key_separation = business_os_snapshot_backup_key_separation(
+        &snapshot_root,
+        &files,
+        &signing_key,
+        &portable_encryption_key,
+    )?;
+    if snapshot_key_separation
+        .get("passed")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        let _ = fs::remove_dir_all(&backup_root);
+        anyhow::bail!(
+            "backup snapshot contains backup signing or portable encryption key material"
+        );
+    }
+    let portable_encrypted_export = match business_os_create_portable_backup_export(
         root,
         &backup_root,
         &snapshot_root,
         &drill_id,
         &files,
-    )?;
-    let raw_backup_security =
-        business_os_raw_backup_security(now, Some(&portable_encrypted_export));
+        &signing_key,
+        &portable_encryption_key,
+        &snapshot_key_separation,
+    ) {
+        Ok(export) => export,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&backup_root);
+            return Err(err);
+        }
+    };
+    let key_separation = portable_encrypted_export
+        .get("backup_key_separation")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let raw_backup_security = business_os_raw_backup_security(
+        now,
+        Some(&portable_encrypted_export),
+        Some(&key_separation),
+    );
     let restore_compatibility = business_os_backup_restore_compatibility();
     let manifest_payload = serde_json::json!({
         "schema_version": BUSINESS_OS_BACKUP_MANIFEST_SCHEMA_VERSION,
@@ -16625,7 +16996,8 @@ pub fn run_business_os_backup_restore_drill(
         .get("ok")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let ok = integrity_ok && restore_ok;
+    let key_separation_ok = key_separation.get("passed").and_then(Value::as_bool) == Some(true);
+    let ok = integrity_ok && restore_ok && key_separation_ok;
     Ok(serde_json::json!({
         "ok": ok,
         "schema_version": 1,
@@ -16653,6 +17025,7 @@ pub fn run_business_os_backup_restore_drill(
             .get("manifest_integrity")
             .cloned()
             .unwrap_or(Value::Null),
+        "backup_key_separation": key_separation,
         "sqlite_snapshots": sqlite_snapshots,
         "copied_directories": copied_directories,
         "restore_validation": {
@@ -16664,7 +17037,8 @@ pub fn run_business_os_backup_restore_drill(
                 Some(&restore_root),
                 Some(&manifest_path),
                 Some(&manifest_sha256),
-                module_id
+                module_id,
+                Some(key_separation_ok)
             )
         },
         "remaining_boundaries": [
@@ -16817,6 +17191,7 @@ pub fn inspect_business_os_backup_key_escrow(root: &Path) -> anyhow::Result<Valu
             "algorithm": "AES-256-GCM",
             "key_id": key_id,
             "source": key.as_ref().map(|key| key.source),
+            "storage": "dedicated_backup_key_store_outside_backup_root",
             "exists_in_secret_store": key_exists,
             "secret_value_revealed": false,
             "secret_value_in_report": false
@@ -16839,7 +17214,7 @@ pub fn inspect_business_os_backup_key_escrow(root: &Path) -> anyhow::Result<Valu
         },
         "operator_actions": [
             "Run a restore-drill so the portable backup key exists before release evidence is captured.",
-            "Escrow the key material from the CTOX Secret Store into an approved organisation secret manager through the operator's secret-handling process.",
+            "Escrow the key material from the dedicated CTOX backup key store into an approved organisation secret manager through the operator's secret-handling process.",
             "Record reviewer, date and evidence revision in docs/business-os-security-privacy-signoff.json after confirming escrow."
         ]
     }))
@@ -16887,6 +17262,7 @@ fn business_os_inspect_backup_manifest_integrity(
         "signature_valid": signature_valid,
         "signing_secret_scope": BUSINESS_OS_SECRET_SCOPE,
         "signing_secret_name": BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
+        "signing_key_storage": "dedicated_backup_key_store_outside_backup_root",
         "secret_value_in_manifest": false
     }))
 }
@@ -17037,6 +17413,7 @@ fn business_os_active_root_restore_runbook(
     manifest_path: Option<&Path>,
     manifest_sha256: Option<&str>,
     module_scope: Option<&str>,
+    backup_key_separation_verified: Option<bool>,
 ) -> Value {
     let restore_root_path =
         restore_root.map(|path| business_os_restore_drill_relative_path(root, path));
@@ -17078,7 +17455,7 @@ fn business_os_active_root_restore_runbook(
             {
                 "id": "verify-snapshot-signature",
                 "required": true,
-                "label": "Snapshot-Manifest-Signatur mit dem Backup-Signing-Key aus dem CTOX Secret Store pruefen"
+                "label": "Snapshot-Manifest-Signatur mit dem Backup-Signing-Key aus dem getrennten Backup-Key-Store pruefen"
             },
             {
                 "id": "verify-restore-compatibility",
@@ -17138,7 +17515,13 @@ fn business_os_active_root_restore_runbook(
             "retention_days": BUSINESS_OS_BACKUP_RAW_RETENTION_DAYS,
             "encryption_required_before_off_machine_transfer": true,
             "portable_encrypted_export_required_for_off_machine_transfer": true,
-            "portable_key_must_not_travel_with_artifact": true,
+            "portable_key_must_not_travel_with_artifact": backup_key_separation_verified,
+            "manifest_signing_key_must_not_travel_with_artifact": backup_key_separation_verified,
+            "backup_key_separation_verification_status": if backup_key_separation_verified == Some(true) {
+                "verified_by_snapshot_and_decrypted_portable_artifact_content_scan"
+            } else {
+                "not_verified_for_this_generic_runbook"
+            },
             "portable_key_escrow_required_for_disaster_restore": true,
             "operator_delete_after_drill": true
         },
@@ -17166,7 +17549,7 @@ fn business_os_active_root_restore_runbook(
             {
                 "id": "backup-signing-key",
                 "required": true,
-                "label": "Backup-Signing-Key ist im wiederhergestellten Secret Store vorhanden"
+                "label": "Backup-Signing-Key ist im getrennten Backup-Key-Store unabhaengig vom Backup vorhanden"
             },
             {
                 "id": "portable-backup-key",
@@ -52602,6 +52985,79 @@ mod tests {
     }
 
     #[test]
+    // The separation check is the only thing standing between a backup and a
+    // key that travels with it, so it needs its own proof that it fires. The
+    // drill test cannot supply that: reverting the key location there is
+    // healed by the migration path before the snapshot is taken. Plant the
+    // material directly instead.
+    #[test]
+    fn backup_key_separation_detects_planted_key_material() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let snapshot_root = temp.path();
+        std::fs::create_dir_all(snapshot_root.join("runtime"))?;
+
+        let signing_key = BusinessOsBackupManifestSigningKey {
+            bytes: vec![7u8; 32],
+            key_id: "signing-test".to_owned(),
+            source: "test",
+        };
+        let portable_key = BusinessOsBackupPortableEncryptionKey {
+            bytes: vec![9u8; 32],
+            key_id: "portable-test".to_owned(),
+            source: "test",
+        };
+        let files = vec![serde_json::json!({"path": "runtime/planted.bin"})];
+
+        std::fs::write(snapshot_root.join("runtime/planted.bin"), b"nothing to see")?;
+        let clean = business_os_snapshot_backup_key_separation(
+            snapshot_root,
+            &files,
+            &signing_key,
+            &portable_key,
+        )?;
+        assert_eq!(
+            clean.get("passed").and_then(Value::as_bool),
+            Some(true),
+            "a snapshot without key material must pass"
+        );
+
+        // Raw bytes.
+        std::fs::write(
+            snapshot_root.join("runtime/planted.bin"),
+            &portable_key.bytes,
+        )?;
+        let leaked_raw = business_os_snapshot_backup_key_separation(
+            snapshot_root,
+            &files,
+            &signing_key,
+            &portable_key,
+        )?;
+        assert_eq!(
+            leaked_raw.get("passed").and_then(Value::as_bool),
+            Some(false),
+            "the portable key's raw bytes inside a backed-up file must fail the check"
+        );
+
+        // And the base64 form, which is how it is actually persisted.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&signing_key.bytes);
+        std::fs::write(
+            snapshot_root.join("runtime/planted.bin"),
+            format!("key={encoded}").as_bytes(),
+        )?;
+        let leaked_encoded = business_os_snapshot_backup_key_separation(
+            snapshot_root,
+            &files,
+            &signing_key,
+            &portable_key,
+        )?;
+        assert_eq!(
+            leaked_encoded.get("passed").and_then(Value::as_bool),
+            Some(false),
+            "the signing key in base64 form must fail the check too"
+        );
+        Ok(())
+    }
+
     fn backup_restore_drill_copies_and_validates_isolated_restore() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -52656,6 +53112,26 @@ mod tests {
             Some(false)
         );
 
+        let legacy_signing_secret = base64::engine::general_purpose::STANDARD.encode([0x31u8; 32]);
+        let legacy_portable_encryption_secret =
+            base64::engine::general_purpose::STANDARD.encode([0x72u8; 32]);
+        crate::secrets::write_secret_record(
+            root,
+            BUSINESS_OS_SECRET_SCOPE,
+            BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
+            &legacy_signing_secret,
+            Some("legacy backup signing key".to_owned()),
+            serde_json::json!({"source": "pre-sec2-test"}),
+        )?;
+        crate::secrets::write_secret_record(
+            root,
+            BUSINESS_OS_SECRET_SCOPE,
+            BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME,
+            &legacy_portable_encryption_secret,
+            Some("legacy portable encryption key".to_owned()),
+            serde_json::json!({"source": "pre-sec2-test"}),
+        )?;
+
         let snapshot_dir = root
             .join("runtime")
             .join("business-os-source-snapshots")
@@ -52705,11 +53181,43 @@ mod tests {
         );
         write_module_catalog_projection_to_rxdb(root)?;
 
+        // The first drill mints the keys, so it cannot prove they stay out of
+        // the artifact — by then they did not exist when the files were
+        // collected. The leak the ticket names starts with the SECOND drill,
+        // where the keys are already on disk. Run one, then assert on the next.
+        let first_drill = run_business_os_backup_restore_drill(root, Some("inventory"))?;
+        assert_eq!(
+            first_drill.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "first drill must succeed before the separation check means anything"
+        );
         let result = run_business_os_backup_restore_drill(root, Some("inventory"))?;
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(
             result.get("artifact_schema").and_then(Value::as_str),
             Some("ctox.business_os.backup_restore_drill_run.v1")
+        );
+        assert_eq!(
+            result
+                .pointer("/backup_key_separation/passed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .pointer("/backup_key_separation/snapshot/forbidden_secret_records")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            result
+                .pointer(
+                    "/backup_key_separation/decrypted_portable_artifact/forbidden_secret_records"
+                )
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
         );
         let remaining_boundaries = result
             .get("remaining_boundaries")
@@ -52792,6 +53300,18 @@ mod tests {
         );
         assert_eq!(
             manifest
+                .pointer("/raw_backup_security/backup_key_separation/portable_key_must_not_travel_with_artifact")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            manifest
+                .pointer("/raw_backup_security/backup_key_separation/manifest_signing_key_must_not_travel_with_artifact")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            manifest
                 .pointer("/manifest_integrity/status")
                 .and_then(Value::as_str),
             Some("signed")
@@ -52826,16 +53346,32 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
-        let signing_secret = crate::secrets::read_secret_value(
+        assert!(!crate::secrets::secret_exists(
             root,
+            BUSINESS_OS_SECRET_SCOPE,
+            BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
+        )?);
+        assert!(!crate::secrets::secret_exists(
+            root,
+            BUSINESS_OS_SECRET_SCOPE,
+            BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME,
+        )?);
+        let backup_key_store_root = business_os_backup_key_store_root(root)?;
+        let signing_secret = crate::secrets::read_secret_value(
+            &backup_key_store_root,
             BUSINESS_OS_SECRET_SCOPE,
             BUSINESS_OS_BACKUP_MANIFEST_SIGNING_SECRET_NAME,
         )?;
         let portable_encryption_secret = crate::secrets::read_secret_value(
-            root,
+            &backup_key_store_root,
             BUSINESS_OS_SECRET_SCOPE,
             BUSINESS_OS_BACKUP_PORTABLE_ENCRYPTION_SECRET_NAME,
         )?;
+        assert_eq!(signing_secret, legacy_signing_secret);
+        assert_eq!(
+            portable_encryption_secret,
+            legacy_portable_encryption_secret
+        );
         let key_escrow_after_drill = inspect_business_os_backup_key_escrow(root)?;
         assert_eq!(
             key_escrow_after_drill.get("ok").and_then(Value::as_bool),
@@ -53002,7 +53538,19 @@ mod tests {
                 snapshot.get("kind").and_then(Value::as_str) == Some("ctox_secret_store")
                     && snapshot.get("copied").and_then(Value::as_bool) == Some(true)
             }),
-            "backup drill must snapshot the CTOX secret store for manifest verification"
+            "backup drill must snapshot the general CTOX secret store without backup keys"
+        );
+        let backup_path = result
+            .get("backup_path")
+            .and_then(Value::as_str)
+            .context("backup path")?;
+        let snapshot_secret_store = root
+            .join(backup_path)
+            .join("snapshot/runtime/ctox-secrets.sqlite3");
+        assert!(snapshot_secret_store.is_file());
+        assert!(
+            sqlite_backup_key_records(&snapshot_secret_store)?.is_empty(),
+            "snapshot secret-store content must not contain either backup key record"
         );
         let readiness = result
             .pointer("/restore_validation/readiness/artifact/surfaces")
@@ -53136,6 +53684,18 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            cli_runbook
+                .pointer("/raw_backup_handling/portable_key_must_not_travel_with_artifact")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            cli_runbook
+                .pointer("/raw_backup_handling/backup_key_separation_verification_status")
+                .and_then(Value::as_str),
+            Some("verified_by_snapshot_and_decrypted_portable_artifact_content_scan")
+        );
+        assert_eq!(
             readiness
                 .pointer("/native_store/releases/release_count")
                 .and_then(Value::as_i64),
@@ -53172,11 +53732,64 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
+
+        let second_result = run_business_os_backup_restore_drill(root, Some("inventory"))?;
+        assert_eq!(second_result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            second_result
+                .pointer("/backup_key_separation/passed")
+                .and_then(Value::as_bool),
+            Some(true),
+            "a second drill with pre-existing backup keys must still exclude both keys"
+        );
+        let second_backup_path = second_result
+            .get("backup_path")
+            .and_then(Value::as_str)
+            .context("second backup path")?;
+        let second_snapshot_secret_store = root
+            .join(second_backup_path)
+            .join("snapshot/runtime/ctox-secrets.sqlite3");
+        assert!(
+            sqlite_backup_key_records(&second_snapshot_secret_store)?.is_empty(),
+            "second-drill snapshot must not contain either backup key record"
+        );
+        assert_eq!(
+            second_result
+                .pointer("/manifest_integrity/signing_key/key_id")
+                .and_then(Value::as_str),
+            result
+                .pointer("/manifest_integrity/signing_key/key_id")
+                .and_then(Value::as_str),
+            "the migrated signing key must remain stable across drills"
+        );
+        assert_eq!(
+            second_result
+                .pointer("/portable_encrypted_export/key/key_id")
+                .and_then(Value::as_str),
+            result
+                .pointer("/portable_encrypted_export/key/key_id")
+                .and_then(Value::as_str),
+            "the migrated portable encryption key must remain stable across drills"
+        );
+
+        let detached_manifest_path = root.join("runtime/detached-backup-manifest.json");
+        fs::write(&detached_manifest_path, &manifest_bytes)?;
+        fs::remove_dir_all(root.join(backup_path))?;
+        let detached_manifest: Value = serde_json::from_slice(&fs::read(&detached_manifest_path)?)?;
+        let detached_integrity =
+            business_os_inspect_backup_manifest_integrity(root, &detached_manifest)?;
+        assert_eq!(
+            detached_integrity.get("signature_valid").and_then(Value::as_bool),
+            Some(true),
+            "manifest verification must work with the external signing key and no backup artifact access"
+        );
+
         let result_text = serde_json::to_string(&result)?;
         assert!(
             !result_text.contains("SECRET_SOURCE_RAW") && !result_text.contains("SECRET_AUDIT_RAW"),
             "backup drill result must not inline raw backed-up content"
         );
+        fs::remove_dir_all(backup_key_store_root)?;
         Ok(())
     }
 
