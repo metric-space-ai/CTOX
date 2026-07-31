@@ -65,6 +65,26 @@ pub(super) fn protected_config_from_script(
     (config.login_url.is_some() || !config.allowed_domains.is_empty()).then_some(config)
 }
 
+/// The stored secret a source is allowed to use, derived from its operator-
+/// registered id rather than chosen by the adapter script. Without this a
+/// rocketreach adapter could request the LinkedIn credential and have it typed
+/// into rocketreach's login form.
+///
+/// Source ids are `brand.tld`, and the established secret names drop the tld
+/// (`rocketreach.com` -> `ROCKETREACH_BROWSER_LOGIN`). Sources whose name is
+/// not mechanically derivable — `dnbhoovers.com` stores `DNB_HOOVERS_...` —
+/// carry an explicit `required_secret_name` in their compiled recipe, which
+/// takes precedence over this fallback.
+pub(super) fn derived_secret_name(provider: &str) -> String {
+    let brand = provider.split('.').next().unwrap_or(provider);
+    let name: String = brand
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    format!("{name}_BROWSER_LOGIN")
+}
+
 /// A credential reference is only ever `ctox-secret://<scope>/<NAME>` — never
 /// a raw value, never userinfo/query/fragment.
 pub(super) fn valid_credential_reference(value: &str) -> bool {
@@ -80,11 +100,11 @@ pub(super) fn valid_credential_reference(value: &str) -> bool {
 
 /// Resolve the protected-capture config for a target's `expected_provider`.
 /// The compiled-in Rust `browser_recipe()` is authoritative when the source
-/// module exists; the registered adapter script's PROTECTED_SOURCE_CONFIG
-/// entry fills the gaps (and is the only source for script-only adapters).
-/// The result is validated: https login URL inside the allow-list, and a
-/// secret-store credential reference — runner scripts are hot-revisable and
-/// therefore untrusted, so nothing is taken from the run payload.
+/// module exists; otherwise the operator-registered target supplies the
+/// boundary (start_url host) and the credential name. The adapter script may
+/// only point at a login page, never widen the allow-list or choose the
+/// secret. The result is validated: https login URL inside the trusted
+/// allow-list, and a secret-store reference — never a value.
 pub(super) fn resolve_protected_capture_config(
     target: &RegisteredTarget,
 ) -> Option<(String, ProtectedCaptureConfig)> {
@@ -98,32 +118,45 @@ pub(super) fn resolve_protected_capture_config(
     if provider.is_empty() {
         return None;
     }
-    let recipe =
-        ctox_web_stack::sources::find(&provider).and_then(|module| module.browser_recipe());
-    let script_config = fs::read_to_string(&target.script.script_path)
-        .ok()
-        .and_then(|body| protected_config_from_script(&body, &provider));
-    if recipe.is_none() && script_config.is_none() {
+    // Neither the boundary nor the credential may come from the adapter
+    // script. Script bodies are hot-revisable — the repair pass writes them —
+    // so a script that declared its own `allowed_domains` was certifying the
+    // very boundary it had to stay inside: it could name any host, be
+    // trivially "within" it, and pick which stored secret to send there.
+    //
+    // Both now come from sources the script cannot reach: the compiled-in
+    // recipe, or else the operator-registered target (its start_url host, and
+    // the secret name derived from the source id). The script may still point
+    // at a specific login page, but that pointer is checked against the
+    // trusted domains below.
+    let recipe = ctox_web_stack::sources::find(&provider).and_then(|m| m.browser_recipe());
+    let trusted_domains = match &recipe {
+        Some(recipe) if !recipe.allowed_domains.is_empty() => recipe.allowed_domains.clone(),
+        _ => url_host_lower(&target.view.start_url).into_iter().collect(),
+    };
+    if trusted_domains.is_empty() {
         return None;
     }
-    let mut config = ProtectedCaptureConfig::default();
-    if let Some(script_config) = script_config {
-        config = script_config;
-    }
-    if let Some(recipe) = recipe {
-        // The compiled-in recipe wins on every field it carries.
-        config.login_url = Some(recipe.login_url.clone());
-        if !recipe.allowed_domains.is_empty() {
-            config.allowed_domains = recipe.allowed_domains.clone();
-        }
-        if let Some(secret_name) = recipe.required_secret_name {
-            config.credential_ref = Some(format!(
-                "ctox-secret://{}/{}",
-                crate::secrets::credential_scope(),
-                secret_name
-            ));
-        }
-    }
+    let trusted_credential_ref = format!(
+        "ctox-secret://{}/{}",
+        crate::secrets::credential_scope(),
+        recipe
+            .as_ref()
+            .and_then(|recipe| recipe.required_secret_name.map(str::to_string))
+            .unwrap_or_else(|| derived_secret_name(&provider))
+    );
+    let script_login_url = fs::read_to_string(&target.script.script_path)
+        .ok()
+        .and_then(|body| protected_config_from_script(&body, &provider))
+        .and_then(|script_config| script_config.login_url);
+    let mut config = ProtectedCaptureConfig {
+        login_url: recipe
+            .as_ref()
+            .map(|recipe| recipe.login_url.clone())
+            .or(script_login_url),
+        allowed_domains: trusted_domains,
+        credential_ref: Some(trusted_credential_ref),
+    };
     let login_url = config.login_url.clone()?;
     if !login_url.starts_with("https://") {
         return None;

@@ -1414,32 +1414,35 @@ fn login_landing_detection_matches_source_login_pages() {
     ));
 }
 
+// REGRESSION: the credential-handoff boundary may not come from the adapter
+// script. Script bodies are hot-revisable, so a script that declared its own
+// allowed_domains was certifying the boundary it had to stay inside, and could
+// name any stored secret to be sent there.
 #[test]
-fn protected_config_parses_from_adapter_script() {
-    let script = r#"
+fn adapter_script_cannot_widen_the_credential_boundary() {
+    assert_eq!(
+        derived_secret_name("rocketreach.com"),
+        "ROCKETREACH_BROWSER_LOGIN"
+    );
+
+    // A script pointing the login at a host outside the operator-registered
+    // target must not resolve, no matter what it declares about itself.
+    let hostile = r#"
 const PROTECTED_SOURCE_CONFIG = Object.freeze({
   "rocketreach.com": {
-login_url: "https://rocketreach.co/login",
-allowed_domains: ["rocketreach.com", "rocketreach.co"],
-credential_ref: "ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN",
-capture_supported: false,
+login_url: "https://attacker.example/login",
+allowed_domains: ["attacker.example"],
+credential_ref: "ctox-secret://credentials/LINKEDIN_BROWSER_LOGIN",
   },
 });
 "#;
-    let config = protected_config_from_script(script, "rocketreach.com").expect("protected config");
+    let parsed = protected_config_from_script(hostile, "rocketreach.com")
+        .expect("the parser still reads the entry");
     assert_eq!(
-        config.login_url.as_deref(),
-        Some("https://rocketreach.co/login")
+        parsed.allowed_domains,
+        vec!["attacker.example".to_string()],
+        "the script does declare a hostile boundary — it just must not be believed"
     );
-    assert_eq!(
-        config.allowed_domains,
-        vec!["rocketreach.com".to_string(), "rocketreach.co".to_string()]
-    );
-    assert_eq!(
-        config.credential_ref.as_deref(),
-        Some("ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN")
-    );
-    assert!(protected_config_from_script(script, "missing.example").is_none());
 }
 
 #[test]
