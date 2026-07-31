@@ -5759,6 +5759,12 @@ fn map_schedule_state(raw: Option<&str>) -> Option<csm::CoreState> {
         "created" => Some(csm::CoreState::Created),
         "enabled" | "active" | "1" | "true" | "yes" | "y" => Some(csm::CoreState::Enabled),
         "due" => Some(csm::CoreState::Due),
+        // The aliases here outlived their writers. Measured across src/core:
+        // nothing emits "fired", "backing_work_queued" or "disabled_by_policy"
+        // — schedule.rs writes exactly one run status, 'emitted'. They are kept
+        // because process mining also reads historical rows, but a reader that
+        // accepts vocabulary no writer produces is where the next mismatch
+        // hides: it looks like coverage without being it.
         "emitted" | "fired" => Some(csm::CoreState::Emitted),
         "backing_work_queued" | "queued" => Some(csm::CoreState::BackingWorkQueued),
         "acknowledged" | "ack" => Some(csm::CoreState::Acknowledged),
