@@ -4779,7 +4779,14 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // A timestamp alone does not separate 22 tests that run in parallel: two
+    // can start inside the same clock tick and then share this root. Nothing
+    // has been observed failing here, but the same fixture shape did corrupt
+    // the state_invariants suite, so the sequence closes it before it bites.
+    static TEST_APP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn test_app() -> App {
         // Hermetic root: settings hydration reads the runtime store under
@@ -4789,9 +4796,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("ctox-tui-render-root-{stamp}"));
+        let sequence = TEST_APP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let unique = format!("{}-{stamp}-{sequence}", std::process::id());
+        let root = std::env::temp_dir().join(format!("ctox-tui-render-root-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        let db_path = root.join(format!("ctox-tui-render-{stamp}.db"));
+        let db_path = root.join(format!("ctox-tui-render-{unique}.db"));
         let mut app = App::new(root, db_path);
         app.page = Page::Chat;
         app
