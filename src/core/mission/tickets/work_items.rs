@@ -19,10 +19,9 @@ use super::{
     TicketKnowledgeUpsertInput, TicketSelfWorkAssignmentView, TicketSelfWorkItemView,
     TicketSelfWorkNoteView, TicketSelfWorkUpsertInput, TicketWorkflowMaterializeResult,
     TicketWorkflowStartInput, TicketWorkflowStepInput, TicketWorkflowStepView, TicketWorkflowView,
-    WorkflowDelta, WORKFLOW_CASE_KIND, WORKFLOW_MATERIALIZE_DEFAULT_LIMIT,
+    WorkItemStatus, WorkflowDelta, WORKFLOW_CASE_KIND, WORKFLOW_MATERIALIZE_DEFAULT_LIMIT,
     WORKFLOW_MAX_STEPS_PER_WORKFLOW, WORKFLOW_ORCHESTRATOR_SKILL, WORKFLOW_ROLE_CASE,
-    WORKFLOW_ROLE_LEAF, WORKFLOW_ROLE_REDUCER, WORKFLOW_STEP_KIND, WORKFLOW_STEP_STATUS_READY,
-    WORKFLOW_STEP_STATUS_WAITING,
+    WORKFLOW_ROLE_LEAF, WORKFLOW_ROLE_REDUCER, WORKFLOW_STEP_KIND,
 };
 #[cfg(test)]
 use super::{
@@ -40,12 +39,23 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+fn parse_work_item_status(raw: &str) -> Result<WorkItemStatus> {
+    WorkItemStatus::parse(raw)
+        .ok_or_else(|| anyhow!("unsupported ticket work-item status `{}`", raw.trim()))
+}
+
 pub(crate) fn put_ticket_self_work_item(
     root: &Path,
     input: TicketSelfWorkUpsertInput,
     publish: bool,
 ) -> Result<TicketSelfWorkItemView> {
     let mut conn = open_ticket_db(root)?;
+    let requested_status = parse_work_item_status(&input.state)?;
+    let status = if publish {
+        WorkItemStatus::Publishing
+    } else {
+        requested_status
+    };
     let item = upsert_ticket_self_work_item_internal(
         &mut conn,
         TicketSelfWorkUpsertInput {
@@ -53,11 +63,7 @@ pub(crate) fn put_ticket_self_work_item(
             kind: input.kind,
             title: input.title,
             body_text: input.body_text,
-            state: if publish {
-                "publishing".to_string()
-            } else {
-                input.state
-            },
+            state: status.as_str().to_string(),
             metadata: input.metadata,
         },
     )?;
@@ -99,12 +105,13 @@ pub(crate) fn put_ticket_self_work_item(
     );
     if let Err(err) = enforce_ticket_self_work_spawn(&conn, &item) {
         let now = Utc::now().to_rfc3339();
-        let fallback_state = if item.kind.to_ascii_lowercase().contains("review") {
-            "failed"
+        let fallback_status = if item.kind.to_ascii_lowercase().contains("review") {
+            WorkItemStatus::Failed
         } else {
-            "blocked"
+            WorkItemStatus::Blocked
         };
-        let fallback_reason = if fallback_state == "failed" {
+        let fallback_state = fallback_status.as_str();
+        let fallback_reason = if fallback_status == WorkItemStatus::Failed {
             "ticket_self_work_spawn_rejected_terminal"
         } else {
             "ticket_self_work_spawn_rejected"
@@ -117,7 +124,7 @@ pub(crate) fn put_ticket_self_work_item(
             fallback_state,
             "ctox-core-spawn-gate",
             fallback_reason,
-            if fallback_state == "failed" {
+            if fallback_status == WorkItemStatus::Failed {
                 Some(failure_reason.as_str())
             } else {
                 None
@@ -498,6 +505,8 @@ pub(crate) fn transition_ticket_self_work_item(
     note: Option<&str>,
     visibility: &str,
 ) -> Result<TicketSelfWorkItemView> {
+    let status = parse_work_item_status(state)?;
+    let state = status.as_str();
     let mut conn = open_ticket_db(root)?;
     let item = load_ticket_self_work_item_raw(&conn, work_id)?
         .context("ticket internal work item not found")?;
@@ -579,6 +588,8 @@ pub(crate) fn list_ticket_self_work_items(
     state: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TicketSelfWorkItemView>> {
+    let state = state.map(parse_work_item_status).transpose()?;
+    let state = state.map(WorkItemStatus::as_str);
     let db_path = resolve_db_path(root);
     let cache_key = ticket_self_work_list_cache_key(&db_path, system, state, limit);
     let initial_stamp = ticket_self_work_list_cache_stamp(&db_path);
@@ -605,23 +616,33 @@ pub(super) fn list_ticket_self_work_items_on_conn(
     state: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TicketSelfWorkItemView>> {
+    let state = state.map(parse_work_item_status).transpose()?;
+    let query_limit = if state.is_some() {
+        i64::MAX
+    } else {
+        limit as i64
+    };
     let mut statement = conn.prepare(
         r#"
         SELECT work_id, source_system, kind, title, body_text, state, metadata_json, remote_ticket_id, remote_locator, created_at, updated_at
         FROM ticket_self_work_items
         WHERE (?1 IS NULL OR source_system = ?1)
-          AND (?2 IS NULL OR state = ?2)
         ORDER BY updated_at DESC
-        LIMIT ?3
+        LIMIT ?2
         "#,
     )?;
-    let rows = statement.query_map(
-        params![system, state, limit as i64],
-        map_ticket_self_work_row,
-    )?;
+    let rows = statement.query_map(params![system, query_limit], map_ticket_self_work_row)?;
     let items = rows
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(anyhow::Error::from)?;
+        .map_err(anyhow::Error::from)?
+        .into_iter()
+        .filter(|item| {
+            state
+                .map(|expected| item.state == expected.as_str())
+                .unwrap_or(true)
+        })
+        .take(limit)
+        .collect();
     hydrate_ticket_self_work_items_with_latest_assignments(conn, items)
 }
 
@@ -706,7 +727,7 @@ pub(crate) fn start_ticket_workflow(
             kind: WORKFLOW_CASE_KIND.to_string(),
             title: title.to_string(),
             body_text: goal.to_string(),
-            state: "open".to_string(),
+            state: WorkItemStatus::Open.as_str().to_string(),
             metadata,
         },
         false,
@@ -772,9 +793,9 @@ pub(crate) fn put_ticket_workflow_step(
     let workflow_id = input.workflow_id;
     let case_priority = metadata_string_value(&case.metadata, "priority");
     let status = if predecessor_work_ids.is_empty() && predecessor_step_ids.is_empty() {
-        WORKFLOW_STEP_STATUS_READY
+        WorkItemStatus::Ready
     } else {
-        WORKFLOW_STEP_STATUS_WAITING
+        WorkItemStatus::Waiting
     };
     let mut metadata = if input.metadata.is_object() {
         input.metadata
@@ -786,7 +807,7 @@ pub(crate) fn put_ticket_workflow_step(
         object.insert("workflow_role".to_string(), json!(role.clone()));
         object.insert("workflow_step_id".to_string(), json!(step_id.clone()));
         object.insert("workflow_phase".to_string(), json!(phase));
-        object.insert("workflow_step_status".to_string(), json!(status));
+        object.insert("workflow_step_status".to_string(), json!(status.as_str()));
         object.insert(
             "workflow_predecessor_work_ids".to_string(),
             json!(predecessor_work_ids),
@@ -876,7 +897,7 @@ pub(crate) fn put_ticket_workflow_step(
             kind: WORKFLOW_STEP_KIND.to_string(),
             title: title.to_string(),
             body_text: body_text.to_string(),
-            state: "open".to_string(),
+            state: WorkItemStatus::Open.as_str().to_string(),
             metadata,
         },
         false,
@@ -915,7 +936,8 @@ pub(crate) fn apply_ticket_workflow_delta(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                object.insert("workflow_step_status".to_string(), json!(status));
+                let status = parse_work_item_status(status)?;
+                object.insert("workflow_step_status".to_string(), json!(status.as_str()));
             }
             if !update.evidence.is_null() {
                 object.insert("workflow_step_evidence".to_string(), update.evidence);
@@ -1052,7 +1074,7 @@ pub(crate) fn materialize_ready_workflow_steps_for_workflow(
     let mut skipped_count = 0usize;
     for candidate in candidates {
         let item = hydrate_ticket_self_work_item(&conn, candidate)?;
-        if workflow_step_is_runnable_state(&item.state)
+        if workflow_step_is_runnable_state(&item.state)?
             && workflow_step_ready_internal(&conn, &item)?
         {
             ready_work_ids.push(item.work_id.clone());
@@ -1085,14 +1107,19 @@ pub(crate) fn materialize_ready_workflow_steps_for_workflow(
 
 pub(crate) fn workflow_prompt_block(root: &Path, limit: usize) -> Result<Option<String>> {
     let conn = open_ticket_db(root)?;
-    let mut statement = conn.prepare(r#"SELECT work_id, source_system, kind, title, body_text, state, metadata_json, remote_ticket_id, remote_locator, created_at, updated_at FROM ticket_self_work_items WHERE kind = ?1 AND state NOT IN ('closed', 'done', 'completed', 'handled', 'cancelled', 'superseded', 'failed') ORDER BY updated_at DESC LIMIT ?2"#)?;
-    let rows = statement.query_map(
-        params![WORKFLOW_CASE_KIND, limit.max(1) as i64],
-        map_ticket_self_work_row,
-    )?;
-    let cases = rows
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(anyhow::Error::from)?;
+    let mut statement = conn.prepare(r#"SELECT work_id, source_system, kind, title, body_text, state, metadata_json, remote_ticket_id, remote_locator, created_at, updated_at FROM ticket_self_work_items WHERE kind = ?1 ORDER BY updated_at DESC"#)?;
+    let rows = statement.query_map(params![WORKFLOW_CASE_KIND], map_ticket_self_work_row)?;
+    let mut cases = Vec::new();
+    for case in rows {
+        let case = case?;
+        let status = parse_work_item_status(&case.state)?;
+        if !status.is_workflow_case_terminal() {
+            cases.push(case);
+            if cases.len() >= limit.max(1) {
+                break;
+            }
+        }
+    }
     drop(statement);
     if cases.is_empty() {
         return Ok(None);
@@ -1108,16 +1135,13 @@ pub(crate) fn workflow_prompt_block(root: &Path, limit: usize) -> Result<Option<
         let mut waiting = Vec::new();
         let mut running = Vec::new();
         for step in &steps {
-            if matches!(
-                normalize_token(&step.state).as_str(),
-                "queued" | "published" | "running" | "executing" | "in_progress"
-            ) {
+            let status = parse_work_item_status(&step.state)?;
+            let satisfied = workflow_step_satisfied(step)?;
+            if status.is_active() {
                 running.push(step);
-            } else if workflow_step_is_runnable_state(&step.state)
-                && workflow_step_ready_internal(&conn, step).unwrap_or(false)
-            {
+            } else if status.is_workflow_runnable() && workflow_step_ready_internal(&conn, step)? {
                 ready.push(step);
-            } else if !workflow_step_satisfied(step) {
+            } else if !satisfied {
                 waiting.push(step);
             }
         }
@@ -1176,12 +1200,12 @@ pub(crate) fn load_ticket_workflow(
     let mut ready_steps = Vec::new();
     let mut waiting_steps = Vec::new();
     for step in steps {
-        let ready = workflow_step_is_runnable_state(&step.state)
+        let ready = workflow_step_is_runnable_state(&step.state)?
             && workflow_step_ready_internal(&conn, &step)?;
         let step_id = workflow_step_id(&step);
         if ready {
             ready_steps.push(step_id.clone());
-        } else if !workflow_step_satisfied(&step) {
+        } else if !workflow_step_satisfied(&step)? {
             waiting_steps.push(step_id.clone());
         }
         step_views.push(TicketWorkflowStepView {
@@ -1191,7 +1215,7 @@ pub(crate) fn load_ticket_workflow(
             phase: workflow_step_phase(&step),
             title: step.title.clone(),
             state: step.state.clone(),
-            status: workflow_step_status(&step),
+            status: workflow_step_status(&step)?.as_str().to_string(),
             predecessor_work_ids: workflow_predecessor_work_ids(&step.metadata),
             predecessor_step_ids: workflow_predecessor_step_ids(&step.metadata),
             ready,
@@ -1297,7 +1321,7 @@ pub(crate) fn workflow_mark_step_queue_ready(
     let mut item = merge_ticket_self_work_metadata(
         root,
         work_id,
-        json!({"workflow_step_status": WORKFLOW_STEP_STATUS_READY}),
+        json!({"workflow_step_status": WorkItemStatus::Ready.as_str()}),
     )?;
     if item.assigned_to.as_deref() != Some("self") {
         item = assign_ticket_self_work_item(
@@ -1308,16 +1332,17 @@ pub(crate) fn workflow_mark_step_queue_ready(
             Some("workflow predecessor conditions are satisfied"),
         )?;
     }
-    match normalize_token(&item.state).as_str() {
-        "queued" | "published" | "running" | "executing" | "in_progress" => Ok(item),
-        _ => transition_ticket_self_work_item(
+    if parse_work_item_status(&item.state)?.is_active() {
+        Ok(item)
+    } else {
+        transition_ticket_self_work_item(
             root,
             work_id,
-            "queued",
+            WorkItemStatus::Queued.as_str(),
             WORKFLOW_ORCHESTRATOR_SKILL,
             Some("Workflow predecessor conditions are satisfied; queued as the next bounded step."),
             "internal",
-        ),
+        )
     }
 }
 pub(super) fn workflow_step_ready_for_queue(root: &Path, work_id: &str) -> Result<bool> {
@@ -1325,20 +1350,23 @@ pub(super) fn workflow_step_ready_for_queue(root: &Path, work_id: &str) -> Resul
     let Some(item) = load_ticket_self_work_item_raw(&conn, work_id)? else {
         return Ok(false);
     };
-    Ok(workflow_step_is_runnable_state(&item.state) && workflow_step_ready_internal(&conn, &item)?)
+    Ok(
+        workflow_step_is_runnable_state(&item.state)?
+            && workflow_step_ready_internal(&conn, &item)?,
+    )
 }
 pub(super) fn workflow_step_ready_internal(
     conn: &Connection,
     item: &TicketSelfWorkItemView,
 ) -> Result<bool> {
-    if item.kind != WORKFLOW_STEP_KIND || workflow_step_satisfied(item) {
+    if item.kind != WORKFLOW_STEP_KIND || workflow_step_satisfied(item)? {
         return Ok(false);
     }
     for work_id in workflow_predecessor_work_ids(&item.metadata) {
         let Some(predecessor) = load_ticket_self_work_item_raw(conn, &work_id)? else {
             return Ok(false);
         };
-        if !workflow_step_satisfied(&predecessor) {
+        if !workflow_step_satisfied(&predecessor)? {
             return Ok(false);
         }
     }
@@ -1347,7 +1375,7 @@ pub(super) fn workflow_step_ready_internal(
         let Some(predecessor) = locate_workflow_step_in_conn(conn, &workflow_id, &step_id)? else {
             return Ok(false);
         };
-        if !workflow_step_satisfied(&predecessor) {
+        if !workflow_step_satisfied(&predecessor)? {
             return Ok(false);
         }
     }
@@ -1414,20 +1442,13 @@ pub(super) fn merge_json_object_values(target: &mut Value, update: &Value) {
         target.insert(key.clone(), value.clone());
     }
 }
-pub(super) fn workflow_step_satisfied(item: &TicketSelfWorkItemView) -> bool {
-    matches!(
-        normalize_token(&item.state).as_str(),
-        "closed" | "done" | "completed" | "handled" | "verified"
-    ) || matches!(
-        normalize_token(&workflow_step_status(item)).as_str(),
-        "verified" | "passed" | "satisfied" | "closed" | "done" | "completed"
-    )
+pub(super) fn workflow_step_satisfied(item: &TicketSelfWorkItemView) -> Result<bool> {
+    let state = parse_work_item_status(&item.state)?;
+    let status = workflow_step_status(item)?;
+    Ok(state.is_workflow_item_satisfied() || status.is_workflow_status_satisfied())
 }
-pub(super) fn workflow_step_is_runnable_state(state: &str) -> bool {
-    matches!(
-        normalize_token(state).as_str(),
-        "" | "created" | "open" | "blocked" | "restored"
-    )
+pub(super) fn workflow_step_is_runnable_state(state: &str) -> Result<bool> {
+    Ok(parse_work_item_status(state)?.is_workflow_runnable())
 }
 pub(super) fn workflow_step_id(item: &TicketSelfWorkItemView) -> String {
     metadata_string_value(&item.metadata, "workflow_step_id")
@@ -1441,9 +1462,15 @@ pub(super) fn workflow_step_phase(item: &TicketSelfWorkItemView) -> String {
     metadata_string_value(&item.metadata, "workflow_phase")
         .unwrap_or_else(|| "unspecified".to_string())
 }
-pub(super) fn workflow_step_status(item: &TicketSelfWorkItemView) -> String {
-    metadata_string_value(&item.metadata, "workflow_step_status")
-        .unwrap_or_else(|| item.state.clone())
+pub(super) fn workflow_step_status(item: &TicketSelfWorkItemView) -> Result<WorkItemStatus> {
+    let raw = metadata_string_value(&item.metadata, "workflow_step_status")
+        .unwrap_or_else(|| item.state.clone());
+    parse_work_item_status(&raw).with_context(|| {
+        format!(
+            "workflow step `{}` has an unknown persisted status",
+            item.work_id
+        )
+    })
 }
 pub(super) fn workflow_predecessor_work_ids(metadata: &Value) -> Vec<String> {
     workflow_metadata_strings(metadata, "workflow_predecessor_work_ids")
@@ -1575,15 +1602,17 @@ pub(crate) fn set_ticket_approval_gate_state_from_authorized_reply(
     state: &str,
     approval_message_key: &str,
 ) -> Result<TicketSelfWorkItemView> {
+    let status = parse_work_item_status(state)?;
+    let state = status.as_str();
     let mut conn = open_ticket_db(root)?;
     let existing = load_ticket_self_work_item_raw(&conn, work_id)?
         .context("approval gate internal work item not found")?;
     if existing.kind != "approval-gate" {
         anyhow::bail!("authorized approval reply target is not an approval gate");
     }
-    let expected_action = match state {
-        "closed" => "approve",
-        "failed" => "reject",
+    let expected_action = match status {
+        WorkItemStatus::Closed => "approve",
+        WorkItemStatus::Failed => "reject",
         _ => anyhow::bail!("authorized approval reply target state must be closed or failed"),
     };
     let ledger: Option<(String, String, String)> = conn
@@ -1612,8 +1641,8 @@ pub(crate) fn set_ticket_approval_gate_state_from_authorized_reply(
         approval_message_key,
         body_sha256.chars().take(16).collect::<String>()
     );
-    let failure_reason =
-        (state == "failed").then_some("authorized approval reply rejected the internal work item");
+    let failure_reason = (status == WorkItemStatus::Failed)
+        .then_some("authorized approval reply rejected the internal work item");
     let item = set_ticket_self_work_state_internal_with_policy(
         &mut conn,
         work_id,
@@ -1884,7 +1913,7 @@ pub(super) fn enforce_ticket_self_work_state_transition(
             lane: RuntimeLane::P2MissionDelivery,
             from_state: from_core,
             to_state: to_core,
-            event: ticket_self_work_core_event(to_state),
+            event: ticket_self_work_core_event(to_state)?,
             actor: actor.to_string(),
             evidence: CoreEvidenceRefs {
                 verification_id: if to_core == CoreState::Closed {
@@ -1946,37 +1975,53 @@ pub(super) fn work_item_has_terminal_success_proof(
 }
 
 pub(super) fn ticket_self_work_core_state(raw: &str) -> Result<CoreState> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "created" => Ok(CoreState::Created),
-        "open" | "queued" | "restored" | "publishing" => Ok(CoreState::Planned),
-        "published" | "running" | "executing" | "in_progress" => Ok(CoreState::Executing),
-        "awaiting_review" | "review" | "reviewing" => Ok(CoreState::AwaitingReview),
-        "rework_required" | "review_rework" | "rework" => Ok(CoreState::ReworkRequired),
-        "awaiting_verification" | "verification" => Ok(CoreState::AwaitingVerification),
-        "verified" => Ok(CoreState::Verified),
-        "blocked" | "spilled" => Ok(CoreState::Blocked),
-        "failed" => Ok(CoreState::Failed),
-        "closed" | "done" | "completed" | "handled" => Ok(CoreState::Closed),
-        "cancelled" | "superseded" => Ok(CoreState::Superseded),
-        other => {
-            anyhow::bail!("ticket internal work state is not mapped to core state machine: {other}")
+    let status = parse_work_item_status(raw)?;
+    match status {
+        WorkItemStatus::Created => Ok(CoreState::Created),
+        WorkItemStatus::Open
+        | WorkItemStatus::Queued
+        | WorkItemStatus::Restored
+        | WorkItemStatus::Publishing => Ok(CoreState::Planned),
+        WorkItemStatus::Published | WorkItemStatus::Executing => Ok(CoreState::Executing),
+        WorkItemStatus::AwaitingReview => Ok(CoreState::AwaitingReview),
+        WorkItemStatus::ReworkRequired => Ok(CoreState::ReworkRequired),
+        WorkItemStatus::AwaitingVerification => Ok(CoreState::AwaitingVerification),
+        WorkItemStatus::Verified => Ok(CoreState::Verified),
+        WorkItemStatus::Blocked | WorkItemStatus::Spilled => Ok(CoreState::Blocked),
+        WorkItemStatus::Failed => Ok(CoreState::Failed),
+        WorkItemStatus::Closed | WorkItemStatus::Handled => Ok(CoreState::Closed),
+        WorkItemStatus::Cancelled | WorkItemStatus::Superseded => Ok(CoreState::Superseded),
+        WorkItemStatus::Ready | WorkItemStatus::Waiting | WorkItemStatus::Satisfied => {
+            anyhow::bail!(
+                "ticket internal work status `{}` is not a state in the core state machine",
+                status.as_str()
+            )
         }
     }
 }
 
-pub(super) fn ticket_self_work_core_event(state: &str) -> CoreEvent {
-    match state.trim().to_ascii_lowercase().as_str() {
-        "open" | "queued" | "restored" | "publishing" => CoreEvent::Plan,
-        "published" | "running" | "executing" | "in_progress" => CoreEvent::Execute,
-        "awaiting_review" | "review" | "reviewing" => CoreEvent::RequestReview,
-        "rework_required" | "review_rework" | "rework" => CoreEvent::RequireRework,
-        "awaiting_verification" | "verification" => CoreEvent::Verify,
-        "verified" => CoreEvent::Verify,
-        "blocked" | "spilled" => CoreEvent::Block,
-        "failed" => CoreEvent::Fail,
-        "closed" | "done" | "completed" | "handled" => CoreEvent::Close,
-        "cancelled" | "superseded" => CoreEvent::Supersede,
-        _ => CoreEvent::CreateTicket,
+pub(super) fn ticket_self_work_core_event(state: &str) -> Result<CoreEvent> {
+    let status = parse_work_item_status(state)?;
+    match status {
+        WorkItemStatus::Created => Ok(CoreEvent::CreateTicket),
+        WorkItemStatus::Open
+        | WorkItemStatus::Queued
+        | WorkItemStatus::Restored
+        | WorkItemStatus::Publishing => Ok(CoreEvent::Plan),
+        WorkItemStatus::Published | WorkItemStatus::Executing => Ok(CoreEvent::Execute),
+        WorkItemStatus::AwaitingReview => Ok(CoreEvent::RequestReview),
+        WorkItemStatus::ReworkRequired => Ok(CoreEvent::RequireRework),
+        WorkItemStatus::AwaitingVerification | WorkItemStatus::Verified => Ok(CoreEvent::Verify),
+        WorkItemStatus::Blocked | WorkItemStatus::Spilled => Ok(CoreEvent::Block),
+        WorkItemStatus::Failed => Ok(CoreEvent::Fail),
+        WorkItemStatus::Closed | WorkItemStatus::Handled => Ok(CoreEvent::Close),
+        WorkItemStatus::Cancelled | WorkItemStatus::Superseded => Ok(CoreEvent::Supersede),
+        WorkItemStatus::Ready | WorkItemStatus::Waiting | WorkItemStatus::Satisfied => {
+            anyhow::bail!(
+                "ticket internal work status `{}` has no core transition event",
+                status.as_str()
+            )
+        }
     }
 }
 
@@ -1996,6 +2041,8 @@ pub(super) fn set_ticket_self_work_state_internal_with_policy(
     failure_reason: Option<&str>,
     terminal_policy_proof: Option<&str>,
 ) -> Result<TicketSelfWorkItemView> {
+    let status = parse_work_item_status(state)?;
+    let state = status.as_str();
     let existing = load_ticket_self_work_item_raw(conn, work_id)?
         .context("ticket internal work item not found")?;
     enforce_ticket_self_work_state_transition(
@@ -2181,6 +2228,8 @@ pub(super) fn upsert_ticket_self_work_item_internal(
     conn: &mut Connection,
     input: TicketSelfWorkUpsertInput,
 ) -> Result<TicketSelfWorkItemView> {
+    let status = parse_work_item_status(&input.state)?;
+    let state = status.as_str();
     let now = now_iso_string();
     let dedupe_key = input
         .metadata
@@ -2202,7 +2251,7 @@ pub(super) fn upsert_ticket_self_work_item_internal(
             conn,
             &existing.work_id,
             &existing.state,
-            &input.state,
+            state,
             "ctox-ticket",
             "self_work_item_upsert",
             None,
@@ -2219,7 +2268,7 @@ pub(super) fn upsert_ticket_self_work_item_internal(
             title=excluded.title,
             body_text=excluded.body_text,
             state=CASE
-                WHEN ticket_self_work_items.state = 'published' THEN ticket_self_work_items.state
+                WHEN ticket_self_work_items.state = ?9 THEN ticket_self_work_items.state
                 ELSE excluded.state
             END,
             metadata_json=excluded.metadata_json,
@@ -2231,9 +2280,10 @@ pub(super) fn upsert_ticket_self_work_item_internal(
             input.kind,
             input.title,
             input.body_text,
-            input.state,
+            state,
             serde_json::to_string(&input.metadata)?,
             now,
+            WorkItemStatus::Published.as_str(),
         ],
     )?;
     clear_ticket_self_work_list_cache();
@@ -2258,11 +2308,12 @@ pub(super) fn mark_ticket_self_work_published(
 ) -> Result<TicketSelfWorkItemView> {
     let existing = load_ticket_self_work_item_raw(conn, work_id)?
         .context("ticket internal work item not found")?;
+    let published = WorkItemStatus::Published.as_str();
     enforce_ticket_self_work_state_transition(
         conn,
         work_id,
         &existing.state,
-        "published",
+        published,
         "ctox-ticket",
         "mark_ticket_self_work_published",
         None,
@@ -2272,13 +2323,13 @@ pub(super) fn mark_ticket_self_work_published(
     conn.execute(
         r#"
         UPDATE ticket_self_work_items
-        SET state = 'published',
-            remote_ticket_id = ?2,
-            remote_locator = ?3,
-            updated_at = ?4
+        SET state = ?2,
+            remote_ticket_id = ?3,
+            remote_locator = ?4,
+            updated_at = ?5
         WHERE work_id = ?1
         "#,
-        params![work_id, remote_ticket_id, remote_locator, now],
+        params![work_id, published, remote_ticket_id, remote_locator, now],
     )?;
     clear_ticket_self_work_list_cache();
     conn.query_row(

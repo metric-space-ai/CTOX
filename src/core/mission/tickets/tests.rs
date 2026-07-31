@@ -2204,6 +2204,50 @@ fn self_work_items_allow_multiple_entries_for_same_kind_when_not_deduped() -> Re
 }
 
 #[test]
+fn self_work_status_reads_aliases_and_rejects_unknown_persisted_values() -> Result<()> {
+    let root = temp_root("self-work-status-persistence");
+    std::fs::create_dir_all(&root)?;
+
+    let item = put_ticket_self_work_item(
+        &root,
+        TicketSelfWorkUpsertInput {
+            source_system: "local".to_string(),
+            kind: "status-persistence".to_string(),
+            title: "Validate persisted work-item status".to_string(),
+            body_text: "Read aliases canonically and reject unknown values.".to_string(),
+            state: "open".to_string(),
+            metadata: json!({"dedupe_key": "self-work-status-persistence"}),
+        },
+        false,
+    )?;
+    let conn = open_ticket_db(&root)?;
+    conn.execute(
+        "UPDATE ticket_self_work_items SET state = 'completed' WHERE work_id = ?1",
+        params![&item.work_id],
+    )?;
+    drop(conn);
+
+    let loaded = load_ticket_self_work_item(&root, &item.work_id)?
+        .context("work item missing after alias update")?;
+    assert_eq!(loaded.state, "closed");
+
+    let conn = open_ticket_db(&root)?;
+    conn.execute(
+        "UPDATE ticket_self_work_items SET state = 'mystery' WHERE work_id = ?1",
+        params![&item.work_id],
+    )?;
+    drop(conn);
+    let err = load_ticket_self_work_item(&root, &item.work_id)
+        .expect_err("unknown persisted state must fail closed");
+    assert!(err
+        .to_string()
+        .contains("unknown persisted ticket work-item status `mystery`"));
+
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn review_spawn_budget_is_scoped_to_parent_work_episode() {
     let first = json!({
         "thread_key": "email/shared-thread",

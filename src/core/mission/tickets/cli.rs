@@ -27,8 +27,8 @@ use super::{
     transition_ticket_self_work_item, workflow_mark_step_queue_ready, writeback_comment,
     writeback_transition, AutonomyGrantInput, ControlBundleInput, TicketClarificationRequestInput,
     TicketKnowledgeUpsertInput, TicketSelfWorkUpsertInput, TicketWorkflowStartInput,
-    TicketWorkflowStepInput, DEFAULT_APPROVAL_MODE, DEFAULT_AUDIT_LIMIT, DEFAULT_AUTONOMY_LEVEL,
-    DEFAULT_LIST_LIMIT, DEFAULT_RISK_LEVEL, DEFAULT_SUPPORT_MODE,
+    TicketWorkflowStepInput, WorkItemStatus, DEFAULT_APPROVAL_MODE, DEFAULT_AUDIT_LIMIT,
+    DEFAULT_AUTONOMY_LEVEL, DEFAULT_LIST_LIMIT, DEFAULT_RISK_LEVEL, DEFAULT_SUPPORT_MODE,
     WORKFLOW_MATERIALIZE_DEFAULT_LIMIT, WORKFLOW_ROLE_LEAF,
 };
 use super::{resolve_db_path, schema_state};
@@ -306,7 +306,7 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
                     kind: "access-request".to_string(),
                     title: title.to_string(),
                     body_text: body.to_string(),
-                    state: "open".to_string(),
+                    state: WorkItemStatus::Open.as_str().to_string(),
                     metadata,
                 },
                 flag_present(args, "--publish"),
@@ -364,7 +364,7 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
                     kind: kind.to_string(),
                     title: title.to_string(),
                     body_text: body.to_string(),
-                    state: "open".to_string(),
+                    state: WorkItemStatus::Open.as_str().to_string(),
                     metadata,
                 },
                 flag_present(args, "--publish"),

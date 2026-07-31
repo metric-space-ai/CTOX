@@ -23,6 +23,9 @@ use cases::{
     writeback_comment, writeback_transition, AuditRequest,
 };
 
+mod work_item_status;
+pub(crate) use work_item_status::WorkItemStatus;
+
 mod work_items;
 #[cfg(test)]
 use work_items::ticket_self_work_spawn_budget;
@@ -111,8 +114,6 @@ pub(crate) const WORKFLOW_ORCHESTRATOR_SKILL: &str = "ticket-workflow-orchestrat
 const WORKFLOW_ROLE_CASE: &str = "case";
 const WORKFLOW_ROLE_LEAF: &str = "leaf";
 const WORKFLOW_ROLE_REDUCER: &str = "reducer";
-const WORKFLOW_STEP_STATUS_READY: &str = "ready";
-const WORKFLOW_STEP_STATUS_WAITING: &str = "waiting";
 const WORKFLOW_MATERIALIZE_DEFAULT_LIMIT: usize = 16;
 const WORKFLOW_MAX_STEPS_PER_WORKFLOW: usize = 256;
 const REQUIRED_KNOWLEDGE_DOMAINS: &[&str] = &[
@@ -5874,7 +5875,36 @@ fn map_ticket_knowledge_entry_row(
 
 fn map_ticket_self_work_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TicketSelfWorkItemView> {
     let kind: String = row.get(2)?;
-    let metadata = parse_json_column(row.get::<_, String>(6)?);
+    let raw_state: String = row.get(5)?;
+    let state = WorkItemStatus::parse(&raw_state).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown persisted ticket work-item status `{raw_state}`"),
+            )),
+        )
+    })?;
+    let mut metadata = parse_json_column(row.get::<_, String>(6)?);
+    if let Some(raw_status) = metadata.get("workflow_step_status").and_then(Value::as_str) {
+        let status = WorkItemStatus::parse(raw_status).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown persisted workflow work-item status `{raw_status}`"),
+                )),
+            )
+        })?;
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "workflow_step_status".to_string(),
+                Value::String(status.as_str().to_string()),
+            );
+        }
+    }
     let suggested_skill = metadata
         .get("skill")
         .and_then(Value::as_str)
@@ -5888,7 +5918,7 @@ fn map_ticket_self_work_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TicketS
         kind,
         title: row.get(3)?,
         body_text: row.get(4)?,
-        state: row.get(5)?,
+        state: state.as_str().to_string(),
         suggested_skill,
         metadata,
         assigned_to: None,
