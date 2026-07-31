@@ -1833,7 +1833,9 @@ asyncio.run(main())
       if (cmd.action === "send_chat") {
         emit({ type: "command_received", action: "send_chat" });
         const sent = await sendTeamsChatFromBranch(cmd.text);
-        emit(sent ? { type: "chat_sent", text: cmd.text } : { type: "chat_send_failed", text: cmd.text });
+        emit(sent
+          ? { type: "chat_sent", text: cmd.text, message_key: cmd.message_key || "" }
+          : { type: "chat_send_failed", text: cmd.text, message_key: cmd.message_key || "" });
       } else if (cmd.action === "overlay_text") {
         emit({ type: "command_received", action: "overlay_text" });
         await page.evaluate(({ text, speaker }) => {
@@ -2183,9 +2185,9 @@ const handleCommandLine = async (line) => {
         sent = await sendChatViaPlaywrightFallback(cmd.text);
       }
       if (sent) {
-        emit({ type: "chat_sent", text: cmd.text });
+        emit({ type: "chat_sent", text: cmd.text, message_key: cmd.message_key || "" });
       } else {
-        emit({ type: "chat_send_failed", text: cmd.text });
+        emit({ type: "chat_send_failed", text: cmd.text, message_key: cmd.message_key || "" });
       }
     } else if (cmd.action === "overlay_text") {
       emit({ type: "command_received", action: "overlay_text" });

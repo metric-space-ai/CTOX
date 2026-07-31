@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,50 @@ struct MeetingSessionFileStamp {
 struct MeetingSyncFileState {
     stamp: MeetingSessionFileStamp,
     active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MeetingSessionStatus {
+    Joining,
+    Running,
+    Active,
+    JoinFailed,
+    Ended,
+}
+
+impl MeetingSessionStatus {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "joining" => Ok(Self::Joining),
+            "running" => Ok(Self::Running),
+            "active" => Ok(Self::Active),
+            "join_failed" => Ok(Self::JoinFailed),
+            "ended" => Ok(Self::Ended),
+            other => bail!("unknown meeting session status `{other}`"),
+        }
+    }
+
+    fn from_session_value(session: &Value) -> Result<Self> {
+        let status = session
+            .get("status")
+            .and_then(Value::as_str)
+            .context("meeting session status must be a string")?;
+        Self::parse(status)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Joining => "joining",
+            Self::Running => "running",
+            Self::Active => "active",
+            Self::JoinFailed => "join_failed",
+            Self::Ended => "ended",
+        }
+    }
+
+    fn is_running(self) -> bool {
+        matches!(self, Self::Joining | Self::Running | Self::Active)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +144,9 @@ pub(crate) fn sync(
             let Ok(mut session) = serde_json::from_str::<Value>(&contents) else {
                 continue;
             };
-            let status = session
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            if status != "active" && status != "joining" && status != "running" {
+            let status = MeetingSessionStatus::from_session_value(&session)
+                .with_context(|| format!("invalid meeting session status at {}", path.display()))?;
+            if !status.is_running() {
                 remember_meeting_session_file_state(&path, stamp, false);
                 continue;
             }
@@ -159,9 +201,9 @@ pub(crate) fn sync(
                             .unwrap_or(false)
                     {
                         let ack_text = first_mention_ack_text();
-                        let _ = write_chat_command_to_session(&session, ack_text);
-                        record_meeting_outbound_message(
+                        submit_meeting_outbound_message(
                             &mut conn,
+                            &session,
                             &session_id,
                             &provider,
                             ack_text,
@@ -192,9 +234,9 @@ pub(crate) fn sync(
                         .unwrap_or(false)
                 {
                     let ack_text = first_mention_ack_text();
-                    let _ = write_chat_command_to_session(&session, ack_text);
-                    record_meeting_outbound_message(
+                    submit_meeting_outbound_message(
                         &mut conn,
+                        &session,
                         &session_id,
                         &provider,
                         ack_text,
@@ -304,8 +346,8 @@ pub(crate) fn sync(
 }
 
 /// Send a chat message to a running meeting session.
-/// 1. Store the outbound message in SQLite (same pipeline as email/jami)
-/// 2. Forward to the Playwright process via stdin pipe
+/// 1. Append the command to the runner's durable command file.
+/// 2. Record it as `submitted`; only a runner `chat_sent` event may promote it to `sent`.
 pub(crate) fn send(
     root: &Path,
     _runtime: &BTreeMap<String, String>,
@@ -321,81 +363,91 @@ pub(crate) fn send(
     }
     let contents = fs::read_to_string(&session_path)?;
     let session: Value = serde_json::from_str(&contents)?;
+    let status = MeetingSessionStatus::from_session_value(&session).with_context(|| {
+        format!(
+            "invalid meeting session status at {}",
+            session_path.display()
+        )
+    })?;
+    if !status.is_running() {
+        bail!(
+            "meeting session {} is not running (status={})",
+            request.session_id,
+            status.as_str()
+        );
+    }
     let provider = session
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-
-    // 1. Store outbound message in SQLite — same as email send does
-    let db_path = request.db_path;
-    let mut conn = open_channel_db(db_path)?;
     let observed_at = now_iso_string();
-    let message_key = format!(
-        "meeting::{}::out::{}",
-        request.session_id,
-        stable_digest(&format!("{}:{}", request.body, observed_at))
-    );
-    let metadata = json!({
-        "provider": provider,
-        "session_id": request.session_id,
-        "source": "ctox_reply",
-    });
-    upsert_communication_message(
+    let message_key =
+        meeting_outbound_message_key(request.session_id, "ctox_reply", request.body, &observed_at);
+
+    write_chat_command_to_session(&session, request.body, Some(&message_key))?;
+
+    let mut conn = open_channel_db(request.db_path)?;
+    record_meeting_outbound_message(
         &mut conn,
-        UpsertMessage {
-            message_key: &message_key,
-            channel: "meeting",
-            account_key: "meeting:system",
-            thread_key: request.session_id,
-            remote_id: &message_key,
-            direction: "outbound",
-            folder_hint: "sent",
-            sender_display: "INF Yoda Notetaker",
-            sender_address: "ctox@local",
-            recipient_addresses_json: "[]",
-            cc_addresses_json: "[]",
-            bcc_addresses_json: "[]",
-            subject: &format!("{} meeting chat reply", provider),
-            preview: &request.body[..request.body.len().min(120)],
-            body_text: request.body,
-            body_html: "",
-            raw_payload_ref: "",
-            trust_level: "internal",
-            status: "sent",
-            seen: true,
-            has_attachments: false,
-            external_created_at: &observed_at,
-            observed_at: &observed_at,
-            metadata_json: &serde_json::to_string(&metadata)?,
-        },
+        request.session_id,
+        provider,
+        request.body,
+        "ctox_reply",
+        &message_key,
+        &observed_at,
     )?;
-    let _ = refresh_thread(&mut conn, request.session_id);
 
-    // 2. Forward to Playwright process via stdin pipe
-    let _ = write_chat_command_to_session(&session, request.body);
-
-    Ok(
-        json!({"ok": true, "status": "sent", "session_id": request.session_id, "message_key": message_key}),
-    )
+    Ok(json!({
+        "ok": true,
+        "status": "submitted",
+        "session_id": request.session_id,
+        "message_key": message_key,
+        "delivery": {
+            "confirmed": false,
+            "state": "submitted_to_meeting_runner",
+            "detail": "submitted means the command was appended to the runner command file; participant-visible delivery is not yet confirmed"
+        }
+    }))
 }
 
 fn first_mention_ack_text() -> &'static str {
     "Ich habe die Frage gesehen und antworte hier im Chat. Das kann einen Augenblick dauern, weil mir Echtzeit-Antworten leider noch nicht zuverlaessig moeglich sind."
 }
 
-fn write_chat_command_to_session(session: &Value, text: &str) -> Result<()> {
-    let Some(stdin_path) = session.get("stdin_pipe").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    let command = json!({"action": "send_chat", "text": text});
-    match fs::OpenOptions::new().append(true).open(stdin_path) {
-        Ok(mut file) => {
-            let _ = writeln!(file, "{}", command);
-        }
-        Err(err) => {
-            eprintln!("[meeting] warning: could not write to stdin pipe: {err}");
-        }
+fn meeting_outbound_message_key(
+    session_id: &str,
+    source: &str,
+    body: &str,
+    observed_at: &str,
+) -> String {
+    format!(
+        "meeting::{session_id}::out::{}",
+        stable_digest(&format!("{source}:{body}:{observed_at}"))
+    )
+}
+
+fn write_chat_command_to_session(
+    session: &Value,
+    text: &str,
+    message_key: Option<&str>,
+) -> Result<()> {
+    let stdin_path = session
+        .get("stdin_pipe")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .context("meeting session has no runner command file")?;
+    let mut command = json!({"action": "send_chat", "text": text});
+    if let Some(message_key) = message_key {
+        command["message_key"] = Value::String(message_key.to_string());
     }
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(stdin_path)
+        .with_context(|| format!("failed to open meeting runner command file {stdin_path}"))?;
+    writeln!(file, "{command}")
+        .with_context(|| format!("failed to write meeting runner command file {stdin_path}"))?;
+    file.flush()
+        .with_context(|| format!("failed to flush meeting runner command file {stdin_path}"))?;
     Ok(())
 }
 
@@ -444,45 +496,6 @@ fn session_value_is_own_message(session: &Value, sender: &str, text: &str) -> bo
         })
         .unwrap_or_default();
     is_own_message_text(bot_name, &outbound, sender, text)
-}
-
-fn reconcile_stale_running_session(path: &Path, mut session: Value) -> Value {
-    let is_running = session
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| status == "running" || status == "joining" || status == "active");
-    if !is_running {
-        return session;
-    }
-    let pid = session
-        .get("pid")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if pid != 0 && process_is_running(pid) {
-        return session;
-    }
-    if let Some(object) = session.as_object_mut() {
-        object.insert("status".to_string(), Value::String("ended".to_string()));
-        object.insert("ended_at".to_string(), Value::String(now_iso_string()));
-        object.insert(
-            "end_reason".to_string(),
-            Value::String("process_not_running".to_string()),
-        );
-    }
-    let _ = fs::write(
-        path,
-        serde_json::to_string_pretty(&session).unwrap_or_default(),
-    );
-    session
-}
-
-fn process_is_running(pid: u64) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 fn meeting_session_file_stamp(path: &Path) -> Option<MeetingSessionFileStamp> {
@@ -537,55 +550,143 @@ fn communication_message_exists(conn: &rusqlite::Connection, message_key: &str) 
         .is_some())
 }
 
+fn submit_meeting_outbound_message(
+    conn: &mut rusqlite::Connection,
+    session: &Value,
+    session_id: &str,
+    provider: &str,
+    body: &str,
+    source: &str,
+) -> Result<String> {
+    let observed_at = now_iso_string();
+    let message_key = meeting_outbound_message_key(session_id, source, body, &observed_at);
+    write_chat_command_to_session(session, body, Some(&message_key))?;
+    record_meeting_outbound_message(
+        conn,
+        session_id,
+        provider,
+        body,
+        source,
+        &message_key,
+        &observed_at,
+    )?;
+    Ok(message_key)
+}
+
 fn record_meeting_outbound_message(
     conn: &mut rusqlite::Connection,
     session_id: &str,
     provider: &str,
     body: &str,
     source: &str,
+    message_key: &str,
+    observed_at: &str,
 ) -> Result<()> {
-    let observed_at = now_iso_string();
-    let message_key = format!(
-        "meeting::{}::out::{}",
-        session_id,
-        stable_digest(&format!("{source}:{body}:{observed_at}"))
-    );
     let metadata = json!({
         "provider": provider,
         "session_id": session_id,
         "source": source,
+        "delivery": {
+            "confirmed": false,
+            "state": "submitted_to_meeting_runner",
+            "detail": "submitted means the command was appended to the runner command file; participant-visible delivery is not yet confirmed",
+        },
     });
+    let preview = clip_chars(body, 120);
     upsert_communication_message(
         conn,
         UpsertMessage {
-            message_key: &message_key,
+            message_key,
             channel: "meeting",
             account_key: "meeting:system",
             thread_key: session_id,
-            remote_id: &message_key,
+            remote_id: message_key,
             direction: "outbound",
-            folder_hint: "sent",
+            folder_hint: "submitted",
             sender_display: "INF Yoda Notetaker",
             sender_address: "ctox@local",
             recipient_addresses_json: "[]",
             cc_addresses_json: "[]",
             bcc_addresses_json: "[]",
             subject: &format!("{} meeting chat reply", provider),
-            preview: &body[..body.len().min(120)],
+            preview: &preview,
             body_text: body,
             body_html: "",
             raw_payload_ref: "",
             trust_level: "internal",
-            status: "sent",
+            status: "submitted",
             seen: true,
             has_attachments: false,
-            external_created_at: &observed_at,
-            observed_at: &observed_at,
+            external_created_at: observed_at,
+            observed_at,
             metadata_json: &serde_json::to_string(&metadata)?,
         },
     )?;
     refresh_thread(conn, session_id)?;
     Ok(())
+}
+
+fn confirm_meeting_outbound_message(
+    root: &Path,
+    session_id: &str,
+    message_key: &str,
+) -> Result<bool> {
+    let db_path = root.join("runtime/ctox.sqlite3");
+    for attempt in 0..20 {
+        if db_path.exists() {
+            let mut conn = open_channel_db(&db_path)?;
+            let row = conn
+                .query_row(
+                    "SELECT status, metadata_json
+                     FROM communication_messages
+                     WHERE message_key = ?1
+                       AND channel = 'meeting'
+                       AND direction = 'outbound'",
+                    [message_key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((status, metadata_json)) = row {
+                if status == "sent" {
+                    return Ok(true);
+                }
+                if status != "submitted" {
+                    return Ok(false);
+                }
+                let confirmed_at = now_iso_string();
+                let mut metadata =
+                    serde_json::from_str::<Value>(&metadata_json).unwrap_or_else(|_| json!({}));
+                if let Some(object) = metadata.as_object_mut() {
+                    object.insert(
+                        "delivery".to_string(),
+                        json!({
+                            "confirmed": true,
+                            "state": "runner_confirmed_sent",
+                            "confirmed_at": confirmed_at,
+                        }),
+                    );
+                }
+                let changed = conn.execute(
+                    "UPDATE communication_messages
+                     SET status = 'sent',
+                         folder_hint = 'sent',
+                         observed_at = ?2,
+                         metadata_json = ?3
+                     WHERE message_key = ?1
+                       AND status = 'submitted'",
+                    rusqlite::params![message_key, confirmed_at, serde_json::to_string(&metadata)?],
+                )?;
+                if changed > 0 {
+                    refresh_thread(&mut conn, session_id)?;
+                    return Ok(true);
+                }
+            }
+        }
+        if attempt < 19 {
+            std::thread::sleep(StdDuration::from_millis(50));
+        }
+    }
+    Ok(false)
 }
 
 fn render_meeting_mention_inbound_body(
@@ -937,13 +1038,17 @@ pub fn handle_meeting_command(root: &Path, args: &[String]) -> Result<()> {
                 for entry in fs::read_dir(&sessions_dir)? {
                     let entry = entry?;
                     if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
-                        if let Ok(contents) = fs::read_to_string(entry.path()) {
-                            if let Ok(session) = serde_json::from_str::<Value>(&contents) {
-                                let session =
-                                    reconcile_stale_running_session(&entry.path(), session);
-                                sessions.push(session);
-                            }
-                        }
+                        let path = entry.path();
+                        let contents = fs::read_to_string(&path)
+                            .with_context(|| format!("read meeting session {}", path.display()))?;
+                        let session =
+                            serde_json::from_str::<Value>(&contents).with_context(|| {
+                                format!("parse meeting session JSON at {}", path.display())
+                            })?;
+                        MeetingSessionStatus::from_session_value(&session).with_context(|| {
+                            format!("invalid meeting session status at {}", path.display())
+                        })?;
+                        sessions.push(session);
                     }
                 }
             }
@@ -1050,7 +1155,7 @@ fn simulate_meeting_session(root: &Path, args: &[String]) -> Result<Value> {
         mistral_api_key: None,
     };
     let mut session = MeetingSession::new(&config);
-    session.status = "ended".to_string();
+    session.status = MeetingSessionStatus::Ended;
     session.ended_at = Some(now_iso_string());
 
     for transcript in find_flag_values(args, "--transcript") {
@@ -1808,6 +1913,36 @@ fn command_stdout(command: &str, args: &[&str]) -> Result<String> {
 // Meeting runner — spawns Node.js, reads events, drives STT + chat
 // ---------------------------------------------------------------------------
 
+fn runner_exit_end_reason(
+    wait_result: std::result::Result<&ExitStatus, &std::io::Error>,
+    reported_reason: Option<&str>,
+    join_failure_reason: Option<&str>,
+) -> String {
+    let status = match wait_result {
+        Ok(status) => status,
+        Err(err) => return format!("runner_wait_failed:{err}"),
+    };
+    if let Some(reason) = join_failure_reason.filter(|reason| !reason.trim().is_empty()) {
+        return format!("join_failed:{reason}");
+    }
+    if !status.success() {
+        return format!("runner_exit_status:{status}");
+    }
+    reported_reason
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or("runner_exit_success")
+        .to_string()
+}
+
+fn record_runner_exit(root: &Path, session: &mut MeetingSession, end_reason: String) -> Result<()> {
+    session.status = MeetingSessionStatus::Ended;
+    if session.ended_at.is_none() {
+        session.ended_at = Some(now_iso_string());
+    }
+    session.end_reason = Some(end_reason);
+    session.save(root)
+}
+
 /// Run a meeting session synchronously: spawn Playwright, capture audio,
 /// transcribe chunks, handle @CTOX mentions, finalize on meeting end.
 pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) -> Result<Value> {
@@ -1934,7 +2069,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     }
 
     session.pid = Some(child.id());
-    session.status = "running".to_string();
+    session.status = MeetingSessionStatus::Running;
     session.save(root)?;
 
     let stdout = child.stdout.take().context("no stdout from node process")?;
@@ -1943,6 +2078,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     // Read stdout line by line (JSON-lines protocol)
     let reader = BufReader::new(stdout);
     let mut join_failure_reason: Option<String> = None;
+    let mut runner_reported_end_reason: Option<String> = None;
     let mut last_speaker_signal: Option<SpeakerSignal> = None;
     let speaker_probe_path =
         meeting_sessions_dir(root).join(format!("{}-speaker-probes.jsonl", session.session_id));
@@ -1979,13 +2115,13 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                 } else {
                     eprintln!("[meeting] Joined meeting successfully ({reason})");
                 }
-                session.status = "active".to_string();
+                session.status = MeetingSessionStatus::Active;
                 session.save(root)?;
             }
             "join_failed" => {
                 let reason = event.get("reason").and_then(Value::as_str).unwrap_or("");
                 eprintln!("[meeting] join verification failed: {reason}");
-                session.status = "join_failed".to_string();
+                session.status = MeetingSessionStatus::JoinFailed;
                 session.ended_at = Some(now_iso_string());
                 session.save(root)?;
                 join_failure_reason = Some(reason.to_string());
@@ -2096,21 +2232,17 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                         .iter()
                         .any(|sent| normalize_chat_text(sent) == normalize_chat_text(ack_text))
                     {
-                        if let Some(stdin_path) = session.stdin_pipe.as_deref() {
-                            let command = json!({"action": "send_chat", "text": ack_text});
-                            match fs::OpenOptions::new().append(true).open(stdin_path) {
-                                Ok(mut file) => {
-                                    let _ = writeln!(file, "{}", command);
-                                    eprintln!("[meeting] queued immediate mention ack");
-                                }
-                                Err(err) => {
-                                    eprintln!(
-                                        "[meeting] warning: could not queue immediate mention ack: {err}"
-                                    );
-                                }
+                        match write_chat_command_to_session(&session.to_json(), ack_text, None) {
+                            Ok(()) => {
+                                eprintln!("[meeting] queued immediate mention ack");
+                                session.outbound_chat_texts.push(ack_text.to_string());
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "[meeting] warning: could not queue immediate mention ack: {err}"
+                                );
                             }
                         }
-                        session.outbound_chat_texts.push(ack_text.to_string());
                     }
                 }
                 // Persist session so sync() can pick up new chat messages
@@ -2128,7 +2260,24 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
             }
             "chat_sent" => {
                 let text = event.get("text").and_then(Value::as_str).unwrap_or("");
+                let message_key = event
+                    .get("message_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 eprintln!("[meeting] chat sent: {}", &text[..text.len().min(80)]);
+                if !message_key.is_empty() {
+                    match confirm_meeting_outbound_message(root, &session.session_id, message_key) {
+                        Ok(true) => eprintln!(
+                            "[meeting] outbound message confirmed sent: {message_key}"
+                        ),
+                        Ok(false) => eprintln!(
+                            "[meeting] warning: no submitted outbound row found for confirmation {message_key}"
+                        ),
+                        Err(err) => eprintln!(
+                            "[meeting] warning: could not persist sent confirmation for {message_key}: {err}"
+                        ),
+                    }
+                }
                 if !text.is_empty() {
                     session.outbound_chat_texts.push(text.to_string());
                     session.save(root)?;
@@ -2172,9 +2321,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 eprintln!("[meeting] Meeting ended: {reason}");
-                session.status = "ended".to_string();
-                session.ended_at = Some(now_iso_string());
-                break;
+                runner_reported_end_reason = Some(reason.to_string());
             }
             "finalized" => {
                 break;
@@ -2196,18 +2343,20 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
         }
     }
 
-    // Wait for process to exit
-    let _ = child.wait();
+    // The process monitor owns terminal session persistence. This covers normal
+    // finalization and runner crashes that close stdout without an `ended` event.
+    let wait_result = child.wait();
+    let end_reason = runner_exit_end_reason(
+        wait_result.as_ref(),
+        runner_reported_end_reason.as_deref(),
+        join_failure_reason.as_deref(),
+    );
+    record_runner_exit(root, &mut session, end_reason)?;
 
     // Clean up script file
     let _ = fs::remove_file(&script_path);
 
     if let Some(reason) = join_failure_reason {
-        session.status = "join_failed".to_string();
-        if session.ended_at.is_none() {
-            session.ended_at = Some(now_iso_string());
-        }
-        session.save(root)?;
         drop(stdin); // close stdin pipe
         stt_guard.finish();
         return Ok(json!({
@@ -2229,7 +2378,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     }
 
     // Finalize
-    session.status = "ended".to_string();
+    session.status = MeetingSessionStatus::Ended;
     if session.ended_at.is_none() {
         session.ended_at = Some(now_iso_string());
     }
@@ -2904,9 +3053,10 @@ pub(crate) struct MeetingSession {
     pub provider: String,
     pub meeting_url: String,
     pub bot_name: String,
-    pub status: String,
+    pub status: MeetingSessionStatus,
     pub started_at: String,
     pub ended_at: Option<String>,
+    pub end_reason: Option<String>,
     pub transcript_chunks: Vec<String>,
     pub transcript_segments: Vec<TranscriptSegment>,
     pub speaker_signals: Vec<SpeakerSignal>,
@@ -3089,9 +3239,10 @@ impl MeetingSession {
             provider: config.provider.as_str().to_string(),
             meeting_url: config.meeting_url.clone(),
             bot_name: config.bot_name.clone(),
-            status: "joining".to_string(),
+            status: MeetingSessionStatus::Joining,
             started_at: now_iso_string(),
             ended_at: None,
+            end_reason: None,
             transcript_chunks: Vec::new(),
             transcript_segments: Vec::new(),
             speaker_signals: Vec::new(),
@@ -3112,9 +3263,10 @@ impl MeetingSession {
             "provider": self.provider,
             "meeting_url": self.meeting_url,
             "bot_name": self.bot_name,
-            "status": self.status,
+            "status": self.status.as_str(),
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "end_reason": self.end_reason,
             "transcript_chunk_count": self.transcript_chunks.len(),
             "transcript_segment_count": self.transcript_segments.len(),
             "speaker_signal_count": self.speaker_signals.len(),
@@ -4759,8 +4911,15 @@ pub(crate) fn load_meeting_transcript(root: &Path, session_id: &str) -> Result<V
     let session: Value = if session_path.exists() {
         let contents = fs::read_to_string(&session_path)
             .with_context(|| format!("read meeting session {}", session_path.display()))?;
-        serde_json::from_str(&contents)
-            .with_context(|| format!("parse meeting session JSON at {}", session_path.display()))?
+        let session: Value = serde_json::from_str(&contents)
+            .with_context(|| format!("parse meeting session JSON at {}", session_path.display()))?;
+        MeetingSessionStatus::from_session_value(&session).with_context(|| {
+            format!(
+                "invalid meeting session status at {}",
+                session_path.display()
+            )
+        })?;
+        session
     } else {
         anyhow::bail!("no meeting session found with id {session_id}");
     };
@@ -4938,29 +5097,45 @@ mod tests {
     }
 
     #[test]
-    fn stale_running_session_is_marked_ended() {
-        let root = temp_root("stale-session");
-        let session_path = root.join("session.json");
-        let session = json!({
-            "session_id": "meeting-test",
-            "status": "active",
-            "pid": 999999999u64,
-            "ended_at": null,
-        });
-        fs::write(
-            &session_path,
-            serde_json::to_string_pretty(&session).unwrap(),
+    fn runner_exit_persists_ended_status_and_reason() {
+        let root = temp_root("runner-exit");
+        let config = MeetingSessionConfig {
+            root: root.clone(),
+            meeting_url: "https://zoom.us/j/123".to_string(),
+            provider: MeetingProvider::Zoom,
+            bot_name: "INF Yoda Notetaker".to_string(),
+            max_duration_minutes: 60,
+            audio_chunk_seconds: 30,
+            stt_model: String::new(),
+            realtime_stt_model: "voxtral-mini-transcribe-realtime-2602".to_string(),
+            mistral_api_key: None,
+        };
+        let mut session = MeetingSession::new(&config);
+        session.status = MeetingSessionStatus::Running;
+        record_runner_exit(
+            &root,
+            &mut session,
+            "runner_exit_status:signal: 9".to_string(),
+        )
+        .expect("persist runner exit");
+
+        let persisted: Value = serde_json::from_str(
+            &fs::read_to_string(meeting_session_file(&root, &session.session_id)).unwrap(),
         )
         .unwrap();
-
-        let reconciled = reconcile_stale_running_session(&session_path, session);
-
-        assert_eq!(reconciled["status"], "ended");
-        assert_eq!(reconciled["end_reason"], "process_not_running");
-        assert!(reconciled["ended_at"].as_str().is_some());
-        let persisted: Value =
-            serde_json::from_str(&fs::read_to_string(&session_path).unwrap()).unwrap();
         assert_eq!(persisted["status"], "ended");
+        assert_eq!(persisted["end_reason"], "runner_exit_status:signal: 9");
+        assert!(persisted["ended_at"].as_str().is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn meeting_session_status_rejects_unknown_value() {
+        let err = MeetingSessionStatus::parse("teleported").expect_err("unknown status");
+        assert_eq!(
+            err.to_string(),
+            "unknown meeting session status `teleported`"
+        );
     }
 
     #[test]
@@ -5590,22 +5765,92 @@ mod tests {
             body: "Ich pruefe das und melde mich hier.",
         };
         let result = send(&root, &BTreeMap::new(), &request).expect("send result");
-        assert_eq!(result["status"], "sent");
+        assert_eq!(result["status"], "submitted");
+        assert_eq!(result["delivery"]["confirmed"], false);
 
         let stdin_contents = std::fs::read_to_string(&stdin_path).expect("stdin contents");
         let command: Value = serde_json::from_str(stdin_contents.trim()).expect("stdin json");
         assert_eq!(command["action"], "send_chat");
         assert_eq!(command["text"], "Ich pruefe das und melde mich hier.");
+        assert_eq!(command["message_key"], result["message_key"]);
 
         let conn = open_channel_db(&db_path).expect("channel db");
+        let outbound: (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(status) FROM communication_messages WHERE channel='meeting' AND direction='outbound' AND metadata_json LIKE '%ctox_reply%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("outbound status");
+        assert_eq!(outbound, (1, "submitted".to_string()));
+        drop(conn);
+
+        assert!(confirm_meeting_outbound_message(
+            &root,
+            "session-send",
+            result["message_key"].as_str().unwrap()
+        )
+        .expect("runner confirmation"));
+        let conn = open_channel_db(&db_path).expect("channel db");
+        let confirmed_status: String = conn
+            .query_row(
+                "SELECT status FROM communication_messages WHERE message_key = ?1",
+                [result["message_key"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .expect("confirmed status");
+        assert_eq!(confirmed_status, "sent");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn send_command_file_write_error_does_not_record_sent() {
+        let root = temp_root("send-chat-write-error");
+        let sessions_dir = meeting_sessions_dir(&root);
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let _conn = open_channel_db(&db_path).expect("channel db");
+        let missing_command_path = sessions_dir.join("missing/session.commands.jsonl");
+        std::fs::write(
+            sessions_dir.join("session-send-error.json"),
+            serde_json::to_string_pretty(&json!({
+                "session_id": "session-send-error",
+                "provider": "zoom",
+                "status": "active",
+                "stdin_pipe": missing_command_path.display().to_string(),
+                "chat_messages": []
+            }))
+            .unwrap(),
+        )
+        .expect("session json");
+
+        let request = MeetingSendCommandRequest {
+            db_path: &db_path,
+            session_id: "session-send-error",
+            body: "Diese Nachricht darf nicht als gesendet gelten.",
+        };
+        let err = send(&root, &BTreeMap::new(), &request).expect_err("write must fail");
+        assert!(err
+            .to_string()
+            .contains("failed to open meeting runner command file"));
+
+        let conn = open_channel_db(&db_path).expect("channel db");
+        let sent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM communication_messages WHERE channel='meeting' AND direction='outbound' AND status='sent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sent count");
         let outbound_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM communication_messages WHERE channel='meeting' AND direction='outbound' AND metadata_json LIKE '%ctox_reply%'",
+                "SELECT COUNT(*) FROM communication_messages WHERE channel='meeting' AND direction='outbound'",
                 [],
                 |row| row.get(0),
             )
             .expect("outbound count");
-        assert_eq!(outbound_count, 1);
+        assert_eq!(sent_count, 0);
+        assert_eq!(outbound_count, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5664,7 +5909,7 @@ mod tests {
         };
         let mut session = MeetingSession::new(&config);
         session.session_id = "meeting-google-finalize-test".to_string();
-        session.status = "ended".to_string();
+        session.status = MeetingSessionStatus::Ended;
         session.ended_at = Some("2026-04-28T12:30:00Z".to_string());
         session
             .transcript_chunks
