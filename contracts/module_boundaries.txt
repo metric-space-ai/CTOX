@@ -34,8 +34,15 @@ mission -> service = 12
 # (channels/business_os_projection.rs). A projection is a legitimate seam,
 # but it points the wrong way and should become a Business OS-side pull.
 mission -> business_os = 7
-# communication reaches into mission mostly for the queue vocabulary. Since
-# QueueRouteStatus exists this could become a narrow typed import.
+# Not the queue vocabulary, as first assumed. Measured, it is
+# communication's own message store living in mission: open_channel_db,
+# upsert_communication_message, refresh_thread, preview_text. The queue and
+# the message store grew inside one module. Note the size before attempting
+# it: open_channel_db alone has ~308 references outside communication, so
+# this is not communication's private store but a shared persistence layer
+# in the wrong place. The fix is to lift it into its own module that both
+# mission and communication depend on — not to narrow the import, and not a
+# side task.
 communication -> mission = 18
 # mission drives communication adapters directly.
 mission -> communication = 10
