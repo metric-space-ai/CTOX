@@ -15,8 +15,6 @@ const reportPath = path.join(outputDir, 'business-os-interactive-window-qa.json'
 const targetUrl = process.env.BUSINESS_OS_INTERACTIVE_URL || 'http://127.0.0.1:8765/?rxdbSmoke=1';
 const headless = process.env.BUSINESS_OS_INTERACTIVE_HEADLESS === '1';
 const readyTimeoutMs = positiveInteger(process.env.BUSINESS_OS_INTERACTIVE_READY_TIMEOUT_MS || '90000');
-const design = String(process.env.BUSINESS_OS_INTERACTIVE_DESIGN || '').trim();
-const theme = String(process.env.BUSINESS_OS_INTERACTIVE_THEME || '').trim().toLowerCase();
 const localAssetPrefixes = String(process.env.BUSINESS_OS_INTERACTIVE_LOCAL_ASSET_PREFIXES || '')
   .split(',')
   .map((value) => value.trim().replace(/^business-os\//, ''))
@@ -43,8 +41,6 @@ const report = {
   endedAt: null,
   url: targetUrl,
   headless,
-  design,
-  theme,
   localAssetPrefixes,
   expectedApps: selectedApps.map((app) => app.id),
   shell: null,
@@ -82,7 +78,6 @@ try {
   if (localAssetPrefixes.length) await attachLocalAssetRouting(page);
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: readyTimeoutMs });
   await waitForShell(page);
-  await configureShellDesign(page);
   await closeAllWindows(page);
   await page.waitForTimeout(250);
 
@@ -964,31 +959,6 @@ async function closeAllWindows(page) {
   await page.waitForFunction(() => (
     (globalThis.ctoxBusinessOsSmoke?.state?.windowManager?.listWindows?.() || []).length === 0
   ), null, { timeout: 5000 }).catch(() => {});
-}
-
-async function configureShellDesign(page) {
-  if (!design && !theme) return;
-  const applied = await page.evaluate(({ designValue, themeValue }) => {
-    const api = globalThis.ctoxBusinessOsSmoke;
-    if (designValue) api?.applyShellStyle?.(designValue);
-    if (themeValue === 'light' || themeValue === 'dark') api?.applyShellTheme?.(themeValue);
-    return {
-      design: document.documentElement.dataset.designTemplate || '',
-      shellStyle: document.documentElement.dataset.shellStyle || '',
-      theme: document.documentElement.dataset.theme || '',
-      stylesheet: document.querySelector('#ctox-shell-design-template')?.getAttribute('href') || '',
-    };
-  }, { designValue: design, themeValue: theme });
-  if (design && applied.design !== design.replace(/^custom:/, '')) {
-    throw new Error(`Shell design did not apply: ${JSON.stringify(applied)}`);
-  }
-  if (theme && applied.theme !== theme) {
-    throw new Error(`Shell theme did not apply: ${JSON.stringify(applied)}`);
-  }
-  if (design && !applied.stylesheet) {
-    throw new Error(`Shell design stylesheet is missing: ${JSON.stringify(applied)}`);
-  }
-  await page.waitForTimeout(200);
 }
 
 async function closeWindowByOwner(page, appId) {

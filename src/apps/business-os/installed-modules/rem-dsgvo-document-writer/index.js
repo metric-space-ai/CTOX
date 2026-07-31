@@ -1,35 +1,5 @@
 const DEFAULT_HTML_FILE = "./index.html";
 
-function ensureStorageGuard(html) {
-  if (/data-rem-storage-guard/.test(html)) return html;
-  const guard = `<script data-rem-storage-guard>
-(() => {
-  try {
-    const storage = window.localStorage;
-    const probe = "__rem_storage_probe__";
-    storage.setItem(probe, "1");
-    storage.removeItem(probe);
-    return;
-  } catch (_) {}
-  const memory = new Map();
-  const fallback = {
-    getItem(key) { key = String(key); return memory.has(key) ? memory.get(key) : null; },
-    setItem(key, value) { memory.set(String(key), String(value)); },
-    removeItem(key) { memory.delete(String(key)); },
-    clear() { memory.clear(); },
-    key(index) { return Array.from(memory.keys())[index] || null; },
-    get length() { return memory.size; }
-  };
-  try {
-    Object.defineProperty(window, "localStorage", { configurable: true, value: fallback });
-  } catch (_) {
-    window.__remLocalStorageFallback = fallback;
-  }
-})();
-<\/script>`;
-  return String(html).replace(/<head([^>]*)>/i, `<head$1>${guard}`);
-}
-
 function remGetCollection(ctx, name) {
   if (!ctx || !ctx.db || typeof ctx.db.collection !== "function") return null;
   try { return ctx.db.collection(name); } catch (_) { return null; }
@@ -134,28 +104,6 @@ export async function mount(ctx = {}) {
     try { return frame.contentDocument; } catch (_) { return null; }
   }
 
-  function shellTheme() {
-    return document.documentElement.dataset.theme === "light" ? "light" : "dark";
-  }
-
-  function applyFrameTheme(theme = shellTheme()) {
-    const doc = appDocument();
-    if (!doc) return;
-    const next = theme === "light" ? "light" : "dark";
-    const button = doc.querySelector(next === "light" ? "#lightTheme" : "#darkTheme");
-    if (button) button.click();
-    doc.documentElement.dataset.theme = next;
-    if (doc.body?.hasAttribute("data-theme")) doc.body.dataset.theme = next;
-    doc.documentElement.style.colorScheme = next;
-  }
-
-  const handlePreferences = (event) => applyFrameTheme(event?.detail?.theme);
-  if (root.__remCtoxPreferencesHandler) {
-    window.removeEventListener("ctox-business-os-preferences", root.__remCtoxPreferencesHandler);
-  }
-  root.__remCtoxPreferencesHandler = handlePreferences;
-  window.addEventListener("ctox-business-os-preferences", handlePreferences);
-
   function editableControls(doc) {
     return Array.from(doc?.querySelectorAll("input, textarea, select") || []).filter((control) => {
       if (!control.id && !control.name) return false;
@@ -195,7 +143,6 @@ export async function mount(ctx = {}) {
 
   function loadFrame(record = null) {
     frame.onload = () => {
-      applyFrameTheme();
       if (record) restoreState(record);
     };
     frame.srcdoc = srcdoc;

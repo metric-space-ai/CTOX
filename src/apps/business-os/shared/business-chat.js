@@ -2380,19 +2380,10 @@ function isScrolledToBottom(container) {
   return distanceFromBottom <= CHAT_BOTTOM_PIN_THRESHOLD_PX;
 }
 
-// The chip strip is re-rendered on every chat mutation — and a batch of running
-// tasks mutates constantly. Smooth-scrolling the active chip on each of those
-// renders made the whole strip slide back and forth on its own while the user
-// was not touching it. Scroll only when the active chat actually changed.
-let lastScrolledActiveChatId = null;
-
 function scrollActiveChatIntoView(root, state) {
-  if (state.activeChatId !== lastScrolledActiveChatId) {
-    lastScrolledActiveChatId = state.activeChatId;
-    const activeChip = Array.from(root.querySelectorAll('[data-chat-focus]'))
-      .find((node) => node.dataset.chatFocus === state.activeChatId);
-    activeChip?.scrollIntoView?.({ inline: 'center', block: 'nearest', behavior: 'smooth' });
-  }
+  const activeChip = Array.from(root.querySelectorAll('[data-chat-focus]'))
+    .find((node) => node.dataset.chatFocus === state.activeChatId);
+  activeChip?.scrollIntoView?.({ inline: 'center', block: 'nearest', behavior: 'smooth' });
   updateChatStripOverflowState(root);
 
   // Follow new messages only in windows the reader left at the bottom. This ran

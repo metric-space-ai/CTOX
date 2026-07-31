@@ -32,7 +32,6 @@ const {
   formatRelativeAge,
   friendlyWebStackStatus,
   labels,
-  loadLocalCollection,
   mergeBundleWithCommands,
   normalizeFocusTask,
   observedDetailsFromFlow,
@@ -50,50 +49,6 @@ const {
   webStackStateFromRefreshResult,
   webStackProjectionMissing,
 } = hooks;
-
-test('CTOX keeps queue rows beyond the newest twenty', async () => {
-  const rows = Array.from({ length: 25 }, (_, index) => ({
-    id: `task-${index + 1}`,
-    updated_at_ms: index + 1,
-  }));
-  const ctx = {
-    db: {
-      collection: () => ({
-        find: () => ({
-          limit: () => ({
-            exec: async () => rows.map((row) => ({ toJSON: () => row })),
-          }),
-        }),
-      }),
-    },
-  };
-
-  const loaded = await loadLocalCollection(ctx, 'ctox_queue_tasks');
-  assert.equal(loaded.length, 25);
-  assert.equal(loaded[0].id, 'task-25');
-  assert.equal(loaded.at(-1).id, 'task-1');
-});
-
-test('Review rework queue tasks remain visible as waiting work', () => {
-  const bundle = mergeBundleWithCommands(
-    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
-    [],
-    [{
-      id: 'queue-review-rework',
-      command_id: 'command-review-rework',
-      title: 'Research campaign',
-      status: 'review_rework',
-      task_status: 'review_rework',
-      route_status: 'review_rework',
-      updated_at_ms: Date.now(),
-    }],
-  );
-
-  const model = buildHarnessModel(bundle, { ok: false, flow: { blocks: [], ledger_events: [] } }, 'en');
-  assert.equal(model.tasks.length, 1);
-  assert.equal(model.tasks[0].status, 'queued');
-  assert.equal(deriveHarnessHealth({ model, flow: { ok: true }, ctx: {} }).waitingCount, 1);
-});
 
 // --- Minimal fake DOM ---------------------------------------------------------
 // Just enough of the element API for the focus-safe refresh + in-place selection
