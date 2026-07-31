@@ -29,6 +29,9 @@ use crate::channels;
 use crate::channels::QueueRouteStatus;
 use crate::governance;
 
+use super::plan_status::PlanGoalStatus;
+use super::plan_status::PlanStepStatus;
+
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_GOAL_THREAD_PREFIX: &str = "plan";
 const DEFAULT_RESULT_EXCERPT_CHARS: usize = 420;
@@ -65,25 +68,14 @@ type PlanDbKey = (PathBuf, u64, u64);
 #[cfg(not(unix))]
 type PlanDbKey = PathBuf;
 
-const STEP_STATUS_PENDING: &str = "pending";
-const STEP_STATUS_QUEUED: &str = "queued";
-const STEP_STATUS_COMPLETED: &str = "completed";
-const STEP_STATUS_BLOCKED: &str = "blocked";
-const STEP_STATUS_FAILED: &str = "failed";
-
-const GOAL_STATUS_ACTIVE: &str = "active";
-const GOAL_STATUS_COMPLETED: &str = "completed";
-const GOAL_STATUS_BLOCKED: &str = "blocked";
-const GOAL_STATUS_FAILED: &str = "failed";
-/// A previously-active goal that is being replaced by a freshly-ingested goal
-/// pointing at the same `thread_key`. The reviewer-rework loop saw a stale
-/// "Owner-Mail zu aktiver Vision/Mission Rev. 2" goal sitting active next to a
-/// freshly-ingested unversioned goal on the same thread_key — both lit up in
-/// the reviewer's scan and produced a phantom "revision mismatch". A new
-/// ingest on the same `thread_key` is the operator's structural signal that
-/// the older slice is no longer the live one; we mark it `superseded` instead
-/// of leaving two competing live truths.
-const GOAL_STATUS_SUPERSEDED: &str = "superseded";
+/// `PlanGoalStatus::Superseded` marks a previously-active goal that is being
+/// replaced by a freshly-ingested goal pointing at the same `thread_key`. The
+/// reviewer-rework loop saw a stale "Owner-Mail zu aktiver Vision/Mission Rev.
+/// 2" goal sitting active next to a freshly-ingested unversioned goal on the
+/// same thread_key — both lit up in the reviewer's scan and produced a phantom
+/// "revision mismatch". A new ingest on the same `thread_key` is the
+/// operator's structural signal that the older slice is no longer the live
+/// one; we supersede it instead of leaving two competing live truths.
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannedGoalView {
@@ -376,9 +368,10 @@ pub fn complete_goal(root: &Path, goal_id: &str, result_text: &str) -> Result<us
         "#,
     )?;
     let step_ids = statement
-        .query_map(params![goal_id, STEP_STATUS_COMPLETED], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(
+            params![goal_id, PlanStepStatus::Completed.as_str()],
+            |row| row.get::<_, String>(0),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
 
@@ -413,7 +406,7 @@ pub fn complete_step_by_message_key(
             ORDER BY updated_at DESC
             LIMIT 1
             "#,
-            params![message_key, STEP_STATUS_COMPLETED],
+            params![message_key, PlanStepStatus::Completed.as_str()],
             |row| row.get(0),
         )
         .optional()?;
@@ -522,9 +515,9 @@ fn create_goal(root: &Path, request: PlanCreateRequest) -> Result<GoalWithStepsV
             request.skill.as_deref(),
             if request.auto_advance { 1 } else { 0 },
             if has_wait {
-                GOAL_STATUS_BLOCKED
+                PlanGoalStatus::Blocked.as_str()
             } else {
-                GOAL_STATUS_ACTIVE
+                PlanGoalStatus::Active.as_str()
             },
             now,
         ],
@@ -551,9 +544,9 @@ fn create_goal(root: &Path, request: PlanCreateRequest) -> Result<GoalWithStepsV
                 draft.title.trim(),
                 draft.instruction.trim(),
                 if has_wait && index == 0 {
-                    STEP_STATUS_BLOCKED
+                    PlanStepStatus::Blocked.as_str()
                 } else {
-                    STEP_STATUS_PENDING
+                    PlanStepStatus::Pending.as_str()
                 },
                 now,
             ],
@@ -642,7 +635,7 @@ fn supersede_active_goals_for_thread_key_tx(
     )?;
     let entries = stmt
         .query_map(
-            params![thread_key, new_goal_id, GOAL_STATUS_ACTIVE],
+            params![thread_key, new_goal_id, PlanGoalStatus::Active.as_str()],
             |row| {
                 Ok(SupersededGoalEntry {
                     goal_id: row.get::<_, String>(0)?,
@@ -666,7 +659,7 @@ fn supersede_active_goals_for_thread_key_tx(
                 updated_at = ?3
             WHERE goal_id = ?1
             "#,
-            params![entry.goal_id, GOAL_STATUS_SUPERSEDED, now],
+            params![entry.goal_id, PlanGoalStatus::Superseded.as_str(), now],
         )?;
     }
     Ok(entries)
@@ -713,7 +706,7 @@ pub fn list_goals(root: &Path) -> Result<Vec<PlannedGoalView>> {
                 SELECT s.step_id
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked')
+                  AND s.status IN (:next_pending, :next_queued, :next_blocked)
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_id,
@@ -721,7 +714,7 @@ pub fn list_goals(root: &Path) -> Result<Vec<PlannedGoalView>> {
                 SELECT s.title
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked')
+                  AND s.status IN (:next_pending, :next_queued, :next_blocked)
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_title,
@@ -735,16 +728,32 @@ pub fn list_goals(root: &Path) -> Result<Vec<PlannedGoalView>> {
         FROM planned_goals g
         ORDER BY
             CASE g.status
-                WHEN 'active' THEN 0
-                WHEN 'blocked' THEN 1
-                WHEN 'completed' THEN 2
-                WHEN 'superseded' THEN 4
+                WHEN :goal_active THEN 0
+                WHEN :goal_blocked THEN 1
+                WHEN :goal_completed THEN 2
+                WHEN :goal_superseded THEN 4
                 ELSE 3
             END,
             g.updated_at DESC
         "#,
     )?;
-    let rows = statement.query_map([], map_goal_row)?;
+    let next_statuses = PlanStepStatus::next_step_display_variants();
+    debug_assert!(next_statuses
+        .iter()
+        .copied()
+        .all(PlanStepStatus::is_next_step_display));
+    let rows = statement.query_map(
+        rusqlite::named_params! {
+            ":next_pending": next_statuses[0].as_str(),
+            ":next_queued": next_statuses[1].as_str(),
+            ":next_blocked": next_statuses[2].as_str(),
+            ":goal_active": PlanGoalStatus::Active.as_str(),
+            ":goal_blocked": PlanGoalStatus::Blocked.as_str(),
+            ":goal_completed": PlanGoalStatus::Completed.as_str(),
+            ":goal_superseded": PlanGoalStatus::Superseded.as_str(),
+        },
+        map_goal_row,
+    )?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)
 }
@@ -795,9 +804,15 @@ fn emit_next_step_for_goal_with_conn(
             last_message_key = ?3,
             updated_at = ?4
         WHERE step_id = ?1
-          AND status = 'pending'
+          AND status = ?5
         "#,
-        params![pending.step.step_id, STEP_STATUS_QUEUED, message_key, now],
+        params![
+            pending.step.step_id,
+            PlanStepStatus::Queued.as_str(),
+            message_key,
+            now,
+            PlanStepStatus::Pending.as_str(),
+        ],
     )?;
     if updated == 0 {
         tx.commit()?;
@@ -811,7 +826,7 @@ fn emit_next_step_for_goal_with_conn(
             updated_at = ?3
         WHERE goal_id = ?1
         "#,
-        params![pending.goal.goal_id, GOAL_STATUS_ACTIVE, now],
+        params![pending.goal.goal_id, PlanGoalStatus::Active.as_str(), now],
     )?;
     tx.commit()?;
     touch_plan_state_stamp(root)?;
@@ -831,10 +846,11 @@ fn prepare_next_step_emission(
 ) -> Result<Option<PendingStepEmission>> {
     let tx = conn.unchecked_transaction()?;
     let goal = load_goal_tx(&tx, goal_id)?.context("planned goal not found")?;
-    if matches!(
-        goal.status.as_str(),
-        GOAL_STATUS_COMPLETED | GOAL_STATUS_BLOCKED | GOAL_STATUS_FAILED | GOAL_STATUS_SUPERSEDED
-    ) {
+    let Some(goal_status) = PlanGoalStatus::parse(&goal.status) else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    if goal_status.prevents_step_emission() {
         tx.commit()?;
         return Ok(None);
     }
@@ -894,7 +910,7 @@ fn mark_step_completed_tx(tx: &Transaction<'_>, step_id: &str, result_text: &str
         "#,
         params![
             step_id,
-            STEP_STATUS_COMPLETED,
+            PlanStepStatus::Completed.as_str(),
             clip_text(result_text, DEFAULT_RESULT_EXCERPT_CHARS),
             now
         ],
@@ -935,10 +951,10 @@ fn mark_step_failed_tx(tx: &Transaction<'_>, step_id: &str, reason: &str) -> Res
         "#,
         params![
             step_id,
-            STEP_STATUS_FAILED,
+            PlanStepStatus::Failed.as_str(),
             clip_text(reason, DEFAULT_RESULT_EXCERPT_CHARS),
             now,
-            STEP_STATUS_COMPLETED
+            PlanStepStatus::Completed.as_str()
         ],
     )?;
     if updated > 0 {
@@ -964,10 +980,10 @@ fn mark_step_blocked(root: &Path, step_id: &str, reason: &str) -> Result<usize> 
         "#,
         params![
             step_id,
-            STEP_STATUS_BLOCKED,
+            PlanStepStatus::Blocked.as_str(),
             reason.trim(),
             now,
-            STEP_STATUS_COMPLETED
+            PlanStepStatus::Completed.as_str()
         ],
     )?;
     if updated > 0 {
@@ -1001,10 +1017,10 @@ fn reset_step_to_pending(root: &Path, step_id: &str, defer_until: Option<String>
         "#,
         params![
             step_id,
-            STEP_STATUS_PENDING,
+            PlanStepStatus::Pending.as_str(),
             defer_until.as_deref(),
             now,
-            STEP_STATUS_COMPLETED
+            PlanStepStatus::Completed.as_str()
         ],
     )?;
     if updated > 0 {
@@ -1218,8 +1234,8 @@ pub fn has_active_goal_with_pending_step(root: &Path) -> Result<bool> {
             SELECT 1
             FROM planned_goals g
             JOIN planned_steps s ON s.goal_id = g.goal_id
-            WHERE g.status = 'active'
-              AND s.status IN ('pending', 'queued')
+            WHERE g.status = ?2
+              AND s.status IN (?3, ?4)
               AND (
                     s.defer_until IS NULL
                     OR s.defer_until = ''
@@ -1227,7 +1243,19 @@ pub fn has_active_goal_with_pending_step(root: &Path) -> Result<bool> {
               )
         )
         "#,
-        params![now],
+        {
+            let runnable_statuses = PlanStepStatus::runnable_work_variants();
+            debug_assert!(runnable_statuses
+                .iter()
+                .copied()
+                .all(PlanStepStatus::is_runnable_work));
+            params![
+                now,
+                PlanGoalStatus::Active.as_str(),
+                runnable_statuses[0].as_str(),
+                runnable_statuses[1].as_str(),
+            ]
+        },
         |row| row.get(0),
     )?;
     Ok(exists != 0)
@@ -1240,13 +1268,13 @@ fn list_goal_ids_with_due_work(conn: &Connection) -> Result<Vec<String>> {
         FROM planned_goals g
         JOIN planned_steps s ON s.goal_id = g.goal_id
         WHERE g.auto_advance = 1
-          AND g.status = 'active'
+          AND g.status = ?2
           AND (
                 g.retry_not_before IS NULL
                 OR g.retry_not_before = ''
                 OR g.retry_not_before <= ?1
           )
-          AND s.status = 'pending'
+          AND s.status = ?3
           AND (
                 s.defer_until IS NULL
                 OR s.defer_until = ''
@@ -1256,7 +1284,19 @@ fn list_goal_ids_with_due_work(conn: &Connection) -> Result<Vec<String>> {
         "#,
     )?;
     let now = now_iso_string();
-    let rows = statement.query_map(params![now], |row| row.get::<_, String>(0))?;
+    let due_statuses = PlanStepStatus::due_work_variants();
+    debug_assert!(due_statuses
+        .iter()
+        .copied()
+        .all(PlanStepStatus::is_due_work));
+    let rows = statement.query_map(
+        params![
+            now,
+            PlanGoalStatus::Active.as_str(),
+            due_statuses[0].as_str(),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)
 }
@@ -1284,15 +1324,19 @@ fn load_next_due_step_at(conn: &Connection, now: &DateTime<Utc>) -> Result<Optio
             FROM planned_goals g
             JOIN planned_steps s ON s.goal_id = g.goal_id
             WHERE g.auto_advance = 1
-              AND g.status = 'active'
-              AND s.status = 'pending'
+              AND g.status = ?2
+              AND s.status = ?3
               AND (
                     (s.defer_until IS NOT NULL AND s.defer_until != '' AND s.defer_until > ?1)
                     OR
                     (g.retry_not_before IS NOT NULL AND g.retry_not_before != '' AND g.retry_not_before > ?1)
               )
             "#,
-            params![now.to_rfc3339()],
+            params![
+                now.to_rfc3339(),
+                PlanGoalStatus::Active.as_str(),
+                PlanStepStatus::due_work_variants()[0].as_str(),
+            ],
             |row| row.get(0),
         )
         .optional()?
@@ -1448,7 +1492,7 @@ fn load_goal(conn: &Connection, goal_id: &str) -> Result<Option<PlannedGoalView>
                 SELECT s.step_id
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked')
+                  AND s.status IN (:next_pending, :next_queued, :next_blocked)
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_id,
@@ -1456,7 +1500,7 @@ fn load_goal(conn: &Connection, goal_id: &str) -> Result<Option<PlannedGoalView>
                 SELECT s.title
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked')
+                  AND s.status IN (:next_pending, :next_queued, :next_blocked)
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_title,
@@ -1468,10 +1512,18 @@ fn load_goal(conn: &Connection, goal_id: &str) -> Result<Option<PlannedGoalView>
             g.retry_not_before,
             g.last_emit_error
         FROM planned_goals g
-        WHERE g.goal_id = ?1
+        WHERE g.goal_id = :goal_id
         LIMIT 1
         "#,
-        params![goal_id],
+        {
+            let next_statuses = PlanStepStatus::next_step_display_variants();
+            rusqlite::named_params! {
+                ":goal_id": goal_id,
+                ":next_pending": next_statuses[0].as_str(),
+                ":next_queued": next_statuses[1].as_str(),
+                ":next_blocked": next_statuses[2].as_str(),
+            }
+        },
         map_goal_row,
     )
     .optional()
@@ -1493,7 +1545,7 @@ fn load_goal_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<PlannedGoa
                 SELECT s.step_id
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked')
+                  AND s.status IN (:next_pending, :next_queued, :next_blocked)
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_id,
@@ -1501,7 +1553,7 @@ fn load_goal_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<PlannedGoa
                 SELECT s.title
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked')
+                  AND s.status IN (:next_pending, :next_queued, :next_blocked)
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_title,
@@ -1513,10 +1565,18 @@ fn load_goal_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<PlannedGoa
             g.retry_not_before,
             g.last_emit_error
         FROM planned_goals g
-        WHERE g.goal_id = ?1
+        WHERE g.goal_id = :goal_id
         LIMIT 1
         "#,
-        params![goal_id],
+        {
+            let next_statuses = PlanStepStatus::next_step_display_variants();
+            rusqlite::named_params! {
+                ":goal_id": goal_id,
+                ":next_pending": next_statuses[0].as_str(),
+                ":next_queued": next_statuses[1].as_str(),
+                ":next_blocked": next_statuses[2].as_str(),
+            }
+        },
         map_goal_row,
     )
     .optional()
@@ -1746,11 +1806,11 @@ fn satisfy_wait_for_work_item_tx(
                     r#"
                     SELECT step_id, last_message_key
                     FROM planned_steps
-                    WHERE goal_id = ?1 AND status = 'blocked'
+                    WHERE goal_id = ?1 AND status = ?2
                     ORDER BY step_order ASC
                     LIMIT 1
                     "#,
-                    params![goal_id],
+                    params![goal_id, PlanStepStatus::Blocked.as_str()],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
                 )
                 .optional()?;
@@ -1764,7 +1824,12 @@ fn satisfy_wait_for_work_item_tx(
                         updated_at = ?3
                     WHERE step_id = ?1 AND status = ?4
                     "#,
-                    params![step_id, STEP_STATUS_PENDING, now, STEP_STATUS_BLOCKED],
+                    params![
+                        step_id,
+                        PlanStepStatus::Pending.as_str(),
+                        now,
+                        PlanStepStatus::Blocked.as_str()
+                    ],
                 )?;
                 if step_updated > 0 {
                     settle_plan_queue_message_tx(
@@ -1776,8 +1841,13 @@ fn satisfy_wait_for_work_item_tx(
                 }
             }
             tx.execute(
-                "UPDATE planned_goals SET status='active', updated_at=?2 WHERE goal_id=?1 AND status='blocked'",
-                params![goal_id, now],
+                "UPDATE planned_goals SET status=?3, updated_at=?2 WHERE goal_id=?1 AND status=?4",
+                params![
+                    goal_id,
+                    now,
+                    PlanGoalStatus::Active.as_str(),
+                    PlanGoalStatus::Blocked.as_str(),
+                ],
             )?;
         }
     }
@@ -1804,11 +1874,14 @@ fn list_completed_steps_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Vec<Pl
             completed_at
         FROM planned_steps
         WHERE goal_id = ?1
-          AND status = 'completed'
+          AND status = ?2
         ORDER BY step_order ASC
         "#,
     )?;
-    let rows = statement.query_map(params![goal_id], map_step_row)?;
+    let rows = statement.query_map(
+        params![goal_id, PlanStepStatus::Completed.as_str()],
+        map_step_row,
+    )?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)
 }
@@ -1833,7 +1906,7 @@ fn next_eligible_step_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<P
             completed_at
         FROM planned_steps
         WHERE goal_id = ?1
-          AND status = 'pending'
+          AND status = ?3
           AND (
                 defer_until IS NULL
                 OR defer_until = ''
@@ -1842,7 +1915,11 @@ fn next_eligible_step_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<P
         ORDER BY step_order ASC
         LIMIT 1
         "#,
-        params![goal_id, now_iso_string()],
+        params![
+            goal_id,
+            now_iso_string(),
+            PlanStepStatus::due_work_variants()[0].as_str(),
+        ],
         map_step_row,
     )
     .optional()
@@ -1855,9 +1932,9 @@ fn has_queued_step_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<bool> {
         SELECT COUNT(*)
         FROM planned_steps
         WHERE goal_id = ?1
-          AND status = 'queued'
+          AND status = ?2
         "#,
-        params![goal_id],
+        params![goal_id, PlanStepStatus::Queued.as_str()],
         |row| row.get(0),
     )?;
     Ok(count > 0)
@@ -1973,12 +2050,16 @@ fn refresh_goal_status_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if matches!(current_status.as_deref(), Some(GOAL_STATUS_SUPERSEDED)) {
+    if current_status
+        .as_deref()
+        .and_then(PlanGoalStatus::parse)
+        .is_some_and(|status| status == PlanGoalStatus::Superseded)
+    {
         return Ok(());
     }
     let completed: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = 'completed'",
-        params![goal_id],
+        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = ?2",
+        params![goal_id, PlanStepStatus::Completed.as_str()],
         |row| row.get(0),
     )?;
     let total: i64 = tx.query_row(
@@ -1987,33 +2068,38 @@ fn refresh_goal_status_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<()> {
         |row| row.get(0),
     )?;
     let blocked: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = 'blocked'",
-        params![goal_id],
+        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = ?2",
+        params![goal_id, PlanStepStatus::Blocked.as_str()],
         |row| row.get(0),
     )?;
     let failed: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = 'failed'",
-        params![goal_id],
+        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = ?2",
+        params![goal_id, PlanStepStatus::Failed.as_str()],
         |row| row.get(0),
     )?;
+    let runnable_statuses = PlanStepStatus::runnable_work_variants();
     let pending_or_queued: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status IN ('pending', 'queued')",
-        params![goal_id],
+        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status IN (?2, ?3)",
+        params![
+            goal_id,
+            runnable_statuses[0].as_str(),
+            runnable_statuses[1].as_str(),
+        ],
         |row| row.get(0),
     )?;
     let status = if total > 0 && completed == total {
-        GOAL_STATUS_COMPLETED
+        PlanGoalStatus::Completed.as_str()
     } else if total > 0 && failed + completed == total && failed > 0 {
-        GOAL_STATUS_FAILED
+        PlanGoalStatus::Failed.as_str()
     } else if blocked > 0 {
-        GOAL_STATUS_BLOCKED
+        PlanGoalStatus::Blocked.as_str()
     } else if pending_or_queued == 0 && failed > 0 {
-        GOAL_STATUS_FAILED
+        PlanGoalStatus::Failed.as_str()
     } else {
-        GOAL_STATUS_ACTIVE
+        PlanGoalStatus::Active.as_str()
     };
     let now = now_iso_string();
-    let completed_at = if status == GOAL_STATUS_COMPLETED {
+    let completed_at = if status == PlanGoalStatus::Completed.as_str() {
         Some(now.clone())
     } else {
         None
@@ -2159,32 +2245,51 @@ fn migrate_legacy_step_routing_state(conn: &Connection) -> Result<usize> {
         FROM planned_steps
         WHERE last_message_key IS NOT NULL
           AND TRIM(last_message_key) <> ''
-          AND status != ?1
+          AND status IN (?1, ?2, ?3, ?4)
         "#,
     )?;
+    let migration_statuses = PlanStepStatus::legacy_routing_migration_variants();
+    debug_assert!(migration_statuses
+        .iter()
+        .copied()
+        .all(PlanStepStatus::is_legacy_routing_migration));
     let rows = stmt
-        .query_map(params![STEP_STATUS_QUEUED], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
+        .query_map(
+            params![
+                migration_statuses[0].as_str(),
+                migration_statuses[1].as_str(),
+                migration_statuses[2].as_str(),
+                migration_statuses[3].as_str(),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
     let mut migrated = 0usize;
     let now = now_iso_string();
     for (step_id, status, message_key) in rows {
-        let route_status = match status.as_str() {
-            STEP_STATUS_COMPLETED => QueueRouteStatus::Handled,
-            STEP_STATUS_FAILED => QueueRouteStatus::Failed,
-            STEP_STATUS_BLOCKED => QueueRouteStatus::Blocked,
-            STEP_STATUS_PENDING => QueueRouteStatus::Cancelled,
-            _ => continue,
+        let Some(step_status) = PlanStepStatus::parse(&status) else {
+            continue;
+        };
+        if !step_status.is_legacy_routing_migration() {
+            continue;
+        }
+        let route_status = match step_status {
+            PlanStepStatus::Completed => QueueRouteStatus::Handled,
+            PlanStepStatus::Failed => QueueRouteStatus::Failed,
+            PlanStepStatus::Blocked => QueueRouteStatus::Blocked,
+            PlanStepStatus::Pending => QueueRouteStatus::Cancelled,
+            PlanStepStatus::Queued => continue,
         };
         set_queue_routing_status_tx(&tx, &message_key, route_status, &now)?;
-        if status != STEP_STATUS_COMPLETED {
+        if step_status != PlanStepStatus::Completed {
             tx.execute(
                 "UPDATE planned_steps SET last_message_key = NULL, updated_at = ?2 WHERE step_id = ?1",
                 params![step_id, now],
@@ -2312,7 +2417,7 @@ fn ensure_plan_schema(conn: &Connection) -> Result<()> {
             g.created_at,
             NULL
         FROM planned_goals g
-        WHERE g.status = 'blocked'
+        WHERE g.status = ?1
           AND EXISTS (
               SELECT 1 FROM planned_steps s
               WHERE s.goal_id = g.goal_id
@@ -2322,7 +2427,7 @@ fn ensure_plan_schema(conn: &Connection) -> Result<()> {
               SELECT 1 FROM planned_goal_waits w WHERE w.goal_id = g.goal_id
           )
         "#,
-        [],
+        params![PlanGoalStatus::Blocked.as_str()],
     )?;
     Ok(())
 }
@@ -2574,7 +2679,7 @@ mod tests {
                     "future goal",
                     "later",
                     "plan/future",
-                    GOAL_STATUS_ACTIVE,
+                    PlanGoalStatus::Active.as_str(),
                     created_at
                 ],
             )
@@ -2592,7 +2697,7 @@ mod tests {
                     "goal-future",
                     "future step",
                     "do it later",
-                    STEP_STATUS_PENDING,
+                    PlanStepStatus::Pending.as_str(),
                     future_due,
                     created_at
                 ],
@@ -2799,8 +2904,8 @@ mod tests {
         let view = load_goal_with_steps(&root, &created.goal.goal_id)?
             .expect("created goal should reload");
         assert!(view.goal.auto_advance);
-        assert_eq!(view.goal.status, GOAL_STATUS_BLOCKED);
-        assert_eq!(view.steps[0].status, STEP_STATUS_BLOCKED);
+        assert_eq!(view.goal.status, PlanGoalStatus::Blocked.as_str());
+        assert_eq!(view.steps[0].status, PlanStepStatus::Blocked.as_str());
         assert_eq!(view.waits.len(), 1);
         assert_eq!(view.waits[0].status, "pending");
 
@@ -2835,8 +2940,8 @@ mod tests {
             1
         );
         let view = load_goal_with_steps(&root, &created.goal.goal_id)?.expect("goal reload");
-        assert_eq!(view.goal.status, GOAL_STATUS_ACTIVE);
-        assert_eq!(view.steps[0].status, STEP_STATUS_PENDING);
+        assert_eq!(view.goal.status, PlanGoalStatus::Active.as_str());
+        assert_eq!(view.steps[0].status, PlanStepStatus::Pending.as_str());
         assert_eq!(view.waits[0].status, "satisfied");
         Ok(())
     }
@@ -2867,7 +2972,7 @@ mod tests {
 
         let view = load_goal_with_steps(&root, &created.goal.goal_id)?
             .expect("goal should reload after failing all steps");
-        assert_eq!(view.goal.status, GOAL_STATUS_FAILED);
+        assert_eq!(view.goal.status, PlanGoalStatus::Failed.as_str());
         assert!(!has_active_goal_with_pending_step(&root)?);
 
         let summary = emit_due_steps(&root)?;
@@ -2927,7 +3032,7 @@ mod tests {
             .into_iter()
             .find(|step| step.step_id == step_id)
             .expect("blocked step should exist");
-        assert_eq!(blocked_step.status, STEP_STATUS_BLOCKED);
+        assert_eq!(blocked_step.status, PlanStepStatus::Blocked.as_str());
         assert!(blocked_step.last_message_key.is_none());
         Ok(())
     }
@@ -2952,7 +3057,7 @@ mod tests {
                 wait_for: None,
             },
         )?;
-        assert_eq!(older.goal.status, GOAL_STATUS_ACTIVE);
+        assert_eq!(older.goal.status, PlanGoalStatus::Active.as_str());
 
         // Second ingest — fresh unversioned goal on the SAME thread_key.
         let newer = ingest_goal(
@@ -2974,11 +3079,13 @@ mod tests {
             .expect("newer goal should still load");
 
         assert_eq!(
-            reloaded_older.goal.status, GOAL_STATUS_SUPERSEDED,
+            reloaded_older.goal.status,
+            PlanGoalStatus::Superseded.as_str(),
             "older goal on the duplicated thread_key must flip to superseded",
         );
         assert_eq!(
-            reloaded_newer.goal.status, GOAL_STATUS_ACTIVE,
+            reloaded_newer.goal.status,
+            PlanGoalStatus::Active.as_str(),
             "newer goal must own the active slot on the thread_key",
         );
 
@@ -3012,8 +3119,8 @@ mod tests {
             .expect("unrelated plan A should reload");
         let reloaded_b = load_goal_with_steps(&root, &unrelated_b.goal.goal_id)?
             .expect("unrelated plan B should reload");
-        assert_eq!(reloaded_a.goal.status, GOAL_STATUS_ACTIVE);
-        assert_eq!(reloaded_b.goal.status, GOAL_STATUS_ACTIVE);
+        assert_eq!(reloaded_a.goal.status, PlanGoalStatus::Active.as_str());
+        assert_eq!(reloaded_b.goal.status, PlanGoalStatus::Active.as_str());
 
         // The supersede must be durably auditable as a governance event.
         let events =
@@ -3071,7 +3178,7 @@ mod tests {
             .into_iter()
             .find(|step| step.step_id == step_id)
             .expect("completed step should reload");
-        assert_eq!(step.status, STEP_STATUS_COMPLETED);
+        assert_eq!(step.status, PlanStepStatus::Completed.as_str());
         assert_eq!(step.last_message_key.as_deref(), Some(message_key.as_str()));
         Ok(())
     }
@@ -3089,7 +3196,7 @@ mod tests {
             .into_iter()
             .find(|step| step.step_id == step_id)
             .expect("failed step should reload");
-        assert_eq!(step.status, STEP_STATUS_FAILED);
+        assert_eq!(step.status, PlanStepStatus::Failed.as_str());
         assert!(step.last_message_key.is_none());
         Ok(())
     }
@@ -3107,7 +3214,7 @@ mod tests {
             .into_iter()
             .find(|step| step.step_id == step_id)
             .expect("blocked step should reload");
-        assert_eq!(step.status, STEP_STATUS_BLOCKED);
+        assert_eq!(step.status, PlanStepStatus::Blocked.as_str());
         assert!(step.last_message_key.is_none());
         Ok(())
     }
@@ -3125,7 +3232,7 @@ mod tests {
             .into_iter()
             .find(|step| step.step_id == step_id)
             .expect("pending step should reload");
-        assert_eq!(step.status, STEP_STATUS_PENDING);
+        assert_eq!(step.status, PlanStepStatus::Pending.as_str());
         assert!(step.last_message_key.is_none());
         Ok(())
     }
@@ -3137,7 +3244,7 @@ mod tests {
         let conn = Connection::open(resolve_db_path(&root))?;
         conn.execute(
             "UPDATE planned_steps SET status = ?2 WHERE step_id = ?1",
-            params![step_id, STEP_STATUS_COMPLETED],
+            params![step_id, PlanStepStatus::Completed.as_str()],
         )?;
         drop(conn);
         reset_plan_schema_ready_for_tests(&root);

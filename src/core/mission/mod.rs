@@ -5,6 +5,7 @@ pub(crate) mod approval_nag;
 pub mod channels;
 pub mod follow_up;
 pub mod plan;
+pub(crate) mod plan_status;
 pub mod queue;
 pub mod review;
 pub mod schedule;

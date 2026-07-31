@@ -186,16 +186,23 @@ pub(super) fn open_queue_backing_exists(conn: &Connection, thread_key: &str) -> 
 }
 
 pub(super) fn open_plan_backing_exists(conn: &Connection, thread_key: &str) -> Result<bool> {
-    let count: i64 = conn.query_row(
+    let terminal = crate::mission::plan_status::PlanGoalStatus::terminal_read_values();
+    let placeholders = (2..terminal.len() + 2)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
         r#"
         SELECT COUNT(*)
         FROM planned_goals
         WHERE thread_key = ?1
-          AND status NOT IN ('completed', 'closed', 'cancelled', 'failed', 'superseded')
-        "#,
-        params![thread_key],
-        |row| row.get(0),
-    )?;
+          AND status NOT IN ({placeholders})
+        "#
+    );
+    let query_params = std::iter::once(thread_key).chain(terminal.iter().copied());
+    let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(query_params), |row| {
+        row.get(0)
+    })?;
     Ok(count > 0)
 }
 

@@ -13433,16 +13433,23 @@ fn review_external_work_backing_evidence_summaries(root: &Path, job: &QueuedProm
         )
         .unwrap_or(0);
     let plan_count = if sqlite_table_exists(&conn, "planned_goals").unwrap_or(false) {
-        conn.query_row(
+        let terminal = crate::mission::plan_status::PlanGoalStatus::terminal_read_values();
+        let placeholders = (2..terminal.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
             r#"
             SELECT COUNT(*)
             FROM planned_goals
             WHERE thread_key = ?1
-              AND status NOT IN ('completed', 'closed', 'cancelled', 'failed', 'superseded')
-            "#,
-            params![thread_key],
-            |row| row.get::<_, i64>(0),
-        )
+              AND status NOT IN ({placeholders})
+            "#
+        );
+        let query_params = std::iter::once(thread_key).chain(terminal.iter().copied());
+        conn.query_row(&sql, rusqlite::params_from_iter(query_params), |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap_or(0)
     } else {
         0
@@ -13534,16 +13541,22 @@ fn review_external_plan_backing_rows(conn: &Connection, thread_key: &str) -> Vec
     if !sqlite_table_exists(conn, "planned_goals").unwrap_or(false) {
         return Vec::new();
     }
-    let mut stmt = match conn.prepare(
+    let terminal = crate::mission::plan_status::PlanGoalStatus::terminal_read_values();
+    let placeholders = (2..terminal.len() + 2)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
         r#"
         SELECT goal_id, status, title, updated_at
         FROM planned_goals
         WHERE thread_key = ?1
-          AND status NOT IN ('completed', 'closed', 'cancelled', 'failed', 'superseded')
+          AND status NOT IN ({placeholders})
         ORDER BY updated_at DESC
         LIMIT 5
-        "#,
-    ) {
+        "#
+    );
+    let mut stmt = match conn.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(err) => {
             return vec![format!(
@@ -13551,7 +13564,8 @@ fn review_external_plan_backing_rows(conn: &Connection, thread_key: &str) -> Vec
             )];
         }
     };
-    let rows = match stmt.query_map(params![thread_key], |row| {
+    let query_params = std::iter::once(thread_key).chain(terminal.iter().copied());
+    let rows = match stmt.query_map(rusqlite::params_from_iter(query_params), |row| {
         Ok(format!(
             "External chat plan backing row: goal_id={} status={} updated_at={} title=`{}`",
             row.get::<_, String>(0)?,
