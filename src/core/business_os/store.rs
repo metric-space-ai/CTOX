@@ -7268,8 +7268,8 @@ pub fn upsert_user(
     let decision = user_upsert_policy_decision(root, session, &role)?;
     anyhow::ensure!(
         decision.allowed,
-        if role == "chef" {
-            "owner role required to assign owner"
+        if WORKSPACE_AUTHORITY_ROLES.contains(&role.as_str()) {
+            "workspace-manage permission required to grant workspace authority"
         } else {
             "admin role required"
         }
@@ -18293,13 +18293,19 @@ fn owner_transfer_policy_decision(session: &BusinessOsSession) -> PolicyDecision
     )
 }
 
+/// Roles that can grant their holder authority over the workspace itself.
+/// Handing one out is an escalation, not user administration, so it needs
+/// workspace-manage rather than users.manage — otherwise a users.manage grant
+/// mints its own superiors and the permission becomes self-elevating.
+const WORKSPACE_AUTHORITY_ROLES: [&str; 2] = ["chef", "admin"];
+
 fn user_upsert_policy_decision(
     root: &Path,
     session: &BusinessOsSession,
     target_role: &str,
 ) -> anyhow::Result<PolicyDecision> {
     let decision = workspace_policy_decision(root, session, BusinessOsPermission::UsersManage)?;
-    if !decision.allowed || target_role != "chef" {
+    if !decision.allowed || !WORKSPACE_AUTHORITY_ROLES.contains(&target_role) {
         return Ok(decision);
     }
     Ok(owner_transfer_policy_decision(session))
@@ -49233,6 +49239,65 @@ mod tests {
     }
 
     #[test]
+    // REGRESSION: a users.manage grant must not mint its own superiors. It
+    // already could not create an owner; admin was the gap, and admin carries
+    // workspace authority just the same — so the permission was self-elevating
+    // one step down.
+    #[test]
+    fn users_manage_grant_cannot_assign_admin_role() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_business_user(root, "viewer", "user")?;
+        seed_permission_grant(
+            root,
+            "grant_viewer_users_manage_admin",
+            "user",
+            "viewer",
+            BusinessOsPermission::UsersManage,
+            "workspace",
+            "",
+        )?;
+
+        let outcome = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_granted_admin_upsert",
+                "command_id": "cmd_granted_admin_upsert",
+                "module": "ctox",
+                "command_type": "ctox.business_os.user.upsert",
+                "record_id": "new-admin",
+                "status": "pending_sync",
+                "payload": {
+                    "id": "new-admin",
+                    "display_name": "New Admin",
+                    "role": "admin",
+                    "active": true
+                },
+                "client_context": {
+                    "actor": {
+                        "id": "viewer",
+                        "display_name": "Viewer",
+                        "role": "user",
+                        "is_admin": false
+                    }
+                }
+            }),
+        )?;
+
+        assert_policy_denied(&outcome, "workspace.manage", "workspace", None);
+        let conn = open_store(root)?;
+        let stored_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_users WHERE user_id = ?1",
+            rusqlite::params!["new-admin"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            stored_count, 0,
+            "denied admin grant must not persist a user"
+        );
+        Ok(())
+    }
+
     fn users_manage_grant_cannot_assign_owner_role() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
