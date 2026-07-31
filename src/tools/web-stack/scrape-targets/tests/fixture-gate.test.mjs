@@ -95,9 +95,9 @@ function containsForbiddenSecretKey(value) {
   );
 }
 
-test("all 14 DACH research scrape targets pass production-like fixture gates", async (t) => {
+test("all DACH research scrape targets pass production-like fixture gates", async (t) => {
   const targets = targetDirectories();
-  assert.equal(targets.length, 14, `expected 14 targets, found: ${targets.join(", ")}`);
+  assert.equal(targets.length, 15, `expected 15 targets, found: ${targets.join(", ")}`);
 
   const seenKeys = new Set();
   for (const targetName of targets) {
