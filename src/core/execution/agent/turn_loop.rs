@@ -1832,8 +1832,40 @@ pub fn synthesize_failure_reply(content: &str) -> String {
 
 pub fn hard_runtime_blocker_retry_cooldown_secs(content: &str) -> Option<u64> {
     let lower = content.to_ascii_lowercase();
+    // Deterministic failures are checked before anything else. A request that
+    // exceeds the context window fails identically on every retry, but the
+    // provider wraps it in transport wording ("stream disconnected before
+    // completion: ... exceed_context_size_error ..."), and that wrapper used to
+    // match the transient list below — so the runtime waited 60s and resent a
+    // request that could never succeed. The cause outranks the envelope.
+    if lower.contains("exceed_context_size_error")
+        || lower.contains("exceeds the available context size")
+    {
+        return None;
+    }
     if let Some(secs) = parse_retry_after_seconds(&lower) {
         return Some(secs.clamp(30, 1_800));
+    }
+    // Specific causes are classified before the generic transport list below.
+    // Providers wrap a 429 in the same "stream disconnected before completion"
+    // envelope as a dropped socket; matching the envelope first gave a rate
+    // limit the 60s socket cooldown instead of its own 300s backoff, so the
+    // runtime hammered a provider that had just asked it to slow down.
+    if lower.contains("too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("http 429")
+        || lower.contains("status 429")
+        || lower.contains(" 429")
+    {
+        return Some(300);
+    }
+    if lower.contains("database is locked")
+        || lower.contains("database is busy")
+        || lower.contains("sqlite_busy")
+        || lower.contains("sqlite locked")
+    {
+        return Some(30);
     }
     if lower.contains("turn completed without assistant message")
         || lower.contains("completed without assistant message")
@@ -1853,22 +1885,6 @@ pub fn hard_runtime_blocker_retry_cooldown_secs(content: &str) -> Option<u64> {
         || lower.contains("incomplete response returned")
     {
         return Some(60);
-    }
-    if lower.contains("database is locked")
-        || lower.contains("database is busy")
-        || lower.contains("sqlite_busy")
-        || lower.contains("sqlite locked")
-    {
-        return Some(30);
-    }
-    if lower.contains("too many requests")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-        || lower.contains("http 429")
-        || lower.contains("status 429")
-        || lower.contains(" 429")
-    {
-        return Some(300);
     }
     if lower.contains("temporarily unavailable")
         || lower.contains("server overloaded")
