@@ -316,7 +316,19 @@ function browserCapturePage(url) {
   } finally {
     // Mandatory: every capture writes a full Chrome profile and a >12 MB
     // netlog; the production tenant's disk must not fill up.
-    rmSync(outDir, { recursive: true, force: true });
+    // Chrome may still be flushing its profile directory when the capture
+    // ends, so the recursive delete races it and throws ENOTEMPTY. `force`
+    // does not cover that case — only retries do. And a cleanup that throws
+    // inside `finally` turns a finished capture into a failed run, which is
+    // how four companies came back as portal_drift with zero records while
+    // their data had already been extracted.
+    try {
+      rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch (cleanupError) {
+      process.stderr.write(
+        "capture cleanup left files behind in " + outDir + ": " + cleanupError.message + "\n",
+      );
+    }
   }
 }
 

@@ -177,37 +177,75 @@ const MAX_CANDIDATE_HOSTS = 6;
 // and different hosts clearly separated).
 const CANDIDATE_POLITENESS_MS = 1_500;
 
+// Filler words a German company name carries but its domain drops: industry
+// words and honorifics, never the distinguishing words. "Chemische Fabrik
+// Berg" runs cfb.de, "Carbosulf Chemische Werke" runs carbosulf.de.
+// Measured 2026-07-31 against the live THESEN leads.
+const DOMAIN_FILLER_TOKENS = new Set([
+  "chemische", "chemisches", "chemischer", "chemisch", "chem",
+  "werke", "werk", "fabrik", "fabriken",
+  "laboratorium", "labor", "manufacturing",
+  "produktions", "produktion", "handelsges", "handelsgesellschaft",
+  "techn", "technische", "technischer", "technisches", "artikel",
+  "dr", "prof", "u", "und",
+]);
+
 function candidateHostsFromCompany(company) {
   const withoutLegalForm = String(company || "")
+    .replace(/[®™©]/g, " ")
     .replace(/&\s*Co\.?/gi, " ")
     .replace(/\b(?:gmbh|mbh|kgaa|ag|se|kg|ohg|gbr|ug|ltd|llc|inc|co)\b\.?/gi, " ");
   const transliterated = withoutLegalForm
     .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue")
     .replace(/Ä/g, "Ae").replace(/Ö/g, "Oe").replace(/Ü/g, "Ue")
     .replace(/ß/g, "ss");
-  const words = transliterated.toLowerCase()
+  const allWords = transliterated.toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     .split(/\s+/)
     .filter(Boolean);
-  if (words.length === 0) return [];
-  // Ordered by how German companies actually name their sites, because the
-  // first verified candidate wins and every miss costs a request: the leading
-  // word alone (aeroxon.de), then the hyphenated full name (bnt-chemicals.de),
-  // then the concatenation, then .com, then initials. The first canary pass
-  // tried only the concatenation and missed notices sitting one hyphen away.
-  const joined = words.join("");
-  const hyphenated = words.join("-");
+  if (allWords.length === 0) return [];
+  const significant = allWords.filter((word) => !DOMAIN_FILLER_TOKENS.has(word));
+  const words = significant.length > 0 ? significant : allWords;
+  // Keep this list and its ORDER identical to solo/probe.mjs (the probe is
+  // the solo-first proving ground; drift between the two was already a
+  // defect once). Ordered by how German companies actually name their sites,
+  // measured live on 2026-07-31: leading significant word (aeroxon.de,
+  // carbosulf.de), the first TWO significant words hyphenated
+  // (additiv-chemie.de), the full hyphenation (bnt-chemicals.de), leading
+  // word .com (chemofast.com), initials of ALL name words including fillers
+  // (cfb.de = Chemische Fabrik Berg), then the concatenation.
   const hosts = [];
-  if (words.length > 1) hosts.push(words[0] + ".de", hyphenated + ".de");
-  hosts.push(joined + ".de");
-  if (words.length > 1) hosts.push(words[0] + ".com", hyphenated + ".com");
-  hosts.push(joined + ".com");
+  hosts.push(words[0] + ".de");
+  if (words.length > 1) hosts.push(words.slice(0, 2).join("-") + ".de");
+  if (words.length > 2) hosts.push(words.join("-") + ".de");
+  hosts.push(words[0] + ".com");
+  if (allWords.length > 1) {
+    const initials = allWords.map((word) => word[0]).join("");
+    if (initials.length >= 2 && initials.length <= 6) hosts.push(initials + ".de");
+  }
   if (words.length > 1) {
-    const initials = words.map((word) => word[0]).join("");
-    if (initials.length >= 2) hosts.push(initials + ".de", initials + ".com");
+    hosts.push(words.join("") + ".de");
+    hosts.push(words.slice(0, 2).join("-") + ".com");
+    hosts.push(words.join("") + ".com");
   }
   return [...new Set(hosts)].slice(0, MAX_CANDIDATE_HOSTS);
+}
+
+// A bare host often 301s every path to the www homepage, DROPPING the path
+// (measured 2026-07-31: aeroxon.de/impressum -> www.aeroxon.de/,
+// chemotechnik.de/meta/impressum/ -> www.chemotechnik.de/index.php). The www
+// variant of the same host serves the real pages, so every origin is tried
+// as given AND under its www/toggled variant.
+function originVariants(origin) {
+  try {
+    const url = new URL(origin);
+    const host = url.hostname;
+    if (host.startsWith("www.")) return [origin, url.protocol + "//" + host.slice(4)];
+    return [origin, url.protocol + "//www." + host];
+  } catch (_err) {
+    return [origin];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +435,10 @@ function isBlockedText(lines, title) {
 // same discipline the contact window applies to phones and emails).
 // ---------------------------------------------------------------------------
 
-const PERSON_LABEL_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vertreten\s+durch|vertretungsberechtigte?r?(?:\(r\))?|vorstand|vorstände|inhaber(?:in)?)(?:\s*:\s*|\s+)(.*)$/i;
+// The label may stand alone on its own line (|$) with the names on the
+// following lines: "Geschäftsführer" / "Dipl. Kfm. Roger Wintzen" — measured
+// on chemofast.com 2026-07-31.
+const PERSON_LABEL_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vertreten\s+durch|vertretungsberechtigte?r?(?:\(r\))?|vorstand|vorstände|inhaber(?:in)?)(?:\s*:\s*|\s+|$)(.*)$/i;
 
 const ROLE_PREFIX_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vorstand|inhaber(?:in)?|prokurist(?:in)?)\s*:\s*(.*)$/i;
 
@@ -405,9 +446,9 @@ const ROLE_EXACT_RE = /^(?:geschäftsführer(?:in)?|geschäftsführung|vorstand|
 
 const TITLE_PAREN_RE = /(?:dipl|dr|prof|mag|ing|kaufmann|kauffrau|betriebswirt|fachwirt|meister|techniker|ökonom|oekonom|med|rer|nat|jur|mba|msc|bsc|wirtschafts)/i;
 
-const TITLE_FIRST_RE = /^(?:prof\.?|pd|dr\.?|habil\.?|dipl\.?-[a-zäöü]+\.?|dipl\.?|mag\.?|ing\.?|mba|msc|m\.sc\.|bsc|b\.sc\.|ll\.?m\.?)$/i;
+const TITLE_FIRST_RE = /^(?:prof\.?|pd|dr\.?|habil\.?|dipl\.?-[a-zäöü]+\.?|dipl\.?|mag\.?|ing\.?|kfm\.?|kffr\.?|mba|msc|m\.sc\.|bsc|b\.sc\.|ll\.?m\.?)$/i;
 
-const TITLE_CONT_RE = /^(?:med|rer|nat|jur|phil|dent|habil|techn|oec|pol|agr|ing|sc)\.?$/i;
+const TITLE_CONT_RE = /^(?:med|rer|nat|jur|phil|dent|habil|techn|oec|pol|agr|ing|sc|kfm|kffr|kfr|kaufm)\.?$/i;
 
 const NAME_PARTICLES = new Set(["von", "van", "de", "der", "den", "zu", "vom", "da", "di", "del", "la", "le", "ten"]);
 
@@ -580,14 +621,29 @@ function looksLikeImpressumHtml(html) {
 }
 
 // Start-page fallback: an anchor whose text or href mentions Impressum/Imprint.
+// Relative hrefs resolve against the page's <base href> when one exists —
+// chemofast.com serves <base href="/home/">, so "rechtliches/impressum.php"
+// lives at /home/rechtliches/impressum.php, not at the origin root (measured
+// 2026-07-31; resolving against the root hits the site's soft-404).
+function pageBaseHref(html, origin) {
+  const match = String(html || "").match(/<base\b[^>]*\bhref\s*=\s*["']([^"']+)["']/i);
+  if (!match) return origin;
+  try {
+    return new URL(decodeEntities(match[1]), origin).href;
+  } catch (_err) {
+    return origin;
+  }
+}
+
 function discoverImpressumLink(html, origin) {
-  const anchors = String(html || "").matchAll(/<a\b[^>]*href\s*=\s*["]([^"]+)["][^>]*>([\s\S]*?)<\/a>/gi);
+  const base = pageBaseHref(html, origin);
+  const anchors = String(html || "").matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi);
   for (const match of anchors) {
     const href = decodeEntities(match[1]);
     const text = htmlToLines(match[2]).join(" ");
     if (!/impressum|imprint/i.test(href) && !/impressum|imprint/i.test(text)) continue;
     try {
-      const target = new URL(href, origin);
+      const target = new URL(href, base);
       const sameOrigin = target.hostname.replace(/^www\./, "") === new URL(origin).hostname.replace(/^www\./, "");
       if (sameOrigin && safePublicHttpUrl(target.href)) return target.href;
     } catch (_err) { /* try the next anchor */ }
@@ -694,7 +750,19 @@ function browserCapturePage(url) {
       commandUnavailable: false,
     };
   } finally {
-    rmSync(outDir, { recursive: true, force: true });
+    // Chrome may still be flushing its profile directory when the capture
+    // ends, so the recursive delete races it and throws ENOTEMPTY. `force`
+    // does not cover that case — only retries do. And a cleanup that throws
+    // inside `finally` turns a finished capture into a failed run, which is
+    // how four companies came back as portal_drift with zero records while
+    // their data had already been extracted.
+    try {
+      rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch (cleanupError) {
+      process.stderr.write(
+        "capture cleanup left files behind in " + outDir + ": " + cleanupError.message + "\n",
+      );
+    }
   }
 }
 
@@ -905,24 +973,32 @@ function main() {
   };
 
   // One full attempt against an origin: the known notice paths, then the
-  // start-page fallback that follows an Impressum/Imprint link.
+  // start-page fallback that follows an Impressum/Imprint link — on the
+  // origin as given AND on its www/toggled variant, because a bare host may
+  // redirect every path to the (www) homepage while the www host serves the
+  // real notice paths.
   const attemptOrigin = (origin) => {
     const loadedRef = { loaded: false };
     let outcome = null;
-    for (const candidate of CANDIDATE_PATHS) {
-      outcome = consider(origin + candidate, loadedRef);
-      if (blocked || outcome) break;
-    }
-    if (!outcome && !blocked) {
+    for (const variant of originVariants(origin)) {
+      for (const candidate of CANDIDATE_PATHS) {
+        outcome = consider(variant + candidate, loadedRef);
+        if (blocked || outcome) break;
+      }
+      if (outcome || blocked) break;
       // Start-page fallback: follow the Impressum/Imprint link.
-      const startPage = loadPage(origin + "/");
+      const startPage = loadPage(variant + "/");
       if (startPage && isBlockedPage(startPage)) {
         blocked = true;
+        break;
       } else if (startPage && startPage.ok) {
         loadedRef.loaded = true;
         const html = startPage.html || startPage.raw_html || "";
-        const link = html ? discoverImpressumLink(html, origin) : null;
-        if (link) outcome = consider(link, loadedRef);
+        const link = html ? discoverImpressumLink(html, variant) : null;
+        if (link) {
+          outcome = consider(link, loadedRef);
+          if (outcome || blocked) break;
+        }
       }
     }
     return { outcome, loaded: loadedRef.loaded };
@@ -994,7 +1070,13 @@ function main() {
     const candidateOrigin = "https://" + candidateHost;
     // A candidate whose DNS/connection fails is skipped, never retried:
     // one cheap reachability read instead of a browser launch per dead path.
-    const reach = plainHttpPage(candidateOrigin + "/");
+    // The www variant gets the same cheap read — small-company hosts often
+    // answer only one of the two.
+    let reach = plainHttpPage(candidateOrigin + "/");
+    if (!reach) {
+      const wwwVariant = originVariants(candidateOrigin)[1];
+      if (wwwVariant) reach = plainHttpPage(wwwVariant + "/");
+    }
     if (reach && isBlockedPage(reach)) {
       sawBlocked = true;
       recordUnlockSignal(candidateOrigin, ["access_challenge"]);
