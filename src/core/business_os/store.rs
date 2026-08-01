@@ -25,6 +25,16 @@ use super::policy::{
 use super::policy::{
     owner_transfer_policy_decision, policy_actor_from_session, policy_decision_payload,
 };
+pub use super::store_catalog_projections::{
+    module_catalog_for_rxdb, write_module_catalog_projection_to_rxdb,
+};
+pub(crate) use super::store_catalog_projections::{
+    module_catalog_projection_stamp, ModuleCatalogProjectionStamp,
+};
+use super::store_catalog_projections::{
+    module_release_ids_for_projection_repair, rxdb_module_catalog_status,
+    write_module_catalog_projection_to_rxdb_for_module,
+};
 pub use super::store_projections::repair_queue_projections;
 #[cfg(test)]
 use super::store_projections::tests::{create_repair_rxdb_tables, insert_rxdb_test_record};
@@ -169,7 +179,7 @@ const RXDB_TABLE_CACHE_MAX_ENTRIES: usize = 64;
 const RXDB_TABLE_CACHE_TTL_SECS: u64 = 60;
 const RUNTIME_SETTINGS_RXDB_CACHE_TTL_SECS: u64 = 300;
 const SYNC_CONNECTION_CONFIG_CACHE_TTL_SECS: u64 = 300;
-const MODULE_CATALOG_SOURCE_STAMP_FILE_LIMIT: usize = 20_000;
+pub(super) const MODULE_CATALOG_SOURCE_STAMP_FILE_LIMIT: usize = 20_000;
 
 static RXDB_TABLE_NAMES_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, RxdbTableNamesCacheEntry>>> =
     OnceLock::new();
@@ -317,25 +327,6 @@ pub(crate) struct BusinessUsersProjectionStamp {
 pub(crate) struct BusinessRecordsProjectionStamp {
     row_count: usize,
     latest_updated_at_ms: i64,
-    content_hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModuleCatalogProjectionStamp {
-    source_modules: ModuleCatalogFileTreeStamp,
-    installed_modules: ModuleCatalogFileTreeStamp,
-    local_modules: ModuleCatalogFileTreeStamp,
-    templates: ModuleCatalogFileTreeStamp,
-    store_hash: String,
-    allowlist_hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ModuleCatalogFileTreeStamp {
-    dir_exists: bool,
-    file_count: usize,
-    latest_modified_at_ms: u64,
-    truncated: bool,
     content_hash: String,
 }
 
@@ -944,7 +935,7 @@ impl Default for CommandAccepted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModuleManifest {
+pub(super) struct ModuleManifest {
     id: String,
     title: String,
     #[serde(default)]
@@ -1030,7 +1021,7 @@ struct ModuleManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TemplateManifest {
+pub(super) struct TemplateManifest {
     id: String,
     title: String,
     #[serde(default)]
@@ -1159,7 +1150,7 @@ fn with_store_connection<T>(
     })
 }
 
-fn business_os_store_path(root: &Path) -> PathBuf {
+pub(super) fn business_os_store_path(root: &Path) -> PathBuf {
     let runtime = root.join("runtime");
     runtime.join(STORE_FILE)
 }
@@ -1513,81 +1504,6 @@ fn business_os_schema_contract_for_store() -> &'static BTreeMap<String, Value> {
     })
 }
 
-fn rxdb_module_catalog_status(root: &Path) -> Value {
-    let path = rxdb_store_path(root);
-    if !path.is_file() {
-        return serde_json::json!({
-            "ok": false,
-            "path": path.display().to_string(),
-            "reason": "native RxDB SQLite store is missing",
-        });
-    }
-    let conn = match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(conn) => conn,
-        Err(err) => {
-            return serde_json::json!({
-                "ok": false,
-                "path": path.display().to_string(),
-                "reason": format!("open native RxDB SQLite store: {err}"),
-            });
-        }
-    };
-    let _ = conn.busy_timeout(Duration::from_millis(100));
-    let path = rxdb_store_path(root);
-    let Some(table) = rxdb_collection_table_name(&path, &conn, "business_module_catalog") else {
-        return serde_json::json!({
-            "ok": false,
-            "path": path.display().to_string(),
-            "reason": "business_module_catalog RxDB collection table is missing",
-        });
-    };
-    let data = match conn
-        .query_row(
-            &format!("SELECT data FROM {table} WHERE id = 'module-catalog'"),
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-    {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-            return serde_json::json!({
-                "ok": false,
-                "path": path.display().to_string(),
-                "table": table,
-                "reason": "module-catalog document is missing",
-            });
-        }
-        Err(err) => {
-            return serde_json::json!({
-                "ok": false,
-                "path": path.display().to_string(),
-                "table": table,
-                "reason": format!("read module-catalog document: {err}"),
-            });
-        }
-    };
-    let parsed = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
-    let module_count = parsed
-        .get("modules")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    serde_json::json!({
-        "ok": module_count > 0,
-        "path": path.display().to_string(),
-        "table": table,
-        "document_id": "module-catalog",
-        "module_count": module_count,
-        "template_count": parsed
-            .get("templates")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0),
-        "updated_at_ms": parsed.get("updated_at_ms").cloned().unwrap_or(Value::Null),
-    })
-}
-
 pub(crate) fn cheap_ctox_service_status(root: &Path) -> Value {
     let pid = std::fs::read_to_string(root.join("runtime/ctox_service.pid"))
         .ok()
@@ -1707,7 +1623,7 @@ fn business_os_set_module_visible(
 /// modules never reach this list; they stay in the marketplace until installed
 /// into `installed-modules/`. Operator-owned `local-modules/` are installed by
 /// directory presence. This makes filesystem placement the installation truth.
-fn augment_modules_with_instance_visibility(
+pub(super) fn augment_modules_with_instance_visibility(
     _root: &Path,
     _installed_app_root: &Path,
     modules: &mut [Value],
@@ -3848,7 +3764,7 @@ fn lifecycle_declared_string_array(module: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn legacy_preview_audience_grant_id(module_id: &str, user_id: &str) -> String {
+pub(super) fn legacy_preview_audience_grant_id(module_id: &str, user_id: &str) -> String {
     let digest = Sha256::digest(format!("{}:{}", module_id.trim(), user_id.trim()).as_bytes());
     let suffix = digest
         .iter()
@@ -3859,7 +3775,7 @@ fn legacy_preview_audience_grant_id(module_id: &str, user_id: &str) -> String {
     format!("legacy_preview_app_view_{module_slug}_{suffix}")
 }
 
-fn backfill_manifest_preview_audience_grants(
+pub(super) fn backfill_manifest_preview_audience_grants(
     root: &Path,
     modules: &[ModuleManifest],
 ) -> anyhow::Result<usize> {
@@ -3935,7 +3851,7 @@ fn backfill_manifest_preview_audience_grants(
     Ok(inserted)
 }
 
-fn backfill_semver_public_release_records(
+pub(super) fn backfill_semver_public_release_records(
     root: &Path,
     modules: &[ModuleManifest],
 ) -> anyhow::Result<usize> {
@@ -4175,7 +4091,7 @@ fn projected_module_lifecycle(
     })
 }
 
-fn modules_with_projected_lifecycle(
+pub(super) fn modules_with_projected_lifecycle(
     root: &Path,
     modules: Vec<ModuleManifest>,
     version_states: &Value,
@@ -4657,7 +4573,7 @@ fn empty_business_records_projection_stamp() -> BusinessRecordsProjectionStamp {
     }
 }
 
-fn configured_business_users_projection_hash() -> String {
+pub(super) fn configured_business_users_projection_hash() -> String {
     let mut users = configured_business_users();
     users.sort_by(|left, right| left.id.cmp(&right.id));
     let mut hasher = Sha256::new();
@@ -6177,56 +6093,6 @@ fn web_stack_secret_configured(
         || env::var(secret_name).is_ok_and(|value| !value.trim().is_empty())
 }
 
-pub(crate) fn module_catalog_projection_stamp(
-    root: &Path,
-) -> anyhow::Result<ModuleCatalogProjectionStamp> {
-    let app_root = resolve_business_os_app_root(root)?;
-    let installed_app_root = resolve_business_os_installed_app_root(root);
-    Ok(ModuleCatalogProjectionStamp {
-        source_modules: module_catalog_file_tree_stamp(&app_root.join("modules"))?,
-        installed_modules: module_catalog_file_tree_stamp(
-            &installed_app_root.join("installed-modules"),
-        )?,
-        local_modules: module_catalog_file_tree_stamp(&installed_app_root.join("local-modules"))?,
-        templates: module_catalog_file_tree_stamp(&app_root.join("template-store"))?,
-        store_hash: module_catalog_store_hash(root)?,
-        allowlist_hash: module_catalog_allowlist_hash(root),
-    })
-}
-
-fn module_catalog_file_tree_stamp(root: &Path) -> anyhow::Result<ModuleCatalogFileTreeStamp> {
-    let dir_exists = root.is_dir();
-    if !dir_exists {
-        return Ok(ModuleCatalogFileTreeStamp {
-            dir_exists: false,
-            file_count: 0,
-            latest_modified_at_ms: 0,
-            truncated: false,
-            content_hash: String::new(),
-        });
-    }
-
-    let mut hasher = Sha256::new();
-    let mut file_count = 0usize;
-    let mut latest_modified_at_ms = 0u64;
-    let mut truncated = false;
-    collect_module_catalog_file_tree_stamp(
-        root,
-        root,
-        &mut hasher,
-        &mut file_count,
-        &mut latest_modified_at_ms,
-        &mut truncated,
-    )?;
-    Ok(ModuleCatalogFileTreeStamp {
-        dir_exists: true,
-        file_count,
-        latest_modified_at_ms,
-        truncated,
-        content_hash: format!("{:x}", hasher.finalize()),
-    })
-}
-
 fn module_asset_revision(module_dir: &Path) -> anyhow::Result<String> {
     if !module_dir.is_dir() {
         return Ok(String::new());
@@ -6299,251 +6165,9 @@ fn collect_module_asset_revision(
     Ok(())
 }
 
-fn collect_module_catalog_file_tree_stamp(
-    root: &Path,
-    current: &Path,
-    hasher: &mut Sha256,
-    file_count: &mut usize,
-    latest_modified_at_ms: &mut u64,
-    truncated: &mut bool,
-) -> anyhow::Result<()> {
-    if *truncated {
-        return Ok(());
-    }
-    let mut entries = fs::read_dir(current)
-        .with_context(|| format!("read module catalog stamp dir {}", current.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("list module catalog stamp dir {}", current.display()))?;
-    entries.sort_by(|left, right| left.path().cmp(&right.path()));
-    for entry in entries {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.')
-            || matches!(name.as_ref(), "node_modules" | "dist" | "build" | "target")
-        {
-            continue;
-        }
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_module_catalog_file_tree_stamp(
-                root,
-                &path,
-                hasher,
-                file_count,
-                latest_modified_at_ms,
-                truncated,
-            )?;
-            if *truncated {
-                return Ok(());
-            }
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        if *file_count >= MODULE_CATALOG_SOURCE_STAMP_FILE_LIMIT {
-            *truncated = true;
-            return Ok(());
-        }
-        let metadata = fs::metadata(&path)?;
-        let modified_at_ms = modified_at_ms(&metadata);
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        *file_count += 1;
-        *latest_modified_at_ms = (*latest_modified_at_ms).max(modified_at_ms);
-        update_module_catalog_stamp_hash(hasher, &rel);
-        hasher.update(metadata.len().to_le_bytes());
-        hasher.update(modified_at_ms.to_le_bytes());
-    }
-    Ok(())
-}
-
-fn module_catalog_store_hash(root: &Path) -> anyhow::Result<String> {
-    let path = business_os_store_path(root);
-    let mut hasher = Sha256::new();
-    hasher.update(u8::from(path.exists()).to_le_bytes());
-    update_module_catalog_stamp_hash(&mut hasher, &configured_business_users_projection_hash());
-    if !path.exists() {
-        return Ok(format!("{:x}", hasher.finalize()));
-    }
-
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| {
-        format!(
-            "open Business OS store for module catalog stamp {}",
-            path.display()
-        )
-    })?;
-    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
-        .context("configure module catalog stamp busy_timeout")?;
-
-    for (table, query) in [
-        (
-            "business_users",
-            "SELECT user_id, display_name, role, active, created_at_ms, updated_at_ms
-             FROM business_users
-             ORDER BY user_id ASC",
-        ),
-        (
-            "business_module_acl",
-            "SELECT module_id, user_id, role, active, created_at_ms, updated_at_ms
-             FROM business_module_acl
-             ORDER BY module_id ASC, user_id ASC, role ASC",
-        ),
-        (
-            "business_permission_grants",
-            "SELECT grant_id, subject_type, subject_id, permission, scope_type, scope_id,
-                    active, reason, created_by, created_at_ms, updated_at_ms
-             FROM business_permission_grants
-             ORDER BY grant_id ASC",
-        ),
-        (
-            "business_module_versions",
-            "SELECT version_id, module_id, seq, origin, label, bundle_sha256, files_json,
-                    sealed, created_by, created_at_ms, updated_at_ms
-             FROM business_module_versions
-             ORDER BY module_id ASC, seq ASC, version_id ASC",
-        ),
-        (
-            "business_module_releases",
-            "SELECT version_id, module_id, version, status, manifest_json, snapshot_json,
-                    created_by, created_at_ms, notes
-             FROM business_module_releases
-             ORDER BY module_id ASC, version DESC, version_id ASC",
-        ),
-    ] {
-        hash_module_catalog_query(&conn, &mut hasher, table, query)?;
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn hash_module_catalog_query(
-    conn: &Connection,
-    hasher: &mut Sha256,
-    table: &str,
-    query: &str,
-) -> anyhow::Result<()> {
-    update_module_catalog_stamp_hash(hasher, table);
-    if !sqlite_table_exists(conn, table)? {
-        hasher.update(0u8.to_le_bytes());
-        return Ok(());
-    }
-    hasher.update(1u8.to_le_bytes());
-    let mut stmt = conn
-        .prepare(query)
-        .with_context(|| format!("prepare module catalog stamp query for {table}"))?;
-    let column_count = stmt.column_count();
-    let mut rows = stmt
-        .query([])
-        .with_context(|| format!("query module catalog stamp table {table}"))?;
-    let mut row_count = 0usize;
-    while let Some(row) = rows
-        .next()
-        .with_context(|| format!("read module catalog stamp table {table}"))?
-    {
-        row_count += 1;
-        hasher.update(row_count.to_le_bytes());
-        for column in 0..column_count {
-            let value: SqlValue = row.get(column)?;
-            update_module_catalog_sql_value_hash(hasher, value);
-        }
-    }
-    hasher.update(row_count.to_le_bytes());
-    Ok(())
-}
-
-fn update_module_catalog_sql_value_hash(hasher: &mut Sha256, value: SqlValue) {
-    match value {
-        SqlValue::Null => {
-            hasher.update([0]);
-        }
-        SqlValue::Integer(value) => {
-            hasher.update([1]);
-            hasher.update(value.to_le_bytes());
-        }
-        SqlValue::Real(value) => {
-            hasher.update([2]);
-            hasher.update(value.to_le_bytes());
-        }
-        SqlValue::Text(value) => {
-            hasher.update([3]);
-            update_module_catalog_stamp_hash(hasher, &value);
-        }
-        SqlValue::Blob(value) => {
-            hasher.update([4]);
-            hasher.update(value.len().to_le_bytes());
-            hasher.update(value);
-        }
-    }
-}
-
-fn module_catalog_allowlist_hash(root: &Path) -> String {
-    let mut hasher = Sha256::new();
-    for id in business_os_module_allowlist(root) {
-        update_module_catalog_stamp_hash(&mut hasher, &id);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-fn update_module_catalog_stamp_hash(hasher: &mut Sha256, value: &str) {
+pub(super) fn update_module_catalog_stamp_hash(hasher: &mut Sha256, value: &str) {
     hasher.update(value.len().to_le_bytes());
     hasher.update(value.as_bytes());
-}
-
-pub fn module_catalog_for_rxdb(root: &Path) -> anyhow::Result<Value> {
-    let app_root = resolve_business_os_app_root(root)?;
-    let installed_app_root = resolve_business_os_installed_app_root(root);
-    let modules = load_module_manifests(&app_root, &installed_app_root)?;
-    backfill_manifest_preview_audience_grants(root, &modules)?;
-    backfill_semver_public_release_records(root, &modules)?;
-    let marketplace = load_marketplace_module_manifests(&app_root)?;
-    let templates = load_template_manifests(&app_root)?;
-    let mut governance = module_governance_map(
-        root,
-        &BusinessOsSession {
-            ok: true,
-            authenticated: true,
-            auth_required: false,
-            user: Some(BusinessOsSessionUser {
-                id: "ctox-system".to_owned(),
-                display_name: "CTOX System".to_owned(),
-                role: "admin".to_owned(),
-                is_admin: true,
-            }),
-            login_url: None,
-            reason: None,
-        },
-    )?;
-    let version_states = module_version_states(root, &app_root).unwrap_or(Value::Null);
-    let (mut modules, lifecycle) =
-        modules_with_projected_lifecycle(root, modules, &version_states)?;
-    augment_modules_with_catalog_update_state(root, &app_root, &mut modules, &version_states);
-    augment_modules_with_instance_visibility(root, &installed_app_root, &mut modules);
-    if let Some(object) = governance.as_object_mut() {
-        object.insert("lifecycle".to_owned(), lifecycle);
-    }
-    Ok(serde_json::json!({
-        "id": "module-catalog",
-        "ok": true,
-        "modules": modules,
-        "marketplace": marketplace,
-        "templates": templates,
-        "governance": governance,
-        "version_states": version_states,
-        // Per-instance allowlist that rides the RxDB data plane. Empty = no restriction.
-        // The shell intersects its merged module list with this set when non-empty.
-        "allowed_module_ids": business_os_module_allowlist(root),
-        "updated_at_ms": now_ms(),
-        "_deleted": false,
-    }))
 }
 
 fn business_os_why_diagnostics(
@@ -6997,82 +6621,6 @@ fn business_os_why_policy_payload(decision: &PolicyDecision, source: &str) -> Va
         object.insert("source".to_owned(), Value::String(source.to_owned()));
     }
     payload
-}
-
-pub fn write_module_catalog_projection_to_rxdb(root: &Path) -> anyhow::Result<()> {
-    let mut document = module_catalog_for_rxdb(root)?;
-    if let Some(object) = document.as_object_mut() {
-        object.remove("_rev");
-        object.remove("_meta");
-        object.insert("_deleted".to_string(), Value::Bool(false));
-        object.insert("is_deleted".to_string(), Value::Bool(false));
-    }
-    let now = now_ms();
-    let revision = format!("{now}-ctox-module-catalog");
-    let path = rxdb_store_path(root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let conn =
-        Connection::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(10))?;
-    conn.execute_batch(
-        r#"
-        PRAGMA journal_mode = WAL;
-        PRAGMA busy_timeout = 10000;
-        CREATE TABLE IF NOT EXISTS "ctox_business_os__business_module_catalog__v0"(
-            id TEXT NOT NULL PRIMARY KEY UNIQUE,
-            revision TEXT,
-            deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
-            lastWriteTime REAL NOT NULL,
-            data TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS "ctox_business_os__business_module_catalog__v0_lwt_id_idx"
-            ON "ctox_business_os__business_module_catalog__v0"(lastWriteTime, id);
-        CREATE INDEX IF NOT EXISTS "ctox_business_os__business_module_catalog__v0_deleted_lwt_id_idx"
-            ON "ctox_business_os__business_module_catalog__v0"(deleted, lastWriteTime, id);
-        "#,
-    )?;
-    conn.execute(
-        r#"
-        INSERT INTO "ctox_business_os__business_module_catalog__v0"
-            (id, revision, deleted, lastWriteTime, data)
-        VALUES ('module-catalog', ?1, 0, ?2, ?3)
-        ON CONFLICT(id) DO UPDATE SET
-            revision = excluded.revision,
-            deleted = 0,
-            lastWriteTime = excluded.lastWriteTime,
-            data = excluded.data
-        "#,
-        params![revision, now as f64, serde_json::to_string(&document)?],
-    )?;
-    Ok(())
-}
-
-fn write_module_catalog_projection_to_rxdb_for_module(
-    root: &Path,
-    module_id: &str,
-) -> anyhow::Result<()> {
-    write_module_catalog_projection_to_rxdb(root).with_context(|| {
-        format!("failed to refresh Business OS module catalog after validating `{module_id}`")
-    })?;
-    let catalog = load_rxdb_collection_record(root, "business_module_catalog", "module-catalog")?;
-    let catalog = catalog
-        .context("Business OS module catalog projection did not create module-catalog record")?;
-    let present = catalog
-        .get("modules")
-        .and_then(Value::as_array)
-        .is_some_and(|modules| {
-            modules
-                .iter()
-                .any(|module| module.get("id").and_then(Value::as_str) == Some(module_id))
-        });
-    anyhow::ensure!(
-        present,
-        "Business OS module catalog projection does not contain validated module `{module_id}`"
-    );
-    Ok(())
 }
 
 fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow::Result<bool> {
@@ -9019,20 +8567,6 @@ fn sync_module_release_records(
     Ok(release_ids)
 }
 
-fn module_release_ids_for_projection_repair(
-    conn: &Connection,
-    module_id: &str,
-) -> anyhow::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT version_id
-         FROM business_module_releases
-         WHERE module_id = ?1
-         ORDER BY version DESC",
-    )?;
-    let rows = stmt.query_map(params![module_id], |row| row.get::<_, String>(0))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
 fn repair_invalid_module_release_version_refs(
     conn: &Connection,
     module_ids: &[String],
@@ -10244,7 +9778,7 @@ fn load_desktop_file_bytes(root: &Path, file_id: &str) -> anyhow::Result<Vec<u8>
     )
 }
 
-fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
+pub(super) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
     let mut candidates = Vec::new();
     if root
         .file_name()
@@ -10286,7 +9820,7 @@ pub(super) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
     root.join("business-os")
 }
 
-fn load_module_manifests(
+pub(super) fn load_module_manifests(
     source_app_root: &Path,
     installed_app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -10582,7 +10116,7 @@ fn normalize_catalog_installed_manifest(
     Ok(())
 }
 
-fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Value>> {
+pub(super) fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Value>> {
     let modules_root = app_root.join("modules");
     let mut marketplace = Vec::new();
     if !modules_root.is_dir() {
@@ -10650,7 +10184,7 @@ fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Valu
     Ok(marketplace)
 }
 
-fn load_template_manifests(app_root: &Path) -> anyhow::Result<Vec<TemplateManifest>> {
+pub(super) fn load_template_manifests(app_root: &Path) -> anyhow::Result<Vec<TemplateManifest>> {
     let templates_root = app_root.join("template-store");
     let mut templates = Vec::new();
     if !templates_root.is_dir() {
@@ -11331,7 +10865,7 @@ fn source_language_for_path(path: &Path) -> &'static str {
     }
 }
 
-fn modified_at_ms(metadata: &fs::Metadata) -> u64 {
+pub(super) fn modified_at_ms(metadata: &fs::Metadata) -> u64 {
     metadata
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -11954,7 +11488,7 @@ fn diff_module_source(
 /// baseline. Keying off the latest sync point (not the original install) is
 /// what lets a freshly updated vanilla app read as unmodified again instead of
 /// staying "modified" forever after an upstream update.
-fn module_version_states(root: &Path, app_root: &Path) -> anyhow::Result<Value> {
+pub(super) fn module_version_states(root: &Path, app_root: &Path) -> anyhow::Result<Value> {
     let conn = open_store(root)?;
     let mut stmt = conn.prepare(
         "SELECT module_id, bundle_sha256, origin, seq
@@ -12096,7 +11630,7 @@ fn catalog_module_version(app_root: &Path, module_id: &str) -> String {
 /// refresh through `ctox upgrade` — so they always report `update_available =
 /// false`. `modification_state` is the vanilla/customized/unknown signal derived
 /// from the same baseline.
-fn augment_modules_with_catalog_update_state(
+pub(super) fn augment_modules_with_catalog_update_state(
     root: &Path,
     app_root: &Path,
     modules: &mut [Value],
@@ -41346,7 +40880,7 @@ fn room_secret_id(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use tempfile::tempdir;
 
@@ -42998,7 +42532,7 @@ mod tests {
         Ok(())
     }
 
-    fn chef_session() -> BusinessOsSession {
+    pub(in crate::business_os) fn chef_session() -> BusinessOsSession {
         BusinessOsSession {
             ok: true,
             authenticated: true,
@@ -43664,7 +43198,10 @@ mod tests {
         Ok(())
     }
 
-    fn write_installed_inventory_module(app_root: &Path, version: &str) -> anyhow::Result<()> {
+    pub(in crate::business_os) fn write_installed_inventory_module(
+        app_root: &Path,
+        version: &str,
+    ) -> anyhow::Result<()> {
         let module_dir = app_root.join("installed-modules").join("inventory");
         let inventory_items_schema = serde_json::json!({
             "title": "Inventory item",
@@ -43830,7 +43367,7 @@ mod tests {
         Ok(app_root)
     }
 
-    fn locked_inventory_data_review() -> Value {
+    pub(in crate::business_os) fn locked_inventory_data_review() -> Value {
         serde_json::json!({
             "completed": true,
             "collections": ["inventory_items"],
@@ -44019,7 +43556,9 @@ mod tests {
         Ok(())
     }
 
-    fn seed_test_business_os_app_root(root: &Path) -> anyhow::Result<()> {
+    pub(in crate::business_os) fn seed_test_business_os_app_root(
+        root: &Path,
+    ) -> anyhow::Result<()> {
         let app_root = root.join("src/apps/business-os");
         fs::create_dir_all(app_root.join("modules/ctox"))?;
         fs::write(app_root.join("index.html"), "<!doctype html>")?;
@@ -45162,7 +44701,11 @@ mod tests {
         Ok(())
     }
 
-    fn seed_module_founder_acl(root: &Path, module_id: &str, user_id: &str) -> anyhow::Result<()> {
+    pub(in crate::business_os) fn seed_module_founder_acl(
+        root: &Path,
+        module_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<()> {
         let conn = open_store(root)?;
         let now = now_ms() as i64;
         conn.execute(
@@ -45174,7 +44717,7 @@ mod tests {
         Ok(())
     }
 
-    fn seed_permission_grant(
+    pub(in crate::business_os) fn seed_permission_grant(
         root: &Path,
         grant_id: &str,
         subject_type: &str,
@@ -62345,399 +61888,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_module_catalog_projection_includes_installed_modules() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let app_root = root.join("src/apps/business-os");
-        let installed_app_root = resolve_business_os_installed_app_root(root);
-        fs::create_dir_all(app_root.join("modules/ctox"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/research"))?;
-        fs::write(app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/research/module.json"),
-            r#"{"id":"research","title":"Web Research","entry":"installed-modules/research/index.html","install_scope":"installed"}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/research/icon.svg"),
-            r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#,
-        )?;
-
-        write_module_catalog_projection_to_rxdb(root)?;
-
-        let conn = Connection::open(rxdb_store_path(root))?;
-        let catalog_json: String = conn.query_row(
-            "SELECT data FROM ctox_business_os__business_module_catalog__v0 WHERE id = 'module-catalog'",
-            [],
-            |row| row.get(0),
-        )?;
-        let catalog: Value = serde_json::from_str(&catalog_json)?;
-        let ids = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|module| module.get("id").and_then(Value::as_str).map(str::to_owned))
-            .collect::<Vec<_>>();
-        assert!(ids.contains(&"ctox".to_owned()), "missing ctox: {ids:?}");
-        assert!(
-            ids.contains(&"research".to_owned()),
-            "missing installed research: {ids:?}"
-        );
-        let research = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules
-                    .iter()
-                    .find(|module| module.get("id").and_then(Value::as_str) == Some("research"))
-            })
-            .expect("installed research module missing from projected catalog");
-        assert_eq!(
-            research.get("icon").and_then(Value::as_str),
-            Some("icon.svg")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn module_catalog_projects_file_plane_declarations_from_schema() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let app_root = root.join("src/apps/business-os");
-        let installed_app_root = resolve_business_os_installed_app_root(root);
-        let module_dir = installed_app_root.join("installed-modules/dynamic-files");
-        fs::create_dir_all(app_root.join("modules/ctox"))?;
-        fs::create_dir_all(&module_dir)?;
-        fs::write(app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            module_dir.join("module.json"),
-            r#"{"id":"dynamic-files","title":"Dynamic Files","entry":"installed-modules/dynamic-files/index.html","install_scope":"installed","collections":["business_commands","dynamic_files","dynamic_file_chunks"]}"#,
-        )?;
-        fs::write(
-            module_dir.join("collections.schema.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_format": "ctox-business-os-module-collections-v1",
-                "collections": {
-                    "dynamic_files": {
-                        "schema": {
-                            "version": 0,
-                            "type": "object",
-                            "primaryKey": "id",
-                            "properties": {"id": {"type": "string", "maxLength": 128}},
-                            "required": ["id"]
-                        }
-                    },
-                    "dynamic_file_chunks": {
-                        "schema": {
-                            "version": 0,
-                            "type": "object",
-                            "primaryKey": "id",
-                            "properties": {
-                                "id": {"type": "string", "maxLength": 180},
-                                "blob_id": {"type": "string"},
-                                "idx": {"type": "number"},
-                                "data": {"type": "string"}
-                            },
-                            "required": ["id", "blob_id", "idx", "data"]
-                        }
-                    }
-                },
-                "file_plane": {
-                    "declarations": [{
-                        "role": "file-chunks",
-                        "request_collection": "dynamic_files",
-                        "storage_collection": "dynamic_file_chunks",
-                        "key_field": "blob_id",
-                        "content_hash_field": "content_hash",
-                        "chunk_index_field": "idx"
-                    }]
-                }
-            }))?,
-        )?;
-
-        let catalog = module_catalog_for_rxdb(root)?;
-        let module = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules.iter().find(|module| {
-                    module.get("id").and_then(Value::as_str) == Some("dynamic-files")
-                })
-            })
-            .expect("dynamic-files module must be projected");
-        let declaration = module
-            .pointer("/file_plane/declarations/0")
-            .expect("file-plane declaration must be projected");
-        assert_eq!(
-            declaration
-                .get("storage_collection")
-                .and_then(Value::as_str),
-            Some("dynamic_file_chunks")
-        );
-        assert_eq!(
-            declaration.get("key_field").and_then(Value::as_str),
-            Some("blob_id")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn module_catalog_keeps_uninstalled_research_in_marketplace() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let app_root = root.join("src/apps/business-os");
-        fs::create_dir_all(app_root.join("modules/ctox"))?;
-        fs::create_dir_all(app_root.join("modules/research"))?;
-        fs::write(app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            app_root.join("modules/research/module.json"),
-            r#"{"id":"research","title":"Web Research","entry":"modules/research/index.html","install_scope":"store"}"#,
-        )?;
-
-        write_module_catalog_projection_to_rxdb(root)?;
-
-        let conn = Connection::open(rxdb_store_path(root))?;
-        let catalog_json: String = conn.query_row(
-            "SELECT data FROM ctox_business_os__business_module_catalog__v0 WHERE id = 'module-catalog'",
-            [],
-            |row| row.get(0),
-        )?;
-        let catalog: Value = serde_json::from_str(&catalog_json)?;
-        assert!(!catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|module| module.get("id").and_then(Value::as_str) == Some("research")));
-        let research = catalog
-            .get("marketplace")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules
-                    .iter()
-                    .find(|module| module.get("id").and_then(Value::as_str) == Some("research"))
-            })
-            .expect("research store app missing from projected marketplace");
-        assert_eq!(
-            research.get("install_scope").and_then(Value::as_str),
-            Some("store")
-        );
-        assert_eq!(
-            research.get("entry").and_then(Value::as_str),
-            Some("modules/research/index.html")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn module_catalog_asset_revision_tracks_module_asset_bytes() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let app_root = root.join("src/apps/business-os");
-        let module_dir = app_root.join("modules/ctox");
-        fs::create_dir_all(&module_dir)?;
-        fs::write(app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            module_dir.join("module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core","launch_kind":"desktop-app","presentation":{"default_mode":"window","supported_modes":["window","maximized","focus"],"initial_size":{"width":1280,"height":820},"minimum_size":{"width":640,"height":480},"multi_instance":false,"auto_restore":false}}"#,
-        )?;
-        fs::write(module_dir.join("index.js"), "export const marker = 'one';")?;
-
-        let first_catalog = module_catalog_for_rxdb(root)?;
-        let first_module = first_catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules
-                    .iter()
-                    .find(|module| module.get("id").and_then(Value::as_str) == Some("ctox"))
-            })
-            .context("first ctox module projection")?;
-        let first_revision = first_module
-            .get("asset_revision")
-            .and_then(Value::as_str)
-            .context("first asset revision")?
-            .to_owned();
-        let manifest_sha = first_module
-            .get("manifest_sha256")
-            .and_then(Value::as_str)
-            .context("manifest sha")?
-            .to_owned();
-        assert_eq!(
-            first_module.get("launch_kind").and_then(Value::as_str),
-            Some("desktop-app")
-        );
-        assert_eq!(
-            first_module
-                .get("presentation")
-                .and_then(|value| value.get("minimum_size"))
-                .and_then(|value| value.get("width"))
-                .and_then(Value::as_u64),
-            Some(640)
-        );
-
-        fs::write(module_dir.join("index.js"), "export const marker = 'two';")?;
-
-        let second_catalog = module_catalog_for_rxdb(root)?;
-        let second_module = second_catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules
-                    .iter()
-                    .find(|module| module.get("id").and_then(Value::as_str) == Some("ctox"))
-            })
-            .context("second ctox module projection")?;
-        let second_revision = second_module
-            .get("asset_revision")
-            .and_then(Value::as_str)
-            .context("second asset revision")?;
-
-        assert_ne!(first_revision, second_revision);
-        assert_eq!(
-            second_module.get("manifest_sha256").and_then(Value::as_str),
-            Some(manifest_sha.as_str())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn module_catalog_does_not_install_or_grant_uninstalled_store_apps() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let app_root = root.join("src/apps/business-os");
-        fs::create_dir_all(app_root.join("modules/ctox"))?;
-        fs::create_dir_all(app_root.join("modules/cv-print-builder"))?;
-        fs::write(app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            app_root.join("modules/cv-print-builder/module.json"),
-            r#"{"id":"cv-print-builder","title":"CV Print Builder","entry":"modules/cv-print-builder/index.html","install_scope":"store","collections":["business_commands","business_chats","ctox_queue_tasks","desktop_files","desktop_file_chunks","documents","document_versions"]}"#,
-        )?;
-
-        let catalog = module_catalog_for_rxdb(root)?;
-        let modules = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .context("catalog modules")?;
-        assert!(!modules.iter().any(|module| {
-            module.get("id").and_then(Value::as_str) == Some("cv-print-builder")
-        }));
-        assert!(catalog
-            .get("marketplace")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|module| {
-                module.get("id").and_then(Value::as_str) == Some("cv-print-builder")
-                    && module.get("install_scope").and_then(Value::as_str) == Some("store")
-            }));
-
-        let conn = open_store(root)?;
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE active = 1
-               AND subject_type = 'role'
-               AND subject_id IN ('user', 'founder')
-               AND permission IN (?1, ?2)
-               AND scope_type = 'module'
-               AND scope_id = 'cv-print-builder'",
-            params![
-                BusinessOsPermission::DataRead.as_str(),
-                BusinessOsPermission::DataWrite.as_str()
-            ],
-            |row| row.get(0),
-        )?;
-        assert_eq!(count, 0);
-        drop(conn);
-
-        let catalog_again = module_catalog_for_rxdb(root)?;
-        let conn = open_store(root)?;
-        let count_again: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE active = 1
-               AND subject_type = 'role'
-               AND subject_id IN ('user', 'founder')
-               AND permission IN (?1, ?2)
-               AND scope_type = 'module'
-               AND scope_id = 'cv-print-builder'",
-            params![
-                BusinessOsPermission::DataRead.as_str(),
-                BusinessOsPermission::DataWrite.as_str()
-            ],
-            |row| row.get(0),
-        )?;
-        assert_eq!(count_again, 0);
-
-        let explicit_grants = catalog_again
-            .pointer("/governance/permission_model/explicit_grants")
-            .and_then(Value::as_array)
-            .context("explicit grants projection")?;
-        assert!(!explicit_grants.iter().any(|grant| {
-            grant.get("subject_type").and_then(Value::as_str) == Some("role")
-                && grant.get("scope_type").and_then(Value::as_str) == Some("module")
-                && grant.get("scope_id").and_then(Value::as_str) == Some("cv-print-builder")
-        }));
-
-        Ok(())
-    }
-
-    #[test]
-    fn module_catalog_prefers_release_source_over_stale_runtime_app_root() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let release_root = temp.path().join("release");
-        let runtime_root = release_root.join("runtime");
-        let stale_app_root = runtime_root.join("business-os");
-        let release_app_root = release_root.join("src/apps/business-os");
-
-        fs::create_dir_all(stale_app_root.join("modules/ctox"))?;
-        fs::create_dir_all(release_app_root.join("modules/ctox"))?;
-        fs::create_dir_all(release_app_root.join("modules/research"))?;
-        fs::write(stale_app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(release_app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            stale_app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            release_app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            release_app_root.join("modules/research/module.json"),
-            r#"{"id":"research","title":"Web Research","entry":"modules/research/index.html","install_scope":"store"}"#,
-        )?;
-
-        let catalog = module_catalog_for_rxdb(&runtime_root)?;
-        let marketplace = catalog
-            .get("marketplace")
-            .and_then(Value::as_array)
-            .context("catalog marketplace")?;
-        assert!(marketplace
-            .iter()
-            .any(|module| module.get("id").and_then(Value::as_str) == Some("research")));
-        Ok(())
-    }
-
-    #[test]
     fn business_app_semver_major_matches_browser_plain_semver_contract() {
         assert_eq!(parse_business_app_semver_major("0.2.3"), Some(0));
         assert_eq!(parse_business_app_semver_major("1.0.0"), Some(1));
@@ -62751,378 +61901,6 @@ mod tests {
         assert_eq!(parse_business_app_semver_major("1.02.0"), None);
         assert_eq!(parse_business_app_semver_major("1.0.03"), None);
         assert_eq!(parse_business_app_semver_major("1.0.0-beta.1"), None);
-    }
-
-    #[test]
-    fn module_catalog_projects_runtime_app_lifecycle_backfill() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let app_root = root.join("src/apps/business-os");
-        let bootstrap_conn = open_store(root)?;
-        drop(bootstrap_conn);
-        let installed_app_root = resolve_business_os_installed_app_root(root);
-        fs::create_dir_all(app_root.join("modules/ctox"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/private-zero"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/legacy-preview-zero"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/modify-only-zero"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/team-one"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/missing-version"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/invalid-semver"))?;
-        fs::create_dir_all(installed_app_root.join("installed-modules/restricted-team"))?;
-        fs::write(app_root.join("index.html"), "<!doctype html>")?;
-        fs::write(
-            app_root.join("modules/ctox/module.json"),
-            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/private-zero/module.json"),
-            r#"{"id":"private-zero","title":"Private Zero","version":"0.2.0","entry":"installed-modules/private-zero/index.html","install_scope":"installed"}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/legacy-preview-zero/module.json"),
-            r#"{"id":"legacy-preview-zero","title":"Legacy Preview Zero","version":"0.4.0","entry":"installed-modules/legacy-preview-zero/index.html","install_scope":"installed","lifecycle":{"visibility_state":"preview","preview_user_ids":["legacy-preview-user","legacy-preview-user","legacy-pregranted-user"]}}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/modify-only-zero/module.json"),
-            r#"{"id":"modify-only-zero","title":"Modify Only Zero","version":"0.3.0","entry":"installed-modules/modify-only-zero/index.html","install_scope":"installed"}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/team-one/module.json"),
-            r#"{"id":"team-one","title":"Team One","version":"1.0.0","entry":"installed-modules/team-one/index.html","install_scope":"installed","lifecycle":{"preview_user_ids":["team-preview-user"]}}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/missing-version/module.json"),
-            r#"{"id":"missing-version","title":"Missing Version","entry":"installed-modules/missing-version/index.html","install_scope":"installed","lifecycle":{"preview_user_ids":["missing-preview-user"]}}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/invalid-semver/module.json"),
-            r#"{"id":"invalid-semver","title":"Invalid Semver","version":"v1.0.0","entry":"installed-modules/invalid-semver/index.html","install_scope":"installed","lifecycle":{"preview_user_ids":["invalid-preview-user"]}}"#,
-        )?;
-        fs::write(
-            installed_app_root.join("installed-modules/restricted-team/module.json"),
-            r#"{"id":"restricted-team","title":"Restricted Team","version":"1.1.0","entry":"installed-modules/restricted-team/index.html","install_scope":"installed","lifecycle":{"visibility_state":"restricted","audience":"restricted","preview_user_ids":["restricted-preview-user"]}}"#,
-        )?;
-        seed_module_founder_acl(root, "private-zero", "app-owner")?;
-        seed_permission_grant(
-            root,
-            "grant_preview_private_zero",
-            "user",
-            "preview-user",
-            BusinessOsPermission::AppsView,
-            "module",
-            "private-zero",
-        )?;
-        seed_permission_grant(
-            root,
-            "grant_modify_only_zero",
-            "user",
-            "modify-user",
-            BusinessOsPermission::AppsModify,
-            "module",
-            "modify-only-zero",
-        )?;
-        seed_permission_grant(
-            root,
-            "grant_existing_legacy_preview",
-            "user",
-            "legacy-pregranted-user",
-            BusinessOsPermission::AppsView,
-            "module",
-            "legacy-preview-zero",
-        )?;
-
-        let conn = open_store(root)?;
-        let now = now_ms() as i64;
-        conn.execute(
-            "INSERT INTO business_module_versions
-                (version_id, module_id, seq, origin, label, bundle_sha256, files_json,
-                 sealed, created_by, created_at_ms, updated_at_ms)
-             VALUES ('modver_private_zero_1', 'private-zero', 1, 'install', 'Installed',
-                 'sha-private-zero', '[]', 1, 'creator-user', ?1, ?1)",
-            params![now],
-        )?;
-        conn.execute(
-            "INSERT INTO business_module_releases
-                (version_id, module_id, version, status, manifest_json, snapshot_json,
-                 created_by, created_at_ms, notes)
-             VALUES ('modrel_team_one_1', 'team-one', 1, 'released',
-                 '{\"id\":\"team-one\"}', '{}', 'release-owner', ?1, 'test release')",
-            params![now + 1],
-        )?;
-        drop(conn);
-
-        let catalog = module_catalog_for_rxdb(root)?;
-        let modules = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .context("catalog modules")?;
-        let module = |id: &str| -> &Value {
-            modules
-                .iter()
-                .find(|module| module.get("id").and_then(Value::as_str) == Some(id))
-                .unwrap_or_else(|| panic!("missing module {id}"))
-        };
-
-        assert_eq!(
-            module("ctox")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("packaged")
-        );
-        assert_eq!(
-            module("private-zero")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("preview")
-        );
-        assert_eq!(
-            module("private-zero")
-                .pointer("/lifecycle/current_semver")
-                .and_then(Value::as_str),
-            Some("0.2.0")
-        );
-        assert_eq!(
-            module("private-zero")
-                .pointer("/lifecycle/creator_user_id")
-                .and_then(Value::as_str),
-            Some("creator-user")
-        );
-        assert!(module("private-zero")
-            .pointer("/lifecycle/responsible_user_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|user| user.as_str() == Some("app-owner")));
-        assert!(module("private-zero")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|grant| grant.as_str() == Some("grant_preview_private_zero")));
-        assert!(module("private-zero")
-            .pointer("/lifecycle/preview_user_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|user| user.as_str() == Some("preview-user")));
-        let legacy_preview_grant_id =
-            legacy_preview_audience_grant_id("legacy-preview-zero", "legacy-preview-user");
-        assert_eq!(
-            module("legacy-preview-zero")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("preview")
-        );
-        assert!(module("legacy-preview-zero")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|grant| grant.as_str() == Some(legacy_preview_grant_id.as_str())));
-        assert_eq!(
-            module("legacy-preview-zero")
-                .pointer("/lifecycle/preview_user_ids")
-                .and_then(Value::as_array)
-                .unwrap()
-                .iter()
-                .filter(|user| user.as_str() == Some("legacy-preview-user"))
-                .count(),
-            1
-        );
-        assert!(module("legacy-preview-zero")
-            .pointer("/lifecycle/preview_user_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|user| user.as_str() == Some("legacy-pregranted-user")));
-        assert!(module("legacy-preview-zero")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|grant| grant.as_str() == Some("grant_existing_legacy_preview")));
-        assert_eq!(
-            module("modify-only-zero")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("private")
-        );
-        assert!(module("modify-only-zero")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .is_empty());
-        assert!(module("modify-only-zero")
-            .pointer("/lifecycle/preview_user_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            module("team-one")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("team")
-        );
-        assert_eq!(
-            module("team-one")
-                .pointer("/lifecycle/public")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            module("team-one")
-                .pointer("/lifecycle/last_release_id")
-                .and_then(Value::as_str),
-            Some("modrel_team_one_1")
-        );
-        assert_eq!(
-            module("missing-version")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("private")
-        );
-        assert_eq!(
-            module("missing-version")
-                .pointer("/lifecycle/warning_code")
-                .and_then(Value::as_str),
-            Some("invalid_semver")
-        );
-        assert!(module("missing-version")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            module("invalid-semver")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("private")
-        );
-        assert_eq!(
-            module("invalid-semver").pointer("/lifecycle/current_semver"),
-            Some(&Value::Null)
-        );
-        assert_eq!(
-            module("invalid-semver")
-                .pointer("/lifecycle/warning_code")
-                .and_then(Value::as_str),
-            Some("invalid_semver")
-        );
-        assert!(module("invalid-semver")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            module("restricted-team")
-                .pointer("/lifecycle/visibility_state")
-                .and_then(Value::as_str),
-            Some("restricted")
-        );
-        assert_eq!(
-            module("restricted-team")
-                .pointer("/lifecycle/public")
-                .and_then(Value::as_bool),
-            Some(false)
-        );
-        let restricted_preview_grant_id =
-            legacy_preview_audience_grant_id("restricted-team", "restricted-preview-user");
-        assert!(module("restricted-team")
-            .pointer("/lifecycle/preview_grant_ids")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|grant| grant.as_str() == Some(restricted_preview_grant_id.as_str())));
-        assert_eq!(
-            catalog
-                .pointer("/governance/lifecycle/team-one/visibility_state")
-                .and_then(Value::as_str),
-            Some("team")
-        );
-        let conn = open_store(root)?;
-        let legacy_grants: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE grant_id = ?1
-               AND subject_type = 'user'
-               AND subject_id = 'legacy-preview-user'
-               AND permission = ?2
-               AND scope_type = 'module'
-               AND scope_id = 'legacy-preview-zero'
-               AND active = 1",
-            params![
-                legacy_preview_grant_id.as_str(),
-                BusinessOsPermission::AppsView.as_str()
-            ],
-            |row| row.get(0),
-        )?;
-        assert_eq!(legacy_grants, 1);
-        let generated_pregranted_grants: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE grant_id = ?1",
-            params![legacy_preview_audience_grant_id(
-                "legacy-preview-zero",
-                "legacy-pregranted-user"
-            )],
-            |row| row.get(0),
-        )?;
-        assert_eq!(generated_pregranted_grants, 0);
-        let unexpected_legacy_visibility_grants: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE permission = ?1
-               AND scope_type = 'module'
-               AND scope_id IN ('missing-version', 'invalid-semver', 'team-one')",
-            params![BusinessOsPermission::AppsView.as_str()],
-            |row| row.get(0),
-        )?;
-        assert_eq!(unexpected_legacy_visibility_grants, 0);
-        let unexpected_data_grants: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE permission IN (?1, ?2)",
-            params![
-                BusinessOsPermission::DataRead.as_str(),
-                BusinessOsPermission::DataWrite.as_str()
-            ],
-            |row| row.get(0),
-        )?;
-        assert_eq!(unexpected_data_grants, 0);
-        drop(conn);
-
-        let _catalog_again = module_catalog_for_rxdb(root)?;
-        let conn = open_store(root)?;
-        let legacy_grants_after_second_projection: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE subject_type = 'user'
-               AND subject_id = 'legacy-preview-user'
-               AND permission = ?1
-               AND scope_type = 'module'
-               AND scope_id = 'legacy-preview-zero'",
-            params![BusinessOsPermission::AppsView.as_str()],
-            |row| row.get(0),
-        )?;
-        assert_eq!(legacy_grants_after_second_projection, 1);
-        let restricted_grants_after_second_projection: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_permission_grants
-             WHERE grant_id = ?1
-               AND subject_type = 'user'
-               AND subject_id = 'restricted-preview-user'
-               AND permission = ?2
-               AND scope_type = 'module'
-               AND scope_id = 'restricted-team'
-               AND active = 1",
-            params![
-                restricted_preview_grant_id.as_str(),
-                BusinessOsPermission::AppsView.as_str()
-            ],
-            |row| row.get(0),
-        )?;
-        assert_eq!(restricted_grants_after_second_projection, 1);
-        Ok(())
     }
 
     #[test]
@@ -63817,171 +62595,6 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
-        Ok(())
-    }
-
-    #[test]
-    fn module_catalog_projects_release_state_data_access_and_rollback_target() -> anyhow::Result<()>
-    {
-        let temp = tempdir()?;
-        let root = temp.path();
-        seed_test_business_os_app_root(root)?;
-        let app_root = root.join("src/apps/business-os");
-        fs::create_dir_all(root.join("runtime"))?;
-        let installed_app_root = resolve_business_os_installed_app_root(root);
-        write_installed_inventory_module(&installed_app_root, "0.9.0")?;
-
-        let first_release = record_module_release(
-            root,
-            &app_root,
-            &chef_session(),
-            ModuleReleaseRequest {
-                module_id: "inventory".to_owned(),
-                target_version: "1.0.0".to_owned(),
-                release_channel: "team".to_owned(),
-                source_version_id: String::new(),
-                rollback_version_id: String::new(),
-                responsible_user_ids: Vec::new(),
-                data_access_review: locked_inventory_data_review(),
-                notes: "First team release".to_owned(),
-            },
-        )?;
-        let first_release_id = first_release
-            .get("version_id")
-            .and_then(Value::as_str)
-            .context("first release id")?
-            .to_owned();
-
-        let second_release = record_module_release(
-            root,
-            &app_root,
-            &chef_session(),
-            ModuleReleaseRequest {
-                module_id: "inventory".to_owned(),
-                target_version: "1.1.0".to_owned(),
-                release_channel: "team".to_owned(),
-                source_version_id: String::new(),
-                rollback_version_id: String::new(),
-                responsible_user_ids: Vec::new(),
-                data_access_review: locked_inventory_data_review(),
-                notes: "Second team release".to_owned(),
-            },
-        )?;
-        let second_release_id = second_release
-            .get("version_id")
-            .and_then(Value::as_str)
-            .context("second release id")?
-            .to_owned();
-
-        let catalog = module_catalog_for_rxdb(root)?;
-        let modules = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .context("catalog modules")?;
-        let inventory = modules
-            .iter()
-            .find(|module| module.get("id").and_then(Value::as_str) == Some("inventory"))
-            .context("inventory module projection")?;
-
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/release_status")
-                .and_then(Value::as_str),
-            Some("released")
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/release_state/current/version_id")
-                .and_then(Value::as_str),
-            Some(second_release_id.as_str())
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/release_state/current/target_version")
-                .and_then(Value::as_str),
-            Some("1.1.0")
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/rollback_target/version_id")
-                .and_then(Value::as_str),
-            Some(first_release_id.as_str())
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/data_access/status")
-                .and_then(Value::as_str),
-            Some("reviewed")
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/data_access/areas/0/read")
-                .and_then(Value::as_str),
-            Some("locked")
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/data_access/areas/0/write")
-                .and_then(Value::as_str),
-            Some("locked")
-        );
-        assert_eq!(
-            inventory
-                .pointer("/lifecycle/data_access/locked_collection_ids/0")
-                .and_then(Value::as_str),
-            Some("inventory_items")
-        );
-        assert_eq!(
-            catalog
-                .pointer("/governance/lifecycle/inventory/release_state/current/version_id")
-                .and_then(Value::as_str),
-            Some(second_release_id.as_str())
-        );
-
-        rollback_module_release(
-            root,
-            &app_root,
-            &chef_session(),
-            ModuleRollbackRequest {
-                module_id: "inventory".to_owned(),
-                version_id: first_release_id.clone(),
-            },
-        )?;
-
-        let catalog_after_rollback = module_catalog_for_rxdb(root)?;
-        let modules_after_rollback = catalog_after_rollback
-            .get("modules")
-            .and_then(Value::as_array)
-            .context("catalog modules after rollback")?;
-        let inventory_after_rollback = modules_after_rollback
-            .iter()
-            .find(|module| module.get("id").and_then(Value::as_str) == Some("inventory"))
-            .context("inventory module projection after rollback")?;
-        assert_eq!(
-            inventory_after_rollback
-                .pointer("/lifecycle/release_state/current/version_id")
-                .and_then(Value::as_str),
-            Some(first_release_id.as_str())
-        );
-        assert_eq!(
-            inventory_after_rollback
-                .pointer("/lifecycle/release_state/current/target_version")
-                .and_then(Value::as_str),
-            Some("1.0.0")
-        );
-        assert_eq!(
-            inventory_after_rollback
-                .pointer("/lifecycle/rollback_target/version_id")
-                .and_then(Value::as_str),
-            Some(second_release_id.as_str())
-        );
-        assert_eq!(
-            inventory_after_rollback
-                .pointer("/lifecycle/current_semver")
-                .and_then(Value::as_str),
-            Some("1.0.0")
-        );
-
         Ok(())
     }
 
