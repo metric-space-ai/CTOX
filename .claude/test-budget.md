@@ -61,6 +61,29 @@ Deshalb:
 - Worker legen für Baseline-Prüfungen Worktrees unter `/private/tmp` an.
   Ein abgebrochener Lauf lässt sie liegen: `git worktree list` prüfen und
   mit `git worktree remove --force` aufräumen.
+- `runtime/build/cargo-target/debug/incremental` wuchs auf 9,1 GB. Reine
+  Rebuild-Beschleunigung, gefahrlos löschbar — und bei `CARGO_INCREMENTAL=0`
+  ohnehin ungenutzt. Der billigste Hebel, bevor man an `cargo clean` denkt.
+
+## Nie zwei Worker auf derselben Datei
+
+Am 01.08. liefen zwei Sol-Instanzen gleichzeitig auf `store.rs`. Der zweite
+stoppte korrekt mit „parallele Änderung ausserhalb der Whitelist" — der
+Fehler lag bei mir, nicht bei ihm.
+
+Ursache war eine **Wache, die eine alte Datei für ein neues Ergebnis hielt**:
+sie prüfte nur `[ -f /tmp/<name>-report.md ]`, und dort lag noch der Report
+des VORIGEN Anlaufs. Sie meldete sofort „fertig", ich las veraltete Zahlen,
+schloss daraus auf einen Fehler des Workers und startete den nächsten Auftrag
+— während der erste noch schrieb.
+
+Deshalb:
+- Report-Dateien VOR dem Start löschen, nicht danach.
+- Die Wache muss zusätzlich prüfen, dass der Report NEUER ist als der
+  Startzeitpunkt (`find <datei> -newermt ...`), nicht bloss dass er existiert.
+- Vor jedem Dispatch: `ps -Ao args | grep -c "[c]laude --bare"` muss 0 sein.
+- Ein Worker-Bericht über „parallele Änderungen" ist ein Alarm über die
+  Orchestrierung, kein Randbefund des Workers.
 
 **Ein voller Datenträger hinterlässt Trümmer, die nach etwas anderem
 aussehen.** Nach dem Vorfall scheiterte der Build an `wha-proto`, einem
