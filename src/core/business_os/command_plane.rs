@@ -41,6 +41,61 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use std::path::Path;
 
+pub(super) const EXACT_CONTROL_TYPES: [&str; 52] = [
+    "ctox.app.access.grant",
+    "ctox.app.access.revoke",
+    "ctox.app.action.run",
+    "ctox.app_store.install",
+    "ctox.app_store.uninstall",
+    "ctox.business_os.audit.list",
+    "ctox.business_os.audit.retention",
+    "ctox.business_os.audit.retention_policy.set",
+    "ctox.business_os.backup.restore_drill",
+    "ctox.business_os.branding.update",
+    "ctox.business_os.support.export_diagnostics",
+    "ctox.business_os.user.upsert",
+    "ctox.business_os.why",
+    "ctox.coding.turn",
+    "ctox.command.cancel",
+    "ctox.file.export",
+    "ctox.file.materialize",
+    "ctox.mailserver.delete_domain",
+    "ctox.mailserver.delete_user",
+    "ctox.mailserver.get_config",
+    "ctox.mailserver.save_domain",
+    "ctox.mailserver.save_user",
+    "ctox.maintenance.client_ready",
+    "ctox.module.assign_founder",
+    "ctox.module.check_updates",
+    "ctox.module.delete",
+    "ctox.module.install_template",
+    "ctox.module.list_versions",
+    "ctox.module.release",
+    "ctox.module.repair_lifecycle_projection",
+    "ctox.module.rollback",
+    "ctox.module.rollback_version",
+    "ctox.module.save",
+    "ctox.module.set_visible",
+    "ctox.module.update",
+    "ctox.office.settings.save",
+    "ctox.runtime_settings.save",
+    "ctox.secret.delete",
+    "ctox.secret.list",
+    "ctox.secret.put",
+    "ctox.source.commit",
+    "ctox.source.diff",
+    "ctox.source.list_snapshots",
+    "ctox.source.load",
+    "ctox.source.log",
+    "ctox.source.rollback_snapshot",
+    "ctox.source.save",
+    "ctox.subscription_auth.start",
+    "ctox.task.delete",
+    "ctox.task.update",
+    "knowledge.command",
+    "web_stack.person_research",
+];
+
 /// Accept a command that originated in trusted, in-process code (operator CLI,
 /// server-side handlers, internal projections, tests). The claimed actor in
 /// `client_context` is trusted. Network-originated commands MUST use
@@ -1095,7 +1150,111 @@ mod tests {
     use super::super::store_projections::tests::create_repair_rxdb_tables;
     use super::*;
     use rusqlite::Connection;
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
+
+    fn rust_brace_depth_after(mut depth: usize, line: &str) -> usize {
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut chars = line.chars().peekable();
+        while let Some(character) = chars.next() {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quoted = false;
+                }
+                continue;
+            }
+            if character == '/' && chars.peek() == Some(&'/') {
+                break;
+            }
+            match character {
+                '"' => quoted = true,
+                '{' => depth += 1,
+                '}' => depth = depth.checked_sub(1).expect("unbalanced Rust braces"),
+                _ => {}
+            }
+        }
+        depth
+    }
+
+    fn dispatcher_exact_control_types(source: &str) -> BTreeSet<String> {
+        let function_start = source
+            .find("pub fn accept_rxdb_business_command_with_origin")
+            .expect("accept_rxdb_business_command_with_origin must exist");
+        let match_start = source[function_start..]
+            .find("match command.command_type.as_str()")
+            .map(|offset| function_start + offset)
+            .expect("command dispatcher match must exist");
+        let fallback = source[match_start..]
+            .find("        _ => {}")
+            .map(|offset| match_start + offset)
+            .expect("command dispatcher fallback must exist");
+        let classifier = &source[match_start..fallback];
+        let mut lines = classifier.lines();
+        let match_line = lines
+            .next()
+            .expect("command dispatcher match must have a body");
+        let mut brace_depth = rust_brace_depth_after(0, match_line);
+        let mut exact_types = BTreeSet::new();
+        let mut arm_pattern = String::new();
+
+        for line in lines {
+            let trimmed = line.trim();
+            if brace_depth == 1 && (trimmed.starts_with('"') || !arm_pattern.is_empty()) {
+                if !arm_pattern.is_empty() {
+                    arm_pattern.push(' ');
+                }
+                arm_pattern.push_str(trimmed);
+                if arm_pattern.contains("=>") {
+                    let pattern = arm_pattern
+                        .split_once("=>")
+                        .expect("literal dispatcher arm must contain =>")
+                        .0;
+                    exact_types.extend(pattern.split('"').skip(1).step_by(2).map(str::to_string));
+                    arm_pattern.clear();
+                }
+            }
+            brace_depth = rust_brace_depth_after(brace_depth, line);
+        }
+
+        assert!(
+            arm_pattern.is_empty(),
+            "unterminated string-literal dispatcher arm: {arm_pattern}"
+        );
+        exact_types
+    }
+
+    #[test]
+    fn business_command_inventory_matches_exact_control_types() {
+        let dispatcher_types = dispatcher_exact_control_types(include_str!("command_plane.rs"));
+        let declared_types = EXACT_CONTROL_TYPES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            declared_types.len(),
+            EXACT_CONTROL_TYPES.len(),
+            "EXACT_CONTROL_TYPES contains duplicates"
+        );
+
+        let dispatcher_only = dispatcher_types
+            .difference(&declared_types)
+            .cloned()
+            .collect::<Vec<_>>();
+        let constant_only = declared_types
+            .difference(&dispatcher_types)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            dispatcher_only.is_empty() && constant_only.is_empty(),
+            "EXACT_CONTROL_TYPES and the dispatcher's string-literal arms differ; \
+             dispatcher_only={dispatcher_only:?}, constant_only={constant_only:?}"
+        );
+    }
 
     #[test]
     fn control_command_outcome_updates_outbox_intake_projection() -> anyhow::Result<()> {

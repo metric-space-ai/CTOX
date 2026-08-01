@@ -27,9 +27,7 @@ if (functionStart < 0 || matchStart < 0 || fallback < 0) {
   throw new Error('cannot locate authoritative Business OS command classifier');
 }
 const classifier = source.slice(matchStart, fallback);
-const exactControlTypes = [...classifier.matchAll(/^\s*((?:"[^"]+"\s*(?:\|\s*)?)+)=>\s*\{/gm)]
-  .flatMap((match) => [...match[1].matchAll(/"([^"]+)"/g)].map((value) => value[1]))
-  .sort();
+const exactControlTypes = rustStringArray(commandPlaneSource, 'EXACT_CONTROL_TYPES').sort();
 const dispatchPredicates = [...classifier.matchAll(/^\s*command_type\s+if\s+(.+?)\s*=>\s*\{/gm)]
   .map((match) => match[1].trim())
   .sort();
@@ -140,6 +138,73 @@ function walk(directory) {
     else files.push(target);
   }
   return files;
+}
+
+function rustStringArray(text, name) {
+  const declarationPattern = new RegExp(
+    `\\bconst\\s+${name}\\s*:\\s*\\[\\s*&str\\s*;\\s*(\\d+)\\s*\\]\\s*=\\s*\\[`,
+    'g',
+  );
+  const declarations = [...text.matchAll(declarationPattern)];
+  if (declarations.length !== 1) {
+    throw new Error(
+      `expected exactly one Rust const ${name}: [&str; N] array, found ${declarations.length}`,
+    );
+  }
+
+  const declaration = declarations[0];
+  const declaredLength = Number.parseInt(declaration[1], 10);
+  const open = declaration.index + declaration[0].length - 1;
+  let depth = 0;
+  let quote = false;
+  let escaped = false;
+  let close = -1;
+  for (let index = open; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quote = false;
+      continue;
+    }
+    if (char === '"') {
+      quote = true;
+      continue;
+    }
+    if (char === '[') depth += 1;
+    else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        close = index;
+        break;
+      }
+    }
+  }
+  if (close < 0) throw new Error(`unterminated Rust const ${name}`);
+
+  const body = text.slice(open + 1, close);
+  const stringPattern = /"((?:\\.|[^"\\])*)"/g;
+  const values = [...body.matchAll(stringPattern)].map((match) => {
+    if (match[1].includes('\\')) {
+      throw new Error(`Rust const ${name} contains an escaped string unsupported by this projection`);
+    }
+    return match[1];
+  });
+  const nonStrings = body
+    .replace(stringPattern, '')
+    .replace(/\/\/.*$/gm, '');
+  if (!/^[\s,]*$/.test(nonStrings)) {
+    throw new Error(`Rust const ${name} must contain only string literals`);
+  }
+  if (values.length !== declaredLength) {
+    throw new Error(
+      `Rust const ${name} declares ${declaredLength} entries but contains ${values.length}`,
+    );
+  }
+  if (new Set(values).size !== values.length) {
+    throw new Error(`Rust const ${name} contains duplicate entries`);
+  }
+  return values;
 }
 
 function functionBody(text, name, required = true) {

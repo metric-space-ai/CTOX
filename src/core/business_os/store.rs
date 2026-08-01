@@ -15784,15 +15784,10 @@ pub(super) fn external_sql_command_in_flight_outcome(
 }
 
 pub(super) fn is_rxdb_control_command_type(command_type: &str) -> bool {
-    static EXACT_TYPES: OnceLock<HashSet<String>> = OnceLock::new();
+    static EXACT_TYPES: OnceLock<HashSet<&'static str>> = OnceLock::new();
     let exact_types = EXACT_TYPES.get_or_init(|| {
-        serde_json::from_str::<Value>(include_str!("business_command_inventory.json"))
-            .ok()
-            .and_then(|inventory| inventory.get("exact_control_types").cloned())
-            .and_then(|types| types.as_array().cloned())
-            .unwrap_or_default()
+        super::command_plane::EXACT_CONTROL_TYPES
             .into_iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
             .collect()
     });
     exact_types.contains(command_type)
