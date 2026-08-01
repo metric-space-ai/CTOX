@@ -35,8 +35,229 @@ use super::store_projections::{
 use crate::mission::channels;
 use anyhow::Context;
 use rusqlite::{params, OptionalExtension};
+use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
+
+const BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT: &str = "ctox-business-command-replay-receipt-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BusinessCommandReplayState {
+    Terminal,
+    Running,
+    Blocked,
+    Uncertain,
+    Known,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BusinessCommandReplayForm {
+    StoredOutcomeWithLifecycle {
+        existing_status: String,
+        lifecycle_projection: Value,
+        stored_outcome: Value,
+    },
+    StoredOutcome {
+        existing_status: String,
+        stored_outcome: Value,
+    },
+    ExistingCommand {
+        existing_status: String,
+    },
+    TerminalControlClaim {
+        terminal_status: String,
+        result: Value,
+    },
+    UncertainControlClaim {
+        claim_disposition: String,
+        presented_execution_phase: String,
+        presented_task_status: String,
+        claim_result: Value,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BusinessCommandReplayReceipt {
+    contract: &'static str,
+    command_id: String,
+    already_accepted: bool,
+    state: BusinessCommandReplayState,
+    control_claim_disposition: Option<String>,
+    form: BusinessCommandReplayForm,
+}
+
+impl BusinessCommandReplayReceipt {
+    fn stored_outcome_with_lifecycle(
+        command_id: &str,
+        existing_status: &str,
+        lifecycle_projection: &Value,
+        stored_outcome: &Value,
+        control_claim_disposition: Option<&str>,
+    ) -> Self {
+        Self {
+            contract: BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT,
+            command_id: command_id.to_string(),
+            already_accepted: true,
+            state: replay_state_with_control_claim(
+                lifecycle_projection,
+                existing_status,
+                control_claim_disposition,
+            ),
+            control_claim_disposition: control_claim_disposition.map(str::to_string),
+            form: BusinessCommandReplayForm::StoredOutcomeWithLifecycle {
+                existing_status: existing_status.to_string(),
+                lifecycle_projection: lifecycle_projection.clone(),
+                stored_outcome: stored_outcome.clone(),
+            },
+        }
+    }
+
+    fn stored_outcome(
+        command_id: &str,
+        existing_status: &str,
+        stored_outcome: &Value,
+        control_claim_disposition: Option<&str>,
+    ) -> Self {
+        Self {
+            contract: BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT,
+            command_id: command_id.to_string(),
+            already_accepted: true,
+            state: replay_state_with_control_claim(
+                stored_outcome,
+                existing_status,
+                control_claim_disposition,
+            ),
+            control_claim_disposition: control_claim_disposition.map(str::to_string),
+            form: BusinessCommandReplayForm::StoredOutcome {
+                existing_status: existing_status.to_string(),
+                stored_outcome: stored_outcome.clone(),
+            },
+        }
+    }
+
+    fn existing_command(
+        command_id: &str,
+        existing_status: &str,
+        control_claim_disposition: Option<&str>,
+    ) -> Self {
+        let status_document = serde_json::json!({ "status": existing_status });
+        Self {
+            contract: BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT,
+            command_id: command_id.to_string(),
+            already_accepted: true,
+            state: replay_state_with_control_claim(
+                &status_document,
+                existing_status,
+                control_claim_disposition,
+            ),
+            control_claim_disposition: control_claim_disposition.map(str::to_string),
+            form: BusinessCommandReplayForm::ExistingCommand {
+                existing_status: existing_status.to_string(),
+            },
+        }
+    }
+
+    fn terminal_control_claim(command_id: &str, terminal_status: &str, result: &Value) -> Self {
+        Self {
+            contract: BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT,
+            command_id: command_id.to_string(),
+            already_accepted: true,
+            state: BusinessCommandReplayState::Terminal,
+            control_claim_disposition: Some("terminal".to_string()),
+            form: BusinessCommandReplayForm::TerminalControlClaim {
+                terminal_status: terminal_status.to_string(),
+                result: result.clone(),
+            },
+        }
+    }
+
+    fn uncertain_control_claim(command_id: &str, claim_result: Option<&Value>) -> Self {
+        Self {
+            contract: BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT,
+            command_id: command_id.to_string(),
+            already_accepted: true,
+            state: BusinessCommandReplayState::Uncertain,
+            control_claim_disposition: Some("uncertain".to_string()),
+            form: BusinessCommandReplayForm::UncertainControlClaim {
+                claim_disposition: "uncertain".to_string(),
+                presented_execution_phase: "blocked".to_string(),
+                presented_task_status: "blocked".to_string(),
+                claim_result: claim_result.cloned().unwrap_or(Value::Null),
+            },
+        }
+    }
+}
+
+fn replay_state_with_control_claim(
+    document: &Value,
+    fallback_status: &str,
+    control_claim_disposition: Option<&str>,
+) -> BusinessCommandReplayState {
+    match control_claim_disposition {
+        Some("terminal") => BusinessCommandReplayState::Terminal,
+        Some("uncertain") => BusinessCommandReplayState::Uncertain,
+        _ => replay_state_from_document(document, fallback_status),
+    }
+}
+
+fn replay_state_from_document(
+    document: &Value,
+    fallback_status: &str,
+) -> BusinessCommandReplayState {
+    if document.get("execution_phase").and_then(Value::as_str) == Some("terminal")
+        || document
+            .get("terminal_status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "none")
+    {
+        return BusinessCommandReplayState::Terminal;
+    }
+    if let Some(phase) = document.get("execution_phase").and_then(Value::as_str) {
+        return match phase {
+            "blocked" | "waiting_dependencies" => BusinessCommandReplayState::Blocked,
+            "accepted" | "leased" | "running" | "awaiting_review" | "validating" => {
+                BusinessCommandReplayState::Running
+            }
+            _ => replay_state_from_status(
+                document
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or(fallback_status),
+            ),
+        };
+    }
+    replay_state_from_status(
+        document
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback_status),
+    )
+}
+
+fn replay_state_from_status(status: &str) -> BusinessCommandReplayState {
+    match status {
+        "completed" | "failed" | "cancelled" => BusinessCommandReplayState::Terminal,
+        "blocked" | "waiting_dependencies" => BusinessCommandReplayState::Blocked,
+        "accepted" | "running" | "queued" | "pending" | "pending_sync" => {
+            BusinessCommandReplayState::Running
+        }
+        _ => BusinessCommandReplayState::Known,
+    }
+}
+
+fn with_business_command_replay_receipt(
+    mut response: Value,
+    receipt: BusinessCommandReplayReceipt,
+) -> anyhow::Result<Value> {
+    let object = response
+        .as_object_mut()
+        .context("business command replay response must be an object")?;
+    object.insert("already_accepted".to_string(), Value::Bool(true));
+    object.insert("replay_receipt".to_string(), serde_json::to_value(receipt)?);
+    Ok(response)
+}
 
 pub(super) const EXACT_CONTROL_TYPES: [&str; 52] = [
     "ctox.app.access.grant",
@@ -212,15 +433,36 @@ pub fn accept_rxdb_business_command_with_origin(
                     object.insert("already_accepted".to_string(), Value::Bool(true));
                 }
                 persist_business_command_lifecycle_projection(root, &lifecycle_outcome)?;
-                return Ok(lifecycle_outcome);
+                let receipt = BusinessCommandReplayReceipt::stored_outcome_with_lifecycle(
+                    &command_id,
+                    existing_status.as_deref().unwrap_or("known"),
+                    &lifecycle_outcome,
+                    &stored_outcome,
+                    control_claim.as_ref().map(|claim| claim.disposition),
+                );
+                return with_business_command_replay_receipt(lifecycle_outcome, receipt);
             }
-            return Ok(stored_outcome);
+            let receipt = BusinessCommandReplayReceipt::stored_outcome(
+                &command_id,
+                existing_status.as_deref().unwrap_or("known"),
+                &stored_outcome,
+                control_claim.as_ref().map(|claim| claim.disposition),
+            );
+            return with_business_command_replay_receipt(stored_outcome, receipt);
         }
-        return Ok(serde_json::json!({
-            "id": command_id,
-            "command_id": command_id,
-            "status": "already_accepted"
-        }));
+        let receipt = BusinessCommandReplayReceipt::existing_command(
+            &command_id,
+            existing_status.as_deref().unwrap_or("known"),
+            control_claim.as_ref().map(|claim| claim.disposition),
+        );
+        return with_business_command_replay_receipt(
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "status": "already_accepted"
+            }),
+            receipt,
+        );
     }
     drop(conn);
     let command = if resumes_recoverable_accepted_claim {
@@ -244,20 +486,29 @@ pub fn accept_rxdb_business_command_with_origin(
             "new" => {}
             "terminal" => {
                 let terminal_status = claim.terminal_status.as_deref().unwrap_or("completed");
-                return Ok(serde_json::json!({
-                    "ok": terminal_status == "completed",
-                    "id": command_id,
-                    "command_id": command_id,
-                    "status": terminal_status,
-                    "execution_mode": "control",
-                    "execution_task_id": "",
-                    "target_task_id": "",
-                    "target_record_id": command.record_id.clone().unwrap_or_default(),
-                    "task_id": "",
-                    "task_status": terminal_status,
-                    "result": claim.result.unwrap_or(Value::Null),
-                    "already_accepted": true,
-                }));
+                let result = claim.result.unwrap_or(Value::Null);
+                let receipt = BusinessCommandReplayReceipt::terminal_control_claim(
+                    &command_id,
+                    terminal_status,
+                    &result,
+                );
+                return with_business_command_replay_receipt(
+                    serde_json::json!({
+                        "ok": terminal_status == "completed",
+                        "id": command_id,
+                        "command_id": command_id,
+                        "status": terminal_status,
+                        "execution_mode": "control",
+                        "execution_task_id": "",
+                        "target_task_id": "",
+                        "target_record_id": command.record_id.clone().unwrap_or_default(),
+                        "task_id": "",
+                        "task_status": terminal_status,
+                        "result": result,
+                        "already_accepted": true,
+                    }),
+                    receipt,
+                );
             }
             _ if is_recoverable_background_control_command_type(&command.command_type) => {}
             _ => {
@@ -278,24 +529,31 @@ pub fn accept_rxdb_business_command_with_origin(
                         }));
                     }
                 } else {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "id": command_id,
-                        "command_id": command_id,
-                        "status": "accepted",
-                        "execution_mode": "control",
-                        "execution_task_id": "",
-                        "target_task_id": "",
-                        "target_record_id": command.record_id.clone().unwrap_or_default(),
-                        "task_id": "",
-                        "task_status": "blocked",
-                        "execution_phase": "blocked",
-                        "terminal_status": "none",
-                        "error_code": "dependency_missing",
-                        "error_message": "control effect was durably claimed but has no terminal outcome; automatic replay is suppressed to prevent a duplicate side effect",
-                        "retryable": false,
-                        "already_accepted": true,
-                    }));
+                    let receipt = BusinessCommandReplayReceipt::uncertain_control_claim(
+                        &command_id,
+                        claim.result.as_ref(),
+                    );
+                    return with_business_command_replay_receipt(
+                        serde_json::json!({
+                            "ok": false,
+                            "id": command_id,
+                            "command_id": command_id,
+                            "status": "accepted",
+                            "execution_mode": "control",
+                            "execution_task_id": "",
+                            "target_task_id": "",
+                            "target_record_id": command.record_id.clone().unwrap_or_default(),
+                            "task_id": "",
+                            "task_status": "blocked",
+                            "execution_phase": "blocked",
+                            "terminal_status": "none",
+                            "error_code": "dependency_missing",
+                            "error_message": "control effect was durably claimed but has no terminal outcome; automatic replay is suppressed to prevent a duplicate side effect",
+                            "retryable": false,
+                            "already_accepted": true,
+                        }),
+                        receipt,
+                    );
                 }
             }
         }
@@ -1264,6 +1522,116 @@ mod tests {
             "unterminated string-literal dispatcher arm: {arm_pattern}"
         );
         exact_types
+    }
+
+    #[test]
+    fn already_accepted_replay_receipt_distinguishes_all_five_forms() -> anyhow::Result<()> {
+        let command_id = "cmd_replay_receipt_forms";
+        let stored_outcome = serde_json::json!({
+            "id": command_id,
+            "command_id": command_id,
+            "status": "running",
+            "result": { "progress": 3 },
+            "stored_only": "preserved"
+        });
+        let lifecycle_projection = serde_json::json!({
+            "id": command_id,
+            "command_id": command_id,
+            "status": "accepted",
+            "execution_phase": "running",
+            "terminal_status": "none",
+            "projection_only": "preserved"
+        });
+        let terminal_result = serde_json::json!({ "ok": true, "value": 42 });
+        let uncertain_result = serde_json::json!({ "status": "running", "progress": 1 });
+
+        let receipts = [
+            serde_json::to_value(BusinessCommandReplayReceipt::stored_outcome_with_lifecycle(
+                command_id,
+                "running",
+                &lifecycle_projection,
+                &stored_outcome,
+                Some("uncertain"),
+            ))?,
+            serde_json::to_value(BusinessCommandReplayReceipt::stored_outcome(
+                command_id,
+                "running",
+                &stored_outcome,
+                None,
+            ))?,
+            serde_json::to_value(BusinessCommandReplayReceipt::existing_command(
+                command_id, "accepted", None,
+            ))?,
+            serde_json::to_value(BusinessCommandReplayReceipt::terminal_control_claim(
+                command_id,
+                "completed",
+                &terminal_result,
+            ))?,
+            serde_json::to_value(BusinessCommandReplayReceipt::uncertain_control_claim(
+                command_id,
+                Some(&uncertain_result),
+            ))?,
+        ];
+
+        let forms = receipts
+            .iter()
+            .map(|receipt| receipt["form"]["kind"].as_str().unwrap_or_default())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            forms,
+            BTreeSet::from([
+                "existing_command",
+                "stored_outcome",
+                "stored_outcome_with_lifecycle",
+                "terminal_control_claim",
+                "uncertain_control_claim",
+            ]),
+            "every former replay response shape needs a distinct typed form"
+        );
+        assert_eq!(receipts[0]["state"], "uncertain");
+        assert_eq!(receipts[0]["control_claim_disposition"], "uncertain");
+        assert_eq!(receipts[1]["state"], "running");
+        assert_eq!(receipts[2]["state"], "running");
+        assert_eq!(receipts[3]["state"], "terminal");
+        assert_eq!(receipts[4]["state"], "uncertain");
+        assert_ne!(
+            receipts[3]["state"], receipts[4]["state"],
+            "terminal and uncertain are load-bearing distinct replay states"
+        );
+        assert_eq!(
+            receipts[0]["form"]["lifecycle_projection"]["projection_only"],
+            "preserved"
+        );
+        assert_eq!(
+            receipts[0]["form"]["stored_outcome"]["stored_only"],
+            "preserved"
+        );
+        assert_eq!(
+            receipts[1]["form"]["stored_outcome"]["stored_only"],
+            "preserved"
+        );
+        assert_eq!(receipts[2]["form"]["existing_status"], "accepted");
+        assert_eq!(receipts[3]["form"]["result"], terminal_result);
+        assert_eq!(receipts[4]["form"]["claim_result"], uncertain_result);
+        assert_eq!(receipts[4]["form"]["presented_execution_phase"], "blocked");
+
+        let wrapped = with_business_command_replay_receipt(
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "status": "already_accepted",
+                "legacy_only": "preserved"
+            }),
+            BusinessCommandReplayReceipt::existing_command(command_id, "accepted", None),
+        )?;
+        assert_eq!(wrapped["legacy_only"], "preserved");
+        assert_eq!(wrapped["status"], "already_accepted");
+        assert_eq!(wrapped["already_accepted"], true);
+        assert_eq!(
+            wrapped["replay_receipt"]["contract"],
+            BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT
+        );
+        Ok(())
     }
 
     #[test]
