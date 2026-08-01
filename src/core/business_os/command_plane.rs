@@ -558,6 +558,329 @@ pub fn accept_rxdb_business_command_with_origin(
             }
         }
     }
+    if command.command_type == "web_stack.person_research" && command.module.trim().is_empty() {
+        return write_rxdb_failed_control_command_outcome(
+            root,
+            &command,
+            "person_research_authorization",
+            anyhow::anyhow!("web_stack.person_research requires a calling module"),
+        );
+    }
+
+    let prepared = PreparedBusinessCommand::from_command(&command)?;
+    match CommandAuthorizationStage::for_command(&command) {
+        CommandAuthorizationStage::Policy(requirement) => {
+            match enforce_command_policy(
+                root,
+                &command,
+                |session| requirement.resolve(root, &command, session),
+                |session| {
+                    dispatch_business_command_with_outcome(
+                        root,
+                        &command_id,
+                        &command,
+                        prepared,
+                        Some(session),
+                    )
+                },
+            ) {
+                Ok(enforced) => enforced.into_outcome(),
+                Err(error) if command.command_type == "web_stack.person_research" => {
+                    write_rxdb_failed_control_command_outcome(
+                        root,
+                        &command,
+                        "person_research_authorization",
+                        error,
+                    )
+                }
+                Err(error) => Err(error),
+            }
+        }
+        CommandAuthorizationStage::AuthenticatedSession => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            dispatch_business_command_with_outcome(
+                root,
+                &command_id,
+                &command,
+                prepared,
+                Some(&session),
+            )
+        }
+        CommandAuthorizationStage::CommandSession => {
+            let session = rxdb_command_session(root, &command)?;
+            dispatch_business_command_with_outcome(
+                root,
+                &command_id,
+                &command,
+                prepared,
+                Some(&session),
+            )
+        }
+        CommandAuthorizationStage::InDispatch => {
+            dispatch_business_command_with_outcome(root, &command_id, &command, prepared, None)
+        }
+    }
+}
+
+enum CommandAuthorizationStage {
+    Policy(CentralCommandPolicyRequirement),
+    AuthenticatedSession,
+    CommandSession,
+    InDispatch,
+}
+
+impl CommandAuthorizationStage {
+    fn for_command(command: &BusinessCommand) -> Self {
+        if let Some(requirement) = CentralCommandPolicyRequirement::for_command(command) {
+            return Self::Policy(requirement);
+        }
+        if is_ats_active_command(&command.command_type)
+            || super::threads::is_threads_command(&command.command_type)
+            || command.command_type.starts_with("ctox.report.")
+        {
+            return Self::AuthenticatedSession;
+        }
+        if is_iot_active_command(&command.command_type)
+            || is_ats_mutating_command(&command.command_type)
+        {
+            return Self::CommandSession;
+        }
+        Self::InDispatch
+    }
+}
+
+enum CentralCommandPolicyRequirement {
+    Fixed(CommandPolicyRequirement),
+    ThreadExternalApproval,
+}
+
+impl CentralCommandPolicyRequirement {
+    fn for_command(command: &BusinessCommand) -> Option<Self> {
+        let command_type = command.command_type.as_str();
+        let fixed = if command_type == "web_stack.person_research" {
+            Some(CommandPolicyRequirement::module(
+                BusinessOsPermission::DataRead,
+                &command.module,
+            ))
+        } else if command_type.starts_with("office.document.") {
+            Some(CommandPolicyRequirement::module(
+                BusinessOsPermission::DataWrite,
+                "documents",
+            ))
+        } else if command_type.starts_with("office.spreadsheet.") {
+            Some(CommandPolicyRequirement::module(
+                BusinessOsPermission::DataWrite,
+                "spreadsheets",
+            ))
+        } else if is_customers_active_command(command_type) {
+            Some(CommandPolicyRequirement::module(
+                BusinessOsPermission::DataWrite,
+                "customers",
+            ))
+        } else if super::external_sql_sync::is_external_sql_command(command_type) {
+            Some(CommandPolicyRequirement::module(
+                super::external_sql_sync::data_write_permission(),
+                &command.module,
+            ))
+        } else if is_outbound_active_command(command_type) {
+            Some(CommandPolicyRequirement::module(
+                BusinessOsPermission::DataWrite,
+                "outbound",
+            ))
+        } else if command_type.starts_with("ctox.channel.") {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::IntegrationsManage,
+            ))
+        } else if is_appsec_business_command(command_type) {
+            let permission = if appsec_business_command_requires_data_write(command_type) {
+                BusinessOsPermission::DataWrite
+            } else {
+                BusinessOsPermission::DataRead
+            };
+            Some(CommandPolicyRequirement::module(
+                permission,
+                APPSEC_MODULE_ID,
+            ))
+        } else if command_type.starts_with("ctox.ticket.") {
+            Some(CommandPolicyRequirement::module(
+                BusinessOsPermission::SupportTriage,
+                "support",
+            ))
+        } else if super::support::is_support_command(command_type) {
+            Some(CommandPolicyRequirement::module(
+                super::support::command_permission(command_type),
+                "support",
+            ))
+        } else {
+            None
+        };
+        if let Some(requirement) = fixed {
+            return Some(Self::Fixed(requirement));
+        }
+        if super::threads::is_threads_command(command_type)
+            && super::threads::requires_external_approval(command_type)
+        {
+            return Some(Self::ThreadExternalApproval);
+        }
+        if matches!(command.origin, CommandOrigin::ReplicatedPeer)
+            && !is_rxdb_control_command_type(command_type)
+            && !command_type.starts_with("ctox.report.")
+            && app_build_command_policy_target(command).is_none()
+        {
+            let permission = if command_type == "business_os.context.ask" {
+                BusinessOsPermission::DataRead
+            } else {
+                BusinessOsPermission::DataWrite
+            };
+            return Some(Self::Fixed(CommandPolicyRequirement::module(
+                permission,
+                &command.module,
+            )));
+        }
+        None
+    }
+
+    fn resolve(
+        self,
+        root: &Path,
+        command: &BusinessCommand,
+        session: &BusinessOsSession,
+    ) -> anyhow::Result<CommandPolicyRequirement> {
+        match self {
+            Self::Fixed(requirement) => Ok(requirement),
+            Self::ThreadExternalApproval => {
+                let approval_id = command
+                    .payload
+                    .get("approval_request_id")
+                    .or_else(|| command.payload.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .or(command.record_id.as_deref())
+                    .unwrap_or_default()
+                    .to_owned();
+                let assigned_to_actor = if approval_id.is_empty() {
+                    false
+                } else {
+                    let actor_id = session_user_id(session).unwrap_or_default();
+                    pull_collection_record(root, "ctox_task_approval_requests", &approval_id)?
+                        .and_then(|approval| first_string_field(&approval, &["reviewer_user_id"]))
+                        .map(|reviewer| reviewer == actor_id)
+                        .unwrap_or(false)
+                };
+                Ok(CommandPolicyRequirement::scoped(
+                    BusinessOsPermission::ExternalApprove,
+                    BusinessOsScope {
+                        scope_type: BusinessOsScopeType::Approval,
+                        scope_id: if approval_id.is_empty() {
+                            None
+                        } else {
+                            Some(approval_id)
+                        },
+                        assigned_to_actor,
+                        owned_by_actor: false,
+                    },
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct PreparedBusinessCommand {
+    channel_mutation: Option<ChannelCommandRequest>,
+    report_mutation: Option<BusinessOsReportMutation>,
+}
+
+impl PreparedBusinessCommand {
+    fn from_command(command: &BusinessCommand) -> anyhow::Result<Self> {
+        let mut prepared = Self::default();
+        if command.command_type.starts_with("ctox.channel.") {
+            prepared.channel_mutation = Some(
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.channel payload")?,
+            );
+        }
+        if command.command_type.starts_with("ctox.report.") {
+            let mut mutation: BusinessOsReportMutation =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.report payload")?;
+            if mutation.kind.trim().is_empty() {
+                mutation.kind = command
+                    .command_type
+                    .strip_prefix("ctox.report.")
+                    .unwrap_or("bug")
+                    .to_string();
+            }
+            mutation.client_context = command.client_context.clone();
+            prepared.report_mutation = Some(mutation);
+        }
+        Ok(prepared)
+    }
+}
+
+enum BusinessCommandDispatchOutcome {
+    Returned(Value),
+    Control {
+        status: String,
+        task_id: Option<String>,
+        task_status: Option<String>,
+        result: Value,
+    },
+    FailedControl {
+        task_id: Option<String>,
+        result: Value,
+        error: anyhow::Error,
+    },
+}
+
+impl BusinessCommandDispatchOutcome {
+    fn completed(result: Value, task_id: Option<String>) -> Self {
+        Self::Control {
+            status: "completed".to_string(),
+            task_id,
+            task_status: Some("completed".to_string()),
+            result,
+        }
+    }
+
+    fn failed(task_id: Option<String>, result: Value, error: anyhow::Error) -> Self {
+        Self::FailedControl {
+            task_id,
+            result,
+            error,
+        }
+    }
+}
+
+fn dispatch_business_command_with_outcome(
+    root: &Path,
+    command_id: &str,
+    command: &BusinessCommand,
+    prepared: PreparedBusinessCommand,
+    authorized_session: Option<&BusinessOsSession>,
+) -> anyhow::Result<Value> {
+    let dispatched =
+        dispatch_business_command(root, command_id, command, prepared, authorized_session)?;
+    write_business_command_dispatch_outcome(root, command, dispatched)
+}
+
+fn authorized_dispatch_session<'a>(
+    authorized_session: Option<&'a BusinessOsSession>,
+    command_type: &str,
+) -> anyhow::Result<&'a BusinessOsSession> {
+    authorized_session.with_context(|| {
+        format!("central authorization did not provide a session for {command_type}")
+    })
+}
+
+fn dispatch_business_command(
+    root: &Path,
+    command_id: &str,
+    command: &BusinessCommand,
+    mut prepared: PreparedBusinessCommand,
+    authorized_session: Option<&BusinessOsSession>,
+) -> anyhow::Result<BusinessCommandDispatchOutcome> {
     match command.command_type.as_str() {
         "ctox.maintenance.client_ready"
         | "ctox.task.update"
@@ -567,19 +890,17 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.office.settings.save"
         | "ctox.coding.turn"
         | "ctox.file.materialize"
-        | "ctox.file.export" => {
-            return handle_workspace_control_command(root, &command);
-        }
+        | "ctox.file.export" => handle_workspace_control_command(root, command)
+            .map(BusinessCommandDispatchOutcome::Returned),
         "ctox.app.action.run"
         | "ctox.app.access.grant"
         | "ctox.app.access.revoke"
         | "ctox.app_store.install"
-        | "ctox.app_store.uninstall" => {
-            return handle_app_lifecycle_command(root, &command_id, &command);
-        }
+        | "ctox.app_store.uninstall" => handle_app_lifecycle_command(root, command_id, command)
+            .map(BusinessCommandDispatchOutcome::Returned),
         command_type if crate::coding_agents::is_coding_agent_command(command_type) => {
-            let outcome = match rxdb_command_session(root, &command)
-                .and_then(|_| crate::coding_agents::handle_business_command(root, &command))
+            let outcome = match rxdb_command_session(root, command)
+                .and_then(|_| crate::coding_agents::handle_business_command(root, command))
             {
                 Ok(outcome) => outcome,
                 Err(error) => serde_json::json!({
@@ -600,44 +921,15 @@ pub fn accept_rxdb_business_command_with_origin(
             } else {
                 "completed"
             };
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                status,
-                None,
-                Some(status),
-                serde_json::json!({ "outcome": outcome }),
-            );
+            Ok(BusinessCommandDispatchOutcome::Control {
+                status: status.to_string(),
+                task_id: None,
+                task_status: Some(status.to_string()),
+                result: serde_json::json!({ "outcome": outcome }),
+            })
         }
-        "web_stack.person_research" => {
-            if command.module.trim().is_empty() {
-                return write_rxdb_failed_control_command_outcome(
-                    root,
-                    &command,
-                    "person_research_authorization",
-                    anyhow::anyhow!("web_stack.person_research requires a calling module"),
-                );
-            }
-            return match enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        BusinessOsPermission::DataRead,
-                        &command.module,
-                    ))
-                },
-                |_| super::person_research_command::start(root, command.clone()),
-            ) {
-                Ok(enforced) => enforced.into_outcome(),
-                Err(error) => write_rxdb_failed_control_command_outcome(
-                    root,
-                    &command,
-                    "person_research_authorization",
-                    error,
-                ),
-            };
-        }
+        "web_stack.person_research" => super::person_research_command::start(root, command.clone())
+            .map(BusinessCommandDispatchOutcome::Returned),
         "knowledge.command" => {
             let args = command
                 .payload
@@ -653,14 +945,7 @@ pub fn accept_rxdb_business_command_with_origin(
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let outcome = crate::knowledge::dispatch_capturing(root, &args)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+            Ok(BusinessCommandDispatchOutcome::completed(outcome, None))
         }
         "ctox.business_os.user.upsert"
         | "ctox.business_os.branding.update"
@@ -670,13 +955,13 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.business_os.backup.restore_drill"
         | "ctox.business_os.support.export_diagnostics"
         | "ctox.business_os.why" => {
-            return handle_business_os_command(root, &command);
+            handle_business_os_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         "ctox.secret.list"
         | "ctox.secret.put"
         | "ctox.secret.delete"
         | "ctox.subscription_auth.start" => {
-            return handle_secret_command(root, &command);
+            handle_secret_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         "ctox.module.repair_lifecycle_projection"
         | "ctox.module.release"
@@ -690,503 +975,243 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.module.rollback"
         | "ctox.module.list_versions"
         | "ctox.module.rollback_version" => {
-            return handle_module_command(root, &command);
+            handle_module_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         command_type
             if command_type.starts_with("office.document.")
                 || command_type.starts_with("office.spreadsheet.") =>
         {
-            let module_id = if command_type.starts_with("office.document.") {
-                "documents"
-            } else {
-                "spreadsheets"
-            };
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        BusinessOsPermission::DataWrite,
-                        module_id,
-                    ))
-                },
-                |_| match handle_office_control_command(root, &command) {
-                    Ok(outcome) => write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    ),
-                    Err(error) => {
-                        let error_code = if error.to_string().contains("version_conflict") {
-                            "version_conflict"
-                        } else if error.to_string().contains("feature_dependency_pending") {
-                            "feature_dependency_pending"
-                        } else {
-                            "office_engine_failed"
-                        };
-                        Err(write_failed_control_command_outcome_observably(
-                            root,
-                            &command,
-                            command.record_id.as_deref(),
-                            serde_json::json!({
-                                "ok": false,
-                                "error_code": error_code,
-                                "error": error.to_string(),
-                            }),
-                            error,
-                        ))
-                    }
-                },
-            )?
-            .into_outcome();
-        }
-        command_type if is_customers_active_command(command_type) => {
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        BusinessOsPermission::DataWrite,
-                        "customers",
-                    ))
-                },
-                |session| match handle_customers_active_command(root, session, &command) {
-                    Ok(outcome) => write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    ),
-                    Err(error) => Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        None,
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                        error,
-                    )),
-                },
-            )?
-            .into_outcome();
-        }
-        command_type if super::external_sql_sync::is_external_sql_command(command_type) => {
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        super::external_sql_sync::data_write_permission(),
-                        &command.module,
-                    ))
-                },
-                |_| match super::external_sql_sync::handle_business_command(root, &command) {
-                    Ok(outcome) => write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    ),
-                    Err(error) => Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        command.record_id.as_deref(),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                        error,
-                    )),
-                },
-            )?
-            .into_outcome();
-        }
-        command_type if is_outbound_active_command(command_type) => {
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        BusinessOsPermission::DataWrite,
-                        "outbound",
-                    ))
-                },
-                |session| {
-                    let outcome =
-                        handle_outbound_active_command(root, session, &command_id, &command)?;
-                    write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    )
-                },
-            )?
-            .into_outcome();
-        }
-        command_type if is_iot_active_command(command_type) => {
-            // §4A: the executor goes through the SAME iot::commands code path the
-            // `ctox iot` CLI uses. This family still uses rxdb_command_session
-            // to enforce a real chef/admin role via session_can_manage_all, so
-            // an untrusted peer that falls through to the default `user` role is
-            // rejected here with "chef or admin role required" instead of
-            // slipping past the always-true `authenticated && !auth_required`
-            // disjunct downstream.
-            // Then write a completed/failed outcome whose `result.projections` the
-            // rxdb_peer branch reprojects into the iot_* collections. Idempotent: a
-            // replayed command short-circuits on the stored outcome above.
-            let session = rxdb_command_session(root, &command)?;
-            match crate::iot::commands::handle_business_command(
-                root,
-                command_type,
-                &command.payload,
-                &session,
-            ) {
-                Ok(outcome) => {
-                    // Project engine state into the RxDB-visible business_records
-                    // store via iot::projector (same code path as the rxdb_peer
-                    // live stream). Failure to project must not silently drop the
-                    // outcome, so surface it.
-                    project_iot_business_command_outcome(root, &outcome)
-                        .context("project iot business command outcome")?;
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    );
-                }
+            match handle_office_control_command(root, command) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(
+                    outcome,
+                    command.record_id.clone(),
+                )),
                 Err(error) => {
-                    return Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        command.record_id.as_deref(),
+                    let error_code = if error.to_string().contains("version_conflict") {
+                        "version_conflict"
+                    } else if error.to_string().contains("feature_dependency_pending") {
+                        "feature_dependency_pending"
+                    } else {
+                        "office_engine_failed"
+                    };
+                    Ok(BusinessCommandDispatchOutcome::failed(
+                        command.record_id.clone(),
                         serde_json::json!({
                             "ok": false,
+                            "error_code": error_code,
                             "error": error.to_string(),
                         }),
                         error,
-                    ));
+                    ))
                 }
             }
         }
-        command_type if is_ats_active_command(command_type) => {
-            // Server-authoritative ATS gate checks: the browser asks the daemon
-            // whether a deployment/presentation is allowed; the decision is
-            // computed native-side from business_credentials/business_consents
-            // via ats_gates and returned as the command outcome. Read-only, so
-            // an authenticated peer suffices (no mutation, no projection).
-            let session = rxdb_authenticated_session(root, &command)?;
-            let outcome = handle_ats_active_command(root, &session, &command)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                command.record_id.as_deref(),
-                Some("completed"),
+        command_type if is_customers_active_command(command_type) => {
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            match handle_customers_active_command(root, session, command) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    None,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
+        }
+        command_type if super::external_sql_sync::is_external_sql_command(command_type) => {
+            match super::external_sql_sync::handle_business_command(root, command) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(
+                    outcome,
+                    command.record_id.clone(),
+                )),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    command.record_id.clone(),
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
+        }
+        command_type if is_outbound_active_command(command_type) => {
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            let outcome = handle_outbound_active_command(root, session, command_id, command)?;
+            Ok(BusinessCommandDispatchOutcome::completed(
                 outcome,
+                command.record_id.clone(),
+            ))
+        }
+        command_type if is_iot_active_command(command_type) => {
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            let outcome = crate::iot::commands::handle_business_command(
+                root,
+                command_type,
+                &command.payload,
+                session,
             );
+            match outcome {
+                Ok(outcome) => {
+                    project_iot_business_command_outcome(root, &outcome)
+                        .context("project iot business command outcome")?;
+                    Ok(BusinessCommandDispatchOutcome::completed(
+                        outcome,
+                        command.record_id.clone(),
+                    ))
+                }
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    command.record_id.clone(),
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
+        }
+        command_type if is_ats_active_command(command_type) => {
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            let outcome = handle_ats_active_command(root, session, command)?;
+            Ok(BusinessCommandDispatchOutcome::completed(
+                outcome,
+                command.record_id.clone(),
+            ))
         }
         command_type if is_ats_mutating_command(command_type) => {
-            // Server-authoritative ATS mutations (write records, gated where
-            // applicable). chef/admin role required, like the other active
-            // mutating module families.
-            let session = rxdb_command_session(root, &command)?;
-            let outcome = handle_ats_mutating_command(root, &session, &command)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                command.record_id.as_deref(),
-                Some("completed"),
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            let outcome = handle_ats_mutating_command(root, session, command)?;
+            Ok(BusinessCommandDispatchOutcome::completed(
                 outcome,
-            );
+                command.record_id.clone(),
+            ))
         }
         command_type if command_type.starts_with("invoices.") => {
-            // §5.6/§5.11 invoices module: server-authoritative accounting
-            // mutations (draft CRUD, post, Storno/cancel, §17 credit notes).
-            // An unknown invoices.* command, an auth failure, or a handler error
-            // must persist a FAILED business_commands outcome AND propagate the
-            // error — never fall through to generic queue acceptance. Reject an
-            // unknown type before the session check so the error names the
-            // unsupported type rather than an auth failure.
             let outcome = (|| -> anyhow::Result<Value> {
                 anyhow::ensure!(
                     super::invoices::is_invoices_active_command(command_type),
                     "unsupported invoices command type: {command_type}"
                 );
-                let session = rxdb_command_session(root, &command)?;
-                super::invoices::handle_invoices_active_command(root, &session, &command)
+                let session = rxdb_command_session(root, command)?;
+                super::invoices::handle_invoices_active_command(root, &session, command)
             })();
             match outcome {
-                Ok(value) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        value,
-                    );
-                }
-                Err(err) => {
-                    return Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        command.record_id.as_deref(),
-                        serde_json::json!({ "ok": false, "error": err.to_string() }),
-                        err,
-                    ));
-                }
+                Ok(value) => Ok(BusinessCommandDispatchOutcome::completed(
+                    value,
+                    command.record_id.clone(),
+                )),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    command.record_id.clone(),
+                    serde_json::json!({ "ok": false, "error": error.to_string() }),
+                    error,
+                )),
             }
         }
         command_type if command_type.starts_with("ctox.channel.") => {
-            let mutation: ChannelCommandRequest = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.channel payload")?;
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::workspace(
-                        BusinessOsPermission::IntegrationsManage,
-                    ))
-                },
-                |session| {
-                    let outcome = run_channel_command(root, session, command_type, mutation)?;
-                    write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    )
-                },
-            )?
-            .into_outcome();
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            let mutation = prepared
+                .channel_mutation
+                .take()
+                .context("ctox.channel mutation was not prepared before authorization")?;
+            let outcome = run_channel_command(root, session, command_type, mutation)?;
+            Ok(BusinessCommandDispatchOutcome::completed(outcome, None))
         }
         command_type if is_appsec_business_command(command_type) => {
-            let permission = if appsec_business_command_requires_data_write(command_type) {
-                BusinessOsPermission::DataWrite
-            } else {
-                BusinessOsPermission::DataRead
-            };
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        permission,
-                        APPSEC_MODULE_ID,
-                    ))
-                },
-                |session| match handle_appsec_business_command(root, session, &command) {
-                    Ok(outcome) => {
-                        let status = if outcome.get("ok").and_then(Value::as_bool) == Some(false) {
-                            "failed"
-                        } else {
-                            "completed"
-                        };
-                        write_rxdb_control_command_outcome(
-                            root,
-                            &command,
-                            status,
-                            command.record_id.as_deref(),
-                            Some(status),
-                            outcome,
-                        )
-                    }
-                    Err(error) => Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        command.record_id.as_deref(),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                        error,
-                    )),
-                },
-            )?
-            .into_outcome();
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            match handle_appsec_business_command(root, session, command) {
+                Ok(outcome) => {
+                    let status = if outcome.get("ok").and_then(Value::as_bool) == Some(false) {
+                        "failed"
+                    } else {
+                        "completed"
+                    };
+                    Ok(BusinessCommandDispatchOutcome::Control {
+                        status: status.to_string(),
+                        task_id: command.record_id.clone(),
+                        task_status: Some(status.to_string()),
+                        result: outcome,
+                    })
+                }
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    command.record_id.clone(),
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
         }
         command_type if command_type.starts_with("ctox.ticket.") => {
-            return enforce_command_policy(
+            let outcome = crate::mission::tickets::run_business_os_ticket_command(
                 root,
-                &command,
-                |_| {
-                    Ok(CommandPolicyRequirement::module(
-                        BusinessOsPermission::SupportTriage,
-                        "support",
-                    ))
-                },
-                |_| {
-                    let outcome = crate::mission::tickets::run_business_os_ticket_command(
-                        root,
-                        command_type,
-                        &command.payload,
-                    )?;
-                    let task_id = outcome
-                        .get("case_id")
-                        .or_else(|| outcome.get("ticket_key"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        task_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    )
-                },
-            )?
-            .into_outcome();
+                command_type,
+                &command.payload,
+            )?;
+            let task_id = outcome
+                .get("case_id")
+                .or_else(|| outcome.get("ticket_key"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Ok(BusinessCommandDispatchOutcome::completed(outcome, task_id))
         }
         command_type if super::support::is_support_command(command_type) => {
-            let permission = super::support::command_permission(command_type);
-            return enforce_command_policy(
-                root,
-                &command,
-                |_| Ok(CommandPolicyRequirement::module(permission, "support")),
-                |session| match super::support::handle_business_command(root, session, &command) {
-                    Ok(outcome) => write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    ),
-                    Err(error) => Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        command.record_id.as_deref(),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                        error,
-                    )),
-                },
-            )?
-            .into_outcome();
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            match super::support::handle_business_command(root, session, command) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(
+                    outcome,
+                    command.record_id.clone(),
+                )),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    command.record_id.clone(),
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
         }
         command_type if super::threads::is_threads_command(command_type) => {
-            let handle = |session: &BusinessOsSession| -> anyhow::Result<Value> {
-                match super::threads::handle_business_command(root, session, &command) {
-                    Ok(outcome) => write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    ),
-                    Err(error) => Err(write_failed_control_command_outcome_observably(
-                        root,
-                        &command,
-                        None,
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                        error,
-                    )),
-                }
-            };
-            if super::threads::requires_external_approval(command_type) {
-                return enforce_command_policy(
-                    root,
-                    &command,
-                    |session| {
-                        let approval_id = command
-                            .payload
-                            .get("approval_request_id")
-                            .or_else(|| command.payload.get("id"))
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .or(command.record_id.as_deref())
-                            .unwrap_or_default()
-                            .to_owned();
-                        let assigned_to_actor = if approval_id.is_empty() {
-                            false
-                        } else {
-                            let actor_id = session_user_id(session).unwrap_or_default();
-                            pull_collection_record(
-                                root,
-                                "ctox_task_approval_requests",
-                                &approval_id,
-                            )?
-                            .and_then(|approval| {
-                                first_string_field(&approval, &["reviewer_user_id"])
-                            })
-                            .map(|reviewer| reviewer == actor_id)
-                            .unwrap_or(false)
-                        };
-                        Ok(CommandPolicyRequirement::scoped(
-                            BusinessOsPermission::ExternalApprove,
-                            BusinessOsScope {
-                                scope_type: BusinessOsScopeType::Approval,
-                                scope_id: if approval_id.is_empty() {
-                                    None
-                                } else {
-                                    Some(approval_id)
-                                },
-                                assigned_to_actor,
-                                owned_by_actor: false,
-                            },
-                        ))
-                    },
-                    handle,
-                )?
-                .into_outcome();
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            match super::threads::handle_business_command(root, session, command) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    None,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
             }
-            let session = rxdb_authenticated_session(root, &command)?;
-            return handle(&session);
         }
         command_type if command_type.starts_with("ctox.report.") => {
-            let mut mutation: BusinessOsReportMutation =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.report payload")?;
-            if mutation.kind.trim().is_empty() {
-                mutation.kind = command_type
-                    .strip_prefix("ctox.report.")
-                    .unwrap_or("bug")
-                    .to_string();
-            }
-            mutation.client_context = command.client_context.clone();
-            let session = rxdb_authenticated_session(root, &command)?;
+            let session = authorized_dispatch_session(authorized_session, command_type)?;
+            let mutation = prepared
+                .report_mutation
+                .take()
+                .context("ctox.report mutation was not prepared before authorization")?;
             let accepted = record_report_command(
                 root,
-                &session,
+                session,
                 mutation,
-                Some(command_id),
+                Some(command_id.to_string()),
                 command.record_id.clone(),
             )?;
-            return Ok(serde_json::json!({
-                "ok": true,
-                "id": accepted.command_id,
-                "command_id": accepted.command_id,
-                "status": "accepted",
-                "task_id": accepted.task_id.unwrap_or_default(),
-                "task_status": accepted.task_status.unwrap_or_else(|| "accepted".to_string()),
-                "report_id": accepted.report_id,
-                "report_status": "open"
-            }));
+            Ok(BusinessCommandDispatchOutcome::Returned(
+                serde_json::json!({
+                    "ok": true,
+                    "id": accepted.command_id,
+                    "command_id": accepted.command_id,
+                    "status": "accepted",
+                    "task_id": accepted.task_id.unwrap_or_default(),
+                    "task_status": accepted.task_status.unwrap_or_else(|| "accepted".to_string()),
+                    "report_id": accepted.report_id,
+                    "report_status": "open"
+                }),
+            ))
         }
         "ctox.source.load"
         | "ctox.source.save"
@@ -1195,56 +1220,56 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.source.commit"
         | "ctox.source.log"
         | "ctox.source.diff" => {
-            return handle_source_command(root, &command);
+            handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         "ctox.mailserver.get_config"
         | "ctox.mailserver.save_domain"
         | "ctox.mailserver.delete_domain"
         | "ctox.mailserver.save_user"
         | "ctox.mailserver.delete_user" => {
-            return handle_mailserver_command(root, &command);
+            handle_mailserver_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
-        _ => {}
+        _ => {
+            let accepted = record_command(root, command.clone())?;
+            Ok(BusinessCommandDispatchOutcome::Returned(
+                serde_json::to_value(accepted)?,
+            ))
+        }
     }
-    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
-    // already-gated arm above falls through here into record_command, which
-    // records it AND enqueues server work (create_ctox_queue_task) — previously
-    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
-    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
-    // CLI / in-process callers, already trusted, matching rxdb_session_from_
-    // command). App-build commands carry their own AppsInstall/AppsModify gate
-    // inside record_command; every other fall-through is a record-mutating data
-    // command (source.parse, matching.*, business_os.chat.task / cv-print,
-    // documents.*), so require module-scoped DataWrite. The session is the
-    // capability-token actor, so an unprivileged / unauthenticated replicated
-    // peer (inert "user", no grant) is denied and never reaches record_command
-    // or create_ctox_queue_task.
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && app_build_command_policy_target(&command).is_none()
-    {
-        return enforce_command_policy(
+}
+
+fn write_business_command_dispatch_outcome(
+    root: &Path,
+    command: &BusinessCommand,
+    dispatched: BusinessCommandDispatchOutcome,
+) -> anyhow::Result<Value> {
+    match dispatched {
+        BusinessCommandDispatchOutcome::Returned(value) => Ok(value),
+        BusinessCommandDispatchOutcome::Control {
+            status,
+            task_id,
+            task_status,
+            result,
+        } => write_rxdb_control_command_outcome(
             root,
-            &command,
-            |_| {
-                let permission = if command.command_type == "business_os.context.ask" {
-                    BusinessOsPermission::DataRead
-                } else {
-                    BusinessOsPermission::DataWrite
-                };
-                Ok(CommandPolicyRequirement::module(
-                    permission,
-                    &command.module,
-                ))
-            },
-            |_| {
-                let accepted = record_command(root, command.clone())?;
-                Ok(serde_json::to_value(accepted)?)
-            },
-        )?
-        .into_outcome();
+            command,
+            &status,
+            task_id.as_deref(),
+            task_status.as_deref(),
+            result,
+        ),
+        BusinessCommandDispatchOutcome::FailedControl {
+            task_id,
+            result,
+            error,
+        } => Err(write_failed_control_command_outcome_observably(
+            root,
+            command,
+            task_id.as_deref(),
+            result,
+            error,
+        )),
     }
-    let accepted = record_command(root, command)?;
-    Ok(serde_json::to_value(accepted)?)
 }
 
 pub(super) fn write_rxdb_control_command_outcome(
@@ -1337,27 +1362,12 @@ fn write_rxdb_control_command_state(
     if !terminal && is_rxdb_control_command_type(&command.command_type) {
         channels::progress_business_control_command(root, command_id, status, &result)?;
     }
-    if terminal && is_rxdb_control_command_type(&command.command_type) {
-        let terminal_status = match status {
+    let canonical_terminal_status =
+        (terminal && is_rxdb_control_command_type(&command.command_type)).then(|| match status {
             "completed" => "completed",
             "cancelled" => "cancelled",
             _ => "failed",
-        };
-        channels::complete_business_control_command(
-            root,
-            command_id,
-            terminal_status,
-            &result,
-            (terminal_status == "failed")
-                .then(|| {
-                    result
-                        .get("error")
-                        .or_else(|| result.pointer("/outcome/stderr"))
-                        .and_then(Value::as_str)
-                })
-                .flatten(),
-        )?;
-    }
+        });
     let conn = open_store(root)?;
     conn.execute(
         "INSERT INTO business_commands
@@ -1422,6 +1432,24 @@ fn write_rxdb_control_command_state(
     )?;
     record_business_module_lifecycle_event(root, command, status, &result)?;
     upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection)?;
+    // Readers treat the canonical terminal transition as a completion barrier.
+    // Publish it only after the chat and all local/RxDB projections are durable.
+    if let Some(terminal_status) = canonical_terminal_status {
+        channels::complete_business_control_command(
+            root,
+            command_id,
+            terminal_status,
+            &result,
+            (terminal_status == "failed")
+                .then(|| {
+                    result
+                        .get("error")
+                        .or_else(|| result.pointer("/outcome/stderr"))
+                        .and_then(Value::as_str)
+                })
+                .flatten(),
+        )?;
+    }
     Ok(serde_json::json!({
         "ok": true,
         "id": command_id,
@@ -1479,14 +1507,14 @@ mod tests {
 
     fn dispatcher_exact_control_types(source: &str) -> BTreeSet<String> {
         let function_start = source
-            .find("pub fn accept_rxdb_business_command_with_origin")
-            .expect("accept_rxdb_business_command_with_origin must exist");
+            .find("fn dispatch_business_command(")
+            .expect("dispatch_business_command must exist");
         let match_start = source[function_start..]
             .find("match command.command_type.as_str()")
             .map(|offset| function_start + offset)
             .expect("command dispatcher match must exist");
         let fallback = source[match_start..]
-            .find("        _ => {}")
+            .find("        _ => {")
             .map(|offset| match_start + offset)
             .expect("command dispatcher fallback must exist");
         let classifier = &source[match_start..fallback];
