@@ -58,10 +58,10 @@ use super::store_catalog_projections::{
     write_module_catalog_projection_to_rxdb_for_module,
 };
 use super::store_policy::{
-    active_permission_grant_allows, evaluate_policy_with_explicit_grants,
+    active_permission_grant_allows, enforce_command_policy, evaluate_policy_with_explicit_grants,
     queue_command_policy_decision, reject_command_if_policy_denied, scoped_policy_decision,
     session_can_manage_task, task_policy_decision, trusted_actor_policy_decision_with_conn,
-    user_upsert_policy_decision, workspace_policy_decision,
+    user_upsert_policy_decision, workspace_policy_decision, CommandPolicyRequirement,
 };
 pub(super) use super::store_policy::{module_policy_decision, session_has_workspace_permission};
 pub use super::store_policy::{
@@ -15927,49 +15927,67 @@ pub(super) fn handle_workspace_control_command(
         "ctox.task.update" => {
             let mutation: CtoxTaskUpdateMutation = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.task.update payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let task_id_for_policy = resolve_ctox_task_id(root, &mutation.task_id)?;
-            let decision = task_policy_decision(root, &session, &task_id_for_policy)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = update_ctox_task(root, &session, mutation)?;
-            let task_id = outcome
-                .get("task")
-                .and_then(|task| task.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return write_rxdb_control_command_outcome(
+            let task_id_for_policy = mutation.task_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                task_id.as_deref(),
-                Some("updated"),
-                outcome,
-            );
+                |_| {
+                    let task_id = resolve_ctox_task_id(root, &task_id_for_policy)?;
+                    Ok(CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::CtoxTaskManage,
+                        BusinessOsScope::task(task_id, false, false),
+                    ))
+                },
+                |session| {
+                    let outcome = update_ctox_task(root, &session, mutation)?;
+                    let task_id = outcome
+                        .get("task")
+                        .and_then(|task| task.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        task_id.as_deref(),
+                        Some("updated"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.task.delete" => {
             let mutation: CtoxTaskDeleteMutation = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.task.delete payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let task_id_for_policy = resolve_ctox_task_id(root, &mutation.task_id)?;
-            let decision = task_policy_decision(root, &session, &task_id_for_policy)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = delete_ctox_task(root, &session, mutation)?;
-            let task_id = outcome
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return write_rxdb_control_command_outcome(
+            let task_id_for_policy = mutation.task_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                task_id.as_deref(),
-                Some("cancelled"),
-                outcome,
-            );
+                |_| {
+                    let task_id = resolve_ctox_task_id(root, &task_id_for_policy)?;
+                    Ok(CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::CtoxTaskManage,
+                        BusinessOsScope::task(task_id, false, false),
+                    ))
+                },
+                |session| {
+                    let outcome = delete_ctox_task(root, &session, mutation)?;
+                    let task_id = outcome
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        task_id.as_deref(),
+                        Some("cancelled"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.command.cancel" => {
             let target_command_id = command
@@ -15987,19 +16005,39 @@ pub(super) fn handle_workspace_control_command(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("cancelled by user");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let target = channels::inspect_business_command(root, target_command_id)?
-                .with_context(|| format!("target command `{target_command_id}` was not found"))?;
-            let task_id = target
-                .get("execution_task_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .context("target command has no cancellable execution task")?;
-            let decision = task_policy_decision(root, &session, task_id)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
+            let target_for_policy = RefCell::new(None);
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    let target = channels::inspect_business_command(root, target_command_id)?
+                        .with_context(|| {
+                            format!("target command `{target_command_id}` was not found")
+                        })?;
+                    let task_id = target
+                        .get("execution_task_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .context("target command has no cancellable execution task")?;
+                    let requirement = CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::CtoxTaskManage,
+                        BusinessOsScope::task(task_id, false, false),
+                    );
+                    *target_for_policy.borrow_mut() = Some(target);
+                    Ok(requirement)
+                },
+                |session| {
+                    let target = target_for_policy
+                        .borrow_mut()
+                        .take()
+                        .context("resolved command policy target is required")?;
+                    let task_id = target
+                        .get("execution_task_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .context("target command has no cancellable execution task")?;
             let actor = session_user_id(&session).unwrap_or("unknown");
             let cancellation = serde_json::json!({
                 "ok": true,
@@ -16030,102 +16068,129 @@ pub(super) fn handle_workspace_control_command(
                 Some("cancelled"),
                 cancellation,
             );
+            },
+        )?
+        .into_outcome();
         }
         "ctox.runtime_settings.save" => {
             let mutation: RuntimeSettingsRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.runtime_settings.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = save_runtime_settings_command(root, &session, mutation)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::RuntimeManage,
+                    ))
+                },
+                |session| {
+                    let outcome = save_runtime_settings_command(root, &session, mutation)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.office.settings.save" => {
             let mutation: OfficeRuntimeSettingsRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.office.settings.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = save_office_runtime_settings(root, mutation)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                Some("runtime-settings"),
-                Some("completed"),
-                serde_json::json!({ "ok": true, "office": outcome }),
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::RuntimeManage,
+                    ))
+                },
+                |_session| {
+                    let outcome = save_office_runtime_settings(root, mutation)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        Some("runtime-settings"),
+                        Some("completed"),
+                        serde_json::json!({ "ok": true, "office": outcome }),
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.coding.turn" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let prompt = command
-                .payload
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let faux = command
-                .payload
-                .get("faux")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            // Optional model override: by default the coding agent uses the same
-            // model/provider as CTOX (the gateway); a payload `model` (any pi-ai
-            // provider model) overrides it, like plain pi.
-            let model_override = command.payload.get("model").cloned();
-            // Delegate one bounded coding turn to the pi-sidecar owner. Errors
-            // (e.g. sidecar not built, gateway unreachable) become an ok:false
-            // outcome rather than a failed command.
-            let outcome = (|| -> anyhow::Result<Value> {
-                let dist = crate::coding_agents::pi_sidecar::resolve_sidecar_dist(root)?;
-                crate::coding_agents::pi_sidecar::run_module_coding_turn(
-                    root,
-                    &dist,
-                    &module_id,
-                    prompt,
-                    faux,
-                    model_override,
-                )
-            })()
-            .unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": error.to_string() }));
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsModify,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    let prompt = command
+                        .payload
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let faux = command
+                        .payload
+                        .get("faux")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    // Optional model override: by default the coding agent uses the same
+                    // model/provider as CTOX (the gateway); a payload `model` (any pi-ai
+                    // provider model) overrides it, like plain pi.
+                    let model_override = command.payload.get("model").cloned();
+                    // Delegate one bounded coding turn to the pi-sidecar owner. Errors
+                    // (e.g. sidecar not built, gateway unreachable) become an ok:false
+                    // outcome rather than a failed command.
+                    let outcome = (|| -> anyhow::Result<Value> {
+                        let dist = crate::coding_agents::pi_sidecar::resolve_sidecar_dist(root)?;
+                        crate::coding_agents::pi_sidecar::run_module_coding_turn(
+                            root,
+                            &dist,
+                            &module_id,
+                            prompt,
+                            faux,
+                            model_override,
+                        )
+                    })()
+                    .unwrap_or_else(
+                        |error| serde_json::json!({ "ok": false, "error": error.to_string() }),
+                    );
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.file.materialize" => {
             let mutation: DesktopFileMaterializeRequest =
@@ -16146,21 +16211,27 @@ pub(super) fn handle_workspace_control_command(
             let mutation: DesktopFileExportRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.file.export payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::DataRead)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = export_desktop_file_command(root, &session, mutation)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::DataRead,
+                    ))
+                },
+                |session| {
+                    let outcome = export_desktop_file_command(root, &session, mutation)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         other => anyhow::bail!("unsupported workspace control command type: {other}"),
     }
@@ -16173,37 +16244,47 @@ pub(super) fn handle_app_lifecycle_command(
 ) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.app.action.run" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = command
-                .payload
-                .get("module_id")
-                .and_then(Value::as_str)
-                .unwrap_or(command.module.as_str())
-                .trim();
-            anyhow::ensure!(
-                module_id == command.module,
-                "app_action_permission_denied: command module and payload module_id differ"
-            );
-            let decision =
-                module_policy_decision(root, &session, BusinessOsPermission::DataWrite, module_id)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let action_name = command
-                .payload
-                .get("action")
-                .or_else(|| command.payload.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            if let Some(idempotency_key) = command
-                .payload
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                anyhow::ensure!(
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    let module_id = command
+                        .payload
+                        .get("module_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(command.module.as_str())
+                        .trim();
+                    anyhow::ensure!(
+                        module_id == command.module,
+                        "app_action_permission_denied: command module and payload module_id differ"
+                    );
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::DataWrite,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let module_id = command
+                        .payload
+                        .get("module_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(command.module.as_str())
+                        .trim();
+                    let action_name = command
+                        .payload
+                        .get("action")
+                        .or_else(|| command.payload.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim();
+                    if let Some(idempotency_key) = command
+                        .payload
+                        .get("idempotency_key")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        anyhow::ensure!(
                     command_id
                         == app_runtime::idempotent_command_id(
                             module_id,
@@ -16212,248 +16293,268 @@ pub(super) fn handle_app_lifecycle_command(
                         ),
                     "app_action_input_invalid: command id does not match stable idempotency key"
                 );
-            }
-            let version = command
-                .payload
-                .get("action_version")
-                .and_then(Value::as_u64);
-            let input = command.payload.get("input").cloned().unwrap_or(Value::Null);
-            let actor_id = session_user_id(&session)
-                .context("app_action_permission_denied: authenticated actor is required")?;
-            let admission = app_runtime::admit(
-                root,
-                command_id,
-                module_id,
-                action_name,
-                version,
-                input,
-                actor_id,
-            )?;
-            if let Some(steps) = admission
-                .snapshot
-                .pointer("/definition/steps")
-                .and_then(Value::as_array)
-            {
-                let mut checked = HashSet::new();
-                for collection in steps
-                    .iter()
-                    .filter_map(|step| step.get("collection"))
-                    .filter_map(Value::as_str)
-                {
-                    if !checked.insert(collection) {
-                        continue;
                     }
-                    let collection_decision = scoped_policy_decision(
+                    let version = command
+                        .payload
+                        .get("action_version")
+                        .and_then(Value::as_u64);
+                    let input = command.payload.get("input").cloned().unwrap_or(Value::Null);
+                    let actor_id = session_user_id(&session)
+                        .context("app_action_permission_denied: authenticated actor is required")?;
+                    let admission = app_runtime::admit(
                         root,
-                        &session,
-                        BusinessOsPermission::DataWrite,
-                        BusinessOsScope::collection(collection),
+                        command_id,
+                        module_id,
+                        action_name,
+                        version,
+                        input,
+                        actor_id,
                     )?;
-                    if let Some(outcome) =
-                        reject_command_if_policy_denied(root, &command, &collection_decision)?
+                    if let Some(steps) = admission
+                        .snapshot
+                        .pointer("/definition/steps")
+                        .and_then(Value::as_array)
                     {
-                        return Ok(outcome);
+                        let mut checked = HashSet::new();
+                        for collection in steps
+                            .iter()
+                            .filter_map(|step| step.get("collection"))
+                            .filter_map(Value::as_str)
+                        {
+                            if !checked.insert(collection) {
+                                continue;
+                            }
+                            let collection_decision = scoped_policy_decision(
+                                root,
+                                &session,
+                                BusinessOsPermission::DataWrite,
+                                BusinessOsScope::collection(collection),
+                            )?;
+                            if let Some(outcome) = reject_command_if_policy_denied(
+                                root,
+                                &command,
+                                &collection_decision,
+                            )? {
+                                return Ok(outcome);
+                            }
+                        }
                     }
-                }
-            }
-            app_runtime::persist_admission(root, command_id, &admission)?;
-            return Ok(serde_json::json!({
-                "ok": true,
-                "id": command_id,
-                "command_id": command_id,
-                "status": "accepted",
-                "execution_mode": "control",
-                "execution_phase": "accepted",
-                "terminal_status": "none",
-                "task_status": "accepted",
-                "definition_hash": admission.definition_hash,
-                "saga_total_steps": admission.step_names.len(),
-                "_app_action_snapshot": admission.snapshot,
-            }));
+                    app_runtime::persist_admission(root, command_id, &admission)?;
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "id": command_id,
+                        "command_id": command_id,
+                        "status": "accepted",
+                        "execution_mode": "control",
+                        "execution_phase": "accepted",
+                        "terminal_status": "none",
+                        "task_status": "accepted",
+                        "definition_hash": admission.definition_hash,
+                        "saga_total_steps": admission.step_names.len(),
+                        "_app_action_snapshot": admission.snapshot,
+                    }));
+                },
+            )?
+            .into_outcome();
         }
         "ctox.app.access.grant" | "ctox.app.access.revoke" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RolesManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let module_id = command
-                .payload
-                .get("module_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let subject_type = command
-                .payload
-                .get("subject_type")
-                .and_then(Value::as_str)
-                .unwrap_or("user")
-                .trim();
-            let subject_id = command
-                .payload
-                .get("subject_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let permission = command
-                .payload
-                .get("permission")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let collection = command
-                .payload
-                .get("collection")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            anyhow::ensure!(
-                matches!(subject_type, "user" | "role"),
-                "subject_type must be user or role"
-            );
-            anyhow::ensure!(!subject_id.is_empty(), "subject_id is required");
-            anyhow::ensure!(
-                matches!(permission, "data.read" | "data.write"),
-                "permission must be data.read or data.write"
-            );
-            let owned_prefix = format!("{}_", module_id.replace('-', "_"));
-            anyhow::ensure!(
-                !module_id.is_empty() && collection.starts_with(&owned_prefix),
-                "collection must be owned by the target module"
-            );
-            let inspection = app_runtime::inspect_module(root, module_id)?;
-            anyhow::ensure!(
-                inspection
-                    .get("collections")
-                    .and_then(Value::as_array)
-                    .is_some_and(|collections| collections
-                        .iter()
-                        .any(|item| item.as_str() == Some(collection))),
-                "collection is not declared by the target module"
-            );
-            let grant_id = format!(
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::RolesManage,
+                    ))
+                },
+                |session| {
+                    let module_id = command
+                        .payload
+                        .get("module_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim();
+                    let subject_type = command
+                        .payload
+                        .get("subject_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("user")
+                        .trim();
+                    let subject_id = command
+                        .payload
+                        .get("subject_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim();
+                    let permission = command
+                        .payload
+                        .get("permission")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim();
+                    let collection = command
+                        .payload
+                        .get("collection")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim();
+                    anyhow::ensure!(
+                        matches!(subject_type, "user" | "role"),
+                        "subject_type must be user or role"
+                    );
+                    anyhow::ensure!(!subject_id.is_empty(), "subject_id is required");
+                    anyhow::ensure!(
+                        matches!(permission, "data.read" | "data.write"),
+                        "permission must be data.read or data.write"
+                    );
+                    let owned_prefix = format!("{}_", module_id.replace('-', "_"));
+                    anyhow::ensure!(
+                        !module_id.is_empty() && collection.starts_with(&owned_prefix),
+                        "collection must be owned by the target module"
+                    );
+                    let inspection = app_runtime::inspect_module(root, module_id)?;
+                    anyhow::ensure!(
+                        inspection
+                            .get("collections")
+                            .and_then(Value::as_array)
+                            .is_some_and(|collections| collections
+                                .iter()
+                                .any(|item| item.as_str() == Some(collection))),
+                        "collection is not declared by the target module"
+                    );
+                    let grant_id = format!(
                 "app-access:{module_id}:{subject_type}:{subject_id}:{permission}:{collection}"
             );
-            let active = command.command_type == "ctox.app.access.grant";
-            let now = now_ms() as i64;
-            let reason = command
-                .payload
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("Business OS app access change")
-                .trim();
-            let actor_id = session_user_id(&session).unwrap_or("ctox-cli");
-            let conn = open_store(root)?;
-            conn.execute(
-                "INSERT INTO business_permission_grants
+                    let active = command.command_type == "ctox.app.access.grant";
+                    let now = now_ms() as i64;
+                    let reason = command
+                        .payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Business OS app access change")
+                        .trim();
+                    let actor_id = session_user_id(&session).unwrap_or("ctox-cli");
+                    let conn = open_store(root)?;
+                    conn.execute(
+                        "INSERT INTO business_permission_grants
                     (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
                      active, reason, created_by, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, ?3, ?4, 'collection', ?5, ?6, ?7, ?8, ?9, ?9)
                  ON CONFLICT(grant_id) DO UPDATE SET
                     active = excluded.active, reason = excluded.reason,
                     created_by = excluded.created_by, updated_at_ms = excluded.updated_at_ms",
-                params![
-                    grant_id,
-                    subject_type,
-                    subject_id,
-                    permission,
-                    collection,
-                    active as i64,
-                    reason,
-                    actor_id,
-                    now,
-                ],
-            )?;
-            insert_business_event(
-                &conn,
-                "business_permission_grants",
-                &grant_id,
-                if active {
-                    "business_os.app_access.granted"
-                } else {
-                    "business_os.app_access.revoked"
+                        params![
+                            grant_id,
+                            subject_type,
+                            subject_id,
+                            permission,
+                            collection,
+                            active as i64,
+                            reason,
+                            actor_id,
+                            now,
+                        ],
+                    )?;
+                    insert_business_event(
+                        &conn,
+                        "business_permission_grants",
+                        &grant_id,
+                        if active {
+                            "business_os.app_access.granted"
+                        } else {
+                            "business_os.app_access.revoked"
+                        },
+                        serde_json::json!({
+                            "grant_id": grant_id,
+                            "module_id": module_id,
+                            "subject_type": subject_type,
+                            "subject_id": subject_id,
+                            "permission": permission,
+                            "collection": collection,
+                            "active": active,
+                            "reason": reason,
+                            "actor_id": actor_id,
+                        }),
+                        now,
+                    )?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        serde_json::json!({
+                            "ok": true,
+                            "grant_id": grant_id,
+                            "active": active,
+                            "module_id": module_id,
+                            "collection": collection,
+                        }),
+                    );
                 },
-                serde_json::json!({
-                    "grant_id": grant_id,
-                    "module_id": module_id,
-                    "subject_type": subject_type,
-                    "subject_id": subject_id,
-                    "permission": permission,
-                    "collection": collection,
-                    "active": active,
-                    "reason": reason,
-                    "actor_id": actor_id,
-                }),
-                now,
-            )?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                serde_json::json!({
-                    "ok": true,
-                    "grant_id": grant_id,
-                    "active": active,
-                    "module_id": module_id,
-                    "collection": collection,
-                }),
-            );
+            )?
+            .into_outcome();
         }
         "ctox.app_store.install" => {
             let request: AppStoreInstallRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.app_store.install payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = scoped_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsInstall,
-                BusinessOsScope::module(module_id, false),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = install_app_module(root, &installed_app_root, &session, request)?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = request.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::AppsInstall,
+                        BusinessOsScope::module(module_id, false),
+                    ))
+                },
+                |session| {
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome = install_app_module(root, &installed_app_root, &session, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.app_store.uninstall" => {
             let request: AppStoreUninstallRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.app_store.uninstall payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = scoped_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsUninstall,
-                BusinessOsScope::module(module_id, false),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = uninstall_app_module(root, &installed_app_root, &session, request)?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = request.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::AppsUninstall,
+                        BusinessOsScope::module(module_id, false),
+                    ))
+                },
+                |session| {
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome =
+                        uninstall_app_module(root, &installed_app_root, &session, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         other => anyhow::bail!("unsupported app lifecycle command type: {other}"),
     }
@@ -16465,12 +16566,15 @@ pub(super) fn handle_mailserver_command(
 ) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.mailserver.get_config" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::SecretsManage,
+                    ))
+                },
+                |_session| {
             let conn = open_mailserver_store_connection(root)?;
 
             // Get domains
@@ -16525,6 +16629,9 @@ pub(super) fn handle_mailserver_command(
                 Some("completed"),
                 outcome,
             );
+            },
+        )?
+        .into_outcome();
         }
         "ctox.mailserver.save_domain" => {
             let domain_name = command
@@ -16617,32 +16724,37 @@ pub(super) fn handle_mailserver_command(
                 .trim()
                 .to_string();
             anyhow::ensure!(!domain_name.is_empty(), "domain_name is required");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-
-            let conn = open_mailserver_store_connection(root)?;
-            conn.execute(
-                "DELETE FROM stalwart_domains WHERE domain_name = ?1",
-                params![domain_name],
-            )?;
-
-            let outcome = serde_json::json!({
-                "domain_name": domain_name,
-                "deleted": true
-            });
-
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::SecretsManage,
+                    ))
+                },
+                |_session| {
+                    let conn = open_mailserver_store_connection(root)?;
+                    conn.execute(
+                        "DELETE FROM stalwart_domains WHERE domain_name = ?1",
+                        params![domain_name],
+                    )?;
+
+                    let outcome = serde_json::json!({
+                        "domain_name": domain_name,
+                        "deleted": true
+                    });
+
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.mailserver.save_user" => {
             let username = command
@@ -16707,36 +16819,41 @@ pub(super) fn handle_mailserver_command(
                 .trim()
                 .to_string();
             anyhow::ensure!(!username.is_empty(), "username is required");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-
-            let conn = open_mailserver_store_connection(root)?;
-            conn.execute(
-                "DELETE FROM stalwart_users WHERE username = ?1",
-                params![username],
-            )?;
-            conn.execute(
-                "DELETE FROM stalwart_mailboxes WHERE owner = ?1",
-                params![username],
-            )?;
-
-            let outcome = serde_json::json!({
-                "username": username,
-                "deleted": true
-            });
-
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::SecretsManage,
+                    ))
+                },
+                |_session| {
+                    let conn = open_mailserver_store_connection(root)?;
+                    conn.execute(
+                        "DELETE FROM stalwart_users WHERE username = ?1",
+                        params![username],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM stalwart_mailboxes WHERE owner = ?1",
+                        params![username],
+                    )?;
+
+                    let outcome = serde_json::json!({
+                        "username": username,
+                        "deleted": true
+                    });
+
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         other => anyhow::bail!("unsupported mailserver command type: {other}"),
     }
@@ -16751,215 +16868,261 @@ pub(super) fn handle_source_command(
             let mutation: ModuleSourceLoadMutation =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.source.load payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = load_module_source_records(root, &mutation)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&mutation.module_id);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsSourceView,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let outcome = load_module_source_records(root, &mutation)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.source.save" => {
             let mutation: ModuleSourceSaveMutation =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.source.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = save_module_source_record(root, mutation)?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = mutation.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsModify,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let outcome = save_module_source_record(root, mutation)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.source.list_snapshots" => {
             let request: ModuleSourceListSnapshotsRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.source.list_snapshots payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_module_source_snapshots(root, request)?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = request.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsSourceView,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let outcome = list_module_source_snapshots(root, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.source.rollback_snapshot" => {
             let request: ModuleSourceRollbackSnapshotRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.source.rollback_snapshot payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsRollback,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = rollback_module_source_snapshot(root, request)?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = request.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsRollback,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let outcome = rollback_module_source_snapshot(root, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.source.commit" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let message = command
-                .payload
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let author = session_user_id(&session).unwrap_or_default().to_string();
-            let outcome = commit_module_source(root, &module_id, message, &author)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsModify,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    let message = command
+                        .payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let author = session_user_id(&session).unwrap_or_default().to_string();
+                    let outcome = commit_module_source(root, &module_id, message, &author)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.source.log" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_module_versions(
-                root,
-                ModuleVersionListRequest {
-                    module_id: module_id.clone(),
-                },
-            )?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsSourceView,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    let outcome = list_module_versions(
+                        root,
+                        ModuleVersionListRequest {
+                            module_id: module_id.clone(),
+                        },
+                    )?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.source.diff" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let from_version_id = command
-                .payload
-                .get("from_version_id")
-                .or_else(|| command.payload.get("from"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let to_version_id = command
-                .payload
-                .get("to_version_id")
-                .or_else(|| command.payload.get("to"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let outcome = diff_module_source(root, &module_id, from_version_id, to_version_id)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsSourceView,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    let from_version_id = command
+                        .payload
+                        .get("from_version_id")
+                        .or_else(|| command.payload.get("from"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let to_version_id = command
+                        .payload
+                        .get("to_version_id")
+                        .or_else(|| command.payload.get("to"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let outcome =
+                        diff_module_source(root, &module_id, from_version_id, to_version_id)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         other => anyhow::bail!("unsupported source command type: {other}"),
     }
@@ -17003,54 +17166,63 @@ pub(super) fn handle_business_os_command(
             let mutation: WorkspaceBrandingUpdateRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.business_os.branding.update payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = workspace_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::WorkspaceBrandingManage,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = match save_workspace_branding_command(root, &session, mutation) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "workspace_branding",
-                        error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                Some(WORKSPACE_BRANDING_ID),
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::WorkspaceBrandingManage,
+                    ))
+                },
+                |session| {
+                    let outcome = match save_workspace_branding_command(root, &session, mutation) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            return write_rxdb_failed_control_command_outcome(
+                                root,
+                                &command,
+                                "workspace_branding",
+                                error,
+                            );
+                        }
+                    };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        Some(WORKSPACE_BRANDING_ID),
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.business_os.audit.list" => {
             let request: BusinessActivityListRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.business_os.audit.list payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_business_activity_events(root, request)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::UsersManage,
+                    ))
+                },
+                |_session| {
+                    let outcome = list_business_activity_events(root, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.business_os.audit.retention" => {
             let request: BusinessAuditRetentionRequest =
@@ -17170,21 +17342,27 @@ pub(super) fn handle_secret_command(
 ) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.secret.list" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_credentials_command(root)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::SecretsManage,
+                    ))
+                },
+                |_session| {
+                    let outcome = list_credentials_command(root)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.secret.put" => {
             let session = rxdb_authenticated_session(root, &command)?;
@@ -17228,12 +17406,15 @@ pub(super) fn handle_secret_command(
             };
         }
         "ctox.secret.delete" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::SecretsManage,
+                    ))
+                },
+                |_session| {
             let mutation: CtoxSecretDeleteMutation =
                 serde_json::from_value(command.payload.clone()).unwrap_or_default();
             return match delete_credential_command(root, &mutation) {
@@ -17254,29 +17435,35 @@ pub(super) fn handle_secret_command(
                     serde_json::json!({ "outcome": { "ok": false, "error": error.to_string() } }),
                 ),
             };
+            },
+        )?
+        .into_outcome();
         }
         "ctox.subscription_auth.start" => {
             let request: SubscriptionAuthStartCommandRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.subscription_auth.start payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = workspace_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::IntegrationsManage,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = start_subscription_auth_command(root, &session, request)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::IntegrationsManage,
+                    ))
+                },
+                |session| {
+                    let outcome = start_subscription_auth_command(root, &session, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         other => anyhow::bail!("unsupported secret command type: {other}"),
     }
@@ -17291,239 +17478,273 @@ pub(super) fn handle_module_command(
             let request: ModuleLifecycleProjectionRepairRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.module.repair_lifecycle_projection payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let safe_command =
-                module_lifecycle_projection_repair_safe_command(&command, &request, &session);
-            let outcome = repair_module_lifecycle_projections(root, &session, request)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::RuntimeManage,
+                    ))
+                },
+                |session| {
+                    let safe_command = module_lifecycle_projection_repair_safe_command(
+                        &command, &request, &session,
+                    );
+                    let outcome = repair_module_lifecycle_projections(root, &session, request)?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &safe_command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.release" => {
             let mutation: ModuleReleaseRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.release payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsRelease,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let app_root = resolve_business_os_app_root(root)?;
-            let outcome = match record_module_release(root, &app_root, &session, mutation) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root, &command, "release", error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = mutation.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsRelease,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let app_root = resolve_business_os_app_root(root)?;
+                    let outcome = match record_module_release(root, &app_root, &session, mutation) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            return write_rxdb_failed_control_command_outcome(
+                                root, &command, "release", error,
+                            );
+                        }
+                    };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.assign_founder" => {
             let mutation: ModuleFounderAssignment = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.assign_founder payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = scoped_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsAssignOwner,
-                BusinessOsScope::module(module_id, false),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = match assign_module_founder(root, &session, mutation) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "assign_founder",
-                        error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = mutation.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::AppsAssignOwner,
+                        BusinessOsScope::module(module_id, false),
+                    ))
+                },
+                |session| {
+                    let outcome = match assign_module_founder(root, &session, mutation) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            return write_rxdb_failed_control_command_outcome(
+                                root,
+                                &command,
+                                "assign_founder",
+                                error,
+                            );
+                        }
+                    };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.save" => {
             let mutation: ModuleUpsertRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.id);
-            anyhow::ensure!(!module_id.is_empty(), "module id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let app_root = resolve_business_os_app_root(root)?;
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = upsert_module_manifest_command(
-                root,
-                &app_root,
-                &installed_app_root,
-                &session,
-                mutation,
-            )?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = mutation.id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsModify,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let app_root = resolve_business_os_app_root(root)?;
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome = upsert_module_manifest_command(
+                        root,
+                        &app_root,
+                        &installed_app_root,
+                        &session,
+                        mutation,
+                    )?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.delete" => {
             let mutation: ModuleDeleteRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.delete payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome =
-                delete_installed_module_command(root, &installed_app_root, &session, mutation)?;
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = mutation.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsModify,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome = delete_installed_module_command(
+                        root,
+                        &installed_app_root,
+                        &session,
+                        mutation,
+                    )?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.install_template" => {
             let mutation: ModuleInstallTemplateRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.module.install_template payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = scoped_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsInstall,
-                BusinessOsScope::workspace(),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let app_root = resolve_business_os_app_root(root)?;
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = install_template_module_command(
-                root,
-                &app_root,
-                &installed_app_root,
-                &session,
-                mutation,
-            )?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::AppsInstall,
+                    ))
+                },
+                |session| {
+                    let app_root = resolve_business_os_app_root(root)?;
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome = install_template_module_command(
+                        root,
+                        &app_root,
+                        &installed_app_root,
+                        &session,
+                        mutation,
+                    )?;
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.update" => {
             let request: ModuleUpdateRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.update payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsInstall,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let app_root = resolve_business_os_app_root(root)?;
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = match update_module_to_catalog(
-                root,
-                &app_root,
-                &installed_app_root,
-                &session,
-                request,
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root, &command, "update", error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = request.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsInstall,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let app_root = resolve_business_os_app_root(root)?;
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome = match update_module_to_catalog(
+                        root,
+                        &app_root,
+                        &installed_app_root,
+                        &session,
+                        request,
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            return write_rxdb_failed_control_command_outcome(
+                                root, &command, "update", error,
+                            );
+                        }
+                    };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.set_visible" => {
             let request: ModuleSetVisibleRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.set_visible payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = scoped_policy_decision(
+            return enforce_command_policy(
                 root,
-                &session,
-                BusinessOsPermission::AppsInstall,
-                BusinessOsScope::module(module_id.clone(), false),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
+                &command,
+                |_| {
+                    let module_id = source_sanitize_slug(&request.module_id);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::scoped(
+                        BusinessOsPermission::AppsInstall,
+                        BusinessOsScope::module(module_id, false),
+                    ))
+                },
+                |_session| {
+                    let module_id = source_sanitize_slug(&request.module_id);
             let command_id = command.id.as_deref().context("command id is required")?;
             channels::start_business_command_saga(root, command_id, &command.command_type)?;
             let prior_evidence = channels::business_command_saga_step_evidence(
@@ -17649,73 +17870,90 @@ pub(super) fn handle_module_command(
                     "visible": request.visible,
                 }),
             );
+            },
+        )?
+        .into_outcome();
         }
         "ctox.module.check_updates" => {
             let request: ModuleCheckUpdatesRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.module.check_updates payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision =
-                module_policy_decision(root, &session, BusinessOsPermission::AppsView, &module_id)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = match check_module_updates(root, &installed_app_root, &module_id) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "check_updates",
-                        error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&request.module_id);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsView,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let module_id = source_sanitize_slug(&request.module_id);
+                    let installed_app_root = resolve_business_os_installed_app_root(root);
+                    let outcome = match check_module_updates(root, &installed_app_root, &module_id)
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            return write_rxdb_failed_control_command_outcome(
+                                root,
+                                &command,
+                                "check_updates",
+                                error,
+                            );
+                        }
+                    };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.rollback" => {
             let mutation: ModuleRollbackRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.module.rollback payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsRollback,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let app_root = resolve_business_os_app_root(root)?;
-            let outcome = match rollback_module_release(root, &app_root, &session, mutation) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root, &command, "rollback", error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = mutation.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsRollback,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let app_root = resolve_business_os_app_root(root)?;
+                    let outcome = match rollback_module_release(root, &app_root, &session, mutation)
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            return write_rxdb_failed_control_command_outcome(
+                                root, &command, "rollback", error,
+                            );
+                        }
+                    };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         "ctox.module.list_versions" => {
             let request: ModuleVersionListRequest = serde_json::from_value(command.payload.clone())
@@ -17741,38 +17979,43 @@ pub(super) fn handle_module_command(
             let request: ModuleVersionRollbackRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.module.rollback_version payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsRollback,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let app_root = resolve_business_os_app_root(root)?;
-            let outcome = match rollback_module_to_version(root, &app_root, &session, request) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "rollback_version",
-                        error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
+            let module_id_for_policy = request.module_id.clone();
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    let module_id = source_sanitize_slug(&module_id_for_policy);
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsRollback,
+                        module_id,
+                    ))
+                },
+                |session| {
+                    let app_root = resolve_business_os_app_root(root)?;
+                    let outcome =
+                        match rollback_module_to_version(root, &app_root, &session, request) {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                return write_rxdb_failed_control_command_outcome(
+                                    root,
+                                    &command,
+                                    "rollback_version",
+                                    error,
+                                );
+                            }
+                        };
+                    return write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    );
+                },
+            )?
+            .into_outcome();
         }
         other => anyhow::bail!("unsupported module command type: {other}"),
     }
