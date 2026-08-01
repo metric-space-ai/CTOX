@@ -116,6 +116,20 @@ Deshalb:
 - Ein Worker-Bericht über „parallele Änderungen" ist ein Alarm über die
   Orchestrierung, kein Randbefund des Workers.
 
+**Zweiter Vorfall, andere Ursache: „Report geschrieben" heißt nicht „fertig".**
+Am 01.08. meldete die Wache einen frischen Report, ich begann zu prüfen und zu
+editieren — und der Worker arbeitete weiter an derselben Datei. Ein
+`cargo check` fiel mitten in seinen Schreibvorgang und meldete einen
+Syntaxfehler, den es nie gab.
+
+Die Wache darf deshalb NICHT auf die Report-Datei allein warten. Richtig ist:
+
+    warte auf frischen Report UND darauf, dass `ps -Ao args | grep -c
+    "[c]laude --bare"` auf 0 fällt
+
+Erst dann ist der Baum meiner. Ein Syntaxfehler, der beim zweiten Blick weg
+ist, ist kein Rätsel — es war ein halb geschriebener Puffer.
+
 **Ein voller Datenträger hinterlässt Trümmer, die nach etwas anderem
 aussehen.** Nach dem Vorfall scheiterte der Build an `wha-proto`, einem
 Typ, den dessen eigenes Build-Skript erzeugt — das sah aus wie ein Schaden
