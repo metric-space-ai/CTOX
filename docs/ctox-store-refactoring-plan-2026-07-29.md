@@ -106,6 +106,41 @@ etablierte Temp-Index/CAS-Weg.
    wo ihre Zerlegung später stattfinden kann. Die Zerlegung der 49 Arme
    ist S-FIX, nicht diese Welle — und sie ist grösser, als dieser Plan
    bisher behauptet hat.
+
+   **ZWEITE KORREKTUR, 01.08. — S-CUT4f ist BLOCKIERT, und zwar
+   strukturell.** Auch nach S-CUT5 (Policy raus) geht der Schnitt bei
+   KEINER Hüllentiefe unter die Grenze. Vollständig vermessen:
+
+   | Hülle          | Familie          | neue `pub(super)` in store.rs |
+   |----------------|------------------|-------------------------------|
+   | nur der Kern   | 5 Fn / 2.812 Z   | **36** |
+   | Tiefe 1        | 50 Fn / 4.529 Z  | **50** |
+   | Tiefe 2        | 89 Fn / 5.827 Z  | **38** |
+   | volle Hülle    | 170 Fn / 7.533 Z | **23** |
+
+   Das Minimum ist 23, und es kostet ein Modul von 7.533 Zeilen, das 30 %
+   von store.rs verschluckt — samt `bind_chatgpt_login_server`,
+   `build_chatgpt_authorize_url` und `assign_module_founder`, die mit
+   einer Command-Plane nichts zu tun haben. Sie landen nur deshalb in der
+   Hülle, weil der Dispatcher ihr einziger Aufrufer ist; er ruft sie aus
+   seinen 49 inline-Armen.
+
+   **Damit kippt für diesen einen Fall die Planregel.** „Erst move-only,
+   Zerlegung später" funktioniert, solange ein Monster wenige Fühler hat.
+   Dieses hat 36. Die Zerlegung muss VOR dem Schnitt kommen, nicht danach.
+
+   Zwei Messrichtungen, beide nötig — hier ist einmal Verwirrung
+   entstanden, die im Plan festgehalten gehört: die API-Fläche (wie viele
+   Familienfunktionen von aussen gerufen werden) ist nur **2**. Die für
+   die Stopgrenze zählende Richtung ist die andere: wie viele private
+   store.rs-Funktionen `pub(super)` werden müssen, damit die verschobene
+   Familie sie noch erreicht. Wer nur die erste misst, hält einen
+   unmöglichen Schnitt für trivial.
+
+   **Nachfolgeticket S-DISPATCH:** die 49 Arme domänenweise in Handler
+   extrahieren (Zielform sind die fünf bereits ausgelagerten Handler),
+   danach S-CUT4f neu vermessen. Das ist Semantikarbeit mit Tests, keine
+   Move-Welle.
 5. **S-CUT5** Policy-Anteile — **Karte erstellt 01.08., Schnitt VERTAGT.**
    Gemessen: 16 Policy-Overlays in store.rs. Sechs davon greifen direkt auf
    den Store zu (Enforcement, bleibt per Ticket). Von den zehn übrigen sind
