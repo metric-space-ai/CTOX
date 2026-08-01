@@ -337,6 +337,46 @@ Escape-Hatch je Schnitt: Nähte > 20 pub(crate)-Einstiege ⇒ STOPP + Karte.
 - SF9 Totholz (~400 Z.: DOCX-Fallback-Kette, Schattenimpl, Rest) mit
   Call-Site-Beweis löschen.
 
+## SF-Prämissenprüfung (01.08.) — was noch steht
+
+Nach drei Tickets, deren Prämisse unter der Messung wegbrach (SM13, SF3,
+SF4), wurde der Rest der Serie vermessen, BEVOR gebaut wird. Ergebnis:
+
+| Ticket | Urteil | Gemessen |
+|---|---|---|
+| SF1 | **STEHT** | Funktion 2.654 → 858 Z., aber weiterhin kein vierstufiger Ablauf; 19 Autorisierungsstellen in 5 Formen, 5 Return-Shapes |
+| SF5 | **STEHT** | kein Cleanup in beiden Quellpfaden, beide Lesepfad-Backfills, 4 Hashdefinitionen, 2 hartkodierte Admin-Sessions |
+| SF6 | **STEHT** | Retention wird berechnet, aber nie aufgerufen — weder Scheduler noch Start-Hook |
+| SF7 | **STEHT** | 59 produktive Call-Sites (Schätzung war ~60), heute in store.rs (48) und command_plane.rs (11) |
+| SF8 | **VERSCHOBEN** | Inventar + Ratchet erledigt (SG2); es bleiben 30 Entscheidungen, 15 davon in service.rs |
+| SF9 | **STEHT** | 398 nachweislich tote Zeilen (Schätzung war ~400) |
+| SF10 | **VERSCHOBEN** | 46 Assertions vorhanden, aber KEIN Gate für SF8/SG2 — die behauptete Serialisierung besteht nicht |
+
+**Korrektur meiner eigenen Verallgemeinerung.** Ich hatte nach SM13/SF3/SF4
+geschrieben, das Review habe „die Ursachen eine Ebene daneben verortet". Das
+trägt nicht: bei fünf von sieben stimmen Symptom UND Ursache, zwei
+Schätzungen (~60, ~400) sind fast exakt. Drei Treffer waren keine Regel.
+
+**Reihenfolge, mit einer Abhängigkeit, die der Plan nicht hatte:**
+
+1. **SF5** — der unmittelbarste Governance-Defekt: Delete/Uninstall kann alte
+   Grants und alte Release-Evidenz unter derselben Modul-ID wieder wirksam
+   machen (Grant-Resurrection).
+2. **SF6** — Klartext-Backups liegen ohne Vollzug unbefristet; kleine
+   Aufrufkante, hohe Datenschutzwirkung. Betriebssemantik ist eine
+   Owner-Frage.
+3. **SF9** — 398 tote Zeilen mit Call-Site-Beweis, risikoarm, verkleinert
+   store.rs vor den grossen Schnitten.
+4. **SF7 VOR SF1.** Erst der typisierte Command→Actor/Permission/Scope→
+   Decision→Denial-Vertrag, dann die 59 Call-Sites darunter. **Ohne das
+   verschiebt SF1 die Autorisierungsstapel nur räumlich.** Diese
+   Abhängigkeit stand nirgends im Plan.
+5. **SF1** stufenweise; die fünf Replay-Shapes in EINEN Receipt-Typ, ohne
+   die terminale und die uncertain-Semantik im JSON zu verlieren.
+6. **SF8** mit dem ausführbaren Bestand 30 planen, nicht mit 42 oder 22, und
+   mit einer benannten Blindstellenliste.
+7. **SF10** just-in-time zu SF8, nicht als globales Vorab-Gate.
+
 ## Welle S-GUARD — Zement
 
 - SG1 Inventar-/Contract-Drift-Checks in `cargo test` (nicht nur Tool).
