@@ -472,19 +472,17 @@ pub fn accept_rxdb_business_command_with_origin(
                     } else {
                         "office_engine_failed"
                     };
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         command.record_id.as_deref(),
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error_code": error_code,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -511,18 +509,16 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         None,
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -549,18 +545,16 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         command.record_id.as_deref(),
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -620,18 +614,16 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         command.record_id.as_deref(),
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -695,15 +687,13 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(err) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         command.record_id.as_deref(),
-                        Some("failed"),
                         serde_json::json!({ "ok": false, "error": err.to_string() }),
-                    );
-                    return Err(err);
+                        err,
+                    ));
                 }
             }
         }
@@ -757,18 +747,16 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         command.record_id.as_deref(),
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -821,18 +809,16 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         command.record_id.as_deref(),
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -889,18 +875,16 @@ pub fn accept_rxdb_business_command_with_origin(
                     );
                 }
                 Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
+                    return Err(write_failed_control_command_outcome_observably(
                         root,
                         &command,
-                        "failed",
                         None,
-                        Some("failed"),
                         serde_json::json!({
                             "ok": false,
                             "error": error.to_string(),
                         }),
-                    );
-                    return Err(error);
+                        error,
+                    ));
                 }
             }
         }
@@ -992,6 +976,38 @@ pub(super) fn write_rxdb_control_command_outcome(
     result: Value,
 ) -> anyhow::Result<Value> {
     write_rxdb_control_command_state(root, command, status, task_id, task_status, result, true)
+}
+
+fn write_failed_control_command_outcome_observably(
+    root: &Path,
+    command: &BusinessCommand,
+    task_id: Option<&str>,
+    result: Value,
+    command_error: anyhow::Error,
+) -> anyhow::Error {
+    match write_rxdb_control_command_outcome(
+        root,
+        command,
+        "failed",
+        task_id,
+        Some("failed"),
+        result,
+    ) {
+        Ok(_) => command_error,
+        Err(outcome_error) => {
+            let command_id = command.id.as_deref().unwrap_or("<missing>");
+            let command_type = command.command_type.as_str();
+            eprintln!(
+                "[business-os] failed to write failed control command outcome: \
+                 command_id={command_id} command_type={command_type} \
+                 outcome_error={outcome_error:#}; command_error={command_error:#}"
+            );
+            command_error.context(format!(
+                "failed to write failed control command outcome for \
+                 command_id={command_id} command_type={command_type}: {outcome_error:#}"
+            ))
+        }
+    }
 }
 
 pub(super) fn write_rxdb_control_command_progress(
@@ -1333,6 +1349,40 @@ mod tests {
         assert_eq!(projected["result"]["status"], "completed");
         assert_eq!(projected["result"]["task_status"], "completed");
         Ok(())
+    }
+
+    #[test]
+    fn failed_outcome_write_is_observable() {
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: None,
+            module: "invoices".to_string(),
+            command_type: "invoices.invoice.create".to_string(),
+            record_id: Some("invoice-observability-test".to_string()),
+            payload: serde_json::json!({}),
+            client_context: serde_json::json!({}),
+        };
+
+        let error = write_failed_control_command_outcome_observably(
+            Path::new("unused-because-the-command-id-is-missing"),
+            &command,
+            command.record_id.as_deref(),
+            serde_json::json!({ "ok": false, "error": "handler failed after mutation" }),
+            anyhow::anyhow!("handler failed after mutation"),
+        );
+        let observable = format!("{error:#}");
+        assert!(observable.contains("failed to write failed control command outcome"));
+        assert!(observable.contains("command_id=<missing>"));
+        assert!(observable.contains("command_type=invoices.invoice.create"));
+        assert!(observable.contains("command id is required"));
+        assert!(observable.contains("handler failed after mutation"));
+
+        let source = include_str!("command_plane.rs");
+        let ignored_write = ["let _ = ", "write_rxdb_control_command_outcome("].concat();
+        assert!(
+            !source.contains(&ignored_write),
+            "failed outcome writes must reach the observable helper"
+        );
     }
 
     #[test]
