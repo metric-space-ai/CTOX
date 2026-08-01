@@ -54,6 +54,23 @@ etablierte Temp-Index/CAS-Weg.
 4. **S-CUT4** `command_plane.rs` — Acceptance/Routing/Outcomes/Outbox
    inkl. der 2.654-Zeilen-Funktion ALS GANZES (Zerlegung ist S-FIX;
    move-only heißt: auch Monster ziehen unzerlegt um).
+
+   **Vermessen 01.08.: S-CUT4 ist KEIN Monolith-Schnitt, sondern sechs
+   unabhängige.** Die Familie liegt zwischen Zeile 19.001 und 41.349 —
+   rund 22.000 Zeilen, ein Drittel von store.rs. Entscheidend ist aber
+   nicht die Größe, sondern die Nahtzahl, und die ist minimal: jeder
+   Domänen-Handler (`handle_outbound_active_command`,
+   `handle_customers_active_command`, `handle_office_control_command`,
+   `handle_ats_active_command`, `handle_ats_mutating_command`,
+   `handle_appsec_business_command`) hat **genau einen** Aufrufer, den
+   Dispatcher, und **null** externe. Jeder zieht also einzeln um, mit
+   einer Naht.
+
+   Reihenfolge daher: erst die sechs Handler als je eigene Welle, zuletzt
+   der Dispatcher `accept_rxdb_business_command_with_origin`. Der ist dann
+   das, was er sein sollte — eine Verzweigung über sechs Namen, statt
+   2.654 Zeilen mit sechs eingebauten Domänen. Ein Schnitt über alle
+   22.000 Zeilen auf einmal wäre nicht schneller, nur unprüfbarer.
 5. **S-CUT5** Policy-Anteile — **Karte erstellt 01.08., Schnitt VERTAGT.**
    Gemessen: 16 Policy-Overlays in store.rs. Sechs davon greifen direkt auf
    den Store zu (Enforcement, bleibt per Ticket). Von den zehn übrigen sind
