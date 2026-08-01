@@ -17246,219 +17246,14 @@ pub fn accept_rxdb_business_command_with_origin(
                 "report_status": "open"
             }));
         }
-        "ctox.source.load" => {
-            let mutation: ModuleSourceLoadMutation =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.source.load payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = load_module_source_records(root, &mutation)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.source.save" => {
-            let mutation: ModuleSourceSaveMutation =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.source.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&mutation.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = save_module_source_record(root, mutation)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.source.list_snapshots" => {
-            let request: ModuleSourceListSnapshotsRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.source.list_snapshots payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_module_source_snapshots(root, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.source.rollback_snapshot" => {
-            let request: ModuleSourceRollbackSnapshotRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.source.rollback_snapshot payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsRollback,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = rollback_module_source_snapshot(root, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.source.commit" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsModify,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let message = command
-                .payload
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let author = session_user_id(&session).unwrap_or_default().to_string();
-            let outcome = commit_module_source(root, &module_id, message, &author)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.source.log" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_module_versions(
-                root,
-                ModuleVersionListRequest {
-                    module_id: module_id.clone(),
-                },
-            )?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.source.diff" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(
-                command
-                    .payload
-                    .get("module_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsSourceView,
-                &module_id,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let from_version_id = command
-                .payload
-                .get("from_version_id")
-                .or_else(|| command.payload.get("from"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let to_version_id = command
-                .payload
-                .get("to_version_id")
-                .or_else(|| command.payload.get("to"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let outcome = diff_module_source(root, &module_id, from_version_id, to_version_id)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+        "ctox.source.load"
+        | "ctox.source.save"
+        | "ctox.source.list_snapshots"
+        | "ctox.source.rollback_snapshot"
+        | "ctox.source.commit"
+        | "ctox.source.log"
+        | "ctox.source.diff" => {
+            return handle_source_command(root, &command);
         }
         "ctox.coding.turn" => {
             let session = rxdb_authenticated_session(root, &command)?;
@@ -17910,6 +17705,226 @@ pub fn accept_rxdb_business_command_with_origin(
     }
     let accepted = record_command(root, command)?;
     Ok(serde_json::to_value(accepted)?)
+}
+
+fn handle_source_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
+        "ctox.source.load" => {
+            let mutation: ModuleSourceLoadMutation =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.source.load payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(&mutation.module_id);
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsSourceView,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = load_module_source_records(root, &mutation)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.source.save" => {
+            let mutation: ModuleSourceSaveMutation =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.source.save payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(&mutation.module_id);
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsModify,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = save_module_source_record(root, mutation)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.source.list_snapshots" => {
+            let request: ModuleSourceListSnapshotsRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.source.list_snapshots payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(&request.module_id);
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsSourceView,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = list_module_source_snapshots(root, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.source.rollback_snapshot" => {
+            let request: ModuleSourceRollbackSnapshotRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.source.rollback_snapshot payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(&request.module_id);
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsRollback,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = rollback_module_source_snapshot(root, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.source.commit" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(
+                command
+                    .payload
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsModify,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let message = command
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let author = session_user_id(&session).unwrap_or_default().to_string();
+            let outcome = commit_module_source(root, &module_id, message, &author)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.source.log" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(
+                command
+                    .payload
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsSourceView,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = list_module_versions(
+                root,
+                ModuleVersionListRequest {
+                    module_id: module_id.clone(),
+                },
+            )?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.source.diff" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(
+                command
+                    .payload
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = module_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsSourceView,
+                &module_id,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let from_version_id = command
+                .payload
+                .get("from_version_id")
+                .or_else(|| command.payload.get("from"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let to_version_id = command
+                .payload
+                .get("to_version_id")
+                .or_else(|| command.payload.get("to"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let outcome = diff_module_source(root, &module_id, from_version_id, to_version_id)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        other => anyhow::bail!("unsupported source command type: {other}"),
+    }
 }
 
 fn handle_business_os_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
