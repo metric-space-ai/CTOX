@@ -64,6 +64,14 @@ Deshalb:
 - `runtime/build/cargo-target/debug/incremental` wuchs auf 9,1 GB. Reine
   Rebuild-Beschleunigung, gefahrlos löschbar — und bei `CARGO_INCREMENTAL=0`
   ohnehin ungenutzt. Der billigste Hebel, bevor man an `cargo clean` denkt.
+- **`cargo clean` ist billiger als gedacht — gemessen, nicht geschätzt.**
+  Ich hatte es als teuren letzten Ausweg behandelt („kostet einen
+  vollständigen Neubau"). Tatsächlich: der Zielbaum war auf 65,4 GB
+  angewachsen, der Neubau danach dauerte **2m19s und belegte 3 GB**. Fast
+  alles davon war Ablagerung aus vielen Läufen, nicht Notwendigkeit.
+  Wenn der Platz knapp wird, ist `cargo clean` also der richtige und
+  nicht der letzte Griff. Die Scheu davor kostete hier zwei abgebrochene
+  Wellen.
 
 ## Nie zwei Worker auf derselben Datei
 
