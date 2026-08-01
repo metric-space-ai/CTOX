@@ -18,6 +18,7 @@ pub use super::backup_restore::{
     inspect_business_os_backup_key_escrow, inspect_business_os_backup_manifest,
     prune_business_os_backup_restore_drills, run_business_os_backup_restore_drill,
 };
+use super::control_command_types::{ActiveExternalSqlControlCommand, ReportAccepted};
 use super::module_lifecycle::{
     catalog_module_version, installed_baseline_bundle_sha, installed_module_app_source,
     load_installed_module_manifests, module_install_scope, module_is_runtime_installed,
@@ -207,7 +208,6 @@ static SYNC_CONNECTION_CONFIG_CACHE: OnceLock<
 > = OnceLock::new();
 static BUSINESS_OS_STORE_SCHEMA_READY: OnceLock<Mutex<HashSet<BusinessOsStoreDbKey>>> =
     OnceLock::new();
-static ACTIVE_EXTERNAL_SQL_CONTROL_COMMANDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 #[cfg(test)]
 static RXDB_TABLE_COLUMN_LOADS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 #[cfg(test)]
@@ -7692,13 +7692,6 @@ pub fn record_report(
         "task_id": accepted.task_id.unwrap_or_default(),
         "status": "open"
     }))
-}
-
-struct ReportAccepted {
-    report_id: String,
-    command_id: String,
-    task_id: Option<String>,
-    task_status: Option<String>,
 }
 
 fn record_report_command(
@@ -15771,32 +15764,6 @@ fn business_command_core_claim_with_authorization(
         intent,
         created_at_ms: now_ms() as i64,
     })
-}
-
-struct ActiveExternalSqlControlCommand {
-    command_id: String,
-}
-
-impl ActiveExternalSqlControlCommand {
-    fn try_acquire(command_id: &str) -> Option<Self> {
-        let mut active = ACTIVE_EXTERNAL_SQL_CONTROL_COMMANDS
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.insert(command_id.to_string()).then(|| Self {
-            command_id: command_id.to_string(),
-        })
-    }
-}
-
-impl Drop for ActiveExternalSqlControlCommand {
-    fn drop(&mut self) {
-        ACTIVE_EXTERNAL_SQL_CONTROL_COMMANDS
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.command_id);
-    }
 }
 
 fn external_sql_command_in_flight_outcome(root: &Path, command_id: &str) -> anyhow::Result<Value> {
