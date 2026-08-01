@@ -16107,53 +16107,16 @@ pub fn accept_rxdb_business_command_with_origin(
         }
     }
     match command.command_type.as_str() {
-        "ctox.maintenance.client_ready" => {
-            let _session = rxdb_authenticated_session(root, &command)?;
-            let lease_id = command
-                .payload
-                .get("lease_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let client_id = command
-                .payload
-                .get("client_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let module_id = command
-                .payload
-                .get("module_id")
-                .and_then(Value::as_str)
-                .unwrap_or(command.module.as_str())
-                .trim();
-            let required_collections = command
-                .payload
-                .get("required_collections")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && value.len() <= 128)
-                .take(256)
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            let outcome = crate::install::acknowledge_business_os_maintenance_ready(
-                root,
-                lease_id,
-                client_id,
-                module_id,
-                &required_collections,
-            )?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+        "ctox.maintenance.client_ready"
+        | "ctox.task.update"
+        | "ctox.task.delete"
+        | "ctox.command.cancel"
+        | "ctox.runtime_settings.save"
+        | "ctox.office.settings.save"
+        | "ctox.coding.turn"
+        | "ctox.file.materialize"
+        | "ctox.file.export" => {
+            return handle_workspace_control_command(root, &command);
         }
         "ctox.app.action.run"
         | "ctox.app.access.grant"
@@ -16224,113 +16187,6 @@ pub fn accept_rxdb_business_command_with_origin(
             }
             return super::person_research_command::start(root, command);
         }
-        "ctox.task.update" => {
-            let mutation: CtoxTaskUpdateMutation = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.task.update payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let task_id_for_policy = resolve_ctox_task_id(root, &mutation.task_id)?;
-            let decision = task_policy_decision(root, &session, &task_id_for_policy)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = update_ctox_task(root, &session, mutation)?;
-            let task_id = outcome
-                .get("task")
-                .and_then(|task| task.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                task_id.as_deref(),
-                Some("updated"),
-                outcome,
-            );
-        }
-        "ctox.task.delete" => {
-            let mutation: CtoxTaskDeleteMutation = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.task.delete payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let task_id_for_policy = resolve_ctox_task_id(root, &mutation.task_id)?;
-            let decision = task_policy_decision(root, &session, &task_id_for_policy)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = delete_ctox_task(root, &session, mutation)?;
-            let task_id = outcome
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                task_id.as_deref(),
-                Some("cancelled"),
-                outcome,
-            );
-        }
-        "ctox.command.cancel" => {
-            let target_command_id = command
-                .payload
-                .get("target_command_id")
-                .and_then(Value::as_str)
-                .or(command.record_id.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .context("ctox.command.cancel requires target_command_id")?;
-            let reason = command
-                .payload
-                .get("reason")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("cancelled by user");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let target = channels::inspect_business_command(root, target_command_id)?
-                .with_context(|| format!("target command `{target_command_id}` was not found"))?;
-            let task_id = target
-                .get("execution_task_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .context("target command has no cancellable execution task")?;
-            let decision = task_policy_decision(root, &session, task_id)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let actor = session_user_id(&session).unwrap_or("unknown");
-            let cancellation = serde_json::json!({
-                "ok": true,
-                "target_command_id": target_command_id,
-                "execution_task_id": task_id,
-                "cancelled_by": actor,
-                "cancelled_at_ms": now_ms(),
-                "reason": reason,
-                "side_effects_may_have_started": target
-                    .pointer("/command/execution_phase")
-                    .and_then(Value::as_str)
-                    .is_some_and(|phase| !matches!(phase, "accepted" | "queued" | "waiting_dependencies")),
-            });
-            channels::transition_business_command_for_task(
-                root,
-                task_id,
-                "cancelled",
-                Some(&cancellation),
-                None,
-                None,
-                &format!("cancelled by {actor}: {reason}"),
-            )?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                Some(task_id),
-                Some("cancelled"),
-                cancellation,
-            );
-        }
         "knowledge.command" => {
             let args = command
                 .payload
@@ -16364,45 +16220,6 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.business_os.support.export_diagnostics"
         | "ctox.business_os.why" => {
             return handle_business_os_command(root, &command);
-        }
-        "ctox.runtime_settings.save" => {
-            let mutation: RuntimeSettingsRequest = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.runtime_settings.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = save_runtime_settings_command(root, &session, mutation)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.office.settings.save" => {
-            let mutation: OfficeRuntimeSettingsRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.office.settings.save payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = save_office_runtime_settings(root, mutation)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                Some("runtime-settings"),
-                Some("completed"),
-                serde_json::json!({ "ok": true, "office": outcome }),
-            );
         }
         "ctox.secret.list"
         | "ctox.secret.put"
@@ -16929,6 +16746,245 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.source.diff" => {
             return handle_source_command(root, &command);
         }
+        "ctox.mailserver.get_config"
+        | "ctox.mailserver.save_domain"
+        | "ctox.mailserver.delete_domain"
+        | "ctox.mailserver.save_user"
+        | "ctox.mailserver.delete_user" => {
+            return handle_mailserver_command(root, &command);
+        }
+        _ => {}
+    }
+    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
+    // already-gated arm above falls through here into record_command, which
+    // records it AND enqueues server work (create_ctox_queue_task) — previously
+    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
+    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
+    // CLI / in-process callers, already trusted, matching rxdb_session_from_
+    // command). App-build commands carry their own AppsInstall/AppsModify gate
+    // inside record_command; every other fall-through is a record-mutating data
+    // command (source.parse, matching.*, business_os.chat.task / cv-print,
+    // documents.*), so require module-scoped DataWrite. The session is the
+    // capability-token actor, so an unprivileged / unauthenticated replicated
+    // peer (inert "user", no grant) is denied and never reaches record_command
+    // or create_ctox_queue_task.
+    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
+        && app_build_command_policy_target(&command).is_none()
+    {
+        let session = rxdb_authenticated_session(root, &command)?;
+        let permission = if command.command_type == "business_os.context.ask" {
+            BusinessOsPermission::DataRead
+        } else {
+            BusinessOsPermission::DataWrite
+        };
+        let decision = module_policy_decision(root, &session, permission, &command.module)?;
+        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+            return Ok(outcome);
+        }
+    }
+    let accepted = record_command(root, command)?;
+    Ok(serde_json::to_value(accepted)?)
+}
+
+fn handle_workspace_control_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
+        "ctox.maintenance.client_ready" => {
+            let _session = rxdb_authenticated_session(root, &command)?;
+            let lease_id = command
+                .payload
+                .get("lease_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            let client_id = command
+                .payload
+                .get("client_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            let module_id = command
+                .payload
+                .get("module_id")
+                .and_then(Value::as_str)
+                .unwrap_or(command.module.as_str())
+                .trim();
+            let required_collections = command
+                .payload
+                .get("required_collections")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 128)
+                .take(256)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let outcome = crate::install::acknowledge_business_os_maintenance_ready(
+                root,
+                lease_id,
+                client_id,
+                module_id,
+                &required_collections,
+            )?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.task.update" => {
+            let mutation: CtoxTaskUpdateMutation = serde_json::from_value(command.payload.clone())
+                .context("invalid ctox.task.update payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let task_id_for_policy = resolve_ctox_task_id(root, &mutation.task_id)?;
+            let decision = task_policy_decision(root, &session, &task_id_for_policy)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = update_ctox_task(root, &session, mutation)?;
+            let task_id = outcome
+                .get("task")
+                .and_then(|task| task.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                task_id.as_deref(),
+                Some("updated"),
+                outcome,
+            );
+        }
+        "ctox.task.delete" => {
+            let mutation: CtoxTaskDeleteMutation = serde_json::from_value(command.payload.clone())
+                .context("invalid ctox.task.delete payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let task_id_for_policy = resolve_ctox_task_id(root, &mutation.task_id)?;
+            let decision = task_policy_decision(root, &session, &task_id_for_policy)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = delete_ctox_task(root, &session, mutation)?;
+            let task_id = outcome
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                task_id.as_deref(),
+                Some("cancelled"),
+                outcome,
+            );
+        }
+        "ctox.command.cancel" => {
+            let target_command_id = command
+                .payload
+                .get("target_command_id")
+                .and_then(Value::as_str)
+                .or(command.record_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("ctox.command.cancel requires target_command_id")?;
+            let reason = command
+                .payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("cancelled by user");
+            let session = rxdb_authenticated_session(root, &command)?;
+            let target = channels::inspect_business_command(root, target_command_id)?
+                .with_context(|| format!("target command `{target_command_id}` was not found"))?;
+            let task_id = target
+                .get("execution_task_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("target command has no cancellable execution task")?;
+            let decision = task_policy_decision(root, &session, task_id)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let actor = session_user_id(&session).unwrap_or("unknown");
+            let cancellation = serde_json::json!({
+                "ok": true,
+                "target_command_id": target_command_id,
+                "execution_task_id": task_id,
+                "cancelled_by": actor,
+                "cancelled_at_ms": now_ms(),
+                "reason": reason,
+                "side_effects_may_have_started": target
+                    .pointer("/command/execution_phase")
+                    .and_then(Value::as_str)
+                    .is_some_and(|phase| !matches!(phase, "accepted" | "queued" | "waiting_dependencies")),
+            });
+            channels::transition_business_command_for_task(
+                root,
+                task_id,
+                "cancelled",
+                Some(&cancellation),
+                None,
+                None,
+                &format!("cancelled by {actor}: {reason}"),
+            )?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                Some(task_id),
+                Some("cancelled"),
+                cancellation,
+            );
+        }
+        "ctox.runtime_settings.save" => {
+            let mutation: RuntimeSettingsRequest = serde_json::from_value(command.payload.clone())
+                .context("invalid ctox.runtime_settings.save payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = save_runtime_settings_command(root, &session, mutation)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.office.settings.save" => {
+            let mutation: OfficeRuntimeSettingsRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.office.settings.save payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = save_office_runtime_settings(root, mutation)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                Some("runtime-settings"),
+                Some("completed"),
+                serde_json::json!({ "ok": true, "office": outcome }),
+            );
+        }
         "ctox.coding.turn" => {
             let session = rxdb_authenticated_session(root, &command)?;
             let module_id = source_sanitize_slug(
@@ -17021,44 +17077,8 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
-        "ctox.mailserver.get_config"
-        | "ctox.mailserver.save_domain"
-        | "ctox.mailserver.delete_domain"
-        | "ctox.mailserver.save_user"
-        | "ctox.mailserver.delete_user" => {
-            return handle_mailserver_command(root, &command);
-        }
-        _ => {}
+        other => anyhow::bail!("unsupported workspace control command type: {other}"),
     }
-    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
-    // already-gated arm above falls through here into record_command, which
-    // records it AND enqueues server work (create_ctox_queue_task) — previously
-    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
-    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
-    // CLI / in-process callers, already trusted, matching rxdb_session_from_
-    // command). App-build commands carry their own AppsInstall/AppsModify gate
-    // inside record_command; every other fall-through is a record-mutating data
-    // command (source.parse, matching.*, business_os.chat.task / cv-print,
-    // documents.*), so require module-scoped DataWrite. The session is the
-    // capability-token actor, so an unprivileged / unauthenticated replicated
-    // peer (inert "user", no grant) is denied and never reaches record_command
-    // or create_ctox_queue_task.
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && app_build_command_policy_target(&command).is_none()
-    {
-        let session = rxdb_authenticated_session(root, &command)?;
-        let permission = if command.command_type == "business_os.context.ask" {
-            BusinessOsPermission::DataRead
-        } else {
-            BusinessOsPermission::DataWrite
-        };
-        let decision = module_policy_decision(root, &session, permission, &command.module)?;
-        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-            return Ok(outcome);
-        }
-    }
-    let accepted = record_command(root, command)?;
-    Ok(serde_json::to_value(accepted)?)
 }
 
 fn handle_app_lifecycle_command(
