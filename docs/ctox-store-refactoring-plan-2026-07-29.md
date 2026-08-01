@@ -254,8 +254,31 @@ SM10 migrate_business_users_roles ohne CREATE-TABLE-Sniffing (P7f, 44407) ·
 SM11 Command-Type→Permission-Handlisten in die generierte Quelle (P7d,
 21452) · SM12 „~42"-Zahl ersetzt durch das echte MiniMax-Inventar aus SG2.
 
+SM13 **App-Store-Installation ist testfrei — beide Enden.** Gefunden 01.08.
+beim Prüfen der roten Tests aus S-CUT2b, und grösser als „zwei veraltete
+Fixtures":
+
+- `app_store_install_uninstall_allows_admin_policy_path` und
+  `..._allows_explicit_module_grants` bedienen sich über
+  `serve_test_zip_once` bei einem lokalen HTTP-Server. Der SSRF-Guard in
+  `module_lifecycle.rs` blockiert Loopback — zu Recht, sein Kommentar sagt
+  genau das. Die Tests sind seit dem Guard rot.
+- Damit läuft KEIN Test mehr über die Berechtigungszusicherungen von
+  Install/Uninstall, obwohl beide Tests genau dafür geschrieben wurden.
+- `serve_test_zip_once` hat exakt zwei Aufrufer: diese beiden. Und der
+  Zip-Pfad über den RxDB-Chunk-Store — im Sicherheitskommentar der
+  *sichere* Weg, "never over HTTP" — hat gar keinen Test.
+
+Reparatur ist kein Fixture-Tausch: es fehlt ein Helfer, der eine
+Desktop-Datei in den Chunk-Store setzt, damit `file_id` bedient werden
+kann. Danach beide Tests auf `source_kind: "zip"` umstellen und
+`serve_test_zip_once` samt HTTP-Fixture löschen. Erst dann prüfen die
+Berechtigungs-Assertions wieder etwas, und der sichere Pfad ist zum
+ersten Mal abgedeckt.
+
 Zuordnung: SM2/SM1/SM11 → command_plane · SM3/SM4 → store_projections ·
-SM5/SM6 → module_lifecycle · SM7/SM8 → backup_restore · SM9/SM10 → Kern.
+SM5/SM6/SM13 → module_lifecycle · SM7/SM8 → backup_restore ·
+SM9/SM10 → Kern.
 
 ## Offene Owner-Fragen (blockieren NUR die genannten Tickets)
 
