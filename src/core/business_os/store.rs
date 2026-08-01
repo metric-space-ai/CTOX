@@ -16627,91 +16627,11 @@ pub fn accept_rxdb_business_command_with_origin(
                 serde_json::json!({ "ok": true, "office": outcome }),
             );
         }
-        "ctox.secret.list" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_credentials_command(root)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.secret.put" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let mutation: CtoxSecretPutMutation =
-                serde_json::from_value(command.payload.clone()).unwrap_or_default();
-            // Redact the secret value before ANY persistence path runs: the
-            // business_commands table, the re-projected RxDB document, the
-            // policy-denied outcome, and the policy-decision audit event all
-            // store the command we hand them. The original payload.value would
-            // otherwise be left at rest in the RxDB store and replicated browser
-            // IndexedDB. Build the redacted command up front and use it
-            // everywhere — including the rejection path.
-            let safe_command = secret_command_safe_command(
-                &command,
-                &session,
-                serde_json::json!({ "name": mutation.name.trim() }),
-            );
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-            return match put_credential_command(root, &mutation) {
-                Ok(outcome) => write_rxdb_control_command_outcome(
-                    root,
-                    &safe_command,
-                    "completed",
-                    None,
-                    Some("completed"),
-                    outcome,
-                ),
-                Err(error) => write_rxdb_control_command_outcome(
-                    root,
-                    &safe_command,
-                    "failed",
-                    None,
-                    Some("failed"),
-                    serde_json::json!({ "outcome": { "ok": false, "error": error.to_string() } }),
-                ),
-            };
-        }
-        "ctox.secret.delete" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let mutation: CtoxSecretDeleteMutation =
-                serde_json::from_value(command.payload.clone()).unwrap_or_default();
-            return match delete_credential_command(root, &mutation) {
-                Ok(outcome) => write_rxdb_control_command_outcome(
-                    root,
-                    &command,
-                    "completed",
-                    None,
-                    Some("completed"),
-                    outcome,
-                ),
-                Err(error) => write_rxdb_control_command_outcome(
-                    root,
-                    &command,
-                    "failed",
-                    None,
-                    Some("failed"),
-                    serde_json::json!({ "outcome": { "ok": false, "error": error.to_string() } }),
-                ),
-            };
+        "ctox.secret.list"
+        | "ctox.secret.put"
+        | "ctox.secret.delete"
+        | "ctox.subscription_auth.start" => {
+            return handle_secret_command(root, &command);
         }
         "ctox.module.repair_lifecycle_projection"
         | "ctox.module.release"
@@ -16726,29 +16646,6 @@ pub fn accept_rxdb_business_command_with_origin(
         | "ctox.module.list_versions"
         | "ctox.module.rollback_version" => {
             return handle_module_command(root, &command);
-        }
-        "ctox.subscription_auth.start" => {
-            let request: SubscriptionAuthStartCommandRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.subscription_auth.start payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = workspace_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::IntegrationsManage,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = start_subscription_auth_command(root, &session, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
         }
         command_type
             if command_type.starts_with("office.document.")
@@ -18133,6 +18030,121 @@ fn handle_business_os_command(root: &Path, command: &BusinessCommand) -> anyhow:
             );
         }
         other => anyhow::bail!("unsupported Business OS command type: {other}"),
+    }
+}
+
+fn handle_secret_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
+        "ctox.secret.list" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = list_credentials_command(root)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.secret.put" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let mutation: CtoxSecretPutMutation =
+                serde_json::from_value(command.payload.clone()).unwrap_or_default();
+            // Redact the secret value before ANY persistence path runs: the
+            // business_commands table, the re-projected RxDB document, the
+            // policy-denied outcome, and the policy-decision audit event all
+            // store the command we hand them. The original payload.value would
+            // otherwise be left at rest in the RxDB store and replicated browser
+            // IndexedDB. Build the redacted command up front and use it
+            // everywhere — including the rejection path.
+            let safe_command = secret_command_safe_command(
+                &command,
+                &session,
+                serde_json::json!({ "name": mutation.name.trim() }),
+            );
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+            return match put_credential_command(root, &mutation) {
+                Ok(outcome) => write_rxdb_control_command_outcome(
+                    root,
+                    &safe_command,
+                    "completed",
+                    None,
+                    Some("completed"),
+                    outcome,
+                ),
+                Err(error) => write_rxdb_control_command_outcome(
+                    root,
+                    &safe_command,
+                    "failed",
+                    None,
+                    Some("failed"),
+                    serde_json::json!({ "outcome": { "ok": false, "error": error.to_string() } }),
+                ),
+            };
+        }
+        "ctox.secret.delete" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let mutation: CtoxSecretDeleteMutation =
+                serde_json::from_value(command.payload.clone()).unwrap_or_default();
+            return match delete_credential_command(root, &mutation) {
+                Ok(outcome) => write_rxdb_control_command_outcome(
+                    root,
+                    &command,
+                    "completed",
+                    None,
+                    Some("completed"),
+                    outcome,
+                ),
+                Err(error) => write_rxdb_control_command_outcome(
+                    root,
+                    &command,
+                    "failed",
+                    None,
+                    Some("failed"),
+                    serde_json::json!({ "outcome": { "ok": false, "error": error.to_string() } }),
+                ),
+            };
+        }
+        "ctox.subscription_auth.start" => {
+            let request: SubscriptionAuthStartCommandRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.subscription_auth.start payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision = workspace_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::IntegrationsManage,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = start_subscription_auth_command(root, &session, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        other => anyhow::bail!("unsupported secret command type: {other}"),
     }
 }
 
