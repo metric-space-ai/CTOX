@@ -32,3 +32,28 @@ Und:
 - Konsumenten-Baselines auf die TATSÄCHLICH berührten Module schneiden,
   nicht auf ganze Bäume. Ein Modul-Filter kostet Sekunden, `business_os::`
   kostet 22 Minuten.
+
+## Plattenplatz — die zweite Ressource
+
+CPU war nicht die einzige, die ich übersehen habe. Am 01.08. lief die
+Datenpartition voll und JEDER Bash-Aufruf scheiterte danach, weil die
+Umgebung ihre eigene Ausgabedatei nicht mehr anlegen konnte. Ursache:
+neun liegengebliebene Verifikations-Checkouts (`git archive HEAD` in den
+Scratch-Bereich), 6,7 GB, einer pro Welle.
+
+Deshalb:
+- `df -h /System/Volumes/Data` vor jeder Welle prüfen. Unter 10 GB frei:
+  erst aufräumen, dann arbeiten.
+- Ein Verifikations-Checkout wird SOFORT nach seiner Prüfung gelöscht,
+  im selben Befehl. Nicht „später", nicht am Ende der Welle.
+- Der Cargo-Zielbaum unter `runtime/build/cargo-target` wuchs auf 44 GB.
+  Er ist wegwerfbar (`runtime/` ist ignorierter Laufzeitzustand), aber ein
+  `cargo clean` kostet einen vollständigen Neubau — das ist eine
+  Owner-Entscheidung, keine stille Aufräumaktion.
+
+**Ein voller Datenträger hinterlässt Trümmer, die nach etwas anderem
+aussehen.** Nach dem Vorfall scheiterte der Build an `wha-proto`, einem
+Typ, den dessen eigenes Build-Skript erzeugt — das sah aus wie ein Schaden
+am gerade laufenden Refactoring. Es war ein abgeschnittenes Artefakt;
+`cargo clean -p wha-proto` genügte. Wer den Fehler dem Schnitt zuschreibt,
+verwirft saubere Arbeit.
