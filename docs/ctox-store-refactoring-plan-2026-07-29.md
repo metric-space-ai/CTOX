@@ -234,6 +234,43 @@ Escape-Hatch je Schnitt: Nähte > 20 pub(crate)-Einstiege ⇒ STOPP + Karte.
   Outcome-Schreiben ist beobachtbar, nie still.
 - SF3 ▲ Uncertain-Claim-Sackgasse generisch lösen (TTL-Re-Drive statt
   5-Typen-Allowlist — vereint mit G3).
+  **ENTSCHIEDEN 01.08.: NICHT GEBAUT, und das ist das Ergebnis.**
+
+  Die Prämisse des Tickets trägt nicht. Die Fünferliste kodiert nicht
+  „diese sind wichtig", sondern „diese sind auditiert idempotent". Ein
+  TTL ersetzt das nicht — er tauscht die bekannte Sackgasse gegen
+  mögliche doppelte Zahlungen, Mails oder Dateien.
+
+  Vermessen, mit Codebelegen: es gibt heute KEIN allgemeines, im Code
+  prüfbares Merkmal für „sicher erneut ausführbar".
+  - `BusinessCommand` trägt keine Replay-Semantik (nur ID, Modul, Typ,
+    Record-ID, Payload, Client-Context, Origin).
+  - Der `idempotency_key` ist immer die `command_id`. Das schützt vor
+    einem zweiten Claim mit anderem Intent, beweist aber nichts über die
+    Idempotenz des Handler-Effekts.
+  - Der Claim-Layer meldet für JEDEN nicht-terminalen Zustand pauschal
+    `uncertain`; er kennt den Stand des externen Effekts nicht.
+  - „Kein Resultat" ist mehrdeutig: noch nicht ausgeführt ODER Effekt
+    ausgeführt und Outcome vor der Persistenz verloren.
+  - `DataRead`/`DataWrite` trägt nicht: `person_research` ist Read,
+    `external_sql.write` ist Write — **beide stehen auf der Liste**.
+    Lesekommandos können externe Kosten und Artefakte erzeugen,
+    Schreibkommandos können per Upsert sicher sein.
+
+  **Was für einen sicheren generischen Re-Drive fehlt** (Owner-Frage 8):
+  1. Eine verpflichtende Handler-Deklaration, zentral auswertbar, z. B.
+     `ReplayPolicy::{Never, Idempotent, ReconcileByReceipt,
+     ReadOnlyRecomputable}` — deklariert, nicht aus Namen oder
+     Permission abgeleitet.
+  2. Für `Idempotent`: eine stabile Effekt-/Dedupe-ID, die der
+     tatsächliche Sink durchsetzt (DB, Mailprovider, Payment, Dateisystem).
+  3. Für `ReconcileByReceipt`: ein dauerhaftes Effekt-Receipt an
+     `command_id + payload_hash`, mit Phasen `not_started`,
+     `pending_external`, `applied`, `completed`, plus einer
+     handler-spezifischen Abfrage, ob der Effekt schon angewendet wurde.
+
+  Bis dahin bleibt die Liste. Sie ist explizit, auditiert und ehrlich —
+  eine generische Lösung ohne 1–3 wäre nur scheinbar allgemeiner.
 
 **store_projections.rs**:
 - SF4 ▲ Kanonischer Schreibpfad statt 6 paralleler Schreiber;
