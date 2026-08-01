@@ -16893,27 +16893,19 @@ pub fn accept_rxdb_business_command_with_origin(
                 ),
             };
         }
-        "ctox.module.repair_lifecycle_projection" => {
-            let request: ModuleLifecycleProjectionRepairRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.module.repair_lifecycle_projection payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let safe_command =
-                module_lifecycle_projection_repair_safe_command(&command, &request, &session);
-            let outcome = repair_module_lifecycle_projections(root, &session, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+        "ctox.module.repair_lifecycle_projection"
+        | "ctox.module.release"
+        | "ctox.module.assign_founder"
+        | "ctox.module.save"
+        | "ctox.module.delete"
+        | "ctox.module.install_template"
+        | "ctox.module.update"
+        | "ctox.module.set_visible"
+        | "ctox.module.check_updates"
+        | "ctox.module.rollback"
+        | "ctox.module.list_versions"
+        | "ctox.module.rollback_version" => {
+            return handle_module_command(root, &command);
         }
         "ctox.subscription_auth.start" => {
             let request: SubscriptionAuthStartCommandRequest =
@@ -17740,6 +17732,390 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
+        "ctox.app_store.install" => {
+            let request: AppStoreInstallRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.app_store.install payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(&request.module_id);
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = scoped_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsInstall,
+                BusinessOsScope::module(module_id, false),
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let installed_app_root = resolve_business_os_installed_app_root(root);
+            let outcome = install_app_module(root, &installed_app_root, &session, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.app_store.uninstall" => {
+            let request: AppStoreUninstallRequest = serde_json::from_value(command.payload.clone())
+                .context("invalid ctox.app_store.uninstall payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = source_sanitize_slug(&request.module_id);
+            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+            let decision = scoped_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::AppsUninstall,
+                BusinessOsScope::module(module_id, false),
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let installed_app_root = resolve_business_os_installed_app_root(root);
+            let outcome = uninstall_app_module(root, &installed_app_root, &session, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.mailserver.get_config" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let conn = open_mailserver_store_connection(root)?;
+
+            // Get domains
+            let mut stmt = conn.prepare("SELECT domain_name, dkim_selector, dkim_private_key, COALESCE(spf_record, ''), COALESCE(dmarc_record, '') FROM stalwart_domains")?;
+            let domain_rows = stmt.query_map(params![], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            let mut domains = Vec::new();
+            for r in domain_rows {
+                let (domain_name, dkim_selector, dkim_private_key, spf_record, dmarc_record) = r?;
+                let dkim_public_key = get_public_key(&dkim_private_key)?;
+                domains.push(serde_json::json!({
+                    "domain_name": domain_name,
+                    "dkim_selector": dkim_selector,
+                    "dkim_private_key_set": !dkim_private_key.trim().is_empty(),
+                    "secret_value_revealed": false,
+                    "dkim_public_key": dkim_public_key,
+                    "spf_record": spf_record,
+                    "dmarc_record": dmarc_record,
+                }));
+            }
+
+            // Get users
+            let mut stmt = conn.prepare("SELECT username, created_at FROM stalwart_users")?;
+            let user_rows = stmt.query_map(params![], |row| {
+                Ok(serde_json::json!({
+                    "username": row.get::<_, String>(0)?,
+                    "created_at": row.get::<_, i64>(1)?,
+                }))
+            })?;
+            let mut users = Vec::new();
+            for r in user_rows {
+                users.push(r?);
+            }
+
+            let outcome = serde_json::json!({
+                "domains": domains,
+                "users": users
+            });
+
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.mailserver.save_domain" => {
+            let domain_name = command
+                .payload
+                .get("domain_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let mut dkim_selector = command
+                .payload
+                .get("dkim_selector")
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                .trim()
+                .to_string();
+            if dkim_selector.is_empty() {
+                dkim_selector = "default".to_string();
+            }
+            let dkim_private_key_opt = command
+                .payload
+                .get("dkim_private_key")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+
+            anyhow::ensure!(!domain_name.is_empty(), "domain_name is required");
+            let session = rxdb_authenticated_session(root, &command)?;
+            let safe_command = mailserver_command_safe_command(
+                &command,
+                &session,
+                serde_json::json!({
+                    "domain_name": domain_name,
+                    "dkim_selector": dkim_selector,
+                    "dkim_private_key_provided": !dkim_private_key_opt.is_empty(),
+                    "secret_value_in_payload": false
+                }),
+            );
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+
+            let dkim_private_key = if dkim_private_key_opt.is_empty() {
+                generate_dkim_private_key()?
+            } else {
+                dkim_private_key_opt
+            };
+
+            let spf_record = format!("v=spf1 mx a ip4:203.0.113.10 ~all");
+            let dmarc_record = format!("v=DMARC1; p=none; rua=mailto:dmarc@{}", domain_name);
+
+            let conn = open_mailserver_store_connection(root)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO stalwart_domains (domain_name, dkim_selector, dkim_private_key, spf_record, dmarc_record)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![domain_name, dkim_selector, dkim_private_key, spf_record, dmarc_record],
+            )?;
+
+            let dkim_public_key = get_public_key(&dkim_private_key)?;
+
+            let outcome = serde_json::json!({
+                "domain_name": domain_name,
+                "dkim_selector": dkim_selector,
+                "spf_record": spf_record,
+                "dmarc_record": dmarc_record,
+                "dkim_private_key_set": true,
+                "secret_value_revealed": false,
+                "dkim_public_key": dkim_public_key
+            });
+
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.mailserver.delete_domain" => {
+            let domain_name = command
+                .payload
+                .get("domain_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            anyhow::ensure!(!domain_name.is_empty(), "domain_name is required");
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+
+            let conn = open_mailserver_store_connection(root)?;
+            conn.execute(
+                "DELETE FROM stalwart_domains WHERE domain_name = ?1",
+                params![domain_name],
+            )?;
+
+            let outcome = serde_json::json!({
+                "domain_name": domain_name,
+                "deleted": true
+            });
+
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.mailserver.save_user" => {
+            let username = command
+                .payload
+                .get("username")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let password = command
+                .payload
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+
+            anyhow::ensure!(!username.is_empty(), "username is required");
+            anyhow::ensure!(!password.is_empty(), "password is required");
+            let session = rxdb_authenticated_session(root, &command)?;
+            let safe_command = mailserver_command_safe_command(
+                &command,
+                &session,
+                serde_json::json!({
+                    "username": username,
+                    "password_set": true,
+                    "secret_value_in_payload": false
+                }),
+            );
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+
+            let db_path = crate::paths::core_db(root).to_string_lossy().into_owned();
+            let store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
+            store.init()?;
+            store.add_user(&username, &password)?;
+
+            let outcome = serde_json::json!({
+                "username": username,
+                "saved": true
+            });
+
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.mailserver.delete_user" => {
+            let username = command
+                .payload
+                .get("username")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            anyhow::ensure!(!username.is_empty(), "username is required");
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+
+            let conn = open_mailserver_store_connection(root)?;
+            conn.execute(
+                "DELETE FROM stalwart_users WHERE username = ?1",
+                params![username],
+            )?;
+            conn.execute(
+                "DELETE FROM stalwart_mailboxes WHERE owner = ?1",
+                params![username],
+            )?;
+
+            let outcome = serde_json::json!({
+                "username": username,
+                "deleted": true
+            });
+
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        _ => {}
+    }
+    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
+    // already-gated arm above falls through here into record_command, which
+    // records it AND enqueues server work (create_ctox_queue_task) — previously
+    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
+    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
+    // CLI / in-process callers, already trusted, matching rxdb_session_from_
+    // command). App-build commands carry their own AppsInstall/AppsModify gate
+    // inside record_command; every other fall-through is a record-mutating data
+    // command (source.parse, matching.*, business_os.chat.task / cv-print,
+    // documents.*), so require module-scoped DataWrite. The session is the
+    // capability-token actor, so an unprivileged / unauthenticated replicated
+    // peer (inert "user", no grant) is denied and never reaches record_command
+    // or create_ctox_queue_task.
+    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
+        && app_build_command_policy_target(&command).is_none()
+    {
+        let session = rxdb_authenticated_session(root, &command)?;
+        let permission = if command.command_type == "business_os.context.ask" {
+            BusinessOsPermission::DataRead
+        } else {
+            BusinessOsPermission::DataWrite
+        };
+        let decision = module_policy_decision(root, &session, permission, &command.module)?;
+        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+            return Ok(outcome);
+        }
+    }
+    let accepted = record_command(root, command)?;
+    Ok(serde_json::to_value(accepted)?)
+}
+
+fn handle_module_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
+        "ctox.module.repair_lifecycle_projection" => {
+            let request: ModuleLifecycleProjectionRepairRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.module.repair_lifecycle_projection payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let safe_command =
+                module_lifecycle_projection_repair_safe_command(&command, &request, &session);
+            let outcome = repair_module_lifecycle_projections(root, &session, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
         "ctox.module.release" => {
             let mutation: ModuleReleaseRequest = serde_json::from_value(command.payload.clone())
                 .context("invalid ctox.module.release payload")?;
@@ -18205,364 +18581,8 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
-        "ctox.app_store.install" => {
-            let request: AppStoreInstallRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.app_store.install payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = scoped_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsInstall,
-                BusinessOsScope::module(module_id, false),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = install_app_module(root, &installed_app_root, &session, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.app_store.uninstall" => {
-            let request: AppStoreUninstallRequest = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.app_store.uninstall payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = source_sanitize_slug(&request.module_id);
-            anyhow::ensure!(!module_id.is_empty(), "module_id is required");
-            let decision = scoped_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::AppsUninstall,
-                BusinessOsScope::module(module_id, false),
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let installed_app_root = resolve_business_os_installed_app_root(root);
-            let outcome = uninstall_app_module(root, &installed_app_root, &session, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.mailserver.get_config" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let conn = open_mailserver_store_connection(root)?;
-
-            // Get domains
-            let mut stmt = conn.prepare("SELECT domain_name, dkim_selector, dkim_private_key, COALESCE(spf_record, ''), COALESCE(dmarc_record, '') FROM stalwart_domains")?;
-            let domain_rows = stmt.query_map(params![], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?;
-            let mut domains = Vec::new();
-            for r in domain_rows {
-                let (domain_name, dkim_selector, dkim_private_key, spf_record, dmarc_record) = r?;
-                let dkim_public_key = get_public_key(&dkim_private_key)?;
-                domains.push(serde_json::json!({
-                    "domain_name": domain_name,
-                    "dkim_selector": dkim_selector,
-                    "dkim_private_key_set": !dkim_private_key.trim().is_empty(),
-                    "secret_value_revealed": false,
-                    "dkim_public_key": dkim_public_key,
-                    "spf_record": spf_record,
-                    "dmarc_record": dmarc_record,
-                }));
-            }
-
-            // Get users
-            let mut stmt = conn.prepare("SELECT username, created_at FROM stalwart_users")?;
-            let user_rows = stmt.query_map(params![], |row| {
-                Ok(serde_json::json!({
-                    "username": row.get::<_, String>(0)?,
-                    "created_at": row.get::<_, i64>(1)?,
-                }))
-            })?;
-            let mut users = Vec::new();
-            for r in user_rows {
-                users.push(r?);
-            }
-
-            let outcome = serde_json::json!({
-                "domains": domains,
-                "users": users
-            });
-
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.mailserver.save_domain" => {
-            let domain_name = command
-                .payload
-                .get("domain_name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let mut dkim_selector = command
-                .payload
-                .get("dkim_selector")
-                .and_then(Value::as_str)
-                .unwrap_or("default")
-                .trim()
-                .to_string();
-            if dkim_selector.is_empty() {
-                dkim_selector = "default".to_string();
-            }
-            let dkim_private_key_opt = command
-                .payload
-                .get("dkim_private_key")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-
-            anyhow::ensure!(!domain_name.is_empty(), "domain_name is required");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let safe_command = mailserver_command_safe_command(
-                &command,
-                &session,
-                serde_json::json!({
-                    "domain_name": domain_name,
-                    "dkim_selector": dkim_selector,
-                    "dkim_private_key_provided": !dkim_private_key_opt.is_empty(),
-                    "secret_value_in_payload": false
-                }),
-            );
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-
-            let dkim_private_key = if dkim_private_key_opt.is_empty() {
-                generate_dkim_private_key()?
-            } else {
-                dkim_private_key_opt
-            };
-
-            let spf_record = format!("v=spf1 mx a ip4:203.0.113.10 ~all");
-            let dmarc_record = format!("v=DMARC1; p=none; rua=mailto:dmarc@{}", domain_name);
-
-            let conn = open_mailserver_store_connection(root)?;
-            conn.execute(
-                "INSERT OR REPLACE INTO stalwart_domains (domain_name, dkim_selector, dkim_private_key, spf_record, dmarc_record)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![domain_name, dkim_selector, dkim_private_key, spf_record, dmarc_record],
-            )?;
-
-            let dkim_public_key = get_public_key(&dkim_private_key)?;
-
-            let outcome = serde_json::json!({
-                "domain_name": domain_name,
-                "dkim_selector": dkim_selector,
-                "spf_record": spf_record,
-                "dmarc_record": dmarc_record,
-                "dkim_private_key_set": true,
-                "secret_value_revealed": false,
-                "dkim_public_key": dkim_public_key
-            });
-
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.mailserver.delete_domain" => {
-            let domain_name = command
-                .payload
-                .get("domain_name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            anyhow::ensure!(!domain_name.is_empty(), "domain_name is required");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-
-            let conn = open_mailserver_store_connection(root)?;
-            conn.execute(
-                "DELETE FROM stalwart_domains WHERE domain_name = ?1",
-                params![domain_name],
-            )?;
-
-            let outcome = serde_json::json!({
-                "domain_name": domain_name,
-                "deleted": true
-            });
-
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.mailserver.save_user" => {
-            let username = command
-                .payload
-                .get("username")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let password = command
-                .payload
-                .get("password")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-
-            anyhow::ensure!(!username.is_empty(), "username is required");
-            anyhow::ensure!(!password.is_empty(), "password is required");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let safe_command = mailserver_command_safe_command(
-                &command,
-                &session,
-                serde_json::json!({
-                    "username": username,
-                    "password_set": true,
-                    "secret_value_in_payload": false
-                }),
-            );
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-
-            let db_path = crate::paths::core_db(root).to_string_lossy().into_owned();
-            let store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
-            store.init()?;
-            store.add_user(&username, &password)?;
-
-            let outcome = serde_json::json!({
-                "username": username,
-                "saved": true
-            });
-
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.mailserver.delete_user" => {
-            let username = command
-                .payload
-                .get("username")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            anyhow::ensure!(!username.is_empty(), "username is required");
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-
-            let conn = open_mailserver_store_connection(root)?;
-            conn.execute(
-                "DELETE FROM stalwart_users WHERE username = ?1",
-                params![username],
-            )?;
-            conn.execute(
-                "DELETE FROM stalwart_mailboxes WHERE owner = ?1",
-                params![username],
-            )?;
-
-            let outcome = serde_json::json!({
-                "username": username,
-                "deleted": true
-            });
-
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        _ => {}
+        other => anyhow::bail!("unsupported module command type: {other}"),
     }
-    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
-    // already-gated arm above falls through here into record_command, which
-    // records it AND enqueues server work (create_ctox_queue_task) — previously
-    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
-    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
-    // CLI / in-process callers, already trusted, matching rxdb_session_from_
-    // command). App-build commands carry their own AppsInstall/AppsModify gate
-    // inside record_command; every other fall-through is a record-mutating data
-    // command (source.parse, matching.*, business_os.chat.task / cv-print,
-    // documents.*), so require module-scoped DataWrite. The session is the
-    // capability-token actor, so an unprivileged / unauthenticated replicated
-    // peer (inert "user", no grant) is denied and never reaches record_command
-    // or create_ctox_queue_task.
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && app_build_command_policy_target(&command).is_none()
-    {
-        let session = rxdb_authenticated_session(root, &command)?;
-        let permission = if command.command_type == "business_os.context.ask" {
-            BusinessOsPermission::DataRead
-        } else {
-            BusinessOsPermission::DataWrite
-        };
-        let decision = module_policy_decision(root, &session, permission, &command.module)?;
-        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-            return Ok(outcome);
-        }
-    }
-    let accepted = record_command(root, command)?;
-    Ok(serde_json::to_value(accepted)?)
 }
 
 fn is_iot_active_command(command_type: &str) -> bool {
