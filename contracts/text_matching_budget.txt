@@ -1,0 +1,59 @@
+# Wo CTOX noch Entscheidungen aus Fehlertext liest — und wie viel davon.
+#
+# Gezählt werden Produktionszeilen, die ALLE drei Eigenschaften haben:
+#   1. eine Kontrollfluss-Entscheidung (if/while/&&/matches!/filter/any/return),
+#   2. `.contains("…")` mit einem String-Literal (keine Mengenabfrage, kein char),
+#   3. einen fehler-/statusartigen EMPFÄNGER links von `.contains(`.
+#
+# Die Zahl ist eine RATSCHE: sie darf nur fallen. Der Guard in
+# src/core/text_matching_tests.rs schlägt in beide Richtungen an — eine zu hoch
+# stehende Zahl ist genauso rot wie eine überschrittene.
+#
+# Warum das eine Schuldklasse ist: eine Entscheidung, die aus Prosa gelesen
+# wird, ändert sich still, wenn jemand die Prosa umformuliert. ST3 hat genau
+# das beseitigt — dort entschied `contains(" completed.") && contains("changed ")`
+# über den Terminalstatus einer Queue-Aufgabe.
+#
+# GRENZE DIESES WÄCHTERS, ehrlich benannt: Punkt 3 prüft den NAMEN des
+# Empfängers. `err.contains("timeout")` wird gezählt, `lower.contains("timeout")`
+# nicht — obwohl `lower` dieselbe Fehlermeldung sein kann. Eine Umbenennung
+# entzieht eine Zeile also der Zählung. Der Wächter fängt damit den Zuwachs an
+# der offensichtlichen Stelle, nicht jede Umgehung. Das ist bewusst so: eine
+# breitere Regel traf hier Mengenabfragen und Pfadprüfungen mit und wäre
+# innerhalb einer Woche mit Ausnahmen durchlöchert worden.
+#
+# NICHT jede gezählte Zeile ist ein Defekt. Wo ein Fremdwerkzeug seinen Fehler
+# nur als Text meldet, ist der Textabgleich die einzige verfügbare Information.
+# Solche Zeilen bleiben, sollen aber sichtbar bleiben.
+
+# --- Fremdwerkzeug meldet nur Text: bleibt, ist aber gezählt -------------
+# python-docx meldet die fehlende Abhängigkeit ausschliesslich auf stderr.
+src/core/report/render/docx.rs = 2
+# DBus-Sitzungsfehler kommen als Meldung, nicht als Code.
+src/core/ui/tui/jami.rs = 1
+
+# --- Eigene Fehlertexte: hier gehört ein Typ hin ------------------------
+# Die Service-Schleife ist der grösste Posten und der lohnendste: sie
+# entscheidet an ihren EIGENEN Statusmeldungen, also an Text, den sie selbst
+# erzeugt. Dort ist ein Feld immer möglich.
+src/core/service/service.rs = 15
+src/core/execution/agent/direct_session.rs = 4
+src/core/business_os/app_runtime.rs = 2
+src/core/business_os/command_plane.rs = 2
+src/core/business_os/office_engine.rs = 1
+# Kommunikation klassifiziert Zustellfehler an Text.
+src/core/communication/chat_native.rs = 1
+src/core/communication/email_native.rs = 1
+# Work-Item-Status aus dem Kind-Namen geraten.
+src/core/mission/tickets/work_items.rs = 1
+
+# --- Erzwungen: diese Dateien entscheiden nicht mehr aus Text -----------
+# `= 0` heisst: hier gibt es keine solche Zeile mehr, und es soll keine
+# dazukommen. store.rs steht hier, weil ST3 die letzte entfernt hat.
+src/core/business_os/store.rs = 0
+src/core/service/process_mining.rs = 0
+# turn_loop.rs klassifiziert Wiederholungen weiterhin an Provider-Fehlertexten
+# — der Empfänger heisst dort `lower`, greift also nicht in die Zählung. Die
+# Null bedeutet hier NICHT „sauber", sondern „von diesem Wächter nicht
+# erfasst". Siehe Grenze oben; die Ablösung ist ein SF-Ticket.
+src/core/execution/agent/turn_loop.rs = 0
