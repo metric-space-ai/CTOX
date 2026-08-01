@@ -28844,16 +28844,30 @@ pub(super) mod tests {
         Ok(buffer.into_inner())
     }
 
-    fn serve_test_zip_once(bytes: Vec<u8>) -> anyhow::Result<String> {
-        let server = Server::http("127.0.0.1:0")
-            .map_err(|err| anyhow::anyhow!("failed to bind test zip server: {err}"))?;
-        let url = format!("http://{}/module.zip", server.server_addr());
-        thread::spawn(move || {
-            if let Ok(request) = server.recv() {
-                let _ = request.respond(Response::from_data(bytes));
-            }
-        });
-        Ok(url)
+    fn seed_test_app_module_zip_upload(
+        root: &Path,
+        file_id: &str,
+        module_id: &str,
+    ) -> anyhow::Result<AppStoreInstallRequest> {
+        let bytes = build_test_app_module_zip(module_id)?;
+        seed_rxdb_chat_attachment(
+            root,
+            file_id,
+            &format!("{module_id}.zip"),
+            "application/zip",
+            &bytes,
+            false,
+        )?;
+        Ok(AppStoreInstallRequest {
+            module_id: module_id.to_owned(),
+            download_url: String::new(),
+            source_path: String::new(),
+            source_kind: "zip".to_owned(),
+            repo: String::new(),
+            git_ref: String::new(),
+            subpath: format!("modules/{module_id}"),
+            file_id: file_id.to_owned(),
+        })
     }
 
     pub(in crate::business_os) fn seed_business_user(
@@ -30862,6 +30876,7 @@ pub(super) mod tests {
         let root = temp.path();
         seed_test_business_os_app_root(root)?;
         seed_business_user(root, "viewer", "user")?;
+        seed_business_user(root, "ungranted-viewer", "user")?;
         seed_permission_grant(
             root,
             "grant_viewer_install_inventory",
@@ -30880,57 +30895,97 @@ pub(super) mod tests {
             "module",
             "inventory",
         )?;
-        let download_url = serve_test_zip_once(build_test_app_module_zip("inventory")?)?;
-        let actor = serde_json::json!({
-            "actor": {
-                "id": "viewer",
-                "display_name": "Viewer",
-                "role": "admin",
-                "is_admin": true
-            }
-        });
+        let request = seed_test_app_module_zip_upload(root, "granted_inventory_zip", "inventory")?;
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+        let granted_session = test_session("viewer", "user");
+        let ungranted_session = test_session("ungranted-viewer", "user");
 
-        let install = accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_granted_app_store_install",
-                "command_id": "cmd_granted_app_store_install",
-                "module": "app-store",
-                "command_type": "ctox.app_store.install",
-                "record_id": "inventory",
-                "status": "pending_sync",
-                "payload": {
-                    "module_id": "inventory",
-                    "download_url": download_url,
-                    "source_path": "modules/inventory"
-                },
-                "client_context": actor.clone()
-            }),
-        )?;
+        assert!(
+            module_policy_decision(
+                root,
+                &granted_session,
+                BusinessOsPermission::AppsInstall,
+                "inventory",
+            )?
+            .allowed
+        );
+        let granted_error =
+            install_app_module(root, &installed_app_root, &granted_session, request.clone())
+                .expect_err("the explicit install grant must reach the later trust gate");
         assert_eq!(
-            install.get("status").and_then(Value::as_str),
-            Some("completed")
+            granted_error.to_string(),
+            "untrusted third-party apps cannot run same-origin; install a CTOX first-party source or wait for the sandbox runtime"
         );
 
-        let uninstall = accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_granted_app_store_uninstall",
-                "command_id": "cmd_granted_app_store_uninstall",
-                "module": "app-store",
-                "command_type": "ctox.app_store.uninstall",
-                "record_id": "inventory",
-                "status": "pending_sync",
-                "payload": {
-                    "module_id": "inventory"
-                },
-                "client_context": actor
-            }),
-        )?;
-        assert_eq!(
-            uninstall.get("status").and_then(Value::as_str),
-            Some("completed")
+        assert!(
+            !module_policy_decision(
+                root,
+                &ungranted_session,
+                BusinessOsPermission::AppsInstall,
+                "inventory",
+            )?
+            .allowed
         );
+        let ungranted_error =
+            install_app_module(root, &installed_app_root, &ungranted_session, request)
+                .expect_err("an ungranted user must be stopped by the install policy check");
+        assert_eq!(
+            ungranted_error.to_string(),
+            "chef or admin role required to install modules"
+        );
+
+        let installed_manifest = installed_app_root
+            .join("installed-modules")
+            .join("inventory")
+            .join("module.json");
+        write_test_manifest(
+            installed_manifest
+                .parent()
+                .context("installed module directory")?,
+            "inventory",
+        )?;
+        let uninstall = uninstall_app_module(
+            root,
+            &installed_app_root,
+            &granted_session,
+            AppStoreUninstallRequest {
+                module_id: "inventory".to_owned(),
+            },
+        )?;
+        assert_eq!(uninstall.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            uninstall.get("uninstalled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!installed_manifest.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn app_store_zip_upload_is_rejected_by_same_origin_trust_gate() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_test_business_os_app_root(root)?;
+        seed_business_user(root, "ops-admin", "admin")?;
+        let request =
+            seed_test_app_module_zip_upload(root, "untrusted_inventory_zip", "inventory")?;
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+
+        let error = install_app_module(
+            root,
+            &installed_app_root,
+            &test_session("ops-admin", "admin"),
+            request,
+        )
+        .expect_err("a zip upload must be rejected by the same-origin trust gate");
+        assert_eq!(
+            error.to_string(),
+            "untrusted third-party apps cannot run same-origin; install a CTOX first-party source or wait for the sandbox runtime"
+        );
+        assert!(!installed_app_root
+            .join("installed-modules")
+            .join("inventory")
+            .exists());
         Ok(())
     }
 
@@ -34558,80 +34613,69 @@ pub(super) mod tests {
         let root = temp.path();
         seed_test_business_os_app_root(root)?;
         seed_business_user(root, "ops_admin", "admin")?;
-        let download_url = serve_test_zip_once(build_test_app_module_zip("inventory")?)?;
-        let actor = serde_json::json!({
-            "actor": {
-                "id": "ops_admin",
-                "display_name": "Ops Admin"
-            }
-        });
+        seed_business_user(root, "viewer", "user")?;
+        let request = seed_test_app_module_zip_upload(root, "admin_inventory_zip", "inventory")?;
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+        let admin_session = test_session("ops_admin", "admin");
+        let viewer_session = test_session("viewer", "user");
 
-        let install = accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_admin_app_store_install",
-                "command_id": "cmd_admin_app_store_install",
-                "module": "app-store",
-                "command_type": "ctox.app_store.install",
-                "record_id": "inventory",
-                "status": "pending_sync",
-                "payload": {
-                    "module_id": "inventory",
-                    "download_url": download_url,
-                    "source_path": "modules/inventory"
-                },
-                "client_context": actor.clone()
-            }),
-        )?;
-        assert_eq!(
-            install.get("status").and_then(Value::as_str),
-            Some("completed")
+        assert!(
+            module_policy_decision(
+                root,
+                &admin_session,
+                BusinessOsPermission::AppsInstall,
+                "inventory",
+            )?
+            .allowed
         );
+        let admin_error =
+            install_app_module(root, &installed_app_root, &admin_session, request.clone())
+                .expect_err("the admin install path must reach the later trust gate");
         assert_eq!(
-            install.pointer("/result/ok").and_then(Value::as_bool),
-            Some(true)
+            admin_error.to_string(),
+            "untrusted third-party apps cannot run same-origin; install a CTOX first-party source or wait for the sandbox runtime"
         );
+
+        assert!(
+            !module_policy_decision(
+                root,
+                &viewer_session,
+                BusinessOsPermission::AppsInstall,
+                "inventory",
+            )?
+            .allowed
+        );
+        let viewer_error = install_app_module(root, &installed_app_root, &viewer_session, request)
+            .expect_err("a regular user must be stopped by the install policy check");
         assert_eq!(
-            install.pointer("/result/module_id").and_then(Value::as_str),
-            Some("inventory")
+            viewer_error.to_string(),
+            "chef or admin role required to install modules"
         );
-        let installed_manifest = resolve_business_os_installed_app_root(root)
+
+        let installed_manifest = installed_app_root
             .join("installed-modules")
             .join("inventory")
             .join("module.json");
-        assert!(
-            installed_manifest.is_file(),
-            "expected installed manifest at {}",
-            installed_manifest.display()
-        );
-
-        let uninstall = accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_admin_app_store_uninstall",
-                "command_id": "cmd_admin_app_store_uninstall",
-                "module": "app-store",
-                "command_type": "ctox.app_store.uninstall",
-                "record_id": "inventory",
-                "status": "pending_sync",
-                "payload": {
-                    "module_id": "inventory"
-                },
-                "client_context": actor
-            }),
+        write_test_manifest(
+            installed_manifest
+                .parent()
+                .context("installed module directory")?,
+            "inventory",
         )?;
+        let uninstall = uninstall_app_module(
+            root,
+            &installed_app_root,
+            &admin_session,
+            AppStoreUninstallRequest {
+                module_id: "inventory".to_owned(),
+            },
+        )?;
+        assert_eq!(uninstall.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(
-            uninstall.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-        assert_eq!(
-            uninstall.pointer("/result/ok").and_then(Value::as_bool),
+            uninstall.get("uninstalled").and_then(Value::as_bool),
             Some(true)
         );
-        assert!(
-            !installed_manifest.exists(),
-            "expected installed manifest to be removed"
-        );
+        assert!(!installed_manifest.exists());
         Ok(())
     }
 
