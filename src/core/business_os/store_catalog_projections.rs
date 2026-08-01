@@ -1446,4 +1446,55 @@ mod tests {
 
         Ok(())
     }
+
+    /// A module may state its restriction through `audience` alone, without
+    /// `visibility_state`. The backfill test covers only the case where both
+    /// are set, so it stays green even if this half of the check is deleted —
+    /// measured, not assumed. `public` is the assertion that matters: the MCP
+    /// visibility gate returns allow on `public` before it consults the policy,
+    /// so a restricted module projected as public is reachable without a
+    /// permission decision.
+    #[test]
+    fn audience_only_restriction_is_not_projected_as_public() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let app_root = root.join("src/apps/business-os");
+        drop(open_store(root)?);
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+        fs::create_dir_all(app_root.join("modules/ctox"))?;
+        fs::create_dir_all(installed_app_root.join("installed-modules/audience-restricted"))?;
+        fs::write(app_root.join("index.html"), "<!doctype html>")?;
+        fs::write(
+            app_root.join("modules/ctox/module.json"),
+            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
+        )?;
+        fs::write(
+            installed_app_root.join("installed-modules/audience-restricted/module.json"),
+            r#"{"id":"audience-restricted","title":"Audience Restricted","version":"1.1.0","entry":"installed-modules/audience-restricted/index.html","install_scope":"installed","lifecycle":{"audience":"restricted"}}"#,
+        )?;
+
+        let catalog = module_catalog_for_rxdb(root)?;
+        let module = catalog
+            .get("modules")
+            .and_then(Value::as_array)
+            .context("catalog modules")?
+            .iter()
+            .find(|module| module.get("id").and_then(Value::as_str) == Some("audience-restricted"))
+            .context("audience-restricted module projection")?
+            .clone();
+
+        assert_eq!(
+            module.pointer("/lifecycle/public").and_then(Value::as_bool),
+            Some(false),
+            "a module restricted by audience must not be projected public"
+        );
+        assert_eq!(
+            module
+                .pointer("/lifecycle/visibility_state")
+                .and_then(Value::as_str),
+            Some("restricted")
+        );
+
+        Ok(())
+    }
 }

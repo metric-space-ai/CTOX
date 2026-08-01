@@ -3980,6 +3980,14 @@ fn projected_module_lifecycle(
     let has_preview_audience = explicit_state.as_deref() == Some("preview")
         || explicit_audience.as_deref() == Some("preview")
         || !preview_user_ids.is_empty();
+    // A module that declares itself restricted stays restricted. The release
+    // channel is the normal source for this, but a backfilled release record
+    // carries no channel at all, and the fallback above is "team" — which
+    // projects `public: true`, and the MCP visibility gate short-circuits on
+    // `public` before it ever asks the policy. A missing channel must not
+    // widen a restriction the module stated about itself.
+    let declared_restricted = explicit_state.as_deref() == Some("restricted")
+        || explicit_audience.as_deref() == Some("restricted");
     let (visibility_state, audience, release_channel, warning_code) = if local_module {
         ("private", "instance", "private", Value::Null)
     } else if !runtime_installed {
@@ -3991,7 +3999,9 @@ fn projected_module_lifecycle(
             "private",
             Value::String("invalid_semver".to_owned()),
         )
-    } else if release.is_some() && projected_release_channel == "restricted" {
+    } else if release.is_some()
+        && (projected_release_channel == "restricted" || declared_restricted)
+    {
         ("restricted", "restricted", "restricted", Value::Null)
     } else if release.is_some() {
         ("team", "team", "team", Value::Null)
