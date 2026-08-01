@@ -16155,235 +16155,12 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
-        "ctox.app.action.run" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let module_id = command
-                .payload
-                .get("module_id")
-                .and_then(Value::as_str)
-                .unwrap_or(command.module.as_str())
-                .trim();
-            anyhow::ensure!(
-                module_id == command.module,
-                "app_action_permission_denied: command module and payload module_id differ"
-            );
-            let decision =
-                module_policy_decision(root, &session, BusinessOsPermission::DataWrite, module_id)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let action_name = command
-                .payload
-                .get("action")
-                .or_else(|| command.payload.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            if let Some(idempotency_key) = command
-                .payload
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                anyhow::ensure!(
-                    command_id
-                        == app_runtime::idempotent_command_id(
-                            module_id,
-                            action_name,
-                            idempotency_key,
-                        ),
-                    "app_action_input_invalid: command id does not match stable idempotency key"
-                );
-            }
-            let version = command
-                .payload
-                .get("action_version")
-                .and_then(Value::as_u64);
-            let input = command.payload.get("input").cloned().unwrap_or(Value::Null);
-            let actor_id = session_user_id(&session)
-                .context("app_action_permission_denied: authenticated actor is required")?;
-            let admission = app_runtime::admit(
-                root,
-                &command_id,
-                module_id,
-                action_name,
-                version,
-                input,
-                actor_id,
-            )?;
-            if let Some(steps) = admission
-                .snapshot
-                .pointer("/definition/steps")
-                .and_then(Value::as_array)
-            {
-                let mut checked = HashSet::new();
-                for collection in steps
-                    .iter()
-                    .filter_map(|step| step.get("collection"))
-                    .filter_map(Value::as_str)
-                {
-                    if !checked.insert(collection) {
-                        continue;
-                    }
-                    let collection_decision = scoped_policy_decision(
-                        root,
-                        &session,
-                        BusinessOsPermission::DataWrite,
-                        BusinessOsScope::collection(collection),
-                    )?;
-                    if let Some(outcome) =
-                        reject_command_if_policy_denied(root, &command, &collection_decision)?
-                    {
-                        return Ok(outcome);
-                    }
-                }
-            }
-            app_runtime::persist_admission(root, &command_id, &admission)?;
-            return Ok(serde_json::json!({
-                "ok": true,
-                "id": command_id,
-                "command_id": command_id,
-                "status": "accepted",
-                "execution_mode": "control",
-                "execution_phase": "accepted",
-                "terminal_status": "none",
-                "task_status": "accepted",
-                "definition_hash": admission.definition_hash,
-                "saga_total_steps": admission.step_names.len(),
-                "_app_action_snapshot": admission.snapshot,
-            }));
-        }
-        "ctox.app.access.grant" | "ctox.app.access.revoke" => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RolesManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let module_id = command
-                .payload
-                .get("module_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let subject_type = command
-                .payload
-                .get("subject_type")
-                .and_then(Value::as_str)
-                .unwrap_or("user")
-                .trim();
-            let subject_id = command
-                .payload
-                .get("subject_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let permission = command
-                .payload
-                .get("permission")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let collection = command
-                .payload
-                .get("collection")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            anyhow::ensure!(
-                matches!(subject_type, "user" | "role"),
-                "subject_type must be user or role"
-            );
-            anyhow::ensure!(!subject_id.is_empty(), "subject_id is required");
-            anyhow::ensure!(
-                matches!(permission, "data.read" | "data.write"),
-                "permission must be data.read or data.write"
-            );
-            let owned_prefix = format!("{}_", module_id.replace('-', "_"));
-            anyhow::ensure!(
-                !module_id.is_empty() && collection.starts_with(&owned_prefix),
-                "collection must be owned by the target module"
-            );
-            let inspection = app_runtime::inspect_module(root, module_id)?;
-            anyhow::ensure!(
-                inspection
-                    .get("collections")
-                    .and_then(Value::as_array)
-                    .is_some_and(|collections| collections
-                        .iter()
-                        .any(|item| item.as_str() == Some(collection))),
-                "collection is not declared by the target module"
-            );
-            let grant_id = format!(
-                "app-access:{module_id}:{subject_type}:{subject_id}:{permission}:{collection}"
-            );
-            let active = command.command_type == "ctox.app.access.grant";
-            let now = now_ms() as i64;
-            let reason = command
-                .payload
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("Business OS app access change")
-                .trim();
-            let actor_id = session_user_id(&session).unwrap_or("ctox-cli");
-            let conn = open_store(root)?;
-            conn.execute(
-                "INSERT INTO business_permission_grants
-                    (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
-                     active, reason, created_by, created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, 'collection', ?5, ?6, ?7, ?8, ?9, ?9)
-                 ON CONFLICT(grant_id) DO UPDATE SET
-                    active = excluded.active, reason = excluded.reason,
-                    created_by = excluded.created_by, updated_at_ms = excluded.updated_at_ms",
-                params![
-                    grant_id,
-                    subject_type,
-                    subject_id,
-                    permission,
-                    collection,
-                    active as i64,
-                    reason,
-                    actor_id,
-                    now,
-                ],
-            )?;
-            insert_business_event(
-                &conn,
-                "business_permission_grants",
-                &grant_id,
-                if active {
-                    "business_os.app_access.granted"
-                } else {
-                    "business_os.app_access.revoked"
-                },
-                serde_json::json!({
-                    "grant_id": grant_id,
-                    "module_id": module_id,
-                    "subject_type": subject_type,
-                    "subject_id": subject_id,
-                    "permission": permission,
-                    "collection": collection,
-                    "active": active,
-                    "reason": reason,
-                    "actor_id": actor_id,
-                }),
-                now,
-            )?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                serde_json::json!({
-                    "ok": true,
-                    "grant_id": grant_id,
-                    "active": active,
-                    "module_id": module_id,
-                    "collection": collection,
-                }),
-            );
+        "ctox.app.action.run"
+        | "ctox.app.access.grant"
+        | "ctox.app.access.revoke"
+        | "ctox.app_store.install"
+        | "ctox.app_store.uninstall" => {
+            return handle_app_lifecycle_command(root, &command_id, &command);
         }
         command_type if crate::coding_agents::is_coding_agent_command(command_type) => {
             let outcome = match rxdb_command_session(root, &command)
@@ -17244,6 +17021,282 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
+        "ctox.mailserver.get_config"
+        | "ctox.mailserver.save_domain"
+        | "ctox.mailserver.delete_domain"
+        | "ctox.mailserver.save_user"
+        | "ctox.mailserver.delete_user" => {
+            return handle_mailserver_command(root, &command);
+        }
+        _ => {}
+    }
+    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
+    // already-gated arm above falls through here into record_command, which
+    // records it AND enqueues server work (create_ctox_queue_task) — previously
+    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
+    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
+    // CLI / in-process callers, already trusted, matching rxdb_session_from_
+    // command). App-build commands carry their own AppsInstall/AppsModify gate
+    // inside record_command; every other fall-through is a record-mutating data
+    // command (source.parse, matching.*, business_os.chat.task / cv-print,
+    // documents.*), so require module-scoped DataWrite. The session is the
+    // capability-token actor, so an unprivileged / unauthenticated replicated
+    // peer (inert "user", no grant) is denied and never reaches record_command
+    // or create_ctox_queue_task.
+    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
+        && app_build_command_policy_target(&command).is_none()
+    {
+        let session = rxdb_authenticated_session(root, &command)?;
+        let permission = if command.command_type == "business_os.context.ask" {
+            BusinessOsPermission::DataRead
+        } else {
+            BusinessOsPermission::DataWrite
+        };
+        let decision = module_policy_decision(root, &session, permission, &command.module)?;
+        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+            return Ok(outcome);
+        }
+    }
+    let accepted = record_command(root, command)?;
+    Ok(serde_json::to_value(accepted)?)
+}
+
+fn handle_app_lifecycle_command(
+    root: &Path,
+    command_id: &str,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
+        "ctox.app.action.run" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let module_id = command
+                .payload
+                .get("module_id")
+                .and_then(Value::as_str)
+                .unwrap_or(command.module.as_str())
+                .trim();
+            anyhow::ensure!(
+                module_id == command.module,
+                "app_action_permission_denied: command module and payload module_id differ"
+            );
+            let decision =
+                module_policy_decision(root, &session, BusinessOsPermission::DataWrite, module_id)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let action_name = command
+                .payload
+                .get("action")
+                .or_else(|| command.payload.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if let Some(idempotency_key) = command
+                .payload
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                anyhow::ensure!(
+                    command_id
+                        == app_runtime::idempotent_command_id(
+                            module_id,
+                            action_name,
+                            idempotency_key,
+                        ),
+                    "app_action_input_invalid: command id does not match stable idempotency key"
+                );
+            }
+            let version = command
+                .payload
+                .get("action_version")
+                .and_then(Value::as_u64);
+            let input = command.payload.get("input").cloned().unwrap_or(Value::Null);
+            let actor_id = session_user_id(&session)
+                .context("app_action_permission_denied: authenticated actor is required")?;
+            let admission = app_runtime::admit(
+                root,
+                command_id,
+                module_id,
+                action_name,
+                version,
+                input,
+                actor_id,
+            )?;
+            if let Some(steps) = admission
+                .snapshot
+                .pointer("/definition/steps")
+                .and_then(Value::as_array)
+            {
+                let mut checked = HashSet::new();
+                for collection in steps
+                    .iter()
+                    .filter_map(|step| step.get("collection"))
+                    .filter_map(Value::as_str)
+                {
+                    if !checked.insert(collection) {
+                        continue;
+                    }
+                    let collection_decision = scoped_policy_decision(
+                        root,
+                        &session,
+                        BusinessOsPermission::DataWrite,
+                        BusinessOsScope::collection(collection),
+                    )?;
+                    if let Some(outcome) =
+                        reject_command_if_policy_denied(root, &command, &collection_decision)?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+            }
+            app_runtime::persist_admission(root, command_id, &admission)?;
+            return Ok(serde_json::json!({
+                "ok": true,
+                "id": command_id,
+                "command_id": command_id,
+                "status": "accepted",
+                "execution_mode": "control",
+                "execution_phase": "accepted",
+                "terminal_status": "none",
+                "task_status": "accepted",
+                "definition_hash": admission.definition_hash,
+                "saga_total_steps": admission.step_names.len(),
+                "_app_action_snapshot": admission.snapshot,
+            }));
+        }
+        "ctox.app.access.grant" | "ctox.app.access.revoke" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::RolesManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let module_id = command
+                .payload
+                .get("module_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            let subject_type = command
+                .payload
+                .get("subject_type")
+                .and_then(Value::as_str)
+                .unwrap_or("user")
+                .trim();
+            let subject_id = command
+                .payload
+                .get("subject_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            let permission = command
+                .payload
+                .get("permission")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            let collection = command
+                .payload
+                .get("collection")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            anyhow::ensure!(
+                matches!(subject_type, "user" | "role"),
+                "subject_type must be user or role"
+            );
+            anyhow::ensure!(!subject_id.is_empty(), "subject_id is required");
+            anyhow::ensure!(
+                matches!(permission, "data.read" | "data.write"),
+                "permission must be data.read or data.write"
+            );
+            let owned_prefix = format!("{}_", module_id.replace('-', "_"));
+            anyhow::ensure!(
+                !module_id.is_empty() && collection.starts_with(&owned_prefix),
+                "collection must be owned by the target module"
+            );
+            let inspection = app_runtime::inspect_module(root, module_id)?;
+            anyhow::ensure!(
+                inspection
+                    .get("collections")
+                    .and_then(Value::as_array)
+                    .is_some_and(|collections| collections
+                        .iter()
+                        .any(|item| item.as_str() == Some(collection))),
+                "collection is not declared by the target module"
+            );
+            let grant_id = format!(
+                "app-access:{module_id}:{subject_type}:{subject_id}:{permission}:{collection}"
+            );
+            let active = command.command_type == "ctox.app.access.grant";
+            let now = now_ms() as i64;
+            let reason = command
+                .payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("Business OS app access change")
+                .trim();
+            let actor_id = session_user_id(&session).unwrap_or("ctox-cli");
+            let conn = open_store(root)?;
+            conn.execute(
+                "INSERT INTO business_permission_grants
+                    (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
+                     active, reason, created_by, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 'collection', ?5, ?6, ?7, ?8, ?9, ?9)
+                 ON CONFLICT(grant_id) DO UPDATE SET
+                    active = excluded.active, reason = excluded.reason,
+                    created_by = excluded.created_by, updated_at_ms = excluded.updated_at_ms",
+                params![
+                    grant_id,
+                    subject_type,
+                    subject_id,
+                    permission,
+                    collection,
+                    active as i64,
+                    reason,
+                    actor_id,
+                    now,
+                ],
+            )?;
+            insert_business_event(
+                &conn,
+                "business_permission_grants",
+                &grant_id,
+                if active {
+                    "business_os.app_access.granted"
+                } else {
+                    "business_os.app_access.revoked"
+                },
+                serde_json::json!({
+                    "grant_id": grant_id,
+                    "module_id": module_id,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "permission": permission,
+                    "collection": collection,
+                    "active": active,
+                    "reason": reason,
+                    "actor_id": actor_id,
+                }),
+                now,
+            )?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                serde_json::json!({
+                    "ok": true,
+                    "grant_id": grant_id,
+                    "active": active,
+                    "module_id": module_id,
+                    "collection": collection,
+                }),
+            );
+        }
         "ctox.app_store.install" => {
             let request: AppStoreInstallRequest =
                 serde_json::from_value(command.payload.clone())
@@ -17297,44 +17350,8 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
-        "ctox.mailserver.get_config"
-        | "ctox.mailserver.save_domain"
-        | "ctox.mailserver.delete_domain"
-        | "ctox.mailserver.save_user"
-        | "ctox.mailserver.delete_user" => {
-            return handle_mailserver_command(root, &command);
-        }
-        _ => {}
+        other => anyhow::bail!("unsupported app lifecycle command type: {other}"),
     }
-    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
-    // already-gated arm above falls through here into record_command, which
-    // records it AND enqueues server work (create_ctox_queue_task) — previously
-    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
-    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
-    // CLI / in-process callers, already trusted, matching rxdb_session_from_
-    // command). App-build commands carry their own AppsInstall/AppsModify gate
-    // inside record_command; every other fall-through is a record-mutating data
-    // command (source.parse, matching.*, business_os.chat.task / cv-print,
-    // documents.*), so require module-scoped DataWrite. The session is the
-    // capability-token actor, so an unprivileged / unauthenticated replicated
-    // peer (inert "user", no grant) is denied and never reaches record_command
-    // or create_ctox_queue_task.
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && app_build_command_policy_target(&command).is_none()
-    {
-        let session = rxdb_authenticated_session(root, &command)?;
-        let permission = if command.command_type == "business_os.context.ask" {
-            BusinessOsPermission::DataRead
-        } else {
-            BusinessOsPermission::DataWrite
-        };
-        let decision = module_policy_decision(root, &session, permission, &command.module)?;
-        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-            return Ok(outcome);
-        }
-    }
-    let accepted = record_command(root, command)?;
-    Ok(serde_json::to_value(accepted)?)
 }
 
 fn handle_mailserver_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
