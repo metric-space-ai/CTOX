@@ -50,6 +50,17 @@ Deshalb:
   Er ist wegwerfbar (`runtime/` ist ignorierter Laufzeitzustand), aber ein
   `cargo clean` kostet einen vollständigen Neubau — das ist eine
   Owner-Entscheidung, keine stille Aufräumaktion.
+- **Worker-Aufträge müssen `CARGO_TARGET_DIR` explizit setzen.**
+  `.cargo/config.toml` (`target-dir = "runtime/build/cargo-target"`) wird
+  relativ zum ARBEITSVERZEICHNIS gelesen, nicht zum Manifest. Ein Worker,
+  der `cargo` von woanders aufruft — etwa aus einem Baseline-Worktree —
+  baut nach `./target` und legt damit einen zweiten vollständigen
+  Artefaktbaum an. Am 01.08. waren das 13 GB, stumm, in einer einzigen
+  Welle. Aufgefallen ist es erst, weil meine eigenen Läufe aus dem
+  Repo-Root gar kein `target/` erzeugen.
+- Worker legen für Baseline-Prüfungen Worktrees unter `/private/tmp` an.
+  Ein abgebrochener Lauf lässt sie liegen: `git worktree list` prüfen und
+  mit `git worktree remove --force` aufräumen.
 
 **Ein voller Datenträger hinterlässt Trümmer, die nach etwas anderem
 aussehen.** Nach dem Vorfall scheiterte der Build an `wha-proto`, einem
