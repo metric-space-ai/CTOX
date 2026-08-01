@@ -8,9 +8,9 @@ use super::policy::{
 use super::session::{session_user_id, BusinessOsSession};
 use super::store::{
     founder_owns_module, normalize_business_role, open_store, queue_command_policy_target,
-    record_business_policy_decision_event, seed_configured_business_users,
-    trusted_mcp_actor_with_conn, write_rxdb_policy_denied_command_outcome, BusinessCommand,
-    WORKSPACE_AUTHORITY_ROLES,
+    record_business_policy_decision_event, rxdb_authenticated_session,
+    seed_configured_business_users, trusted_mcp_actor_with_conn,
+    write_rxdb_policy_denied_command_outcome, BusinessCommand, WORKSPACE_AUTHORITY_ROLES,
 };
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -245,6 +245,90 @@ pub(super) fn reject_command_if_policy_denied(
     )?))
 }
 
+pub(super) enum CommandPolicyRequirement {
+    Module {
+        permission: BusinessOsPermission,
+        module_id: String,
+    },
+    Workspace {
+        permission: BusinessOsPermission,
+    },
+    Scoped {
+        permission: BusinessOsPermission,
+        scope: BusinessOsScope,
+    },
+}
+
+impl CommandPolicyRequirement {
+    pub(super) fn module(permission: BusinessOsPermission, module_id: impl Into<String>) -> Self {
+        Self::Module {
+            permission,
+            module_id: module_id.into(),
+        }
+    }
+
+    pub(super) fn workspace(permission: BusinessOsPermission) -> Self {
+        Self::Workspace { permission }
+    }
+
+    pub(super) fn scoped(permission: BusinessOsPermission, scope: BusinessOsScope) -> Self {
+        Self::Scoped { permission, scope }
+    }
+}
+
+/// The result of an allowed command continuation or the persisted denial outcome.
+///
+/// The inner result is deliberately opaque: callers must consume it with
+/// `into_outcome`, and the continuation that can mutate state is never invoked
+/// when policy denies the command.
+#[must_use = "return the enforced command outcome; dropping it discards the command result"]
+pub(super) struct EnforcedCommandOutcome(anyhow::Result<Value>);
+
+impl EnforcedCommandOutcome {
+    pub(super) fn into_outcome(self) -> anyhow::Result<Value> {
+        self.0
+    }
+}
+
+/// Resolve the authenticated session, choose and evaluate policy, persist a
+/// denial when necessary, and invoke `on_allowed` only after all gates pass.
+///
+/// The outer `Result` contains session, requirement-resolution, and policy-
+/// evaluation failures. The opaque inner outcome contains denial-persistence
+/// failures, the persisted denial, or the allowed command's result. Keeping
+/// those layers separate preserves callers that report authorization lookup
+/// failures differently from command outcome failures.
+#[must_use = "authorization must be consumed and returned to the command caller"]
+pub(super) fn enforce_command_policy<Resolve, OnAllowed>(
+    root: &Path,
+    command: &BusinessCommand,
+    resolve_requirement: Resolve,
+    on_allowed: OnAllowed,
+) -> anyhow::Result<EnforcedCommandOutcome>
+where
+    Resolve: FnOnce(&BusinessOsSession) -> anyhow::Result<CommandPolicyRequirement>,
+    OnAllowed: FnOnce(&BusinessOsSession) -> anyhow::Result<Value>,
+{
+    let session = rxdb_authenticated_session(root, command)?;
+    let decision = match resolve_requirement(&session)? {
+        CommandPolicyRequirement::Module {
+            permission,
+            module_id,
+        } => module_policy_decision(root, &session, permission, &module_id)?,
+        CommandPolicyRequirement::Workspace { permission } => {
+            workspace_policy_decision(root, &session, permission)?
+        }
+        CommandPolicyRequirement::Scoped { permission, scope } => {
+            scoped_policy_decision(root, &session, permission, scope)?
+        }
+    };
+    match reject_command_if_policy_denied(root, command, &decision) {
+        Ok(Some(outcome)) => Ok(EnforcedCommandOutcome(Ok(outcome))),
+        Ok(None) => Ok(EnforcedCommandOutcome(on_allowed(&session))),
+        Err(error) => Ok(EnforcedCommandOutcome(Err(error))),
+    }
+}
+
 pub(super) fn workspace_policy_decision(
     root: &Path,
     session: &BusinessOsSession,
@@ -282,11 +366,60 @@ pub(super) fn task_policy_decision(
 mod tests {
     use super::super::policy::{BusinessOsPermission, BusinessOsScopeType};
     use super::super::store::tests::{seed_business_user, test_session};
-    use super::super::store::{now_ms, open_store, push_collection_records};
+    use super::super::store::{
+        accept_rxdb_business_command, now_ms, open_store, outbound_load_record,
+        push_collection_records,
+    };
     use super::{session_can_modify_module, trusted_mcp_actor_policy_decision};
     use rusqlite::params;
     use serde_json::Value;
     use tempfile::tempdir;
+
+    #[test]
+    fn control_command_policy_contract_denial_blocks_mutation() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_business_user(root, "viewer", "user")?;
+
+        let outcome = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "policy-contract-denied",
+                "command_id": "policy-contract-denied",
+                "module": "customers",
+                "command_type": "customers.account.create",
+                "record_id": "account-must-not-be-created",
+                "payload": {
+                    "account_id": "account-must-not-be-created",
+                    "name": "Denied GmbH"
+                },
+                "client_context": {
+                    "actor": { "id": "viewer", "display_name": "Viewer" }
+                }
+            }),
+        )?;
+
+        assert_eq!(outcome.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            outcome
+                .pointer("/result/policy_decision/permission")
+                .and_then(Value::as_str),
+            Some(BusinessOsPermission::DataWrite.as_str())
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/policy_decision/scope_id")
+                .and_then(Value::as_str),
+            Some("customers")
+        );
+        let conn = open_store(root)?;
+        assert!(
+            outbound_load_record(&conn, "customer_accounts", "account-must-not-be-created")?
+                .is_none(),
+            "the contract must not invoke the customer mutation after denial"
+        );
+        Ok(())
+    }
 
     #[test]
     fn permission_grant_allows_scoped_module_action_without_new_role() -> anyhow::Result<()> {
