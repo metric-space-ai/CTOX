@@ -17400,6 +17400,48 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
+        "ctox.mailserver.get_config"
+        | "ctox.mailserver.save_domain"
+        | "ctox.mailserver.delete_domain"
+        | "ctox.mailserver.save_user"
+        | "ctox.mailserver.delete_user" => {
+            return handle_mailserver_command(root, &command);
+        }
+        _ => {}
+    }
+    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
+    // already-gated arm above falls through here into record_command, which
+    // records it AND enqueues server work (create_ctox_queue_task) — previously
+    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
+    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
+    // CLI / in-process callers, already trusted, matching rxdb_session_from_
+    // command). App-build commands carry their own AppsInstall/AppsModify gate
+    // inside record_command; every other fall-through is a record-mutating data
+    // command (source.parse, matching.*, business_os.chat.task / cv-print,
+    // documents.*), so require module-scoped DataWrite. The session is the
+    // capability-token actor, so an unprivileged / unauthenticated replicated
+    // peer (inert "user", no grant) is denied and never reaches record_command
+    // or create_ctox_queue_task.
+    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
+        && app_build_command_policy_target(&command).is_none()
+    {
+        let session = rxdb_authenticated_session(root, &command)?;
+        let permission = if command.command_type == "business_os.context.ask" {
+            BusinessOsPermission::DataRead
+        } else {
+            BusinessOsPermission::DataWrite
+        };
+        let decision = module_policy_decision(root, &session, permission, &command.module)?;
+        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+            return Ok(outcome);
+        }
+    }
+    let accepted = record_command(root, command)?;
+    Ok(serde_json::to_value(accepted)?)
+}
+
+fn handle_mailserver_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
         "ctox.mailserver.get_config" => {
             let session = rxdb_authenticated_session(root, &command)?;
             let decision =
@@ -17674,37 +17716,8 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
-        _ => {}
+        other => anyhow::bail!("unsupported mailserver command type: {other}"),
     }
-    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
-    // already-gated arm above falls through here into record_command, which
-    // records it AND enqueues server work (create_ctox_queue_task) — previously
-    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
-    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
-    // CLI / in-process callers, already trusted, matching rxdb_session_from_
-    // command). App-build commands carry their own AppsInstall/AppsModify gate
-    // inside record_command; every other fall-through is a record-mutating data
-    // command (source.parse, matching.*, business_os.chat.task / cv-print,
-    // documents.*), so require module-scoped DataWrite. The session is the
-    // capability-token actor, so an unprivileged / unauthenticated replicated
-    // peer (inert "user", no grant) is denied and never reaches record_command
-    // or create_ctox_queue_task.
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && app_build_command_policy_target(&command).is_none()
-    {
-        let session = rxdb_authenticated_session(root, &command)?;
-        let permission = if command.command_type == "business_os.context.ask" {
-            BusinessOsPermission::DataRead
-        } else {
-            BusinessOsPermission::DataWrite
-        };
-        let decision = module_policy_decision(root, &session, permission, &command.module)?;
-        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-            return Ok(outcome);
-        }
-    }
-    let accepted = record_command(root, command)?;
-    Ok(serde_json::to_value(accepted)?)
 }
 
 fn handle_source_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
