@@ -7,6 +7,7 @@ mod backup_restore;
 mod browser_control;
 mod browser_runtime;
 mod capability;
+mod command_plane;
 mod control_command_types;
 mod desktop_files;
 mod external_sql_sync;

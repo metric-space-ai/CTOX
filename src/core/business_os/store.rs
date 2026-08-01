@@ -18,7 +18,15 @@ pub use super::backup_restore::{
     inspect_business_os_backup_key_escrow, inspect_business_os_backup_manifest,
     prune_business_os_backup_restore_drills, run_business_os_backup_restore_drill,
 };
-use super::control_command_types::{ActiveExternalSqlControlCommand, ReportAccepted};
+pub use super::command_plane::{
+    accept_rxdb_business_command, accept_rxdb_business_command_with_origin,
+};
+pub(super) use super::command_plane::{
+    write_rxdb_control_command_outcome, write_rxdb_control_command_progress,
+};
+#[cfg(test)]
+use super::control_command_types::ActiveExternalSqlControlCommand;
+use super::control_command_types::ReportAccepted;
 use super::module_lifecycle::{
     catalog_module_version, installed_baseline_bundle_sha, installed_module_app_source,
     load_installed_module_manifests, module_install_scope, module_is_runtime_installed,
@@ -38,8 +46,6 @@ use super::policy::{
     PolicyDecision,
 };
 use super::policy::{policy_actor_from_session, policy_decision_payload};
-use super::store_appsec_commands::handle_appsec_business_command;
-use super::store_ats_commands::{handle_ats_active_command, handle_ats_mutating_command};
 pub use super::store_catalog_projections::{
     module_catalog_for_rxdb, write_module_catalog_projection_to_rxdb,
 };
@@ -50,9 +56,6 @@ use super::store_catalog_projections::{
     module_release_ids_for_projection_repair, rxdb_module_catalog_status,
     write_module_catalog_projection_to_rxdb_for_module,
 };
-use super::store_customer_commands::handle_customers_active_command;
-use super::store_office_commands::handle_office_control_command;
-use super::store_outbound_commands::handle_outbound_active_command;
 use super::store_policy::{
     active_permission_grant_allows, evaluate_policy_with_explicit_grants,
     queue_command_policy_decision, reject_command_if_policy_denied, scoped_policy_decision,
@@ -77,11 +80,10 @@ pub(super) use super::store_projections::upsert_business_record;
 use super::store_projections::{
     business_chat_id, business_chat_owner_user_id, business_chat_payload, business_chat_title,
     business_command_queue_task_payload, enrich_queue_projection_payload, is_business_chat_command,
-    materialize_control_business_chat_state, materialize_pending_business_chat,
-    normalize_queue_status, persist_terminal_business_chat_command_projection,
-    queue_projection_command_id, queue_projection_execution_phase,
-    queue_projection_terminal_status, queue_task_payload, refresh_queue_task_projection,
-    write_queue_task_projection,
+    materialize_pending_business_chat, normalize_queue_status,
+    persist_terminal_business_chat_command_projection, queue_projection_command_id,
+    queue_projection_execution_phase, queue_projection_terminal_status, queue_task_payload,
+    refresh_queue_task_projection, write_queue_task_projection,
 };
 use super::store_release_review::{
     data_access_review_from_release_snapshot, module_release_data_access_review_summary,
@@ -7694,7 +7696,7 @@ pub fn record_report(
     }))
 }
 
-fn record_report_command(
+pub(super) fn record_report_command(
     root: &Path,
     session: &BusinessOsSession,
     mutation: BusinessOsReportMutation,
@@ -12081,7 +12083,7 @@ fn module_lifecycle_audit_summary(command: &BusinessCommand, result: &Value) -> 
     })
 }
 
-fn record_business_module_lifecycle_event(
+pub(super) fn record_business_module_lifecycle_event(
     root: &Path,
     command: &BusinessCommand,
     status: &str,
@@ -15731,14 +15733,14 @@ fn open_mailserver_store_connection(root: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-fn business_command_core_claim(
+pub(crate) fn business_command_core_claim(
     command_id: &str,
     command: &BusinessCommand,
 ) -> anyhow::Result<channels::BusinessCommandClaimRequest> {
     business_command_core_claim_with_authorization(command_id, command, None)
 }
 
-fn business_command_core_claim_with_authorization(
+pub(super) fn business_command_core_claim_with_authorization(
     command_id: &str,
     command: &BusinessCommand,
     native_authorization: Option<&Value>,
@@ -15766,7 +15768,10 @@ fn business_command_core_claim_with_authorization(
     })
 }
 
-fn external_sql_command_in_flight_outcome(root: &Path, command_id: &str) -> anyhow::Result<Value> {
+pub(super) fn external_sql_command_in_flight_outcome(
+    root: &Path,
+    command_id: &str,
+) -> anyhow::Result<Value> {
     let mut outcome = channels::business_command_projection(root, command_id)?;
     if let Some(object) = outcome.as_object_mut() {
         object.insert("ok".to_string(), Value::Bool(true));
@@ -15776,7 +15781,7 @@ fn external_sql_command_in_flight_outcome(root: &Path, command_id: &str) -> anyh
     Ok(outcome)
 }
 
-fn is_rxdb_control_command_type(command_type: &str) -> bool {
+pub(super) fn is_rxdb_control_command_type(command_type: &str) -> bool {
     static EXACT_TYPES: OnceLock<HashSet<String>> = OnceLock::new();
     let exact_types = EXACT_TYPES.get_or_init(|| {
         serde_json::from_str::<Value>(include_str!("business_command_inventory.json"))
@@ -15835,7 +15840,7 @@ fn recoverable_background_control_authorization(
     }))
 }
 
-fn recoverable_background_control_claim_authorization(
+pub(super) fn recoverable_background_control_claim_authorization(
     root: &Path,
     command: &BusinessCommand,
 ) -> Option<Value> {
@@ -15866,894 +15871,7 @@ fn recoverable_background_control_permission(command_type: &str) -> Option<Busin
     }
 }
 
-/// Accept a command that originated in trusted, in-process code (operator CLI,
-/// server-side handlers, internal projections, tests). The claimed actor in
-/// `client_context` is trusted. Network-originated commands MUST use
-/// [`accept_rxdb_business_command_with_origin`] with [`CommandOrigin::ReplicatedPeer`].
-pub fn accept_rxdb_business_command(root: &Path, document: Value) -> anyhow::Result<Value> {
-    accept_rxdb_business_command_with_origin(root, document, CommandOrigin::TrustedLocal)
-}
-
-/// Accept a Business OS command, tagging it with its trust [`CommandOrigin`].
-/// `ReplicatedPeer` commands (arriving over the WebRTC/RxDB data plane) cannot
-/// authorize a privileged role from the browser-asserted actor; identity/role
-/// for those comes only from a verified capability token.
-pub fn accept_rxdb_business_command_with_origin(
-    root: &Path,
-    document: Value,
-    origin: CommandOrigin,
-) -> anyhow::Result<Value> {
-    let command_id = document
-        .get("command_id")
-        .or_else(|| document.get("id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("business command id is required")?
-        .to_string();
-    let command = BusinessCommand {
-        origin,
-        id: Some(command_id.clone()),
-        module: document
-            .get("module")
-            .and_then(Value::as_str)
-            .unwrap_or("ctox")
-            .to_string(),
-        command_type: document
-            .get("command_type")
-            .or_else(|| document.get("type"))
-            .and_then(Value::as_str)
-            .unwrap_or("business_os.command")
-            .to_string(),
-        record_id: document
-            .get("record_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        payload: document.get("payload").cloned().unwrap_or(Value::Null),
-        client_context: document
-            .get("client_context")
-            .cloned()
-            .unwrap_or(Value::Null),
-    };
-    let native_authorization = recoverable_background_control_claim_authorization(root, &command);
-    let control_claim = if is_rxdb_control_command_type(&command.command_type) {
-        Some(channels::claim_business_control_command(
-            root,
-            business_command_core_claim_with_authorization(
-                &command_id,
-                &command,
-                native_authorization.as_ref(),
-            )?,
-        )?)
-    } else {
-        None
-    };
-    let _external_sql_execution_guard =
-        if super::external_sql_sync::is_external_sql_command(&command.command_type) {
-            match ActiveExternalSqlControlCommand::try_acquire(&command_id) {
-                Some(guard) => Some(guard),
-                None => return external_sql_command_in_flight_outcome(root, &command_id),
-            }
-        } else {
-            None
-        };
-    let owns_new_control_claim = control_claim
-        .as_ref()
-        .is_some_and(|claim| claim.disposition == "new");
-    let conn = open_store(root)?;
-    let existing_status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM business_commands WHERE command_id = ?1",
-            params![command_id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let resumes_recoverable_accepted_claim = control_claim
-        .as_ref()
-        .is_some_and(|claim| claim.disposition == "uncertain")
-        && existing_status.as_deref() == Some("accepted")
-        && is_recoverable_background_control_command_type(&command.command_type);
-    if !owns_new_control_claim
-        && !resumes_recoverable_accepted_claim
-        && existing_status.as_deref() != Some("waiting_dependencies")
-        && existing_status.is_some()
-    {
-        if let Some(stored_outcome) = stored_rxdb_business_command_outcome(&conn, &command_id)? {
-            if let Ok(mut lifecycle_outcome) =
-                channels::business_command_projection(root, &command_id)
-            {
-                if let Some(object) = lifecycle_outcome.as_object_mut() {
-                    let stored_chat_id = stored_outcome
-                        .get("chat_id")
-                        .or_else(|| {
-                            stored_outcome
-                                .get("result")
-                                .and_then(|result| result.get("chat_id"))
-                        })
-                        .cloned();
-                    if let Some(chat_id) = stored_chat_id {
-                        object.insert("chat_id".to_string(), chat_id);
-                    }
-                    for field in ["outbound_text", "response", "answer", "summary"] {
-                        if !object.contains_key(field) {
-                            if let Some(value) = stored_outcome.get(field) {
-                                object.insert(field.to_string(), value.clone());
-                            }
-                        }
-                    }
-                    object.insert("ok".to_string(), Value::Bool(true));
-                    object.insert("already_accepted".to_string(), Value::Bool(true));
-                }
-                persist_business_command_lifecycle_projection(root, &lifecycle_outcome)?;
-                return Ok(lifecycle_outcome);
-            }
-            return Ok(stored_outcome);
-        }
-        return Ok(serde_json::json!({
-            "id": command_id,
-            "command_id": command_id,
-            "status": "already_accepted"
-        }));
-    }
-    drop(conn);
-    let command = if resumes_recoverable_accepted_claim {
-        match authorize_recoverable_background_control_command(root, &command) {
-            Ok(command) => command,
-            Err(error) => {
-                return write_rxdb_failed_control_command_outcome(
-                    root,
-                    &command,
-                    "recoverable_control_authorization",
-                    error,
-                );
-            }
-        }
-    } else {
-        command
-    };
-    if is_rxdb_control_command_type(&command.command_type) {
-        let claim = control_claim.context("business control command claim is missing")?;
-        match claim.disposition {
-            "new" => {}
-            "terminal" => {
-                let terminal_status = claim.terminal_status.as_deref().unwrap_or("completed");
-                return Ok(serde_json::json!({
-                    "ok": terminal_status == "completed",
-                    "id": command_id,
-                    "command_id": command_id,
-                    "status": terminal_status,
-                    "execution_mode": "control",
-                    "execution_task_id": "",
-                    "target_task_id": "",
-                    "target_record_id": command.record_id.clone().unwrap_or_default(),
-                    "task_id": "",
-                    "task_status": terminal_status,
-                    "result": claim.result.unwrap_or(Value::Null),
-                    "already_accepted": true,
-                }));
-            }
-            _ if is_recoverable_background_control_command_type(&command.command_type) => {}
-            _ => {
-                if command.command_type == app_runtime::APP_ACTION_COMMAND_TYPE {
-                    if let Some(snapshot) = app_runtime::admitted_snapshot(root, &command_id)? {
-                        return Ok(serde_json::json!({
-                            "ok": true,
-                            "id": command_id,
-                            "command_id": command_id,
-                            "status": "accepted",
-                            "execution_mode": "control",
-                            "execution_phase": "accepted",
-                            "terminal_status": "none",
-                            "task_status": "accepted",
-                            "_app_action_snapshot": snapshot,
-                            "already_accepted": false,
-                            "resumed": true,
-                        }));
-                    }
-                } else {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "id": command_id,
-                        "command_id": command_id,
-                        "status": "accepted",
-                        "execution_mode": "control",
-                        "execution_task_id": "",
-                        "target_task_id": "",
-                        "target_record_id": command.record_id.clone().unwrap_or_default(),
-                        "task_id": "",
-                        "task_status": "blocked",
-                        "execution_phase": "blocked",
-                        "terminal_status": "none",
-                        "error_code": "dependency_missing",
-                        "error_message": "control effect was durably claimed but has no terminal outcome; automatic replay is suppressed to prevent a duplicate side effect",
-                        "retryable": false,
-                        "already_accepted": true,
-                    }));
-                }
-            }
-        }
-    }
-    match command.command_type.as_str() {
-        "ctox.maintenance.client_ready"
-        | "ctox.task.update"
-        | "ctox.task.delete"
-        | "ctox.command.cancel"
-        | "ctox.runtime_settings.save"
-        | "ctox.office.settings.save"
-        | "ctox.coding.turn"
-        | "ctox.file.materialize"
-        | "ctox.file.export" => {
-            return handle_workspace_control_command(root, &command);
-        }
-        "ctox.app.action.run"
-        | "ctox.app.access.grant"
-        | "ctox.app.access.revoke"
-        | "ctox.app_store.install"
-        | "ctox.app_store.uninstall" => {
-            return handle_app_lifecycle_command(root, &command_id, &command);
-        }
-        command_type if crate::coding_agents::is_coding_agent_command(command_type) => {
-            let outcome = match rxdb_command_session(root, &command)
-                .and_then(|_| crate::coding_agents::handle_business_command(root, &command))
-            {
-                Ok(outcome) => outcome,
-                Err(error) => serde_json::json!({
-                    "ok": false,
-                    "provider": command
-                        .payload
-                        .get("provider")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown"),
-                    "operation": command.command_type,
-                    "stdout": "",
-                    "stderr": error.to_string(),
-                    "exit_code": 1
-                }),
-            };
-            let status = if outcome.get("ok").and_then(Value::as_bool) == Some(false) {
-                "failed"
-            } else {
-                "completed"
-            };
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                status,
-                None,
-                Some(status),
-                serde_json::json!({ "outcome": outcome }),
-            );
-        }
-        "web_stack.person_research" => {
-            let authorization = (|| -> anyhow::Result<_> {
-                anyhow::ensure!(
-                    !command.module.trim().is_empty(),
-                    "web_stack.person_research requires a calling module"
-                );
-                let session = rxdb_authenticated_session(root, &command)?;
-                module_policy_decision(
-                    root,
-                    &session,
-                    BusinessOsPermission::DataRead,
-                    &command.module,
-                )
-            })();
-            let decision = match authorization {
-                Ok(decision) => decision,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "person_research_authorization",
-                        error,
-                    );
-                }
-            };
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            return super::person_research_command::start(root, command);
-        }
-        "knowledge.command" => {
-            let args = command
-                .payload
-                .get("args")
-                .and_then(Value::as_array)
-                .context("knowledge.command payload.args array is required")?
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_string)
-                        .context("knowledge.command args must be strings")
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            let outcome = crate::knowledge::dispatch_capturing(root, &args)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.user.upsert"
-        | "ctox.business_os.branding.update"
-        | "ctox.business_os.audit.list"
-        | "ctox.business_os.audit.retention"
-        | "ctox.business_os.audit.retention_policy.set"
-        | "ctox.business_os.backup.restore_drill"
-        | "ctox.business_os.support.export_diagnostics"
-        | "ctox.business_os.why" => {
-            return handle_business_os_command(root, &command);
-        }
-        "ctox.secret.list"
-        | "ctox.secret.put"
-        | "ctox.secret.delete"
-        | "ctox.subscription_auth.start" => {
-            return handle_secret_command(root, &command);
-        }
-        "ctox.module.repair_lifecycle_projection"
-        | "ctox.module.release"
-        | "ctox.module.assign_founder"
-        | "ctox.module.save"
-        | "ctox.module.delete"
-        | "ctox.module.install_template"
-        | "ctox.module.update"
-        | "ctox.module.set_visible"
-        | "ctox.module.check_updates"
-        | "ctox.module.rollback"
-        | "ctox.module.list_versions"
-        | "ctox.module.rollback_version" => {
-            return handle_module_command(root, &command);
-        }
-        command_type
-            if command_type.starts_with("office.document.")
-                || command_type.starts_with("office.spreadsheet.") =>
-        {
-            let module_id = if command_type.starts_with("office.document.") {
-                "documents"
-            } else {
-                "spreadsheets"
-            };
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                module_policy_decision(root, &session, BusinessOsPermission::DataWrite, module_id)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            match handle_office_control_command(root, &command) {
-                Ok(outcome) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let error_code = if error.to_string().contains("version_conflict") {
-                        "version_conflict"
-                    } else if error.to_string().contains("feature_dependency_pending") {
-                        "feature_dependency_pending"
-                    } else {
-                        "office_engine_failed"
-                    };
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        command.record_id.as_deref(),
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error_code": error_code,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if is_customers_active_command(command_type) => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::DataWrite,
-                "customers",
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            match handle_customers_active_command(root, &session, &command) {
-                Ok(outcome) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        None,
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if super::external_sql_sync::is_external_sql_command(command_type) => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = module_policy_decision(
-                root,
-                &session,
-                super::external_sql_sync::data_write_permission(),
-                &command.module,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            match super::external_sql_sync::handle_business_command(root, &command) {
-                Ok(outcome) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        command.record_id.as_deref(),
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if is_outbound_active_command(command_type) => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::DataWrite,
-                "outbound",
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = handle_outbound_active_command(root, &session, &command_id, &command)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                command.record_id.as_deref(),
-                Some("completed"),
-                outcome,
-            );
-        }
-        command_type if is_iot_active_command(command_type) => {
-            // §4A: the executor goes through the SAME iot::commands code path the
-            // `ctox iot` CLI uses. This family still uses rxdb_command_session
-            // to enforce a real chef/admin role via session_can_manage_all, so
-            // an untrusted peer that falls through to the default `user` role is
-            // rejected here with "chef or admin role required" instead of
-            // slipping past the always-true `authenticated && !auth_required`
-            // disjunct downstream.
-            // Then write a completed/failed outcome whose `result.projections` the
-            // rxdb_peer branch reprojects into the iot_* collections. Idempotent: a
-            // replayed command short-circuits on the stored outcome above.
-            let session = rxdb_command_session(root, &command)?;
-            match crate::iot::commands::handle_business_command(
-                root,
-                command_type,
-                &command.payload,
-                &session,
-            ) {
-                Ok(outcome) => {
-                    // Project engine state into the RxDB-visible business_records
-                    // store via iot::projector (same code path as the rxdb_peer
-                    // live stream). Failure to project must not silently drop the
-                    // outcome, so surface it.
-                    project_iot_business_command_outcome(root, &outcome)
-                        .context("project iot business command outcome")?;
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        command.record_id.as_deref(),
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if is_ats_active_command(command_type) => {
-            // Server-authoritative ATS gate checks: the browser asks the daemon
-            // whether a deployment/presentation is allowed; the decision is
-            // computed native-side from business_credentials/business_consents
-            // via ats_gates and returned as the command outcome. Read-only, so
-            // an authenticated peer suffices (no mutation, no projection).
-            let session = rxdb_authenticated_session(root, &command)?;
-            let outcome = handle_ats_active_command(root, &session, &command)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                command.record_id.as_deref(),
-                Some("completed"),
-                outcome,
-            );
-        }
-        command_type if is_ats_mutating_command(command_type) => {
-            // Server-authoritative ATS mutations (write records, gated where
-            // applicable). chef/admin role required, like the other active
-            // mutating module families.
-            let session = rxdb_command_session(root, &command)?;
-            let outcome = handle_ats_mutating_command(root, &session, &command)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                command.record_id.as_deref(),
-                Some("completed"),
-                outcome,
-            );
-        }
-        command_type if command_type.starts_with("invoices.") => {
-            // §5.6/§5.11 invoices module: server-authoritative accounting
-            // mutations (draft CRUD, post, Storno/cancel, §17 credit notes).
-            // An unknown invoices.* command, an auth failure, or a handler error
-            // must persist a FAILED business_commands outcome AND propagate the
-            // error — never fall through to generic queue acceptance. Reject an
-            // unknown type before the session check so the error names the
-            // unsupported type rather than an auth failure.
-            let outcome = (|| -> anyhow::Result<Value> {
-                anyhow::ensure!(
-                    super::invoices::is_invoices_active_command(command_type),
-                    "unsupported invoices command type: {command_type}"
-                );
-                let session = rxdb_command_session(root, &command)?;
-                super::invoices::handle_invoices_active_command(root, &session, &command)
-            })();
-            match outcome {
-                Ok(value) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        value,
-                    );
-                }
-                Err(err) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        command.record_id.as_deref(),
-                        Some("failed"),
-                        serde_json::json!({ "ok": false, "error": err.to_string() }),
-                    );
-                    return Err(err);
-                }
-            }
-        }
-        command_type if command_type.starts_with("ctox.channel.") => {
-            let mutation: ChannelCommandRequest = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.channel payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = workspace_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::IntegrationsManage,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = run_channel_command(root, &session, command_type, mutation)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        command_type if is_appsec_business_command(command_type) => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let permission = if appsec_business_command_requires_data_write(command_type) {
-                BusinessOsPermission::DataWrite
-            } else {
-                BusinessOsPermission::DataRead
-            };
-            let decision = module_policy_decision(root, &session, permission, APPSEC_MODULE_ID)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            match handle_appsec_business_command(root, &session, &command) {
-                Ok(outcome) => {
-                    let status = if outcome.get("ok").and_then(Value::as_bool) == Some(false) {
-                        "failed"
-                    } else {
-                        "completed"
-                    };
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        status,
-                        command.record_id.as_deref(),
-                        Some(status),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        command.record_id.as_deref(),
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if command_type.starts_with("ctox.ticket.") => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = module_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::SupportTriage,
-                "support",
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = crate::mission::tickets::run_business_os_ticket_command(
-                root,
-                command_type,
-                &command.payload,
-            )?;
-            let task_id = outcome
-                .get("case_id")
-                .or_else(|| outcome.get("ticket_key"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                task_id.as_deref(),
-                Some("completed"),
-                outcome,
-            );
-        }
-        command_type if super::support::is_support_command(command_type) => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            let permission = super::support::command_permission(command_type);
-            let decision = module_policy_decision(root, &session, permission, "support")?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            match super::support::handle_business_command(root, &session, &command) {
-                Ok(outcome) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        command.record_id.as_deref(),
-                        Some("completed"),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        command.record_id.as_deref(),
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if super::threads::is_threads_command(command_type) => {
-            let session = rxdb_authenticated_session(root, &command)?;
-            if super::threads::requires_external_approval(command_type) {
-                let approval_id = command
-                    .payload
-                    .get("approval_request_id")
-                    .or_else(|| command.payload.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .or(command.record_id.as_deref())
-                    .unwrap_or_default()
-                    .to_owned();
-                let assigned_to_actor = if approval_id.is_empty() {
-                    false
-                } else {
-                    let actor_id = session_user_id(&session).unwrap_or_default();
-                    pull_collection_record(root, "ctox_task_approval_requests", &approval_id)?
-                        .and_then(|approval| first_string_field(&approval, &["reviewer_user_id"]))
-                        .map(|reviewer| reviewer == actor_id)
-                        .unwrap_or(false)
-                };
-                let decision = scoped_policy_decision(
-                    root,
-                    &session,
-                    BusinessOsPermission::ExternalApprove,
-                    BusinessOsScope {
-                        scope_type: BusinessOsScopeType::Approval,
-                        scope_id: if approval_id.is_empty() {
-                            None
-                        } else {
-                            Some(approval_id)
-                        },
-                        assigned_to_actor,
-                        owned_by_actor: false,
-                    },
-                )?;
-                if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                    return Ok(outcome);
-                }
-            }
-            match super::threads::handle_business_command(root, &session, &command) {
-                Ok(outcome) => {
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    );
-                }
-                Err(error) => {
-                    let _ = write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "failed",
-                        None,
-                        Some("failed"),
-                        serde_json::json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        }
-        command_type if command_type.starts_with("ctox.report.") => {
-            let mut mutation: BusinessOsReportMutation =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.report payload")?;
-            if mutation.kind.trim().is_empty() {
-                mutation.kind = command_type
-                    .strip_prefix("ctox.report.")
-                    .unwrap_or("bug")
-                    .to_string();
-            }
-            mutation.client_context = command.client_context.clone();
-            let session = rxdb_authenticated_session(root, &command)?;
-            let accepted = record_report_command(
-                root,
-                &session,
-                mutation,
-                Some(command_id),
-                command.record_id.clone(),
-            )?;
-            return Ok(serde_json::json!({
-                "ok": true,
-                "id": accepted.command_id,
-                "command_id": accepted.command_id,
-                "status": "accepted",
-                "task_id": accepted.task_id.unwrap_or_default(),
-                "task_status": accepted.task_status.unwrap_or_else(|| "accepted".to_string()),
-                "report_id": accepted.report_id,
-                "report_status": "open"
-            }));
-        }
-        "ctox.source.load"
-        | "ctox.source.save"
-        | "ctox.source.list_snapshots"
-        | "ctox.source.rollback_snapshot"
-        | "ctox.source.commit"
-        | "ctox.source.log"
-        | "ctox.source.diff" => {
-            return handle_source_command(root, &command);
-        }
-        "ctox.mailserver.get_config"
-        | "ctox.mailserver.save_domain"
-        | "ctox.mailserver.delete_domain"
-        | "ctox.mailserver.save_user"
-        | "ctox.mailserver.delete_user" => {
-            return handle_mailserver_command(root, &command);
-        }
-        _ => {}
-    }
-    // CHOKEPOINT (DS-0.2 / H5+H9): every command type without a dedicated,
-    // already-gated arm above falls through here into record_command, which
-    // records it AND enqueues server work (create_ctox_queue_task) — previously
-    // with no authorization. The exposure is the untrusted RxDB/WebRTC data
-    // plane, so gate only ReplicatedPeer commands (TrustedLocal is the operator
-    // CLI / in-process callers, already trusted, matching rxdb_session_from_
-    // command). App-build commands carry their own AppsInstall/AppsModify gate
-    // inside record_command; every other fall-through is a record-mutating data
-    // command (source.parse, matching.*, business_os.chat.task / cv-print,
-    // documents.*), so require module-scoped DataWrite. The session is the
-    // capability-token actor, so an unprivileged / unauthenticated replicated
-    // peer (inert "user", no grant) is denied and never reaches record_command
-    // or create_ctox_queue_task.
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && app_build_command_policy_target(&command).is_none()
-    {
-        let session = rxdb_authenticated_session(root, &command)?;
-        let permission = if command.command_type == "business_os.context.ask" {
-            BusinessOsPermission::DataRead
-        } else {
-            BusinessOsPermission::DataWrite
-        };
-        let decision = module_policy_decision(root, &session, permission, &command.module)?;
-        if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-            return Ok(outcome);
-        }
-    }
-    let accepted = record_command(root, command)?;
-    Ok(serde_json::to_value(accepted)?)
-}
-
-fn handle_workspace_control_command(
+pub(super) fn handle_workspace_control_command(
     root: &Path,
     command: &BusinessCommand,
 ) -> anyhow::Result<Value> {
@@ -17048,7 +16166,7 @@ fn handle_workspace_control_command(
     }
 }
 
-fn handle_app_lifecycle_command(
+pub(super) fn handle_app_lifecycle_command(
     root: &Path,
     command_id: &str,
     command: &BusinessCommand,
@@ -17341,7 +16459,10 @@ fn handle_app_lifecycle_command(
     }
 }
 
-fn handle_mailserver_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+pub(super) fn handle_mailserver_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.mailserver.get_config" => {
             let session = rxdb_authenticated_session(root, &command)?;
@@ -17621,7 +16742,10 @@ fn handle_mailserver_command(root: &Path, command: &BusinessCommand) -> anyhow::
     }
 }
 
-fn handle_source_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+pub(super) fn handle_source_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.source.load" => {
             let mutation: ModuleSourceLoadMutation =
@@ -17841,7 +16965,10 @@ fn handle_source_command(root: &Path, command: &BusinessCommand) -> anyhow::Resu
     }
 }
 
-fn handle_business_os_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+pub(super) fn handle_business_os_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.business_os.user.upsert" => {
             let mutation: BusinessOsUserMutation = serde_json::from_value(command.payload.clone())
@@ -18037,7 +17164,10 @@ fn handle_business_os_command(root: &Path, command: &BusinessCommand) -> anyhow:
     }
 }
 
-fn handle_secret_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+pub(super) fn handle_secret_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.secret.list" => {
             let session = rxdb_authenticated_session(root, &command)?;
@@ -18152,7 +17282,10 @@ fn handle_secret_command(root: &Path, command: &BusinessCommand) -> anyhow::Resu
     }
 }
 
-fn handle_module_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+pub(super) fn handle_module_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "ctox.module.repair_lifecycle_projection" => {
             let request: ModuleLifecycleProjectionRepairRequest =
@@ -18645,7 +17778,7 @@ fn handle_module_command(root: &Path, command: &BusinessCommand) -> anyhow::Resu
     }
 }
 
-fn is_iot_active_command(command_type: &str) -> bool {
+pub(super) fn is_iot_active_command(command_type: &str) -> bool {
     matches!(
         command_type,
         "ctox.iot.attribute.write"
@@ -18659,7 +17792,7 @@ fn is_iot_active_command(command_type: &str) -> bool {
     )
 }
 
-fn is_outbound_active_command(command_type: &str) -> bool {
+pub(super) fn is_outbound_active_command(command_type: &str) -> bool {
     matches!(
         command_type,
         "outbound.engagement.create"
@@ -18960,7 +18093,7 @@ fn get_public_key(private_key_pem: &str) -> anyhow::Result<String> {
     Ok(output)
 }
 
-fn stored_rxdb_business_command_outcome(
+pub(super) fn stored_rxdb_business_command_outcome(
     conn: &Connection,
     command_id: &str,
 ) -> anyhow::Result<Option<Value>> {
@@ -19326,7 +18459,7 @@ pub fn issue_business_os_capability_token_for_managed_user(
     issue_business_os_capability_token(root, user_id, now_ms)
 }
 
-fn rxdb_command_session(
+pub(super) fn rxdb_command_session(
     root: &Path,
     command: &BusinessCommand,
 ) -> anyhow::Result<BusinessOsSession> {
@@ -19582,165 +18715,6 @@ fn active_business_user(
         .optional()?)
 }
 
-pub(super) fn write_rxdb_control_command_outcome(
-    root: &Path,
-    command: &BusinessCommand,
-    status: &str,
-    task_id: Option<&str>,
-    task_status: Option<&str>,
-    result: Value,
-) -> anyhow::Result<Value> {
-    write_rxdb_control_command_state(root, command, status, task_id, task_status, result, true)
-}
-
-pub(super) fn write_rxdb_control_command_progress(
-    root: &Path,
-    command: &BusinessCommand,
-    status: &str,
-    result: Value,
-) -> anyhow::Result<Value> {
-    write_rxdb_control_command_state(root, command, status, None, Some(status), result, false)
-}
-
-fn write_rxdb_control_command_state(
-    root: &Path,
-    command: &BusinessCommand,
-    status: &str,
-    task_id: Option<&str>,
-    task_status: Option<&str>,
-    mut result: Value,
-    terminal: bool,
-) -> anyhow::Result<Value> {
-    let command_id = command.id.as_deref().context("command id is required")?;
-    let now = now_ms() as i64;
-    let target_task_id = if command.command_type.starts_with("ctox.task.") {
-        task_id.unwrap_or_default()
-    } else {
-        ""
-    };
-    let target_record_id = command
-        .record_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            (!command.command_type.starts_with("ctox.task."))
-                .then_some(task_id)
-                .flatten()
-        })
-        .unwrap_or_default();
-    if let Some(object) = result.as_object_mut() {
-        object.insert("status".to_string(), Value::String(status.to_string()));
-        object.insert(
-            "task_status".to_string(),
-            Value::String(task_status.unwrap_or(status).to_string()),
-        );
-    }
-    if !terminal && is_rxdb_control_command_type(&command.command_type) {
-        channels::progress_business_control_command(root, command_id, status, &result)?;
-    }
-    if terminal && is_rxdb_control_command_type(&command.command_type) {
-        let terminal_status = match status {
-            "completed" => "completed",
-            "cancelled" => "cancelled",
-            _ => "failed",
-        };
-        channels::complete_business_control_command(
-            root,
-            command_id,
-            terminal_status,
-            &result,
-            (terminal_status == "failed")
-                .then(|| {
-                    result
-                        .get("error")
-                        .or_else(|| result.pointer("/outcome/stderr"))
-                        .and_then(Value::as_str)
-                })
-                .flatten(),
-        )?;
-    }
-    let conn = open_store(root)?;
-    conn.execute(
-        "INSERT INTO business_commands
-            (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(command_id) DO UPDATE SET
-            module = excluded.module,
-            command_type = excluded.command_type,
-            record_id = excluded.record_id,
-            status = excluded.status,
-            payload_json = excluded.payload_json,
-            client_context_json = excluded.client_context_json,
-            observed_at_ms = excluded.observed_at_ms",
-        params![
-            command_id,
-            command.module,
-            command.command_type,
-            command.record_id.clone().unwrap_or_default(),
-            status,
-            serde_json::to_string(&command.payload)?,
-            serde_json::to_string(&command.client_context)?,
-            now
-        ],
-    )?;
-    let chat_id = if is_business_chat_command(command) {
-        Some(materialize_control_business_chat_state(
-            root, &conn, command_id, command, status, &result, terminal, now,
-        )?)
-    } else {
-        None
-    };
-    let mut projection = serde_json::json!({
-        "id": command_id,
-        "command_id": command_id,
-        "module": command.module.clone(),
-        "command_type": command.command_type.clone(),
-        "record_id": command.record_id.clone().unwrap_or_default(),
-        "status": status,
-        "execution_mode": "control",
-        "execution_task_id": "",
-        "target_task_id": target_task_id,
-        "target_record_id": target_record_id,
-        "inbound_channel": command_inbound_channel(command),
-        "task_id": task_id.unwrap_or_default(),
-        "task_status": task_status.unwrap_or(status),
-        "payload": command.payload.clone(),
-        "client_context": command.client_context.clone(),
-        "result": result.clone(),
-        "error_code": result.get("error_code").cloned().unwrap_or(Value::Null),
-        "error_message": result.get("error").cloned().unwrap_or(Value::Null),
-        "updated_at_ms": now
-    });
-    if let Some(chat_id) = chat_id.as_deref() {
-        projection["chat_id"] = Value::String(chat_id.to_string());
-    }
-    upsert_business_record(
-        &conn,
-        "business_commands",
-        command_id,
-        now,
-        projection.clone(),
-    )?;
-    record_business_module_lifecycle_event(root, command, status, &result)?;
-    upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection)?;
-    Ok(serde_json::json!({
-        "ok": true,
-        "id": command_id,
-        "command_id": command_id,
-        "status": status,
-        "execution_mode": "control",
-        "execution_task_id": "",
-        "target_task_id": target_task_id,
-        "target_record_id": target_record_id,
-        "task_id": task_id.unwrap_or_default(),
-        "task_status": task_status.unwrap_or(status),
-        "error_code": result.get("error_code").cloned().unwrap_or(Value::Null),
-        "error_message": result.get("error").cloned().unwrap_or(Value::Null),
-        "chat_id": chat_id,
-        "result": result
-    }))
-}
-
 pub(crate) fn finalize_runtime_app_action(
     root: &Path,
     document: &Value,
@@ -19789,7 +18763,7 @@ pub(super) fn authorize_recoverable_person_research_command(
     authorize_recoverable_background_control_command(root, command)
 }
 
-fn authorize_recoverable_background_control_command(
+pub(super) fn authorize_recoverable_background_control_command(
     root: &Path,
     command: &BusinessCommand,
 ) -> anyhow::Result<BusinessCommand> {
@@ -20398,7 +19372,7 @@ pub fn business_command_diagnostics(root: &Path) -> anyhow::Result<Value> {
     }))
 }
 
-fn is_customers_active_command(command_type: &str) -> bool {
+pub(super) fn is_customers_active_command(command_type: &str) -> bool {
     matches!(
         command_type,
         "customers.account.create"
@@ -26227,7 +25201,7 @@ pub(super) fn project_iot_projection_rows(
     Ok(pairs)
 }
 
-fn is_appsec_business_command(command_type: &str) -> bool {
+pub(super) fn is_appsec_business_command(command_type: &str) -> bool {
     command_type.starts_with("ctox.appsec.")
 }
 
@@ -28221,85 +27195,6 @@ pub(super) mod tests {
             projected_updated_at_ms, 1006,
             "new evidence must advance the finding projection cursor"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn control_command_outcome_updates_outbox_intake_projection() -> anyhow::Result<()> {
-        let root = tempdir()?;
-        let command_id = "cmd_appsec_outbox_race";
-        drop(create_repair_rxdb_tables(root.path())?);
-        let command = BusinessCommand {
-            origin: CommandOrigin::TrustedLocal,
-            id: Some(command_id.to_string()),
-            module: APPSEC_MODULE_ID.to_string(),
-            command_type: "ctox.appsec.tools.doctor".to_string(),
-            record_id: Some("runtime/appsec/test".to_string()),
-            payload: serde_json::json!({ "profile": "full" }),
-            client_context: serde_json::json!({ "actor": { "id": "local-dev" } }),
-        };
-
-        let claim = channels::claim_business_control_command(
-            root.path(),
-            business_command_core_claim(command_id, &command)?,
-        )?;
-        assert_eq!(claim.disposition, "new");
-
-        let conn = open_store(root.path())?;
-        conn.execute(
-            "INSERT INTO business_commands
-                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
-             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, 1)",
-            params![
-                command_id,
-                command.module,
-                command.command_type,
-                command.record_id,
-                serde_json::to_string(&command.payload)?,
-                serde_json::to_string(&command.client_context)?,
-            ],
-        )?;
-        drop(conn);
-
-        write_rxdb_control_command_progress(
-            root.path(),
-            &command,
-            "running",
-            serde_json::json!({ "ok": true, "status": "running" }),
-        )?;
-
-        let outcome = write_rxdb_control_command_outcome(
-            root.path(),
-            &command,
-            "completed",
-            command.record_id.as_deref(),
-            Some("completed"),
-            serde_json::json!({ "ok": true }),
-        )?;
-        assert_eq!(
-            outcome.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-
-        let conn = open_store(root.path())?;
-        let (count, status): (i64, String) = conn.query_row(
-            "SELECT COUNT(*), MAX(status) FROM business_commands WHERE command_id = ?1",
-            params![command_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        assert_eq!(count, 1);
-        assert_eq!(status, "completed");
-        let rxdb_conn = Connection::open(rxdb_store_path(root.path()))?;
-        let projected: String = rxdb_conn.query_row(
-            "SELECT data FROM ctox_business_os__business_commands__v1 WHERE id = ?1",
-            params![command_id],
-            |row| row.get(0),
-        )?;
-        let projected: Value = serde_json::from_str(&projected)?;
-        assert_eq!(projected["status"], "completed");
-        assert_eq!(projected["task_status"], "completed");
-        assert_eq!(projected["result"]["status"], "completed");
-        assert_eq!(projected["result"]["task_status"], "completed");
         Ok(())
     }
 
@@ -36599,60 +35494,6 @@ pub(super) mod tests {
             release_events, 1,
             "replayed command must not duplicate audit events"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn control_command_outcome_updates_an_existing_intake_projection() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let command_id = "cmd_long_running_control_outcome";
-        let command = BusinessCommand {
-            origin: CommandOrigin::TrustedLocal,
-            id: Some(command_id.to_string()),
-            module: "inventory".to_string(),
-            command_type: "external_sql.sync.refresh".to_string(),
-            record_id: None,
-            payload: serde_json::json!({ "input": { "mode": "full" } }),
-            client_context: serde_json::json!({ "actor": { "id": "mcp-admin" } }),
-        };
-
-        let claim = channels::claim_business_control_command(
-            root,
-            business_command_core_claim(command_id, &command)?,
-        )?;
-        assert_eq!(claim.disposition, "new");
-
-        let conn = open_store(root)?;
-        conn.execute(
-            "INSERT INTO business_commands
-                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
-             VALUES (?1, 'inventory', 'external_sql.sync.refresh', '', 'accepted', '{}', '{}', 1)",
-            params![command_id],
-        )?;
-        drop(conn);
-
-        let outcome = write_rxdb_control_command_outcome(
-            root,
-            &command,
-            "completed",
-            None,
-            Some("completed"),
-            serde_json::json!({ "ok": true, "synced": 1 }),
-        )?;
-        assert_eq!(
-            outcome.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-
-        let conn = open_store(root)?;
-        let (count, status): (i64, String) = conn.query_row(
-            "SELECT COUNT(*), MAX(status) FROM business_commands WHERE command_id = ?1",
-            params![command_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        assert_eq!(count, 1);
-        assert_eq!(status, "completed");
         Ok(())
     }
 
