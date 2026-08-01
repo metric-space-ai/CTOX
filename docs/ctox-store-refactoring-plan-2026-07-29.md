@@ -117,10 +117,38 @@ etablierte Temp-Index/CAS-Weg.
    drehte genau die Schichtung um, die dieses Ticket herstellen soll.
    Sieben der 16 Overlays sind session-gekoppelt.
 
-   **Vorbedingung für S-CUT5:** `BusinessOsSession` samt `session_user_id`/
-   `session_role` muss zuerst unter store.rs und policy.rs wandern (Muster:
-   `core_state`, `command_lifecycle`, `communication_store` — dort hat genau
-   dieser Schritt die vermeintlich grossen Ziele klein gemacht). Erst danach
+   **STAND 01.08.: Vorbedingung ERFÜLLT, S-CUT5 wird VORGEZOGEN — vor
+   S-CUT4f.** `session.rs` liegt seit der Session-Welle unter store.rs und
+   policy.rs. Und S-CUT4f hat gezeigt, warum die Reihenfolge zwingend ist:
+   der Command-Plane-Schnitt stoppte bei 25 Nähten (Grenze 20), und **14
+   der 25 sind Policy-Funktionen** — `reject_command_if_policy_denied`,
+   `workspace_policy_decision`, `task_policy_decision`,
+   `policy_audit_actor_context` und weitere.
+
+   Die beiden Schnitte sind verschränkt: die Policy-Nähte zählen die
+   Aufrufe des Dispatchers mit, die Dispatcher-Nähte die Policy-Aufrufe.
+   Wer zuerst zieht, entlastet den anderen. Policy ist die kleinere und
+   tiefere Schicht, also zieht Policy zuerst.
+
+   Vermessen: 30 Funktionen, 550 Zeilen, **21 Nähte** — eine über der
+   Grenze. Die Familie teilt sich sauber, und diesmal **ohne Zusatzkosten**
+   (13 + 8 = 21, kein Aufschlag wie bei S-CUT2/3):
+
+   - **S-CUT5a Entscheidungen** — 16 Funktionen, 276 Zeilen, 13 Nähte.
+   - **S-CUT5b Audit/Summary/Rest** — 14 Funktionen, 274 Zeilen, 8 Nähte.
+
+   Ziel ist ein NEUES Modul `store_policy.rs`, NICHT das bestehende
+   `policy.rs`: die Overlays brauchen Store-Helfer, ein Umzug nach
+   policy.rs erzeugte damit `policy → store` und drehte genau die
+   Schichtung um, die dieses Ticket herstellen soll.
+
+   **Zum fünften Mal dasselbe Muster.** Ein „hartes Ziel" löst sich auf,
+   sobald das, was eine Ebene zu hoch einsortiert war, nach unten wandert.
+   Vorher: core_state, command_lifecycle, communication_store, session.
+
+   Ursprüngliche Notiz (historisch): `BusinessOsSession` samt
+   `session_user_id`/`session_role` muss zuerst unter store.rs und
+   policy.rs wandern. Erst danach
    ist der Policy-Schnitt ein Move und keine Zyklus-Erzeugung.
    Ein Probeumzug wurde ausgeführt und wieder zurückgenommen; der
    Compiler-Fehler (BusinessOsSession/session_user_id/session_role nicht in
