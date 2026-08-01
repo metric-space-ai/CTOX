@@ -975,7 +975,9 @@ fn write_rxdb_control_command_state(
         })
         .unwrap_or_default();
     if let Some(object) = result.as_object_mut() {
-        object.insert("status".to_string(), Value::String(status.to_string()));
+        object
+            .entry("status".to_string())
+            .or_insert_with(|| Value::String(status.to_string()));
         object.insert(
             "task_status".to_string(),
             Value::String(task_status.unwrap_or(status).to_string()),
