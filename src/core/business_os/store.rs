@@ -82,8 +82,9 @@ use super::store_projections::{
     business_command_queue_task_payload, enrich_queue_projection_payload, is_business_chat_command,
     materialize_pending_business_chat, normalize_queue_status,
     persist_terminal_business_chat_command_projection, queue_projection_command_id,
-    queue_projection_execution_phase, queue_projection_terminal_status, queue_task_payload,
-    refresh_queue_task_projection, write_queue_task_projection,
+    queue_projection_execution_phase, queue_projection_structured_status,
+    queue_projection_terminal_status, queue_task_payload, refresh_queue_task_projection,
+    write_queue_task_projection,
 };
 use super::store_release_review::{
     data_access_review_from_release_snapshot, module_release_data_access_review_summary,
@@ -10650,6 +10651,7 @@ pub fn record_command(
                 &command,
                 task,
                 inbound_channel.as_str(),
+                Some("accepted"),
                 observed_at_ms,
             ),
         )?;
@@ -19765,10 +19767,17 @@ pub fn update_ctox_task(
     )?;
     let now = now_ms() as i64;
     let command_id = queue_projection_command_id(&conn, &task_id)?;
+    let structured_status =
+        queue_projection_structured_status(&conn, command_id.as_deref(), &task_id)?;
     write_queue_task_projection(&conn, command_id.as_deref(), &updated, now)?;
     Ok(serde_json::json!({
         "ok": true,
-        "task": queue_task_payload(command_id.as_deref(), &updated, now)
+        "task": queue_task_payload(
+            command_id.as_deref(),
+            &updated,
+            structured_status.as_deref(),
+            now,
+        )
     }))
 }
 
@@ -23205,25 +23214,16 @@ pub(super) fn projection_status_is_active(status: &str) -> bool {
     )
 }
 
-pub(super) fn queue_status_note_is_terminal_success(note: Option<&str>) -> bool {
-    let Some(note) = note.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let lower = note.to_ascii_lowercase();
-    lower.contains("business-os:terminal-success")
-        || lower.contains("terminal-success")
-        || (lower.contains(" completed.") && lower.contains("changed "))
-        || (lower.contains("completed.") && lower.contains("verified "))
+pub(super) fn queue_status_is_terminal_success(status: Option<&str>) -> bool {
+    status
+        .map(str::trim)
+        .is_some_and(|status| matches!(status, "completed" | "handled" | "done"))
 }
 
-pub(super) fn queue_status_note_is_terminal_failure(note: Option<&str>) -> bool {
-    let Some(note) = note.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let lower = note.to_ascii_lowercase();
-    lower.contains("terminal-failure")
-        || lower.contains("input exceeds the maximum length")
-        || lower.contains("turn/start failed")
+pub(super) fn queue_status_is_terminal_failure(status: Option<&str>) -> bool {
+    status
+        .map(str::trim)
+        .is_some_and(|status| matches!(status, "failed" | "error"))
 }
 
 pub(super) fn apply_queue_projection_status_fields(

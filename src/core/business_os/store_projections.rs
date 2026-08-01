@@ -6,12 +6,11 @@ use super::store::{
     command_inbound_channel, command_status_for_queue_route_status,
     count_legacy_http_fallback_records, find_queue_task_for_command, first_string_field, now_ms,
     open_store, projection_route_status_for_command_status, projection_status_is_active,
-    push_repair_action, queue_status_note_is_terminal_failure,
-    queue_status_note_is_terminal_success, redact_document_client_context_secrets,
-    repair_inline_payload_artifacts, upsert_command_projection_from_queue_status,
-    upsert_rxdb_collection_record, upsert_rxdb_collection_record_cached, BusinessCommand,
-    QueueProjectionRepairOptions, RxdbProjectionWriterCache,
-    BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
+    push_repair_action, queue_status_is_terminal_failure, queue_status_is_terminal_success,
+    redact_document_client_context_secrets, repair_inline_payload_artifacts,
+    upsert_command_projection_from_queue_status, upsert_rxdb_collection_record,
+    upsert_rxdb_collection_record_cached, BusinessCommand, QueueProjectionRepairOptions,
+    RxdbProjectionWriterCache, BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
 };
 use crate::mission::channels;
 use anyhow::Context;
@@ -582,11 +581,19 @@ pub(super) fn refresh_queue_task_projection(
         return Ok(());
     };
     let inbound_channel = command_inbound_channel(command);
+    let structured_status =
+        channels::inspect_business_command_for_task(root, &task_id)?.and_then(|context| {
+            context
+                .pointer("/command/terminal_status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     let payload = business_command_queue_task_payload(
         command_id,
         command,
         &task,
         &inbound_channel,
+        structured_status.as_deref(),
         updated_at_ms,
     );
     upsert_business_record(
@@ -611,9 +618,10 @@ pub(super) fn business_command_queue_task_payload(
     command: &BusinessCommand,
     task: &channels::QueueTaskView,
     inbound_channel: &str,
+    structured_status: Option<&str>,
     updated_at_ms: i64,
 ) -> Value {
-    let route_status = effective_queue_projection_route_status(task);
+    let route_status = effective_queue_projection_route_status(task, structured_status);
     let mut payload = serde_json::json!({
         "id": task.message_key,
         "command_id": command_id,
@@ -645,21 +653,29 @@ pub(super) fn write_queue_task_projection(
     task: &channels::QueueTaskView,
     updated_at_ms: i64,
 ) -> anyhow::Result<()> {
+    let structured_status =
+        queue_projection_structured_status(conn, command_id, &task.message_key)?;
     upsert_business_record(
         conn,
         "ctox_queue_tasks",
         &task.message_key,
         updated_at_ms,
-        queue_task_payload(command_id, task, updated_at_ms),
+        queue_task_payload(
+            command_id,
+            task,
+            structured_status.as_deref(),
+            updated_at_ms,
+        ),
     )
 }
 
 pub(super) fn queue_task_payload(
     command_id: Option<&str>,
     task: &channels::QueueTaskView,
+    structured_status: Option<&str>,
     updated_at_ms: i64,
 ) -> Value {
-    let route_status = effective_queue_projection_route_status(task);
+    let route_status = effective_queue_projection_route_status(task, structured_status);
     let mut payload = serde_json::json!({
         "id": task.message_key,
         "command_id": command_id.unwrap_or_default(),
@@ -680,14 +696,54 @@ pub(super) fn queue_task_payload(
     payload
 }
 
-fn effective_queue_projection_route_status(task: &channels::QueueTaskView) -> String {
+pub(super) fn queue_projection_structured_status(
+    conn: &Connection,
+    command_id: Option<&str>,
+    task_id: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(command_id) = command_id {
+        let command_status = conn
+            .query_row(
+                "SELECT status FROM business_commands WHERE command_id = ?1",
+                params![command_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if command_status.as_deref().is_some_and(|status| {
+            queue_status_is_terminal_success(Some(status))
+                || queue_status_is_terminal_failure(Some(status))
+        }) {
+            return Ok(command_status);
+        }
+    }
+    let projection_status = conn
+        .query_row(
+            "SELECT payload_json FROM business_records
+             WHERE collection = 'ctox_queue_tasks' AND record_id = ?1 AND deleted = 0",
+            params![task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+        .and_then(|payload| {
+            structured_terminal_status_from_projection(&payload).map(str::to_string)
+        });
+    Ok(projection_status)
+}
+
+fn effective_queue_projection_route_status(
+    task: &channels::QueueTaskView,
+    structured_status: Option<&str>,
+) -> String {
     if task.route_status == "leased"
-        && queue_status_note_is_terminal_success(task.status_note.as_deref())
+        && (queue_status_is_terminal_success(structured_status)
+            || queue_status_is_terminal_success(Some(&task.route_status)))
     {
         return "handled".to_string();
     }
     if task.route_status == "leased"
-        && queue_status_note_is_terminal_failure(task.status_note.as_deref())
+        && (queue_status_is_terminal_failure(structured_status)
+            || queue_status_is_terminal_failure(Some(&task.route_status)))
     {
         return "failed".to_string();
     }
@@ -805,6 +861,16 @@ pub(super) fn queue_projection_command_id(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         }))
+}
+
+fn structured_terminal_status_from_projection(payload: &Value) -> Option<&str> {
+    ["terminal_status", "route_status", "status", "task_status"]
+        .into_iter()
+        .filter_map(|field| payload.get(field).and_then(Value::as_str))
+        .find(|status| {
+            queue_status_is_terminal_success(Some(status))
+                || queue_status_is_terminal_failure(Some(status))
+        })
 }
 
 pub(super) fn normalize_queue_status(route_status: &str) -> &str {
@@ -949,13 +1015,29 @@ pub fn repair_queue_projections(
 
         match channels::load_queue_task(root, &task_id)? {
             Some(mut task) => {
+                let canonical_terminal_status = channels::inspect_business_command_for_task(
+                    root, &task_id,
+                )?
+                .and_then(|context| {
+                    context
+                        .pointer("/command/terminal_status")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+                let structured_terminal_status = canonical_terminal_status
+                    .as_deref()
+                    .filter(|status| {
+                        queue_status_is_terminal_success(Some(status))
+                            || queue_status_is_terminal_failure(Some(status))
+                    })
+                    .or_else(|| structured_terminal_status_from_projection(&payload));
                 let mut desired_route_status = task.route_status.clone();
                 let mut repair_kind = None;
                 if desired_route_status == "leased"
-                    && queue_status_note_is_terminal_success(task.status_note.as_deref())
+                    && queue_status_is_terminal_success(structured_terminal_status)
                 {
                     desired_route_status = "handled".to_string();
-                    repair_kind = Some("leased_terminal_success_note");
+                    repair_kind = Some("leased_terminal_success_status");
                     if apply {
                         let note = task
                             .status_note
@@ -977,10 +1059,10 @@ pub fn repair_queue_projections(
                         }
                     }
                 } else if desired_route_status == "leased"
-                    && queue_status_note_is_terminal_failure(task.status_note.as_deref())
+                    && queue_status_is_terminal_failure(structured_terminal_status)
                 {
                     desired_route_status = "failed".to_string();
-                    repair_kind = Some("leased_terminal_failure_note");
+                    repair_kind = Some("leased_terminal_failure_status");
                     if apply {
                         let reason = task
                             .status_note
@@ -1247,10 +1329,14 @@ pub fn repair_queue_projections(
 pub(crate) mod tests {
     use super::super::store::{
         accept_rxdb_business_command, load_rxdb_collection_record, now_ms, open_store,
-        reset_rxdb_collection_writer_open_count, reset_rxdb_table_column_load_count,
-        rxdb_collection_writer_open_count, rxdb_store_path, rxdb_table_column_load_count,
+        queue_status_is_terminal_success, reset_rxdb_collection_writer_open_count,
+        reset_rxdb_table_column_load_count, rxdb_collection_writer_open_count, rxdb_store_path,
+        rxdb_table_column_load_count,
     };
-    use super::{repair_queue_projections, upsert_business_record, QueueProjectionRepairOptions};
+    use super::{
+        effective_queue_projection_route_status, repair_queue_projections, upsert_business_record,
+        QueueProjectionRepairOptions,
+    };
     use crate::mission::channels;
     use anyhow::Context;
     use rusqlite::{params, Connection};
@@ -1329,6 +1415,57 @@ pub(crate) mod tests {
             params![id, serde_json::to_string(&payload)?],
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn queue_status_detection_ignores_status_note_wording() {
+        let mut task = channels::QueueTaskView {
+            message_key: "queue:system::structured-status-wording".to_string(),
+            thread_key: "queue/structured-status-wording".to_string(),
+            title: "Structured status wording test".to_string(),
+            prompt: "Use the structured terminal state.".to_string(),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+            route_status: "leased".to_string(),
+            status_note: Some(
+                "Business-OS documents bug report completed. Changed editor rendering. Verified in browser."
+                    .to_string(),
+            ),
+            lease_owner: Some("ctox-service".to_string()),
+            leased_at: Some("2026-08-01T00:00:00Z".to_string()),
+            acked_at: None,
+            created_at: "2026-08-01T00:00:00Z".to_string(),
+            sort_at: "2026-08-01T00:00:00Z".to_string(),
+            updated_at: "2026-08-01T00:00:00Z".to_string(),
+        };
+
+        let success_with_old_wording =
+            effective_queue_projection_route_status(&task, Some("completed"));
+        task.status_note =
+            Some("Erledigt; Nachweis liegt im strukturierten Ergebnisfeld.".to_string());
+        let success_with_new_wording =
+            effective_queue_projection_route_status(&task, Some("completed"));
+        assert_eq!(success_with_old_wording, "handled");
+        assert_eq!(success_with_new_wording, success_with_old_wording);
+
+        task.status_note = Some("turn/start failed".to_string());
+        let failure_with_old_wording =
+            effective_queue_projection_route_status(&task, Some("failed"));
+        task.status_note = Some("Ausführung beendet; Details stehen im Fehlerobjekt.".to_string());
+        let failure_with_new_wording =
+            effective_queue_projection_route_status(&task, Some("failed"));
+        assert_eq!(failure_with_old_wording, "failed");
+        assert_eq!(failure_with_new_wording, failure_with_old_wording);
+
+        task.status_note = Some("terminal-success completed. Changed and verified.".to_string());
+        assert_eq!(
+            effective_queue_projection_route_status(&task, Some("running")),
+            "leased",
+            "terminal-looking prose must not override a non-terminal structured status"
+        );
     }
 
     #[test]
@@ -1533,7 +1670,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn repair_queue_projections_acks_leased_terminal_success_note() -> anyhow::Result<()> {
+    fn repair_queue_projections_acks_leased_structured_terminal_success() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         let accepted = accept_rxdb_business_command(
@@ -1567,7 +1704,7 @@ pub(crate) mod tests {
             channels::QueueTaskUpdateRequest {
                 message_key: task_id.clone(),
                 status_note: Some(
-                    "Business-OS documents bug report completed. Changed editor rendering. Verified in browser."
+                    "Der Lauf ist beendet; Einzelheiten stehen im strukturierten Ergebnis."
                         .to_string(),
                 ),
                 ..Default::default()
@@ -1869,5 +2006,41 @@ pub(crate) mod tests {
             Some(true)
         );
         Ok(())
+    }
+
+    /// ST3: the terminal decision must come from the status field, never from
+    /// the wording of the human-readable note.
+    ///
+    /// Before this, `queue_status_note_is_terminal_success` searched the note
+    /// for substrings — among them `" completed."` together with `"changed "`.
+    /// A note rephrased by a translator or a log tweak silently changed whether
+    /// a task counted as finished.
+    ///
+    /// The prose below is deliberately the exact shape the old matcher accepted.
+    /// If someone reintroduces substring matching, this test goes red on the
+    /// first two assertions.
+    #[test]
+    fn terminal_success_reads_the_status_field_and_not_the_note_wording() {
+        for prose in [
+            "business-os:terminal-success: all good",
+            "Run completed. Changed 3 records and verified them.",
+            "completed. verified everything",
+        ] {
+            assert!(
+                !queue_status_is_terminal_success(Some(prose)),
+                "note wording must not decide terminal success: {prose:?}"
+            );
+        }
+
+        // Same state, three different notes, one answer — because none of them
+        // is consulted.
+        for status in ["completed", "handled", "done"] {
+            assert!(
+                queue_status_is_terminal_success(Some(status)),
+                "structured status {status:?} must count as terminal success"
+            );
+        }
+        assert!(!queue_status_is_terminal_success(Some("leased")));
+        assert!(!queue_status_is_terminal_success(None));
     }
 }
