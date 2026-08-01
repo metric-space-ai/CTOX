@@ -121,6 +121,9 @@ const CHANNEL_SYNC_BACKOFF_MAX_SECS: u64 = 900;
 const TICKET_SYNC_POLL_SECS: u64 = 60;
 const TICKET_SYNC_BACKOFF_MAX_SECS: u64 = 900;
 const MISSION_MAINTENANCE_POLL_SECS: u64 = 15;
+const BUSINESS_OS_BACKUP_RETENTION_SWEEP_SECS: u64 = 24 * 60 * 60;
+const BUSINESS_OS_BACKUP_RETENTION_MARKER_FILE: &str =
+    "business-os-backup-retention-sweep.last-run";
 const APPROVAL_NAG_IDLE_SAFETY_SECS: u64 = 300;
 const HARNESS_AUDIT_TICK_SECS: u64 = 300;
 const HARNESS_AUDIT_IDLE_SAFETY_SECS: u64 = 3600;
@@ -16629,6 +16632,10 @@ fn start_mission_maintenance_loop(root: std::path::PathBuf, state: Arc<Mutex<Sha
                     Err(err) => push_event(&state, format!("Approval nag sweep failed: {err}")),
                 }
             }
+            // Backup restore-drill retention is enforced by the long-running
+            // maintenance loop rather than only being declared by the CLI.
+            // Its durable marker bounds apply-mode sweeps across daemon restarts.
+            run_business_os_backup_retention_sweep(&root, &state);
             // lease-2 (F-002): orphaned queue-lease recovery sweep. Runs on
             // the maintenance cadence, independent of the channel-router idle
             // gates, so a leased task whose worker disappeared (no heartbeat
@@ -16638,6 +16645,104 @@ fn start_mission_maintenance_loop(root: std::path::PathBuf, state: Arc<Mutex<Sha
             thread::sleep(Duration::from_secs(MISSION_MAINTENANCE_POLL_SECS));
         }
     });
+}
+
+fn run_business_os_backup_retention_sweep(root: &Path, state: &Arc<Mutex<SharedState>>) {
+    match should_skip_business_os_backup_retention_sweep(root) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(err) => {
+            push_event(
+                state,
+                format!(
+                    "Business OS backup retention marker check failed: {}",
+                    clip_text(&err.to_string(), 180)
+                ),
+            );
+            return;
+        }
+    }
+
+    // Claim the daily slot before applying the prune. This preserves the
+    // at-most-once bound even if pruning encounters a partial filesystem error;
+    // the prune operation itself remains idempotent and the next daily pass can
+    // continue with whatever eligible directories remain.
+    if let Err(err) = mark_business_os_backup_retention_sweep_ran(root) {
+        push_event(
+            state,
+            format!(
+                "Business OS backup retention marker update failed: {}",
+                clip_text(&err.to_string(), 180)
+            ),
+        );
+        return;
+    }
+
+    match crate::business_os::store::prune_business_os_backup_restore_drills(root, false) {
+        Ok(summary) => {
+            let deleted = summary
+                .get("deleted_drill_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if deleted > 0 {
+                let expired = summary
+                    .get("expired_drill_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(deleted);
+                let scanned = summary
+                    .get("scanned_drill_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                push_event(
+                    state,
+                    format!(
+                        "Business OS backup retention: scanned={scanned} expired={expired} deleted={deleted}"
+                    ),
+                );
+            }
+        }
+        Err(err) => push_event(
+            state,
+            format!(
+                "Business OS backup retention sweep failed: {}",
+                clip_text(&err.to_string(), 180)
+            ),
+        ),
+    }
+}
+
+fn business_os_backup_retention_marker_path(root: &Path) -> PathBuf {
+    crate::paths::runtime_dir(root).join(BUSINESS_OS_BACKUP_RETENTION_MARKER_FILE)
+}
+
+fn should_skip_business_os_backup_retention_sweep(root: &Path) -> Result<bool> {
+    let marker_path = business_os_backup_retention_marker_path(root);
+    let raw = match std::fs::read_to_string(&marker_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", marker_path.display()));
+        }
+    };
+    let last_run_epoch_secs = raw.trim().parse::<u64>().with_context(|| {
+        format!(
+            "failed to parse backup retention marker {}",
+            marker_path.display()
+        )
+    })?;
+    Ok(current_epoch_secs().saturating_sub(last_run_epoch_secs)
+        < BUSINESS_OS_BACKUP_RETENTION_SWEEP_SECS)
+}
+
+fn mark_business_os_backup_retention_sweep_ran(root: &Path) -> Result<()> {
+    let marker_path = business_os_backup_retention_marker_path(root);
+    let parent = marker_path
+        .parent()
+        .context("backup retention marker has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    std::fs::write(&marker_path, format!("{}\n", current_epoch_secs()))
+        .with_context(|| format!("failed to write {}", marker_path.display()))
 }
 
 const ORPHANED_QUEUE_LEASE_SWEEP_SECS: u64 = 60;
@@ -28516,6 +28621,56 @@ mod tests {
 
         clear_business_os_app_recovery_idle_gate_for_tests();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backup_retention_daily_sweep_applies_once_across_restart() -> anyhow::Result<()> {
+        let root = temp_root("backup-retention-daily-sweep");
+        let backup_root = crate::paths::backup_dir(&root);
+        std::fs::create_dir_all(&backup_root)?;
+
+        let write_expired_drill = |name: &str| -> anyhow::Result<PathBuf> {
+            let drill = backup_root.join(name);
+            std::fs::create_dir_all(&drill)?;
+            std::fs::write(drill.join("payload.sqlite3"), "raw-drill-payload")?;
+            std::fs::write(
+                drill.join("manifest.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "raw_backup_security": {
+                        "retention": {
+                            "expires_at_ms": 1
+                        }
+                    }
+                }))?,
+            )?;
+            Ok(drill)
+        };
+
+        let first_expired = write_expired_drill("business-os-drill-expired-first")?;
+        let first_state = Arc::new(Mutex::new(SharedState::default()));
+        run_business_os_backup_retention_sweep(&root, &first_state);
+        assert!(
+            !first_expired.exists(),
+            "a due maintenance sweep must apply retention and remove an expired drill"
+        );
+        assert!(
+            business_os_backup_retention_marker_path(&root).is_file(),
+            "a successful daily-slot claim must be persisted"
+        );
+
+        // A fresh SharedState models a restarted daemon: there is no in-memory
+        // gate to preserve, so only the marker on disk can suppress this pass.
+        drop(first_state);
+        let second_expired = write_expired_drill("business-os-drill-expired-second")?;
+        let restarted_state = Arc::new(Mutex::new(SharedState::default()));
+        run_business_os_backup_retention_sweep(&root, &restarted_state);
+        assert!(
+            second_expired.is_dir(),
+            "the persistent marker must prevent a second apply sweep inside 24 hours"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[test]
