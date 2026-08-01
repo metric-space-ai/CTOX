@@ -1014,76 +1014,8 @@ pub fn repair_queue_projections(
             .to_string();
 
         match channels::load_queue_task(root, &task_id)? {
-            Some(mut task) => {
-                let canonical_terminal_status = channels::inspect_business_command_for_task(
-                    root, &task_id,
-                )?
-                .and_then(|context| {
-                    context
-                        .pointer("/command/terminal_status")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-                let structured_terminal_status = canonical_terminal_status
-                    .as_deref()
-                    .filter(|status| {
-                        queue_status_is_terminal_success(Some(status))
-                            || queue_status_is_terminal_failure(Some(status))
-                    })
-                    .or_else(|| structured_terminal_status_from_projection(&payload));
-                let mut desired_route_status = task.route_status.clone();
-                let mut repair_kind = None;
-                if desired_route_status == "leased"
-                    && queue_status_is_terminal_success(structured_terminal_status)
-                {
-                    desired_route_status = "handled".to_string();
-                    repair_kind = Some("leased_terminal_success_status");
-                    if apply {
-                        let note = task
-                            .status_note
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("Business OS queued command completed.");
-                        channels::update_queue_task(
-                            root,
-                            channels::QueueTaskUpdateRequest {
-                                message_key: task_id.clone(),
-                                route_status: Some("handled".to_string()),
-                                status_note: Some(format!("business-os:terminal-success: {note}")),
-                                ..Default::default()
-                            },
-                        )?;
-                        if let Some(reloaded) = channels::load_queue_task(root, &task_id)? {
-                            task = reloaded;
-                        }
-                    }
-                } else if desired_route_status == "leased"
-                    && queue_status_is_terminal_failure(structured_terminal_status)
-                {
-                    desired_route_status = "failed".to_string();
-                    repair_kind = Some("leased_terminal_failure_status");
-                    if apply {
-                        let reason = task
-                            .status_note
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("leased queue task had terminal failure note");
-                        let _ = channels::ack_leased_messages_with_failure_reason(
-                            root,
-                            std::slice::from_ref(&task_id),
-                            "failed",
-                            reason,
-                        )?;
-                        if let Some(reloaded) = channels::load_queue_task(root, &task_id)? {
-                            task = reloaded;
-                        }
-                    }
-                }
-                if apply {
-                    desired_route_status = task.route_status.clone();
-                }
+            Some(task) => {
+                let desired_route_status = task.route_status.clone();
                 let fallback_error_note =
                     if desired_route_status == "failed" && task.status_note.is_none() {
                         channels::load_queue_task_last_error(root, &task_id)?
@@ -1100,8 +1032,7 @@ pub fn repair_queue_projections(
                 let desired_status = normalize_queue_status(&desired_route_status).to_string();
                 let needs_projection_repair = projection_route_status != desired_route_status
                     || projection_status != desired_status
-                    || projection_task_status != desired_status
-                    || repair_kind.is_some();
+                    || projection_task_status != desired_status;
                 if needs_projection_repair {
                     let class = match desired_route_status.as_str() {
                         "failed" => "failed_from_canonical",
@@ -1670,7 +1601,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn repair_queue_projections_acks_leased_structured_terminal_success() -> anyhow::Result<()> {
+    fn repair_queue_projections_does_not_mutate_leased_canonical_task_from_projection_status(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         let accepted = accept_rxdb_business_command(
@@ -1745,7 +1677,7 @@ pub(crate) mod tests {
             repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
         assert_eq!(
             dry_run
-                .pointer("/counts/completed_from_canonical")
+                .pointer("/counts/running_from_canonical")
                 .and_then(Value::as_u64),
             Some(1)
         );
@@ -1760,7 +1692,10 @@ pub(crate) mod tests {
         repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
         let canonical =
             channels::load_queue_task(root, &task_id)?.context("queue task after apply")?;
-        assert_eq!(canonical.route_status, "handled");
+        assert_eq!(
+            canonical.route_status, "leased",
+            "projection repair must not mutate the canonical queue task"
+        );
 
         let conn = open_store(root)?;
         let queue_payload: String = conn.query_row(
@@ -1771,46 +1706,30 @@ pub(crate) mod tests {
         let queue_projection: Value = serde_json::from_str(&queue_payload)?;
         assert_eq!(
             queue_projection.get("status").and_then(Value::as_str),
-            Some("completed")
+            Some("running")
         );
         assert_eq!(
             queue_projection.get("route_status").and_then(Value::as_str),
-            Some("handled")
+            Some("leased")
         );
         assert_eq!(
             queue_projection.get("task_status").and_then(Value::as_str),
-            Some("completed")
+            Some("running")
         );
 
-        let command_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_commands' AND record_id = 'cmd_repair_leased_success'",
-            [],
-            |row| row.get(0),
-        )?;
-        let command_projection: Value = serde_json::from_str(&command_payload)?;
-        assert_eq!(
-            command_projection.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-        assert_eq!(
-            command_projection
-                .get("task_status")
-                .and_then(Value::as_str),
-            Some("completed")
-        );
         let rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
             .context("expected repaired rxdb queue row")?;
         assert_eq!(
             rxdb_queue.get("status").and_then(Value::as_str),
-            Some("completed")
+            Some("running")
         );
         assert_eq!(
             rxdb_queue.get("route_status").and_then(Value::as_str),
-            Some("handled")
+            Some("leased")
         );
         assert_eq!(
             rxdb_queue.get("task_status").and_then(Value::as_str),
-            Some("completed")
+            Some("running")
         );
         Ok(())
     }

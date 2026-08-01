@@ -1770,6 +1770,83 @@ mod tests {
     }
 
     #[test]
+    fn terminal_control_command_settles_linked_leased_queue_task_without_repair(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        for (suffix, terminal_status, expected_route, error_message) in [
+            ("success", "completed", "handled", None),
+            (
+                "failure",
+                "failed",
+                "failed",
+                Some("synthetic terminal failure"),
+            ),
+        ] {
+            let command_id = format!("cmd_terminal_linked_queue_{suffix}");
+            let command = BusinessCommand {
+                origin: CommandOrigin::TrustedLocal,
+                id: Some(command_id.clone()),
+                module: "research".to_string(),
+                command_type: "business_os.chat.task".to_string(),
+                record_id: Some("research".to_string()),
+                payload: serde_json::json!({ "prompt": "prove atomic terminal carry" }),
+                client_context: serde_json::json!({ "source": "test" }),
+            };
+            let claimed = channels::claim_business_command_with_queue(
+                root,
+                business_command_core_claim(&command_id, &command)?,
+                channels::QueueTaskCreateRequest {
+                    title: format!("Terminal carry {suffix}"),
+                    prompt: "prove atomic terminal carry".to_string(),
+                    thread_key: format!("business-os/tests/terminal-carry/{suffix}"),
+                    workspace_root: Some(root.display().to_string()),
+                    priority: "normal".to_string(),
+                    suggested_skill: None,
+                    parent_message_key: None,
+                    extra_metadata: Some(serde_json::json!({
+                        "command_id": command_id,
+                    })),
+                },
+            )?;
+            let task_id = claimed.task.message_key;
+            channels::lease_queue_task(root, &task_id, "ctox-test")?;
+            channels::transition_business_command_for_task(
+                root,
+                &task_id,
+                "leased",
+                None,
+                None,
+                None,
+                "test worker leased linked task",
+            )?;
+
+            channels::complete_business_control_command(
+                root,
+                &command_id,
+                terminal_status,
+                &serde_json::json!({
+                    "ok": terminal_status == "completed",
+                    "status": terminal_status,
+                }),
+                error_message,
+            )?;
+
+            let task = channels::load_queue_task(root, &task_id)?
+                .context("linked queue task must remain loadable after terminalization")?;
+            assert_eq!(
+                task.route_status, expected_route,
+                "terminal command must settle its canonical queue task without repair"
+            );
+            assert!(task.lease_owner.is_none());
+            assert!(task.leased_at.is_none());
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn failed_outcome_write_is_observable() {
         let command = BusinessCommand {
             origin: CommandOrigin::TrustedLocal,

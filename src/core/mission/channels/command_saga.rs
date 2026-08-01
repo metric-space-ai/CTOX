@@ -825,6 +825,47 @@ pub(crate) fn complete_business_control_command(
         }
     }
     crate::command_lifecycle::validate_execution_phase_transition(&phase, "terminal")?;
+    let now = now_iso_string();
+    if let Some(task_id) = tx
+        .query_row(
+            "SELECT task_id FROM business_command_task_links WHERE command_id = ?1",
+            params![command_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        let current_route =
+            canonical_queue_route_status(&current_queue_route_status(&tx, &task_id)?)?;
+        if matches!(
+            current_route,
+            QueueRouteStatus::Leased | QueueRouteStatus::Running
+        ) {
+            let settled_route = match terminal_status {
+                "completed" => QueueRouteStatus::Handled,
+                "cancelled" => QueueRouteStatus::Cancelled,
+                _ => QueueRouteStatus::Failed,
+            };
+            let reason = "linked queue task settled with terminal control command";
+            let status_note = (settled_route == QueueRouteStatus::Failed).then(|| {
+                error_message
+                    .or_else(|| result.get("error").and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(reason)
+            });
+            set_routing_status(
+                &tx,
+                &task_id,
+                settled_route.as_str(),
+                &now,
+                "business-control-command-terminal-owner",
+                reason,
+                status_note,
+                (settled_route == QueueRouteStatus::Handled)
+                    .then_some(TerminalPolicyGrant::business_command_reviewed_terminal_success()),
+            )?;
+        }
+    }
     let next_version = version.saturating_add(1);
     let now_ms = epoch_millis();
     let error_code = result.get("error_code").and_then(Value::as_str);
