@@ -23,6 +23,20 @@ sich auf sie verlässt, misst nicht mehr nach.
 
 Der wirksame Hebel ist deshalb der FILTER, nicht die Thread-Zahl.
 
+**Verbotene Filter — namentlich, weil eine allgemeine Regel nicht reicht:**
+`business_os`, `business_os::`, `store`, `mission`, `service`, `execution`,
+sowie jeder Lauf ohne Filter. Ich habe die Regel oben selbst geschrieben und
+sie vierzig Minuten später gebrochen, indem ich `cargo test --bin ctox
+business_os` startete: Load 166, zwei Testbinaries, Abbruch per `pkill -9`.
+
+Der Kontrast ist gemessen und sollte die Versuchung beenden: die sechs engen
+Filter derselben Welle (`audit`, `branding`, `restore_drill`,
+`business_os_why`, `user_upsert`, `export_diagnostics`) liefen zusammen in
+**unter zwei Sekunden**. Der Breitfilter braucht 22 Minuten für dieselbe
+Aussage.
+
+Wenn ein Modulname als Filter „bequem" wirkt, ist genau das das Warnzeichen.
+
 Und:
 - Vor dem Start: `uptime` prüfen. Load > 30 => warten.
 - Während langer Läufe regelmäßig `ps` prüfen; > 400 % CPU über mehrere
