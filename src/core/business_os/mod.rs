@@ -28,6 +28,7 @@ mod store_customer_commands;
 mod store_office_commands;
 mod store_outbound_commands;
 mod store_policy;
+mod store_policy_audit;
 mod store_projections;
 mod store_release_review;
 mod support;
