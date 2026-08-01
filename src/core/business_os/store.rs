@@ -16578,195 +16578,15 @@ pub fn accept_rxdb_business_command_with_origin(
                 outcome,
             );
         }
-        "ctox.business_os.user.upsert" => {
-            let mutation: BusinessOsUserMutation = serde_json::from_value(command.payload.clone())
-                .context("invalid ctox.business_os.user.upsert payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let target_role = normalize_business_role(&mutation.role);
-            let decision = user_upsert_policy_decision(root, &session, &target_role)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = match upsert_user(root, &session, mutation) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "user_upsert",
-                        error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.branding.update" => {
-            let mutation: WorkspaceBrandingUpdateRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.branding.update payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision = workspace_policy_decision(
-                root,
-                &session,
-                BusinessOsPermission::WorkspaceBrandingManage,
-            )?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = match save_workspace_branding_command(root, &session, mutation) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return write_rxdb_failed_control_command_outcome(
-                        root,
-                        &command,
-                        "workspace_branding",
-                        error,
-                    );
-                }
-            };
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                Some(WORKSPACE_BRANDING_ID),
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.audit.list" => {
-            let request: BusinessActivityListRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.audit.list payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
-                return Ok(outcome);
-            }
-            let outcome = list_business_activity_events(root, request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.audit.retention" => {
-            let request: BusinessAuditRetentionRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.audit.retention payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let safe_command =
-                business_os_audit_retention_safe_command(root, &command, &request, &session)?;
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-            let outcome = business_os_audit_retention_export(root, &session, &request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.audit.retention_policy.set" => {
-            let request: BusinessAuditRetentionPolicySetRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.audit.retention_policy.set payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let safe_command =
-                business_os_audit_retention_policy_safe_command(&command, &request, &session);
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-            let outcome = business_os_audit_retention_policy_set(root, &session, &request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.backup.restore_drill" => {
-            let request: BusinessBackupRestoreDrillRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.backup.restore_drill payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let safe_command =
-                business_os_backup_restore_drill_safe_command(&command, &request, &session);
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-            let outcome = business_os_backup_restore_drill_export(root, &session, &request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.support.export_diagnostics" => {
-            let request: BusinessSupportDiagnosticsExportRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.support.export_diagnostics payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let safe_command =
-                business_os_support_diagnostics_safe_command(&command, &request, &session);
-            let decision =
-                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
-            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
-            {
-                return Ok(outcome);
-            }
-            let outcome = business_os_support_diagnostics_export(root, &session, &request)?;
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
-        }
-        "ctox.business_os.why" => {
-            let request: BusinessOsWhyDiagnosticsRequest =
-                serde_json::from_value(command.payload.clone())
-                    .context("invalid ctox.business_os.why payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let outcome = business_os_why_diagnostics(root, &session, &request)?;
-            let safe_command = business_os_why_safe_command(&command, &request, &session);
-            return write_rxdb_control_command_outcome(
-                root,
-                &safe_command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+        "ctox.business_os.user.upsert"
+        | "ctox.business_os.branding.update"
+        | "ctox.business_os.audit.list"
+        | "ctox.business_os.audit.retention"
+        | "ctox.business_os.audit.retention_policy.set"
+        | "ctox.business_os.backup.restore_drill"
+        | "ctox.business_os.support.export_diagnostics"
+        | "ctox.business_os.why" => {
+            return handle_business_os_command(root, &command);
         }
         "ctox.runtime_settings.save" => {
             let mutation: RuntimeSettingsRequest = serde_json::from_value(command.payload.clone())
@@ -18090,6 +17910,202 @@ pub fn accept_rxdb_business_command_with_origin(
     }
     let accepted = record_command(root, command)?;
     Ok(serde_json::to_value(accepted)?)
+}
+
+fn handle_business_os_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    match command.command_type.as_str() {
+        "ctox.business_os.user.upsert" => {
+            let mutation: BusinessOsUserMutation = serde_json::from_value(command.payload.clone())
+                .context("invalid ctox.business_os.user.upsert payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let target_role = normalize_business_role(&mutation.role);
+            let decision = user_upsert_policy_decision(root, &session, &target_role)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = match upsert_user(root, &session, mutation) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return write_rxdb_failed_control_command_outcome(
+                        root,
+                        &command,
+                        "user_upsert",
+                        error,
+                    );
+                }
+            };
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.branding.update" => {
+            let mutation: WorkspaceBrandingUpdateRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.branding.update payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision = workspace_policy_decision(
+                root,
+                &session,
+                BusinessOsPermission::WorkspaceBrandingManage,
+            )?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = match save_workspace_branding_command(root, &session, mutation) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return write_rxdb_failed_control_command_outcome(
+                        root,
+                        &command,
+                        "workspace_branding",
+                        error,
+                    );
+                }
+            };
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                Some(WORKSPACE_BRANDING_ID),
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.audit.list" => {
+            let request: BusinessActivityListRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.audit.list payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &command, &decision)? {
+                return Ok(outcome);
+            }
+            let outcome = list_business_activity_events(root, request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.audit.retention" => {
+            let request: BusinessAuditRetentionRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.audit.retention payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let safe_command =
+                business_os_audit_retention_safe_command(root, &command, &request, &session)?;
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+            let outcome = business_os_audit_retention_export(root, &session, &request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.audit.retention_policy.set" => {
+            let request: BusinessAuditRetentionPolicySetRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.audit.retention_policy.set payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let safe_command =
+                business_os_audit_retention_policy_safe_command(&command, &request, &session);
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+            let outcome = business_os_audit_retention_policy_set(root, &session, &request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.backup.restore_drill" => {
+            let request: BusinessBackupRestoreDrillRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.backup.restore_drill payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let safe_command =
+                business_os_backup_restore_drill_safe_command(&command, &request, &session);
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::RuntimeManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+            let outcome = business_os_backup_restore_drill_export(root, &session, &request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.support.export_diagnostics" => {
+            let request: BusinessSupportDiagnosticsExportRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.support.export_diagnostics payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let safe_command =
+                business_os_support_diagnostics_safe_command(&command, &request, &session);
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::UsersManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+            let outcome = business_os_support_diagnostics_export(root, &session, &request)?;
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        "ctox.business_os.why" => {
+            let request: BusinessOsWhyDiagnosticsRequest =
+                serde_json::from_value(command.payload.clone())
+                    .context("invalid ctox.business_os.why payload")?;
+            let session = rxdb_authenticated_session(root, &command)?;
+            let outcome = business_os_why_diagnostics(root, &session, &request)?;
+            let safe_command = business_os_why_safe_command(&command, &request, &session);
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
+        }
+        other => anyhow::bail!("unsupported Business OS command type: {other}"),
+    }
 }
 
 fn handle_module_command(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
