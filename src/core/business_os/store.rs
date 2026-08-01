@@ -29679,6 +29679,17 @@ pub(super) mod tests {
     // cover policy-gated commands dispatched via rxdb_authenticated_session, not
     // only require_manage_all ones). A replicated peer claiming a chef id without
     // a token must NOT pass the SecretsManage policy gate.
+    //
+    // INTENTIONALLY RED (SM16, 01.08.). The guarantee still holds — it now holds
+    // earlier. A tokenless peer is refused at the authentication boundary and
+    // never receives the synthetic user whose policy this test then inspects, so
+    // the assertion below waits for a rejection that can no longer happen at that
+    // stage. Turning it green would mean asserting the weaker of two guarantees.
+    //
+    // The repair is to split it: one test that the auth boundary refuses a
+    // tokenless peer, one that the SecretsManage gate refuses an authenticated
+    // non-chef. Left red rather than adjusted, because an assertion edited to
+    // match today's behaviour stops being evidence about it.
     #[test]
     fn replicated_peer_without_token_cannot_manage_secrets() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
@@ -40946,7 +40957,37 @@ pub(super) mod tests {
             "completed mailserver user command leaked the password into business_commands"
         );
 
-        let private_key = "DO_NOT_LEAK_DKIM_PRIVATE_KEY";
+        // Valid, non-production PKCS#8 fixture. The previous marker-only string
+        // was non-empty but could not be parsed by `openssl pkey -pubout`, so the
+        // test never reached its permission and redaction assertions.
+        let private_key = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC42CQ6n+NaqfXX
+WhkHUkx17eCy+NCs6f6LJrLUN9rvHXkehQxew1GAHdRT2xyPzz3XggHhG86NGqDI
+L7iQJn2SYN0qb0AdWu86pDdCvHVoKA3moRHHRKlaXhhqZksGUQ7XOybkq0p7no/5
+hUCk10lZ5Gyyw8c0EE8pjIrZq5VObRcNYDwevMA5nWqBGknISlJhMuKbKdMIAobw
+Nk5s0vYPGzRTsPEiw25h5xTTonW+Q4hIIpV4hw3gnYEeXUjRVpIZjvOpiWdfwwF9
+DJEfVh2mU9iuKler6IWlckShRNozkLsxCX3ahwf567llejpWQUwvMgF2zyEXslCa
+cIBfOlT3AgMBAAECggEAMpz0Zp0LKvMo3rvL6KZPS2dERJ0+vmogCcgh5VwZ9alz
+VbkGpxgCQ/tm/UMc8f/EJjNyAkqT5y0oY0g12DrB3YfqZ0kpHCCfKsZ2Xy6tU0TM
+cZ8e+BpD6Puk4dV6q5McZjDLOIfykCDduWwURE6yxgt2/AgBjq78jhruliWWb2+V
+CAjcRtrZq9DABYKGPNLJ7/3c4/QpCOFltrUgGKVTIWkjwPTTiKk+8BjElUK0XJQ9
+jSO9Rxsql3Pwm51X7ytPNzU2e3RY/HuKOOMKIpInkWmNnsoR8c4doa54XR0/ee3T
+oH4d8+3C+9Sxqbmn8/Ce/v0t2SdH02WKJQ2Xw9hKoQKBgQD8/RAnPUVa0hMXiYAm
+EAS3O6aLyeQFrq/9KESDoe9gjNmL+vHqGhjAex50T219pzXicWrLwkc4x3fuEJYU
+v/wjUZC9rS1kqvGOqyZGhD1S8BSN9WQhrovNfiEAwJT8R3iEpDXRRDaQN6ZG27vW
+qEfwLAbteQPNfkM351CIA6je8QKBgQC7C2vS+gtpIfIYjysntZNFxNfV4ru5OCJM
+CX+KQdwgTf84KLDPzc8iWTMgOTxoL89nejp/5x4gabK/f4jPqF4fQZaz25fgvemI
+jg/Y8QBd5gHn1y3bFvfs1xIfv5E60ZWaBWQQ/UKwM0LYD9Z5gxU1CzKKm1u5tFHf
+VBNVTrbCZwKBgQDRN58CNGOExjJPxsCZuamMtuH2vNG7+UlFfOWcTnEeUZ0fbDpf
+tZE+rRL0cTNFNOEVEWKWe2ZXCG6gDEtxgYvM0Yl3sx3VIKF/sP6IVpg4XJ9C/ur+
+B9FJ8cLtUlZjg9+hIgP3uge9oKf79YAT9zr23hIklW2VpZOFSeCJey1OoQKBgHve
+4neEVM45RuVw2zmfDHtmEzJ4x62wOTZ2C9r6JtfWD7GXcREN0aGDxVIP1auCDi8P
+SXKvEsqQdWpRAb/UVxEIFM/kG78gxmpC+sfHQ2DsFFL/tESl/2cAP+Z6ralwZ0zr
+SQvfTaz3JcuFIZqzbvYEBmK45JQlkRr/yRXz3SD9AoGBAJZAWdh0DLOqtnMgg1d1
+5paA9PtV6miKQ3MNSi9VnAH1mdz9FY+1Xv8iRllWNE1VTUzdLdwsiQhCVjBmVQvX
+A7j29+7WIS5FCpoqwnVXSwINhNFRHkALZMCutCOUcGcu0XoS01Vd8QnxA3jUynLk
+BRbBv2mhaOAuKib7tmks74He
+-----END PRIVATE KEY-----"#;
         let saved_domain = accept_rxdb_business_command(
             root,
             serde_json::json!({

@@ -621,6 +621,16 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // INTENTIONALLY RED (SM16, 01.08.). The name states the contract; four of the
+    // assertions below contradict it. They expect effective_runtime_env_map to
+    // carry CTOX_CUDA_HOME and CTOX_ENGINE_LOG with values this fixture never
+    // persists — which is the process environment seeping in, the exact thing
+    // "only from store" forbids. It was inconsistent from the day it was written.
+    //
+    // So the failure is the contract working. Flipping those four to None would
+    // make it green and would also be the correct fix; it is left red because
+    // deciding what an effective runtime value may be sourced from is a call for
+    // the owner, not a side effect of tidying a test.
     #[test]
     fn env_or_config_reads_secrets_only_from_store() {
         let root = make_temp_root();
