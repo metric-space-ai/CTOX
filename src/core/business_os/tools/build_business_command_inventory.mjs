@@ -5,11 +5,20 @@ import { fileURLToPath } from 'node:url';
 const toolDir = path.dirname(fileURLToPath(import.meta.url));
 const businessOsDir = path.resolve(toolDir, '..');
 const repoRoot = path.resolve(businessOsDir, '../../..');
+// The dispatcher moved out of store.rs into command_plane.rs (S-CUT4f). This
+// generator located it by string index and therefore broke silently — no test
+// ran it, so nothing said so. SG1 wires the drift check into cargo test; this
+// path is the other half of that repair.
 const storePath = path.join(businessOsDir, 'store.rs');
+const commandPlanePath = path.join(businessOsDir, 'command_plane.rs');
 const peerPath = path.join(businessOsDir, 'rxdb_peer.rs');
 const browserRoot = path.join(repoRoot, 'src/apps/business-os');
 const outputPath = path.join(businessOsDir, 'business_command_inventory.json');
-const source = fs.readFileSync(storePath, 'utf8');
+const storeSource = fs.readFileSync(storePath, 'utf8');
+const commandPlaneSource = fs.readFileSync(commandPlanePath, 'utf8');
+// The classifier lives wherever the dispatcher lives; the helpers it needs may
+// still be in either file, so both are searched.
+const source = `${commandPlaneSource}\n${storeSource}`;
 const peerSource = fs.readFileSync(peerPath, 'utf8');
 const functionStart = source.indexOf('pub fn accept_rxdb_business_command_with_origin');
 const matchStart = source.indexOf('match command.command_type.as_str()', functionStart);
@@ -73,7 +82,7 @@ const browserLiteralTypes = [...new Set(
 
 const inventory = {
   schema: 'ctox.business_os.command_type_inventory.v1',
-  authoritative_router: 'src/core/business_os/store.rs::accept_rxdb_business_command_with_origin',
+  authoritative_router: 'src/core/business_os/command_plane.rs::accept_rxdb_business_command_with_origin',
   classification: {
     control: 'an exact_control_type or control_predicate match',
     queue: 'all remaining command types fall through to record_command',

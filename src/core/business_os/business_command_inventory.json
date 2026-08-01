@@ -1,6 +1,6 @@
 {
   "schema": "ctox.business_os.command_type_inventory.v1",
-  "authoritative_router": "src/core/business_os/store.rs::accept_rxdb_business_command_with_origin",
+  "authoritative_router": "src/core/business_os/command_plane.rs::accept_rxdb_business_command_with_origin",
   "classification": {
     "control": "an exact_control_type or control_predicate match",
     "queue": "all remaining command types fall through to record_command"
@@ -214,6 +214,7 @@
     "browser.controller.acquire",
     "browser.controller.release",
     "browser.controller.renew",
+    "browser.credential.fill",
     "browser.forward",
     "browser.navigate",
     "browser.reload",
@@ -326,6 +327,8 @@
     "document.extract-requirements",
     "document.review-risks",
     "document.summarize",
+    "example.control.refresh",
+    "example.work.execute",
     "invoices.dunning.run",
     "invoices.invoice.create",
     "invoices.invoice.delete",
@@ -345,6 +348,7 @@
     "outbound.pipeline.outreach_draft",
     "outbound.pipeline.write_outreach_draft",
     "outbound.source.import",
+    "rem.persistence.save",
     "research.knowledge.refresh",
     "research.systematic.report.create",
     "research.systematic.run",

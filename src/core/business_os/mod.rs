@@ -12,6 +12,7 @@ mod control_command_types;
 mod desktop_files;
 mod external_sql_sync;
 mod importer;
+mod inventory_drift_tests;
 mod invoices;
 mod iot_supervision;
 pub mod mcp_channel;
