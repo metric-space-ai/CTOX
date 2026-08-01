@@ -21,6 +21,7 @@ mod rxdb_peer;
 pub mod server;
 mod session;
 pub mod store;
+mod store_ats_commands;
 mod store_catalog_projections;
 mod store_customer_commands;
 mod store_office_commands;
