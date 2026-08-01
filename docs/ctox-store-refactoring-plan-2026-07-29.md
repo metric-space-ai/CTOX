@@ -276,7 +276,28 @@ kann. Danach beide Tests auf `source_kind: "zip"` umstellen und
 Berechtigungs-Assertions wieder etwas, und der sichere Pfad ist zum
 ersten Mal abgedeckt.
 
-Zuordnung: SM2/SM1/SM11 → command_plane · SM3/SM4 → store_projections ·
+SM14 **`status` heisst zweierlei, und die Transportschicht gewinnt.**
+Gefunden 01.08. bei S-CUT4a. `write_rxdb_control_command_state`
+(store.rs:20080) schreibt bedingungslos
+
+    object.insert("status", Value::String(status.to_string()));
+
+in das Ergebnisobjekt des Handlers. `status` ist dort der *Lebenszyklus*-
+Status des Kommandos (`completed`/`cancelled`/`failed`); im Handler-Ergebnis
+steht aber der *fachliche* Status der Domäne. Ein Handler, der
+`needs_review` oder `active` beantwortet, bekommt seine Antwort durch
+`completed` ersetzt — nicht überstimmt, sondern überschrieben.
+
+Zwei Tests zeigen das seit Längerem und sind deshalb rot:
+`outbound_campaign_activation_requires_ready_channel` und
+`customers_import_from_outbound_creates_account_contacts_and_dedupe`.
+
+Dieselbe Form wie die bereits behobenen Vokabular-Befunde: ein Feldname
+für zwei Bedeutungen. Reparatur ist NICHT „den Test anpassen" — es braucht
+getrennte Felder (fachlicher Status im Ergebnis, Lebenszyklus daneben),
+und dann müssen die Leser beider Seiten mitgezogen werden.
+
+Zuordnung: SM2/SM1/SM11/SM14 → command_plane · SM3/SM4 → store_projections ·
 SM5/SM6/SM13 → module_lifecycle · SM7/SM8 → backup_restore ·
 SM9/SM10 → Kern.
 
