@@ -137,6 +137,30 @@ etablierte Temp-Index/CAS-Weg.
    Familie sie noch erreicht. Wer nur die erste misst, hält einen
    unmöglichen Schnitt für trivial.
 
+   **DRITTE MESSUNG, nach den sieben S-DISPATCH-Wellen.** Der Dispatcher
+   ist von 2.653 auf 874 Zeilen gefallen, und der enge Kern kostet statt 36
+   nur noch — nach meiner Messung — 19 Nähte. Der Worker mass 21 und stoppte.
+
+   **Seine Zahl ist die richtige, meine war ein Werkzeugfehler.** Mein Skript
+   zählt nur Funktionen. Die echte Naht umfasst auch private TYPEN, ihre
+   assoziierten Funktionen und die Felder, die der Dispatcher liest:
+   `ActiveExternalSqlControlCommand` samt `try_acquire`, und `ReportAccepted`,
+   den privaten Rückgabetyp von `record_report_command`.
+
+   Damit ist es der dritte Messfehler dieser Art in derselben Frage: erst die
+   falsche Richtung (API-Fläche statt benötigter Sichtbarkeiten), dann die
+   Hüllentiefe, jetzt Typen und Felder. Eine compilergestützte Messung schlägt
+   ein Regex-Skript — das gilt ab hier als Regel, nicht als Einzelfall.
+
+   Interessant nebenbei: nach der Zerlegung ist die transitive Hülle der
+   SCHLECHTESTE Weg (Tiefe 1 kostet 35, Tiefe 2 sogar 46 Nähte), während sie
+   vorher das Minimum lieferte. Die Helfer gehören jetzt sichtbar den
+   Handlern.
+
+   **S-CUT4g** zieht die geteilten Control-Command-Typen unter store.rs und
+   die Command-Plane — zum sechsten Mal dasselbe Muster. Danach wird erneut
+   gemessen, compilergestützt.
+
    **Nachfolgeticket S-DISPATCH:** die 49 Arme domänenweise in Handler
    extrahieren (Zielform sind die fünf bereits ausgelagerten Handler),
    danach S-CUT4f neu vermessen. Das ist Semantikarbeit mit Tests, keine
