@@ -83,10 +83,29 @@ etablierte Temp-Index/CAS-Weg.
    einer Naht.
 
    Reihenfolge daher: erst die sechs Handler als je eigene Welle, zuletzt
-   der Dispatcher `accept_rxdb_business_command_with_origin`. Der ist dann
-   das, was er sein sollte — eine Verzweigung über sechs Namen, statt
-   2.654 Zeilen mit sechs eingebauten Domänen. Ein Schnitt über alle
-   22.000 Zeilen auf einmal wäre nicht schneller, nur unprüfbarer.
+   der Dispatcher `accept_rxdb_business_command_with_origin`. Ein Schnitt
+   über alle 22.000 Zeilen auf einmal wäre nicht schneller, nur unprüfbarer.
+
+   **KORREKTUR 01.08., nach den fünf Handler-Wellen.** Ich hatte hier
+   geschrieben, der Dispatcher werde danach „eine Verzweigung über sechs
+   Namen". Das war falsch, und es steht so auch in mehreren Commits.
+   Gemessen nach S-CUT4e: der Dispatcher ist **2.653 Zeilen** — vorher
+   2.654. Die fünf Wellen haben ihn um genau eine Zeile verkleinert.
+
+   Der Grund: die sechs Handler waren Funktionen, die er *aufruft*. Sein
+   eigener Rumpf enthält **49 weitere `ctox.*`-Kommandotypen inline**,
+   nach Domäne: module (12), business_os (8), source (7), mailserver (5),
+   secret (3), task/file/app_store/app (je 2), und neun weitere einzeln.
+   Ich hatte die Nahtzahl gemessen und den Rumpf nicht gelesen — die
+   Nahtzahl sagt, wie teuer ein Schnitt ist, nicht was in der Funktion
+   steht.
+
+   Für S-CUT4f folgt daraus: der Dispatcher zieht **unzerlegt** um, wie
+   die Planregel es für Monster vorsieht. Das macht ihn nicht besser, es
+   holt nur 2.653 Zeilen aus store.rs und legt die Command-Plane dorthin,
+   wo ihre Zerlegung später stattfinden kann. Die Zerlegung der 49 Arme
+   ist S-FIX, nicht diese Welle — und sie ist grösser, als dieser Plan
+   bisher behauptet hat.
 5. **S-CUT5** Policy-Anteile — **Karte erstellt 01.08., Schnitt VERTAGT.**
    Gemessen: 16 Policy-Overlays in store.rs. Sechs davon greifen direkt auf
    den Store zu (Enforcement, bleibt per Ticket). Von den zehn übrigen sind
