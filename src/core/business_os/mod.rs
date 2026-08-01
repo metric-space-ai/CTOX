@@ -22,6 +22,7 @@ mod session;
 pub mod store;
 mod store_catalog_projections;
 mod store_projections;
+mod store_release_review;
 mod support;
 mod threads;
 

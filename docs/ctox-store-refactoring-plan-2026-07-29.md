@@ -49,6 +49,22 @@ etablierte Temp-Index/CAS-Weg.
    Lebenszyklus-Familie, und S-CUT2 wird neu vermessen sehr wahrscheinlich
    unter die 20er-Grenze fallen. Die bisherige Reihenfolge S-CUT2 → S-CUT3
    war eine Annahme, keine Messung.
+
+   **Neuvermessung 01.08., nach S-CUT3a+b: 35 → 20 Nähte.** Die Vorhersage
+   hat gehalten; die Familie ist auf 38 Funktionen und 1.629 Zeilen
+   geschrumpft, weil sechs projektionsartige Mitglieder mit S-CUT3
+   abgeflossen sind. 20 ist aber genau die Grenze, also ohne Spielraum —
+   und die Familie hat eine natürliche Fuge:
+
+   - **S-CUT2a Release-Review/Audit** — 10 Funktionen, 343 Zeilen,
+     **4 Nähte**. Klein genug, um sie direkt zu schneiden.
+   - **S-CUT2b Version/Release/Install** — 28 Funktionen, 1.286 Zeilen,
+     **17 Nähte**. Schwerster Träger `record_module_version` (5).
+
+   Der Teil kostet zusammen 21 statt 20 Nähte, also genau eine mehr: die
+   eine Stelle, an der Review-Code den Versionskern ruft. Ein Schnitt
+   exakt auf der Grenze ist das nicht wert — beide Hälften einzeln sind
+   prüfbar, der Gesamtschnitt wäre es kaum.
 3. **S-CUT3** `store_projections.rs` — die business_records-/Queue-/Chat-
    Kompatibilitätsprojektionen (~74 fns) inkl. `repair_queue_projections`.
 4. **S-CUT4** `command_plane.rs` — Acceptance/Routing/Outcomes/Outbox
