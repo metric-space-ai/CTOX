@@ -1109,7 +1109,7 @@ fn install_template_module(
     Ok(manifest)
 }
 
-fn delete_installed_module(
+pub(super) fn delete_installed_module(
     app_root: &Path,
     root: &Path,
     request: ModuleDeleteRequest,
@@ -1123,11 +1123,90 @@ fn delete_installed_module(
     if !target.is_dir() {
         anyhow::bail!("installed module not found: {module_id}");
     }
-    fs::remove_dir_all(&target)
-        .with_context(|| format!("failed to delete module dir {}", target.display()))?;
+
+    let layout_path = root.join("runtime").join("business-os-module-layout.json");
+    let original_layout_bytes =
+        if layout_path.is_file() {
+            Some(fs::read(&layout_path).with_context(|| {
+                format!("failed to read module layout {}", layout_path.display())
+            })?)
+        } else {
+            None
+        };
     let mut layout = load_module_layout(root)?;
     remove_module_from_layout_value(&mut layout, &module_id);
-    save_module_layout(root, &layout)?;
+
+    let staged = app_root
+        .join("installed-modules")
+        .join(format!(".module-delete-{module_id}-{}", Uuid::new_v4()));
+    anyhow::ensure!(
+        !staged.exists(),
+        "module deletion stage already exists: {}",
+        staged.display()
+    );
+
+    let mut conn = open_store(root)?;
+    let tx = conn.transaction()?;
+    fs::rename(&target, &staged).with_context(|| {
+        format!(
+            "failed to stage module directory {} for deletion",
+            target.display()
+        )
+    })?;
+
+    let deletion = (|| -> anyhow::Result<()> {
+        save_module_layout(root, &layout)?;
+        tx.execute(
+            "DELETE FROM business_permission_grants
+             WHERE scope_type = 'module' AND scope_id = ?1",
+            params![module_id],
+        )?;
+        tx.execute(
+            "DELETE FROM business_module_acl WHERE module_id = ?1",
+            params![module_id],
+        )?;
+        tx.execute(
+            "DELETE FROM business_module_releases WHERE module_id = ?1",
+            params![module_id],
+        )?;
+        tx.execute(
+            "DELETE FROM business_module_versions WHERE module_id = ?1",
+            params![module_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })();
+
+    if let Err(error) = deletion {
+        let layout_restore = match original_layout_bytes {
+            Some(bytes) => fs::write(&layout_path, bytes).with_context(|| {
+                format!("failed to restore module layout {}", layout_path.display())
+            }),
+            None if layout_path.exists() => fs::remove_file(&layout_path).with_context(|| {
+                format!(
+                    "failed to remove newly created module layout {}",
+                    layout_path.display()
+                )
+            }),
+            None => Ok(()),
+        };
+        let module_restore = fs::rename(&staged, &target).with_context(|| {
+            format!(
+                "failed to restore staged module directory {}",
+                target.display()
+            )
+        });
+        if let Err(restore_error) = layout_restore.and(module_restore) {
+            return Err(anyhow::anyhow!(
+                "module deletion failed ({error:#}); rollback also failed ({restore_error:#}); staged module remains at {}",
+                staged.display()
+            ));
+        }
+        return Err(error.context("module deletion rolled back"));
+    }
+
+    fs::remove_dir_all(&staged)
+        .with_context(|| format!("failed to remove deleted module stage {}", staged.display()))?;
     Ok(())
 }
 
@@ -1848,19 +1927,20 @@ mod tests {
     use super::super::policy::BusinessOsPermission;
     use super::super::store::tests::{
         chef_session, locked_inventory_data_review, save_widget_source, seed_business_user,
-        seed_permission_grant, seed_test_business_os_app_root, write_installed_inventory_module,
-        write_runtime_installed_inventory_module, write_widget_module,
+        seed_module_founder_acl, seed_permission_grant, seed_test_business_os_app_root,
+        test_session, write_installed_inventory_module, write_runtime_installed_inventory_module,
+        write_widget_module,
     };
     use super::super::store::{
         accept_rxdb_business_command, now_ms, open_store, outbound_load_required,
-        resolve_business_os_installed_app_root, ModuleReleaseRequest, ModuleVersionListRequest,
-        ModuleVersionRollbackRequest,
+        resolve_business_os_installed_app_root, ModuleDeleteRequest, ModuleReleaseRequest,
+        ModuleVersionListRequest, ModuleVersionRollbackRequest,
     };
     use super::{
-        compute_module_bundle, copy_dir_recursive, list_module_versions, module_catalog_source_id,
-        normalize_catalog_installed_manifest, record_module_release, record_module_version,
-        release_managed_shadow_source, rollback_module_to_version, sync_module_version_records,
-        validate_staged_catalog_module,
+        compute_module_bundle, copy_dir_recursive, delete_installed_module, list_module_versions,
+        module_catalog_source_id, module_policy_decision, normalize_catalog_installed_manifest,
+        record_module_release, record_module_version, release_managed_shadow_source,
+        rollback_module_to_version, sync_module_version_records, validate_staged_catalog_module,
     };
     use rusqlite::{params, Connection};
     use serde_json::Value;
@@ -1938,6 +2018,268 @@ mod tests {
             Some("research")
         );
         assert_eq!(release_managed_shadow_source(&app_root, &bespoke)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_installed_module_clears_only_deleted_module_authority_and_history(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_test_business_os_app_root(root)?;
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+        let write_module = |module_id: &str| -> anyhow::Result<()> {
+            let module_dir = installed_app_root.join("installed-modules").join(module_id);
+            fs::create_dir_all(&module_dir)?;
+            fs::write(
+                module_dir.join("module.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "id": module_id,
+                    "title": module_id,
+                    "version": "1.0.0",
+                    "entry": format!("installed-modules/{module_id}/index.html"),
+                    "install_scope": "installed"
+                }))?,
+            )?;
+            fs::write(module_dir.join("index.html"), "<!doctype html>")?;
+            Ok(())
+        };
+        write_module("inventory")?;
+        write_module("ledger")?;
+        fs::create_dir_all(root.join("runtime"))?;
+        fs::write(
+            root.join("runtime/business-os-module-layout.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 1,
+                "labels": {},
+                "ungrouped": ["inventory", "ledger"],
+                "groups": []
+            }))?,
+        )?;
+
+        seed_business_user(root, "viewer", "user")?;
+        seed_business_user(root, "ledger-owner", "user")?;
+        seed_module_founder_acl(root, "inventory", "viewer")?;
+        seed_module_founder_acl(root, "ledger", "ledger-owner")?;
+        seed_permission_grant(
+            root,
+            "grant_inventory_modify_old",
+            "user",
+            "viewer",
+            BusinessOsPermission::AppsModify,
+            "module",
+            "inventory",
+        )?;
+        seed_permission_grant(
+            root,
+            "grant_ledger_modify_keep",
+            "user",
+            "viewer",
+            BusinessOsPermission::AppsModify,
+            "module",
+            "ledger",
+        )?;
+        seed_permission_grant(
+            root,
+            "grant_collection_named_inventory_keep",
+            "user",
+            "viewer",
+            BusinessOsPermission::AppsModify,
+            "collection",
+            "inventory",
+        )?;
+
+        let now = now_ms() as i64;
+        let conn = open_store(root)?;
+        for module_id in ["inventory", "ledger"] {
+            conn.execute(
+                "INSERT INTO business_module_releases
+                    (version_id, module_id, version, status, manifest_json, snapshot_json,
+                     created_by, created_at_ms, notes)
+                 VALUES (?1, ?2, 1, 'released', '{}', '{}', 'tester', ?3, 'old evidence')",
+                params![format!("release_{module_id}"), module_id, now],
+            )?;
+            conn.execute(
+                "INSERT INTO business_module_versions
+                    (version_id, module_id, seq, origin, label, bundle_sha256, files_json,
+                     sealed, created_by, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 1, 'install', 'Installed', ?3, '[]', 1, 'tester', ?4, ?4)",
+                params![
+                    format!("version_{module_id}"),
+                    module_id,
+                    format!("sha-{module_id}"),
+                    now
+                ],
+            )?;
+        }
+        drop(conn);
+
+        let viewer = test_session("viewer", "user");
+        assert!(
+            module_policy_decision(root, &viewer, BusinessOsPermission::AppsModify, "inventory")?
+                .allowed
+        );
+        assert!(
+            module_policy_decision(root, &viewer, BusinessOsPermission::AppsModify, "ledger")?
+                .allowed
+        );
+
+        delete_installed_module(
+            &installed_app_root,
+            root,
+            ModuleDeleteRequest {
+                module_id: "inventory".to_owned(),
+            },
+        )?;
+
+        let conn = open_store(root)?;
+        let target_acl: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_module_acl WHERE module_id = 'inventory'",
+            [],
+            |row| row.get(0),
+        )?;
+        let target_grants: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_permission_grants
+             WHERE scope_type = 'module' AND scope_id = 'inventory'",
+            [],
+            |row| row.get(0),
+        )?;
+        let target_releases: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_module_releases WHERE module_id = 'inventory'",
+            [],
+            |row| row.get(0),
+        )?;
+        let target_versions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_module_versions WHERE module_id = 'inventory'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            (target_acl, target_grants, target_releases, target_versions),
+            (0, 0, 0, 0)
+        );
+
+        let ledger_state: (i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM business_module_acl WHERE module_id = 'ledger'),
+                (SELECT COUNT(*) FROM business_permission_grants
+                    WHERE scope_type = 'module' AND scope_id = 'ledger'),
+                (SELECT COUNT(*) FROM business_module_releases WHERE module_id = 'ledger'),
+                (SELECT COUNT(*) FROM business_module_versions WHERE module_id = 'ledger')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(ledger_state, (1, 1, 1, 1));
+        let other_scope_grant: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_permission_grants
+             WHERE grant_id = 'grant_collection_named_inventory_keep'
+               AND scope_type = 'collection' AND scope_id = 'inventory'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(other_scope_grant, 1);
+        drop(conn);
+
+        write_module("inventory")?;
+        assert!(
+            !module_policy_decision(root, &viewer, BusinessOsPermission::AppsModify, "inventory")?
+                .allowed,
+            "reinstalling the same id must not revive its old grant or ACL"
+        );
+        assert!(
+            module_policy_decision(root, &viewer, BusinessOsPermission::AppsModify, "ledger")?
+                .allowed,
+            "the parallel module grant must survive unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_installed_module_rolls_back_files_layout_and_state_on_cleanup_failure(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_test_business_os_app_root(root)?;
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+        let module_dir = installed_app_root.join("installed-modules/inventory");
+        fs::create_dir_all(&module_dir)?;
+        fs::write(
+            module_dir.join("module.json"),
+            r#"{"id":"inventory","title":"Inventory","install_scope":"installed"}"#,
+        )?;
+        fs::create_dir_all(root.join("runtime"))?;
+        let layout_path = root.join("runtime/business-os-module-layout.json");
+        let original_layout = serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "labels": {},
+            "ungrouped": ["inventory"],
+            "groups": []
+        }))?;
+        fs::write(&layout_path, &original_layout)?;
+
+        seed_business_user(root, "viewer", "user")?;
+        seed_module_founder_acl(root, "inventory", "viewer")?;
+        seed_permission_grant(
+            root,
+            "grant_inventory_delete_rollback",
+            "user",
+            "viewer",
+            BusinessOsPermission::AppsModify,
+            "module",
+            "inventory",
+        )?;
+        let now = now_ms() as i64;
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_module_releases
+                (version_id, module_id, version, status, manifest_json, snapshot_json,
+                 created_by, created_at_ms, notes)
+             VALUES ('release_inventory_rollback', 'inventory', 1, 'released', '{}', '{}',
+                 'tester', ?1, 'evidence')",
+            params![now],
+        )?;
+        conn.execute(
+            "INSERT INTO business_module_versions
+                (version_id, module_id, seq, origin, label, bundle_sha256, files_json,
+                 sealed, created_by, created_at_ms, updated_at_ms)
+             VALUES ('version_inventory_rollback', 'inventory', 1, 'install', 'Installed',
+                 'sha-inventory', '[]', 1, 'tester', ?1, ?1)",
+            params![now],
+        )?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_inventory_release_delete
+             BEFORE DELETE ON business_module_releases
+             WHEN OLD.module_id = 'inventory'
+             BEGIN
+               SELECT RAISE(FAIL, 'injected module cleanup failure');
+             END;",
+        )?;
+        drop(conn);
+
+        let error = delete_installed_module(
+            &installed_app_root,
+            root,
+            ModuleDeleteRequest {
+                module_id: "inventory".to_owned(),
+            },
+        )
+        .expect_err("injected cleanup failure must abort deletion");
+        assert!(error.to_string().contains("module deletion rolled back"));
+        assert!(module_dir.join("module.json").is_file());
+        assert_eq!(fs::read(&layout_path)?, original_layout);
+
+        let conn = open_store(root)?;
+        let state: (i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM business_module_acl WHERE module_id = 'inventory'),
+                (SELECT COUNT(*) FROM business_permission_grants
+                    WHERE scope_type = 'module' AND scope_id = 'inventory'),
+                (SELECT COUNT(*) FROM business_module_releases WHERE module_id = 'inventory'),
+                (SELECT COUNT(*) FROM business_module_versions WHERE module_id = 'inventory')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(state, (1, 1, 1, 1));
         Ok(())
     }
 

@@ -27,6 +27,7 @@ pub(super) use super::command_plane::{
 #[cfg(test)]
 use super::control_command_types::ActiveExternalSqlControlCommand;
 use super::control_command_types::ReportAccepted;
+use super::module_lifecycle::delete_installed_module;
 use super::module_lifecycle::{
     catalog_module_version, installed_baseline_bundle_sha, installed_module_app_source,
     load_installed_module_manifests, module_install_scope, module_is_runtime_installed,
@@ -9990,13 +9991,13 @@ pub fn uninstall_app_module(
         anyhow::bail!("Module '{}' is not installed", module_id);
     }
 
-    fs::remove_dir_all(&dest_dir)
-        .with_context(|| format!("Failed to delete module directory {}", dest_dir.display()))?;
-
-    // Update layout if module_id exists in it
-    let mut layout = load_module_layout(root)?;
-    remove_module_from_layout_value(&mut layout, &module_id);
-    save_module_layout(root, &layout)?;
+    delete_installed_module(
+        app_root,
+        root,
+        ModuleDeleteRequest {
+            module_id: module_id.clone(),
+        },
+    )?;
     write_module_catalog_projection_to_rxdb(root)?;
 
     Ok(serde_json::json!({
@@ -30959,6 +30960,26 @@ pub(super) mod tests {
                 .context("installed module directory")?,
             "inventory",
         )?;
+        seed_module_founder_acl(root, "inventory", "viewer")?;
+        let now = now_ms() as i64;
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_module_releases
+                (version_id, module_id, version, status, manifest_json, snapshot_json,
+                 created_by, created_at_ms, notes)
+             VALUES ('release_inventory_uninstall', 'inventory', 1, 'released', '{}', '{}',
+                 'viewer', ?1, 'uninstall cleanup')",
+            params![now],
+        )?;
+        conn.execute(
+            "INSERT INTO business_module_versions
+                (version_id, module_id, seq, origin, label, bundle_sha256, files_json,
+                 sealed, created_by, created_at_ms, updated_at_ms)
+             VALUES ('version_inventory_uninstall', 'inventory', 1, 'install', 'Installed',
+                 'sha-inventory-uninstall', '[]', 1, 'viewer', ?1, ?1)",
+            params![now],
+        )?;
+        drop(conn);
         let uninstall = uninstall_app_module(
             root,
             &installed_app_root,
@@ -30973,6 +30994,18 @@ pub(super) mod tests {
             Some(true)
         );
         assert!(!installed_manifest.exists());
+        let conn = open_store(root)?;
+        let remaining: (i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM business_module_acl WHERE module_id = 'inventory'),
+                (SELECT COUNT(*) FROM business_permission_grants
+                    WHERE scope_type = 'module' AND scope_id = 'inventory'),
+                (SELECT COUNT(*) FROM business_module_releases WHERE module_id = 'inventory'),
+                (SELECT COUNT(*) FROM business_module_versions WHERE module_id = 'inventory')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(remaining, (0, 0, 0, 0));
         Ok(())
     }
 
