@@ -75,6 +75,15 @@ Deshalb:
 - Worker legen für Baseline-Prüfungen Worktrees unter `/private/tmp` an.
   Ein abgebrochener Lauf lässt sie liegen: `git worktree list` prüfen und
   mit `git worktree remove --force` aufräumen.
+- **Ein gelöschter Scratch-Checkout vergiftet den geteilten Zielbaum.**
+  `wha-proto`s Build-Skript speichert den Pfad seines Proto-Baums im
+  Cache. Läuft ein Baseline-Checkout mit demselben `CARGO_TARGET_DIR` und
+  wird danach gelöscht, zeigt der Cache ins Leere und der nächste Build im
+  Hauptbaum scheitert an einem Typ, den das Skript erzeugt — es sieht aus
+  wie ein Schaden am laufenden Refactoring. `cargo clean -p wha-proto`
+  genügt. Zweimal passiert; beim ersten Mal war ein voller Datenträger die
+  Ursache, beim zweiten der gelöschte Checkout. Gleiches Symptom, gleiche
+  Falle: dem gerade laufenden Schnitt die Schuld zu geben.
 - `runtime/build/cargo-target/debug/incremental` wuchs auf 9,1 GB. Reine
   Rebuild-Beschleunigung, gefahrlos löschbar — und bei `CARGO_INCREMENTAL=0`
   ohnehin ungenutzt. Der billigste Hebel, bevor man an `cargo clean` denkt.
