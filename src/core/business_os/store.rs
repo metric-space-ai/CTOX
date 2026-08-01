@@ -36,9 +36,7 @@ use super::policy::{
     self, BusinessOsActor, BusinessOsPermission, BusinessOsScope, BusinessOsScopeType,
     PolicyDecision,
 };
-use super::policy::{
-    owner_transfer_policy_decision, policy_actor_from_session, policy_decision_payload,
-};
+use super::policy::{policy_actor_from_session, policy_decision_payload};
 use super::store_appsec_commands::handle_appsec_business_command;
 use super::store_ats_commands::{handle_ats_active_command, handle_ats_mutating_command};
 pub use super::store_catalog_projections::{
@@ -54,6 +52,17 @@ use super::store_catalog_projections::{
 use super::store_customer_commands::handle_customers_active_command;
 use super::store_office_commands::handle_office_control_command;
 use super::store_outbound_commands::handle_outbound_active_command;
+use super::store_policy::{
+    active_permission_grant_allows, evaluate_policy_with_explicit_grants,
+    queue_command_policy_decision, reject_command_if_policy_denied, scoped_policy_decision,
+    session_can_manage_task, task_policy_decision, trusted_actor_policy_decision_with_conn,
+    user_upsert_policy_decision, workspace_policy_decision,
+};
+pub(super) use super::store_policy::{module_policy_decision, session_has_workspace_permission};
+pub use super::store_policy::{
+    session_can_manage_workspace_branding, session_can_modify_module,
+    trusted_mcp_actor_policy_decision, trusted_mcp_actor_policy_decision_with_role,
+};
 pub use super::store_projections::repair_queue_projections;
 #[cfg(test)]
 use super::store_projections::tests::{create_repair_rxdb_tables, insert_rxdb_test_record};
@@ -114,10 +123,6 @@ use std::time::UNIX_EPOCH;
 use tiny_http::{Header, Request, Response, Server};
 use url::Url;
 use uuid::Uuid;
-
-fn should_record_allowed_policy_decision(command: &BusinessCommand) -> bool {
-    !matches!(command.command_type.as_str(), "ctox.business_os.audit.list")
-}
 
 use super::session::{session_role, session_user_id};
 pub use super::session::{BusinessOsSession, BusinessOsSessionUser};
@@ -2414,7 +2419,7 @@ fn configured_business_users() -> Vec<ConfiguredAuthUser> {
     users
 }
 
-fn seed_configured_business_users(conn: &Connection) -> anyhow::Result<()> {
+pub(super) fn seed_configured_business_users(conn: &Connection) -> anyhow::Result<()> {
     let now = now_ms() as i64;
     for user in configured_business_users() {
         conn.execute(
@@ -2428,90 +2433,12 @@ fn seed_configured_business_users(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn normalize_business_role(role: &str) -> String {
+pub(super) fn normalize_business_role(role: &str) -> String {
     policy::normalize_role(role)
 }
 
 fn role_can_manage(role: &str) -> bool {
     policy::role_can_manage(role)
-}
-
-pub(super) fn module_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    permission: BusinessOsPermission,
-    module_id: &str,
-) -> anyhow::Result<PolicyDecision> {
-    let actor = policy_actor_from_session(session);
-    let conn = open_store(root)?;
-    let assigned_to_actor = if actor.role.as_str() == "founder" {
-        if let Some(user_id) = session_user_id(session) {
-            founder_owns_module(&conn, module_id, user_id)?
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    let scope = BusinessOsScope::module(module_id.trim(), assigned_to_actor);
-    evaluate_policy_with_explicit_grants(&conn, &actor, permission, &scope)
-}
-
-fn scoped_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    permission: BusinessOsPermission,
-    scope: BusinessOsScope,
-) -> anyhow::Result<PolicyDecision> {
-    let actor = policy_actor_from_session(session);
-    let conn = open_store(root)?;
-    evaluate_policy_with_explicit_grants(&conn, &actor, permission, &scope)
-}
-
-pub fn trusted_mcp_actor_policy_decision(
-    root: &Path,
-    actor_id: &str,
-    actor_display_name: &str,
-    permission: BusinessOsPermission,
-    scope_type: BusinessOsScopeType,
-    scope_id: Option<&str>,
-) -> anyhow::Result<PolicyDecision> {
-    let conn = open_store(root)?;
-    let actor = trusted_mcp_actor_with_conn(&conn, actor_id, actor_display_name)?;
-    trusted_actor_policy_decision_with_conn(
-        &conn,
-        &actor.id,
-        &actor.role,
-        permission,
-        scope_type,
-        scope_id,
-    )
-}
-
-pub fn trusted_mcp_actor_policy_decision_with_role(
-    root: &Path,
-    actor_id: &str,
-    actor_role: &str,
-    permission: BusinessOsPermission,
-    scope_type: BusinessOsScopeType,
-    scope_id: Option<&str>,
-) -> anyhow::Result<PolicyDecision> {
-    let conn = open_store(root)?;
-    seed_configured_business_users(&conn)?;
-    let actor_id = actor_id.trim();
-    let actor_id = if actor_id.is_empty() {
-        "mcp:local"
-    } else {
-        actor_id
-    };
-    trusted_actor_policy_decision_with_conn(
-        &conn,
-        actor_id,
-        &normalize_business_role(actor_role),
-        permission,
-        scope_type,
-        scope_id,
-    )
 }
 
 pub fn trusted_mcp_actor(
@@ -2523,7 +2450,7 @@ pub fn trusted_mcp_actor(
     trusted_mcp_actor_with_conn(&conn, actor_id, actor_display_name)
 }
 
-fn trusted_mcp_actor_with_conn(
+pub(super) fn trusted_mcp_actor_with_conn(
     conn: &Connection,
     actor_id: &str,
     actor_display_name: &str,
@@ -2557,39 +2484,6 @@ fn trusted_mcp_actor_with_conn(
     })
 }
 
-fn trusted_actor_policy_decision_with_conn(
-    conn: &Connection,
-    actor_id: &str,
-    actor_role: &str,
-    permission: BusinessOsPermission,
-    scope_type: BusinessOsScopeType,
-    scope_id: Option<&str>,
-) -> anyhow::Result<PolicyDecision> {
-    let actor = BusinessOsActor::new(Some(actor_id.to_owned()), actor_role);
-    let scope = match scope_type {
-        BusinessOsScopeType::Workspace => BusinessOsScope::workspace(),
-        BusinessOsScopeType::Module => {
-            let module_id = scope_id.unwrap_or("").trim();
-            let assigned_to_actor =
-                actor.role.as_str() == "founder" && founder_owns_module(conn, module_id, actor_id)?;
-            BusinessOsScope::module(module_id, assigned_to_actor)
-        }
-        BusinessOsScopeType::Task => {
-            BusinessOsScope::task(scope_id.unwrap_or("").trim(), false, false)
-        }
-        other => BusinessOsScope {
-            scope_type: other,
-            scope_id: scope_id
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned),
-            assigned_to_actor: false,
-            owned_by_actor: false,
-        },
-    };
-    evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
-}
-
 pub fn session_can_manage_all(session: &BusinessOsSession) -> bool {
     let actor = policy_actor_from_session(session);
     policy::evaluate(
@@ -2600,41 +2494,11 @@ pub fn session_can_manage_all(session: &BusinessOsSession) -> bool {
     .allowed
 }
 
-pub fn session_can_manage_workspace_branding(
-    root: &Path,
-    session: &BusinessOsSession,
-) -> anyhow::Result<bool> {
-    Ok(
-        workspace_policy_decision(root, session, BusinessOsPermission::WorkspaceBrandingManage)?
-            .allowed,
-    )
-}
-
-pub fn session_can_modify_module(
-    root: &Path,
-    session: &BusinessOsSession,
+pub(super) fn founder_owns_module(
+    conn: &Connection,
     module_id: &str,
+    user_id: &str,
 ) -> anyhow::Result<bool> {
-    Ok(module_policy_decision(root, session, BusinessOsPermission::AppsModify, module_id)?.allowed)
-}
-
-pub(super) fn session_has_workspace_permission(
-    root: &Path,
-    session: &BusinessOsSession,
-    permission: BusinessOsPermission,
-) -> anyhow::Result<bool> {
-    Ok(scoped_policy_decision(root, session, permission, BusinessOsScope::workspace())?.allowed)
-}
-
-fn session_can_manage_task(
-    root: &Path,
-    session: &BusinessOsSession,
-    task_id: &str,
-) -> anyhow::Result<bool> {
-    Ok(task_policy_decision(root, session, task_id)?.allowed)
-}
-
-fn founder_owns_module(conn: &Connection, module_id: &str, user_id: &str) -> anyhow::Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM business_module_acl acl
@@ -2645,52 +2509,6 @@ fn founder_owns_module(conn: &Connection, module_id: &str, user_id: &str) -> any
            AND acl.active = 1
            AND COALESCE(user.active, 1) = 1",
         params![module_id.trim(), user_id.trim()],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-fn evaluate_policy_with_explicit_grants(
-    conn: &Connection,
-    actor: &BusinessOsActor,
-    permission: BusinessOsPermission,
-    scope: &BusinessOsScope,
-) -> anyhow::Result<PolicyDecision> {
-    let decision = policy::evaluate(actor, permission, scope);
-    if decision.allowed {
-        return Ok(decision);
-    }
-    if active_permission_grant_allows(conn, actor, permission, scope)? {
-        return Ok(policy::allow_decision(permission, scope));
-    }
-    Ok(decision)
-}
-
-fn active_permission_grant_allows(
-    conn: &Connection,
-    actor: &BusinessOsActor,
-    permission: BusinessOsPermission,
-    scope: &BusinessOsScope,
-) -> anyhow::Result<bool> {
-    let actor_id = actor.id.as_deref().unwrap_or("").trim();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*)
-         FROM business_permission_grants
-         WHERE active = 1
-           AND permission = ?1
-           AND scope_type = ?2
-           AND scope_id = ?3
-           AND (
-                (subject_type = 'role' AND subject_id = ?4)
-                OR (subject_type = 'user' AND subject_id = ?5)
-           )",
-        params![
-            permission.as_str(),
-            scope.scope_type.as_str(),
-            scope.scope_id.as_deref().unwrap_or(""),
-            actor.role.as_str(),
-            actor_id,
-        ],
         |row| row.get(0),
     )?;
     Ok(count > 0)
@@ -11862,7 +11680,9 @@ fn reject_app_build_command_if_denied(
     Ok(Some(decision))
 }
 
-fn queue_command_policy_target(command: &BusinessCommand) -> (BusinessOsPermission, String, bool) {
+pub(super) fn queue_command_policy_target(
+    command: &BusinessCommand,
+) -> (BusinessOsPermission, String, bool) {
     if let Some((permission, module_id)) = app_build_command_policy_target(command) {
         return (
             permission,
@@ -11879,24 +11699,6 @@ fn queue_command_policy_target(command: &BusinessCommand) -> (BusinessOsPermissi
         command.module.clone(),
         false,
     )
-}
-
-fn queue_command_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    command: &BusinessCommand,
-) -> anyhow::Result<PolicyDecision> {
-    let (permission, module_id, explicitly_scoped) = queue_command_policy_target(command);
-    if explicitly_scoped {
-        scoped_policy_decision(
-            root,
-            session,
-            permission,
-            BusinessOsScope::module(module_id, false),
-        )
-    } else {
-        module_policy_decision(root, session, permission, &module_id)
-    }
 }
 
 fn queue_command_native_authorization(
@@ -12079,7 +11881,7 @@ fn app_build_command_policy_target(
     Some((permission, module_id))
 }
 
-fn write_rxdb_policy_denied_command_outcome(
+pub(super) fn write_rxdb_policy_denied_command_outcome(
     root: &Path,
     command: &BusinessCommand,
     decision: &PolicyDecision,
@@ -12156,7 +11958,7 @@ pub(super) fn write_rxdb_failed_control_command_outcome(
     Ok(outcome)
 }
 
-fn record_business_policy_decision_event(
+pub(super) fn record_business_policy_decision_event(
     root: &Path,
     command: &BusinessCommand,
     decision: &PolicyDecision,
@@ -13602,60 +13404,11 @@ fn record_module_founder_change_event(
     )
 }
 
-fn reject_command_if_policy_denied(
-    root: &Path,
-    command: &BusinessCommand,
-    decision: &PolicyDecision,
-) -> anyhow::Result<Option<Value>> {
-    if decision.allowed {
-        if should_record_allowed_policy_decision(command) {
-            record_business_policy_decision_event(root, command, decision)?;
-        }
-        return Ok(None);
-    }
-    Ok(Some(write_rxdb_policy_denied_command_outcome(
-        root, command, decision,
-    )?))
-}
-
-fn workspace_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    permission: BusinessOsPermission,
-) -> anyhow::Result<PolicyDecision> {
-    scoped_policy_decision(root, session, permission, BusinessOsScope::workspace())
-}
-
 /// Roles that can grant their holder authority over the workspace itself.
 /// Handing one out is an escalation, not user administration, so it needs
 /// workspace-manage rather than users.manage — otherwise a users.manage grant
 /// mints its own superiors and the permission becomes self-elevating.
-const WORKSPACE_AUTHORITY_ROLES: [&str; 2] = ["chef", "admin"];
-
-fn user_upsert_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    target_role: &str,
-) -> anyhow::Result<PolicyDecision> {
-    let decision = workspace_policy_decision(root, session, BusinessOsPermission::UsersManage)?;
-    if !decision.allowed || !WORKSPACE_AUTHORITY_ROLES.contains(&target_role) {
-        return Ok(decision);
-    }
-    Ok(owner_transfer_policy_decision(session))
-}
-
-fn task_policy_decision(
-    root: &Path,
-    session: &BusinessOsSession,
-    task_id: &str,
-) -> anyhow::Result<PolicyDecision> {
-    scoped_policy_decision(
-        root,
-        session,
-        BusinessOsPermission::CtoxTaskManage,
-        BusinessOsScope::task(task_id.trim(), false, false),
-    )
-}
+pub(super) const WORKSPACE_AUTHORITY_ROLES: [&str; 2] = ["chef", "admin"];
 
 pub fn process_source_parse_command(
     root: &Path,
@@ -31423,85 +31176,6 @@ pub(super) mod tests {
         assert_eq!(normalize_business_role("team"), "user");
         assert_eq!(normalize_business_role("business_os_team"), "user");
         assert_eq!(normalize_business_role("unknown"), "user");
-    }
-
-    #[test]
-    fn permission_grant_allows_scoped_module_action_without_new_role() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let conn = open_store(root)?;
-        let now = now_ms() as i64;
-        conn.execute(
-            "INSERT INTO business_users
-                (user_id, display_name, role, active, created_at_ms, updated_at_ms)
-             VALUES ('viewer', 'Viewer', 'user', 1, ?1, ?1)",
-            params![now],
-        )?;
-        conn.execute(
-            "INSERT INTO business_permission_grants
-                (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
-                 active, reason, created_by, created_at_ms, updated_at_ms)
-             VALUES (?1, 'user', 'viewer', ?2, 'module', 'inventory', 1,
-                 'temporary app editor', 'tester', ?3, ?3)",
-            params![
-                "grant_viewer_inventory_modify",
-                BusinessOsPermission::AppsModify.as_str(),
-                now
-            ],
-        )?;
-        drop(conn);
-
-        let session = test_session("viewer", "user");
-        assert!(
-            session_can_modify_module(root, &session, "inventory")?,
-            "explicit module grant should allow a Teammitglied to modify that module"
-        );
-        assert!(
-            !session_can_modify_module(root, &session, "billing")?,
-            "the same grant must not leak to another module"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn record_owner_payload_field_does_not_grant_native_policy_access() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        seed_business_user(root, "record-owner", "team")?;
-        push_collection_records(
-            root,
-            serde_json::json!({
-                "collection": "customer_opportunities",
-                "documents": [{
-                    "id": "opp_1",
-                    "name": "Opportunity",
-                    "owner_id": "record-owner",
-                    "updated_at_ms": 10
-                }]
-            }),
-        )?;
-
-        let decision = trusted_mcp_actor_policy_decision(
-            root,
-            "record-owner",
-            "Record Owner",
-            BusinessOsPermission::DataRead,
-            BusinessOsScopeType::Record,
-            Some("customer_opportunities/opp_1"),
-        )?;
-
-        assert!(
-            !decision.allowed,
-            "owner-like payload fields must not become implicit record grants"
-        );
-        assert_eq!(decision.permission, BusinessOsPermission::DataRead.as_str());
-        assert_eq!(decision.scope_type, BusinessOsScopeType::Record.as_str());
-        assert_eq!(
-            decision.scope_id.as_deref(),
-            Some("customer_opportunities/opp_1")
-        );
-        assert_eq!(decision.reason_code, "role_or_scope_denied");
-        Ok(())
     }
 
     #[test]

@@ -1,0 +1,369 @@
+// Origin: CTOX
+// License: Apache-2.0
+
+use super::policy::{
+    self, owner_transfer_policy_decision, policy_actor_from_session, BusinessOsActor,
+    BusinessOsPermission, BusinessOsScope, BusinessOsScopeType, PolicyDecision,
+};
+use super::session::{session_user_id, BusinessOsSession};
+use super::store::{
+    founder_owns_module, normalize_business_role, open_store, queue_command_policy_target,
+    record_business_policy_decision_event, seed_configured_business_users,
+    trusted_mcp_actor_with_conn, write_rxdb_policy_denied_command_outcome, BusinessCommand,
+    WORKSPACE_AUTHORITY_ROLES,
+};
+use rusqlite::{params, Connection};
+use serde_json::Value;
+use std::path::Path;
+
+fn should_record_allowed_policy_decision(command: &BusinessCommand) -> bool {
+    !matches!(command.command_type.as_str(), "ctox.business_os.audit.list")
+}
+
+pub(super) fn module_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    permission: BusinessOsPermission,
+    module_id: &str,
+) -> anyhow::Result<PolicyDecision> {
+    let actor = policy_actor_from_session(session);
+    let conn = open_store(root)?;
+    let assigned_to_actor = if actor.role.as_str() == "founder" {
+        if let Some(user_id) = session_user_id(session) {
+            founder_owns_module(&conn, module_id, user_id)?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let scope = BusinessOsScope::module(module_id.trim(), assigned_to_actor);
+    evaluate_policy_with_explicit_grants(&conn, &actor, permission, &scope)
+}
+
+pub(super) fn scoped_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    permission: BusinessOsPermission,
+    scope: BusinessOsScope,
+) -> anyhow::Result<PolicyDecision> {
+    let actor = policy_actor_from_session(session);
+    let conn = open_store(root)?;
+    evaluate_policy_with_explicit_grants(&conn, &actor, permission, &scope)
+}
+
+pub fn trusted_mcp_actor_policy_decision(
+    root: &Path,
+    actor_id: &str,
+    actor_display_name: &str,
+    permission: BusinessOsPermission,
+    scope_type: BusinessOsScopeType,
+    scope_id: Option<&str>,
+) -> anyhow::Result<PolicyDecision> {
+    let conn = open_store(root)?;
+    let actor = trusted_mcp_actor_with_conn(&conn, actor_id, actor_display_name)?;
+    trusted_actor_policy_decision_with_conn(
+        &conn,
+        &actor.id,
+        &actor.role,
+        permission,
+        scope_type,
+        scope_id,
+    )
+}
+
+pub fn trusted_mcp_actor_policy_decision_with_role(
+    root: &Path,
+    actor_id: &str,
+    actor_role: &str,
+    permission: BusinessOsPermission,
+    scope_type: BusinessOsScopeType,
+    scope_id: Option<&str>,
+) -> anyhow::Result<PolicyDecision> {
+    let conn = open_store(root)?;
+    seed_configured_business_users(&conn)?;
+    let actor_id = actor_id.trim();
+    let actor_id = if actor_id.is_empty() {
+        "mcp:local"
+    } else {
+        actor_id
+    };
+    trusted_actor_policy_decision_with_conn(
+        &conn,
+        actor_id,
+        &normalize_business_role(actor_role),
+        permission,
+        scope_type,
+        scope_id,
+    )
+}
+
+pub(super) fn trusted_actor_policy_decision_with_conn(
+    conn: &Connection,
+    actor_id: &str,
+    actor_role: &str,
+    permission: BusinessOsPermission,
+    scope_type: BusinessOsScopeType,
+    scope_id: Option<&str>,
+) -> anyhow::Result<PolicyDecision> {
+    let actor = BusinessOsActor::new(Some(actor_id.to_owned()), actor_role);
+    let scope = match scope_type {
+        BusinessOsScopeType::Workspace => BusinessOsScope::workspace(),
+        BusinessOsScopeType::Module => {
+            let module_id = scope_id.unwrap_or("").trim();
+            let assigned_to_actor =
+                actor.role.as_str() == "founder" && founder_owns_module(conn, module_id, actor_id)?;
+            BusinessOsScope::module(module_id, assigned_to_actor)
+        }
+        BusinessOsScopeType::Task => {
+            BusinessOsScope::task(scope_id.unwrap_or("").trim(), false, false)
+        }
+        other => BusinessOsScope {
+            scope_type: other,
+            scope_id: scope_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            assigned_to_actor: false,
+            owned_by_actor: false,
+        },
+    };
+    evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
+}
+
+pub fn session_can_manage_workspace_branding(
+    root: &Path,
+    session: &BusinessOsSession,
+) -> anyhow::Result<bool> {
+    Ok(
+        workspace_policy_decision(root, session, BusinessOsPermission::WorkspaceBrandingManage)?
+            .allowed,
+    )
+}
+
+pub fn session_can_modify_module(
+    root: &Path,
+    session: &BusinessOsSession,
+    module_id: &str,
+) -> anyhow::Result<bool> {
+    Ok(module_policy_decision(root, session, BusinessOsPermission::AppsModify, module_id)?.allowed)
+}
+
+pub(super) fn session_has_workspace_permission(
+    root: &Path,
+    session: &BusinessOsSession,
+    permission: BusinessOsPermission,
+) -> anyhow::Result<bool> {
+    Ok(scoped_policy_decision(root, session, permission, BusinessOsScope::workspace())?.allowed)
+}
+
+pub(super) fn session_can_manage_task(
+    root: &Path,
+    session: &BusinessOsSession,
+    task_id: &str,
+) -> anyhow::Result<bool> {
+    Ok(task_policy_decision(root, session, task_id)?.allowed)
+}
+
+pub(super) fn evaluate_policy_with_explicit_grants(
+    conn: &Connection,
+    actor: &BusinessOsActor,
+    permission: BusinessOsPermission,
+    scope: &BusinessOsScope,
+) -> anyhow::Result<PolicyDecision> {
+    let decision = policy::evaluate(actor, permission, scope);
+    if decision.allowed {
+        return Ok(decision);
+    }
+    if active_permission_grant_allows(conn, actor, permission, scope)? {
+        return Ok(policy::allow_decision(permission, scope));
+    }
+    Ok(decision)
+}
+
+pub(super) fn active_permission_grant_allows(
+    conn: &Connection,
+    actor: &BusinessOsActor,
+    permission: BusinessOsPermission,
+    scope: &BusinessOsScope,
+) -> anyhow::Result<bool> {
+    let actor_id = actor.id.as_deref().unwrap_or("").trim();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM business_permission_grants
+         WHERE active = 1
+           AND permission = ?1
+           AND scope_type = ?2
+           AND scope_id = ?3
+           AND (
+                (subject_type = 'role' AND subject_id = ?4)
+                OR (subject_type = 'user' AND subject_id = ?5)
+           )",
+        params![
+            permission.as_str(),
+            scope.scope_type.as_str(),
+            scope.scope_id.as_deref().unwrap_or(""),
+            actor.role.as_str(),
+            actor_id,
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+pub(super) fn queue_command_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    command: &BusinessCommand,
+) -> anyhow::Result<PolicyDecision> {
+    let (permission, module_id, explicitly_scoped) = queue_command_policy_target(command);
+    if explicitly_scoped {
+        scoped_policy_decision(
+            root,
+            session,
+            permission,
+            BusinessOsScope::module(module_id, false),
+        )
+    } else {
+        module_policy_decision(root, session, permission, &module_id)
+    }
+}
+
+pub(super) fn reject_command_if_policy_denied(
+    root: &Path,
+    command: &BusinessCommand,
+    decision: &PolicyDecision,
+) -> anyhow::Result<Option<Value>> {
+    if decision.allowed {
+        if should_record_allowed_policy_decision(command) {
+            record_business_policy_decision_event(root, command, decision)?;
+        }
+        return Ok(None);
+    }
+    Ok(Some(write_rxdb_policy_denied_command_outcome(
+        root, command, decision,
+    )?))
+}
+
+pub(super) fn workspace_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    permission: BusinessOsPermission,
+) -> anyhow::Result<PolicyDecision> {
+    scoped_policy_decision(root, session, permission, BusinessOsScope::workspace())
+}
+
+pub(super) fn user_upsert_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    target_role: &str,
+) -> anyhow::Result<PolicyDecision> {
+    let decision = workspace_policy_decision(root, session, BusinessOsPermission::UsersManage)?;
+    if !decision.allowed || !WORKSPACE_AUTHORITY_ROLES.contains(&target_role) {
+        return Ok(decision);
+    }
+    Ok(owner_transfer_policy_decision(session))
+}
+
+pub(super) fn task_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    task_id: &str,
+) -> anyhow::Result<PolicyDecision> {
+    scoped_policy_decision(
+        root,
+        session,
+        BusinessOsPermission::CtoxTaskManage,
+        BusinessOsScope::task(task_id.trim(), false, false),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::policy::{BusinessOsPermission, BusinessOsScopeType};
+    use super::super::store::tests::{seed_business_user, test_session};
+    use super::super::store::{now_ms, open_store, push_collection_records};
+    use super::{session_can_modify_module, trusted_mcp_actor_policy_decision};
+    use rusqlite::params;
+    use serde_json::Value;
+    use tempfile::tempdir;
+
+    #[test]
+    fn permission_grant_allows_scoped_module_action_without_new_role() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let conn = open_store(root)?;
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT INTO business_users
+                (user_id, display_name, role, active, created_at_ms, updated_at_ms)
+             VALUES ('viewer', 'Viewer', 'user', 1, ?1, ?1)",
+            params![now],
+        )?;
+        conn.execute(
+            "INSERT INTO business_permission_grants
+                (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
+                 active, reason, created_by, created_at_ms, updated_at_ms)
+             VALUES (?1, 'user', 'viewer', ?2, 'module', 'inventory', 1,
+                 'temporary app editor', 'tester', ?3, ?3)",
+            params![
+                "grant_viewer_inventory_modify",
+                BusinessOsPermission::AppsModify.as_str(),
+                now
+            ],
+        )?;
+        drop(conn);
+
+        let session = test_session("viewer", "user");
+        assert!(
+            session_can_modify_module(root, &session, "inventory")?,
+            "explicit module grant should allow a Teammitglied to modify that module"
+        );
+        assert!(
+            !session_can_modify_module(root, &session, "billing")?,
+            "the same grant must not leak to another module"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_owner_payload_field_does_not_grant_native_policy_access() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_business_user(root, "record-owner", "team")?;
+        push_collection_records(
+            root,
+            serde_json::json!({
+                "collection": "customer_opportunities",
+                "documents": [{
+                    "id": "opp_1",
+                    "name": "Opportunity",
+                    "owner_id": "record-owner",
+                    "updated_at_ms": 10
+                }]
+            }),
+        )?;
+
+        let decision = trusted_mcp_actor_policy_decision(
+            root,
+            "record-owner",
+            "Record Owner",
+            BusinessOsPermission::DataRead,
+            BusinessOsScopeType::Record,
+            Some("customer_opportunities/opp_1"),
+        )?;
+
+        assert!(
+            !decision.allowed,
+            "owner-like payload fields must not become implicit record grants"
+        );
+        assert_eq!(decision.permission, BusinessOsPermission::DataRead.as_str());
+        assert_eq!(decision.scope_type, BusinessOsScopeType::Record.as_str());
+        assert_eq!(
+            decision.scope_id.as_deref(),
+            Some("customer_opportunities/opp_1")
+        );
+        assert_eq!(decision.reason_code, "role_or_scope_denied");
+        Ok(())
+    }
+}
