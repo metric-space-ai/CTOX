@@ -22,6 +22,7 @@ pub mod server;
 mod session;
 pub mod store;
 mod store_catalog_projections;
+mod store_customer_commands;
 mod store_outbound_commands;
 mod store_projections;
 mod store_release_review;
