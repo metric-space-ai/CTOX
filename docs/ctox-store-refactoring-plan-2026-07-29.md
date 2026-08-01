@@ -277,6 +277,40 @@ Escape-Hatch je Schnitt: Nähte > 20 pub(crate)-Einstiege ⇒ STOPP + Karte.
   **Akzeptanz: `repair_queue_projections` ist GELÖSCHT**; tote
   Schattenimplementierung (~140 Z.) raus; `waiting_dependencies` erhält
   Verhaltenstests.
+  **VERMESSEN 01.08.: Prämisse hält nicht. Nichts gelöscht, nichts
+  geändert — und das ist das Ergebnis.**
+
+  Die Karte Schreiber → Reparaturzweig lässt sich nicht ziehen, weil die
+  Reparatur etwas anderes heilt, als das Ticket annimmt:
+
+  - `leased_terminal_success_status` / `..._failure_status` korrigieren
+    NICHT die Projektion. Sie mutieren einen kanonischen Queue-Task, der
+    noch auf `leased` steht, obwohl das Kommando terminal ist. Der
+    kanonische `refresh_queue_task_projection` projiziert in genau dieser
+    Lage bereits korrekt `completed`/`failed` — **ohne** den kanonischen
+    Task anzufassen. Die Projektion ist also richtig und die QUELLE falsch.
+  - Die `*_from_canonical`-Zweige gleichen Status, Note und Lease-Felder
+    mit einem vorhandenen Task ab. Historische Ursache war laut
+    Recovery-Dokument ein Worker-Ack ohne anschliessenden Refresh. Denselben
+    Zustand erzeugen heute weiterhin der generische
+    `push_collection_records`-Schreiber und `channels`-Mutationen ohne
+    Store-Refresh.
+
+  Die sechs „parallelen Schreiber" sind also nicht die Ursache. Die
+  Ursache ist, dass kanonische Mutationen aus anderen Pfaden keinen
+  Refresh auslösen. Wer die Schreiber vereinheitlicht und dann die
+  Reparatur löscht, entfernt das Netz und lässt den Boden, wie er ist.
+
+  **Neu geschnitten (SF4a/b):**
+  - SF4a: `leased` + terminales Kommando ⇒ der kanonische Task wird beim
+    Terminalwerden mitgeführt, statt später geheilt. Danach fallen die
+    beiden `leased_terminal_*`-Zweige.
+  - SF4b: `push_collection_records` und die `channels`-Mutationen lösen
+    einen Refresh aus. Danach fallen die `*_from_canonical`-Zweige.
+
+  Erst wenn beide liegen, ist `repair_queue_projections` löschbar. Vorher
+  nicht — die Kampagne hat sieben Reparaturen gelöscht, jede NACH ihrer
+  Ursache.
 
 **module_lifecycle.rs**:
 - SF5 ▲ Uninstall/Delete räumt vollständig ab (Grants, ACL, Release-Zeilen);
