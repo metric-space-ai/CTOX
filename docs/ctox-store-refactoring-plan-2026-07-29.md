@@ -375,12 +375,34 @@ Fixtures":
   Zip-Pfad über den RxDB-Chunk-Store — im Sicherheitskommentar der
   *sichere* Weg, "never over HTTP" — hat gar keinen Test.
 
-Reparatur ist kein Fixture-Tausch: es fehlt ein Helfer, der eine
-Desktop-Datei in den Chunk-Store setzt, damit `file_id` bedient werden
-kann. Danach beide Tests auf `source_kind: "zip"` umstellen und
-`serve_test_zip_once` samt HTTP-Fixture löschen. Erst dann prüfen die
-Berechtigungs-Assertions wieder etwas, und der sichere Pfad ist zum
-ersten Mal abgedeckt.
+**KORREKTUR 01.08. — meine Begründung war ein Lesefehler.** Ich hatte
+den Zip-Pfad „den sicheren Weg" genannt und mich dabei auf den Kommentar
+`never over HTTP` gestützt. Der beschreibt den TRANSPORT (RxDB/WebRTC
+statt HTTP), nicht die Vertrauensstufe.
+
+Gemessen beim Reparaturversuch: `install_app_module` stempelt für Zip die
+Provenienz `{"kind":"zip","file_id":...}` OHNE `verified`, und derselbe
+Pfad verlangt später `app_source.verified == true` (fehlend = false).
+**Kein Zip-Upload kann also je installieren.** Und das ist ABSICHT: der
+Kommentar an der Prüfung sagt, dass nicht vertrauenswürdige
+Drittanbieter-Archive gesperrt bleiben, bis eine isolierte Sandbox
+existiert. Nur `catalog` und der Erstanbieter-`github`-Pfad setzen
+`verified: true`.
+
+Der Zip-Pfad hat also keinen Test, weil er gesperrt ist — ein Test dort
+könnte nur die Sperre bestätigen. Was bleibt, ist trotzdem ein Befund,
+nur ein anderer:
+
+- Die zwei Berechtigungstests brauchen eine Quelle, die das Trust-Gate
+  BESTEHT (`catalog`), nicht Zip. Erst dann prüfen sie wieder, wofür sie
+  geschrieben wurden.
+- Für die Sperre selbst fehlt ein Test, der sie als Sperre festhält:
+  ein Zip-Upload MUSS abgelehnt werden. Solange das niemand prüft, kann
+  die Sperre unbemerkt fallen.
+
+Brauchbar aus dem Versuch: `seed_rxdb_chat_attachment` existiert bereits
+als Helfer, der Dokument und Chunks so schreibt, dass die Verifikation
+besteht — die Fixture-Infrastruktur fehlt also nicht, wie ich annahm.
 
 SM14 **`status` heisst zweierlei, und die Transportschicht gewinnt.**
 Gefunden 01.08. bei S-CUT4a. `write_rxdb_control_command_state`
