@@ -782,7 +782,7 @@ pub(crate) fn complete_business_control_command(
     error_message: Option<&str>,
 ) -> Result<()> {
     anyhow::ensure!(
-        matches!(terminal_status, "completed" | "failed" | "cancelled"),
+        crate::command_lifecycle::terminal_status_is_outcome(terminal_status),
         "invalid control command terminal status"
     );
     let db_path = resolve_db_path(root, None);

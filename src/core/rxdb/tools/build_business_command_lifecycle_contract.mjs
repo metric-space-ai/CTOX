@@ -25,6 +25,18 @@ const rustPath = resolve(
 );
 
 const fixture = JSON.parse(readFileSync(lifecycleFixturePath, 'utf8'));
+const terminalOutcomeStatuses = fixture.terminalOutcomeStatuses;
+if (
+  !Array.isArray(terminalOutcomeStatuses)
+  || terminalOutcomeStatuses.length === 0
+  || new Set(terminalOutcomeStatuses).size !== terminalOutcomeStatuses.length
+  || terminalOutcomeStatuses.includes('none')
+  || terminalOutcomeStatuses.some((status) => !fixture.terminalStatuses.includes(status))
+) {
+  throw new Error(
+    'terminalOutcomeStatuses must be unique, non-empty terminalStatuses excluding none',
+  );
+}
 const protocolFixture = JSON.parse(readFileSync(protocolFixturePath, 'utf8'));
 const capability = protocolFixture.optionalCapabilities?.commandLifecycle;
 if (!capability) {
@@ -42,6 +54,7 @@ export const CTOX_COMMAND_REPLICATION_PHASES = Object.freeze(${json(fixture.repl
 export const CTOX_COMMAND_EXECUTION_MODES = Object.freeze(${json(fixture.executionModes)});
 export const CTOX_COMMAND_EXECUTION_PHASES = Object.freeze(${json(fixture.executionPhases)});
 export const CTOX_COMMAND_TERMINAL_STATUSES = Object.freeze(${json(fixture.terminalStatuses)});
+export const CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES = Object.freeze(${json(fixture.terminalOutcomeStatuses)});
 export const CTOX_COMMAND_ERROR_CODES = Object.freeze(${json(fixture.errorCodes)});
 export const CTOX_COMMAND_AUTHORIZATION = Object.freeze(${json(fixture.authorization)});
 export const CTOX_COMMAND_IMMUTABLE_INTENT_FIELDS = Object.freeze(${json(fixture.immutableIntentFields)});
@@ -62,6 +75,8 @@ ${rustSlice('CTOX_COMMAND_REPLICATION_PHASES', fixture.replicationPhases)}
 ${rustSlice('CTOX_COMMAND_EXECUTION_MODES', fixture.executionModes)}
 ${rustSlice('CTOX_COMMAND_EXECUTION_PHASES', fixture.executionPhases)}
 ${rustSlice('CTOX_COMMAND_TERMINAL_STATUSES', fixture.terminalStatuses)}
+${rustSlice('CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES', fixture.terminalOutcomeStatuses)}
+pub(crate) const CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST: &str = ${rustString(fixture.terminalOutcomeStatuses.map(sqlString).join(', '))};
 ${rustSlice('CTOX_COMMAND_ERROR_CODES', fixture.errorCodes)}
 pub(crate) const CTOX_COMMAND_DEFAULT_AUTHORIZATION_REQUIREMENT: &str = ${rustString(fixture.authorization.defaultRequirement)};
 pub(crate) const CTOX_COMMAND_OFFLINE_INTENT_ALLOWED: bool = ${Boolean(fixture.authorization.offlineIntentAllowed)};
@@ -90,6 +105,10 @@ function json(value) {
 
 function rustString(value) {
   return JSON.stringify(String(value));
+}
+
+function sqlString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
 }
 
 function rustSlice(name, values) {

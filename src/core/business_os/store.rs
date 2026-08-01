@@ -13662,15 +13662,17 @@ pub fn complete_ready_documents_report_commands(
     limit: usize,
 ) -> anyhow::Result<usize> {
     with_store_connection(root, |conn| {
-        let mut statement = conn.prepare(
+        let query = format!(
             "SELECT command_id
              FROM business_commands
              WHERE module = 'documents'
                AND command_type = 'research.systematic.report.create'
-               AND status NOT IN ('completed', 'failed', 'cancelled')
+               AND status NOT IN ({})
              ORDER BY observed_at_ms ASC, command_id ASC
              LIMIT ?1",
-        )?;
+            crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
+        );
+        let mut statement = conn.prepare(&query)?;
         let rows =
             statement.query_map(params![limit.max(1) as i64], |row| row.get::<_, String>(0))?;
         let command_ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -19273,13 +19275,15 @@ pub fn business_command_diagnostics(root: &Path) -> anyhow::Result<Value> {
         [],
         |row| row.get::<_, u64>(0),
     )?;
-    let oldest_nonterminal_at_ms = conn.query_row(
+    let oldest_nonterminal_query = format!(
         "SELECT MIN(observed_at_ms)
          FROM business_commands
-         WHERE status NOT IN ('completed', 'failed', 'cancelled')",
-        [],
-        |row| row.get::<_, Option<u64>>(0),
-    )?;
+         WHERE status NOT IN ({})",
+        crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
+    );
+    let oldest_nonterminal_at_ms = conn.query_row(&oldest_nonterminal_query, [], |row| {
+        row.get::<_, Option<u64>>(0)
+    })?;
     let (open_intake_failures, exhausted_intake_failures, oldest_failure_at_ms) = conn.query_row(
         "SELECT COUNT(*),
                 COALESCE(SUM(CASE WHEN exhausted = 1 THEN 1 ELSE 0 END), 0),
@@ -26144,8 +26148,7 @@ pub(super) fn find_queue_task_for_command(root: &Path, command_id: &str) -> Opti
 }
 
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(
-        "
+    let schema = "
         CREATE TABLE IF NOT EXISTS business_records (
             collection TEXT NOT NULL,
             record_id TEXT NOT NULL,
@@ -26457,7 +26460,7 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
             ON business_commands(observed_at_ms, command_id)
             WHERE module = 'documents'
               AND command_type = 'research.systematic.report.create'
-              AND status NOT IN ('completed', 'failed', 'cancelled');
+              AND status NOT IN (__CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST__);
 
         CREATE TABLE IF NOT EXISTS business_command_intake_failures (
             command_id TEXT NOT NULL,
@@ -26620,8 +26623,12 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
             ON business_os_mcp_events(actor, created_at_ms DESC);
         CREATE INDEX IF NOT EXISTS idx_business_os_mcp_events_tool
             ON business_os_mcp_events(tool, created_at_ms DESC);
-        ",
-    )?;
+        "
+    .replace(
+        "__CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST__",
+        crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
+    );
+    conn.execute_batch(&schema)?;
     migrate_business_users_roles(conn)?;
     migrate_business_users_profile_json(conn)?;
     migrate_business_users_capability_epoch(conn)?;
@@ -30738,16 +30745,18 @@ pub(super) mod tests {
     fn documents_report_completion_query_uses_partial_command_index() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let conn = open_store(temp.path())?;
-        let mut stmt = conn.prepare(
+        let query = format!(
             "EXPLAIN QUERY PLAN
              SELECT command_id
              FROM business_commands
              WHERE module = 'documents'
                AND command_type = 'research.systematic.report.create'
-               AND status NOT IN ('completed', 'failed', 'cancelled')
+               AND status NOT IN ({})
              ORDER BY observed_at_ms ASC, command_id ASC
              LIMIT 10",
-        )?;
+            crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
+        );
+        let mut stmt = conn.prepare(&query)?;
         let details = stmt
             .query_map([], |row| row.get::<_, String>(3))?
             .collect::<rusqlite::Result<Vec<_>>>()?;

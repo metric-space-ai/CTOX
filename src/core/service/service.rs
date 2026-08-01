@@ -4206,17 +4206,17 @@ fn router_document_report_table_stamp(path: &Path) -> Result<RouterDocumentRepor
             latest_observed_at_ms: 0,
         });
     }
-    let (pending_count, latest_observed_at_ms) = conn.query_row(
-        r#"
-        SELECT COUNT(*), COALESCE(MAX(observed_at_ms), 0)
-        FROM business_commands
-        WHERE module = 'documents'
-          AND command_type = 'research.systematic.report.create'
-          AND status NOT IN ('completed', 'failed', 'cancelled')
-        "#,
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
+    let query = format!(
+        "SELECT COUNT(*), COALESCE(MAX(observed_at_ms), 0)
+         FROM business_commands
+         WHERE module = 'documents'
+           AND command_type = 'research.systematic.report.create'
+           AND status NOT IN ({})",
+        crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
+    );
+    let (pending_count, latest_observed_at_ms) = conn.query_row(&query, [], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
     Ok(RouterDocumentReportTableStamp {
         database_exists: true,
         table_exists: true,

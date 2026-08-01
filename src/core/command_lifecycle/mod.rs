@@ -9,6 +9,9 @@ use self::generated::{
     CTOX_COMMAND_IMMUTABLE_INTENT_FIELDS, CTOX_COMMAND_REPLICATION_PHASES,
     CTOX_COMMAND_TERMINAL_STATUSES,
 };
+pub(crate) use self::generated::{
+    CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST, CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandLifecycleError {
@@ -151,6 +154,10 @@ pub(crate) fn validate_execution_phase_transition(
     }
 }
 
+pub(crate) fn terminal_status_is_outcome(status: &str) -> bool {
+    CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES.contains(&status)
+}
+
 fn validate_terminal_pair(
     execution_phase: &str,
     terminal_status: &str,
@@ -234,6 +241,28 @@ mod tests {
             "projection_version": version,
             "attempt": attempt
         })
+    }
+
+    #[test]
+    fn lifecycle_terminal_outcome_consumers_cover_contract() {
+        let contract_outcomes = CTOX_COMMAND_TERMINAL_STATUSES
+            .iter()
+            .copied()
+            .filter(|status| *status != "none")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contract_outcomes,
+            CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES,
+            "every terminal status except none must be assigned to the generated terminal-outcome milestone"
+        );
+        for status in CTOX_COMMAND_TERMINAL_STATUSES {
+            assert_eq!(
+                terminal_status_is_outcome(status),
+                *status != "none",
+                "terminal outcome consumer classification drifted for {status}"
+            );
+        }
+        assert!(!terminal_status_is_outcome("unknown"));
     }
 
     #[test]

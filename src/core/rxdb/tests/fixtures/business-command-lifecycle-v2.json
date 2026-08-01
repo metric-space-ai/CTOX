@@ -27,6 +27,11 @@
     "failed",
     "cancelled"
   ],
+  "terminalOutcomeStatuses": [
+    "completed",
+    "failed",
+    "cancelled"
+  ],
   "errorCodes": [
     "sync_unavailable",
     "schema_mismatch",

@@ -31,6 +31,11 @@ export const CTOX_COMMAND_TERMINAL_STATUSES = Object.freeze([
   "failed",
   "cancelled"
 ]);
+export const CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES = Object.freeze([
+  "completed",
+  "failed",
+  "cancelled"
+]);
 export const CTOX_COMMAND_ERROR_CODES = Object.freeze([
   "sync_unavailable",
   "schema_mismatch",

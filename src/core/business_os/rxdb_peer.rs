@@ -5222,11 +5222,10 @@ fn enrich_native_command_lifecycle(document: &mut Value, accepted: &Value) -> an
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let terminal_status = match status {
-        "completed" => "completed",
-        "failed" => "failed",
-        "cancelled" => "cancelled",
-        _ => "none",
+    let terminal_status = if crate::command_lifecycle::terminal_status_is_outcome(status) {
+        status
+    } else {
+        "none"
     };
     let execution_phase = if terminal_status != "none" {
         "terminal"

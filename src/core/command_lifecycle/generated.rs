@@ -22,6 +22,10 @@ pub(crate) const CTOX_COMMAND_EXECUTION_PHASES: &[&str] = &[
 ];
 pub(crate) const CTOX_COMMAND_TERMINAL_STATUSES: &[&str] =
     &["none", "completed", "failed", "cancelled"];
+pub(crate) const CTOX_COMMAND_TERMINAL_OUTCOME_STATUSES: &[&str] =
+    &["completed", "failed", "cancelled"];
+pub(crate) const CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST: &str =
+    "'completed', 'failed', 'cancelled'";
 pub(crate) const CTOX_COMMAND_ERROR_CODES: &[&str] = &[
     "sync_unavailable",
     "schema_mismatch",
