@@ -11,6 +11,7 @@ mod command_plane;
 mod control_command_types;
 mod desktop_files;
 mod external_sql_sync;
+mod hashing;
 mod importer;
 mod inventory_drift_tests;
 mod invoices;

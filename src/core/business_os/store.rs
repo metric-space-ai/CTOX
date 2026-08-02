@@ -23574,10 +23574,7 @@ fn slug_for_document_id(value: &str) -> String {
     }
 }
 
-pub(super) fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = sha2::Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+pub(super) use super::hashing::hex_sha256;
 
 pub(super) fn clip_text(value: &str, max_chars: usize) -> String {
     let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -27294,11 +27291,7 @@ fn read_persisted_signaling_urls(root: &Path) -> Option<Vec<String>> {
     (!urls.is_empty()).then_some(urls)
 }
 
-pub(super) fn short_hash(value: &str) -> String {
-    let digest = sha2::Sha256::digest(value.as_bytes());
-    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &digest)[..10]
-        .to_string()
-}
+pub(super) use super::hashing::short_hash;
 
 fn room_secret_id(value: &str) -> String {
     let digest = sha2::Sha256::digest(value.as_bytes());

@@ -3286,10 +3286,7 @@ fn short_path_hash(path: &Path) -> String {
     format!("{:x}", hasher.finalize())[..16].to_owned()
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+use super::hashing::hex_sha256;
 
 fn file_modified_label(path: &Path) -> String {
     fs::metadata(path)

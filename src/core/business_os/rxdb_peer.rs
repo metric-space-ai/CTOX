@@ -13694,11 +13694,7 @@ fn load_live_ctox_desktop_file_documents_sync(root: &Path) -> anyhow::Result<Vec
     Ok(documents)
 }
 
-pub(super) fn hex_sha256(bytes: &[u8]) -> String {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
+pub(super) use super::hashing::hex_sha256;
 
 pub(super) fn metadata_modified_at_ms(metadata: &fs::Metadata) -> u128 {
     metadata
