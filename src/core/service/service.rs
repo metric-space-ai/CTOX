@@ -1398,6 +1398,14 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     }
 }
 
+fn state_invariant_check_is_not_ready(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<lcm::MissingStoredContinuityDocument>()
+            .is_some()
+    })
+}
+
 fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) {
     // P2 — flush any mission_state field-clobber attempts that the guard
     // suppressed during pre-boot writes (the previous run may have
@@ -1518,11 +1526,7 @@ fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) 
         }
         Err(err) => {
             let error_text = clip_text(&err.to_string(), 180);
-            let (reason, severity, summary) = if error_text
-                .contains("missing stored narrative continuity document")
-                || error_text.contains("missing stored anchors continuity document")
-                || error_text.contains("missing stored focus continuity document")
-            {
+            let (reason, severity, summary) = if state_invariant_check_is_not_ready(&err) {
                 (
                     "boot_state_invariants_not_ready",
                     "info",
@@ -1804,11 +1808,7 @@ fn run_turn_end_state_invariant_check(
         }
         Err(err) => {
             let error_text = clip_text(&err.to_string(), 180);
-            let (reason, severity, summary) = if error_text
-                .contains("missing stored narrative continuity document")
-                || error_text.contains("missing stored anchors continuity document")
-                || error_text.contains("missing stored focus continuity document")
-            {
+            let (reason, severity, summary) = if state_invariant_check_is_not_ready(&err) {
                 (
                     "turn_state_invariants_not_ready",
                     "info",
@@ -3606,6 +3606,18 @@ fn handle_request(
 // (UDS-only, no TCP), so external inbound webhooks are fronted by the operator's
 // HTTP layer calling `crate::iot::webhook::handle_http` / `ctox iot webhook
 // ingest` — the same tested core, no CTOX-run TCP server.
+fn iot_webhook_http_error_status(error: &anyhow::Error) -> u16 {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::iot::webhook::WebhookHttpError>()
+            .is_some()
+    }) {
+        401
+    } else {
+        400
+    }
+}
+
 #[cfg(not(unix))]
 fn handle_iot_webhook_request(
     mut request: tiny_http::Request,
@@ -3651,17 +3663,9 @@ fn handle_iot_webhook_request(
     match crate::iot::webhook::handle_http(root, &id, &token, &payload, 0) {
         Ok(_) => respond_json(request, StatusCode(202), &serde_json::json!({"ok": true})),
         Err(err) => {
-            let msg = err.to_string();
             // Wrong token, missing secret, and unknown id all return 401 with a
             // generic body so an attacker cannot distinguish them.
-            let code = if msg.contains("rejected")
-                || msg.contains("secret missing")
-                || msg.contains("unknown webhook")
-            {
-                401
-            } else {
-                400
-            };
+            let code = iot_webhook_http_error_status(&err);
             respond_json(request, StatusCode(code), &serde_json::json!({"ok": false}))
         }
     }
@@ -7786,10 +7790,10 @@ fn start_prompt_worker(
                                 timeout_worker_message,
                                 retry_worker_message,
                             );
-                            let retry_reason = if timeout_worker_message {
-                                "turn timeout retry backoff"
+                            let retry_kind = if timeout_worker_message {
+                                WorkerRetryKind::TurnTimeout
                             } else {
-                                "retryable runtime/API failure"
+                                WorkerRetryKind::RuntimeApiFailure
                             };
                             let ack_result = if route_status == "failed" {
                                 channels::ack_leased_messages_with_failure_reason(
@@ -7802,7 +7806,7 @@ fn start_prompt_worker(
                                 release_retryable_worker_messages(
                                     &root,
                                     &job.leased_message_keys,
-                                    retry_reason,
+                                    retry_kind,
                                     &compact_error,
                                 )
                             } else {
@@ -9591,11 +9595,15 @@ fn record_typed_business_command_review(
 
 fn command_review_persistence_is_locked(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        let message = cause.to_string().to_ascii_lowercase();
-        message.contains("database is locked")
-            || message.contains("database table is locked")
-            || message.contains("sqlite_busy")
-            || message.contains("sqlite_locked")
+        let Some(rusqlite::Error::SqliteFailure(sqlite_error, _)) =
+            cause.downcast_ref::<rusqlite::Error>()
+        else {
+            return false;
+        };
+        matches!(
+            sqlite_error.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        )
     })
 }
 
@@ -18148,6 +18156,16 @@ fn leased_business_os_app_queue_task_exists_for_stop_guard(root: &Path) -> Resul
     leased_business_os_rxdb_app_queue_task_exists(root)
 }
 
+const BUSINESS_OS_RXDB_QUEUE_TABLE: &str = "ctox_business_os__ctox_queue_tasks__v0";
+
+fn sqlite_schema_object_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view'))",
+        [name],
+        |row| row.get(0),
+    )
+}
+
 fn leased_business_os_rxdb_app_queue_task_exists(root: &Path) -> Result<bool> {
     let db_path = crate::paths::runtime_dir(root).join("business-os-rxdb.sqlite3");
     if !db_path.is_file() {
@@ -18163,8 +18181,17 @@ fn leased_business_os_rxdb_app_queue_task_exists(root: &Path) -> Result<bool> {
             db_path.display()
         )
     })?;
-    let mut stmt = match conn.prepare(
-        r#"
+    if !sqlite_schema_object_exists(&conn, BUSINESS_OS_RXDB_QUEUE_TABLE).with_context(|| {
+        format!(
+            "failed to inspect Business OS RxDB queue schema {}",
+            db_path.display()
+        )
+    })? {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare(
+            r#"
         SELECT json_extract(data, '$.prompt')
         FROM ctox_business_os__ctox_queue_tasks__v0
         WHERE deleted = 0
@@ -18176,18 +18203,13 @@ fn leased_business_os_rxdb_app_queue_task_exists(root: &Path) -> Result<bool> {
           )
         LIMIT 32
         "#,
-    ) {
-        Ok(stmt) => stmt,
-        Err(err) if err.to_string().contains("no such table") => return Ok(false),
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "failed to inspect Business OS RxDB queue table {}",
-                    db_path.display()
-                )
-            });
-        }
-    };
+        )
+        .with_context(|| {
+            format!(
+                "failed to inspect Business OS RxDB queue table {}",
+                db_path.display()
+            )
+        })?;
     let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
     for row in rows {
         let prompt = row?.unwrap_or_default();
@@ -25222,22 +25244,32 @@ fn runtime_retry_not_before_iso(error_text: &str) -> String {
     chrono_like_iso(current_epoch_secs().saturating_add(cooldown_secs))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerRetryKind {
+    TurnTimeout,
+    RuntimeApiFailure,
+}
+
+impl WorkerRetryKind {
+    fn policy_id(self) -> &'static str {
+        match self {
+            Self::TurnTimeout => "worker-turn-timeout",
+            Self::RuntimeApiFailure => "worker-runtime-api-failure",
+        }
+    }
+}
+
 fn release_retryable_worker_messages(
     root: &Path,
     message_keys: &[String],
-    reason: &str,
+    retry_kind: WorkerRetryKind,
     summary: &str,
 ) -> Result<usize> {
-    let policy_id = if reason.contains("timeout") {
-        "worker-turn-timeout"
-    } else {
-        "worker-runtime-api-failure"
-    };
     channels::hold_leased_messages(
         root,
         message_keys,
         &review::HoldReason::Technical {
-            policy_id: policy_id.to_string(),
+            policy_id: retry_kind.policy_id().to_string(),
         },
         summary,
     )
@@ -26194,6 +26226,117 @@ mod tests {
         std::sync::Mutex::new(());
     static DURABLE_STATUS_SNAPSHOT_CACHE_TEST_LOCK: std::sync::Mutex<()> =
         std::sync::Mutex::new(());
+
+    #[test]
+    fn service_state_invariant_readiness_uses_typed_continuity_error() {
+        let cases = [
+            (
+                ContinuityKind::Narrative,
+                "missing stored narrative continuity document",
+            ),
+            (
+                ContinuityKind::Anchors,
+                "missing stored anchors continuity document",
+            ),
+            (
+                ContinuityKind::Focus,
+                "missing stored focus continuity document",
+            ),
+        ];
+        for (kind, legacy_message) in cases {
+            let typed = anyhow::Error::new(lcm::MissingStoredContinuityDocument::new(kind))
+                .context("continuity has not been initialized yet");
+            assert!(state_invariant_check_is_not_ready(&typed));
+            assert_eq!(
+                typed
+                    .chain()
+                    .find_map(|cause| {
+                        cause.downcast_ref::<lcm::MissingStoredContinuityDocument>()
+                    })
+                    .map(|error| error.kind()),
+                Some(kind)
+            );
+
+            let prose_only = anyhow::anyhow!(legacy_message);
+            assert!(!state_invariant_check_is_not_ready(&prose_only));
+        }
+    }
+
+    #[test]
+    fn service_webhook_status_uses_typed_authentication_error() {
+        let typed_errors = [
+            crate::iot::webhook::WebhookHttpError::UnknownWebhook {
+                webhook_id: "missing-id".to_string(),
+            },
+            crate::iot::webhook::WebhookHttpError::SecretMissing {
+                source: anyhow::anyhow!("secret backend unavailable"),
+            },
+            crate::iot::webhook::WebhookHttpError::TokenRejected,
+        ];
+        for typed_error in typed_errors {
+            let error = anyhow::Error::new(typed_error)
+                .context("request credentials could not be accepted");
+            assert_eq!(iot_webhook_http_error_status(&error), 401);
+        }
+
+        for legacy_message in [
+            "webhook token rejected",
+            "webhook secret missing",
+            "unknown webhook: missing-id",
+        ] {
+            assert_eq!(
+                iot_webhook_http_error_status(&anyhow::anyhow!(legacy_message)),
+                400
+            );
+        }
+    }
+
+    #[test]
+    fn service_sqlite_lock_retry_uses_error_code_not_message() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            let error = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some("write could not proceed right now".to_string()),
+            ))
+            .context("command review persistence failed");
+            assert!(command_review_persistence_is_locked(&error));
+        }
+
+        for legacy_message in [
+            "database is locked",
+            "database table is locked",
+            "sqlite_busy",
+            "sqlite_locked",
+        ] {
+            let error = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(legacy_message.to_string()),
+            ));
+            assert!(!command_review_persistence_is_locked(&error));
+        }
+    }
+
+    #[test]
+    fn service_rxdb_queue_presence_uses_schema_metadata_not_prepare_error_text() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        assert!(
+            !sqlite_schema_object_exists(&conn, BUSINESS_OS_RXDB_QUEUE_TABLE)
+                .expect("inspect empty schema")
+        );
+
+        conn.execute_batch(&format!(
+            "CREATE TABLE {BUSINESS_OS_RXDB_QUEUE_TABLE} (\
+                 data TEXT NOT NULL,\
+                 deleted INTEGER NOT NULL DEFAULT 0,\
+                 legacy_diagnostic TEXT DEFAULT 'no such table'\
+             );"
+        ))
+        .expect("create queue table");
+        assert!(
+            sqlite_schema_object_exists(&conn, BUSINESS_OS_RXDB_QUEUE_TABLE)
+                .expect("inspect populated schema")
+        );
+    }
 
     #[test]
     fn canonical_business_command_prompt_context_is_compact_and_non_redundant() {
@@ -39316,7 +39459,7 @@ Use shell tools to create or update these files."
     }
 
     #[test]
-    fn runtime_retry_moves_business_command_to_retry_wait_before_releasing_queue() {
+    fn service_runtime_retry_kind_controls_policy_independently_of_summary() {
         let root = temp_root("business-command-runtime-retry-wait");
         let accepted = crate::business_os::store::record_command(
             &root,
@@ -39373,8 +39516,8 @@ Use shell tools to create or update these files."
         release_retryable_worker_messages(
             &root,
             std::slice::from_ref(&task_id),
-            "retryable runtime/API failure",
-            "provider stream disconnected before completion",
+            WorkerRetryKind::RuntimeApiFailure,
+            "turn timeout retry backoff",
         )
         .expect("release retryable command");
 

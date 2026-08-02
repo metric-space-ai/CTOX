@@ -29,6 +29,34 @@ use std::collections::BTreeMap;
 
 const WEBHOOK_SECRET_SCOPE: &str = "iot_webhook";
 
+#[derive(Debug)]
+pub(crate) enum WebhookHttpError {
+    UnknownWebhook { webhook_id: String },
+    SecretMissing { source: anyhow::Error },
+    TokenRejected,
+}
+
+impl std::fmt::Display for WebhookHttpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownWebhook { webhook_id } => {
+                write!(formatter, "unknown webhook: {webhook_id}")
+            }
+            Self::SecretMissing { .. } => formatter.write_str("webhook secret missing"),
+            Self::TokenRejected => formatter.write_str("webhook token rejected"),
+        }
+    }
+}
+
+impl std::error::Error for WebhookHttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SecretMissing { source } => Some(source.as_ref()),
+            Self::UnknownWebhook { .. } | Self::TokenRejected => None,
+        }
+    }
+}
+
 /// Canonical signal binding form: `"<asset_id>::<attribute_name>"`.
 fn parse_signal_ref(signal_ref: &str) -> Result<(&str, &str)> {
     signal_ref
@@ -232,13 +260,14 @@ pub(crate) fn handle_http(
         )
         .optional()
         .context("failed to look up webhook")?;
-    let (signal_ref, value_path) = row.ok_or_else(|| anyhow!("unknown webhook: {webhook_id}"))?;
+    let (signal_ref, value_path) = row.ok_or_else(|| WebhookHttpError::UnknownWebhook {
+        webhook_id: webhook_id.to_string(),
+    })?;
     let expected = crate::secrets::read_secret_value(root, WEBHOOK_SECRET_SCOPE, webhook_id)
-        .context("webhook secret missing")?;
-    anyhow::ensure!(
-        constant_eq(provided_token, &expected),
-        "webhook token rejected"
-    );
+        .map_err(|source| WebhookHttpError::SecretMissing { source })?;
+    if !constant_eq(provided_token, &expected) {
+        return Err(WebhookHttpError::TokenRejected.into());
+    }
     ingest(
         root,
         &signal_ref,

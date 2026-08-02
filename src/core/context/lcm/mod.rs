@@ -324,6 +324,33 @@ impl ContinuityKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingStoredContinuityDocument {
+    kind: ContinuityKind,
+}
+
+impl MissingStoredContinuityDocument {
+    pub fn new(kind: ContinuityKind) -> Self {
+        Self { kind }
+    }
+
+    pub fn kind(self) -> ContinuityKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for MissingStoredContinuityDocument {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "missing stored {} continuity document",
+            self.kind.as_str()
+        )
+    }
+}
+
+impl std::error::Error for MissingStoredContinuityDocument {}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ContinuityDocumentState {
     pub conversation_id: i64,
@@ -4676,11 +4703,11 @@ fn load_continuity_show_all_with(
 ) -> Result<ContinuityShowAll> {
     let narrative =
         fetch_continuity_document_with(conn, conversation_id, ContinuityKind::Narrative)?
-            .context("missing stored narrative continuity document")?;
+            .ok_or_else(|| MissingStoredContinuityDocument::new(ContinuityKind::Narrative))?;
     let anchors = fetch_continuity_document_with(conn, conversation_id, ContinuityKind::Anchors)?
-        .context("missing stored anchors continuity document")?;
+        .ok_or_else(|| MissingStoredContinuityDocument::new(ContinuityKind::Anchors))?;
     let focus = fetch_continuity_document_with(conn, conversation_id, ContinuityKind::Focus)?
-        .context("missing stored focus continuity document")?;
+        .ok_or_else(|| MissingStoredContinuityDocument::new(ContinuityKind::Focus))?;
     Ok(ContinuityShowAll {
         conversation_id,
         narrative,
