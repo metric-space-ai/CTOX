@@ -404,6 +404,51 @@ diese Meldung Teil des öffentlichen Verhaltens? Wo ja, gehört sie festgenagelt
 Wo nein, ist ein typisierter Fehler die Antwort — und der entsteht bei SF8, nicht
 hier. Kein Sammelticket.
 
+
+### SG4 — unabhängige Nachprüfung (02.08., Kimi)
+
+Geprüft wurde die Berechtigungsfläche, die ich und Sol gebaut haben — deshalb
+von einem Dritten, mit dem Auftrag zu WIDERLEGEN.
+
+**Der Hauptbefund korrigiert eine Behauptung von mir.** Nach SF7a/b hatte ich
+geschrieben: „59 Stellen ohne eine einzige ungeschützte Mutation — die
+Verdopplung war real, die fehlende Durchsetzung nicht." Das war wahr und
+irreführend. Beide Wellen inventarisierten **Durchsetzungsstellen** und prüften,
+ob jede ihre Ablehnung auswertet. **Ein Pfad ganz ohne Prüfung hat nichts, was
+ein Inventar von Prüfungen finden könnte.** Zählen, was da ist, entdeckt nicht,
+was fehlt.
+
+Gefunden wurden zwei mutierende Pfade ohne jede Entscheidung:
+
+- **C-1 `ctox.file.materialize`** — schrieb Datei-Chunks hinter blosser
+  Authentifizierung, während das Geschwister `ctox.file.export` zum blossen
+  LESEN eine Berechtigung verlangte. Der Schreibpfad war der schwächere.
+  **Behoben** (Commit 852a6e644), mit Test und Gegenprobe.
+- **C-2 `ctox.maintenance.client_ready`** — schliesst Wartungs-Leases ohne
+  Entscheidung. Das fehlende Gate ist Fakt; die Auswirkung (vorzeitiges Beenden
+  eines Wartungsfensters bei bekannter `lease_id`) ist als Vermutung markiert.
+  **Offen** — braucht eine Owner-Entscheidung, ob dieser Pfad überhaupt
+  aufruferbezogen sein soll.
+
+Was der Prüfer angegriffen hat und was gehalten hat, gehört genauso zum
+Ergebnis: `enforce_command_policy` liess sich nicht umgehen — die
+`PolicyDecision` bleibt intern, der Aufrufer bekommt nur ein `#[must_use]`
+gekennzeichnetes Ergebnis, und `on_allowed` läuft erst nach geprüfter Ablehnung.
+Die groben Gates (`require_manage_all` für Rechnungen, IoT, ATS, Coding-Agent),
+das Teilnehmer-Modell der Threads und die Read-only-Pfade wurden einzeln
+durchgegangen und sind keine Lücken.
+
+**Kleinere Befunde, offen:**
+
+- Vier der elf bewussten SF7-Ausnahmen sind Persistenz-Konsistenz, nicht
+  Entscheidungslogik — der Vertrag träfe dieselben Fälle. **Meine
+  Commit-Begründung überzeichnet dort.** Kein Sicherheitsimpact.
+- Collection-bezogene Grants überleben `ctox.module.delete` (SF5a räumt
+  `scope_type='collection'` nicht ab). Stale Grants bei Namens-Wiederverwendung.
+- Legacy-Manifeste mit `preview_user_ids` verlieren Preview-Zugriff bis zur
+  expliziten Migration aus SF5b — die Migration existiert, muss aber gefahren
+  werden.
+
 ## Welle S-GUARD — Zement
 
 - SG1 Inventar-/Contract-Drift-Checks in `cargo test` (nicht nur Tool).
