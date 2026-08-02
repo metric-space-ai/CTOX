@@ -96,6 +96,14 @@
   font-size: 12px;
 }
 
+.research-status-line {
+  min-width: 0;
+  border-bottom: 1px solid var(--research-line);
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--research-accent) 5%, var(--research-surface));
+  overflow-wrap: anywhere;
+}
+
 .research-task-list,
 .research-ranking-list,
 .research-note-stack,
@@ -190,7 +198,9 @@
   padding: 12px;
 }
 
-.research-center-header .ctox-pane-title {
+.research-left .ctox-pane-title,
+.research-center .ctox-pane-title,
+.research-right .ctox-pane-title {
   display: -webkit-box;
   overflow: hidden;
   white-space: normal;
@@ -202,6 +212,10 @@
 .research-graph-shell {
   min-height: 460px;
   overflow: hidden;
+  /* The query container sits on the shell, not on the stage: the stage holds
+     the WebGL canvas, and inline-size containment there changes how the canvas
+     measures itself — the graph renders zoomed out and near-empty. */
+  container: research-graph-stage / inline-size;
 }
 
 .research-graph-stage {
@@ -273,7 +287,7 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  max-width: min(58%, 620px);
+  max-width: min(calc(100% - 330px), 620px);
   pointer-events: none;
 }
 
@@ -289,9 +303,13 @@
   letter-spacing: -0.01em;
 }
 
-.research-graph-meta span {
+.research-graph-meta > div > span {
+  display: block;
+  overflow: hidden;
   color: #7f8d94;
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .research-graph-live {
@@ -900,6 +918,7 @@
 .research-workbench {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  container: research-workbench / inline-size;
 }
 
 /* Table cell content inside the kit table (source title button, sub id). */
@@ -1367,14 +1386,13 @@
   white-space: normal;
 }
 
-@container business-app-window (max-width: 980px) {
+@container business-app-window (max-width: 1120px) {
   .ctox-workspace.research-module {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(640px, auto) minmax(260px, auto) minmax(260px, auto);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(560px, auto) minmax(260px, auto);
     grid-template-areas:
-      "research-center"
-      "research-left"
-      "research-right";
+      "research-center research-center"
+      "research-left research-right";
     height: 100%;
     min-height: 0;
     overflow-y: auto;
@@ -1413,7 +1431,12 @@
 
 @container business-app-window (max-width: 680px) {
   .ctox-workspace.research-module {
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(690px, auto) minmax(220px, auto) minmax(240px, auto);
+    grid-template-areas:
+      "research-center"
+      "research-left"
+      "research-right";
   }
 
   .research-module > .ctox-column-resizer {
@@ -1561,6 +1584,21 @@
   min-width: 0;
 }
 
+/* The view-switch sits in the same row as the tabs. Once the tabs need the
+   whole row, that switch eats the last tab labels ("Knowledge" clipped to
+   "Kn", "Fachberichte" hidden behind the buttons). Below that width the
+   switch moves to its own row so every tab keeps its full label. */
+@container research-workbench (max-width: 720px) {
+  .research-tabs-container {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
+  }
+
+  .research-tabs-container .research-view-toggle {
+    justify-self: end;
+  }
+}
+
 .research-tabs-container > .ctox-pane-tabs:first-child {
   display: flex;
   width: 100%;
@@ -1596,7 +1634,7 @@
   color: currentColor;
 }
 
-@container business-app-window (max-width: 980px) {
+@container business-app-window (max-width: 1120px) {
   .research-tabs-container {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1671,6 +1709,29 @@
 .research-source-table {
   width: 100%;
   table-layout: fixed;
+}
+
+/* The table is wider than a narrow module window, so it scrolls sideways. The
+   title column has to stay put — otherwise it slides out of view and the rows
+   become unreadable stumps ("…tric") with no way to tell which source a score
+   belongs to. */
+.research-source-table th:first-child,
+.research-source-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--research-surface);
+}
+
+.research-source-table thead th:first-child {
+  z-index: 3;
+}
+
+/* Header labels wrap instead of being cut mid-word ("EVIDENCE STREI…"). */
+.research-source-table th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: bottom;
 }
 
 .research-source-col-title {
@@ -1780,13 +1841,15 @@
 }
 
 .research-source-card-title {
+  display: -webkit-box;
   font-size: 13.5px;
   font-weight: 850;
   line-height: 1.25;
   color: var(--research-text);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .research-source-card-subtitle {
@@ -2176,4 +2239,34 @@
 
 .research-metric-progress-bar-fill.warn {
   background: var(--research-warn);
+}
+
+/* Die Graph-Steuerung kompaktiert nach Stage-Breite, nicht nur nach
+   Fensterbreite: im Desktop-Layout kann die Stage schmal bleiben, während das
+   Modulfenster breit ist (z. B. 1280er-Viewport oder 60%-Modulfenster). */
+@container research-graph-stage (max-width: 760px) {
+  .research-graph-meta > div > span,
+  .research-graph-live {
+    display: none;
+  }
+
+  .research-graph-actions span {
+    display: none;
+  }
+
+  .research-graph-action {
+    min-width: 34px;
+    justify-content: center;
+  }
+
+  /* At this width the layer switch (fixed label set) and the insights panel
+     claim the same 12px of stage. The panel yields — its content reflows,
+     the switch labels would have to truncate. */
+  .research-graph-insights {
+    width: 258px;
+  }
+
+  .research-graph-stage.has-insights .research-graph-canvas {
+    right: 282px;
+  }
 }

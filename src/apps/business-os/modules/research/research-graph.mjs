@@ -32,10 +32,14 @@ export function createResearchGraph(host, options = {}) {
   let hoveredId = '';
   let autoRotateEnabled = options.autoRotate !== false;
   let settledFitPending = true;
+  let layoutLocked = false;
+  let layoutLockTimer = 0;
   let topologyKey = projectionTopologyKey(projection);
   let focusFrame = 0;
   let disposed = false;
+  let persistentLabelIds = selectPersistentLabelIds(projection);
   host.dataset.graphReheatCount = '0';
+  host.dataset.graphLayoutLocked = 'false';
   let projectionFingerprint = graphProjectionFingerprint(projection);
 
   const graph = ForceGraph3D({
@@ -72,6 +76,10 @@ export function createResearchGraph(host, options = {}) {
     .linkDirectionalParticleColor((link) => link.color || MUTED)
     .linkOpacity(0.5)
     .onNodeHover((node) => {
+      // ForceGraph may keep a warm simulation alive while the pointer is over
+      // the canvas. Freeze the current coordinates before applying hover
+      // styling so pointer movement can never restart or reshape the layout.
+      if (!layoutLocked) settleLayout();
       hoveredId = node?.id || '';
       if (focusFrame) window.cancelAnimationFrame(focusFrame);
       focusFrame = window.requestAnimationFrame(() => {
@@ -90,13 +98,7 @@ export function createResearchGraph(host, options = {}) {
       options.onBackgroundClick?.();
     })
     .onEngineStop(() => {
-      // The initial force pass can expand far beyond the camera bounds after
-      // the eager first fit. Re-fit once the layout has actually settled so a
-      // freshly replicated graph never opens as an apparently empty canvas.
-      if (settledFitPending) {
-        settledFitPending = false;
-        fit(900);
-      }
+      settleLayout();
       options.onSettled?.();
     });
 
@@ -127,6 +129,7 @@ export function createResearchGraph(host, options = {}) {
   const api = {
     setData(nextProjection) {
       if (disposed) return;
+      const wasLayoutLocked = layoutLocked;
       const positionedNodes = new Map(
         (graph.graphData?.().nodes || []).map((node) => [node.id, node]),
       );
@@ -139,6 +142,7 @@ export function createResearchGraph(host, options = {}) {
         || !sameIdSet(next.visibleLinkIds, projection.visibleLinkIds);
       if (!topologyChanged && !semanticChanged && !visibilityChanged) return false;
       projection = next;
+      persistentLabelIds = selectPersistentLabelIds(projection);
       projectionFingerprint = nextFingerprint;
       topologyKey = nextTopologyKey;
       projection.nodes = projection.nodes.map((node) => {
@@ -152,35 +156,54 @@ export function createResearchGraph(host, options = {}) {
           vx: positioned.vx,
           vy: positioned.vy,
           vz: positioned.vz,
+          ...(wasLayoutLocked && !topologyChanged ? {
+            fx: positioned.x,
+            fy: positioned.y,
+            fz: dimensions === 2 ? 0 : positioned.z,
+          } : {}),
         };
       });
       // Detail/layer slices preserve the existing camera and node positions.
       // Only the initial mount needs the settled-layout camera correction.
-      settledFitPending = false;
-      for (const timer of cameraFitTimers) window.clearTimeout(timer);
-      cameraFitTimers.clear();
+      settledFitPending = topologyChanged;
       rebuildAdjacency();
       if (topologyChanged || semanticChanged) {
+        if (topologyChanged) {
+          for (const timer of cameraFitTimers) window.clearTimeout(timer);
+          cameraFitTimers.clear();
+          cancelLayoutLock();
+          unlockLayout();
+        }
         graph.graphData(cloneProjection(projection));
+        if (wasLayoutLocked && !topologyChanged) {
+          layoutLocked = true;
+          host.dataset.graphLayoutLocked = 'true';
+        }
         disposeStaleNodeObjects(new Set(projection.nodes.map((node) => node.id)));
       }
       applyVisibilityState();
       configureForces();
       if (topologyChanged || semanticChanged) {
         host.dataset.graphReheatCount = String(Number(host.dataset.graphReheatCount || 0) + 1);
-        if (topologyChanged) graph.d3ReheatSimulation?.();
+        if (topologyChanged) {
+          graph.d3ReheatSimulation?.();
+        }
+        if (!layoutLocked) scheduleLayoutLock();
         if (selectedId || hoveredId) applyFocusState();
       }
       return true;
     },
     setDimensions(nextDimensions) {
       if (disposed) return;
+      cancelLayoutLock();
+      unlockLayout();
       dimensions = nextDimensions === 2 ? 2 : 3;
       settledFitPending = true;
       graph.numDimensions(dimensions);
       configureForces();
       host.dataset.graphReheatCount = String(Number(host.dataset.graphReheatCount || 0) + 1);
       graph.d3ReheatSimulation?.();
+      scheduleLayoutLock();
       setAutoRotate(autoRotateEnabled);
       if (dimensions === 2) graph.cameraPosition({ x: 0, y: 0, z: 520 }, { x: 0, y: 0, z: 0 }, 700);
       window.setTimeout(() => fit(560), 180);
@@ -222,6 +245,7 @@ export function createResearchGraph(host, options = {}) {
       document.removeEventListener('visibilitychange', visibilityHandler);
       graph.pauseAnimation?.();
       if (focusFrame) window.cancelAnimationFrame(focusFrame);
+      if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
       for (const timer of cameraFitTimers) window.clearTimeout(timer);
       cameraFitTimers.clear();
       disposeNodeObjects();
@@ -285,9 +309,8 @@ export function createResearchGraph(host, options = {}) {
     // A graph with a label sprite for every node becomes unreadable long
     // before it reaches the 120-node default. Keep persistent labels to the
     // most important concepts; all remaining nodes retain the hover tooltip.
-    const labelRankLimit = projection.nodes.length > 90 ? 10 : projection.nodes.length > 50 ? 14 : 20;
-    if (node.primary || Number(node.rank || 0) <= labelRankLimit) {
-      const label = new SpriteText(node.label || node.id);
+    if (persistentLabelIds.has(node.id)) {
+      const label = new SpriteText(truncateGraphLabel(node.label || node.id));
       label.color = node.color || '#d6eaf3';
       label.textHeight = Math.min(9, Math.max(3.2, node.labelSize || 4.5));
       label.fontFace = 'Inter, ui-sans-serif, system-ui, sans-serif';
@@ -440,11 +463,21 @@ export function createResearchGraph(host, options = {}) {
   }
 
   function fit(duration = 700) {
-    graph.resumeAnimation?.();
+    const connectedVisibleNodeIds = new Set();
+    for (const link of projection.links) {
+      if (!projection.visibleLinkIds.has(link.id)) continue;
+      const source = nodeId(link.source);
+      const target = nodeId(link.target);
+      if (projection.visibleNodeIds.has(source)) connectedVisibleNodeIds.add(source);
+      if (projection.visibleNodeIds.has(target)) connectedVisibleNodeIds.add(target);
+    }
+    const fitNodeIds = connectedVisibleNodeIds.size >= 4
+      ? connectedVisibleNodeIds
+      : projection.visibleNodeIds;
     graph.zoomToFit?.(
       duration,
-      36,
-      (node) => projection.visibleNodeIds.has(node.id),
+      dimensions === 2 ? 64 : 40,
+      (node) => fitNodeIds.has(node.id),
     );
   }
 
@@ -452,6 +485,50 @@ export function createResearchGraph(host, options = {}) {
     // The settled fit handles the final force layout. This early checkpoint
     // makes initial content visible without repeatedly moving the camera.
     scheduleCameraFit(520, 560);
+    scheduleLayoutLock();
+  }
+
+  function scheduleLayoutLock() {
+    if (layoutLockTimer || layoutLocked) return;
+    layoutLockTimer = window.setTimeout(() => {
+      layoutLockTimer = 0;
+      if (!disposed) settleLayout();
+    }, projection.nodes.length > 120 ? 2800 : 4400);
+  }
+
+  function cancelLayoutLock() {
+    if (!layoutLockTimer) return;
+    window.clearTimeout(layoutLockTimer);
+    layoutLockTimer = 0;
+  }
+
+  function settleLayout() {
+    if (!layoutLocked) lockLayout();
+    if (settledFitPending) {
+      settledFitPending = false;
+      fit(900);
+    }
+  }
+
+  function lockLayout() {
+    for (const node of graph.graphData?.().nodes || []) {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
+      node.fx = node.x;
+      node.fy = node.y;
+      node.fz = dimensions === 2 ? 0 : (Number.isFinite(node.z) ? node.z : 0);
+    }
+    layoutLocked = true;
+    host.dataset.graphLayoutLocked = 'true';
+  }
+
+  function unlockLayout() {
+    for (const node of graph.graphData?.().nodes || []) {
+      node.fx = undefined;
+      node.fy = undefined;
+      node.fz = undefined;
+    }
+    layoutLocked = false;
+    host.dataset.graphLayoutLocked = 'false';
   }
 
   function scheduleCameraFit(delay, duration) {
@@ -525,6 +602,33 @@ function normalizeProjection(value) {
     visibleNodeIds: new Set(Array.isArray(value?.visibleNodeIds) ? value.visibleNodeIds : nodes.map((node) => node.id)),
     visibleLinkIds: new Set(Array.isArray(value?.visibleLinkIds) ? value.visibleLinkIds : links.map((link) => link.id)),
   };
+}
+
+function selectPersistentLabelIds(projection) {
+  const limit = projection.nodes.length > 50 ? 1 : 3;
+  const seenLabels = new Set();
+  return new Set(
+    [...projection.nodes]
+      .sort((left, right) => (
+        Number(Boolean(right.primary)) - Number(Boolean(left.primary))
+        || Number(right.importance || 0) - Number(left.importance || 0)
+        || Number(left.rank || Number.MAX_SAFE_INTEGER) - Number(right.rank || Number.MAX_SAFE_INTEGER)
+      ))
+      .filter((node) => {
+        const key = String(node.label || node.id || '').trim().toLocaleLowerCase();
+        if (!key || seenLabels.has(key)) return false;
+        seenLabels.add(key);
+        return true;
+      })
+      .slice(0, limit)
+      .map((node) => node.id),
+  );
+}
+
+function truncateGraphLabel(value, maxLength = 30) {
+  const label = String(value || '').trim();
+  if (label.length <= maxLength) return label;
+  return `${label.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
 function projectionTopologyKey(value) {

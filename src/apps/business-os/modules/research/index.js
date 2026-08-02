@@ -8,7 +8,7 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v88';
+const BUILD = '20260729-research-knowledge-usability-v91';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -216,6 +216,85 @@ const RESEARCH_TABLE_CONTRACT = Object.freeze({
   },
 });
 
+const BEARING_MEASUREMENT_TABLE_CONTRACT = Object.freeze({
+  measured_load_points: {
+    title: 'Direct Measurement Points',
+    columns: [
+      'measurement_id',
+      'source_id',
+      'dataset_id',
+      'source_file',
+      'source_row_ref',
+      'propeller_size_original',
+      'prop_diameter_in',
+      'prop_pitch_in',
+      'rpm',
+      'thrust_N',
+      'torque_Nm',
+      'shaft_power_W',
+      'radial_load_N_direct',
+      'axial_load_N_direct',
+      'thrust_coefficient_CT',
+      'power_coefficient_CP',
+      'measurement_kind',
+      'uncertainty',
+      'confidence',
+      'canonical_url',
+      'snapshot_sha256',
+      'is_derived',
+    ],
+  },
+  derived_propeller_load_points: {
+    title: 'Derived Propeller Load Points',
+    columns: [
+      'derivation_id',
+      'source_id',
+      'dataset_id',
+      'source_file',
+      'source_row_ref',
+      'propeller_size_original',
+      'prop_diameter_in',
+      'prop_pitch_in',
+      'diameter_m_input',
+      'rpm_input',
+      'air_density_kg_m3_input',
+      'thrust_coefficient_CT_input',
+      'power_coefficient_CP_input',
+      'thrust_N_derived',
+      'shaft_power_W_derived',
+      'torque_Nm_derived',
+      'formula_thrust',
+      'formula_power',
+      'formula_torque',
+      'assumptions',
+      'uncertainty',
+      'confidence',
+      'derivation_method',
+      'is_derived',
+      'canonical_url',
+      'snapshot_sha256',
+    ],
+  },
+  derived_bearing_loads: {
+    title: 'Derived Bearing Reactions',
+    columns: [
+      'derivation_id',
+      'source_id',
+      'source_row_ref',
+      'bearing_radial_load_N',
+      'axial_load_N',
+      'moment_Nm',
+      'derivation_method',
+      'assumption_text',
+      'uncertainty',
+      'claim_id',
+      'evidence_id',
+      'canonical_url',
+      'snapshot_hash',
+    ],
+  },
+});
+
 const DRONE_SOURCES_METADATA = Object.freeze({
   'nasa-mtb2': {
     group: 'nasa',
@@ -391,6 +470,7 @@ const state = {
   candidateModels: [],
   sourceRows: [],
   curatedRows: [],
+  evidenceRows: [],
   measurementRows: [],
   derivedMeasurementRows: [],
   graphNodeRows: [],
@@ -401,6 +481,7 @@ const state = {
   graphContractErrors: [],
   graphProjectionCache: new Map(),
   graphSurface: null,
+  graphTaskId: '',
   graphMountToken: 0,
   knowledgeRefreshInFlight: false,
   selectedGraphNodeId: '',
@@ -435,6 +516,7 @@ const state = {
   refreshDirty: false,
   researchRefreshTimer: null,
   knowledgeRefreshTimer: null,
+  pendingLocalRefreshCollections: new Set(),
   refreshSequences: {
     research: 0,
     knowledge: 0,
@@ -787,12 +869,7 @@ async function loadLocalState({ mountToken = null } = {}) {
 }
 
 function wireRealtime() {
-  const knowledgeLifecycleCollections = new Set([
-    'research_tasks',
-    'research_runs',
-    'business_commands',
-    'ctox_queue_tasks',
-  ]);
+  const knowledgeLifecycleCollections = new Set(['research_tasks']);
   const collections = [
     ['research_tasks', readableCollection('research_tasks')],
     ['research_runs', readableCollection('research_runs')],
@@ -803,10 +880,17 @@ function wireRealtime() {
   ].filter(([, collection]) => collection);
   for (const [name, collection] of collections) {
     const subscription = collection.$?.subscribe?.(() => {
-      scheduleLocalRefresh(80);
+      scheduleLocalRefresh(80, name);
       if (knowledgeLifecycleCollections.has(name)) scheduleKnowledgeRefresh(250);
     });
     if (subscription?.unsubscribe) state.cleanup.push(() => subscription.unsubscribe());
+  }
+  const subscribeChanges = state.ctx?.sync?.subscribeCollectionChanges;
+  if (typeof subscribeChanges === 'function') {
+    const unsubscribe = subscribeChanges.call(state.ctx.sync, 'knowledge_tables', () => {
+      scheduleKnowledgeRefresh(120);
+    });
+    if (typeof unsubscribe === 'function') state.cleanup.push(unsubscribe);
   }
 }
 
@@ -851,7 +935,8 @@ function schedulePostSyncRefresh(delay = 250) {
   scheduleKnowledgeRefresh(delay);
 }
 
-function scheduleLocalRefresh(delay = 80) {
+function scheduleLocalRefresh(delay = 80, collectionName = '') {
+  if (collectionName) state.pendingLocalRefreshCollections.add(collectionName);
   if (state.researchRefreshTimer) window.clearTimeout(state.researchRefreshTimer);
   const sequence = ++state.refreshSequences.research;
   const mountToken = state.mountToken;
@@ -859,9 +944,23 @@ function scheduleLocalRefresh(delay = 80) {
     if (sequence !== state.refreshSequences.research) return;
     state.researchRefreshTimer = null;
     if (!mountToken || state.mountToken !== mountToken) return;
+    const changedCollections = new Set(state.pendingLocalRefreshCollections);
+    state.pendingLocalRefreshCollections.clear();
     await loadLocalState({ mountToken });
     if (state.mountToken !== mountToken) return;
-    render();
+    if (changedCollections.has('research_tasks')) {
+      await loadDashboardData();
+      if (state.mountToken !== mountToken) return;
+      render();
+      return;
+    }
+    if (changedCollections.has('documents')) {
+      renderCenter();
+    }
+    // Queue, command and run documents update while work is active. They only
+    // affect the context pane; rebuilding the center pane here disconnects
+    // tabs, resets nested scroll containers and remounts the graph mid-click.
+    renderRight();
   }, delay);
 }
 
@@ -1278,6 +1377,7 @@ async function loadDashboardData() {
   state.candidateModels = [];
   state.sourceRows = [];
   state.curatedRows = [];
+  state.evidenceRows = [];
   state.measurementRows = [];
   state.derivedMeasurementRows = [];
   state.graphNodeRows = [];
@@ -1296,14 +1396,17 @@ async function loadDashboardData() {
     task.source_catalog_key || tableKey(base, ['source_catalog', 'sources', 'curated_sources']),
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
-  const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
-  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
+  const evidenceTable = tableForKey(base, 'evidence_points');
+  const measurementTable = preferredDirectMeasurementTable(base, task);
+  const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
+    || tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
-  const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
+  const [candidateRows, sourceRows, curatedRows, evidenceRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
     candidateTable ? fetchTableRows(candidateTable.id) : Promise.resolve([]),
     sourceTable ? fetchTableRows(sourceTable.id) : Promise.resolve([]),
     curatedTable && curatedTable.id !== sourceTable?.id ? fetchTableRows(curatedTable.id) : Promise.resolve([]),
+    evidenceTable ? fetchTableRows(evidenceTable.id) : Promise.resolve([]),
     measurementTable && measurementTable.id !== sourceTable?.id && measurementTable.id !== curatedTable?.id ? fetchTableRows(measurementTable.id) : Promise.resolve([]),
     derivedMeasurementTable ? fetchTableRows(derivedMeasurementTable.id) : Promise.resolve([]),
     graphNodeTable ? fetchTableRows(graphNodeTable.id) : Promise.resolve([]),
@@ -1312,14 +1415,21 @@ async function loadDashboardData() {
   state.candidateRows = candidateRows;
   state.sourceRows = sourceRows;
   state.curatedRows = curatedRows;
+  state.evidenceRows = evidenceRows;
   state.measurementRows = measurementRows;
   state.derivedMeasurementRows = derivedMeasurementRows;
   state.graphNodeRows = graphNodeRows;
   state.graphEdgeRows = graphEdgeRows;
   state.candidateModels = buildSourceModels(task, candidateRows, [], []);
-  state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows);
+  state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows);
   const evidenceMeasurementRows = filterMeasurementRowsForEvidence(measurementRows, state.sourceModels);
-  const evidenceGraphRows = filterGraphRowsForEvidence(graphNodeRows, graphEdgeRows, evidenceSourceIds(state.sourceModels));
+  state.sourceCatalogComplete = sourceCatalogRowsComplete(sourceTable, sourceRows);
+  const evidenceGraphRows = filterGraphRowsForEvidence(
+    graphNodeRows,
+    graphEdgeRows,
+    evidenceSourceIds(state.sourceModels),
+    state.sourceCatalogComplete,
+  );
   state.graphContractStatus = evidenceGraphRows.status || '';
   state.graphContractErrors = evidenceGraphRows.errors || [];
   state.graphProjection = buildResearchGraphProjection({
@@ -1515,11 +1625,19 @@ function finitePositive(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
+function buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows = []) {
   const curatedBySource = new Map();
   for (const row of curatedRows) {
     const id = sourceId(row);
     if (id) curatedBySource.set(id, row);
+  }
+  const evidenceBySource = new Map();
+  for (const row of evidenceRows) {
+    const id = sourceId(row);
+    if (!id) continue;
+    const sourceEvidence = evidenceBySource.get(id) || [];
+    if (sourceEvidence.length < 12) sourceEvidence.push(row);
+    evidenceBySource.set(id, sourceEvidence);
   }
   const raw = (sourceRows.length ? sourceRows : curatedRows).filter((row) => sourceModelId(row));
   const initialModels = raw.map((row) => {
@@ -1552,6 +1670,7 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
       note,
       row,
       curated,
+      evidenceRows: evidenceBySource.get(id) || [],
       measurements: agg,
       evidenceEligible: gate.eligible,
       evidenceStatus: gate.status,
@@ -1594,8 +1713,22 @@ function filterMeasurementRowsForEvidence(rows, sourceModels = state.sourceModel
   });
 }
 
-function filterGraphRowsForEvidence(nodeRows, edgeRows, eligibleIds) {
+function sourceCatalogRowsComplete(sourceTable, sourceRows) {
+  if (!sourceTable) return true;
+  const payload = sourceTable.payload && typeof sourceTable.payload === 'object' ? sourceTable.payload : {};
+  if ((payload.rows_complete ?? sourceTable.rows_complete) === false) return false;
+  const expected = Number(payload.row_count ?? sourceTable.row_count ?? 0);
+  if (!Number.isFinite(expected) || expected <= 0) return true;
+  return (sourceRows || []).length >= Math.min(expected, ROW_LIMIT);
+}
+
+function filterGraphRowsForEvidence(nodeRows, edgeRows, eligibleIds, sourcesComplete = true) {
   if (!(nodeRows || []).length && !(edgeRows || []).length) return { nodes: [], edges: [], status: '', errors: [] };
+  // The contract can only be judged once the source catalogue is fully loaded.
+  // While chunks are still arriving, every not-yet-known source id looks like a
+  // violation — that turned a normal loading window into a permanent
+  // `invalid_graph_contract` panel even though the stored graph was intact.
+  if (!sourcesComplete) return { nodes: [], edges: [], status: 'pending_sources', errors: [] };
   const errors = [];
   const nodes = (nodeRows || []).map((row) => {
     const nodeId = firstString(row, ['node_id', 'id', 'concept_id', 'key']);
@@ -1858,13 +1991,22 @@ function aggregateMeasurements(rows, sourceModels = null) {
       count: 0,
       maxAxial: 0,
       maxTangentialEquivalent: 0,
+      minRpm: Number.POSITIVE_INFINITY,
       maxRpm: 0,
+      hasCt: false,
+      hasCp: false,
       files: new Set(),
     };
     current.count += 1;
     current.maxAxial = Math.max(current.maxAxial, numberValue(row.force_N ?? row.axial_load_N ?? row.thrust_N));
     current.maxTangentialEquivalent = Math.max(current.maxTangentialEquivalent, numberValue(tangentialEquivalentForce(row)));
-    current.maxRpm = Math.max(current.maxRpm, numberValue(row.rpm));
+    const rpm = optionalNumberValue(row.rpm);
+    if (rpm !== null) {
+      current.minRpm = Math.min(current.minRpm, rpm);
+      current.maxRpm = Math.max(current.maxRpm, rpm);
+    }
+    current.hasCt ||= optionalNumberValue(row.thrust_coefficient_CT) !== null;
+    current.hasCp ||= optionalNumberValue(row.power_coefficient_CP) !== null;
     if (row.source_file) current.files.add(String(row.source_file));
     bySource.set(id, current);
   }
@@ -2120,6 +2262,12 @@ function renderCenter() {
   }
   const projection = currentGraphProjection(task);
   const visibleStatus = visibleResearchStatus();
+  const preservedGraphHost = state.showDiagram
+    && state.graphSurface
+    && state.graphTaskId === task.id
+    ? root.querySelector('[data-research-graph-host]')
+    : null;
+  preservedGraphHost?.remove();
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band research-center-header">
       <div class="ctox-pane-title-row">
@@ -2179,8 +2327,16 @@ function renderCenter() {
       </section>
     </div>
   `;
-  if (state.showDiagram) scheduleResearchGraphMount(task, projection);
-  else disposeResearchGraph();
+  if (state.showDiagram && preservedGraphHost) {
+    const replacementHost = root.querySelector('[data-research-graph-host]');
+    replacementHost?.replaceWith(preservedGraphHost);
+    root.querySelector('[data-research-graph-loading]')?.remove();
+    state.graphSurface.setData(projection);
+  } else if (state.showDiagram) {
+    scheduleResearchGraphMount(task, projection);
+  } else {
+    disposeResearchGraph();
+  }
   restorePaneScroll(root, scrollState);
 }
 
@@ -2304,7 +2460,12 @@ function formatGraphProvenance(value) {
 }
 
 function currentGraphProjection(task = selectedTask()) {
-  const evidenceGraphRows = filterGraphRowsForEvidence(state.graphNodeRows, state.graphEdgeRows, evidenceSourceIds(state.sourceModels));
+  const evidenceGraphRows = filterGraphRowsForEvidence(
+    state.graphNodeRows,
+    state.graphEdgeRows,
+    evidenceSourceIds(state.sourceModels),
+    state.sourceCatalogComplete !== false,
+  );
   const key = graphProjectionFingerprint(task, evidenceGraphRows, state.graph.layer, state.sourceModels, state.measurementRows);
   const cached = state.graphProjectionCache.get(key);
   const baseProjection = cached || enrichGraphSemanticMetadata(buildResearchGraphProjection({
@@ -2410,7 +2571,9 @@ async function scheduleResearchGraphMount(task, projection) {
   const token = ++state.graphMountToken;
   const loading = root.querySelector('[data-research-graph-loading]');
   if (!projection.nodes.length) {
-    if (loading) loading.innerHTML = projection.status === 'invalid_graph_contract'
+    if (loading) loading.innerHTML = projection.status === 'pending_sources'
+      ? `<span class="research-spinner" aria-hidden="true"></span><span>${escapeHtml(state.t('graphAwaitingSources', 'Quellen werden geladen — der Graph erscheint, sobald der Quellenkatalog vollständig ist.'))}</span>`
+      : projection.status === 'invalid_graph_contract'
       ? '<strong>invalid_graph_contract</strong><span>Persistierte Graphdaten erfüllen den Evidence-/Provenienzvertrag nicht.</span>'
       : `<span>${escapeHtml(state.t('graphNoData', 'Noch keine Begriffe. Starte eine Nachrecherche oder füge Quellen hinzu.'))}</span>`;
     return;
@@ -2436,6 +2599,7 @@ async function scheduleResearchGraphMount(task, projection) {
         loading?.remove();
       },
     });
+    state.graphTaskId = task.id;
     state.graph.status = 'ready';
     loading?.remove();
   } catch (error) {
@@ -2458,6 +2622,7 @@ function disposeResearchGraph() {
   state.graphMountToken += 1;
   state.graphSurface?.dispose?.();
   state.graphSurface = null;
+  state.graphTaskId = '';
 }
 
 function selectGraphNode(node) {
@@ -3407,13 +3572,32 @@ function selectSourceFromUi(sourceId) {
 
   const centerMatch = [...(pane('center')?.querySelectorAll('[data-source-id]') || [])]
     .find((node) => node.dataset.sourceId === nextId && node.closest('.research-table-host'));
-  centerMatch?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  scrollElementWithinNearestList(centerMatch);
 
   renderRight();
-  pane('right')?.querySelector('[data-selected-source-section]')?.scrollIntoView?.({
-    block: 'start',
-    inline: 'nearest',
-  });
+  scrollElementWithinNearestList(
+    pane('right')?.querySelector('[data-selected-source-section]'),
+  );
+}
+
+function scrollElementWithinNearestList(element) {
+  if (!element) return;
+  const container = element.closest(
+    '.research-sources-shards-scroll, .research-table-host, .research-left-scroll, .research-right-scroll',
+  );
+  if (!container || container === element) return;
+  const elementRect = element.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  if (elementRect.top < containerRect.top) {
+    container.scrollTop -= containerRect.top - elementRect.top;
+  } else if (elementRect.bottom > containerRect.bottom) {
+    container.scrollTop += elementRect.bottom - containerRect.bottom;
+  }
+  if (elementRect.left < containerRect.left) {
+    container.scrollLeft -= containerRect.left - elementRect.left;
+  } else if (elementRect.right > containerRect.right) {
+    container.scrollLeft += elementRect.right - containerRect.right;
+  }
 }
 
 function capturePaneScroll(root) {
@@ -3497,6 +3681,24 @@ function sourceDataSummary(source) {
   const row = source?.row || {};
   const direct = firstString(row, ['data_fields', 'fields', 'measurement_fields', 'summary', 'abstract']);
   if (direct) return direct;
+  const measurements = source?.measurements;
+  if (measurements?.count) {
+    const channels = [
+      measurements.hasCt ? 'CT' : '',
+      measurements.hasCp ? 'CP' : '',
+      measurements.maxAxial > 0 ? 'Schub (N)' : '',
+      measurements.maxTangentialEquivalent > 0 ? 'Tangentialkraft (N)' : '',
+    ].filter(Boolean);
+    const rpmRange = Number.isFinite(measurements.minRpm) && measurements.maxRpm > 0
+      ? `; ${formatMeasurementNumber(measurements.minRpm, 0)}–${formatMeasurementNumber(measurements.maxRpm, 0)} RPM`
+      : '';
+    return `${Number(measurements.count).toLocaleString(state.lang === 'de' ? 'de-DE' : 'en-US')} Messzeilen${channels.length ? `; ${channels.join(', ')}` : ''}${rpmRange}`;
+  }
+  const evidence = source?.evidenceRows?.find((item) => (
+    firstString(item, ['exact_quote_or_value', 'fact_value', 'quote'])
+  ));
+  const excerpt = compactSourceExcerpt(firstString(evidence, ['exact_quote_or_value', 'fact_value', 'quote']));
+  if (excerpt) return excerpt;
   const bibliographic = [
     firstString(row, ['authors_or_institution', 'authors', 'institution', 'publisher']),
     firstString(row, ['publication_year', 'year']),
@@ -3511,7 +3713,14 @@ function sourceDataSummary(source) {
 function sourceContributionSummary(source) {
   const row = source?.row || {};
   const direct = firstString(row, ['contribution_note', 'contribution', 'use', 'verification_notes', 'evidence_note']);
-  if (direct) return direct;
+  if (direct && !/original content read|snapshot retained|sha-256 verified/i.test(direct)) return direct;
+  const evidence = source?.evidenceRows?.find((item) => firstString(item, ['claim_id']))
+    || source?.evidenceRows?.[0];
+  const evidenceValue = compactSourceExcerpt(firstString(evidence, ['fact_value', 'exact_quote_or_value', 'quote']));
+  if (evidenceValue) {
+    const label = firstString(evidence, ['fact_label', 'statement_type', 'criterion_id']);
+    return `${label && label !== 'source_relevance' ? `${label}: ` : ''}${evidenceValue}`;
+  }
   const relevance = firstString(row, ['evidence_relevance_score', 'relevance_score']);
   return relevance
     ? `Evidence-Relevanz ${relevance}/100; Originalinhalt und Snapshot verifiziert.`
@@ -3526,7 +3735,18 @@ function sourceLimitationsSummary(source) {
     'limitations',
     'uncertainty',
     'independence_note',
+  ]) || firstString(source?.evidenceRows?.find((item) => firstString(item, ['limitations'])), [
+    'limitations',
   ]) || 'Geltungsbereich und Übertragbarkeit müssen für den konkreten Betriebspunkt geprüft werden.';
+}
+
+function compactSourceExcerpt(value, maxLength = 260) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  const cut = text.slice(0, maxLength);
+  const boundary = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('; '), cut.lastIndexOf(' '));
+  return `${cut.slice(0, Math.max(boundary, Math.floor(maxLength * 0.7))).trim()}…`;
 }
 
 function sourceTags(source) {
@@ -3572,7 +3792,10 @@ function formatDimensionScore(value) {
 
 function renderMeasurementsTable() {
   const directRows = filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels);
-  const derivedRows = filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels);
+  const derivedRows = derivedMeasurementDisplayRows(
+    filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels),
+    directRows,
+  );
   const mode = state.measurementMode === 'direct' ? 'direct' : 'derived';
   const rows = mode === 'direct' ? directRows : derivedRows;
   return `
@@ -3581,7 +3804,7 @@ function renderMeasurementsTable() {
         Direkte Messwerte <span>${directRows.length}</span>
       </button>
       <button type="button" class="ctox-pane-tab${mode === 'derived' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="derived" role="tab" aria-selected="${mode === 'derived'}">
-        Abgeleitete Kräfte &amp; Momente <span>${derivedRows.length}</span>
+        Abgeleitete Propellerlasten <span>${derivedRows.length}</span>
       </button>
     </div>
     <p class="research-measurement-note">${mode === 'direct'
@@ -3589,6 +3812,16 @@ function renderMeasurementsTable() {
       : 'Aus CT/CP mit dokumentierter Luftdichte und Propellergeometrie abgeleitet. Diese Werte sind keine direkt gemessenen Lagerkräfte.'}</p>
     ${mode === 'direct' ? renderDirectMeasurements(rows) : renderDerivedMeasurements(rows)}
   `;
+}
+
+function derivedMeasurementDisplayRows(derivedRows, directRows) {
+  const directRowsById = new Map((directRows || [])
+    .map((row) => [String(row.measurement_id || '').trim(), row])
+    .filter(([id]) => id));
+  return (derivedRows || []).map((row) => ({
+    ...(directRowsById.get(String(row.measurement_id || '').trim()) || {}),
+    ...row,
+  }));
 }
 
 function renderDirectMeasurements(rows) {
@@ -3655,11 +3888,11 @@ function renderDerivedMeasurements(rows) {
             <td>${escapeHtml(firstString(row, ['propeller_size_original', 'propeller_size']))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_diameter'))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_pitch'))}</td>
-            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.rpm, 0)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.thrust_N)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.torque_Nm)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.shaft_power_W)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.air_density_kg_m3)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.input_rpm ?? row.rpm, 0)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.derived_thrust_N ?? row.thrust_N)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.derived_torque_Nm ?? row.torque_Nm)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.derived_shaft_power_W ?? row.shaft_power_W)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.input_rho_kg_m3 ?? row.air_density_kg_m3)}</td>
           </tr>
         `).join('') || `<tr><td colspan="9">Keine verifizierten abgeleiteten Kraft-/Momentzeilen vorhanden.</td></tr>`}
       </tbody>
@@ -3687,7 +3920,12 @@ function metricPropellerLength(row, stem) {
   const metric = optionalNumberValue(row[`${stem}_mm`]);
   if (metric !== null) return metric;
   const inches = optionalNumberValue(row[`${stem}_in`]);
-  return inches === null ? '' : inches * 25.4;
+  if (inches !== null) return inches * 25.4;
+  if (stem === 'prop_diameter') {
+    const meters = optionalNumberValue(row.diameter_m_input ?? row.input_D_m);
+    if (meters !== null) return meters * 1000;
+  }
+  return '';
 }
 
 function tangentialEquivalentForce(row) {
@@ -3782,6 +4020,14 @@ function renderRight() {
 function renderRunPanel(runInfo) {
   const task = selectedTask();
   const canRun = canRunResearchTask(task);
+  const isCancelledHistory = runInfo.statusKind === 'cancelled';
+  const visibleStatusKind = isCancelledHistory ? 'idle' : runInfo.statusKind;
+  const visibleStatusLabel = isCancelledHistory
+    ? state.t('lastRunCancelled', 'Letzter Lauf abgebrochen')
+    : runInfo.statusLabel;
+  const visibleRunTitle = isCancelledHistory
+    ? state.t('readyForContinuation', 'Bereit für eine Fortsetzung')
+    : (runInfo.title || runInfo.commandType || 'Systematic Research');
   return `
     <section class="research-run-panel">
       <div class="research-section-head flush">
@@ -3789,18 +4035,13 @@ function renderRunPanel(runInfo) {
         <span>${escapeHtml(runInfo.updatedLabel || state.t('noActiveRun', 'kein Lauf'))}</span>
       </div>
       ${runInfo.run || runInfo.command || runInfo.queueTask ? `
-        <div class="research-run-state research-run-${escapeHtml(runInfo.statusKind)}">
+        <div class="research-run-state research-run-${escapeHtml(visibleStatusKind)}">
           <span></span>
           <div>
-            <strong>${escapeHtml(runInfo.statusLabel)}</strong>
-            <small>${escapeHtml(runInfo.title || runInfo.commandType || 'Systematic Research')}</small>
+            <strong>${escapeHtml(visibleStatusLabel)}</strong>
+            <small>${escapeHtml(visibleRunTitle)}</small>
           </div>
         </div>
-        <dl class="ctox-fields">
-          <dt>${escapeHtml(state.t('command', 'Command'))}</dt><dd>${escapeHtml(shortId(runInfo.commandId))}</dd>
-          <dt>${escapeHtml(state.t('queue', 'Queue'))}</dt><dd>${escapeHtml(shortId(runInfo.taskQueueId))}</dd>
-          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
-        </dl>
         <div class="research-run-actions">
           <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" data-task-status="${escapeHtml(runInfo.status)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
         </div>
@@ -4151,12 +4392,19 @@ async function runSelectedResearch() {
   const commandId = `cmd_${crypto.randomUUID()}`;
   const researchRunId = `research_run_${crypto.randomUUID()}`;
   const scoringDimensions = scoringDimensionsForTask(task).filter((axis) => axis.id !== 'portfolio_priority');
-  const tableContract = task.payload?.table_contract || RESEARCH_TABLE_CONTRACT;
+  const baseTableContract = task.payload?.table_contract || RESEARCH_TABLE_CONTRACT;
+  const tableContract = inferResearchKind(task) === 'bearing'
+    ? { ...BEARING_MEASUREMENT_TABLE_CONTRACT, ...baseTableContract }
+    : baseTableContract;
   const existingTables = new Set((base?.tables || []).map((table) => table.table_key));
   const missingTables = Object.keys(tableContract).filter((key) => !existingTables.has(key));
-  const requireMeasuredLoadPoints = task.measurements_table_key === 'measured_load_points'
+  const requireMeasuredLoadPoints = inferResearchKind(task) === 'bearing'
+    || task.measurements_table_key === 'measured_load_points'
     || existingTables.has('measured_load_points')
     || Object.hasOwn(tableContract, 'measured_load_points');
+  const requireDerivedPropellerLoads = inferResearchKind(task) === 'bearing'
+    || existingTables.has('derived_propeller_load_points')
+    || Object.hasOwn(tableContract, 'derived_propeller_load_points');
   const requireDerivedBearingLoads = existingTables.has('derived_bearing_loads')
     || Object.hasOwn(tableContract, 'derived_bearing_loads');
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
@@ -4288,6 +4536,7 @@ async function runSelectedResearch() {
         semantic_graph_nodes: 'semantic_graph_nodes',
         semantic_graph_edges: 'semantic_graph_edges',
         ...(requireMeasuredLoadPoints ? { measured_load_points: 'measured_load_points' } : {}),
+        ...(requireDerivedPropellerLoads ? { derived_propeller_load_points: 'derived_propeller_load_points' } : {}),
         ...(requireDerivedBearingLoads ? { derived_bearing_loads: 'derived_bearing_loads' } : {}),
       },
     },
@@ -5008,17 +5257,26 @@ function latestRunForTask(taskId) {
 function researchRunInfo(task) {
   const run = latestRunForTask(task?.id);
   const fallbackCommand = latestResearchCommandForTask(task?.id);
-  const commandId = run?.command_id || run?.payload?.result?.command_id || fallbackCommand?.command_id || fallbackCommand?.id || '';
-  const taskQueueId = run?.task_queue_id || run?.payload?.result?.task_id || '';
+  // A run row only records that a run was requested; the command and the queue
+  // task carry its outcome. A run whose command already finished — or that is
+  // older than the newest command for this task — describes a past attempt.
+  // Treating its `queued` as live state left "Research fortsetzen" permanently
+  // disabled with "läuft bereits" while nothing was running at all.
+  const runStale = Boolean(fallbackCommand)
+    && Number(fallbackCommand.updated_at_ms || 0) > Number(run?.updated_at_ms || 0);
+  const commandId = (runStale ? '' : (run?.command_id || run?.payload?.result?.command_id || ''))
+    || fallbackCommand?.command_id || fallbackCommand?.id || '';
+  const taskQueueId = runStale ? '' : (run?.task_queue_id || run?.payload?.result?.task_id || '');
   const command = commandId
-    ? state.commands.find((item) => item.command_id === commandId || item.id === commandId)
+    ? (state.commands.find((item) => item.command_id === commandId || item.id === commandId) || fallbackCommand)
     : fallbackCommand;
   const queueTask = taskQueueId
     ? state.queueTasks.find((item) => item.id === taskQueueId)
     : commandId
       ? state.queueTasks.find((item) => item.command_id === commandId)
       : null;
-  const status = queueTask?.status || command?.task_status || command?.status || run?.status || '';
+  const runStatus = runStale ? '' : (run?.status || '');
+  const status = queueTask?.status || command?.task_status || command?.status || runStatus || '';
   const statusKind = statusKindFor(status);
   return {
     run,
@@ -5069,6 +5327,12 @@ function knowledgeBaseForTask(task) {
 function tableForKey(base, key) {
   if (!base || !key) return null;
   return base.tables.find((table) => table.table_key === key) || null;
+}
+
+function preferredDirectMeasurementTable(base, task = null) {
+  return tableForKey(base, 'measured_load_points')
+    || tableForKey(base, task?.measurements_table_key)
+    || firstTableMatching(base, /measure|load|point/i);
 }
 
 function firstTableMatching(base, pattern) {
@@ -5418,6 +5682,12 @@ function reloadStatusText() {
 
 function visibleResearchStatus() {
   if (diagnosticFailures().length) return reloadStatusText();
+  const passiveStatuses = new Set([
+    '',
+    state.t('loadingKnowledge', 'Knowledge wird geladen...'),
+    reloadStatusText(),
+  ]);
+  if (!passiveStatuses.has(String(state.status || ''))) return state.status;
   if (state.initialDataReady && state.tasks.length) return '';
   return state.status;
 }
@@ -6098,6 +6368,7 @@ export const __researchTestHooks = {
   emptyStateForNoTask,
   evidenceGate,
   defaultMeasurementsTableKey,
+  derivedMeasurementDisplayRows,
   eligibleGraphFocusSourceIds,
   filterGraphRowsForEvidence,
   filterMeasurementRowsForEvidence,
@@ -6111,6 +6382,7 @@ export const __researchTestHooks = {
   knowledgeLineageForPayload,
   knowledgeRefreshPayload,
   compactKnowledgeTableReferences,
+  preferredDirectMeasurementTable,
   graphDocumentLineage,
   latestEvidenceRunForTask,
   researchScoringContract,
