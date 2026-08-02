@@ -19270,6 +19270,21 @@ pub fn issue_business_os_capability_token_for_session(
     let role = normalize_business_role(&user.role);
     let conn = open_store(root)?;
     seed_configured_business_users(&conn)?;
+
+    // SEC3, first half. This upsert sets active = 1, so asking for a token
+    // provisions a user who did not exist and revives one who was deactivated.
+    // Whether issuance should instead fail is an owner decision, because
+    // failing is a breaking change for live tenants. Making it visible is not,
+    // and nobody can weigh that decision without knowing how often it happens.
+    let prior_active: Option<bool> = conn
+        .query_row(
+            "SELECT active FROM business_users WHERE user_id = ?1",
+            params![user_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .map(|active| active == 1);
+
     conn.execute(
         "INSERT INTO business_users
             (user_id, display_name, role, active, created_at_ms, updated_at_ms)
@@ -19281,6 +19296,29 @@ pub fn issue_business_os_capability_token_for_session(
             updated_at_ms = excluded.updated_at_ms",
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
+
+    // Only the two mutating cases are recorded. Issuing a token for a user who
+    // was already active changes nothing and would drown the signal.
+    if let Some(effect) = match prior_active {
+        None => Some("provisioned"),
+        Some(false) => Some("reactivated"),
+        Some(true) => None,
+    } {
+        insert_business_event(
+            &conn,
+            "business_users",
+            user_id,
+            "ctox.capability.token.issue",
+            serde_json::json!({
+                "effect": effect,
+                "user_id": user_id,
+                "role": role.as_str(),
+                "source": "capability_token_issuance",
+            }),
+            now_ms,
+        )?;
+    }
+
     drop(conn);
     issue_business_os_capability_token(root, user_id, now_ms)
 }
@@ -28700,6 +28738,75 @@ pub(super) mod tests {
         assert_eq!(display_name, "Local CTOX");
         assert_eq!(role, "admin");
         assert_eq!(active, 1);
+
+        // SEC3: the user did not exist before, so the issuance leaves a trace.
+        let effect: String = conn.query_row(
+            "SELECT json_extract(payload_json, '$.effect') FROM business_events
+             WHERE command_type = 'ctox.capability.token.issue' AND record_id = 'local-dev'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(effect, "provisioned");
+        Ok(())
+    }
+
+    /// SEC3, first half: asking for a capability token revives a deactivated
+    /// user, and used to do it without a trace.
+    ///
+    /// Whether issuance should refuse instead is the owner's call — refusing
+    /// breaks live tenants. Nobody can weigh that without knowing how often
+    /// this fires, so it is recorded before it is decided.
+    #[test]
+    fn capability_token_issuance_records_reviving_a_deactivated_user() -> anyhow::Result<()> {
+        let _env = EnvRestore::set(&[
+            ("CTOX_AUTH_USERS", ""),
+            ("CTOX_BUSINESS_PASSWORD", ""),
+            ("CTOX_BUSINESS_OS_DESKTOP_DISPLAY_NAME", "Local CTOX"),
+            ("CTOX_BUSINESS_OS_DESKTOP_USER", "local-dev"),
+            ("CTOX_BUSINESS_OS_DESKTOP_ROLE", "admin"),
+            ("CTOX_BUSINESS_OS_LOGIN_URL", ""),
+            ("CTOX_BUSINESS_OS_REQUIRE_LOGIN", "0"),
+            ("CTOX_BUSINESS_OS_SESSION_TOKEN", ""),
+        ]);
+        let temp = tempdir()?;
+        let root = temp.path();
+        let session = session_for_request(None, None, true);
+        let now = now_ms() as i64;
+
+        // Exists and is then deactivated — the case an operator performs on
+        // purpose and would not expect a token request to undo.
+        issue_business_os_capability_token_for_session(root, &session, now)?;
+        let conn = open_store(root)?;
+        conn.execute(
+            "UPDATE business_users SET active = 0 WHERE user_id = 'local-dev'",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM business_events WHERE command_type = 'ctox.capability.token.issue'",
+            [],
+        )?;
+        drop(conn);
+
+        issue_business_os_capability_token_for_session(root, &session, now + 1)?;
+
+        let conn = open_store(root)?;
+        let active: i64 = conn.query_row(
+            "SELECT active FROM business_users WHERE user_id = 'local-dev'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(active, 1, "issuance still revives the user");
+
+        let effect: String = conn.query_row(
+            "SELECT json_extract(payload_json, '$.effect') FROM business_events
+             WHERE command_type = 'ctox.capability.token.issue' AND record_id = 'local-dev'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            effect, "reactivated",
+            "reviving a deactivated user must leave evidence"
+        );
         Ok(())
     }
 
