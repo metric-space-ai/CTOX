@@ -691,12 +691,32 @@ Empfänger durchsetzt, und für abgleichbare Effekte ein Receipt an
 ist explizit und auditiert; ein generischer Ersatz ohne diese drei Bausteine
 wäre nur scheinbar allgemeiner.
 
-**9. `ctox.maintenance.client_ready` ohne Berechtigungsentscheidung (SG4/C-2)**
+**9. ~~`ctox.maintenance.client_ready` ohne Berechtigung~~ — BEANTWORTET (02.08.),
+und die Prüfung fand etwas Schärferes**
 
-Gemessen: fehlendes Gate ist Fakt. Die Auswirkung — vorzeitiges Beenden eines
-Wartungsfensters bei bekannter `lease_id` — ist **Vermutung**, nicht belegt.
-Optionen: (a) aufruferbezogene Berechtigung; (b) als bewusst ungated
-dokumentieren, weil der Pfad Infrastruktur und kein Benutzerkommando ist.
-**Empfehlung: erst klären, wer diesen Pfad ruft**, dann entscheiden. Ein Gate
-auf einem Infrastrukturpfad kann eine Wiederanlauf-Schleife brechen.
+Die Berechtigungsfrage ist entschieden: **kein Gate.** Nachgemessen ruft
+`src/apps/business-os/app.js` diesen Pfad als Shell selbst
+(`source: business-os-maintenance-readiness`), um die eigene Bereitschaft im
+Wartungsfenster zu melden. `acknowledge_business_os_maintenance_ready` verlangt
+bereits, dass das Lease das AKTUELLE und nicht terminal ist, dass der Dienst
+läuft und die Replikation steht. Eine aufruferbezogene Berechtigung würde
+legitime Clients aussperren und die Wiederanlauf-Schleife brechen — Option (b),
+dokumentiert.
+
+**Dabei kam ein anderer Befund heraus, mit Beleg statt Vermutung.**
+`complete_maintenance_for_client` (`src/core/install/mod.rs`) führt eine LISTE
+`client_readiness`, trägt den meldenden Client ein (und behält die anderen) —
+und setzt anschliessend `phase = "completed"`, `status = "completed"`,
+`percent = 100` für das GANZE Lease.
+
+**Die erste Client-Meldung beendet das Wartungsfenster für alle.** Wenn nur die
+erste zählte, bräuchte es keine Liste; die Liste ist der Beleg, dass hier
+mehrere Clients gemeint sind. Der Funktionsname sagt „für einen Client", die
+Wirkung gilt für alle — dieselbe Form wie SM14, wo ein Feld zwei Bedeutungen
+trug.
+
+**Owner-Frage (neu, ersetzt die alte Nummer 9):** Soll das Fenster erst
+schliessen, wenn ALLE erwarteten Clients gemeldet haben, oder ist die erste
+Meldung das gewollte Signal? Ich habe es nicht repariert, weil beide Antworten
+vertretbar sind und die falsche einen Upgrade-Pfad hängen lässt.
 
