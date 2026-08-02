@@ -630,7 +630,23 @@ Optionen: (a) strukturiert scheitern, Provisionierung explizit und auditiert;
 hat, ist dasselbe Muster wie die Grant-Wiederauferstehung aus SF5a.
 Gibt frei: SEC3.
 
-**2. Auto-Release bei `module.json` Version 1.0.0 (SF5)**
+**2. ~~Auto-Release bei Version 1.0.0~~ — durch SF5b entschärft (02.08.)**
+
+Die gefährliche Form gibt es nicht mehr. `backfill_semver_public_release_records`
+liegt seit SF5b **innerhalb** `migrate_legacy_module_lifecycle_authority` — der
+policy-geschützten, katalogweiten Migration mit Probelauf. Beim Lesen des
+Katalogs passiert nichts mehr.
+
+Was bleibt, ist zahm: die einmalige Migration legt für Alt-Module mit Major ≥ 1
+OHNE vorhandenen Release-Datensatz einen an, gekennzeichnet als
+`reviewed_by: ctox.release-record-migration`. Module mit bestehendem Release
+werden übersprungen.
+
+Das ist keine stille Veröffentlichung aus einer Versionsnummer, sondern das
+Nachtragen fehlender Evidenz — und ohne es verlieren genau diese Module ihren
+Release-Nachweis (der SF5b-Vorbehalt). **Nichts zu entscheiden.**
+
+**ALTE FASSUNG (überholt):**
 
 Gemessen: heute test-gepinntes Produktverhalten — eine 1.0.0 löst automatisch
 ein Team-Release aus. Optionen: (a) entfällt; (b) bleibt, ausdrücklich
@@ -763,8 +779,17 @@ mehrere Clients gemeint sind. Der Funktionsname sagt „für einen Client", die
 Wirkung gilt für alle — dieselbe Form wie SM14, wo ein Feld zwei Bedeutungen
 trug.
 
-**Owner-Frage (neu, ersetzt die alte Nummer 9):** Soll das Fenster erst
-schliessen, wenn ALLE erwarteten Clients gemeldet haben, oder ist die erste
-Meldung das gewollte Signal? Ich habe es nicht repariert, weil beide Antworten
-vertretbar sind und die falsche einen Upgrade-Pfad hängen lässt.
+**Nachgemessen (02.08.):** `client_readiness` wird **nur geschrieben und
+nirgends gelesen** — weder in Rust noch im Browser. Es gibt also keine
+„alle Clients"-Semantik, die verloren gegangen wäre; sie wurde nie gebaut. Es
+existiert auch keine Menge erwarteter Clients, gegen die man vergleichen könnte.
+
+Damit ist das gegenwärtige Verhalten in sich stimmig: der erste bereite Client
+belegt, dass das Upgrade trägt. Die Liste ist unbenutzte Buchführung.
+
+**Kein Blocker, sondern eine kleine Aufräumfrage:** entweder die Liste
+auswerten (dann ist „alle erwarteten Clients" ein neues Feature, samt
+Erwartungsmenge) oder sie entfernen. Solange sie geschrieben und nie gelesen
+wird, verspricht sie eine Genauigkeit, die es nicht gibt — dieselbe Form wie
+der Zähler aus SF4b, der auch mitzählte, was er nicht geändert hatte.
 
