@@ -1706,6 +1706,14 @@
   vertical-align: top;
 }
 
+/* Measurement headers carry their unit in parentheses. The shared `nowrap`
+   plus this table's fixed layout clipped "DURCHMESSER (MM)" to
+   "DURCHMESSER (I" - in a bearing table an unreadable unit is a correctness
+   problem, not a cosmetic one. Let the header wrap onto a second line. */
+.research-table-host .ctox-table th {
+  white-space: normal;
+}
+
 .research-source-table {
   width: 100%;
   table-layout: fixed;
