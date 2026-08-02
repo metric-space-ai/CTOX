@@ -638,7 +638,19 @@ dokumentiert; (c) bleibt, aber hinter einer expliziten Freigabe.
 **Empfehlung: (c).** Ein Release ist eine Veröffentlichung; sie sollte nicht aus
 einer Versionsnummer folgen. Gibt frei: den Rest von SF5.
 
-**3. Einmal-Korrektur für bereits gedriftete Feld-Datenbanken (SF4/SF5)**
+**3. ~~Einmal-Korrektur für gedriftete Feld-Datenbanken~~ — BEANTWORTET durch die
+Implementierung (02.08.)**
+
+Nachgemessen: der einzige produktive Auslöser ist das policy-geschützte Kommando
+`ctox.module.repair_lifecycle_projection` mit
+`migrate_legacy_manifest_lifecycle: true`. Es **verweigert einen `module_id`-Filter**
+(„must run for the complete catalog") und kennt `dry_run`. Die beiden anderen
+Aufrufstellen liegen im Testmodul.
+
+Das ist genau die empfohlene Variante: manuell, katalogweit, mit Probelauf und
+Evidenz. Ein Updater-Hook bleibt ein späterer Schritt, kein Blocker.
+
+**ALTE FASSUNG (überholt):**
 
 Gemessen: SF5b hat die Migration gebaut
 (`business_os.legacy_module_lifecycle_authority.v1`, policy-geschützt, verweigert
@@ -649,7 +661,19 @@ still heilten. Offen ist nur der **Auslöser**. Optionen: (a) Updater-Hook;
 danach (a). Ohne Reparatur-Netz ist ein automatischer Massenlauf riskant.
 Gibt frei: den Abschluss von SF4/SF5 im Feld.
 
-**4. Destruktiver Active-Root-Drill (SF6)**
+**4. ~~Destruktiver Active-Root-Drill~~ — LÖST SICH AUF (02.08.)**
+
+Es gibt ihn nicht. `destructive_restore_performed` steht an allen drei
+produktiven Stellen **fest auf `false`** und wird nirgends auf `true` gesetzt;
+ein Test hält das fest. Der Active-Root-Restore ist als
+`"status": "manual_operator_runbook"` mit `requires_operator_confirmation: true`
+ausgewiesen — eine Anleitung für einen Menschen, keine automatisierte
+Zerstörung.
+
+Es ist also kein Radius festzulegen. Die Frage stammt aus einem Review, das
+annahm, der Code führe den Drill selbst aus.
+
+**ALTE FASSUNG (überholt):**
 
 Gemessen: der Drill existiert; die Retention läuft jetzt (SF6). Offen sind
 Umgebung und Radius. Optionen: (a) nur in isolierter Umgebung; (b) auf dem
@@ -663,7 +687,14 @@ Entschieden für die Wartungsschleife mit Tagesmarker, nicht Start-Hook: der
 Daemon läuft wochenlang, ein Start-Hook feuerte nie wieder. Der Worker hat die
 Begründung geprüft und mitgetragen. Erledigt.
 
-**6. P7d-LOWs: `deny_supported:false`, Epoch-Flut**
+**6. P7d-LOWs: `deny_supported:false`, Epoch-Flut — AKZEPTIERT (02.08.)**
+
+Beide sind bekannt, begrenzt und nicht sicherheitsrelevant. Akzeptiert und hier
+dokumentiert, statt als Ticket ohne Termin geführt zu werden — ein Ticket, das
+niemand einplant, ist eine Behauptung, keine Absicht. Wer sie später angeht,
+findet sie hier; wer sie nicht angeht, hat nichts übersehen.
+
+**ALTE FASSUNG:**
 
 Optionen: akzeptieren und dokumentieren, oder auf die Roadmap.
 **Empfehlung: dokumentieren.** Beide sind bekannt und begrenzt; ein Ticket ohne
