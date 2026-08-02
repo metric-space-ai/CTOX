@@ -612,17 +612,91 @@ Zuordnung: SM2/SM1/SM11/SM14 → command_plane · SM3/SM4 → store_projections 
 SM5/SM6/SM13 → module_lifecycle · SM7/SM8 → backup_restore ·
 SM9/SM10 → Kern.
 
-## Offene Owner-Fragen (blockieren NUR die genannten Tickets)
+## Offene Owner-Fragen — entscheidungsreif (Stand 02.08.)
 
-1. **SEC3**: strukturiertes Fehlschlagen statt stiller Reaktivierung ist ein
-   Breaking Change für lebende Tenants — wer provisioniert künftig, ist das
-   ohne Migrationsankündigung akzeptabel? (SEC3 wartet ohnehin auf D-Welle.)
-2. **SF5**: „module.json version 1.0.0 ⇒ Auto-Release ins Team" ist heute
-   test-gepinntes Produktverhalten — darf das entfallen?
-3. **SF4/SF5**: Einmal-Korrektur für bereits gedriftete Feld-DBs — Updater-
-   Hook oder Startup? Risikoträger ohne Repair-Fallback?
-4. **SF6**: destruktiver Active-Root-Drill — Umgebung/Blast-Radius?
-5. **SF6**: Retention-Vollzug: Daemon-Scheduler oder Start-Hook?
-   (Architektur-Entscheidung außerhalb store.rs.)
-6. **P7d-LOWs** (`deny_supported:false`, Epoch-Flut): akzeptieren oder
-   Roadmap?
+Alle technischen Tickets sind durch. Was hier steht, kann ich nicht entscheiden:
+es sind Produkt-, Betriebs- und Risikoabwägungen. Je Frage: was gemessen ist,
+die Optionen, meine Empfehlung, und was die Antwort freigibt.
+
+---
+
+**1. Stille Reaktivierung bei der Token-Ausstellung (SEC3)**
+
+Gemessen: der Ausstellungspfad provisioniert und reaktiviert Benutzer stumm.
+Strukturiertes Fehlschlagen wäre für lebende Tenants ein Breaking Change.
+Optionen: (a) strukturiert scheitern, Provisionierung explizit und auditiert;
+(b) beibehalten und dokumentieren; (c) Übergangsfrist mit Warnung.
+**Empfehlung: (a) mit Ankündigung.** Eine Reaktivierung, die niemand angefordert
+hat, ist dasselbe Muster wie die Grant-Wiederauferstehung aus SF5a.
+Gibt frei: SEC3.
+
+**2. Auto-Release bei `module.json` Version 1.0.0 (SF5)**
+
+Gemessen: heute test-gepinntes Produktverhalten — eine 1.0.0 löst automatisch
+ein Team-Release aus. Optionen: (a) entfällt; (b) bleibt, ausdrücklich
+dokumentiert; (c) bleibt, aber hinter einer expliziten Freigabe.
+**Empfehlung: (c).** Ein Release ist eine Veröffentlichung; sie sollte nicht aus
+einer Versionsnummer folgen. Gibt frei: den Rest von SF5.
+
+**3. Einmal-Korrektur für bereits gedriftete Feld-Datenbanken (SF4/SF5)**
+
+Gemessen: SF5b hat die Migration gebaut
+(`business_os.legacy_module_lifecycle_authority.v1`, policy-geschützt, verweigert
+Teilkataloge). SF4a/b haben die Reparaturen entfernt, die Altbestand bisher
+still heilten. Offen ist nur der **Auslöser**. Optionen: (a) Updater-Hook;
+(b) manuell pro Installation; (c) beim Start.
+**Empfehlung: (b) für den ersten Durchlauf**, mit Evidenz je Installation —
+danach (a). Ohne Reparatur-Netz ist ein automatischer Massenlauf riskant.
+Gibt frei: den Abschluss von SF4/SF5 im Feld.
+
+**4. Destruktiver Active-Root-Drill (SF6)**
+
+Gemessen: der Drill existiert; die Retention läuft jetzt (SF6). Offen sind
+Umgebung und Radius. Optionen: (a) nur in isolierter Umgebung; (b) auf dem
+aktiven Root mit Vorab-Sicherung; (c) gar nicht.
+**Empfehlung: (a).** Ein Wiederherstellungstest, der die Produktion beschädigen
+kann, prüft das falsche Risiko.
+
+**5. ~~Retention-Vollzug: Scheduler oder Start-Hook~~ — BEANTWORTET (SF6)**
+
+Entschieden für die Wartungsschleife mit Tagesmarker, nicht Start-Hook: der
+Daemon läuft wochenlang, ein Start-Hook feuerte nie wieder. Der Worker hat die
+Begründung geprüft und mitgetragen. Erledigt.
+
+**6. P7d-LOWs: `deny_supported:false`, Epoch-Flut**
+
+Optionen: akzeptieren und dokumentieren, oder auf die Roadmap.
+**Empfehlung: dokumentieren.** Beide sind bekannt und begrenzt; ein Ticket ohne
+Termin ist eine Behauptung, keine Absicht.
+
+**7. Woher darf ein wirksamer Laufzeitwert stammen? (SM16)**
+
+Gemessen: `env_or_config_reads_secrets_only_from_store` ist rot, und **vier
+seiner Assertions widersprechen seinem eigenen Namen** — sie erwarten Werte, die
+die Fixture nie persistiert, also durchsickerndes Prozess-Environment.
+Optionen: (a) Vertrag gilt, die vier auf `None` drehen; (b) Prozess-Environment
+ist erlaubt, Name und Vertrag korrigieren.
+**Empfehlung: (a).** Aber es ist Ihre Entscheidung, weil sie festlegt, worauf
+sich der Laufzeit-Vertrag stützt — deshalb habe ich den Test rot gelassen statt
+ihn still grün zu ziehen.
+
+**8. `ReplayPolicy` — ein Vertrag für sicheres Wiederanlaufen (SF3)**
+
+Gemessen: es gibt heute KEIN allgemeines Merkmal für „sicher erneut ausführbar";
+alle Surrogate scheitern (siehe SF3 oben). Ein sicherer generischer Re-Drive
+bräuchte: deklarierte `ReplayPolicy` je Handler, eine Dedupe-Kennung, die der
+Empfänger durchsetzt, und für abgleichbare Effekte ein Receipt an
+`command_id + payload_hash`.
+**Empfehlung: bauen, wenn die Fünferliste zur Last wird — nicht vorher.** Sie
+ist explizit und auditiert; ein generischer Ersatz ohne diese drei Bausteine
+wäre nur scheinbar allgemeiner.
+
+**9. `ctox.maintenance.client_ready` ohne Berechtigungsentscheidung (SG4/C-2)**
+
+Gemessen: fehlendes Gate ist Fakt. Die Auswirkung — vorzeitiges Beenden eines
+Wartungsfensters bei bekannter `lease_id` — ist **Vermutung**, nicht belegt.
+Optionen: (a) aufruferbezogene Berechtigung; (b) als bewusst ungated
+dokumentieren, weil der Pfad Infrastruktur und kein Benutzerkommando ist.
+**Empfehlung: erst klären, wer diesen Pfad ruft**, dann entscheiden. Ein Gate
+auf einem Infrastrukturpfad kann eine Wiederanlauf-Schleife brechen.
+
