@@ -876,8 +876,6 @@ pub struct ModuleLifecycleProjectionRepairRequest {
     #[serde(default)]
     pub repair_invalid_version_refs: bool,
     #[serde(default)]
-    pub repair_orphan_private_apps: bool,
-    #[serde(default)]
     pub migrate_legacy_manifest_lifecycle: bool,
 }
 
@@ -1878,7 +1876,7 @@ fn rxdb_collection_table_name_from_tables(
         })
 }
 
-fn rxdb_schema_version(collection: &str) -> i64 {
+pub(super) fn rxdb_schema_version(collection: &str) -> i64 {
     business_os_schema_contract_for_store()
         .get(collection)
         .and_then(|schema| schema.get("version"))
@@ -3602,8 +3600,39 @@ fn backfill_semver_public_release_records(
     Ok(inserted)
 }
 
+fn backfill_legacy_private_app_responsibility(
+    conn: &Connection,
+    session: &BusinessOsSession,
+    modules: &[ModuleManifest],
+    now: i64,
+) -> anyhow::Result<usize> {
+    let recovery_user_id = session_user_id(session)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("authenticated lifecycle migration user is required")?;
+    seed_session_user(conn, session)?;
+    let mut inserted = 0usize;
+    for manifest in modules {
+        if !module_manifest_requires_active_responsibility(manifest)?
+            || module_has_active_responsibility(conn, &manifest.id)?
+        {
+            continue;
+        }
+        upsert_module_founder_assignment_record(
+            conn,
+            session,
+            &manifest.id,
+            recovery_user_id,
+            true,
+            now,
+        )?;
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
 const LEGACY_MODULE_LIFECYCLE_MIGRATION_ID: &str =
-    "business_os.legacy_module_lifecycle_authority.v1";
+    "business_os.legacy_module_lifecycle_authority.v2";
 
 pub fn migrate_legacy_module_lifecycle_authority(
     root: &Path,
@@ -3636,11 +3665,14 @@ pub fn migrate_legacy_module_lifecycle_authority(
     let tx = conn.transaction()?;
     let preview_grants_inserted = backfill_manifest_preview_audience_grants(&tx, &modules, now)?;
     let release_records_inserted = backfill_semver_public_release_records(&tx, &modules, now)?;
+    let private_app_responsibilities_inserted =
+        backfill_legacy_private_app_responsibility(&tx, session, &modules, now)?;
     let evidence = serde_json::json!({
         "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
         "actor_id": actor_id,
         "preview_grants_inserted": preview_grants_inserted,
         "release_records_inserted": release_records_inserted,
+        "private_app_responsibilities_inserted": private_app_responsibilities_inserted,
         "applied_at_ms": now,
     });
 
@@ -6391,19 +6423,9 @@ fn business_os_why_policy_payload(decision: &PolicyDecision, source: &str) -> Va
     payload
 }
 
-fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow::Result<bool> {
-    let Ok(app_root) = resolve_business_os_app_root(root) else {
-        return Ok(false);
-    };
-    let installed_app_root = resolve_business_os_installed_app_root(root);
-    let module_id = module_id.trim();
-    if module_id.is_empty() {
-        return Ok(false);
-    }
-    let manifests = load_module_manifests(&app_root, &installed_app_root)?;
-    let Some(manifest) = manifests.iter().find(|manifest| manifest.id == module_id) else {
-        return Ok(false);
-    };
+fn module_manifest_requires_active_responsibility(
+    manifest: &ModuleManifest,
+) -> anyhow::Result<bool> {
     if !module_is_runtime_installed(manifest) {
         return Ok(false);
     }
@@ -6421,6 +6443,22 @@ fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow
         parse_business_app_semver_major(&manifest.version),
         Some(major) if major >= 1
     ))
+}
+
+fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow::Result<bool> {
+    let Ok(app_root) = resolve_business_os_app_root(root) else {
+        return Ok(false);
+    };
+    let installed_app_root = resolve_business_os_installed_app_root(root);
+    let module_id = module_id.trim();
+    if module_id.is_empty() {
+        return Ok(false);
+    }
+    let manifests = load_module_manifests(&app_root, &installed_app_root)?;
+    let Some(manifest) = manifests.iter().find(|manifest| manifest.id == module_id) else {
+        return Ok(false);
+    };
+    module_manifest_requires_active_responsibility(manifest)
 }
 
 fn active_module_founder_count_excluding(
@@ -6491,7 +6529,7 @@ fn sole_responsibility_module_ids_for_user(
     Ok(module_ids)
 }
 
-fn upsert_module_founder_assignment_record(
+pub(super) fn upsert_module_founder_assignment_record(
     conn: &Connection,
     session: &BusinessOsSession,
     module_id: &str,
@@ -7843,66 +7881,6 @@ fn module_has_active_responsibility(conn: &Connection, module_id: &str) -> anyho
     Ok(count > 0)
 }
 
-fn orphan_private_module_ids(
-    root: &Path,
-    conn: &Connection,
-    module_filter: &str,
-) -> anyhow::Result<Vec<String>> {
-    let module_ids = current_business_os_module_ids(root)?;
-    let mut orphan_ids = Vec::new();
-    for module_id in module_ids {
-        if !module_filter.is_empty() && module_id != module_filter {
-            continue;
-        }
-        if module_requires_active_responsibility(root, &module_id)?
-            && !module_has_active_responsibility(conn, &module_id)?
-        {
-            orphan_ids.push(module_id);
-        }
-    }
-    Ok(orphan_ids)
-}
-
-fn repair_orphan_private_app_responsibility(
-    root: &Path,
-    conn: &Connection,
-    session: &BusinessOsSession,
-    module_filter: &str,
-    dry_run: bool,
-    now: i64,
-) -> anyhow::Result<Vec<Value>> {
-    let recovery_user_id = session_user_id(session)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("authenticated recovery user is required")?
-        .to_owned();
-    let orphan_ids = orphan_private_module_ids(root, conn, module_filter)?;
-    if !dry_run && !orphan_ids.is_empty() {
-        seed_session_user(conn, session)?;
-    }
-    let mut actions = Vec::new();
-    for module_id in orphan_ids {
-        actions.push(serde_json::json!({
-            "kind": "orphan_private_app_responsibility",
-            "module_id": module_id.as_str(),
-            "recovery_user_id": recovery_user_id.as_str(),
-            "action": "assign_recovery_responsibility",
-            "apply": !dry_run,
-        }));
-        if !dry_run {
-            upsert_module_founder_assignment_record(
-                conn,
-                session,
-                &module_id,
-                &recovery_user_id,
-                true,
-                now,
-            )?;
-        }
-    }
-    Ok(actions)
-}
-
 fn current_business_os_module_ids(root: &Path) -> anyhow::Result<BTreeSet<String>> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
@@ -8027,18 +8005,6 @@ pub fn repair_module_lifecycle_projections(
     } else {
         Vec::new()
     };
-    let orphan_private_app_actions = if request.repair_orphan_private_apps {
-        repair_orphan_private_app_responsibility(
-            root,
-            &conn,
-            session,
-            &module_filter,
-            request.dry_run,
-            now,
-        )?
-    } else {
-        Vec::new()
-    };
     let mut release_ids = Vec::new();
     for module_id in &module_ids {
         if request.dry_run {
@@ -8094,7 +8060,6 @@ pub fn repair_module_lifecycle_projections(
     }
     let release_projection_count = release_ids.len();
     let version_ref_repair_count = version_ref_actions.len();
-    let orphan_private_app_repair_count = orphan_private_app_actions.len();
     let permission_grant_repair_count = permission_grant_actions.len();
     Ok(serde_json::json!({
         "ok": true,
@@ -8106,8 +8071,6 @@ pub fn repair_module_lifecycle_projections(
         "release_projection_count": release_projection_count,
         "version_ref_actions": version_ref_actions,
         "version_ref_repair_count": version_ref_repair_count,
-        "orphan_private_app_actions": orphan_private_app_actions,
-        "orphan_private_app_repair_count": orphan_private_app_repair_count,
         "permission_grant_actions": permission_grant_actions,
         "permission_grant_repair_count": permission_grant_repair_count,
         "legacy_manifest_migration": legacy_manifest_migration.unwrap_or(Value::Null),
@@ -8131,7 +8094,6 @@ fn module_lifecycle_projection_repair_safe_command(
             "dry_run": request.dry_run,
             "repair_stale_grants": request.repair_stale_grants,
             "repair_invalid_version_refs": request.repair_invalid_version_refs,
-            "repair_orphan_private_apps": request.repair_orphan_private_apps,
             "migrate_legacy_manifest_lifecycle": request.migrate_legacy_manifest_lifecycle,
         }),
         client_context: serde_json::json!({
@@ -36985,7 +36947,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn module_lifecycle_projection_repair_assigns_orphan_private_app_responsibility(
+    fn orphan_private_legacy_drift_is_handled_only_by_explicit_lifecycle_migration(
     ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -36996,17 +36958,14 @@ pub(super) mod tests {
         let dry_run = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_repair_orphan_private_app_dry_run",
-                "command_id": "cmd_repair_orphan_private_app_dry_run",
+                "id": "cmd_migrate_orphan_private_app_dry_run",
+                "command_id": "cmd_migrate_orphan_private_app_dry_run",
                 "module": "ctox",
                 "command_type": "ctox.module.repair_lifecycle_projection",
-                "record_id": "private-orphan",
                 "status": "pending_sync",
                 "payload": {
-                    "module_id": "private-orphan",
                     "dry_run": true,
-                    "repair_orphan_private_apps": true,
-                    "prompt": "SECRET_ORPHAN_REPAIR_PROMPT"
+                    "migrate_legacy_manifest_lifecycle": true
                 },
                 "client_context": {
                     "actor": {
@@ -37018,67 +36977,33 @@ pub(super) mod tests {
         )?;
         assert_eq!(
             dry_run
-                .pointer("/result/orphan_private_app_repair_count")
+                .pointer("/result/legacy_manifest_migration/evidence/private_app_responsibilities_inserted")
                 .and_then(Value::as_u64),
             Some(1)
         );
-        assert_eq!(
-            dry_run
-                .pointer("/result/orphan_private_app_actions/0/module_id")
-                .and_then(Value::as_str),
-            Some("private-orphan")
-        );
-        assert_eq!(
-            dry_run
-                .pointer("/result/orphan_private_app_actions/0/recovery_user_id")
-                .and_then(Value::as_str),
-            Some("ops-admin")
-        );
-        assert_eq!(
-            dry_run
-                .pointer("/result/orphan_private_app_actions/0/apply")
-                .and_then(Value::as_bool),
-            Some(false)
-        );
         let conn = open_store(root)?;
-        let dry_responsibility_rows: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM business_module_acl
-             WHERE module_id = 'private-orphan'
-               AND role = 'founder'
-               AND active = 1",
+        let dry_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_module_acl
+             WHERE module_id = 'private-orphan' AND role = 'founder' AND active = 1",
             [],
             |row| row.get(0),
         )?;
         assert_eq!(
-            dry_responsibility_rows, 0,
-            "dry-run must not assign orphan private app responsibility"
-        );
-        let dry_run_command = outbound_load_record(
-            &conn,
-            "business_commands",
-            "cmd_repair_orphan_private_app_dry_run",
-        )?
-        .context("orphan dry-run command projection")?;
-        let dry_run_command_text = serde_json::to_string(&dry_run_command)?;
-        assert!(
-            !dry_run_command_text.contains("SECRET_ORPHAN_REPAIR_PROMPT"),
-            "orphan repair command projection must be sanitized"
+            dry_rows, 0,
+            "migration dry-run must roll back responsibility"
         );
         drop(conn);
 
-        let repair = accept_rxdb_business_command(
+        let applied = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_repair_orphan_private_app_apply",
-                "command_id": "cmd_repair_orphan_private_app_apply",
+                "id": "cmd_migrate_orphan_private_app_apply",
+                "command_id": "cmd_migrate_orphan_private_app_apply",
                 "module": "ctox",
                 "command_type": "ctox.module.repair_lifecycle_projection",
-                "record_id": "private-orphan",
                 "status": "pending_sync",
                 "payload": {
-                    "module_id": "private-orphan",
-                    "repair_orphan_private_apps": true
+                    "migrate_legacy_manifest_lifecycle": true
                 },
                 "client_context": {
                     "actor": {
@@ -37089,60 +37014,19 @@ pub(super) mod tests {
             }),
         )?;
         assert_eq!(
-            repair
-                .pointer("/result/orphan_private_app_repair_count")
+            applied
+                .pointer("/result/legacy_manifest_migration/evidence/private_app_responsibilities_inserted")
                 .and_then(Value::as_u64),
             Some(1)
         );
-        assert_eq!(
-            repair
-                .pointer("/result/orphan_private_app_actions/0/apply")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-
         let conn = open_store(root)?;
-        let recovery_active: i64 = conn.query_row(
-            "SELECT active
-             FROM business_module_acl
-             WHERE module_id = 'private-orphan'
-               AND user_id = 'ops-admin'
-               AND role = 'founder'",
+        let owner: String = conn.query_row(
+            "SELECT user_id FROM business_module_acl
+             WHERE module_id = 'private-orphan' AND role = 'founder' AND active = 1",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(recovery_active, 1);
-        let recovery_payloads = business_event_payloads(
-            &conn,
-            "business_module_acl",
-            "private-orphan:founder:ops-admin",
-            "business_os.app_responsibility.changed",
-        )?;
-        assert_eq!(recovery_payloads.len(), 1);
-        assert_eq!(
-            recovery_payloads[0]
-                .pointer("/actor/id")
-                .and_then(Value::as_str),
-            Some("ops-admin")
-        );
-        drop(conn);
-
-        let catalog = module_catalog_for_rxdb(root)?;
-        let private_app = catalog
-            .get("modules")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules.iter().find(|module| {
-                    module.get("id").and_then(Value::as_str) == Some("private-orphan")
-                })
-            })
-            .context("expected private orphan app in catalog")?;
-        assert!(private_app
-            .pointer("/lifecycle/responsible_user_ids")
-            .and_then(Value::as_array)
-            .context("expected responsible ids")?
-            .iter()
-            .any(|id| id.as_str() == Some("ops-admin")));
+        assert_eq!(owner, "ops-admin");
         Ok(())
     }
 
