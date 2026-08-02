@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 thread_local! {
     static SQLITE_STORE_CONNECTIONS: RefCell<HashMap<String, Connection>> =
@@ -36,6 +36,17 @@ struct SqliteFileChangeStamp {
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     db_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryOutcome {
+    pub outbox_id: i64,
+    pub provider_message_id: String,
+    pub from_addr: String,
+    pub to_addr: String,
+    pub outcome: String,
+    pub error_text: Option<String>,
+    pub completed_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,9 +226,53 @@ impl SqliteStore {
         })
     }
 
-    /// Record a terminal SMTP delivery outcome (success or permanent failure) so the
-    /// outbound module can reconcile send_status without polling the queue table that
-    /// has already been deleted from.
+    /// Persist a terminal SMTP result in the audit log and durable delivery
+    /// outbox. When `remove_queue_entry` is true, deleting the successfully sent
+    /// queue item is part of the same SQLite transaction as creating the outbox
+    /// row, so the handoff cannot disappear between those operations.
+    pub fn complete_delivery(
+        &self,
+        id: &str,
+        from_addr: &str,
+        to_addr: &str,
+        outcome: &str,
+        error_text: Option<&str>,
+        completed_at: i64,
+        remove_queue_entry: bool,
+    ) -> StalwartResult<()> {
+        self.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO stalwart_smtp_delivery_log
+                    (id, from_addr, to_addr, outcome, error_text, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, from_addr, to_addr, outcome, error_text, completed_at],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO stalwart_smtp_delivery_outbox
+                    (provider_message_id, from_addr, to_addr, outcome, error_text,
+                     completed_at, next_attempt_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id, from_addr, to_addr, outcome, error_text, completed_at],
+            )?;
+            if remove_queue_entry {
+                tx.execute("DELETE FROM stalwart_smtp_queue WHERE id = ?1", params![id])?;
+            } else if outcome == "failed" {
+                tx.execute(
+                    "UPDATE stalwart_smtp_queue
+                     SET status = 'failed_permanent', retry_count = retry_count + 1,
+                         next_attempt_at = ?2
+                     WHERE id = ?1",
+                    params![id, crate::util::now_utc_secs().saturating_add(86_400)],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Compatibility entry point for callers that only have an outcome. New
+    /// SMTP terminal paths use `complete_delivery` so queue mutation is atomic.
     pub fn record_delivery_outcome(
         &self,
         id: &str,
@@ -227,14 +282,93 @@ impl SqliteStore {
         error_text: Option<&str>,
         completed_at: i64,
     ) -> StalwartResult<()> {
+        self.complete_delivery(
+            id,
+            from_addr,
+            to_addr,
+            outcome,
+            error_text,
+            completed_at,
+            false,
+        )
+    }
+
+    pub fn pending_delivery_outcomes(&self, limit: usize) -> StalwartResult<Vec<DeliveryOutcome>> {
+        self.with_connection(|conn| {
+            let now = unix_time_ms();
+            let mut stmt = conn.prepare(
+                "SELECT outbox_id, provider_message_id, from_addr, to_addr,
+                        outcome, error_text, completed_at
+                 FROM stalwart_smtp_delivery_outbox
+                 WHERE acked_at IS NULL AND next_attempt_at <= ?1
+                 ORDER BY outbox_id ASC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![now, limit as i64], |row| {
+                Ok(DeliveryOutcome {
+                    outbox_id: row.get(0)?,
+                    provider_message_id: row.get(1)?,
+                    from_addr: row.get(2)?,
+                    to_addr: row.get(3)?,
+                    outcome: row.get(4)?,
+                    error_text: row.get(5)?,
+                    completed_at: row.get(6)?,
+                })
+            })?;
+            let mut outcomes = Vec::new();
+            for row in rows {
+                outcomes.push(row?);
+            }
+            Ok(outcomes)
+        })
+    }
+
+    pub fn ack_delivery_outcome(&self, outbox_id: i64) -> StalwartResult<()> {
         self.with_connection(|conn| {
             conn.execute(
-                "INSERT OR IGNORE INTO stalwart_smtp_delivery_log
-                    (id, from_addr, to_addr, outcome, error_text, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, from_addr, to_addr, outcome, error_text, completed_at],
+                "UPDATE stalwart_smtp_delivery_outbox
+                 SET acked_at = ?2, last_error = NULL
+                 WHERE outbox_id = ?1 AND acked_at IS NULL",
+                params![outbox_id, unix_time_ms()],
             )?;
             Ok(())
+        })
+    }
+
+    pub fn retry_delivery_outcome(&self, outbox_id: i64, error: &str) -> StalwartResult<()> {
+        self.with_connection(|conn| {
+            let attempts: i64 = conn.query_row(
+                "SELECT delivery_attempts FROM stalwart_smtp_delivery_outbox
+                 WHERE outbox_id = ?1",
+                params![outbox_id],
+                |row| row.get(0),
+            )?;
+            let next_attempt = attempts.saturating_add(1);
+            let shift = u32::try_from(next_attempt.min(6)).unwrap_or(6);
+            let delay_ms = 5_000_i64.saturating_mul(1_i64 << shift);
+            conn.execute(
+                "UPDATE stalwart_smtp_delivery_outbox
+                 SET delivery_attempts = ?2, next_attempt_at = ?3, last_error = ?4
+                 WHERE outbox_id = ?1 AND acked_at IS NULL",
+                params![
+                    outbox_id,
+                    next_attempt,
+                    unix_time_ms().saturating_add(delay_ms),
+                    error
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    fn delivery_outcome_acknowledged(&self, outbox_id: i64) -> StalwartResult<bool> {
+        self.with_connection(|conn| {
+            let acked: Option<i64> = conn.query_row(
+                "SELECT acked_at FROM stalwart_smtp_delivery_outbox WHERE outbox_id = ?1",
+                params![outbox_id],
+                |row| row.get(0),
+            )?;
+            Ok(acked.is_some())
         })
     }
 
@@ -730,6 +864,13 @@ impl SqliteStore {
     }
 }
 
+fn unix_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn sqlite_store_change_stamp(path: &Path) -> SqliteStoreChangeStamp {
     SqliteStoreChangeStamp {
         main: sqlite_file_change_stamp(path),
@@ -943,6 +1084,36 @@ mod tests {
             .get_mailbox_id("alice@example.test", "INBOX")?
             .expect("inbox mailbox");
         Ok((temp, store, inbox))
+    }
+
+    #[test]
+    fn delivery_outcome_outbox_is_durable_until_acknowledged() -> StalwartResult<()> {
+        let (_temp, store, _inbox) = test_store()?;
+        let email_id = store.queue_email(
+            "sender@example.test",
+            "alice@example.test",
+            "Subject: outcome\r\n\r\nbody",
+        )?;
+        store.complete_delivery(
+            &email_id,
+            "sender@example.test",
+            "alice@example.test",
+            "delivered",
+            None,
+            unix_time_ms(),
+            true,
+        )?;
+
+        assert!(store.get_pending_emails()?.is_empty());
+        let pending = store.pending_delivery_outcomes(10)?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].provider_message_id, email_id);
+        assert!(!store.delivery_outcome_acknowledged(pending[0].outbox_id)?);
+
+        store.ack_delivery_outcome(pending[0].outbox_id)?;
+        assert!(store.delivery_outcome_acknowledged(pending[0].outbox_id)?);
+        assert!(store.pending_delivery_outcomes(10)?.is_empty());
+        Ok(())
     }
 
     #[test]

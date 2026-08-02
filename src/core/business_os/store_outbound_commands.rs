@@ -3559,6 +3559,81 @@ fn outbound_handle_scheduling_update_slots(
     }))
 }
 
+/// Apply one terminal SMTP result directly to its Business OS message. The
+/// mailserver calls this through its durable outbox and acks only after this
+/// targeted update succeeds. A not-yet-visible provider id is retryable: SMTP
+/// queue insertion and Business OS message persistence live in separate files.
+pub(crate) fn apply_outbound_delivery_outcome(
+    root: &Path,
+    delivery: &ctox_mailserver::DeliveryOutcome,
+) -> anyhow::Result<()> {
+    let conn = open_store(root)?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT payload_json FROM business_records
+             WHERE collection = 'outbound_messages' AND deleted = 0
+               AND CASE WHEN json_valid(payload_json) THEN
+                    json_extract(payload_json, '$.provider_message_id') = ?1
+                    OR json_extract(payload_json, '$.payload.provider_queue_id') = ?1
+                    OR json_extract(payload_json, '$.payload.provider_message_id') = ?1
+                   ELSE 0 END
+             LIMIT 1",
+            params![delivery.provider_message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let raw = raw.ok_or_else(|| {
+        anyhow::anyhow!(
+            "outbound message for provider id {} is not visible yet",
+            delivery.provider_message_id
+        )
+    })?;
+    let mut message: Value = serde_json::from_str(&raw)?;
+    let message_id = outbound_string(&message, &["id"])
+        .ok_or_else(|| anyhow::anyhow!("outbound message has no id"))?;
+    let new_status = match delivery.outcome.as_str() {
+        "delivered" => "sent",
+        "failed" => "failed",
+        other => anyhow::bail!("unsupported SMTP delivery outcome: {other}"),
+    };
+    let now = now_ms() as i64;
+    outbound_put_string(&mut message, "send_status", new_status);
+    outbound_payload_insert(
+        &mut message,
+        "provider_dispatch_status",
+        Value::String(delivery.outcome.clone()),
+    );
+    outbound_payload_insert(
+        &mut message,
+        "provider_completed_at_ms",
+        Value::Number(serde_json::Number::from(delivery.completed_at)),
+    );
+    if let Some(error_text) = delivery.error_text.as_ref() {
+        outbound_payload_insert(
+            &mut message,
+            "provider_error_text",
+            Value::String(error_text.clone()),
+        );
+    }
+    if new_status == "sent" {
+        outbound_put_i64(&mut message, "sent_at_ms", delivery.completed_at);
+    }
+    outbound_put_i64(&mut message, "updated_at_ms", now);
+    upsert_business_record(
+        &conn,
+        "outbound_messages",
+        &message_id,
+        now,
+        message.clone(),
+    )?;
+    if new_status == "sent" {
+        if let Some(engagement_id) = outbound_string(&message, &["engagement_id"]) {
+            outbound_update_engagement_status(&conn, &engagement_id, "sent", now)?;
+        }
+    }
+    Ok(())
+}
+
 /// Reconcile outbound_messages.send_status with terminal SMTP delivery outcomes
 /// recorded by the mailserver runner in `stalwart_smtp_delivery_log`.
 /// For every outbound_message with `send_status = queued_for_provider` and a
@@ -5201,6 +5276,90 @@ mod tests {
     };
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn smtp_outbound_provider_delivery_outcome_push_updates_send_status() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let core_db = crate::paths::core_db(root);
+        std::fs::create_dir_all(core_db.parent().context("core db parent")?)?;
+        let mail_store = ctox_mailserver::store::SqliteStore::new(
+            core_db.to_str().context("utf8 core db path")?,
+        );
+        mail_store.init()?;
+        mail_store.add_user("recipient@ctox.local", "test-password")?;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let smtp_addr = listener.local_addr()?;
+        drop(listener);
+        let smtp_config = ctox_mailserver::config::SmtpConfig {
+            bind_address: smtp_addr,
+            outbound_throttle_per_min: 100,
+            max_connections: 10,
+        };
+        let smtp_server =
+            std::sync::Arc::new(ctox_mailserver::smtp::server::SmtpInboundServer::new(
+                mail_store.clone(),
+                smtp_config.clone(),
+            ));
+        let smtp_handle = tokio::spawn(async move { smtp_server.start().await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let provider_message_id = mail_store.queue_email(
+            "sender@example.test",
+            "recipient@ctox.local",
+            "Subject: Producer push\r\n\r\nDelivered body",
+        )?;
+        let conn = open_store(root)?;
+        upsert_business_record(
+            &conn,
+            "outbound_messages",
+            "msg_producer_push",
+            now_ms() as i64,
+            serde_json::json!({
+                "id": "msg_producer_push",
+                "provider_message_id": provider_message_id.clone(),
+                "send_status": "queued_for_provider",
+                "payload": {
+                    "provider_queue_id": provider_message_id.clone(),
+                    "provider_send_executed": true
+                }
+            }),
+        )?;
+        drop(conn);
+
+        let sink_root = root.to_path_buf();
+        let sink: ctox_mailserver::DeliveryOutcomeSink = std::sync::Arc::new(move |delivery| {
+            apply_outbound_delivery_outcome(&sink_root, delivery)
+                .map_err(|error| format!("{error:#}"))
+        });
+        let queue =
+            ctox_mailserver::smtp::client_queue::SmtpOutboundQueue::new_with_delivery_outcome_sink(
+                mail_store.clone(),
+                smtp_config,
+                Some(sink),
+            );
+        queue.process_queue().await?;
+
+        let conn = open_store(root)?;
+        let message =
+            outbound_load_required(&conn, "outbound_messages", "msg_producer_push", "message")?;
+        assert_eq!(
+            outbound_string(&message, &["send_status"]).as_deref(),
+            Some("sent"),
+            "the SMTP producer must push its terminal outcome without a sweep"
+        );
+        let acknowledged: i64 = Connection::open(&core_db)?.query_row(
+            "SELECT COUNT(*) FROM stalwart_smtp_delivery_outbox
+             WHERE provider_message_id = ?1 AND acked_at IS NOT NULL",
+            params![provider_message_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(acknowledged, 1, "successful sink delivery must be acked");
+        smtp_handle.abort();
+        Ok(())
+    }
 
     #[test]
     fn outbound_approval_decisions_write_business_event_audit() -> anyhow::Result<()> {

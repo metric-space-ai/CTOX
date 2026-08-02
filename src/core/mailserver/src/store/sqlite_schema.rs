@@ -20,9 +20,8 @@ CREATE TABLE IF NOT EXISTS stalwart_smtp_queue (
     status TEXT NOT NULL
 );
 
--- Append-only delivery log so the outbound module can reconcile real send
--- outcomes back into outbound_messages.send_status after the SMTP queue row is
--- gone. One row per terminal delivery attempt (success or permanent failure).
+-- Audit history retained for the fallback reconciler. Delivery to Business OS
+-- is driven by the durable outbox below, not by polling this log.
 CREATE TABLE IF NOT EXISTS stalwart_smtp_delivery_log (
     id TEXT NOT NULL,
     from_addr TEXT NOT NULL,
@@ -34,6 +33,26 @@ CREATE TABLE IF NOT EXISTS stalwart_smtp_delivery_log (
 );
 CREATE INDEX IF NOT EXISTS stalwart_smtp_delivery_log_id_idx
     ON stalwart_smtp_delivery_log (id);
+
+-- Durable handoff from the SMTP runner to the Business OS store. The runner
+-- acks a row only after the targeted Business OS update succeeds; failures stay
+-- pending with bounded exponential retry. provider_message_id is unique because
+-- an SMTP queue item has exactly one terminal outcome.
+CREATE TABLE IF NOT EXISTS stalwart_smtp_delivery_outbox (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_message_id TEXT NOT NULL UNIQUE,
+    from_addr TEXT NOT NULL,
+    to_addr TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    error_text TEXT,
+    completed_at INTEGER NOT NULL,
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    last_error TEXT,
+    acked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS stalwart_smtp_delivery_outbox_pending_idx
+    ON stalwart_smtp_delivery_outbox (acked_at, next_attempt_at, outbox_id);
 
 CREATE TABLE IF NOT EXISTS stalwart_caldav_calendars (
     id TEXT PRIMARY KEY,
