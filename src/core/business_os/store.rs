@@ -16801,20 +16801,36 @@ pub(super) fn handle_workspace_control_command(
             )?
             .into_outcome();
         }
+        // SG4/C-1: this writes file chunks and asked only for authentication,
+        // while its sibling ctox.file.export demanded DataRead to *look*. The
+        // write path was the weaker of the two. Neither SF7 wave reported it,
+        // because both counted enforcement sites and this had none to count —
+        // an absent check is invisible to an inventory of checks.
         "ctox.file.materialize" => {
             let mutation: DesktopFileMaterializeRequest =
                 serde_json::from_value(command.payload.clone())
                     .context("invalid ctox.file.materialize payload")?;
-            let session = rxdb_authenticated_session(root, &command)?;
-            let outcome = materialize_desktop_file_command(root, &session, mutation)?;
-            return write_rxdb_control_command_outcome(
+            return enforce_command_policy(
                 root,
                 &command,
-                "completed",
-                None,
-                Some("completed"),
-                outcome,
-            );
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::DataWrite,
+                    ))
+                },
+                |session| {
+                    let outcome = materialize_desktop_file_command(root, session, mutation)?;
+                    write_rxdb_control_command_outcome(
+                        root,
+                        command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    )
+                },
+            )?
+            .into_outcome();
         }
         "ctox.file.export" => {
             let mutation: DesktopFileExportRequest =
@@ -31567,6 +31583,48 @@ pub(super) mod tests {
             .join("installed-modules")
             .join("inventory")
             .exists());
+        Ok(())
+    }
+
+    /// SG4/C-1. Writing file chunks used to need only authentication, while
+    /// reading them through ctox.file.export needed DataRead — the write was
+    /// the weaker of the pair.
+    ///
+    /// Neither SF7 wave caught it. Both inventoried enforcement sites and
+    /// reported no gaps among 59, which was true and misleading: a path with
+    /// no check has nothing for an inventory of checks to find. An
+    /// independent review looking for absent gates found it in one pass.
+    #[test]
+    fn file_materialize_requires_data_write_like_its_sibling_export() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_business_user(root, "viewer", "user")?;
+
+        let outcome = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_deny_file_materialize",
+                "command_id": "cmd_deny_file_materialize",
+                "module": "ctox",
+                "command_type": "ctox.file.materialize",
+                "record_id": "file_1",
+                "status": "pending_sync",
+                "payload": { "file_id": "file_1", "content": "x" },
+                "client_context": {
+                    "actor": {
+                        "id": "viewer",
+                        "display_name": "Viewer",
+                        "role": "admin",
+                        "is_admin": true
+                    }
+                }
+            }),
+        )
+        .context("accept ctox.file.materialize")?;
+
+        // The claimed admin role in client_context must not decide anything —
+        // the seeded user is a plain user, and the server owns that judgement.
+        assert_policy_denied(&outcome, "data.write", "workspace", None);
         Ok(())
     }
 
