@@ -38,6 +38,28 @@ mod tests {
     /// with the script the manifest was built from — two definitions of one
     /// thing, which is the circular-inventory shape this campaign removes.
     /// The guard is the definition now; the manifest is derived from it.
+    /// KNOWN BLIND SPOT (01.08.): a rename hides the decision from this guard.
+    ///
+    ///     let lower = error.to_string().to_ascii_lowercase();
+    ///     lower.contains("sqlite_busy")
+    ///
+    /// The receiver is `lower`, which carries none of these tokens, so the
+    /// line is not counted. Two production functions in service.rs already
+    /// classify SQLite failures exactly this way — found while checking
+    /// whether SF8 had really replaced the SQLite text matching. It had
+    /// replaced the ones the guard could see.
+    ///
+    /// I tried to close it by tracking `let` bindings whose right-hand side
+    /// reads an error, and stopped: file-wide tracking reported 139 decisions
+    /// against a budget of 3, and even scoped to the function it turned
+    /// chat_native.rs from 1 to 42, because there a "message" is the subject
+    /// matter rather than a failure. A ratchet that overcounts is as harmful
+    /// as one that undercounts — it teaches people to raise the number.
+    ///
+    /// Closing this needs the receiver's type, not its name, which means
+    /// asking the compiler rather than reading lines. Until then the blind
+    /// spot is written down here rather than papered over, and the two known
+    /// sites are named in the plan.
     const ERROR_SHAPED: [&str; 8] = [
         "err", "error", "status", "note", "message", "msg", "reason", "stderr",
     ];
