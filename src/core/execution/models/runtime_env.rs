@@ -658,14 +658,24 @@ mod tests {
             effective.get("OPENROUTER_API_KEY").map(String::as_str),
             Some("or-store")
         );
-        assert_eq!(
-            effective.get("CTOX_CUDA_HOME").map(String::as_str),
-            Some("/opt/cuda")
-        );
-        assert_eq!(
-            effective.get("CTOX_ENGINE_LOG").map(String::as_str),
-            Some("/tmp/ctox-engine.log")
-        );
+        // SM16. These two used to expect Some("/opt/cuda") and
+        // Some("/tmp/ctox-engine.log") — values this fixture never persists.
+        // They can only have come from the process environment, which is the
+        // one thing "only from store" forbids, and which AGENTS.md forbids as
+        // well: runtime configuration lives in typed config, the SQLite
+        // runtime store or the secret store.
+        //
+        // Production already obeys that. effective_operator_env_map reads the
+        // persisted map and the secret store and touches std::env nowhere, so
+        // the assertions were describing an implementation that no longer
+        // exists while the test's own name described the current one.
+        //
+        // Left red through the campaign because flipping them was also the
+        // green move, and a fix that is convenient deserves more evidence than
+        // a fix that is not. The evidence: no std::env read on the path, no
+        // resolver that produces these keys, and an empty runtime root.
+        assert_eq!(effective.get("CTOX_CUDA_HOME"), None);
+        assert_eq!(effective.get("CTOX_ENGINE_LOG"), None);
 
         std::fs::remove_dir_all(root).unwrap();
     }

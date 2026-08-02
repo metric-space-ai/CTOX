@@ -669,7 +669,24 @@ Optionen: akzeptieren und dokumentieren, oder auf die Roadmap.
 **Empfehlung: dokumentieren.** Beide sind bekannt und begrenzt; ein Ticket ohne
 Termin ist eine Behauptung, keine Absicht.
 
-**7. Woher darf ein wirksamer Laufzeitwert stammen? (SM16)**
+**7. ~~Woher darf ein wirksamer Laufzeitwert stammen?~~ — LÖST SICH AUF (02.08.)**
+
+Es war keine Owner-Frage. Gemessen: `effective_operator_env_map` liest den
+persistierten Laufzeit-Env und den Secret-Store und greift **null Mal** auf
+`std::env` zu; kein Resolver erzeugt `CTOX_CUDA_HOME`; die Fixture legt einen
+leeren Root an. Die vier Assertions erwarteten Werte, die auf diesem Pfad nicht
+entstehen können — geschrieben gegen eine Fassung, die es nicht mehr gibt.
+
+Die Produktion hält den Vertrag also bereits, und `AGENTS.md` schreibt ihn
+ohnehin vor. Korrigiert wurde der TEST, nicht das Verhalten.
+
+**Die Gegenprobe ist der Punkt:** baut man einen `std::env`-Zugriff ein, wird
+der Test jetzt rot. Vorher behauptete er den Verstoss, statt ihn zu erkennen.
+Deshalb blieb er die Kampagne über rot: das Umdrehen war zugleich der bequeme
+grüne Weg, und ein Fix, der bequem ist, braucht mehr Belege als einer, der es
+nicht ist.
+
+**ALTE FASSUNG DER FRAGE (überholt):**
 
 Gemessen: `env_or_config_reads_secrets_only_from_store` ist rot, und **vier
 seiner Assertions widersprechen seinem eigenen Namen** — sie erwarten Werte, die
