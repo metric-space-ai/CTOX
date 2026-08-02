@@ -7,7 +7,14 @@ const KNOWLEDGE_OPEN_TARGET_KEY = 'ctox.businessOs.knowledge.openId';
 const KNOWLEDGE_OPEN_DOMAIN_KEY = 'ctox.businessOs.knowledge.openDomain';
 // Matches the bound the native peer uses when it reads the same collections
 // (`rxdb_peer.rs`, MangoQuery limit 100_000).
-const KNOWLEDGE_QUERY_LIMIT = 100_000;
+// Read the collection in wire-sized pages. A single huge `limit` does not
+// survive the sync channel's per-chunk byte budget: on the SKF instance
+// `limit: 100000` produced a `fetch:start` for knowledge_items that never
+// completed, so the module reported "store not connected" while IndexedDB
+// held every record. Pages are small enough to answer, and the loop keeps
+// reading until the collection is exhausted.
+const KNOWLEDGE_QUERY_PAGE_SIZE = 200;
+const KNOWLEDGE_QUERY_MAX_DOCUMENTS = 20_000;
 const KNOWLEDGE_DATA_COLLECTIONS = Object.freeze([
   'knowledge_items',
   'knowledge_runbooks',
@@ -473,7 +480,14 @@ async function loadLocalKnowledgeRecords(collectionName, missingCollections = st
   // Knowledge showing "Skillbooks (0) · Runbooks (0)" while IndexedDB held 263
   // items including the skillbook and all six runbooks. The native peer reads
   // the same collections with an explicit bound; the browser must do the same.
-  const docs = await collection.find({ limit: KNOWLEDGE_QUERY_LIMIT }).exec();
+  // The query contract names the page offset `skip`; the loader derives its
+  // wire `offset` from it. Passing `offset` here would silently re-read page 0.
+  const docs = [];
+  for (let skip = 0; skip < KNOWLEDGE_QUERY_MAX_DOCUMENTS; skip += KNOWLEDGE_QUERY_PAGE_SIZE) {
+    const page = await collection.find({ skip, limit: KNOWLEDGE_QUERY_PAGE_SIZE }).exec();
+    docs.push(...page);
+    if (page.length < KNOWLEDGE_QUERY_PAGE_SIZE) break;
+  }
   return sortKnowledgeRecords(docs
     .map((doc) => normalizeStoredKnowledgeRecord(doc.toJSON()))
     .filter(isActiveKnowledgeRecord));
