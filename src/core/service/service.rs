@@ -134,7 +134,6 @@ const APPSEC_PIPELINE_WORKER_QUEUE_SCAN_LIMIT: usize = 64;
 const APPSEC_PIPELINE_SERVICE_LEASE_OWNER: &str = "ctox-appsec-pipeline-service";
 const IDLE_QUEUE_DISPATCH_POLL_SECS: u64 = 8;
 const WORKER_IDLE_QUEUE_KICK_DELAY_MS: u64 = 250;
-const BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS: u64 = 180;
 const BUSINESS_OS_APP_RECOVERY_STALE_SECS: u64 = 180;
 const BUSINESS_OS_APP_RECOVERY_PREFLIGHT_IDLE_SAFETY_SECS: u64 = 60;
 const BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT: usize = 128;
@@ -4702,76 +4701,15 @@ fn status_from_shared_state(root: &Path, state: &Arc<Mutex<SharedState>>) -> Res
     })
 }
 
-fn recover_business_os_app_queue_tasks_for_idle_status_snapshot(
-    root: &Path,
-    state: &Arc<Mutex<SharedState>>,
-) {
-    {
-        let mut shared = lock_shared_state(state);
-        if !begin_business_os_app_recovery_locked(&mut shared, "idle status snapshot") {
-            return;
-        }
-    }
-    let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        recover_stale_business_os_app_queue_task_summary(
-            root,
-            state,
-            BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT,
-            0,
-        )
-    }));
-    {
-        let mut shared = lock_shared_state(state);
-        shared.app_recovery_active = false;
-        shared.app_recovery_started_epoch_secs = None;
-    }
-    match recovered {
-        Ok(Ok(summary)) if summary.total() > 0 => {
-            push_event(
-                state,
-                format!(
-                    "Recovered {} abandoned Business OS app queue task(s) during idle status snapshot",
-                    summary.total()
-                ),
-            );
-        }
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => push_event(
-            state,
-            format!(
-                "Business OS app recovery skipped during idle status snapshot: {}",
-                clip_text(&err.to_string(), 180)
-            ),
-        ),
-        Err(_) => push_event(
-            state,
-            "Business OS app recovery panicked during idle status snapshot; continuing".to_string(),
-        ),
-    }
-}
-
 fn begin_business_os_app_recovery_locked(shared: &mut SharedState, reason: &str) -> bool {
     if shared.busy || shared.worker_active_count > 0 {
         return false;
     }
     if shared.app_recovery_active {
-        if reason == "idle status snapshot" {
-            push_event_locked(
-                shared,
-                "Bypassed active Business OS app recovery guard during idle status snapshot"
-                    .to_string(),
-            );
-            return true;
-        }
         let now = current_epoch_secs();
-        let stale_after_secs = if reason == "idle status snapshot" {
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS
-        } else {
-            BUSINESS_OS_APP_RECOVERY_STALE_SECS
-        };
         let stale = shared
             .app_recovery_started_epoch_secs
-            .map(|started| now.saturating_sub(started) >= stale_after_secs)
+            .map(|started| now.saturating_sub(started) >= BUSINESS_OS_APP_RECOVERY_STALE_SECS)
             .unwrap_or(true);
         if !stale {
             return false;
@@ -16522,9 +16460,7 @@ fn maybe_spawn_business_os_app_recovery(
                         "Recovered {updated} abandoned Business OS app queue task(s) during {reason}"
                     ),
                 );
-                if reason != "idle status snapshot" {
-                    maybe_dispatch_after_business_os_app_recovery(root, state, reason);
-                }
+                maybe_dispatch_after_business_os_app_recovery(root, state, reason);
             }
             Ok(Ok(_)) => {
                 mark_business_os_app_recovery_ran(&root);
@@ -34608,8 +34544,8 @@ Business OS command:
     }
 
     #[test]
-    fn status_snapshot_does_not_run_business_os_app_recovery() {
-        let root = temp_root("status-snapshot-no-app-recovery");
+    fn idle_status_snapshot_reads_expired_queue_lease_without_repair() {
+        let root = temp_root("idle-status-snapshot-read-only");
         let script_dir = root.join("src/apps/business-os/scripts");
         std::fs::create_dir_all(&script_dir).expect("create validator script dir");
         std::fs::write(
@@ -34637,422 +34573,38 @@ Business OS command:
         age_queue_task_lease(
             &root,
             &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+            BUSINESS_OS_APP_RECOVERY_STALE_SECS + 5,
         );
         let state = Arc::new(Mutex::new(SharedState::default()));
+        let before = channels::load_queue_task(&root, &task.message_key)
+            .expect("load expired lease before status snapshot")
+            .expect("expired lease exists before status snapshot");
 
-        status_from_shared_state(&root, &state).expect("status snapshot failed");
+        let status = status_from_shared_state(&root, &state).expect("status snapshot failed");
 
-        assert_eq!(route_status_for(&root, &task.message_key), "leased");
-        let shared = lock_shared_state(&state);
-        assert!(!shared.recent_events.iter().any(|event| {
-            event.contains("Recovered green Business OS app queue task")
-                || event.contains("Recovered 1 abandoned Business OS app queue task")
-        }));
-    }
-
-    #[test]
-    fn explicit_idle_recovery_completes_green_business_os_app_queue_lease() {
-        let root = temp_root("status-snapshot-green-app-recovery");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "process.exit(0);\n",
-        )
-        .expect("write green validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create projects app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: projects\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/projects\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/projects".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "projects");
-        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        age_queue_task_lease(
-            &root,
-            &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-        for _ in 0..40 {
-            if route_status_for(&root, &task.message_key) == "handled" {
-                break;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-
-        assert_eq!(route_status_for(&root, &task.message_key), "handled");
-    }
-
-    #[test]
-    fn status_snapshot_recovery_completes_fresh_abandoned_written_app_queue_lease() {
-        let root = temp_root("status-snapshot-fresh-written-app-complete");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "process.exit(0);\n",
-        )
-        .expect("write green validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create subscriptions app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/subscriptions".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "subscriptions");
-        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(route_status_for(&root, &task.message_key), "handled");
-        let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
-    }
-
-    #[test]
-    fn status_snapshot_recovery_does_not_prefetch_next_app_queue_task_after_green_lease() {
-        let root = temp_root("status-snapshot-green-app-dispatch-next");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "process.exit(0);\n",
-        )
-        .expect("write green validator script fixture");
-        let completed_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create subscriptions app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/subscriptions".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create completed app queue task");
-        seed_business_os_app_artifacts(&root, "subscriptions");
-        channels::lease_queue_task(&root, &completed_task.message_key, "ctox-service-test")
-            .expect("failed to lease completed app queue task");
-        age_queue_task_lease(
-            &root,
-            &completed_task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let next_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create inventory app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: inventory\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/inventory\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/inventory".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create next app queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(
-            route_status_for(&root, &completed_task.message_key),
-            "handled"
-        );
-        assert_eq!(route_status_for(&root, &next_task.message_key), "pending");
-        let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
-    }
-
-    #[test]
-    fn idle_status_snapshot_does_not_lease_pending_business_os_app_task() {
-        let root = temp_root("status-snapshot-pending-app-dispatch");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create inventory app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: inventory\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/inventory\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/inventory".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create pending app queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(route_status_for(&root, &task.message_key), "pending");
-        let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
-        assert!(!shared.recent_events.iter().any(|event| {
-            event.contains("Queued durable queue task after Business OS app recovery")
-        }));
-    }
-
-    #[test]
-    fn status_snapshot_recovery_requeues_missing_app_target_without_prefetch() {
-        let root = temp_root("status-snapshot-missing-app-target-requeue");
-        let leased_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create subscriptions app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/subscriptions".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create leased app queue task");
-        channels::lease_queue_task(&root, &leased_task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        age_queue_task_lease(
-            &root,
-            &leased_task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let pending_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create contracts app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/contracts".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create pending app queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        let reloaded = channels::load_queue_task(&root, &leased_task.message_key)
-            .expect("load leased task")
-            .expect("leased task exists");
-        assert_eq!(reloaded.route_status, "pending");
-        assert_eq!(
-            reloaded.status_note.as_deref(),
-            Some("business-os:requeued-unstarted-app: app target missing or empty")
-        );
-        assert_eq!(
-            route_status_for(&root, &pending_task.message_key),
-            "pending"
-        );
-        let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
-    }
-
-    #[test]
-    fn status_snapshot_recovery_resets_stale_app_recovery_guard() {
-        let root = temp_root("status-snapshot-stale-app-recovery-guard");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "process.exit(0);\n",
-        )
-        .expect("write green validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create contracts app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/contracts".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "contracts");
-        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        age_queue_task_lease(
-            &root,
-            &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = lock_shared_state(&state);
-            shared.app_recovery_active = true;
-            shared.app_recovery_started_epoch_secs =
-                Some(current_epoch_secs().saturating_sub(BUSINESS_OS_APP_RECOVERY_STALE_SECS + 1));
-        }
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(route_status_for(&root, &task.message_key), "handled");
-        let shared = lock_shared_state(&state);
         assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("Bypassed active Business OS app recovery guard")),
-            "idle status recovery guard bypass should be observable: {:?}",
-            shared.recent_events
+            status.pending_count >= 1,
+            "leased task remains visible to the reader"
         );
-    }
-
-    #[test]
-    fn status_snapshot_recovery_resets_idle_stale_app_recovery_guard() {
-        let root = temp_root("status-snapshot-idle-stale-app-recovery-guard");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "process.exit(0);\n",
-        )
-        .expect("write green validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create subscriptions app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/subscriptions".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "subscriptions");
-        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        age_queue_task_lease(
-            &root,
-            &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let state = Arc::new(Mutex::new(SharedState::default()));
+        let after = channels::load_queue_task(&root, &task.message_key)
+            .expect("load expired lease after status snapshot")
+            .expect("expired lease exists after status snapshot");
+        assert_eq!(after.route_status, before.route_status);
+        assert_eq!(after.leased_at, before.leased_at);
+        assert_eq!(after.status_note, before.status_note);
+        assert_eq!(after.prompt, before.prompt);
         {
-            let mut shared = lock_shared_state(&state);
-            shared.app_recovery_active = true;
-            shared.app_recovery_started_epoch_secs = Some(
-                current_epoch_secs().saturating_sub(BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 1),
-            );
+            let shared = lock_shared_state(&state);
+            assert!(!shared.recent_events.iter().any(|event| {
+                event.contains("Recovered green Business OS app queue task")
+                    || event.contains("Recovered 1 abandoned Business OS app queue task")
+            }));
         }
 
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
+        let recovered = recover_stale_business_os_app_queue_tasks(&root, &state, 10)
+            .expect("dedicated maintenance should recover the expired lease");
+        assert_eq!(recovered, 1);
         assert_eq!(route_status_for(&root, &task.message_key), "handled");
-        let shared = lock_shared_state(&state);
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("Bypassed active Business OS app recovery guard")),
-            "idle stale recovery guard bypass should be observable: {:?}",
-            shared.recent_events
-        );
-    }
-
-    #[test]
-    fn status_snapshot_recovery_bypasses_fresh_idle_guard_for_stale_app_lease() {
-        let root = temp_root("status-snapshot-fresh-app-recovery-guard");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "process.exit(0);\n",
-        )
-        .expect("write green validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create projects app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: projects\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/projects\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/projects".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "projects");
-        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        age_queue_task_lease(
-            &root,
-            &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = lock_shared_state(&state);
-            shared.app_recovery_active = true;
-            shared.app_recovery_started_epoch_secs = Some(current_epoch_secs());
-        }
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(route_status_for(&root, &task.message_key), "handled");
-        let shared = lock_shared_state(&state);
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("Bypassed active Business OS app recovery guard")),
-            "fresh idle recovery guard bypass should be observable: {:?}",
-            shared.recent_events
-        );
-    }
-
-    #[test]
-    fn idle_status_recovery_bypass_does_not_extend_active_guard_start_time() {
-        let started = current_epoch_secs().saturating_sub(7);
-        let mut shared = SharedState::default();
-        shared.app_recovery_active = true;
-        shared.app_recovery_started_epoch_secs = Some(started);
-
-        assert!(begin_business_os_app_recovery_locked(
-            &mut shared,
-            "idle status snapshot"
-        ));
-
-        assert_eq!(shared.app_recovery_started_epoch_secs, Some(started));
     }
 
     #[test]
@@ -35074,161 +34626,6 @@ Business OS command:
             "stale guard reset should be visible: {:?}",
             shared.recent_events
         );
-    }
-
-    #[test]
-    fn status_snapshot_recovery_marks_red_business_os_app_queue_lease_for_rework_without_prefetch()
-    {
-        let root = temp_root("status-snapshot-red-app-recovery");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "console.error('module tests failed'); process.exit(1);\n",
-        )
-        .expect("write red validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create subscriptions app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/subscriptions".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "subscriptions");
-        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        age_queue_task_lease(
-            &root,
-            &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-        assert_eq!(route_status_for(&root, &task.message_key), "review_rework");
-        let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
-    }
-
-    #[test]
-    fn status_snapshot_recovery_leaves_a_locally_owned_app_lease_alone() {
-        let root = temp_root("status-snapshot-red-app-idle-shadow");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "console.error('missing index.js'); process.exit(1);\n",
-        )
-        .expect("write red validator script fixture");
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Create contracts app".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/contracts".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create app queue task");
-        seed_business_os_app_artifacts(&root, "contracts");
-        let leased = channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
-            .expect("failed to lease app queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = lock_shared_state(&state);
-            shared
-                .pending_prompts
-                .push_back(queued_prompt_from_queue_task(leased));
-        }
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(route_status_for(&root, &task.message_key), "leased");
-        let shared = lock_shared_state(&state);
-        assert_eq!(shared.pending_prompts.len(), 1);
-        assert!(shared.pending_prompts.iter().any(|prompt| {
-            prompt
-                .leased_message_keys
-                .iter()
-                .any(|message_key| message_key == &task.message_key)
-        }));
-        assert!(!shared.recent_events.iter().any(|event| {
-            event.contains("Cleared idle pending prompt shadow")
-                && event.contains(task.message_key.as_str())
-        }));
-    }
-
-    #[test]
-    fn status_snapshot_recovery_prioritizes_red_app_rework_before_pending_app() {
-        let root = temp_root("status-snapshot-red-app-rework-before-pending");
-        let script_dir = root.join("src/apps/business-os/scripts");
-        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
-        std::fs::write(
-            script_dir.join("validate-app-module.mjs"),
-            "console.error('missing module directory'); process.exit(1);\n",
-        )
-        .expect("write red validator script fixture");
-        let red_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Projects Bench".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: projects\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/projects\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/projects".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create red app queue task");
-        seed_business_os_app_artifacts(&root, "projects");
-        channels::lease_queue_task(&root, &red_task.message_key, "ctox-service-test")
-            .expect("failed to lease red app queue task");
-        age_queue_task_lease(
-            &root,
-            &red_task.message_key,
-            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
-        );
-        let pending_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Quality Bench".to_string(),
-                prompt: "Business OS app task metadata:\n- module_id: quality\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/quality\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
-                thread_key: "business-os/apps/quality".to_string(),
-                workspace_root: Some(root.display().to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("business-os-app-module-development".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to create pending app queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-
-        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
-
-        assert_eq!(
-            route_status_for(&root, &red_task.message_key),
-            "review_rework"
-        );
-        assert_eq!(
-            route_status_for(&root, &pending_task.message_key),
-            "pending"
-        );
-        let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
     }
 
     #[test]
