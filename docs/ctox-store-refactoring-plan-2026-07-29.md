@@ -377,6 +377,33 @@ Schätzungen (~60, ~400) sind fast exakt. Drei Treffer waren keine Regel.
    mit einer benannten Blindstellenliste.
 7. **SF10** just-in-time zu SF8, nicht als globales Vorab-Gate.
 
+
+### SF10 — geschlossen ohne Umbau (02.08.)
+
+Das Ticket wollte 46 Message-Assertions umbauen, weil sie SG2 blockierten.
+Beide Hälften halten nicht:
+
+- **Die Blockade existiert nicht.** SG2 ignoriert Testmodule ausdrücklich und
+  ist längst gelandet. Das stand schon in der Prämissenprüfung.
+- **Die Zahl stimmt nicht.** Allein in `business_os/` und `service/` sind es
+  **522**, nicht 46.
+
+Und die Verteilung entscheidet die Sache. Der grösste erkennbare Block sind
+**negative** Zusicherungen wie `assert!(!output.contains("sk-test-secret"))` —
+sie belegen, dass ein Geheimnis NICHT durchsickert. Dort ist das Festnageln des
+Literals nicht Schuld, sondern der Test selbst. Ein pauschaler Umbau hätte
+Sicherheitstests beschädigt, um eine Metrik zu verbessern.
+
+Die zielbezogene Fassung aus der Prämissenprüfung — „nur die Tests umbauen, die
+den jeweils in SF8 typisierten Prosa-Vertrag festnageln" — wurde nach SF8
+geprüft und ist **leer**: SF8s typisierte Fehler haben keine verwaisten
+Assertions hinterlassen.
+
+Was bleibt, ist keine mechanische Aufgabe, sondern eine Frage pro Stelle: Ist
+diese Meldung Teil des öffentlichen Verhaltens? Wo ja, gehört sie festgenagelt.
+Wo nein, ist ein typisierter Fehler die Antwort — und der entsteht bei SF8, nicht
+hier. Kein Sammelticket.
+
 ## Welle S-GUARD — Zement
 
 - SG1 Inventar-/Contract-Drift-Checks in `cargo test` (nicht nur Tool).
