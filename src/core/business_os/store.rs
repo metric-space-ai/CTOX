@@ -877,6 +877,8 @@ pub struct ModuleLifecycleProjectionRepairRequest {
     pub repair_invalid_version_refs: bool,
     #[serde(default)]
     pub repair_orphan_private_apps: bool,
+    #[serde(default)]
+    pub migrate_legacy_manifest_lifecycle: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3458,12 +3460,11 @@ pub(super) fn legacy_preview_audience_grant_id(module_id: &str, user_id: &str) -
     format!("legacy_preview_app_view_{module_slug}_{suffix}")
 }
 
-pub(super) fn backfill_manifest_preview_audience_grants(
-    root: &Path,
+fn backfill_manifest_preview_audience_grants(
+    conn: &Connection,
     modules: &[ModuleManifest],
+    now: i64,
 ) -> anyhow::Result<usize> {
-    let conn = open_store(root)?;
-    let now = now_ms() as i64;
     let mut inserted = 0usize;
 
     for manifest in modules {
@@ -3534,12 +3535,11 @@ pub(super) fn backfill_manifest_preview_audience_grants(
     Ok(inserted)
 }
 
-pub(super) fn backfill_semver_public_release_records(
-    root: &Path,
+fn backfill_semver_public_release_records(
+    conn: &Connection,
     modules: &[ModuleManifest],
+    now: i64,
 ) -> anyhow::Result<usize> {
-    let conn = open_store(root)?;
-    let now = now_ms() as i64;
     let mut inserted = 0usize;
     for manifest in modules {
         if !module_is_runtime_installed(manifest)
@@ -3600,6 +3600,81 @@ pub(super) fn backfill_semver_public_release_records(
         )?;
     }
     Ok(inserted)
+}
+
+const LEGACY_MODULE_LIFECYCLE_MIGRATION_ID: &str =
+    "business_os.legacy_module_lifecycle_authority.v1";
+
+pub fn migrate_legacy_module_lifecycle_authority(
+    root: &Path,
+    session: &BusinessOsSession,
+    dry_run: bool,
+) -> anyhow::Result<Value> {
+    let app_root = resolve_business_os_app_root(root)?;
+    let installed_app_root = resolve_business_os_installed_app_root(root);
+    let modules = load_module_manifests(&app_root, &installed_app_root)?;
+    let mut conn = open_store(root)?;
+    let existing_evidence = conn
+        .query_row(
+            "SELECT payload_json FROM business_events WHERE event_id = ?1",
+            params![LEGACY_MODULE_LIFECYCLE_MIGRATION_ID],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(payload_json) = existing_evidence {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
+            "status": "already_applied",
+            "dry_run": dry_run,
+            "evidence": serde_json::from_str::<Value>(&payload_json).unwrap_or(Value::Null),
+        }));
+    }
+
+    let now = now_ms() as i64;
+    let actor_id = session_user_id(session).unwrap_or("").trim().to_owned();
+    let tx = conn.transaction()?;
+    let preview_grants_inserted = backfill_manifest_preview_audience_grants(&tx, &modules, now)?;
+    let release_records_inserted = backfill_semver_public_release_records(&tx, &modules, now)?;
+    let evidence = serde_json::json!({
+        "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
+        "actor_id": actor_id,
+        "preview_grants_inserted": preview_grants_inserted,
+        "release_records_inserted": release_records_inserted,
+        "applied_at_ms": now,
+    });
+
+    if dry_run {
+        tx.rollback()?;
+        return Ok(serde_json::json!({
+            "ok": true,
+            "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
+            "status": "dry_run",
+            "dry_run": true,
+            "evidence": evidence,
+        }));
+    }
+
+    tx.execute(
+        "INSERT INTO business_events
+            (event_id, collection, record_id, command_type, payload_json, observed_at_ms)
+         VALUES (?1, 'business_os_migrations', ?1, ?2, ?3, ?4)",
+        params![
+            LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
+            "business_os.migration.legacy_module_lifecycle_authority",
+            serde_json::to_string(&evidence)?,
+            now
+        ],
+    )?;
+    tx.commit()?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
+        "status": "applied",
+        "dry_run": false,
+        "evidence": evidence,
+    }))
 }
 
 fn normalized_lifecycle_state(value: Option<String>) -> Option<String> {
@@ -3682,8 +3757,8 @@ fn projected_module_lifecycle(
             "private",
             Value::String("invalid_semver".to_owned()),
         )
-    } else if release.is_some()
-        && (projected_release_channel == "restricted" || declared_restricted)
+    } else if declared_restricted
+        || (release.is_some() && projected_release_channel == "restricted")
     {
         ("restricted", "restricted", "restricted", Value::Null)
     } else if release.is_some() {
@@ -7921,6 +7996,19 @@ pub fn repair_module_lifecycle_projections(
     request: ModuleLifecycleProjectionRepairRequest,
 ) -> anyhow::Result<Value> {
     let module_filter = source_sanitize_slug(&request.module_id);
+    let legacy_manifest_migration = if request.migrate_legacy_manifest_lifecycle {
+        anyhow::ensure!(
+            module_filter.is_empty(),
+            "legacy manifest lifecycle migration must run for the complete catalog"
+        );
+        Some(migrate_legacy_module_lifecycle_authority(
+            root,
+            session,
+            request.dry_run,
+        )?)
+    } else {
+        None
+    };
     let now = now_ms() as i64;
     let conn = open_store(root)?;
     let module_ids = if module_filter.is_empty() {
@@ -7960,6 +8048,14 @@ pub fn repair_module_lifecycle_projections(
         }
     }
     let mut actions = Vec::new();
+    if let Some(migration) = legacy_manifest_migration.as_ref() {
+        actions.push(serde_json::json!({
+            "kind": "legacy_module_lifecycle_authority_migration",
+            "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
+            "status": migration.get("status").cloned().unwrap_or(Value::Null),
+            "apply": !request.dry_run,
+        }));
+    }
     let mut rxdb_writers = RxdbProjectionWriterCache::new(root);
     for release_id in &release_ids {
         actions.push(serde_json::json!({
@@ -8014,6 +8110,7 @@ pub fn repair_module_lifecycle_projections(
         "orphan_private_app_repair_count": orphan_private_app_repair_count,
         "permission_grant_actions": permission_grant_actions,
         "permission_grant_repair_count": permission_grant_repair_count,
+        "legacy_manifest_migration": legacy_manifest_migration.unwrap_or(Value::Null),
         "module_catalog_projected": !request.dry_run
     }))
 }
@@ -8035,6 +8132,7 @@ fn module_lifecycle_projection_repair_safe_command(
             "repair_stale_grants": request.repair_stale_grants,
             "repair_invalid_version_refs": request.repair_invalid_version_refs,
             "repair_orphan_private_apps": request.repair_orphan_private_apps,
+            "migrate_legacy_manifest_lifecycle": request.migrate_legacy_manifest_lifecycle,
         }),
         client_context: serde_json::json!({
             "actor": {

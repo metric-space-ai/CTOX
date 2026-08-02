@@ -3,7 +3,6 @@
 
 use super::store::{
     augment_modules_with_catalog_update_state, augment_modules_with_instance_visibility,
-    backfill_manifest_preview_audience_grants, backfill_semver_public_release_records,
     business_os_module_allowlist, business_os_store_path,
     configured_business_users_projection_hash, load_marketplace_module_manifests,
     load_module_manifests, load_rxdb_collection_record, load_template_manifests, modified_at_ms,
@@ -360,30 +359,29 @@ fn module_catalog_allowlist_hash(root: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn module_catalog_projection_service_session() -> BusinessOsSession {
+    BusinessOsSession {
+        ok: true,
+        authenticated: true,
+        auth_required: false,
+        user: Some(BusinessOsSessionUser {
+            id: "service:module-catalog-projection".to_owned(),
+            display_name: "Module Catalog Projection Service".to_owned(),
+            role: "service".to_owned(),
+            is_admin: false,
+        }),
+        login_url: None,
+        reason: None,
+    }
+}
+
 pub fn module_catalog_for_rxdb(root: &Path) -> anyhow::Result<Value> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
     let modules = load_module_manifests(&app_root, &installed_app_root)?;
-    backfill_manifest_preview_audience_grants(root, &modules)?;
-    backfill_semver_public_release_records(root, &modules)?;
     let marketplace = load_marketplace_module_manifests(&app_root)?;
     let templates = load_template_manifests(&app_root)?;
-    let mut governance = module_governance_map(
-        root,
-        &BusinessOsSession {
-            ok: true,
-            authenticated: true,
-            auth_required: false,
-            user: Some(BusinessOsSessionUser {
-                id: "ctox-system".to_owned(),
-                display_name: "CTOX System".to_owned(),
-                role: "admin".to_owned(),
-                is_admin: true,
-            }),
-            login_url: None,
-            reason: None,
-        },
-    )?;
+    let mut governance = module_governance_map(root, &module_catalog_projection_service_session())?;
     let version_states = module_version_states(root, &app_root).unwrap_or(Value::Null);
     let (mut modules, lifecycle) =
         modules_with_projected_lifecycle(root, modules, &version_states)?;
@@ -506,9 +504,9 @@ mod tests {
         seed_test_business_os_app_root, write_installed_inventory_module,
     };
     use super::super::store::{
-        legacy_preview_audience_grant_id, now_ms, open_store, record_module_release,
-        resolve_business_os_installed_app_root, rollback_module_release, rxdb_store_path,
-        ModuleReleaseRequest, ModuleRollbackRequest,
+        legacy_preview_audience_grant_id, migrate_legacy_module_lifecycle_authority, now_ms,
+        open_store, record_module_release, resolve_business_os_installed_app_root,
+        rollback_module_release, rxdb_store_path, ModuleReleaseRequest, ModuleRollbackRequest,
     };
     use super::{module_catalog_for_rxdb, write_module_catalog_projection_to_rxdb};
     use anyhow::Context;
@@ -911,7 +909,74 @@ mod tests {
     }
 
     #[test]
-    fn module_catalog_projects_runtime_app_lifecycle_backfill() -> anyhow::Result<()> {
+    fn module_catalog_read_does_not_write_legacy_grants_or_release_records() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let app_root = root.join("src/apps/business-os");
+        fs::create_dir_all(root.join("runtime"))?;
+        let installed_app_root = resolve_business_os_installed_app_root(root);
+        fs::create_dir_all(app_root.join("modules/ctox"))?;
+        fs::create_dir_all(installed_app_root.join("installed-modules/legacy-preview"))?;
+        fs::create_dir_all(installed_app_root.join("installed-modules/legacy-team"))?;
+        fs::write(app_root.join("index.html"), "<!doctype html>")?;
+        fs::write(
+            app_root.join("modules/ctox/module.json"),
+            r#"{"id":"ctox","title":"CTOX","entry":"modules/ctox/index.html","install_scope":"core"}"#,
+        )?;
+        fs::write(
+            installed_app_root.join("installed-modules/legacy-preview/module.json"),
+            r#"{"id":"legacy-preview","title":"Legacy Preview","version":"0.4.0","entry":"installed-modules/legacy-preview/index.html","install_scope":"installed","lifecycle":{"visibility_state":"preview","preview_user_ids":["preview-user"]}}"#,
+        )?;
+        fs::write(
+            installed_app_root.join("installed-modules/legacy-team/module.json"),
+            r#"{"id":"legacy-team","title":"Legacy Team","version":"1.2.0","entry":"installed-modules/legacy-team/index.html","install_scope":"installed"}"#,
+        )?;
+
+        let counts = |conn: &Connection| -> anyhow::Result<(i64, i64)> {
+            Ok((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM business_permission_grants",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM business_module_releases", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        };
+        let conn = open_store(root)?;
+        let before = counts(&conn)?;
+        drop(conn);
+
+        let catalog = module_catalog_for_rxdb(root)?;
+
+        let conn = open_store(root)?;
+        let after = counts(&conn)?;
+        assert_eq!(
+            after, before,
+            "a catalog read must not create authority or releases"
+        );
+        assert_eq!(
+            catalog
+                .pointer("/governance/can_manage_all")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            catalog.pointer("/governance/role").and_then(Value::as_str),
+            Some("service")
+        );
+        assert_eq!(
+            catalog
+                .pointer("/governance/user_id")
+                .and_then(Value::as_str),
+            Some("service:module-catalog-projection")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_migration_projects_runtime_app_lifecycle_authority() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         let app_root = root.join("src/apps/business-os");
@@ -1007,6 +1072,24 @@ mod tests {
             params![now + 1],
         )?;
         drop(conn);
+
+        let migration = migrate_legacy_module_lifecycle_authority(root, &chef_session(), false)?;
+        assert_eq!(
+            migration.get("status").and_then(Value::as_str),
+            Some("applied")
+        );
+        assert_eq!(
+            migration
+                .pointer("/evidence/preview_grants_inserted")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            migration
+                .pointer("/evidence/release_records_inserted")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
 
         let catalog = module_catalog_for_rxdb(root)?;
         let modules = catalog
@@ -1279,6 +1362,19 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(restricted_grants_after_second_projection, 1);
+        drop(conn);
+        let migration_again =
+            migrate_legacy_module_lifecycle_authority(root, &chef_session(), false)?;
+        assert_eq!(
+            migration_again.get("status").and_then(Value::as_str),
+            Some("already_applied")
+        );
+        assert_eq!(
+            migration_again
+                .pointer("/evidence/preview_grants_inserted")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
         Ok(())
     }
 
