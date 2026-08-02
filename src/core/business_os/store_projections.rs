@@ -1033,15 +1033,8 @@ pub fn repair_queue_projections(
                 let needs_projection_repair = projection_route_status != desired_route_status
                     || projection_status != desired_status
                     || projection_task_status != desired_status;
-                if needs_projection_repair {
-                    let class = match desired_route_status.as_str() {
-                        "failed" => "failed_from_canonical",
-                        "handled" => "completed_from_canonical",
-                        "cancelled" => "cancelled_from_canonical",
-                        "blocked" => "blocked_from_canonical",
-                        "leased" => "running_from_canonical",
-                        _ => "queued_from_canonical",
-                    };
+                if needs_projection_repair && desired_route_status == "pending" {
+                    let class = "queued_from_canonical";
                     *counters.entry(class).or_insert(0) += 1;
                     push_repair_action(
                         &mut actions,
@@ -1062,22 +1055,11 @@ pub fn repair_queue_projections(
                         if let Some(object) = payload.as_object_mut() {
                             object.insert(
                                 "repair_note".to_string(),
-                                Value::String(format!(
-                                    "queue projection repaired from canonical route_status={desired_route_status}"
-                                )),
+                                Value::String(
+                                    "queue projection repaired from canonical route_status=pending"
+                                        .to_string(),
+                                ),
                             );
-                            if desired_route_status == "failed" {
-                                if let Some(note) = canonical_note {
-                                    object.insert(
-                                        "status_note".to_string(),
-                                        Value::String(note.to_string()),
-                                    );
-                                    object.insert(
-                                        "error".to_string(),
-                                        Value::String(note.to_string()),
-                                    );
-                                }
-                            }
                         }
                         upsert_business_record(
                             &conn,
@@ -1087,29 +1069,6 @@ pub fn repair_queue_projections(
                             payload.clone(),
                         )?;
                         rxdb_writers.upsert("ctox_queue_tasks", &task_id, now, payload)?;
-                    }
-                }
-
-                if let Some(command_id) = command_id.as_deref() {
-                    if command_status_for_queue_route_status(&desired_route_status).is_some() {
-                        *counters.entry("commands_updated_from_queue").or_insert(0) += 1;
-                        touched_commands.insert(command_id.to_string());
-                        if apply {
-                            upsert_command_projection_from_queue_status(
-                                root,
-                                &conn,
-                                Some(&mut rxdb_writers),
-                                command_id,
-                                Some(&task),
-                                &desired_route_status,
-                                now,
-                                if desired_route_status == "failed" {
-                                    canonical_note
-                                } else {
-                                    None
-                                },
-                            )?;
-                        }
                     }
                 }
             }
@@ -1260,9 +1219,7 @@ pub fn repair_queue_projections(
 pub(crate) mod tests {
     use super::super::store::{
         accept_rxdb_business_command, load_rxdb_collection_record, now_ms, open_store,
-        queue_status_is_terminal_success, reset_rxdb_collection_writer_open_count,
-        reset_rxdb_table_column_load_count, rxdb_collection_writer_open_count, rxdb_store_path,
-        rxdb_table_column_load_count,
+        queue_status_is_terminal_success, rxdb_store_path,
     };
     use super::{
         effective_queue_projection_route_status, repair_queue_projections, upsert_business_record,
@@ -1400,22 +1357,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn repair_queue_projections_updates_failed_canonical_queue_and_command() -> anyhow::Result<()> {
+    fn canonical_queue_ack_refreshes_queue_and_command_without_repair() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         let accepted = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_repair_failed_queue",
-                "command_id": "cmd_repair_failed_queue",
+                "id": "cmd_canonical_ack_refresh",
+                "command_id": "cmd_canonical_ack_refresh",
                 "module": "research",
                 "command_type": "business_os.chat.task",
                 "record_id": "research",
                 "status": "pending_sync",
                 "payload": {
                     "title": "Kontext-Aufgabe · Web Research",
-                    "instruction": "teste repair failure",
-                    "prompt": "teste repair failure"
+                    "instruction": "teste kanonischen refresh",
+                    "prompt": "teste kanonischen refresh"
                 },
                 "client_context": {
                     "source": "business-os-chat",
@@ -1428,13 +1385,6 @@ pub(crate) mod tests {
             .and_then(Value::as_str)
             .context("expected queue task id")?
             .to_string();
-        channels::lease_queue_task(root, &task_id, "ctox-service")?;
-        channels::ack_leased_messages_with_failure_reason(
-            root,
-            std::slice::from_ref(&task_id),
-            "failed",
-            "Input exceeds the maximum length of 1048576 characters.",
-        )?;
         let rxdb_conn = create_repair_rxdb_tables(root)?;
         insert_rxdb_test_record(
             &rxdb_conn,
@@ -1442,7 +1392,7 @@ pub(crate) mod tests {
             &task_id,
             serde_json::json!({
                 "id": task_id,
-                "command_id": "cmd_repair_failed_queue",
+                "command_id": "cmd_canonical_ack_refresh",
                 "status": "queued",
                 "route_status": "pending",
                 "task_status": "queued",
@@ -1452,10 +1402,10 @@ pub(crate) mod tests {
         insert_rxdb_test_record(
             &rxdb_conn,
             "ctox_business_os__business_commands__v1",
-            "cmd_repair_failed_queue",
+            "cmd_canonical_ack_refresh",
             serde_json::json!({
-                "id": "cmd_repair_failed_queue",
-                "command_id": "cmd_repair_failed_queue",
+                "id": "cmd_canonical_ack_refresh",
+                "command_id": "cmd_canonical_ack_refresh",
                 "status": "accepted",
                 "route_status": "pending",
                 "task_status": "queued",
@@ -1464,61 +1414,36 @@ pub(crate) mod tests {
         )?;
         drop(rxdb_conn);
 
-        let dry_run =
-            repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
-        assert_eq!(
-            dry_run
-                .pointer("/counts/failed_from_canonical")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            dry_run
-                .pointer("/counts/commands_updated_from_queue")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-
+        channels::lease_queue_task(root, &task_id, "ctox-service")?;
         let conn = open_store(root)?;
-        let stale_queue_payload: String = conn.query_row(
+        let leased_payload: Value = serde_json::from_str(&conn.query_row(
             "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
             params![task_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let stale_queue: Value = serde_json::from_str(&stale_queue_payload)?;
+            |row| row.get::<_, String>(0),
+        )?)?;
         assert_eq!(
-            stale_queue.get("status").and_then(Value::as_str),
-            Some("queued"),
-            "dry-run must not mutate stale queue projection"
+            leased_payload.get("route_status").and_then(Value::as_str),
+            Some("leased")
+        );
+        assert_eq!(
+            leased_payload.get("status").and_then(Value::as_str),
+            Some("running")
         );
         drop(conn);
-        let stale_rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
-            .context("expected stale rxdb queue row after dry-run")?;
-        assert_eq!(
-            stale_rxdb_queue.get("status").and_then(Value::as_str),
-            Some("queued"),
-            "dry-run must not mutate active RxDB projection"
-        );
 
-        reset_rxdb_table_column_load_count(root, "ctox_business_os__ctox_queue_tasks__v0");
-        reset_rxdb_table_column_load_count(root, "ctox_business_os__business_commands__v1");
-        reset_rxdb_collection_writer_open_count(root, "ctox_queue_tasks");
-        reset_rxdb_collection_writer_open_count(root, "business_commands");
-        let applied = repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
-        assert_eq!(
-            applied
-                .pointer("/counts/failed_from_canonical")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
+        channels::ack_leased_messages_with_failure_reason(
+            root,
+            std::slice::from_ref(&task_id),
+            "failed",
+            "Input exceeds the maximum length of 1048576 characters.",
+        )?;
 
         let conn = open_store(root)?;
-        let queue_payload: String = conn.query_row(
+        let queue_projection: Value = serde_json::from_str(&conn.query_row(
             "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
             params![task_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let queue_projection: Value = serde_json::from_str(&queue_payload)?;
+            |row| row.get::<_, String>(0),
+        )?)?;
         assert_eq!(
             queue_projection.get("status").and_then(Value::as_str),
             Some("failed")
@@ -1528,16 +1453,19 @@ pub(crate) mod tests {
             Some("failed")
         );
         assert_eq!(
+            queue_projection.get("task_status").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
             queue_projection.get("error").and_then(Value::as_str),
             Some("Input exceeds the maximum length of 1048576 characters.")
         );
 
-        let command_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_commands' AND record_id = 'cmd_repair_failed_queue'",
+        let command_projection: Value = serde_json::from_str(&conn.query_row(
+            "SELECT payload_json FROM business_records WHERE collection = 'business_commands' AND record_id = 'cmd_canonical_ack_refresh'",
             [],
-            |row| row.get(0),
-        )?;
-        let command_projection: Value = serde_json::from_str(&command_payload)?;
+            |row| row.get::<_, String>(0),
+        )?)?;
         assert_eq!(
             command_projection.get("status").and_then(Value::as_str),
             Some("failed")
@@ -1552,23 +1480,21 @@ pub(crate) mod tests {
             command_projection.get("error").and_then(Value::as_str),
             Some("Input exceeds the maximum length of 1048576 characters.")
         );
+        drop(conn);
+
         let rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
-            .context("expected repaired rxdb queue row")?;
-        assert_eq!(
-            rxdb_queue.get("status").and_then(Value::as_str),
-            Some("failed")
-        );
+            .context("expected refreshed RxDB queue projection")?;
         assert_eq!(
             rxdb_queue.get("route_status").and_then(Value::as_str),
             Some("failed")
         );
         assert_eq!(
-            rxdb_queue.get("error").and_then(Value::as_str),
-            Some("Input exceeds the maximum length of 1048576 characters.")
+            rxdb_queue.get("task_status").and_then(Value::as_str),
+            Some("failed")
         );
         let rxdb_command =
-            load_rxdb_collection_record(root, "business_commands", "cmd_repair_failed_queue")?
-                .context("expected repaired rxdb command row")?;
+            load_rxdb_collection_record(root, "business_commands", "cmd_canonical_ack_refresh")?
+                .context("expected refreshed RxDB command projection")?;
         assert_eq!(
             rxdb_command.get("status").and_then(Value::as_str),
             Some("failed")
@@ -1577,47 +1503,26 @@ pub(crate) mod tests {
             rxdb_command.get("task_status").and_then(Value::as_str),
             Some("failed")
         );
-        assert_eq!(
-            rxdb_table_column_load_count(root, "ctox_business_os__ctox_queue_tasks__v0"),
-            1,
-            "queue repair must cache ctox_queue_tasks table metadata"
-        );
-        assert_eq!(
-            rxdb_table_column_load_count(root, "ctox_business_os__business_commands__v1"),
-            1,
-            "queue repair must cache business_commands table metadata"
-        );
-        assert_eq!(
-            rxdb_collection_writer_open_count(root, "ctox_queue_tasks"),
-            1,
-            "queue repair must reuse one ctox_queue_tasks writer"
-        );
-        assert_eq!(
-            rxdb_collection_writer_open_count(root, "business_commands"),
-            1,
-            "queue repair must reuse one business_commands writer"
-        );
         Ok(())
     }
 
     #[test]
-    fn repair_queue_projections_does_not_mutate_leased_canonical_task_from_projection_status(
-    ) -> anyhow::Result<()> {
+    fn repair_queue_projections_no_longer_owns_running_canonical_refresh() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         let accepted = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_repair_leased_success",
-                "command_id": "cmd_repair_leased_success",
+                "id": "cmd_no_running_repair",
+                "command_id": "cmd_no_running_repair",
                 "module": "research",
                 "command_type": "business_os.chat.task",
                 "record_id": "research",
                 "status": "pending_sync",
                 "payload": {
-                    "title": "Kontext-Aufgabe · Web Research",
-                    "instruction": "teste terminal success repair",
-                    "prompt": "teste terminal success repair"
+                    "title": "No running repair",
+                    "instruction": "running is refreshed by the mutation",
+                    "prompt": "running is refreshed by the mutation"
                 },
                 "client_context": {
                     "source": "business-os-chat",
@@ -1631,17 +1536,7 @@ pub(crate) mod tests {
             .context("expected queue task id")?
             .to_string();
         channels::lease_queue_task(root, &task_id, "ctox-service")?;
-        channels::update_queue_task(
-            root,
-            channels::QueueTaskUpdateRequest {
-                message_key: task_id.clone(),
-                status_note: Some(
-                    "Der Lauf ist beendet; Einzelheiten stehen im strukturierten Ergebnis."
-                        .to_string(),
-                ),
-                ..Default::default()
-            },
-        )?;
+
         let conn = open_store(root)?;
         upsert_business_record(
             &conn,
@@ -1650,86 +1545,29 @@ pub(crate) mod tests {
             now_ms() as i64,
             serde_json::json!({
                 "id": task_id,
-                "command_id": "cmd_repair_leased_success",
+                "command_id": "cmd_no_running_repair",
                 "status": "completed",
                 "route_status": "handled",
-                "task_status": "running"
+                "task_status": "completed"
             }),
         )?;
         drop(conn);
-        let rxdb_conn = create_repair_rxdb_tables(root)?;
-        insert_rxdb_test_record(
-            &rxdb_conn,
-            "ctox_business_os__ctox_queue_tasks__v0",
-            &task_id,
-            serde_json::json!({
-                "id": task_id,
-                "command_id": "cmd_repair_leased_success",
-                "status": "completed",
-                "route_status": "handled",
-                "task_status": "running",
-                "updated_at_ms": 1
-            }),
-        )?;
-        drop(rxdb_conn);
 
         let dry_run =
             repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
-        assert_eq!(
-            dry_run
-                .pointer("/counts/running_from_canonical")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            channels::load_queue_task(root, &task_id)?
-                .context("queue task after dry-run")?
-                .route_status,
-            "leased",
-            "dry-run must not ack leased tasks"
-        );
-
+        assert!(dry_run.pointer("/counts/running_from_canonical").is_none());
         repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
-        let canonical =
-            channels::load_queue_task(root, &task_id)?.context("queue task after apply")?;
-        assert_eq!(
-            canonical.route_status, "leased",
-            "projection repair must not mutate the canonical queue task"
-        );
 
         let conn = open_store(root)?;
-        let queue_payload: String = conn.query_row(
+        let payload: Value = serde_json::from_str(&conn.query_row(
             "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
             params![task_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let queue_projection: Value = serde_json::from_str(&queue_payload)?;
+            |row| row.get::<_, String>(0),
+        )?)?;
         assert_eq!(
-            queue_projection.get("status").and_then(Value::as_str),
-            Some("running")
-        );
-        assert_eq!(
-            queue_projection.get("route_status").and_then(Value::as_str),
-            Some("leased")
-        );
-        assert_eq!(
-            queue_projection.get("task_status").and_then(Value::as_str),
-            Some("running")
-        );
-
-        let rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
-            .context("expected repaired rxdb queue row")?;
-        assert_eq!(
-            rxdb_queue.get("status").and_then(Value::as_str),
-            Some("running")
-        );
-        assert_eq!(
-            rxdb_queue.get("route_status").and_then(Value::as_str),
-            Some("leased")
-        );
-        assert_eq!(
-            rxdb_queue.get("task_status").and_then(Value::as_str),
-            Some("running")
+            payload.get("route_status").and_then(Value::as_str),
+            Some("handled"),
+            "historical non-pending mismatches require an explicit migration, not repair_queue_projections"
         );
         Ok(())
     }

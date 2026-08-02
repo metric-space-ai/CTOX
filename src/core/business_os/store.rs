@@ -1065,7 +1065,374 @@ pub fn open_store(root: &Path) -> anyhow::Result<Connection> {
     let path = business_os_store_path(root);
     let conn = open_store_connection(&path)?;
     ensure_store_schema_once(&path, &conn)?;
+    channels::register_queue_projection_hooks(
+        attach_business_os_projection_store,
+        refresh_attached_queue_projections,
+    );
     Ok(conn)
+}
+
+fn database_is_attached(conn: &Connection, name: &str) -> anyhow::Result<bool> {
+    Ok(conn
+        .prepare("PRAGMA database_list")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|attached| attached == name))
+}
+
+fn attach_database_if_present(conn: &Connection, path: &Path, name: &str) -> anyhow::Result<()> {
+    if !path.is_file() || database_is_attached(conn, name)? {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        name.chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+        "unsafe attached database name"
+    );
+    conn.execute(
+        &format!("ATTACH DATABASE ?1 AS {name}"),
+        params![path.to_string_lossy().as_ref()],
+    )?;
+    Ok(())
+}
+
+fn attach_rxdb_projection_store(root: &Path, conn: &Connection) -> anyhow::Result<()> {
+    attach_database_if_present(conn, &rxdb_store_path(root), "business_os_rxdb_projection")
+}
+
+fn attach_business_os_projection_store(root: &Path, conn: &Connection) -> anyhow::Result<()> {
+    attach_database_if_present(
+        conn,
+        &business_os_store_path(root),
+        "business_os_projection",
+    )?;
+    attach_rxdb_projection_store(root, conn)
+}
+
+fn upsert_attached_business_record(
+    conn: &Connection,
+    collection: &str,
+    record_id: &str,
+    updated_at_ms: i64,
+    mut payload: Value,
+) -> anyhow::Result<()> {
+    let rev = format!("rev_{}", Uuid::new_v4());
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("id".to_string(), Value::String(record_id.to_string()));
+        object.insert("_rev".to_string(), Value::String(rev.clone()));
+        object.insert("_deleted".to_string(), Value::Bool(false));
+        object.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
+    }
+    redact_document_client_context_secrets(&mut payload);
+    conn.execute(
+        "INSERT INTO business_os_projection.business_records
+            (collection, record_id, rev, deleted, updated_at_ms, payload_json)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5)
+         ON CONFLICT(collection, record_id) DO UPDATE SET
+            rev = excluded.rev,
+            deleted = excluded.deleted,
+            updated_at_ms = excluded.updated_at_ms,
+            payload_json = excluded.payload_json",
+        params![
+            collection,
+            record_id,
+            rev,
+            updated_at_ms,
+            serde_json::to_string(&payload)?
+        ],
+    )?;
+    Ok(())
+}
+
+fn attached_rxdb_collection_table(
+    conn: &Connection,
+    collection: &str,
+) -> anyhow::Result<Option<String>> {
+    if !database_is_attached(conn, "business_os_rxdb_projection")? {
+        return Ok(None);
+    }
+    let mut statement = conn.prepare(
+        "SELECT name
+         FROM business_os_rxdb_projection.sqlite_master
+         WHERE type = 'table'",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    let expected = format!(
+        "ctox_business_os__{collection}__v{}",
+        rxdb_schema_version(collection)
+    );
+    Ok(rxdb_collection_table_name_from_tables(
+        &tables, &expected, collection,
+    ))
+}
+
+fn attached_rxdb_table_columns(conn: &Connection, table: &str) -> anyhow::Result<HashSet<String>> {
+    let quoted = sqlite_quote_identifier(table);
+    let mut statement = conn.prepare(&format!(
+        "PRAGMA business_os_rxdb_projection.table_info({quoted})"
+    ))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    Ok(columns)
+}
+
+fn upsert_attached_rxdb_record(
+    conn: &Connection,
+    collection: &str,
+    record_id: &str,
+    updated_at_ms: i64,
+    mut payload: Value,
+) -> anyhow::Result<()> {
+    let Some(table) = attached_rxdb_collection_table(conn, collection)? else {
+        return Ok(());
+    };
+    let qualified_table = format!(
+        "business_os_rxdb_projection.{}",
+        sqlite_quote_identifier(&table)
+    );
+    if let Some(existing_json) = conn
+        .query_row(
+            &format!("SELECT data FROM {qualified_table} WHERE id = ?1"),
+            params![record_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        if let Ok(mut existing) = serde_json::from_str::<Value>(&existing_json) {
+            merge_json_object_values(&mut existing, &payload);
+            payload = existing;
+        }
+    }
+    let rev = format!("rev_{}", Uuid::new_v4());
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("id".to_string(), Value::String(record_id.to_string()));
+        object.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
+    }
+    redact_document_client_context_secrets(&mut payload);
+    let table_columns = attached_rxdb_table_columns(conn, &table)?;
+    let mut columns = vec!["id".to_string(), "data".to_string()];
+    let mut values = vec![
+        SqlValue::Text(record_id.to_string()),
+        SqlValue::Text(serde_json::to_string(&payload)?),
+    ];
+    let mut updates = vec!["data = excluded.data".to_string()];
+    if let Some(deleted_column) = ["deleted", "_deleted"]
+        .into_iter()
+        .find_map(|column| table_columns.contains(column).then_some(column))
+    {
+        columns.push(deleted_column.to_string());
+        values.push(SqlValue::Integer(0));
+        updates.push(format!("{deleted_column} = excluded.{deleted_column}"));
+    }
+    if let Some(revision_column) = ["revision", "_rev"]
+        .into_iter()
+        .find_map(|column| table_columns.contains(column).then_some(column))
+    {
+        columns.push(revision_column.to_string());
+        values.push(SqlValue::Text(rev));
+        updates.push(format!("{revision_column} = excluded.{revision_column}"));
+    }
+    if table_columns.contains("lastWriteTime") {
+        columns.push("lastWriteTime".to_string());
+        values.push(SqlValue::Real(updated_at_ms as f64));
+        updates.push("lastWriteTime = excluded.lastWriteTime".to_string());
+    }
+    let placeholders = (1..=columns.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.execute(
+        &format!(
+            "INSERT INTO {qualified_table} ({columns}) VALUES ({placeholders})
+             ON CONFLICT(id) DO UPDATE SET {updates}",
+            columns = columns.join(", "),
+            updates = updates.join(", ")
+        ),
+        params_from_iter(values),
+    )?;
+    Ok(())
+}
+
+fn queue_projection_status_fields_match(payload: &Value, task: &channels::QueueTaskView) -> bool {
+    let route_status = task.route_status.as_str();
+    let normalized = normalize_queue_status(route_status);
+    let string_matches = |field: &str, expected: Option<&str>| {
+        payload.get(field).and_then(Value::as_str) == expected
+    };
+    string_matches("route_status", Some(route_status))
+        && string_matches("status", Some(normalized))
+        && string_matches("task_status", Some(normalized))
+        && string_matches("status_note", task.status_note.as_deref())
+        && string_matches("lease_owner", task.lease_owner.as_deref())
+        && string_matches("leased_at", task.leased_at.as_deref())
+        && string_matches("acked_at", task.acked_at.as_deref())
+        && (route_status != "failed"
+            || task
+                .status_note
+                .as_deref()
+                .is_none_or(|note| payload.get("error").and_then(Value::as_str) == Some(note)))
+}
+
+fn command_projection_status_fields_match(payload: &Value, task: &channels::QueueTaskView) -> bool {
+    let Some(command_status) = command_status_for_queue_route_status(&task.route_status) else {
+        return true;
+    };
+    payload.get("status").and_then(Value::as_str) == Some(command_status)
+        && payload.get("route_status").and_then(Value::as_str) == Some(task.route_status.as_str())
+        && payload.get("task_status").and_then(Value::as_str)
+            == Some(normalize_queue_status(&task.route_status))
+        && payload.get("task_id").and_then(Value::as_str) == Some(task.message_key.as_str())
+        && task.status_note.as_deref().is_none_or(|note| {
+            payload.get("queue_status_note").and_then(Value::as_str) == Some(note)
+                && (task.route_status != "failed"
+                    || payload.get("error").and_then(Value::as_str) == Some(note))
+        })
+}
+
+fn refresh_attached_queue_projections(
+    _root: &Path,
+    conn: &Connection,
+    tasks: &[channels::QueueTaskView],
+) -> anyhow::Result<()> {
+    let attached = conn
+        .prepare("PRAGMA database_list")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|name| name == "business_os_projection");
+    if !attached {
+        return Ok(());
+    }
+    let updated_at_ms = now_ms() as i64;
+    for task in tasks {
+        let row = conn
+            .query_row(
+                "SELECT payload_json
+                 FROM business_os_projection.business_records
+                 WHERE collection = 'ctox_queue_tasks'
+                   AND record_id = ?1
+                   AND deleted = 0",
+                params![task.message_key.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(raw) = row else {
+            continue;
+        };
+        let mut payload = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| {
+            serde_json::json!({
+                "id": task.message_key,
+                "status": "queued",
+                "route_status": "pending"
+            })
+        });
+        let command_id = payload
+            .get("command_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if !queue_projection_status_fields_match(&payload, task) {
+            payload = apply_queue_projection_status_fields(
+                payload,
+                task,
+                &task.route_status,
+                updated_at_ms,
+            );
+            upsert_attached_business_record(
+                conn,
+                "ctox_queue_tasks",
+                &task.message_key,
+                updated_at_ms,
+                payload.clone(),
+            )?;
+        }
+        upsert_attached_rxdb_record(
+            conn,
+            "ctox_queue_tasks",
+            &task.message_key,
+            updated_at_ms,
+            payload,
+        )?;
+        let Some(command_id) = command_id else {
+            continue;
+        };
+        let Some(command_status) = command_status_for_queue_route_status(&task.route_status) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE business_os_projection.business_commands
+             SET status = ?2, observed_at_ms = ?3
+             WHERE command_id = ?1
+               AND (status != ?2 OR observed_at_ms != ?3)",
+            params![command_id.as_str(), command_status, updated_at_ms],
+        )?;
+        let command_row = conn
+            .query_row(
+                "SELECT payload_json
+                 FROM business_os_projection.business_records
+                 WHERE collection = 'business_commands'
+                   AND record_id = ?1
+                   AND deleted = 0",
+                params![command_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(command_raw) = command_row else {
+            continue;
+        };
+        let mut command_payload = serde_json::from_str::<Value>(&command_raw)?;
+        let command_projection_changed =
+            !command_projection_status_fields_match(&command_payload, task);
+        if command_projection_changed {
+            if let Some(object) = command_payload.as_object_mut() {
+                object.insert(
+                    "status".to_string(),
+                    Value::String(command_status.to_string()),
+                );
+                object.insert(
+                    "route_status".to_string(),
+                    Value::String(task.route_status.clone()),
+                );
+                object.insert(
+                    "task_status".to_string(),
+                    Value::String(normalize_queue_status(&task.route_status).to_string()),
+                );
+                object.insert(
+                    "task_id".to_string(),
+                    Value::String(task.message_key.clone()),
+                );
+                if let Some(note) = task.status_note.as_deref() {
+                    object.insert(
+                        "queue_status_note".to_string(),
+                        Value::String(note.to_string()),
+                    );
+                    if task.route_status == "failed" {
+                        object.insert("error".to_string(), Value::String(note.to_string()));
+                    }
+                }
+            }
+            upsert_attached_business_record(
+                conn,
+                "business_commands",
+                &command_id,
+                updated_at_ms,
+                command_payload.clone(),
+            )?;
+        }
+        upsert_attached_rxdb_record(
+            conn,
+            "business_commands",
+            &command_id,
+            updated_at_ms,
+            command_payload,
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn reusable_web_stack_auth_assist_request(
@@ -15151,6 +15518,141 @@ fn seed_readme_note_if_needed(
     Ok(())
 }
 
+fn refresh_pushed_queue_projections(
+    root: &Path,
+    conn: &Connection,
+    task_ids: &[String],
+) -> anyhow::Result<()> {
+    let updated_at_ms = now_ms() as i64;
+    let unique_task_ids = task_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let tasks = channels::load_queue_tasks(root, &unique_task_ids)?;
+    for task in tasks {
+        let task_id = task.message_key.as_str();
+        let row = conn
+            .query_row(
+                "SELECT payload_json
+                 FROM business_records
+                 WHERE collection = 'ctox_queue_tasks'
+                   AND record_id = ?1
+                   AND deleted = 0",
+                params![task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(raw) = row else {
+            continue;
+        };
+        let mut payload = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| {
+            serde_json::json!({
+                "id": task_id,
+                "status": "queued",
+                "route_status": "pending"
+            })
+        });
+        let command_id = payload
+            .get("command_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if !queue_projection_status_fields_match(&payload, &task) {
+            payload = apply_queue_projection_status_fields(
+                payload,
+                &task,
+                &task.route_status,
+                updated_at_ms,
+            );
+            upsert_business_record(
+                conn,
+                "ctox_queue_tasks",
+                task_id,
+                updated_at_ms,
+                payload.clone(),
+            )?;
+        }
+        upsert_attached_rxdb_record(conn, "ctox_queue_tasks", task_id, updated_at_ms, payload)?;
+        let Some(command_id) = command_id else {
+            continue;
+        };
+        let Some(command_status) = command_status_for_queue_route_status(&task.route_status) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE business_commands
+             SET status = ?2, observed_at_ms = ?3
+             WHERE command_id = ?1
+               AND (status != ?2 OR observed_at_ms != ?3)",
+            params![command_id.as_str(), command_status, updated_at_ms],
+        )?;
+        let command_row = conn
+            .query_row(
+                "SELECT payload_json
+                 FROM business_records
+                 WHERE collection = 'business_commands'
+                   AND record_id = ?1
+                   AND deleted = 0",
+                params![command_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(command_raw) = command_row else {
+            continue;
+        };
+        let mut command_payload = serde_json::from_str::<Value>(&command_raw)?;
+        let command_projection_changed =
+            !command_projection_status_fields_match(&command_payload, &task);
+        if command_projection_changed {
+            if let Some(object) = command_payload.as_object_mut() {
+                object.insert(
+                    "status".to_string(),
+                    Value::String(command_status.to_string()),
+                );
+                object.insert(
+                    "route_status".to_string(),
+                    Value::String(task.route_status.clone()),
+                );
+                object.insert(
+                    "task_status".to_string(),
+                    Value::String(normalize_queue_status(&task.route_status).to_string()),
+                );
+                object.insert(
+                    "task_id".to_string(),
+                    Value::String(task.message_key.clone()),
+                );
+                if let Some(note) = task.status_note.as_deref() {
+                    object.insert(
+                        "queue_status_note".to_string(),
+                        Value::String(note.to_string()),
+                    );
+                    if task.route_status == "failed" {
+                        object.insert("error".to_string(), Value::String(note.to_string()));
+                    }
+                }
+            }
+            upsert_business_record(
+                conn,
+                "business_commands",
+                &command_id,
+                updated_at_ms,
+                command_payload.clone(),
+            )?;
+        }
+        upsert_attached_rxdb_record(
+            conn,
+            "business_commands",
+            &command_id,
+            updated_at_ms,
+            command_payload,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn push_collection_records(root: &Path, body: Value) -> anyhow::Result<Value> {
     let collection = body
         .get("collection")
@@ -15198,7 +15700,11 @@ pub fn push_collection_records(root: &Path, body: Value) -> anyhow::Result<Value
         }
 
         let mut conn = open_store(root)?;
+        if collection == "ctox_queue_tasks" {
+            attach_rxdb_projection_store(root, &conn)?;
+        }
         let mut note_file_actions = Vec::new();
+        let mut pushed_queue_task_ids = Vec::new();
         #[cfg(test)]
         record_push_collection_records_store_transaction(root, collection);
         {
@@ -15238,8 +15744,13 @@ pub fn push_collection_records(root: &Path, body: Value) -> anyhow::Result<Value
                 if collection == "notes" {
                     note_file_actions
                         .push(NoteFileAction::Write(record_id.clone(), document.clone()));
+                } else if collection == "ctox_queue_tasks" {
+                    pushed_queue_task_ids.push(record_id.clone());
                 }
                 accepted.push(serde_json::json!({ "id": record_id, "status": "stored" }));
+            }
+            if collection == "ctox_queue_tasks" {
+                refresh_pushed_queue_projections(root, &tx, &pushed_queue_task_ids)?;
             }
             tx.commit()?;
         }
@@ -29767,6 +30278,93 @@ pub(super) mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(rows, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn push_collection_records_refreshes_stale_queue_projection_in_same_batch_transaction(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let accepted = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_push_queue_refresh",
+                "command_id": "cmd_push_queue_refresh",
+                "module": "research",
+                "command_type": "business_os.chat.task",
+                "record_id": "research",
+                "status": "pending_sync",
+                "payload": {
+                    "title": "Push queue refresh",
+                    "instruction": "keep the canonical lease",
+                    "prompt": "keep the canonical lease"
+                },
+                "client_context": {
+                    "source": "business-os-chat",
+                    "module": "research"
+                }
+            }),
+        )?;
+        let task_id = accepted
+            .get("task_id")
+            .and_then(Value::as_str)
+            .context("expected queue task id")?
+            .to_string();
+        channels::lease_queue_task(root, &task_id, "ctox-service")?;
+        reset_push_collection_records_store_transaction_count(root, "ctox_queue_tasks");
+        let channel_db_path = crate::paths::core_db(root);
+        channels::reset_channel_db_open_count_for_tests(&channel_db_path);
+        let documents = (0..25)
+            .map(|updated_at_ms| {
+                serde_json::json!({
+                    "id": task_id,
+                    "command_id": "cmd_push_queue_refresh",
+                    "status": "queued",
+                    "route_status": "pending",
+                    "task_status": "queued",
+                    "updated_at_ms": updated_at_ms
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let response = push_collection_records(
+            root,
+            serde_json::json!({
+                "collection": "ctox_queue_tasks",
+                "documents": documents
+            }),
+        )?;
+        assert_eq!(response.get("count").and_then(Value::as_u64), Some(25));
+        assert_eq!(
+            push_collection_records_store_transaction_count(root, "ctox_queue_tasks"),
+            1,
+            "queue refresh must stay inside the one batch store transaction"
+        );
+        assert_eq!(
+            channels::channel_db_open_count_for_tests(&channel_db_path),
+            1,
+            "one pushed batch must use one canonical queue database read, not one per document"
+        );
+
+        let conn = open_store(root)?;
+        let payload: Value = serde_json::from_str(&conn.query_row(
+            "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
+            params![task_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )?)?;
+        assert_eq!(
+            payload.get("route_status").and_then(Value::as_str),
+            Some("leased")
+        );
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str),
+            Some("running")
+        );
+        assert_eq!(
+            payload.get("task_status").and_then(Value::as_str),
+            Some("running")
+        );
         Ok(())
     }
 

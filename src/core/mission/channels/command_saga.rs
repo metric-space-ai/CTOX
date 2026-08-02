@@ -4,11 +4,13 @@
 // storage audits and one-time legacy-data migrations.
 
 use super::{
-    canonical_queue_route_status, create_queue_task_with_metadata_tx, current_queue_route_status,
-    ensure_queue_account, epoch_millis, load_queue_task_from_conn, now_iso_string, open_channel_db,
-    resolve_db_path, sanitize_path_component, set_routing_status, sha256_hex,
-    BusinessCommandClaimRequest, BusinessCommandControlClaim, BusinessCommandOutboxEvent,
-    BusinessCommandQueueClaim, QueueRouteStatus, QueueTaskCreateRequest, TerminalPolicyGrant,
+    attach_queue_projection_store, canonical_queue_route_status,
+    create_queue_task_with_metadata_tx, current_queue_route_status, ensure_queue_account,
+    epoch_millis, load_queue_task_from_conn, now_iso_string, open_channel_db,
+    refresh_queue_projection_tasks, resolve_db_path, sanitize_path_component, set_routing_status,
+    sha256_hex, BusinessCommandClaimRequest, BusinessCommandControlClaim,
+    BusinessCommandOutboxEvent, BusinessCommandQueueClaim, QueueRouteStatus,
+    QueueTaskCreateRequest, TerminalPolicyGrant,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -24,6 +26,7 @@ pub(crate) fn claim_business_command_with_queue(
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
     let existing = tx
         .query_row(
@@ -174,6 +177,7 @@ pub(crate) fn claim_business_command_with_queue(
         }),
         now_ms,
     )?;
+    refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
     tx.commit()?;
     Ok(BusinessCommandQueueClaim {
         task,
@@ -787,6 +791,7 @@ pub(crate) fn complete_business_control_command(
     );
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
     let (phase, version, command_type) = tx.query_row(
         "SELECT execution_phase, projection_version, command_type
@@ -826,6 +831,7 @@ pub(crate) fn complete_business_control_command(
     }
     crate::command_lifecycle::validate_execution_phase_transition(&phase, "terminal")?;
     let now = now_iso_string();
+    let mut linked_task_id = None;
     if let Some(task_id) = tx
         .query_row(
             "SELECT task_id FROM business_command_task_links WHERE command_id = ?1",
@@ -834,6 +840,7 @@ pub(crate) fn complete_business_control_command(
         )
         .optional()?
     {
+        linked_task_id = Some(task_id.clone());
         let current_route =
             canonical_queue_route_status(&current_queue_route_status(&tx, &task_id)?)?;
         if matches!(
@@ -930,6 +937,11 @@ pub(crate) fn complete_business_control_command(
         }),
         now_ms,
     )?;
+    if let Some(task_id) = linked_task_id.as_deref() {
+        if let Some(task) = load_queue_task_from_conn(&tx, task_id)? {
+            refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
+        }
+    }
     tx.commit()?;
     Ok(())
 }
@@ -1019,6 +1031,7 @@ pub(crate) fn transition_business_command_for_task(
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
     let transitioned = transition_business_command_for_task_in_transaction(
         &tx,
@@ -1029,6 +1042,9 @@ pub(crate) fn transition_business_command_for_task(
         error_message,
         reason,
     )?;
+    if let Some(task) = load_queue_task_from_conn(&tx, task_id)? {
+        refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
+    }
     tx.commit()?;
     Ok(transitioned)
 }

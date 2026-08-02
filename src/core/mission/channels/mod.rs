@@ -147,6 +147,17 @@ const QUEUE_PROVIDER: &str = "system";
 const QUEUE_SENDER_DISPLAY: &str = "CTOX queue";
 const QUEUE_SENDER_ADDRESS: &str = "queue:system";
 static REVIEWED_FOUNDER_SEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+type QueueProjectionAttachHook = fn(&Path, &Connection) -> Result<()>;
+type QueueProjectionRefreshHook = fn(&Path, &Connection, &[QueueTaskView]) -> Result<()>;
+
+#[derive(Clone, Copy)]
+struct QueueProjectionHooks {
+    attach: QueueProjectionAttachHook,
+    refresh: QueueProjectionRefreshHook,
+}
+
+static QUEUE_PROJECTION_HOOKS: OnceLock<QueueProjectionHooks> = OnceLock::new();
 static CHANNEL_SCHEMA_READY: OnceLock<Mutex<HashSet<ChannelSchemaCacheKey>>> = OnceLock::new();
 static CHANNEL_OPEN_ROUTING_READY: OnceLock<
     Mutex<BTreeMap<ChannelSchemaCacheKey, ChannelRoutingCacheStamp>>,
@@ -280,6 +291,48 @@ pub struct QueueTaskView {
     pub created_at: String,
     pub sort_at: String,
     pub updated_at: String,
+}
+
+pub(crate) fn register_queue_projection_hooks(
+    attach: QueueProjectionAttachHook,
+    refresh: QueueProjectionRefreshHook,
+) {
+    let _ = QUEUE_PROJECTION_HOOKS.set(QueueProjectionHooks { attach, refresh });
+}
+
+fn attach_queue_projection_store(root: &Path, conn: &Connection) -> Result<bool> {
+    let Some(hooks) = QUEUE_PROJECTION_HOOKS.get().copied() else {
+        return Ok(false);
+    };
+    (hooks.attach)(root, conn)?;
+    Ok(true)
+}
+
+fn refresh_queue_projection_tasks(
+    root: &Path,
+    conn: &Connection,
+    tasks: &[QueueTaskView],
+) -> Result<()> {
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    if let Some(hooks) = QUEUE_PROJECTION_HOOKS.get().copied() {
+        (hooks.refresh)(root, conn, tasks)?;
+    }
+    Ok(())
+}
+
+fn load_queue_projection_tasks(
+    conn: &Connection,
+    message_keys: &[String],
+) -> Result<Vec<QueueTaskView>> {
+    let mut tasks = Vec::new();
+    for message_key in message_keys {
+        if let Some(task) = load_queue_task_from_conn(conn, message_key)? {
+            tasks.push(task);
+        }
+    }
+    Ok(tasks)
 }
 
 #[derive(Debug, Clone)]
@@ -1775,7 +1828,13 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
                 .unwrap_or_else(|| "codex".to_string());
             let channel = find_flag_value(args, "--channel").map(ToOwned::to_owned);
             let mut conn = open_channel_db(&db_path)?;
-            let taken = take_messages(&mut conn, channel.as_deref(), limit, &lease_owner)?;
+            let taken = take_messages_with_projection(
+                find_flag_value(args, "--db").is_none().then_some(root),
+                &mut conn,
+                channel.as_deref(),
+                limit,
+                &lease_owner,
+            )?;
             print_json(&json!({
                 "ok": true,
                 "db_path": db_path,
@@ -1803,6 +1862,7 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
                 (None, failure_reason)
             };
             let updated = ack_messages(
+                find_flag_value(args, "--db").is_none().then_some(root),
                 &mut conn,
                 &message_keys,
                 status.as_str(),
@@ -2028,7 +2088,7 @@ pub fn lease_pending_inbound_messages(
     refresh_inbound_priority_credits(root)?;
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
-    let leased = take_messages(&mut conn, None, limit, lease_owner)?;
+    let leased = take_messages_with_projection(Some(root), &mut conn, None, limit, lease_owner)?;
     Ok(leased
         .into_iter()
         .map(|item| {
@@ -2327,7 +2387,15 @@ pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
-    ack_messages(&mut conn, message_keys, status.as_str(), None, None, None)
+    ack_messages(
+        Some(root),
+        &mut conn,
+        message_keys,
+        status.as_str(),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Ack with an explicit routing reason. The reason is audit data only and does
@@ -2343,6 +2411,7 @@ pub fn ack_leased_messages_with_reason(
     let mut conn = open_channel_db(&db_path)?;
     guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
     ack_messages(
+        Some(root),
         &mut conn,
         message_keys,
         status.as_str(),
@@ -2364,6 +2433,7 @@ pub(crate) fn ack_leased_messages_with_reason_and_grant(
     let mut conn = open_channel_db(&db_path)?;
     guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
     ack_messages(
+        Some(root),
         &mut conn,
         message_keys,
         status.as_str(),
@@ -2388,6 +2458,7 @@ pub fn ack_leased_messages_with_failure_reason(
     let mut conn = open_channel_db(&db_path)?;
     guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
     ack_messages(
+        Some(root),
         &mut conn,
         message_keys,
         status.as_str(),
@@ -2410,6 +2481,7 @@ pub fn hold_leased_messages(
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
     let now = now_iso_string();
     let mut updated = 0usize;
@@ -2545,6 +2617,8 @@ pub fn hold_leased_messages(
             }
         }
     }
+    let tasks = load_queue_projection_tasks(&tx, message_keys)?;
+    refresh_queue_projection_tasks(root, &tx, &tasks)?;
     tx.commit()?;
     Ok(updated)
 }
@@ -2552,6 +2626,7 @@ pub fn hold_leased_messages(
 pub fn wake_messages_waiting_for(root: &Path, entity_type: &str, entity_id: &str) -> Result<usize> {
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.unchecked_transaction()?;
     let now = now_iso_string();
     let message_keys = {
@@ -2575,7 +2650,7 @@ pub fn wake_messages_waiting_for(root: &Path, entity_type: &str, entity_id: &str
     let from_route_status = QueueRouteStatus::Blocked;
     let to_route_status = QueueRouteStatus::Pending;
     let mut updated = 0usize;
-    for message_key in message_keys {
+    for message_key in &message_keys {
         let changed = tx.execute(
             r#"UPDATE communication_routing_state
                SET route_status=?2, hold_reason=NULL, wait_entity_type=NULL,
@@ -2595,6 +2670,8 @@ pub fn wake_messages_waiting_for(root: &Path, entity_type: &str, entity_id: &str
             updated += changed;
         }
     }
+    let tasks = load_queue_projection_tasks(&tx, &message_keys)?;
+    refresh_queue_projection_tasks(root, &tx, &tasks)?;
     tx.commit()?;
     Ok(updated)
 }
@@ -2632,8 +2709,10 @@ pub fn create_queue_task_with_metadata(
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
     let task = create_queue_task_with_metadata_tx(&tx, request)?;
+    refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
     tx.commit()?;
     Ok(task)
 }
@@ -3015,6 +3094,12 @@ pub fn load_queue_task(root: &Path, message_key: &str) -> Result<Option<QueueTas
     load_queue_task_from_conn(&conn, message_key)
 }
 
+pub(crate) fn load_queue_tasks(root: &Path, message_keys: &[String]) -> Result<Vec<QueueTaskView>> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    load_queue_projection_tasks(&conn, message_keys)
+}
+
 pub fn load_queue_task_last_error(root: &Path, message_key: &str) -> Result<Option<String>> {
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
@@ -3168,6 +3253,7 @@ fn update_queue_task_with_optional_terminal_policy_grant(
         metadata.remove("not_before");
         metadata.remove("defer_reason");
     }
+    attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
     upsert_communication_message_tx(
         &tx,
@@ -3231,6 +3317,7 @@ fn update_queue_task_with_optional_terminal_policy_grant(
     refresh_thread_tx(&tx, &thread_key)?;
     let updated = load_queue_task_from_conn(&tx, &current.message_key)?
         .context("failed to load updated queue task")?;
+    refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&updated))?;
     tx.commit()?;
     Ok(updated)
 }
@@ -3307,6 +3394,7 @@ pub fn lease_queue_task(
     let lease_expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
     // Hold a write lock across the read-modify-write so a concurrent leaser on
     // a separate connection cannot overwrite our lease_owner (lost-update).
+    attach_queue_projection_store(root, &conn)?;
     let leased = {
         let tx =
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
@@ -3349,6 +3437,7 @@ pub fn lease_queue_task(
         }
         let leased = load_queue_task_from_conn(&tx, message_key)?
             .context("failed to load leased queue task")?;
+        refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&leased))?;
         tx.commit()?;
         leased
     };
@@ -3449,6 +3538,7 @@ pub fn release_stale_queue_task_leases(
     })?;
     let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
+    attach_queue_projection_store(root, &conn)?;
 
     let now = now_iso_string();
     let mut result = QueueLeaseSweepResult::default();
@@ -3498,6 +3588,9 @@ pub fn release_stale_queue_task_leases(
                 Some("stale or ownerless queue lease recovered"),
                 "stale or ownerless queue lease recovered",
             )? {
+                let task = load_queue_task_from_conn(&tx, &candidate.message_key)?
+                    .context("failed to load recovered queue task")?;
+                refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
                 tx.commit()?;
                 return Ok(true);
             }
@@ -3543,6 +3636,9 @@ pub fn release_stale_queue_task_leases(
                 updated == 1,
                 "stale lease identity changed before recovery write"
             );
+            let task = load_queue_task_from_conn(&tx, &candidate.message_key)?
+                .context("failed to load recovered queue task")?;
+            refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
             tx.commit()?;
             Ok(true)
         })();
@@ -4987,6 +5083,16 @@ fn take_messages(
     limit: usize,
     lease_owner: &str,
 ) -> Result<Vec<ChannelMessageView>> {
+    take_messages_with_projection(None, conn, channel, limit, lease_owner)
+}
+
+fn take_messages_with_projection(
+    projection_root: Option<&Path>,
+    conn: &mut Connection,
+    channel: Option<&str>,
+    limit: usize,
+    lease_owner: &str,
+) -> Result<Vec<ChannelMessageView>> {
     let sql = if channel.is_some() {
         r#"
         WITH eligible AS (
@@ -5180,6 +5286,9 @@ fn take_messages(
     // check-and-set: its WHERE mirrors the eligibility predicate above, so a
     // losing racer flips 0 rows and we record neither the row nor a
     // core-transition proof for it.
+    if let Some(root) = projection_root {
+        attach_queue_projection_store(root, conn)?;
+    }
     let tx =
         rusqlite::Transaction::new_unchecked(&*conn, rusqlite::TransactionBehavior::Immediate)?;
     let rows = {
@@ -5233,6 +5342,14 @@ fn take_messages(
         item.routing.updated_at = leased_at.clone();
         taken.push(item);
     }
+    if let Some(root) = projection_root {
+        let message_keys = taken
+            .iter()
+            .map(|item| item.message_key.clone())
+            .collect::<Vec<_>>();
+        let tasks = load_queue_projection_tasks(&tx, &message_keys)?;
+        refresh_queue_projection_tasks(root, &tx, &tasks)?;
+    }
     tx.commit()?;
     Ok(taken)
 }
@@ -5277,6 +5394,7 @@ pub fn defer_messages_until(
 }
 
 fn ack_messages(
+    projection_root: Option<&Path>,
     conn: &mut Connection,
     message_keys: &[String],
     status: &str,
@@ -5284,6 +5402,9 @@ fn ack_messages(
     ack_reason: Option<&str>,
     terminal_policy_grant: Option<TerminalPolicyGrant>,
 ) -> Result<usize> {
+    if let Some(root) = projection_root {
+        attach_queue_projection_store(root, conn)?;
+    }
     let tx = conn.unchecked_transaction()?;
     let updated = ack_messages_in_transaction(
         &tx,
@@ -5293,6 +5414,10 @@ fn ack_messages(
         ack_reason,
         terminal_policy_grant,
     )?;
+    if let Some(root) = projection_root {
+        let tasks = load_queue_projection_tasks(&tx, message_keys)?;
+        refresh_queue_projection_tasks(root, &tx, &tasks)?;
+    }
     tx.commit()?;
     Ok(updated)
 }
