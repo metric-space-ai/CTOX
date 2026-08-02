@@ -335,6 +335,7 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             let thread_key = find_flag_value(args, "--thread-key")
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| default_thread_key(title));
+            let idempotency_key = queue_add_argv_sha256(args)?;
             let task = channels::create_queue_task(
                 root,
                 channels::QueueTaskCreateRequest {
@@ -350,7 +351,7 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     suggested_skill: find_flag_value(args, "--skill").map(ToOwned::to_owned),
                     parent_message_key: find_flag_value(args, "--parent-message-key")
                         .map(ToOwned::to_owned),
-                    extra_metadata: None,
+                    extra_metadata: Some(json!({"idempotency_key": idempotency_key})),
                 },
             )?;
             print_json(&json!({"ok": true, "task": task}))
@@ -2581,6 +2582,18 @@ fn stable_digest(input: &str) -> String {
     hex[..12].to_string()
 }
 
+fn queue_add_argv_sha256(args: &[String]) -> Result<String> {
+    // CliCommandLedger hashes the complete argv after argv[0], while this
+    // handler receives the slice after "queue". Reconstruct that exact array
+    // so a retried command uses the same natural key already recorded by the
+    // audit ledger.
+    let audited_args = std::iter::once("queue")
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let argv_json = serde_json::to_string(&audited_args)?;
+    Ok(format!("{:x}", Sha256::digest(argv_json.as_bytes())))
+}
+
 fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     find_flag_value(args, flag)
 }
@@ -2630,6 +2643,61 @@ mod tests {
 
         handle_queue_command(&root, &["add".to_string(), "--help".to_string()])?;
 
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn queue_add_retry_reuses_message_key_from_argv_sha256_idempotency_key() -> Result<()> {
+        let root = temp_root("queue-add-idempotency");
+        std::fs::create_dir_all(&root)?;
+        let args = vec![
+            "add".to_string(),
+            "--title".to_string(),
+            "Retry-safe task".to_string(),
+            "--prompt".to_string(),
+            "Create exactly one durable queue row.".to_string(),
+            "--thread-key".to_string(),
+            "queue/retry-safe".to_string(),
+            "--priority".to_string(),
+            "high".to_string(),
+        ];
+        let expected_argv_sha256 =
+            "5e647ae83c3808874e6ac213aa4ab715227b37f0b20351f4e4b6d6c3b1dde0fa";
+        assert_eq!(queue_add_argv_sha256(&args)?, expected_argv_sha256);
+
+        handle_queue_command(&root, &args)?;
+        let conn = Connection::open(crate::paths::core_db(&root))?;
+        let (first_message_key, stored_idempotency_key): (String, Option<String>) = conn
+            .query_row(
+                "SELECT message_key, json_extract(metadata_json, '$.idempotency_key') \
+             FROM communication_messages \
+             WHERE thread_key = 'queue/retry-safe'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+        if stored_idempotency_key.is_none() {
+            std::thread::sleep(Duration::from_millis(1_100));
+        }
+
+        handle_queue_command(&root, &args)?;
+        let (row_count, distinct_message_keys, second_message_key): (i64, i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT message_key), MAX(message_key) \
+                 FROM communication_messages \
+                 WHERE thread_key = 'queue/retry-safe'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert_eq!(row_count, 1);
+        assert_eq!(distinct_message_keys, 1);
+        assert_eq!(second_message_key, first_message_key);
+        assert_eq!(
+            stored_idempotency_key.as_deref(),
+            Some(expected_argv_sha256)
+        );
+
+        drop(conn);
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
