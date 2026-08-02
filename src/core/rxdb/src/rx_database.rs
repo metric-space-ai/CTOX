@@ -20,7 +20,6 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::plugins::utils::utils_document::{get_default_revision, get_default_rx_document_meta};
 use crate::plugins::utils::utils_error::plugin_missing;
-use crate::plugins::utils::utils_object::sort_object;
 use crate::plugins::utils::utils_revision::create_revision;
 use crate::plugins::utils::utils_string::random_token;
 use crate::plugins::utils::utils_time::now;
@@ -303,8 +302,8 @@ impl RxDatabase {
     /// native peer bring up required collections (and the rest) even when an
     /// optional collection has drifted, instead of aborting the whole peer on
     /// the first failure. The strict `add_collections` is unchanged for other
-    /// callers, and the auto-repair-when-structurally-identical path inside
-    /// `write_collection_meta` is reused untouched.
+    /// callers, and `write_collection_meta` applies the same strict schema-hash
+    /// check to both entry points.
     pub async fn add_collections_tolerant(
         self: &Arc<Self>,
         collection_creators: HashMap<String, RxCollectionCreator>,
@@ -334,7 +333,7 @@ impl RxDatabase {
 
     /// FIX 4: register exactly one collection. Extracted from `add_collections`
     /// so the strict and fault-tolerant entry points share identical
-    /// per-collection semantics (including the existing auto-repair path).
+    /// per-collection schema-hash semantics.
     async fn add_single_collection(
         self: &Arc<Self>,
         internal_store: &Arc<dyn RxStorageInstance>,
@@ -711,22 +710,9 @@ async fn write_collection_meta(
             .and_then(|data| data.get("schemaHash"))
             .and_then(Value::as_str);
         if previous_hash != Some(schema_hash.as_str()) {
-            let previous_schema = doc_in_db.get("data").and_then(|data| data.get("schema"));
-            let current_schema = serde_json::to_value(&schema.json_schema).unwrap_or(Value::Null);
-            if previous_schema
-                .map(|stored| schemas_compatible_for_meta_repair(stored, &current_schema))
-                .unwrap_or(false)
-            {
-                repair_collection_meta_schema_hash(
-                    database,
-                    internal_store,
-                    doc_in_db,
-                    &schema_hash,
-                    &current_schema,
-                )
-                .await?;
-                continue;
-            }
+            // The collection-meta id already contains the schema version. A
+            // different hash under that id is therefore an unversioned schema
+            // change and must fail closed instead of rewriting persisted truth.
             return Err(new_rx_error(
                 "DB6",
                 Some(json!({
@@ -734,163 +720,6 @@ async fn write_collection_meta(
                     "collection": collection_name,
                     "previousSchemaHash": previous_hash,
                     "schemaHash": schema_hash,
-                })),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn schemas_compatible_for_meta_repair(stored: &Value, current: &Value) -> bool {
-    let stored = normalize_schema_for_meta_repair(stored);
-    let current = normalize_schema_for_meta_repair(current);
-    if stored == current {
-        return true;
-    }
-    schemas_allow_additive_optional_properties(&stored, &current)
-}
-
-fn normalize_schema_for_meta_repair(schema: &Value) -> Value {
-    let mut normalized = schema.clone();
-    strip_legacy_rxdb_reserved_schema_fields(&mut normalized);
-    sort_object(&normalized, true)
-}
-
-fn strip_legacy_rxdb_reserved_schema_fields(schema: &mut Value) {
-    const RESERVED_FIELDS: &[&str] = &["_attachments", "_deleted", "_meta", "_rev"];
-    let Some(obj) = schema.as_object_mut() else {
-        return;
-    };
-    if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
-        for field in RESERVED_FIELDS {
-            properties.remove(*field);
-        }
-    }
-    if let Some(required) = obj.get_mut("required").and_then(Value::as_array_mut) {
-        required.retain(|field| {
-            field
-                .as_str()
-                .map(|name| !RESERVED_FIELDS.contains(&name))
-                .unwrap_or(true)
-        });
-    }
-}
-
-fn schemas_allow_additive_optional_properties(stored: &Value, current: &Value) -> bool {
-    let (Some(stored_obj), Some(current_obj)) = (stored.as_object(), current.as_object()) else {
-        return false;
-    };
-    for (key, stored_value) in stored_obj {
-        if schema_meta_repair_ignores_top_level_key(key) {
-            continue;
-        }
-        if current_obj.get(key) != Some(stored_value) {
-            return false;
-        }
-    }
-    for (key, current_value) in current_obj {
-        if schema_meta_repair_ignores_top_level_key(key) {
-            continue;
-        }
-        if stored_obj.get(key) != Some(current_value) {
-            return false;
-        }
-    }
-
-    let stored_required = schema_required_fields(stored);
-    let current_required = schema_required_fields(current);
-    if stored_required != current_required {
-        return false;
-    }
-
-    let Some(stored_properties) = stored_obj.get("properties").and_then(Value::as_object) else {
-        return current_obj
-            .get("properties")
-            .and_then(Value::as_object)
-            .map(|properties| {
-                properties
-                    .keys()
-                    .all(|name| !current_required.contains(name))
-            })
-            .unwrap_or(true);
-    };
-    let Some(current_properties) = current_obj.get("properties").and_then(Value::as_object) else {
-        return stored_properties.is_empty();
-    };
-
-    for (name, stored_property) in stored_properties {
-        if current_properties.get(name) != Some(stored_property) {
-            return false;
-        }
-    }
-    current_properties
-        .keys()
-        .filter(|name| !stored_properties.contains_key(*name))
-        .all(|name| !current_required.contains(name))
-}
-
-fn schema_meta_repair_ignores_top_level_key(key: &str) -> bool {
-    // Index changes are storage metadata, not document-shape changes. The
-    // collection storage instance creates missing indexes after the meta hash is
-    // repaired, while stale extra indexes are harmless for compatibility.
-    matches!(key, "properties" | "required" | "indexes")
-}
-
-fn schema_required_fields(schema: &Value) -> std::collections::BTreeSet<String> {
-    schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|required| {
-            required
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-async fn repair_collection_meta_schema_hash(
-    database: &RxDatabase,
-    internal_store: &Arc<dyn RxStorageInstance>,
-    previous: Value,
-    schema_hash: &str,
-    schema_json: &Value,
-) -> RxResult<()> {
-    let mut document = flat_clone_doc_with_meta(&previous);
-    if let Some(obj) = document.as_object_mut() {
-        if let Some(data) = obj.get_mut("data").and_then(Value::as_object_mut) {
-            data.insert(
-                "schemaHash".to_string(),
-                Value::String(schema_hash.to_string()),
-            );
-            data.insert("schema".to_string(), schema_json.clone());
-        }
-        if let Some(meta) = obj.get_mut("_meta").and_then(Value::as_object_mut) {
-            meta.insert("lwt".to_string(), json!(now()));
-        }
-        let previous_rev = previous.get("_rev").and_then(Value::as_str);
-        obj.insert(
-            "_rev".to_string(),
-            Value::String(create_revision(&database.token, previous_rev).unwrap_or_default()),
-        );
-    }
-    let result = internal_store
-        .bulk_write(
-            vec![BulkWriteRow {
-                previous: Some(previous),
-                document,
-            }],
-            "rx-database-repair-collection-schema-hash",
-        )
-        .await?;
-    if let Some(error) = result.error.first() {
-        if error.status != 409 {
-            return Err(new_rx_error(
-                "DB12",
-                Some(json!({
-                    "database": database.name,
-                    "writeError": error,
                 })),
             ));
         }
@@ -981,169 +810,93 @@ mod tests {
         schema
     }
 
-    #[test]
-    fn schema_meta_repair_ignores_legacy_rxdb_reserved_fields() {
-        let stored = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "status": { "type": "string" },
-                "_deleted": { "type": "boolean" },
-                "_rev": { "type": "string" },
-                "_meta": { "type": "object" },
-                "_attachments": { "type": "object" }
-            },
-            "required": ["id", "status", "_deleted", "_rev", "_meta", "_attachments"],
-            "additionalProperties": false
-        });
-        let current = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "status": { "type": "string" }
-            },
-            "required": ["id", "status"],
-            "additionalProperties": false
-        });
+    #[tokio::test]
+    async fn additive_schema_change_requires_version_bump_and_preserves_collection_meta() {
+        let database = create_rx_database(RxDatabaseCreator {
+            name: "db-schema-version-required".to_string(),
+            storage: get_rx_storage_memory(()),
+            multi_instance: false,
+            password: None,
+            hash_function: Arc::new(TestHashFunction),
+            options: HashMap::new(),
+            ignore_duplicate: false,
+            close_duplicates: false,
+            event_reduce: true,
+            allow_slow_count: false,
+        })
+        .await
+        .unwrap();
+        let internal_store = database.internal_store.as_ref().unwrap();
+        let original_schema =
+            create_rx_schema(test_schema(), Arc::clone(&database.hash_function), true).unwrap();
+        write_collection_meta(&database, internal_store, "humans", &original_schema)
+            .await
+            .unwrap();
+        let original_meta = get_all_collection_documents(internal_store)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
 
-        assert!(schemas_compatible_for_meta_repair(&stored, &current));
-    }
-
-    #[test]
-    fn schema_meta_repair_allows_additive_optional_properties() {
-        let stored = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "title": { "type": "string" },
-                "status": { "type": "string" }
+        let mut changed_schema_json = test_schema();
+        changed_schema_json.properties.insert(
+            "nickname".to_string(),
+            JsonSchema {
+                schema_type: Some("string".to_string()),
+                ..Default::default()
             },
-            "required": ["id", "title", "status"],
-            "additionalProperties": false
-        });
-        let current = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "title": { "type": "string" },
-                "status": { "type": "string" },
-                "command_id": { "type": "string" },
-                "command_type": { "type": "string" }
-            },
-            "required": ["id", "title", "status"],
-            "additionalProperties": false
-        });
+        );
+        let changed_schema = create_rx_schema(
+            changed_schema_json.clone(),
+            Arc::clone(&database.hash_function),
+            true,
+        )
+        .unwrap();
+        let result =
+            write_collection_meta(&database, internal_store, "humans", &changed_schema).await;
+        let Err(error) = result else {
+            panic!("same-version additive schema change unexpectedly succeeded");
+        };
+        assert_eq!(error.code(), "DB6");
+        let unchanged_meta = get_all_collection_documents(internal_store)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            unchanged_meta
+                .get("data")
+                .and_then(|data| data.get("schemaHash")),
+            original_meta
+                .get("data")
+                .and_then(|data| data.get("schemaHash"))
+        );
+        assert_eq!(
+            unchanged_meta
+                .get("data")
+                .and_then(|data| data.get("schema")),
+            original_meta
+                .get("data")
+                .and_then(|data| data.get("schema"))
+        );
 
-        assert!(schemas_compatible_for_meta_repair(&stored, &current));
-    }
-
-    #[test]
-    fn schema_meta_repair_allows_index_only_drift() {
-        let stored = json!({
-            "version": 1,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "command_id": { "type": "string" },
-                "status": { "type": "string" },
-                "_deleted": { "type": "boolean" },
-                "_rev": { "type": "string" },
-                "_meta": { "type": "object" },
-                "_attachments": { "type": "object" }
-            },
-            "required": ["id", "command_id", "status", "_deleted", "_rev", "_meta", "_attachments"],
-            "indexes": [["_deleted", "id"], ["_meta.lwt", "id"]],
-            "additionalProperties": false,
-            "encrypted": [],
-            "keyCompression": false
-        });
-        let current = json!({
-            "version": 1,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "command_id": { "type": "string" },
-                "status": { "type": "string" }
-            },
-            "required": ["id", "command_id", "status"],
-            "indexes": [
-                ["_deleted", "status", "id"],
-                ["_deleted", "command_id", "id"],
-                ["_meta.lwt", "id"]
-            ],
-            "additionalProperties": false,
-            "encrypted": [],
-            "keyCompression": false
-        });
-
-        assert!(schemas_compatible_for_meta_repair(&stored, &current));
-    }
-
-    #[test]
-    fn schema_meta_repair_rejects_property_type_changes_despite_index_drift() {
-        let stored = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "status": { "type": "string" }
-            },
-            "required": ["id", "status"],
-            "indexes": [["_deleted", "id"]],
-            "additionalProperties": false
-        });
-        let current = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "status": { "type": "number" }
-            },
-            "required": ["id", "status"],
-            "indexes": [["_deleted", "status", "id"], ["_meta.lwt", "id"]],
-            "additionalProperties": false
-        });
-
-        assert!(!schemas_compatible_for_meta_repair(&stored, &current));
-    }
-
-    #[test]
-    fn schema_meta_repair_rejects_required_property_additions() {
-        let stored = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" }
-            },
-            "required": ["id"],
-            "additionalProperties": false
-        });
-        let current = json!({
-            "version": 0,
-            "primaryKey": "id",
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" },
-                "status": { "type": "string" }
-            },
-            "required": ["id", "status"],
-            "additionalProperties": false
-        });
-
-        assert!(!schemas_compatible_for_meta_repair(&stored, &current));
+        changed_schema_json.version = 1;
+        let versioned_schema = create_rx_schema(
+            changed_schema_json,
+            Arc::clone(&database.hash_function),
+            true,
+        )
+        .unwrap();
+        write_collection_meta(&database, internal_store, "humans", &versioned_schema)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_all_collection_documents(internal_store)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
