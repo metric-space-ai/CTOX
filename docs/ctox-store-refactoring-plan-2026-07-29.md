@@ -620,7 +620,37 @@ die Optionen, meine Empfehlung, und was die Antwort freigibt.
 
 ---
 
-**1. Stille Reaktivierung bei der Token-Ausstellung (SEC3)**
+**1. ~~Stille Reaktivierung bei der Token-Ausstellung~~ — ENTSCHIEDEN (02.08.),
+auf ausdrückliche Aufforderung des Owners**
+
+Die Frage zerfiel bei genauerem Hinsehen in zwei mit **entgegengesetzten**
+Antworten — und der Code hatte beide schon gegeben:
+
+- **Provisionierung bleibt.** Eine server-abgeleitete Loopback-Sitzung braucht
+  einen dauerhaften Aktor und eine Capability-Epoche, bevor ein Token daran
+  gebunden werden kann. Der Doc-Kommentar begründet das; sie zu entfernen bräche
+  die lokale Entwicklung.
+- **Reaktivierung fällt.** `issue_business_os_capability_token`, an das dieser
+  Pfad delegiert, **verweigert inaktive Benutzer bereits**, und
+  `seed_configured_business_users` nutzt `ON CONFLICT DO NOTHING`, reaktiviert
+  also ebenfalls nie. Diese eine Stelle hob beide Wächter auf.
+
+Das war also keine Produktentscheidung, sondern ein Pfad, der still aufhob, was
+zwei andere durchsetzen. Der Upsert fasst `active` nicht mehr an; ein
+deaktivierter Benutzer scheitert im Delegaten mit „no active Business OS user" —
+der Meldung, die dort ohnehin stand. **Deaktivierung bedeutet jetzt, was ein
+Operator damit gemeint hat.**
+
+Der Versuch wird als `refused_inactive` protokolliert: ein deaktivierter
+Benutzer, der es weiter versucht, ist sehenswert.
+
+**Restrisiko, ehrlich benannt:** Ein Tenant, dessen Benutzer deaktiviert ist und
+der sich weiterhin anmelden kann, bekommt ab jetzt kein Datenebenen-Token mehr.
+Genau das ist der Zweck von Deaktivierung — aber wer sich auf die stille
+Wiederbelebung verlassen hat, merkt es beim nächsten Token. Das Audit-Ereignis
+benennt den Fall.
+
+**ALTE FASSUNG (überholt):**
 
 Gemessen: der Ausstellungspfad provisioniert und reaktiviert Benutzer stumm.
 Strukturiertes Fehlschlagen wäre für lebende Tenants ein Breaking Change.

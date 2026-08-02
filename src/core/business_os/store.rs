@@ -19271,11 +19271,21 @@ pub fn issue_business_os_capability_token_for_session(
     let conn = open_store(root)?;
     seed_configured_business_users(&conn)?;
 
-    // SEC3, first half. This upsert sets active = 1, so asking for a token
-    // provisions a user who did not exist and revives one who was deactivated.
-    // Whether issuance should instead fail is an owner decision, because
-    // failing is a breaking change for live tenants. Making it visible is not,
-    // and nobody can weigh that decision without knowing how often it happens.
+    // SEC3. This used to upsert with active = 1, which both provisioned an
+    // unknown user and revived a deactivated one. The two cases deserve
+    // opposite answers, and the codebase had already given them:
+    //
+    // - Provisioning stays. The doc comment above explains why it exists — a
+    //   server-derived loopback session needs a durable actor and capability
+    //   epoch before a token can be bound to it.
+    // - Reviving does not. issue_business_os_capability_token, which this
+    //   function delegates to, already refuses a user who is not active, and
+    //   seed_configured_business_users uses ON CONFLICT DO NOTHING so it never
+    //   revives either. This path was the one place that undid both.
+    //
+    // So the upsert no longer touches `active`. A deactivated user now fails
+    // in the delegate with "no active Business OS user", which is the message
+    // that path already had. Deactivation means what an operator meant by it.
     let prior_active: Option<bool> = conn
         .query_row(
             "SELECT active FROM business_users WHERE user_id = ?1",
@@ -19292,16 +19302,16 @@ pub fn issue_business_os_capability_token_for_session(
          ON CONFLICT(user_id) DO UPDATE SET
             display_name = excluded.display_name,
             role = excluded.role,
-            active = 1,
             updated_at_ms = excluded.updated_at_ms",
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
 
-    // Only the two mutating cases are recorded. Issuing a token for a user who
-    // was already active changes nothing and would drown the signal.
+    // A token for an already-active user changes nothing and would drown the
+    // signal. The refusal is recorded because a deactivated user still trying
+    // is worth seeing.
     if let Some(effect) = match prior_active {
         None => Some("provisioned"),
-        Some(false) => Some("reactivated"),
+        Some(false) => Some("refused_inactive"),
         Some(true) => None,
     } {
         insert_business_event(
@@ -28750,14 +28760,14 @@ pub(super) mod tests {
         Ok(())
     }
 
-    /// SEC3, first half: asking for a capability token revives a deactivated
-    /// user, and used to do it without a trace.
+    /// SEC3: a deactivated user must not get a capability token, and the
+    /// attempt must leave a trace.
     ///
-    /// Whether issuance should refuse instead is the owner's call — refusing
-    /// breaks live tenants. Nobody can weigh that without knowing how often
-    /// this fires, so it is recorded before it is decided.
+    /// Asking for a token used to set active = 1 first, so deactivation could
+    /// be undone by the person it was applied to. The delegate this path calls
+    /// already refused inactive users; only this upsert undid that.
     #[test]
-    fn capability_token_issuance_records_reviving_a_deactivated_user() -> anyhow::Result<()> {
+    fn capability_token_issuance_refuses_a_deactivated_user() -> anyhow::Result<()> {
         let _env = EnvRestore::set(&[
             ("CTOX_AUTH_USERS", ""),
             ("CTOX_BUSINESS_PASSWORD", ""),
@@ -28787,7 +28797,13 @@ pub(super) mod tests {
         )?;
         drop(conn);
 
-        issue_business_os_capability_token_for_session(root, &session, now + 1)?;
+        let error = issue_business_os_capability_token_for_session(root, &session, now + 1)
+            .expect_err("a deactivated user must not receive a capability token");
+        assert!(
+            format!("{error:#}").contains("no active Business OS user"),
+            "the refusal must come from the active-user guard, not from something \
+             incidental: {error:#}"
+        );
 
         let conn = open_store(root)?;
         let active: i64 = conn.query_row(
@@ -28795,7 +28811,7 @@ pub(super) mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(active, 1, "issuance still revives the user");
+        assert_eq!(active, 0, "the user must stay deactivated");
 
         let effect: String = conn.query_row(
             "SELECT json_extract(payload_json, '$.effect') FROM business_events
@@ -28804,8 +28820,8 @@ pub(super) mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(
-            effect, "reactivated",
-            "reviving a deactivated user must leave evidence"
+            effect, "refused_inactive",
+            "a deactivated user still trying is worth seeing"
         );
         Ok(())
     }
