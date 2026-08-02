@@ -1,5 +1,5 @@
 import { CtoxResizer } from './shared/resizer.js?v=20260723-resizer-pointer-capture-v1';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260728-sync-readiness-v131';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260717-knowledge-sync-v130';
 import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260721-pane-grammar-v2';
 import { createAppActions } from './shared/app-actions.js?v=20260715-runtime-v2';
 import {
@@ -22,6 +22,12 @@ import {
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
 } from './shared/branding.js?v=20260714-chat-queue-v56';
+import {
+  currentShellDesignValue,
+  normalizeBuiltinShellStyle,
+  resolveShellDesign,
+  shellDesignOptions,
+} from './shared/design-templates.js?v=20260728-custom-design-templates-v1';
 import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260714-chat-queue-v56';
 import {
   launchesInWindow,
@@ -65,14 +71,15 @@ const LOGGED_OUT_KEY = 'ctox.businessOs.loggedOut';
 const ACCOUNT_PREFS_KEY = 'ctox.businessOs.accountPreferences';
 const PAIRING_CONFIG_KEY = 'ctox.businessOs.pairingConfig';
 const RXDB_BOOTSTRAP_VERSION_KEY = 'ctox.businessOs.rxdbBootstrapVersion';
-const RXDB_SCHEMA_REPAIR_KEY = 'ctox.businessOs.rxdbSchemaRepair';
 const MODULE_LAYOUT_KEY = 'ctox.businessOs.moduleLayout';
 const TASKBAR_PINS_KEY = 'ctox.businessOs.taskbarPins';
 const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260729-pairing-ice-inheritance-v95';
+const MODULE_SCHEMA_RELOAD_KEY = 'ctox.businessOs.moduleSchemaReload';
+const APP_BUILD = '20260729-business-chat-submit-confirm-v91';
+const SHELL_DESIGN_STYLESHEET_ID = 'ctox-shell-design-template';
 
 ensureShellStylesheets();
 
@@ -90,8 +97,6 @@ const CTOX_MAINTENANCE_POLL_MS = 2000;
 const CTOX_MAINTENANCE_LEASE_KEY = 'ctox.businessOs.maintenanceLease';
 const CTOX_MAINTENANCE_CLIENT_KEY = 'ctox.businessOs.maintenanceClient';
 const CTOX_UPDATE_CHECK_POLL_MS = 30 * 60 * 1000;
-const SYNC_RECOVERY_REPAIR_DELAY_MS = 30000;
-const SYNC_RECOVERY_MIN_STALLED_MS = 25000;
 const SHELL_IMPORT_TIMEOUT_MS = 45000;
 const MODULE_SCRIPT_PRELOAD_STABLE_HEALTH_MS = 10000;
 const MODULE_SCRIPT_PRELOAD_INTERVAL_MS = 250;
@@ -160,8 +165,6 @@ let syncToastRefresh = null;
 let syncToastWatchdog = 0;
 let moduleResizers = [];
 const integratedModuleToolSessions = new Map();
-let syncRecoveryRepairTimer = null;
-let syncRecoveryRepairRunning = false;
 let moduleScriptPreloadPending = false;
 let moduleScriptPreloadHealthySinceMs = 0;
 let moduleScriptPreloadResumeTimer = null;
@@ -203,7 +206,7 @@ const state = {
   },
   modules: [],
   activeModule: null,
-  moduleRevisions: {},
+  moduleRevisions: readPendingModuleSchemaRevisions(),
   packagedModuleAssetRevisions: new Map(),
   navHistory: [],
   navIndex: -1,
@@ -410,6 +413,8 @@ if (new URLSearchParams(window.location.search).has('rxdbSmoke')) {
     createLiveDbFacade,
     createModuleContext,
     createModulePermissionFacade,
+    applyShellStyle,
+    applyShellTheme,
     storageKeys: businessOsStorageKeys,
     renderTabs,
     listLaunchTargets,
@@ -933,8 +938,7 @@ globalThis.addEventListener?.('ctox-indexeddb-recovery-required', updateRecovery
 globalThis.addEventListener?.('ctox-indexeddb-recovery-status', updateRecoveryWarningFromEvent);
 globalThis.addEventListener?.('ctox-indexeddb-storage-pressure', updateRecoveryWarningFromEvent);
 
-bootstrap().catch(async (error) => {
-  if (await recoverFromLocalRxDbSchemaDrift(error)) return;
+bootstrap().catch((error) => {
   console.error(error);
   showStartupError(error);
 });
@@ -990,17 +994,9 @@ async function bootstrap() {
     modules = await loadModules();
   } catch (error) {
     if (!isModuleCatalogSyncError(error)) throw error;
-    console.warn('[business-os] module catalog sync stalled; extending WebRTC wait before local cache repair', error);
+    console.warn('[business-os] module catalog sync stalled; extending the WebRTC wait without deleting local data', error);
     setStartupProgress(82, shellText('bootCatalog'));
-    try {
-      modules = await loadModules({ timeoutMs: 180000, allowShellSeed: false });
-    } catch (retryError) {
-      if (!isModuleCatalogSyncError(retryError)) throw retryError;
-      console.warn('[business-os] module catalog still unavailable; resetting local RxDB cache and retrying WebRTC sync', retryError);
-      setStartupProgress(80, shellText('bootOptimize'));
-      await repairBusinessDataPlane(syncConfig);
-      modules = await loadModules({ timeoutMs: 180000, allowShellSeed: false });
-    }
+    modules = await loadModules({ timeoutMs: 180000, allowShellSeed: false });
   }
   modules = await waitForRequestedHashModule(modules);
   state.modules = modules.modules || [];
@@ -1095,6 +1091,48 @@ async function bootstrap() {
   // stays, scheduled off the idle path.
   scheduleModuleScriptPreload();
   refreshRemoteShellStateInBackground();
+}
+
+function readPendingModuleSchemaRevisions() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(MODULE_SCHEMA_RELOAD_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed)
+      .filter(([moduleId, revision]) => String(moduleId || '').trim() && Number.isFinite(Number(revision)))
+      .map(([moduleId, revision]) => [String(moduleId), Number(revision)]));
+  } catch {
+    return {};
+  }
+}
+
+async function reloadAfterModuleSchemaChange(moduleId, statusText) {
+  const normalizedModuleId = String(moduleId || '').trim();
+  if (!normalizedModuleId) throw new TypeError('Module id is required for a schema-changing reload.');
+  const revision = Date.now();
+  state.moduleRevisions[normalizedModuleId] = revision;
+  try {
+    const pending = readPendingModuleSchemaRevisions();
+    pending[normalizedModuleId] = revision;
+    sessionStorage.setItem(MODULE_SCHEMA_RELOAD_KEY, JSON.stringify(pending));
+  } catch {}
+  setStatus(statusText);
+  await delay(250);
+  window.location.reload();
+}
+
+function clearPendingModuleSchemaRevision(moduleId) {
+  const normalizedModuleId = String(moduleId || '').trim();
+  if (!normalizedModuleId) return;
+  try {
+    const pending = readPendingModuleSchemaRevisions();
+    if (!Object.prototype.hasOwnProperty.call(pending, normalizedModuleId)) return;
+    delete pending[normalizedModuleId];
+    if (Object.keys(pending).length) {
+      sessionStorage.setItem(MODULE_SCHEMA_RELOAD_KEY, JSON.stringify(pending));
+    } else {
+      sessionStorage.removeItem(MODULE_SCHEMA_RELOAD_KEY);
+    }
+  } catch {}
 }
 
 function businessDbName(syncConfig = state.syncConfig) {
@@ -1220,8 +1258,16 @@ async function openBusinessDbAndRegisterCoreCollections(dbName) {
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     setStartupProgress(54, shellText('bootDbOpen'));
-    state.db = await createBusinessDb({ name: dbName });
-    assertCriticalSyncCollectionsMatchBundle(state.db?.rxdb);
+    try {
+      state.db = await createBusinessDb({ name: dbName });
+      assertCriticalSyncCollectionsMatchBundle(state.db?.rxdb);
+    } catch (error) {
+      state.db = null;
+      if (!isLocalRxDbStartupError(error) || attempt >= maxAttempts) throw error;
+      console.warn(`[business-os] IndexedDB open did not complete; retrying without deleting local data (${attempt}/${maxAttempts - 1})`, error);
+      await new Promise((resolve) => window.setTimeout(resolve, attempt * 150));
+      continue;
+    }
 
     try {
       setStartupProgress(58, shellText('bootDbStructures'));
@@ -1235,7 +1281,7 @@ async function openBusinessDbAndRegisterCoreCollections(dbName) {
       }
       state.db = null;
       if (!retryable) throw error;
-      console.warn(`[business-os] Core schema registration did not complete; reopening IndexedDB (${attempt}/${maxAttempts - 1})`, error);
+      console.warn(`[business-os] Core schema registration did not complete; reopening IndexedDB without deleting local data (${attempt}/${maxAttempts - 1})`, error);
       await new Promise((resolve) => window.setTimeout(resolve, attempt * 150));
     }
   }
@@ -1287,45 +1333,6 @@ async function runQueuedCatalogRefresh() {
       state.catalogRefreshTimer = window.setTimeout(runQueuedCatalogRefresh, 100);
     }
   }
-}
-
-async function repairBusinessDataPlane(syncConfig) {
-  state.dataPlaneGeneration += 1;
-  resetDataPlaneReady('repair-business-data-plane');
-  clearSyncRecoveryRepairTimer();
-  if (state.catalogRefreshTimer) {
-    window.clearTimeout(state.catalogRefreshTimer);
-    state.catalogRefreshTimer = null;
-  }
-  state.catalogRefreshRunning = false;
-  state.catalogRefreshQueued = false;
-  state.moduleCatalogFingerprint = '';
-  state.initialModuleOpened = false;
-  if (state.ctoxHealthTimer) {
-    window.clearInterval(state.ctoxHealthTimer);
-    state.ctoxHealthTimer = null;
-  }
-  if (state.catalogSubscription) {
-    try { state.catalogSubscription.unsubscribe(); } catch (e) {}
-    state.catalogSubscription = null;
-  }
-  if (state.workspaceBrandingSubscription) {
-    try { state.workspaceBrandingSubscription.unsubscribe(); } catch (e) {}
-    state.workspaceBrandingSubscription = null;
-  }
-  state.workspaceBranding = applyWorkspaceBranding(null);
-  try { await state.sync?.stop?.(); } catch (error) { console.warn('[business-os] sync stop before cache reset failed', error); }
-  try { await state.db?.close?.(); } catch (error) { console.warn('[business-os] db close before cache reset failed', error); }
-  state.db = null;
-  state.sync = null;
-  updateSyncDiagnostics(null);
-  state.commandBus = null;
-  state.activeModuleSyncLease = null;
-  state.schemaRegistrations.clear();
-  state.schemaRegistrationQueue = Promise.resolve();
-  const { resetBusinessDb } = await loadBusinessDbModule();
-  await resetBusinessDb({ name: businessDbName(syncConfig) });
-  await openBusinessDataPlane(syncConfig);
 }
 
 function isModuleCatalogSyncError(error) {
@@ -1886,6 +1893,17 @@ function wireShellActions() {
     console.log('[business-os] modules changed event received:', event.detail);
     await refreshModules();
   });
+  window.addEventListener('ctox-business-os-design-templates-changed', () => {
+    const preferredStyle = readAccountPrefs().shellStyle || 'ctox';
+    const resolved = resolveShellDesign(preferredStyle);
+    const customTemplateMissing = preferredStyle.startsWith('custom:') && !resolved.templateId;
+    applyShellStyle(
+      customTemplateMissing ? 'ctox' : preferredStyle,
+      { persist: customTemplateMissing, reloadStylesheet: true },
+    );
+    syncHeaderControls();
+    postCurrentPreferencesToModule();
+  });
   window.addEventListener('hashchange', () => {
     if (state.navTransitioning) return;
     const id = currentHashModuleId();
@@ -1982,7 +2000,11 @@ function wireShellActions() {
       syncHeaderControls();
       postCurrentPreferencesToModule();
     } else if (control.matches('[data-shell-style-select]')) {
-      applyShellStyle(control.value);
+      applyShellStyle(control.value, {
+        // A custom template may have been edited through Settings or MCP
+        // while this browser kept the previous stylesheet in memory.
+        reloadStylesheet: String(control.value || '').startsWith('custom:'),
+      });
       syncHeaderControls();
       postCurrentPreferencesToModule();
     }
@@ -2363,13 +2385,11 @@ async function renderIntegratedModuleVersions({ mod, host, windowId }) {
         payload: { module_id: mod.id, version_id: selected.version_id },
         source: 'business-os-integrated-versions',
       });
-      state.moduleRevisions[mod.id] = Date.now();
-      state.schemaRegistrations.delete(mod.id);
-      setStatus(`${moduleDisplayTitle(mod)} wurde auf Version #${selected.seq || '—'} zurückgesetzt.`);
-      state.windowManager?.destroy?.(windowId);
-      await delay(240);
-      const refreshed = state.modules.find((entry) => entry.id === mod.id) || mod;
-      await openWindowedModule(refreshed);
+      await reloadAfterModuleSchemaChange(
+        mod.id,
+        `${moduleDisplayTitle(mod)} wurde auf Version #${selected.seq || '—'} zurückgesetzt. Arbeitsbereich wird neu geladen.`,
+      );
+      return;
     } catch (error) {
       button.disabled = false;
       button.textContent = `Auf #${selected.seq || '—'} wechseln`;
@@ -2447,7 +2467,7 @@ function formatLifecycleTimestamp(value) {
 }
 
 function shellPreferenceControlsTemplate() {
-  const shellStyle = normalizeShellStyle(document.documentElement.dataset.shellStyle);
+  const shellStyle = currentShellDesignValue();
   const language = shellLang();
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   return `
@@ -2455,9 +2475,7 @@ function shellPreferenceControlsTemplate() {
       <label class="settings-preference-control">
         <span data-shell-t="shellStyleLabel">${escapeHtml(shellText('shellStyleLabel') || 'Window')}</span>
         <select class="header-select" data-shell-style-select aria-label="${escapeHtml(shellText('shellStyleAria') || 'Style')}" data-shell-t-aria="shellStyleAria">
-          ${preferenceOption('ctox', 'CTOX', shellStyle)}
-          ${preferenceOption('windows', 'Windows', shellStyle)}
-          ${preferenceOption('macos', 'macOS', shellStyle)}
+          ${shellDesignOptionsTemplate(shellStyle)}
         </select>
       </label>
       <label class="settings-preference-control">
@@ -2480,6 +2498,20 @@ function shellPreferenceControlsTemplate() {
 
 function preferenceOption(value, label, selected) {
   return `<option value="${escapeHtml(value)}" ${selected === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+}
+
+function shellDesignOptionsTemplate(selected) {
+  const options = shellDesignOptions();
+  const builtins = options
+    .filter((option) => !option.templateId)
+    .map((option) => preferenceOption(option.value, option.label, selected))
+    .join('');
+  const custom = options.filter((option) => option.templateId);
+  if (!custom.length) return builtins;
+  const label = shellLang() === 'de' ? 'Eigene Designs' : 'Custom designs';
+  return `${builtins}<optgroup label="${escapeHtml(label)}">${custom
+    .map((option) => preferenceOption(option.value, option.label, selected))
+    .join('')}</optgroup>`;
 }
 
 
@@ -2924,7 +2956,6 @@ function updateSyncDiagnostics(snapshot) {
   if (hasWebRtcConnectedCollection(snapshot)) markBootTiming('firstWebRtcConnectedMs');
   updateModuleScriptPreloadAvailability(snapshot);
   window.ctoxBusinessOsSyncDiagnostics = snapshot;
-  scheduleSyncRecoveryRepairIfNeeded(snapshot);
   refreshOpenSyncDiagnosticsDrawer();
   window.dispatchEvent(new CustomEvent('ctox-business-os-sync-diagnostics', {
     detail: snapshot,
@@ -2954,73 +2985,6 @@ function serializeBootTimings() {
     firstWebRtcConnectedMs: state.bootTimings.firstWebRtcConnectedMs,
     firstAdvancedStatusHealthyMs: state.bootTimings.firstAdvancedStatusHealthyMs,
   };
-}
-
-function scheduleSyncRecoveryRepairIfNeeded(snapshot) {
-  if (!hasRecoverableWebRtcFailure(snapshot)) {
-    clearSyncRecoveryRepairTimer();
-    return;
-  }
-  if (syncRecoveryRepairTimer || syncRecoveryRepairRunning) return;
-  syncRecoveryRepairTimer = window.setTimeout(() => {
-    syncRecoveryRepairTimer = null;
-    repairRecoveringDataPlane().catch((error) => {
-      console.error('[business-os] automatic RxDB/WebRTC data-plane repair failed', error);
-    });
-  }, SYNC_RECOVERY_REPAIR_DELAY_MS);
-}
-
-function clearSyncRecoveryRepairTimer() {
-  if (!syncRecoveryRepairTimer) return;
-  window.clearTimeout(syncRecoveryRepairTimer);
-  syncRecoveryRepairTimer = null;
-}
-
-function hasRecoverableWebRtcFailure(snapshot) {
-  if (!snapshot || snapshot.mode !== 'webrtc') return false;
-  const collections = Object.values(snapshot.collections || {});
-  const hadEstablishedConnection = collections.some((collection) => collection?.connectedAt || collection?.initialReplicationAt);
-  if (!hadEstablishedConnection && !state.advancedStatusEverHealthy) return false;
-  return collections.some(isRecoverableWebRtcCollection);
-}
-
-function isRecoverableWebRtcCollection(collection, minStalledMs = 0) {
-  if (!collection?.lastError || collection.lastError.retryable === false) return false;
-  const reconnecting = collection.connectionStatus === 'reconnecting'
-    || collection.status === 'reconnecting';
-  if (!reconnecting) return false;
-  if (minStalledMs <= 0) return true;
-  const reconnectingSinceMs = Date.parse(String(collection.reconnectingSince || ''));
-  return Number.isFinite(reconnectingSinceMs)
-    && Date.now() - reconnectingSinceMs >= minStalledMs;
-}
-
-async function repairRecoveringDataPlane() {
-  if (new URLSearchParams(window.location.search).has('rxdbSmoke')) {
-    console.info('[business-os] smoke mode keeps the local RxDB cache intact; sync runtime handles reconnect');
-    return;
-  }
-  if (syncRecoveryRepairRunning || !state.syncConfig || !state.db) return;
-  syncRecoveryRepairRunning = true;
-  try {
-    const diagnostics = state.syncDiagnostics?.collections || {};
-    const affectedCollections = Object.entries(diagnostics)
-      .filter(([, collection]) => isRecoverableWebRtcCollection(
-        collection,
-        SYNC_RECOVERY_MIN_STALLED_MS,
-      ))
-      .map(([collection]) => collection);
-    const collections = [...new Set(affectedCollections)];
-    if (!collections.length) return;
-    console.warn('[business-os] restarting stalled RxDB/WebRTC collections', collections);
-    setStatus('RxDB/WebRTC wird neu verbunden');
-    await state.sync.restartCollections(collections);
-    if (state.activeModule) {
-      state.activeModuleSyncLease = startModuleSync(state.activeModule);
-    }
-  } finally {
-    syncRecoveryRepairRunning = false;
-  }
 }
 
 // Phase 2: the critical-sync warmup choreography
@@ -3136,7 +3100,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
     noFailedCollections: failedCollections.length === 0,
     noStalledReconnect: requiredReconnectingCollections.length === 0,
     frameTransportRealtimeHealthy: frameTransport.healthy,
-    noAutomaticRepairRunning: !syncRecoveryRepairRunning,
+    noAutomaticRepairRunning: true,
   };
   const ok = Object.values(checks).every(Boolean);
   if (ok) markBootTiming('firstAdvancedStatusHealthyMs');
@@ -4043,7 +4007,18 @@ async function openDesktopApp(appId, options = {}) {
 async function openWindowedModule(mod, options = {}) {
   if (!state.windowManager || !mod?.id) return null;
   const descriptor = desktopAppDescriptorForModule(mod);
-  const existing = descriptor.multiInstance ? null : findDesktopWindow(mod.id);
+  let existing = descriptor.multiInstance ? null : findDesktopWindow(mod.id);
+  if (existing && options.force === true) {
+    state.windowManager.destroy(existing.id);
+    const deadline = Date.now() + 2000;
+    while (findDesktopWindow(mod.id) && Date.now() < deadline) {
+      await delay(25);
+    }
+    existing = findDesktopWindow(mod.id);
+    if (existing) {
+      throw new Error(`Module window could not be replaced: ${mod.id}`);
+    }
+  }
   if (existing) {
     restoreAndFocusWindow(existing);
     const launchDelivered = dispatchDesktopAppLaunch(existing, mod.id, options.args);
@@ -4274,18 +4249,50 @@ function applyShellTheme(theme, options = {}) {
 }
 
 function normalizeShellStyle(style) {
-  if (style === 'macos' || style === 'windows') return style;
-  return 'ctox';
+  return normalizeBuiltinShellStyle(resolveShellDesign(style).shellStyle);
 }
 
 function applyShellStyle(style, options = {}) {
-  const value = normalizeShellStyle(style);
+  const design = resolveShellDesign(style);
+  const value = design.shellStyle;
   document.documentElement.dataset.shellStyle = value;
+  if (design.templateId) {
+    document.documentElement.dataset.designTemplate = design.templateId;
+  } else {
+    document.documentElement.removeAttribute('data-design-template');
+  }
+  syncShellDesignStylesheet(design, {
+    force: options.reloadStylesheet === true,
+  });
   // The window manager only distinguishes control layouts; the CTOX style
   // uses the windows layout (controls right) under its own visual chrome.
   state.windowManager?.setChromeLayout(value === 'macos' ? 'macos' : 'windows');
   if (options.persist !== false) {
-    writeAccountPrefs({ shellStyle: value });
+    writeAccountPrefs({ shellStyle: design.value });
+  }
+}
+
+function syncShellDesignStylesheet(design, { force = false } = {}) {
+  const existing = document.getElementById(SHELL_DESIGN_STYLESHEET_ID);
+  if (!design?.stylesheet) {
+    existing?.remove();
+    return;
+  }
+  const stylesheetUrl = new URL(design.stylesheet, document.baseURI);
+  const canonicalHref = stylesheetUrl.href;
+  if (!force && existing?.href === canonicalHref) return;
+  if (force) {
+    stylesheetUrl.searchParams.set('ctox-template-reload', String(Date.now()));
+  }
+  const link = document.createElement('link');
+  link.id = SHELL_DESIGN_STYLESHEET_ID;
+  link.rel = 'stylesheet';
+  link.href = stylesheetUrl.href;
+  link.dataset.designTemplate = design.templateId;
+  if (existing) {
+    existing.replaceWith(link);
+  } else {
+    document.head.appendChild(link);
   }
 }
 
@@ -4297,7 +4304,7 @@ function syncHeaderControls() {
     select.value = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   });
   document.querySelectorAll('[data-shell-style-select]').forEach((select) => {
-    select.value = normalizeShellStyle(document.documentElement.dataset.shellStyle);
+    select.value = currentShellDesignValue();
   });
 }
 
@@ -4379,6 +4386,8 @@ function postCurrentPreferencesToModule() {
   const detail = {
     theme: document.documentElement.dataset.theme === 'light' ? 'light' : 'dark',
     language: document.documentElement.lang === 'en' ? 'en' : 'de',
+    shellStyle: normalizeShellStyle(document.documentElement.dataset.shellStyle),
+    designTemplate: String(document.documentElement.dataset.designTemplate || ''),
     branding: brandingForPreferencePayload(state.workspaceBranding),
   };
   window.dispatchEvent(new CustomEvent('ctox-business-os-preferences', { detail }));
@@ -5035,6 +5044,7 @@ async function openModule(moduleId, options = {}) {
         ? 'focus'
         : resolvePresentation(mod).defaultMode),
       args: launchArgs,
+      force: options.force === true,
     });
     return;
   }
@@ -5234,6 +5244,7 @@ async function registerModuleSchemas(mod) {
       state.schemaRegistrationQueue = nextRegistration.catch(() => {});
       await nextRegistration;
     }
+    clearPendingModuleSchemaRevision(mod.id);
   })().catch((error) => {
     state.schemaRegistrations.delete(mod.id);
     throw error;
@@ -5287,50 +5298,11 @@ function startModuleSync(mod) {
         release: async () => false,
       }));
     })
-    .catch(async (error) => {
+    .catch((error) => {
       if (isRecoverableDataPlaneAbort(error)) return;
-      if (await recoverFromLocalRxDbSchemaDrift(error)) return;
       console.error(`[business-os] Sync startup failed for ${mod.id}`, error);
       setStatus(`Sync failed: ${error.message || error}`);
     });
-}
-
-async function recoverFromLocalRxDbSchemaDrift(error) {
-  if (!isRxDbSchemaDriftError(error)) return false;
-  const repairToken = `${businessDbName()}:${RXDB_BOOTSTRAP_VERSION}`;
-  try {
-    if (sessionStorage.getItem(RXDB_SCHEMA_REPAIR_KEY) === repairToken) return false;
-    sessionStorage.setItem(RXDB_SCHEMA_REPAIR_KEY, repairToken);
-  } catch {}
-  const log = isRxDbOpenTimeoutError(error) ? console.info : console.warn;
-  log('[business-os] local RxDB cache repair triggered; rebuilding browser cache', error);
-  setStatus('Lokale RxDB wird neu aufgebaut');
-  try { await state.sync?.stop?.(); } catch (stopError) { console.warn('[business-os] sync stop before schema repair failed', stopError); }
-  try { await state.db?.close?.(); } catch (closeError) { console.warn('[business-os] db close before schema repair failed', closeError); }
-  try {
-    const { resetBusinessDb } = await loadBusinessDbModule();
-    await resetBusinessDb({ name: businessDbName() });
-  } catch (resetError) { console.warn('[business-os] RxDB schema repair reset failed', resetError); }
-  window.setTimeout(() => window.location.reload(), 250);
-  return true;
-}
-
-function isRxDbSchemaDriftError(error) {
-  const message = String(error?.message || error || '');
-  return message.includes('RxDB Error-Code: DB6')
-    || message.includes('previousSchemaHash')
-    || message.includes('schemaHash')
-    || message.includes('timed out')
-    || message.includes('IndexedDB lock');
-}
-
-function isRxDbOpenTimeoutError(error) {
-  const message = String(error?.message || error || '');
-  return message.includes('RxDB database creation timed out')
-    || message.includes('RxDB database retry timed out')
-    || message.includes('IndexedDB lock')
-    || message.includes('IndexedDB open timed out')
-    || message.includes('IndexedDB open blocked');
 }
 
 function hasLiveModulePreloadDataPlane(snapshot = state.syncDiagnostics) {
@@ -5711,9 +5683,8 @@ function createRuntimeCapabilityFacade(mod) {
 // Live DB facade handed to modules as ctx.db. A Proxy forwards unknown
 // property names to the live RxDB collections, so modules get the ergonomic
 // `ctx.db.notes.find()` style WITHOUT unwrapping ctx.db.raw. The indirection
-// through state.db is the point: the data plane can be torn down and rebuilt
-// (schema-drift recovery bumps state.dataPlaneGeneration) and the facade keeps
-// pointing at the live database, while an unwrapped raw handle goes stale.
+// through state.db is the point: a future session lifecycle can replace the
+// data-plane handle without leaving modules with an unwrapped stale database.
 // The module conformance guard (scripts/assert-module-conformance.mjs)
 // forbids ctx.db.raw in modules.
 const READ_COLLECTION_METHODS = new Set([
@@ -6383,38 +6354,6 @@ function createLiveSyncFacade({ host = null } = {}) {
       }
       return unsubscribe;
     },
-    subscribeCollectionChanges: (collection, listener) => {
-      assertActive();
-      if (typeof listener !== 'function') throw new TypeError('Collection change listener must be a function.');
-      const normalizedCollection = String(collection || '').trim();
-      if (!normalizedCollection) throw new TypeError('Collection name is required.');
-      let active = true;
-      const unsubscribe = () => {
-        if (!active) return;
-        active = false;
-        window.removeEventListener('ctox-rxdb-storage-change', handleStorageChange);
-      };
-      const handleStorageChange = (event) => {
-        if (!active) return;
-        if (host && !host.isConnected) {
-          unsubscribe();
-          return;
-        }
-        const detail = event?.detail || {};
-        const databaseName = state.db?.name || state.db?.raw?.name || '';
-        if (detail.databaseName && databaseName && detail.databaseName !== databaseName) return;
-        if (String(detail.collection || '') !== normalizedCollection) return;
-        listener({
-          collection: normalizedCollection,
-          ids: Array.isArray(detail.ids) ? [...detail.ids] : [],
-          replicationOriginRole: String(detail.replicationOriginRole || ''),
-          atMs: Number(detail.atMs || Date.now()),
-        });
-        if (host && !host.isConnected) unsubscribe();
-      };
-      window.addEventListener('ctox-rxdb-storage-change', handleStorageChange);
-      return unsubscribe;
-    },
     // Module code may request an eager bridge, but it must never promote that
     // bridge to a permanent shell pin. The shell-owned module lease is the
     // lifecycle authority and releases the last unpinned bridge on unmount.
@@ -6870,11 +6809,12 @@ async function rollbackModuleSelection(moduleId, selection) {
       source: 'business-os-shell',
     });
   }
-  state.moduleRevisions ||= {};
-  state.moduleRevisions[moduleId] = Date.now();
-  state.schemaRegistrations.delete(moduleId);
-  setStatus(shellLang() === 'de' ? 'Erfolgreich zurückgesetzt!' : 'Successfully rolled back!');
-  await openModule(moduleId, { force: true });
+  await reloadAfterModuleSchemaChange(
+    moduleId,
+    shellLang() === 'de'
+      ? 'Erfolgreich zurückgesetzt. Arbeitsbereich wird neu geladen.'
+      : 'Successfully rolled back. Reloading workspace.',
+  );
 }
 
 function renderModuleAppBar(mod) {
@@ -8628,7 +8568,6 @@ async function refreshMaintenanceStatus(options = {}) {
 }
 
 function applyMaintenanceState(next) {
-  const wasActive = Boolean(state.maintenance?.active);
   state.maintenance = next;
   document.body.dataset.maintenanceActive = next.active ? 'true' : 'false';
   document.body.dataset.maintenanceStatus = next.status || 'idle';
@@ -8654,16 +8593,6 @@ function applyMaintenanceState(next) {
   } else {
     stopMaintenanceEmptyStateGuard();
     state.maintenanceAckLeaseId = '';
-    if (wasActive && state.initialModuleOpened && state.activeModule?.id) {
-      const moduleId = state.activeModule.id;
-      queueMicrotask(() => {
-        if (state.maintenance?.active || state.activeModule?.id !== moduleId) return;
-        openModule(moduleId, { force: true, isNavHistory: true }).catch((error) => {
-          console.error(`[business-os] failed to remount ${moduleId} after maintenance`, error);
-          setStatus(`${moduleDisplayTitle(state.activeModule)}: ${error?.message || error}`);
-        });
-      });
-    }
   }
 }
 
@@ -10495,14 +10424,6 @@ function isClosedRxDbCollectionError(error) {
     || /IDBDatabase.*closing|database connection is closing/i.test(message);
 }
 
-function isTransientModuleLoadError(error) {
-  const message = String(error?.message || error || '');
-  return message.includes('Failed to fetch dynamically imported module')
-    || message.includes('Importing a module script failed')
-    || message.includes('net::ERR_CONNECTION_REFUSED')
-    || message.includes('net::ERR_CONNECTION_RESET');
-}
-
 function actorContext(session) {
   const user = session?.user || {};
   return {
@@ -10548,11 +10469,9 @@ async function readBusinessOsLaunchConfig() {
     window.ctoxBusinessOsLaunch,
     storedPairingConfig,
   );
-  // A packed launch payload carries room, signaling and session, but pairing
-  // links are minted without ICE servers. Without a fallback the pool starts
-  // with zero STUN/TURN: fine on loopback (host candidates), never connecting
-  // across NAT — the collections then sit in `reconnecting` with no lastError,
-  // so no recovery path fires. ICE is instance transport config, not identity.
+  // Pairing payloads carry identity, room and signaling but can omit the
+  // instance transport. Inherit STUN/TURN from the served instance config so
+  // cross-NAT sessions start with the same reachable data plane as local ones.
   const config = await normalizeBusinessOsLaunchConfig(launch, firstObject(
     root.CTOX_BUSINESS_OS_CONFIG,
     window.CTOX_BUSINESS_OS_CONFIG,
@@ -11034,12 +10953,12 @@ function getFriendlyErrorMessage(error) {
     advice = 'Bitte öffnen Sie Business OS über den bereitgestellten Link aus Ihrer CTOX-Schnittstelle oder koppeln Sie die Instanz erneut.';
   } else if (msg.includes('IndexedDB lock') || msg.includes('timed out')) {
     title = 'Lokaler Speicher blockiert';
-    description = 'Der lokale Browsercache hat nicht rechtzeitig geantwortet.';
-    advice = 'Die Anwendung versucht automatisch einen frischen lokalen Cache zu öffnen und neu zu synchronisieren. Falls diese Meldung erneut erscheint, bitte die Seite neu laden; die technischen Details nennen den konkreten Timeout.';
+    description = 'Der lokale Browsercache hat nach mehreren nicht-destruktiven Öffnungsversuchen nicht rechtzeitig geantwortet.';
+    advice = 'Bitte andere Business-OS-Tabs schließen und danach erneut versuchen. Der lokale Datenbestand wird dabei nicht gelöscht.';
   } else if (msg.includes('Schema-Drift') || msg.includes('DB6') || msg.includes('previousSchemaHash') || msg.includes('schemaHash') || msg.includes('drift')) {
-    title = 'Datenstruktur-Aktualisierung';
-    description = 'Die Struktur des lokalen Datenspeichers wird an die neue Version angepasst.';
-    advice = 'Der lokale Speicher wird automatisch zurückgesetzt und neu synchronisiert. Bitte klicken Sie auf "Erneut versuchen", um fortzufahren.';
+    title = 'Datenstruktur-Aktualisierung fehlgeschlagen';
+    description = 'Eine App-Version hat eine nicht kompatibel versionierte Datenstruktur geliefert.';
+    advice = 'Bitte die betroffene App auf eine Version mit deklarierter Migration aktualisieren. Der Browser löscht den lokalen Datenbestand nicht automatisch.';
   } else if (msg.includes('modulkatalog') || msg.includes('business_module_catalog') || msg.includes('module catalog')) {
     title = 'Systemmodule konnten nicht geladen werden';
     description = 'Die Synchronisation der Systemmodule mit der CTOX-Hintergrundinstanz konnte nicht abgeschlossen werden.';
@@ -11077,29 +10996,6 @@ function isLocalRxDbStartupError(error) {
     || msg.includes('RxDB database retry timed out')
     || msg.includes('RxDB createRxDatabase timed out')
     || msg.includes('RxDB database reset timed out');
-}
-
-async function resetLocalRxDbBeforeStartupRetry(error) {
-  if (!isLocalRxDbStartupError(error)) return false;
-  setStatus('Lokale RxDB wird neu synchronisiert');
-  try { sessionStorage.removeItem(RXDB_SCHEMA_REPAIR_KEY); } catch {}
-  try { await state.sync?.stop?.(); } catch (stopError) { console.warn('[business-os] sync stop before startup retry reset failed', stopError); }
-  try { await state.db?.close?.(); } catch (closeError) { console.warn('[business-os] db close before startup retry reset failed', closeError); }
-  if (state.workspaceBrandingSubscription) {
-    try { state.workspaceBrandingSubscription.unsubscribe(); } catch (error) {}
-    state.workspaceBrandingSubscription = null;
-  }
-  state.workspaceBranding = applyWorkspaceBranding(null);
-  state.sync = null;
-  state.db = null;
-  try {
-    const { resetBusinessDb } = await loadBusinessDbModule();
-    await resetBusinessDb({ name: businessDbName() });
-    return true;
-  } catch (resetError) {
-    console.warn('[business-os] local RxDB startup retry reset failed', resetError);
-    return false;
-  }
 }
 
 function showStartupError(error) {
@@ -11166,9 +11062,8 @@ function showStartupError(error) {
         return;
       }
       retryBtn.textContent = isLocalRxDbStartupError(error)
-        ? 'Lokale RxDB wird neu synchronisiert...'
+        ? 'Lokale RxDB wird erneut geöffnet...'
         : 'Wird neu geladen...';
-      await resetLocalRxDbBeforeStartupRetry(error);
       window.location.reload();
     };
   }
@@ -11263,8 +11158,6 @@ function showStartMenu(panel) {
     setTimeout(() => searchInput.focus(), 20);
   }
   filterStartMenu(panel, '');
-  const menuBody = panel.querySelector('.start-menu-body');
-  if (menuBody) menuBody.scrollTop = 0;
 
   // Close when clicking outside
   const outsideClickListener = (evt) => {
