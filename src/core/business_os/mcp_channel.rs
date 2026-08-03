@@ -778,7 +778,9 @@ fn mcp_request_authorized(root: &Path, request: &Request) -> bool {
     let Some(presented) = request_bearer_token(request) else {
         return false;
     };
-    ring::constant_time::verify_slices_are_equal(expected.as_bytes(), presented.as_bytes()).is_ok()
+    let key = hmac::Key::new(hmac::HMAC_SHA256, b"ctox-mcp-token-comparison-v1");
+    let expected_tag = hmac::sign(&key, expected.as_bytes());
+    hmac::verify(&key, presented.as_bytes(), expected_tag.as_ref()).is_ok()
 }
 
 pub fn serve_mcp_channel(root: &Path, options: BusinessOsMcpServeOptions) -> anyhow::Result<()> {

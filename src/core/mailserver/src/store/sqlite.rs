@@ -3,6 +3,7 @@
 
 use crate::store::sqlite_schema::SQLITE_SCHEMA;
 use crate::util::errors::StalwartResult;
+use ring::hmac;
 use rusqlite::{params, Connection};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -612,9 +613,7 @@ impl SqliteStore {
         // Legacy row from before hashing: the column held the raw password.
         // Verify in constant time, then rewrite the row hashed so the
         // plaintext disappears on first successful login.
-        let matches =
-            ring::constant_time::verify_slices_are_equal(stored.as_bytes(), password.as_bytes())
-                .is_ok();
+        let matches = constant_time_eq(stored.as_bytes(), password.as_bytes());
         if matches {
             let upgraded = hash_password(password);
             self.with_connection(|conn| {
@@ -983,6 +982,12 @@ struct ParsedPasswordHash {
     iterations: std::num::NonZeroU32,
     salt: Vec<u8>,
     derived_key: Vec<u8>,
+}
+
+fn constant_time_eq(expected: &[u8], presented: &[u8]) -> bool {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, b"ctox-constant-time-equality-v1");
+    let expected_tag = hmac::sign(&key, expected);
+    hmac::verify(&key, presented, expected_tag.as_ref()).is_ok()
 }
 
 fn hash_password(password: &str) -> String {

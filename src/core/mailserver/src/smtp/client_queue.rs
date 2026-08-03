@@ -498,7 +498,6 @@ fn parse_dns_name(response: &[u8], mut p: usize, depth: usize) -> Option<(String
     }
     let mut name = String::new();
     let mut read_bytes = 0;
-    let mut jumped = false;
 
     loop {
         if p >= response.len() {
@@ -506,9 +505,7 @@ fn parse_dns_name(response: &[u8], mut p: usize, depth: usize) -> Option<(String
         }
         let len = response[p] as usize;
         if len == 0 {
-            if !jumped {
-                read_bytes += 1;
-            }
+            read_bytes += 1;
             break;
         }
 
@@ -517,10 +514,7 @@ fn parse_dns_name(response: &[u8], mut p: usize, depth: usize) -> Option<(String
                 return None;
             }
             let offset = (((len & 0x3F) as usize) << 8) | (response[p + 1] as usize);
-            if !jumped {
-                read_bytes += 2;
-            }
-            jumped = true;
+            read_bytes += 2;
             let (referred_name, _) = parse_dns_name(response, offset, depth + 1)?;
             if !name.is_empty() {
                 name.push('.');
@@ -529,9 +523,7 @@ fn parse_dns_name(response: &[u8], mut p: usize, depth: usize) -> Option<(String
             break;
         } else {
             p += 1;
-            if !jumped {
-                read_bytes += 1;
-            }
+            read_bytes += 1;
             if p + len > response.len() {
                 return None;
             }
@@ -541,9 +533,7 @@ fn parse_dns_name(response: &[u8], mut p: usize, depth: usize) -> Option<(String
             }
             name.push_str(&label);
             p += len;
-            if !jumped {
-                read_bytes += len;
-            }
+            read_bytes += len;
         }
     }
     Some((name, read_bytes))
