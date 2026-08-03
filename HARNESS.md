@@ -229,14 +229,17 @@ There are three context-protection mechanisms in the current code:
   diagnostics only. Once a schema-format failure is observed, the remaining
   semantic compaction stages are skipped for that run.
 
-Before every model request, history normalization keeps only the newest marked
-`<ctox_runtime_context ...>` developer section. It does not delete real user
-turns, assistant/tool history, or unrelated developer policy. This gives the
-per-turn context replace semantics without introducing a second history type or
-making LCM and the harness compete as memory owners. The exact preflight counts
-base instructions, the current runtime context, and the user input; on a reused
-thread it also projects from the last model-reported input usage and compacts
-before the safe boundary is crossed.
+Between compactions, history normalization does not remove or rewrite marked
+`<ctox_runtime_context ...>` developer sections. A changed runtime snapshot is
+appended and declares itself authoritative over earlier snapshots. This keeps
+normal worker requests prefix-stable so `llm.ctox.dev` can reuse
+`previous_response_id` with delta-only input. Compaction owns replacement: it
+drops the superseded history and re-injects one canonical current snapshot.
+Reviewer sessions, systematic-research attempts, and sessions rebuilt for a
+different base-instruction or model contract have separate cache lineages. The
+exact preflight counts base instructions, accumulated history, the current
+runtime context, and the user input, then compacts before the safe boundary is
+crossed.
 
 The build order, contribution contract, omission rules, and audit checks for
 every context component are documented in the

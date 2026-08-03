@@ -86,7 +86,7 @@ fn developer_input_text_msg(texts: &[&str]) -> ResponseItem {
 }
 
 #[test]
-fn for_prompt_keeps_only_latest_ctox_runtime_context() {
+fn for_prompt_keeps_ctox_runtime_context_append_only_until_compaction() {
     let history = create_history_with_items(vec![
         developer_input_text_msg(&[
             "persistent developer policy",
@@ -120,13 +120,13 @@ fn for_prompt_keeps_only_latest_ctox_runtime_context() {
             .iter()
             .any(|text| text == "persistent developer policy")
     );
-    assert!(!visible_text.iter().any(|text| text.contains(">old<")));
+    assert!(visible_text.iter().any(|text| text.contains(">old<")));
     assert_eq!(
         visible_text
             .iter()
             .filter(|text| text.starts_with("<ctox_runtime_context "))
             .count(),
-        1
+        2
     );
     assert!(visible_text.iter().any(|text| text.contains(">new<")));
 }

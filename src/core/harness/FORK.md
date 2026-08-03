@@ -24,9 +24,13 @@ CTOX uses the existing turn-context and rollout machinery for a durable normal
 worker thread. The app-server `turn/start` request accepts an optional
 `developer_instructions` override, persists it in `TurnContextItem`, and emits a
 developer update only when it changes. CTOX runtime context is wrapped in the
-reserved `<ctox_runtime_context ...>` marker. Request normalization retains only
-the newest marked section while preserving all non-CTOX history. This is a
-model-request projection rule; the rollout remains an append-only audit source.
+reserved `<ctox_runtime_context ...>` marker. Between compactions, request
+normalization preserves prior marked sections and appends a changed snapshot;
+the newest snapshot declares itself authoritative. This keeps the provider
+prompt prefix stable for response chaining and prompt caching. Compaction is
+the replacement boundary that collapses prior snapshots and re-injects one
+canonical current context. Reviewer and deliberately isolated sessions remain
+separate cache lineages.
 
 This delta deliberately does not add a second scheduler, memory store, or
 CTOX-specific response-item type. Resume and compaction continue to use the

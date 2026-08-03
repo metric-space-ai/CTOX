@@ -204,17 +204,14 @@ pub fn render_runtime_prompt(
         &rendered_context,
         suggested_skill,
     );
-    let mut context_instructions = format!(
-        "<ctox_runtime_context version=\"1\">\n{}\n</ctox_runtime_context>",
-        render_chat_context(
-            root,
-            &runtime_blocks,
-            governance_snapshot,
-            health,
-            &rendered_context,
-            suggested_skill,
-        )
-    );
+    let mut context_instructions = wrap_runtime_context(&render_chat_context(
+        root,
+        &runtime_blocks,
+        governance_snapshot,
+        health,
+        &rendered_context,
+        suggested_skill,
+    ));
     if let Some(skill_instructions) = render_bound_skill_instructions(root, suggested_skill)? {
         context_instructions.push_str("\n\n");
         context_instructions.push_str(&skill_instructions);
@@ -308,17 +305,14 @@ pub fn prompt_context_breakdown(
         .sum::<usize>()
         + rendered_context.entries.len().saturating_sub(1)
         + context_notice_chars;
-    let rendered_context_instructions = format!(
-        "<ctox_runtime_context version=\"1\">\n{}\n</ctox_runtime_context>",
-        render_chat_context(
-            root,
-            &runtime_blocks,
-            governance_snapshot,
-            health,
-            &rendered_context,
-            None,
-        )
-    );
+    let rendered_context_instructions = wrap_runtime_context(&render_chat_context(
+        root,
+        &runtime_blocks,
+        governance_snapshot,
+        health,
+        &rendered_context,
+        None,
+    ));
     let known_dynamic_chars = narrative_block.len()
         + anchors_block.len()
         + focus_block.len()
@@ -349,6 +343,13 @@ pub fn prompt_context_breakdown(
             + rendered_context_instructions.len()
             + latest_user_turn_chars,
     })
+}
+
+fn wrap_runtime_context(content: &str) -> String {
+    format!(
+        "<ctox_runtime_context version=\"1\">\nThe newest ctox_runtime_context snapshot is authoritative and supersedes earlier snapshots in this thread. Earlier snapshots remain visible only to preserve append-only provider caching.\n{}\n</ctox_runtime_context>",
+        content
+    )
 }
 
 pub fn prompt_context_breakdown_for_runtime(
@@ -2310,6 +2311,16 @@ mod tests {
         assert!(!context.contains("User asked:"));
         assert!(!context.contains("VERIFIED EVIDENCE"));
         assert!(!context.contains("NARRATIVE"));
+    }
+
+    #[test]
+    fn runtime_context_marks_latest_snapshot_authoritative() {
+        let context = wrap_runtime_context("FOCUS\n- Main task: inspect CASE-778");
+
+        assert!(context.starts_with("<ctox_runtime_context version=\"1\">"));
+        assert!(context.contains("newest ctox_runtime_context snapshot is authoritative"));
+        assert!(context.contains("Earlier snapshots remain visible only to preserve"));
+        assert!(context.ends_with("</ctox_runtime_context>"));
     }
 
     #[test]

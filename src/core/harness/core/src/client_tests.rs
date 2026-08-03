@@ -3,6 +3,8 @@ use super::LastResponse;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::UnauthorizedRecoveryExecution;
+use crate::context_manager::ContextManager;
+use crate::truncate::TruncationPolicy;
 use ctox_api::ResponseCreateWsRequest;
 use ctox_api::ResponsesApiRequest;
 use ctox_otel::SessionTelemetry;
@@ -13,6 +15,7 @@ use ctox_protocol::models::ContentItem;
 use ctox_protocol::models::ResponseItem;
 use ctox_protocol::openai_models::ModelInfo;
 use ctox_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use ctox_protocol::openai_models::default_input_modalities;
 use ctox_protocol::protocol::SessionSource;
 use ctox_protocol::protocol::SubAgentSource;
 use pretty_assertions::assert_eq;
@@ -31,10 +34,13 @@ fn required_initial_tool_is_the_only_visible_required_tool_before_its_call() {
         super::apply_required_initial_tool(tools, &[], Some("ctox_deep_research")).unwrap();
 
     assert_eq!(choice, "auto");
-    assert_eq!(visible, vec![json!({
-        "type": "function",
-        "name": "ctox_deep_research"
-    })]);
+    assert_eq!(
+        visible,
+        vec![json!({
+            "type": "function",
+            "name": "ctox_deep_research"
+        })]
+    );
 }
 
 #[test]
@@ -350,6 +356,18 @@ fn test_assistant_message(text: &str) -> ResponseItem {
     }
 }
 
+fn test_developer_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    }
+}
+
 fn test_responses_request(input: Vec<ResponseItem>) -> ResponsesApiRequest {
     ResponsesApiRequest {
         model: "gpt-test".to_string(),
@@ -395,10 +413,7 @@ fn http_request_uses_previous_response_id_for_incremental_delta() {
         wire_request.previous_response_id.as_deref(),
         Some("resp_previous")
     );
-    assert_eq!(
-        wire_request.prompt_cache_key.as_deref(),
-        Some("thread-1")
-    );
+    assert_eq!(wire_request.prompt_cache_key.as_deref(), Some("thread-1"));
     assert_eq!(wire_request.input, vec![next_user]);
 }
 
@@ -463,11 +478,131 @@ fn http_request_uses_previous_response_id_for_minimax_proxy_responses() {
         wire_request.previous_response_id.as_deref(),
         Some("resp_previous")
     );
-    assert_eq!(
-        wire_request.prompt_cache_key.as_deref(),
-        Some("thread-1")
-    );
+    assert_eq!(wire_request.prompt_cache_key.as_deref(), Some("thread-1"));
     assert_eq!(wire_request.input, vec![next_user]);
+}
+
+#[test]
+fn minimax_proxy_keeps_worker_runtime_context_append_only_between_compactions() {
+    let client = test_minimax_proxy_model_client(SessionSource::Cli);
+    let mut session = client.new_session();
+    let old_context =
+        test_developer_message("<ctox_runtime_context version=\"1\">old</ctox_runtime_context>");
+    let initial_user = test_user_message("initial");
+    let assistant = test_assistant_message("done");
+    let new_context =
+        test_developer_message("<ctox_runtime_context version=\"1\">new</ctox_runtime_context>");
+    let next_user = test_user_message("next");
+
+    let mut history = ContextManager::new();
+    history.record_items(
+        [&old_context, &initial_user],
+        TruncationPolicy::Tokens(10_000),
+    );
+    let previous_request =
+        test_responses_request(history.clone().for_prompt(&default_input_modalities()));
+    history.record_items(
+        [&assistant, &new_context, &next_user],
+        TruncationPolicy::Tokens(10_000),
+    );
+    let next_request = test_responses_request(history.for_prompt(&default_input_modalities()));
+
+    let (tx, rx) = oneshot::channel();
+    tx.send(LastResponse {
+        response_id: "resp_previous".to_string(),
+        items_added: vec![assistant],
+    })
+    .expect("last response receiver should be open");
+    session.websocket_session.last_request = Some(previous_request);
+    session.websocket_session.last_response_rx = Some(rx);
+
+    let wire_request = session.prepare_http_request(&next_request);
+
+    assert_eq!(
+        wire_request.previous_response_id.as_deref(),
+        Some("resp_previous")
+    );
+    assert_eq!(wire_request.input, vec![new_context, next_user]);
+}
+
+#[test]
+fn minimax_proxy_keeps_worker_and_reviewer_cache_lineages_separate() {
+    let worker_client = test_minimax_proxy_model_client(SessionSource::Cli);
+    let reviewer_client = test_minimax_proxy_model_client(SessionSource::Exec);
+    let worker_session = worker_client.new_session();
+    let reviewer_session = reviewer_client.new_session();
+    let worker_provider = worker_client.state.provider.to_api_provider(None).unwrap();
+    let reviewer_provider = reviewer_client
+        .state
+        .provider
+        .to_api_provider(None)
+        .unwrap();
+    let model_info = test_model_info();
+    let prompt = crate::client_common::Prompt {
+        input: vec![test_user_message("inspect")],
+        tools: Vec::new(),
+        parallel_tool_calls: false,
+        base_instructions: BaseInstructions::default(),
+        personality: None,
+        output_schema: None,
+        required_initial_tool: None,
+    };
+    let worker_request = worker_session
+        .build_responses_request(
+            &worker_provider,
+            &prompt,
+            &model_info,
+            None,
+            ReasoningSummaryConfig::Auto,
+            None,
+        )
+        .unwrap();
+    let reviewer_request = reviewer_session
+        .build_responses_request(
+            &reviewer_provider,
+            &prompt,
+            &model_info,
+            None,
+            ReasoningSummaryConfig::Auto,
+            None,
+        )
+        .unwrap();
+
+    assert_ne!(
+        worker_request.prompt_cache_key,
+        reviewer_request.prompt_cache_key
+    );
+}
+
+#[test]
+fn minimax_proxy_rebuilds_full_input_after_compaction() {
+    let client = test_minimax_proxy_model_client(SessionSource::Cli);
+    let mut session = client.new_session();
+    let initial_user = test_user_message("initial");
+    let assistant = test_assistant_message("done");
+    let compacted_summary = ResponseItem::Compaction {
+        encrypted_content: "canonical compacted history".to_string(),
+    };
+    let canonical_context = test_developer_message(
+        "<ctox_runtime_context version=\"1\">canonical</ctox_runtime_context>",
+    );
+    let next_user = test_user_message("next");
+    let previous_request = test_responses_request(vec![initial_user]);
+    let next_request =
+        test_responses_request(vec![compacted_summary, canonical_context, next_user]);
+    let (tx, rx) = oneshot::channel();
+    tx.send(LastResponse {
+        response_id: "resp_previous".to_string(),
+        items_added: vec![assistant],
+    })
+    .expect("last response receiver should be open");
+    session.websocket_session.last_request = Some(previous_request);
+    session.websocket_session.last_response_rx = Some(rx);
+
+    let wire_request = session.prepare_http_request(&next_request);
+
+    assert_eq!(wire_request.previous_response_id, None);
+    assert_eq!(wire_request.input, next_request.input);
 }
 
 #[test]

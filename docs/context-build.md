@@ -1,8 +1,10 @@
 # CTOX Context Build Contract
 
-The live model input is rebuilt for every turn. “Rebuilt” does not mean that
-every available document is appended. The builder selects the smallest set of
-authoritative signals that can change the model's next action.
+The dynamic runtime snapshot is rebuilt for every turn. The provider-visible
+thread is not rewritten with it: a changed snapshot is appended, and prior
+snapshots remain as superseded history until compaction. The builder selects
+the smallest set of authoritative signals that can change the model's next
+action.
 
 ## Physical input lanes
 
@@ -11,9 +13,10 @@ authoritative signals that can change the model's next action.
    them rebuilds the process-local session contract before the next turn.
 2. The current user request is sent once as the actual user message, without a
    generated wrapper.
-3. The dynamic CTOX context is sent as one marked developer section. It is
-   rebuilt each turn and replaces the older marked section in the actual model
-   request.
+3. The dynamic CTOX context is sent as a marked developer section. It is
+   rebuilt each turn and appended when it changes. The newest section declares
+   itself authoritative; older sections remain provider-visible only to keep
+   the prompt prefix byte-stable until compaction.
 4. Prior user, assistant, reasoning, and tool-call history remains harness
    history and is compacted by the existing harness compactor.
 5. LCM is the durable source for selected summaries, referenced context items,
@@ -59,11 +62,16 @@ of narrative material.
 ## Cross-module invariants
 
 - Exactly one current user request is present in the wire request.
-- At most one marked CTOX runtime context is present in the wire request.
+- Between compactions, each changed marked CTOX runtime context extends the
+  wire request without removing or modifying prior marked contexts.
 - A marked runtime context survives rollout/resume through the latest
   `TurnContextItem`.
-- Old marked runtime contexts may remain in the append-only rollout for audit,
-  but are not model-visible.
+- The newest marked runtime context is authoritative. Older marked contexts are
+  model-visible superseded history until compaction replaces them with one
+  canonical current snapshot.
+- A normal worker request without compaction or a session-contract change can
+  use `previous_response_id` with delta-only input. Reviewer and deliberately
+  isolated sessions have separate cache lineages.
 - Empty/default optional blocks consume no live prompt budget.
 - Focus and the execution contract remain present even when every optional
   component is empty.
@@ -79,9 +87,12 @@ The deterministic checks live beside their owners:
 
 - `context::live_context` tests conditional inclusion, relevant-evidence
   ranking, current-request rendering, and bounded selection.
-- `context_manager::history_tests` verifies that only the latest marked runtime
-  context reaches the model while unrelated developer and conversation history
-  survives.
+- `context_manager::history_tests` verifies that marked runtime contexts remain
+  append-only between compactions while unrelated developer and conversation
+  history survives.
+- Responses client tests verify that `llm.ctox.dev` can chain a changed worker
+  runtime snapshot through `previous_response_id`, and that compaction falls
+  back to a full canonical input.
 - app-server/core checks verify the typed developer-instruction override and
   durable `TurnContextItem` path.
 - direct-session and turn-loop checks verify exact/heuristic preflight behavior,
@@ -104,7 +115,7 @@ diagnostic combined prompt artifact.
 | Workflow state | serves its purpose, conditional | open ticket and relevance-scope tests |
 | Governance, autonomy, health | serve exception handling, conditional | they render only for recent events, non-default autonomy, or unhealthy context |
 | Conversation evidence | serves recall without bulk history | relevance-before-recency, mission-floor fallback, omission counts, and 50k-message LCM bound |
-| Harness history projection | serves long-session hygiene | latest-marker-only request test; normal and compaction model requests share the projection |
+| Harness history projection | serves long-session cache stability | append-only runtime-context test plus explicit compaction replacement test |
 | Rollout/resume | serves restart continuity | non-ephemeral named worker thread, persisted `TurnContextItem`, typed resume path |
 | Token protection | serves bounded execution | physical-lane exact preflight plus model-usage-based history projection |
 
