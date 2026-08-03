@@ -42,6 +42,17 @@ Reparatur an persistierten Daten, deren Ursache noch existiert.
 dicht zuerst: `queue.rs` ist in einer Sitzung durchmessbar, `service.rs` ist
 ein eigener Feldzug.
 
+**KORREKTUR 03.08., beim ersten Einsatz der Metrik.** Die Dichte zählt
+FUNKTIONEN und überschätzt dadurch. In `queue.rs` gehören zehn der elf
+Treffer zu EINER Sache — der agentischen Reparatur (Prompt bauen, Bericht
+parsen, Aktionen anwenden, Ereignis schreiben, Zeilen 1204–1620). Real sind
+es **zwei Belange**, nicht elf.
+
+Die Metrik bleibt brauchbar, aber sie ist ein Sortierschlüssel, kein Maß.
+Vor der Priorisierung gehört je Datei geprüft, wie viele UNABHÄNGIGE Belange
+hinter den Treffern stehen. Sonst gewinnt die Datei mit den meisten Helfern,
+nicht die mit den meisten Ursachen.
+
 **`src/tools/appsec-pentest/` ist ausdrücklich AUSSERHALB dieses Plans**
 (Owner-Entscheid 03.08.). Die Datei ist die größte des Repos, aber sie gehört
 nicht in diese Kampagne und wird nicht vermessen, nicht benotet, nicht
