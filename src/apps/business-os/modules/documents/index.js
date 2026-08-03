@@ -2822,7 +2822,6 @@ async function dispatchNewDocumentReport(state, input = {}) {
   const filename = ensureExtension(slugFilename(title), '.docx');
   const outputPath = `runtime/business-os/documents/generated/${filename}`;
   const commandId = `cmd_${crypto.randomUUID()}`;
-  const startedAtMs = Date.now();
   const instruction = [
     `Erstelle das Word-Dokument "${title}".`,
     `Nutzerauftrag: ${prompt}`,
@@ -2896,7 +2895,7 @@ async function dispatchNewDocumentReport(state, input = {}) {
       knowledge_selection_mode: knowledgeContext?.selection_mode || 'auto',
     },
   };
-  const result = await dispatchDocumentCommandWithBackendFallback(state, command, commandId, startedAtMs);
+  const result = await state.ctx.commandBus.dispatch(command);
   rememberDocumentTask(result, {
     title,
     filename,
@@ -2904,52 +2903,6 @@ async function dispatchNewDocumentReport(state, input = {}) {
     reportType,
   });
   return result;
-}
-
-async function dispatchDocumentCommandWithBackendFallback(state, command, commandId, startedAtMs) {
-  const firstResult = await state.ctx.commandBus.dispatch(command);
-  if (firstResult?.status && firstResult.status !== 'pending_sync') return firstResult;
-
-  const projection = await waitForBusinessCommandProjection(state, commandId, startedAtMs);
-  if (projection) {
-    return {
-      ok: projection.status !== 'failed',
-      command_id: commandId,
-      status: projection.status || 'accepted',
-      task_id: projection.task_id || '',
-      task_status: projection.task_status || projection.status || 'accepted',
-      transport: 'rxdb-webrtc-projection',
-    };
-  }
-  throw new Error('CTOX hat den Dokument-Command nicht bestaetigt. Bitte erneut versuchen.');
-}
-
-async function waitForBusinessCommandProjection(state, commandId, startedAtMs) {
-  const collection = documentCollection(state.ctx, 'business_commands');
-  if (!collection) return null;
-  const earliestUpdatedAt = Math.max(0, Number(startedAtMs || Date.now()) - 1000);
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    try {
-      const doc = await collection.findOne(commandId).exec();
-      const match = typeof doc?.toJSON === 'function' ? doc.toJSON() : doc;
-      if (
-        match
-        && Number(match.updated_at_ms || 0) >= earliestUpdatedAt
-        && match.status
-        && match.status !== 'pending_sync'
-      ) {
-        return match;
-      }
-    } catch (_) {
-      // Retry below; the submit path should not stay visually stuck on a transient local read failure.
-    }
-    await delay(1000);
-  }
-  return null;
-}
-
-function delay(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function rememberDocumentTask(result, meta = {}) {

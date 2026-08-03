@@ -1193,19 +1193,6 @@ async function waitForCampaignProjection(campaignId, minUpdatedAtMs, timeoutMs =
   return null;
 }
 
-async function dispatchBusinessCommandWithRxdbFallback(command, options = {}) {
-  const commandId = command.id || command.command_id || `cmd_${crypto.randomUUID()}`;
-  const prepared = {
-    ...command,
-    id: commandId,
-  };
-  const dispatchResult = state.ctx?.commandBus?.dispatch
-    ? await withTimeout(state.ctx.commandBus.dispatch(prepared), options.timeoutMs || 45000, null)
-    : null;
-  if (dispatchResult) return dispatchResult;
-  throw new Error('CTOX command bus is required for outbound command dispatch');
-}
-
 async function enqueueBusinessCommandForProjection(command) {
   const commandId = command.id || command.command_id || `cmd_${crypto.randomUUID()}`;
   if (!state.ctx?.commandBus?.dispatch) {
@@ -6488,7 +6475,7 @@ async function saveCampaignInlineEdit(campaignId) {
     },
   };
   try {
-    await dispatchBusinessCommandWithRxdbFallback(updateCommand, { timeoutMs: 5000 });
+    await state.ctx.commandBus.dispatch(updateCommand, { timeoutMs: 5000 });
   } catch (error) {
     showBusinessAlert(error?.message || String(error));
     return;
