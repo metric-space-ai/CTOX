@@ -603,6 +603,16 @@ pub(super) fn refresh_queue_task_projection(
         updated_at_ms,
         payload.clone(),
     )?;
+    let mut rxdb_writers = rxdb_writers;
+    let route_status = effective_queue_projection_route_status(&task, structured_status.as_deref());
+    refresh_research_run_projection(
+        root,
+        conn,
+        rxdb_writers.as_deref_mut(),
+        command,
+        &route_status,
+        updated_at_ms,
+    )?;
     upsert_rxdb_collection_record_cached(
         root,
         rxdb_writers,
@@ -610,6 +620,84 @@ pub(super) fn refresh_queue_task_projection(
         &task.message_key,
         updated_at_ms,
         payload,
+    )
+}
+
+/// The browser writes a `research_runs` record once when the user starts a
+/// run, and the systematic-research writeback only touches it again at the
+/// very end. In between, the record froze on `queued` while the queue task
+/// advanced through its slices, so a long-lived client kept rendering the
+/// previous finished run for a research that was actively working. Mirror
+/// the queue route status onto the run record on every projection refresh;
+/// the skill's terminal writeback stays the authority for result payloads,
+/// so a stored `completed` is never overwritten here.
+fn refresh_research_run_projection(
+    root: &Path,
+    conn: &Connection,
+    rxdb_writers: Option<&mut RxdbProjectionWriterCache>,
+    command: &BusinessCommand,
+    route_status: &str,
+    updated_at_ms: i64,
+) -> anyhow::Result<()> {
+    if command.command_type != "research.systematic.run" {
+        return Ok(());
+    }
+    let Some(run_id) = command
+        .payload
+        .get("research_run_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+    let next_status = match route_status {
+        "leased" => "running",
+        "failed" => "failed",
+        "handled" => "completed",
+        // `pending` between slices carries no new information for the run
+        // record: either the first slice has not started yet or the next one
+        // is about to re-lease. Leave the stored status untouched.
+        _ => return Ok(()),
+    };
+    let Some(mut record) = conn
+        .query_row(
+            "SELECT payload_json FROM business_records WHERE collection = 'research_runs' AND record_id = ?1",
+            params![run_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+    else {
+        return Ok(());
+    };
+    let current = record
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if current == "completed" || current == next_status {
+        return Ok(());
+    }
+    let Some(obj) = record.as_object_mut() else {
+        return Ok(());
+    };
+    obj.insert("status".to_string(), Value::String(next_status.to_string()));
+    obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
+    upsert_business_record(
+        conn,
+        "research_runs",
+        &run_id,
+        updated_at_ms,
+        record.clone(),
+    )?;
+    upsert_rxdb_collection_record_cached(
+        root,
+        rxdb_writers,
+        "research_runs",
+        &run_id,
+        updated_at_ms,
+        record,
     )
 }
 
