@@ -1063,6 +1063,22 @@
   background: var(--research-risk);
 }
 
+.research-run-note {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--research-line, rgba(255,255,255,0.14));
+  color: var(--research-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.research-run-note small {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+}
+
 .research-run-actions {
   display: flex;
   justify-content: flex-start;

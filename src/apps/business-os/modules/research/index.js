@@ -4042,6 +4042,7 @@ function renderRunPanel(runInfo) {
             <small>${escapeHtml(visibleRunTitle)}</small>
           </div>
         </div>
+        ${runNoteMarkup(runInfo)}
         <div class="research-run-actions">
           <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" data-task-status="${escapeHtml(runInfo.status)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
         </div>
@@ -4052,6 +4053,22 @@ function renderRunPanel(runInfo) {
         <span aria-hidden="true">▶</span>${escapeHtml(runInfoActionLabel(task))}
       </button>
     </section>
+  `;
+}
+
+// A slice-based run reports hours of real activity that the dashboard tables
+// only see at writeback time. Surface the harness's own status note (already
+// projected into ctox_queue_tasks) so an active run never looks idle.
+function runNoteMarkup(runInfo) {
+  const note = String(runInfo.queueTask?.status_note || '').trim();
+  if (!note) return '';
+  const noteTime = Number(runInfo.queueTask?.updated_at_ms || 0);
+  const stamp = noteTime ? relativeTime(noteTime) : '';
+  return `
+    <p class="research-run-note" title="${escapeHtml(note)}">
+      <small>${escapeHtml(state.t('lastHarnessNote', 'Letzte Harness-Meldung'))}${stamp ? ` · ${escapeHtml(stamp)}` : ''}</small><br>
+      ${escapeHtml(note.length > 220 ? `${note.slice(0, 220)}…` : note)}
+    </p>
   `;
 }
 
@@ -4126,7 +4143,13 @@ function validateSelectedResearchTask(task, knowledgeBases = []) {
   const domain = String(task.knowledge_domain || '').trim();
   if (!domain) return { valid: false, message: state.t('missingDomain', 'Die Research-Aufgabe hat keine Knowledge Domain.') };
   if (!knowledgeBases.some((base) => base.domain === domain)) {
-    return { valid: false, message: state.t('domainNotLoaded', 'Die Knowledge Domain ist lokal nicht geladen.') };
+    // A declared-new domain has no tables until the first run writes them
+    // back server-side; blocking the run here would make new-topic research
+    // impossible. Every other task keeps the guard: a missing base then means
+    // the domain data is simply not loaded in this browser yet.
+    if (task?.payload?.new_domain !== true) {
+      return { valid: false, message: state.t('domainNotLoaded', 'Die Knowledge Domain ist lokal nicht geladen.') };
+    }
   }
   return { valid: true, message: '' };
 }
@@ -4156,7 +4179,12 @@ function validateResearchTaskInput(values, knowledgeBases = [], { isEdit = false
   const prompt = String(values?.prompt || '').trim();
   if (!title) return { valid: false, field: 'title', message: 'Titel ist erforderlich.' };
   if (!domain) return { valid: false, field: 'domain', message: 'Knowledge Domain ist erforderlich.' };
-  if (!isEdit && !knowledgeBases.some((base) => base.domain === domain)) {
+  if (!isEdit && domain === '__new__') {
+    const newDomain = String(values?.new_domain || '').trim();
+    if (!newDomain) {
+      return { valid: false, field: 'new_domain', message: state.t('newDomainRequired', 'Name für die neue Knowledge Domain ist erforderlich.') };
+    }
+  } else if (!isEdit && !knowledgeBases.some((base) => base.domain === domain)) {
     return { valid: false, field: 'domain', message: 'Wähle eine lokal verfügbare Knowledge Domain.' };
   }
   if (!prompt) return { valid: false, field: 'prompt', message: 'Auftrag ist erforderlich.' };
@@ -4168,6 +4196,7 @@ function formValues(form) {
   return {
     title: data.get('title'),
     domain: data.get('domain'),
+    new_domain: data.get('new_domain'),
     prompt: data.get('prompt'),
   };
 }
@@ -4203,12 +4232,17 @@ function openTaskDialog(editTask = null) {
         <label><span class="ctox-field-label">${escapeHtml(state.t('titel', 'Titel'))}</span><input class="ctox-input" name="title" placeholder="${escapeHtml(state.t('neueResearch', 'Neue Research'))}" value="${escapeHtml(editTask?.title || '')}" required></label>
         <label>
           <span class="ctox-field-label">Knowledge Domain</span>
-          <select class="ctox-select" name="${isEdit ? 'domain_display' : 'domain'}" ${isEdit || !state.knowledgeBases.length ? 'disabled' : ''} required>
+          <select class="ctox-select" name="${isEdit ? 'domain_display' : 'domain'}" ${isEdit ? 'disabled' : ''} required>
             <option value="" ${selectedDomain ? '' : 'selected'} disabled>${escapeHtml(state.t('selectKnowledgeDomain', 'Knowledge Domain auswählen'))}</option>
             ${domainOptions}
+            ${isEdit ? '' : `<option value="__new__">${escapeHtml(state.t('newKnowledgeDomain', 'Neue Knowledge Domain anlegen …'))}</option>`}
           </select>
           <small class="research-field-note">${escapeHtml(domainSelectionNote(isEdit))}</small>
         </label>
+        ${isEdit ? '' : `<label data-new-domain-row hidden>
+          <span class="ctox-field-label">${escapeHtml(state.t('newDomainName', 'Name der neuen Domain'))}</span>
+          <input class="ctox-input" name="new_domain" placeholder="${escapeHtml(state.t('newDomainPlaceholder', 'z. B. bearing-condition-monitoring'))}">
+        </label>`}
         <label><span class="ctox-field-label">${escapeHtml(state.t('auftrag', 'Auftrag'))}</span><textarea class="ctox-textarea" name="prompt" placeholder="${escapeHtml(state.t('promptPlaceholder', 'Was soll das Dashboard auswerten?'))}" required>${escapeHtml(editTask?.prompt || '')}</textarea></label>
         <label><span class="ctox-field-label">${escapeHtml(state.t('kriterien', 'Kriterien'))}</span><textarea class="ctox-textarea" name="criteria" placeholder="${escapeHtml(state.t('criteriaPlaceholder', 'Scope, Ausschlüsse, Scoring-Hinweise'))}">${escapeHtml(editTask?.criteria || '')}</textarea></label>
         <label><span class="ctox-field-label">${escapeHtml(state.t('scoringDimensions', 'Scoring Dimensionen'))}</span><textarea class="ctox-textarea" name="scoring_dimensions" placeholder="${escapeHtml(state.t('scoringPlaceholder', 'overlap: Overlap\nbuyer_clarity: Buyer clarity'))}">${escapeHtml(dimensionsText)}</textarea></label>
@@ -4233,8 +4267,14 @@ function openTaskDialog(editTask = null) {
     submit.disabled = !validation.valid;
     status.textContent = validation.valid ? '' : validation.message;
   };
+  const syncNewDomainRow = () => {
+    const select = formEl?.querySelector('select[name="domain"]');
+    const row = formEl?.querySelector('[data-new-domain-row]');
+    if (row) row.hidden = select?.value !== '__new__';
+  };
   formEl?.addEventListener('input', syncFormState);
-  formEl?.addEventListener('change', syncFormState);
+  formEl?.addEventListener('change', () => { syncNewDomainRow(); syncFormState(); });
+  syncNewDomainRow();
   formEl?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const submit = event.currentTarget.querySelector('button[type="submit"]');
@@ -4257,7 +4297,10 @@ function openTaskDialog(editTask = null) {
   });
   root.append(overlay);
   syncFormState();
-  if (!isEdit && !state.knowledgeBases.length) {
+  if (!isEdit) {
+    // Always refresh with an unfiltered load: outside the dialog the module
+    // only loads tables for domains its tasks already use, so a domain that
+    // exists server-side but has no task yet would otherwise never appear.
     refreshTaskDialogKnowledgeOptions().catch((error) => {
       console.warn('[research] task dialog knowledge refresh failed', error);
     });
@@ -4286,10 +4329,12 @@ function refreshOpenTaskDialogDomainOptions() {
   const selectedDomain = state.knowledgeBases.some((base) => base.domain === currentValue)
     ? currentValue
     : state.knowledgeBases[0]?.domain || '';
-  select.disabled = !state.knowledgeBases.length;
+  select.disabled = false;
+  if (select.value === '__new__') return;
   select.innerHTML = `
     <option value="" ${selectedDomain ? '' : 'selected'} disabled>${escapeHtml(state.t('selectKnowledgeDomain', 'Knowledge Domain auswählen'))}</option>
     ${knowledgeDomainOptionsMarkup(selectedDomain)}
+    <option value="__new__">${escapeHtml(state.t('newKnowledgeDomain', 'Neue Knowledge Domain anlegen …'))}</option>
   `;
   if (selectedDomain) select.value = selectedDomain;
   const note = form.querySelector('.research-field-note');
@@ -4334,7 +4379,10 @@ async function createTaskFromForm(form) {
   if (!validation.valid) throw new Error(validation.message);
   const rawDomain = String(form.get('domain') || current?.knowledge_domain || '').trim();
   const rawTitle = String(form.get('title') || '').trim();
-  const domain = researchDomainFromFormValue(rawDomain, state.knowledgeBases, rawTitle || current?.title || 'research');
+  const isNewDomain = !current && rawDomain === '__new__';
+  const domain = isNewDomain
+    ? normalizeResearchDomain(String(form.get('new_domain') || '').trim() || rawTitle)
+    : researchDomainFromFormValue(rawDomain, state.knowledgeBases, rawTitle || current?.title || 'research');
   const base = state.knowledgeBases.find((item) => item.domain === domain);
   const now = Date.now();
   const title = String(rawTitle || base?.title || titleFromDomain(domain) || 'Research').trim();
@@ -4360,6 +4408,11 @@ async function createTaskFromForm(form) {
     payload: {
       ...(current?.payload || {}),
       user_created: current?.payload?.user_created ?? true,
+      // A user-created task may target a domain that has no local knowledge
+      // base yet: the systematic-research writeback creates its tables
+      // server-side and they replicate down afterwards. The flag lets the
+      // run gate distinguish this from "existing domain not synced yet".
+      new_domain: current?.payload?.new_domain ?? isNewDomain,
       scoring_dimensions: scoringDimensions,
       scoring_weights: scoringWeights(scoringDimensions),
       table_contract: RESEARCH_TABLE_CONTRACT,
