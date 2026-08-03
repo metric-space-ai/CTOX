@@ -42,10 +42,10 @@ Reparatur an persistierten Daten, deren Ursache noch existiert.
 dicht zuerst: `queue.rs` ist in einer Sitzung durchmessbar, `service.rs` ist
 ein eigener Feldzug.
 
-**Vor allem anderen: `appsec-pentest/src/lib.rs` vermessen.** 64.966 Zeilen,
-die größte Datei des Repos, in keiner Kampagne, in keinem Zeugnis benotet. Ein
-blinder Fleck ist kein Ergebnis. Erst Prämissenprüfung, dann Urteil, ob sie
-überhaupt in diesen Plan gehört.
+**`src/tools/appsec-pentest/` ist ausdrücklich AUSSERHALB dieses Plans**
+(Owner-Entscheid 03.08.). Die Datei ist die größte des Repos, aber sie gehört
+nicht in diese Kampagne und wird nicht vermessen, nicht benotet, nicht
+angefasst.
 
 ## Das Verfahren (aus der ersten Welle gelernt)
 
@@ -109,4 +109,3 @@ neu gebaut). Aus den Befunden: I-040 (Command-Bus-Widerspruch), I-041
 - **I-008** — zurück: Fix korrekt, aber `dist/` nicht neu gebaut, Cache-Buster
   nicht gebumpt (`docs/ctox-rxdb.md`). Neu stellen mit Testort.
 - **queue.rs / rxdb_peer.rs / service.rs** — nach Dichte, wie oben.
-- **appsec-pentest** — vermessen, dann entscheiden.
