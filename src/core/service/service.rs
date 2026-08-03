@@ -12918,8 +12918,13 @@ fn validate_systematic_research_workspace(
             || actual_command_id != expected_command_id
             || actual_attempt_id != expected_attempt_id
         {
+            // Four fields are compared but the old message printed only
+            // three of them: a manifest whose `run_id` disagreed with its
+            // own `research_run_id` produced "expected X, found X" and
+            // burned the validation budget with no actionable cause. Print
+            // every compared field so a mismatch names the field at fault.
             anyhow::bail!(
-                "stale or foreign evidence manifest {}: expected run/command/attempt {expected_run_id}/{expected_command_id}/{expected_attempt_id}, found {actual_run_id}/{actual_command_id}/{actual_attempt_id}",
+                "stale or foreign evidence manifest {}: expected run/command/attempt {expected_run_id}/{expected_command_id}/{expected_attempt_id}, found research_run_id={actual_run_id} run_id={manifest_run_id} command={actual_command_id} attempt={actual_attempt_id}",
                 manifest.display()
             );
         }

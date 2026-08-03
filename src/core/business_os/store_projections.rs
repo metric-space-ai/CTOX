@@ -4,13 +4,14 @@
 use super::store::{
     apply_queue_projection_status_fields, browser_context_artifact_for_command, clip_text,
     command_inbound_channel, command_status_for_queue_route_status,
-    count_legacy_http_fallback_records, find_queue_task_for_command, first_string_field, now_ms,
-    open_store, projection_route_status_for_command_status, projection_status_is_active,
-    push_repair_action, queue_status_is_terminal_failure, queue_status_is_terminal_success,
-    redact_document_client_context_secrets, repair_inline_payload_artifacts,
-    upsert_command_projection_from_queue_status, upsert_rxdb_collection_record,
-    upsert_rxdb_collection_record_cached, BusinessCommand, QueueProjectionRepairOptions,
-    RxdbProjectionWriterCache, BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
+    count_legacy_http_fallback_records, find_queue_task_for_command, first_string_field,
+    load_rxdb_collection_record, now_ms, open_store, projection_route_status_for_command_status,
+    projection_status_is_active, push_repair_action, queue_status_is_terminal_failure,
+    queue_status_is_terminal_success, redact_document_client_context_secrets,
+    repair_inline_payload_artifacts, upsert_command_projection_from_queue_status,
+    upsert_rxdb_collection_record, upsert_rxdb_collection_record_cached, BusinessCommand,
+    QueueProjectionRepairOptions, RxdbProjectionWriterCache,
+    BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
 };
 use crate::mission::channels;
 use anyhow::Context;
@@ -607,7 +608,6 @@ pub(super) fn refresh_queue_task_projection(
     let route_status = effective_queue_projection_route_status(&task, structured_status.as_deref());
     refresh_research_run_projection(
         root,
-        conn,
         rxdb_writers.as_deref_mut(),
         command,
         &route_status,
@@ -633,7 +633,6 @@ pub(super) fn refresh_queue_task_projection(
 /// so a stored `completed` is never overwritten here.
 fn refresh_research_run_projection(
     root: &Path,
-    conn: &Connection,
     rxdb_writers: Option<&mut RxdbProjectionWriterCache>,
     command: &BusinessCommand,
     route_status: &str,
@@ -661,15 +660,10 @@ fn refresh_research_run_projection(
         // is about to re-lease. Leave the stored status untouched.
         _ => return Ok(()),
     };
-    let Some(mut record) = conn
-        .query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'research_runs' AND record_id = ?1",
-            params![run_id.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
-    else {
+    // research_runs records are created by the browser and live only in the
+    // replicated RxDB store; the native business_records ledger never carries
+    // this collection, so reading it there would make this projection a no-op.
+    let Some(mut record) = load_rxdb_collection_record(root, "research_runs", &run_id)? else {
         return Ok(());
     };
     let current = record
@@ -684,13 +678,6 @@ fn refresh_research_run_projection(
     };
     obj.insert("status".to_string(), Value::String(next_status.to_string()));
     obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
-    upsert_business_record(
-        conn,
-        "research_runs",
-        &run_id,
-        updated_at_ms,
-        record.clone(),
-    )?;
     upsert_rxdb_collection_record_cached(
         root,
         rxdb_writers,
