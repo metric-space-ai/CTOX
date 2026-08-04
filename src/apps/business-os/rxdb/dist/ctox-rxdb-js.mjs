@@ -1596,6 +1596,7 @@ var QueryMetaStorage = class {
     this.schedulerKey = schedulerKey;
     this.clock = clock;
     this.primaryDelete = typeof primaryDelete === "function" ? primaryDelete : null;
+    this._metadataMutationTail = Promise.resolve();
   }
   setPrimaryDelete(fn) {
     this.primaryDelete = typeof fn === "function" ? fn : null;
@@ -1651,102 +1652,97 @@ var QueryMetaStorage = class {
     await this.backend.putQueryWindow(existing);
   }
   async touchDocuments(collection, ids, { estimatedBytes = 0, pinReason = PIN_RECENT_READ } = {}) {
-    const now = this.clock();
     const normalizedIds = Array.isArray(ids) ? ids.filter(Boolean) : [];
     if (!normalizedIds.length) return;
-    const perDocumentBytes = normalizeEstimatedBytes(estimatedBytes);
-    let deltaBytes = 0;
-    for (const id of normalizedIds) {
-      const previous = await this.backend.getDocumentAccess(collection, id) || {};
-      const nextEstimatedBytes = perDocumentBytes || previous.estimatedBytes || 0;
-      deltaBytes += nextEstimatedBytes - (previous.estimatedBytes || 0);
-      await this.backend.putDocumentAccess({
-        collection,
-        id,
-        lastAccessedAt: now,
-        pinReason: previous.dirty ? "dirty" : pinReason,
-        dirty: Boolean(previous.dirty),
-        estimatedBytes: nextEstimatedBytes
-      });
-    }
-    if (deltaBytes !== 0) {
-      const stats = await this.getCacheStats();
-      stats.estimatedBytes = Math.max(0, (stats.estimatedBytes || 0) + deltaBytes);
-      await this.backend.putCacheStats(stats);
-    }
+    return this.enqueueMetadataMutation(async () => {
+      const now = this.clock();
+      const perDocumentBytes = normalizeEstimatedBytes(estimatedBytes);
+      let deltaBytes = 0;
+      for (const id of normalizedIds) {
+        const previous = await this.backend.getDocumentAccess(collection, id) || {};
+        const nextEstimatedBytes = perDocumentBytes || previous.estimatedBytes || 0;
+        deltaBytes += nextEstimatedBytes - (previous.estimatedBytes || 0);
+        await this.backend.putDocumentAccess({
+          collection,
+          id,
+          lastAccessedAt: now,
+          pinReason: previous.dirty ? "dirty" : pinReason,
+          dirty: Boolean(previous.dirty),
+          estimatedBytes: nextEstimatedBytes
+        });
+      }
+      if (deltaBytes !== 0) {
+        const stats = await this.readCacheStats();
+        stats.estimatedBytes = Math.max(0, (stats.estimatedBytes || 0) + deltaBytes);
+        await this.backend.putCacheStats(stats);
+      }
+    });
   }
   async markDirty(collection, id, dirty) {
-    const previous = await this.backend.getDocumentAccess(collection, id) || {
-      collection,
-      id,
-      lastAccessedAt: this.clock(),
-      estimatedBytes: 0
-    };
-    await this.backend.putDocumentAccess({
-      ...previous,
-      dirty: Boolean(dirty),
-      pinReason: dirty ? "dirty" : previous.pinReason ?? null
+    return this.enqueueMetadataMutation(async () => {
+      const previous = await this.backend.getDocumentAccess(collection, id) || {
+        collection,
+        id,
+        lastAccessedAt: this.clock(),
+        estimatedBytes: 0
+      };
+      await this.backend.putDocumentAccess({
+        ...previous,
+        dirty: Boolean(dirty),
+        pinReason: dirty ? "dirty" : previous.pinReason ?? null
+      });
     });
   }
   async getDocumentAccess(collection, id) {
+    await this._metadataMutationTail;
     const record = await this.backend.getDocumentAccess(collection, id);
     return record ? { ...record } : null;
   }
   async evictDocuments(ids) {
-    const now = this.clock();
-    let removed = 0;
-    for (const { collection, id } of ids) {
-      const record = await this.backend.getDocumentAccess(collection, id);
-      if (!record) continue;
-      if (record.dirty) continue;
-      if (record.pinReason === PIN_RECENT_READ && now - record.lastAccessedAt < SIDECAR_PIN_RECENT_READ_TTL_MS) {
-        continue;
-      }
-      if (this.primaryDelete) {
-        try {
-          await this.primaryDelete(collection, id);
-        } catch {
+    return this.enqueueMetadataMutation(async () => {
+      const now = this.clock();
+      let removed = 0;
+      for (const { collection, id } of ids) {
+        const record = await this.backend.getDocumentAccess(collection, id);
+        if (!record) continue;
+        if (record.dirty) continue;
+        if (record.pinReason === PIN_RECENT_READ && now - record.lastAccessedAt < SIDECAR_PIN_RECENT_READ_TTL_MS) {
           continue;
         }
+        if (this.primaryDelete) {
+          try {
+            await this.primaryDelete(collection, id);
+          } catch {
+            continue;
+          }
+        }
+        await this.backend.deleteDocumentAccess(collection, id);
+        removed += 1;
       }
-      await this.backend.deleteDocumentAccess(collection, id);
-      removed += 1;
-    }
-    const stats = await this.backend.getCacheStats(this.databaseName) || {
-      databaseName: this.databaseName,
-      estimatedBytes: 0,
-      budgetBytes: 0,
-      lastEvictionAt: null
-    };
-    stats.lastEvictionAt = removed > 0 ? now : stats.lastEvictionAt;
-    stats.estimatedBytes = await this.estimateWorkingSetBytes();
-    await this.backend.putCacheStats(stats);
-    return removed;
+      const stats = await this.readCacheStats();
+      stats.lastEvictionAt = removed > 0 ? now : stats.lastEvictionAt;
+      stats.estimatedBytes = await this.estimateWorkingSetBytesUnqueued();
+      await this.backend.putCacheStats(stats);
+      return removed;
+    });
   }
   async estimateWorkingSetBytes() {
-    const docs = await this.backend.scanDocumentAccess();
-    return docs.reduce((sum, record) => sum + (record.estimatedBytes || 0), 0);
+    await this._metadataMutationTail;
+    return this.estimateWorkingSetBytesUnqueued();
   }
   async setBudgetBytes(budgetBytes) {
-    const stats = await this.backend.getCacheStats(this.databaseName) || {
-      databaseName: this.databaseName,
-      estimatedBytes: 0,
-      budgetBytes: 0,
-      lastEvictionAt: null
-    };
-    stats.budgetBytes = Number(budgetBytes) || 0;
-    await this.backend.putCacheStats(stats);
+    return this.enqueueMetadataMutation(async () => {
+      const stats = await this.readCacheStats();
+      stats.budgetBytes = Number(budgetBytes) || 0;
+      await this.backend.putCacheStats(stats);
+    });
   }
   async getCacheStats() {
-    return await this.backend.getCacheStats(this.databaseName) || {
-      databaseName: this.databaseName,
-      estimatedBytes: 0,
-      budgetBytes: 0,
-      lastEvictionAt: null
-    };
+    await this._metadataMutationTail;
+    return this.readCacheStats();
   }
   async clear() {
-    await this.backend.clear();
+    return this.enqueueMetadataMutation(() => this.backend.clear());
   }
   async invalidateQueryWindowsForDocuments(collection, ids) {
     const normalizedIds = normalizeDocumentIds2(ids);
@@ -1838,58 +1834,63 @@ var QueryMetaStorage = class {
     return keys;
   }
   async close() {
+    await this._metadataMutationTail;
     await this.backend.close();
   }
   /// Evicts LRU document access entries until the working set fits the budget.
   /// Skips dirty docs and unexpired recently-read pins. Returns the number of
   /// document records removed.
   async runEvictionIfOverBudget({ forceRecount = false } = {}) {
-    const stats = await this.getCacheStats();
-    if (!stats.budgetBytes) {
-      return 0;
-    }
-    if (!forceRecount && (stats.estimatedBytes || 0) <= stats.budgetBytes) {
-      return 0;
-    }
-    const all = await this.backend.scanDocumentAccess();
-    const workingSetBytes = sumEstimatedDocumentAccessBytes(all);
-    if (stats.estimatedBytes !== workingSetBytes) {
-      stats.estimatedBytes = workingSetBytes;
-      await this.backend.putCacheStats(stats);
-    }
-    if (workingSetBytes <= stats.budgetBytes) {
-      return 0;
-    }
-    const now = this.clock();
-    const candidates = all.filter((record) => !record.dirty).filter((record) => {
-      if (record.pinReason !== "recently-read") return true;
-      return now - record.lastAccessedAt >= SIDECAR_PIN_RECENT_READ_TTL_MS;
-    }).sort((a, b) => a.lastAccessedAt - b.lastAccessedAt);
-    let removed = 0;
-    let remainingBytes = workingSetBytes;
-    for (const candidate of candidates) {
-      if (remainingBytes <= stats.budgetBytes) break;
-      if (this.primaryDelete) {
-        try {
-          await this.primaryDelete(candidate.collection, candidate.id);
-        } catch {
-          continue;
-        }
+    return this.enqueueMetadataMutation(async () => {
+      const stats = await this.readCacheStats();
+      if (!stats.budgetBytes) {
+        return 0;
       }
-      await this.backend.deleteDocumentAccess(candidate.collection, candidate.id);
-      remainingBytes -= candidate.estimatedBytes || 0;
-      removed += 1;
-    }
-    if (removed > 0) {
-      const updated = { ...stats, estimatedBytes: remainingBytes, lastEvictionAt: now };
-      await this.backend.putCacheStats(updated);
-    }
-    return removed;
+      if (!forceRecount && (stats.estimatedBytes || 0) <= stats.budgetBytes) {
+        return 0;
+      }
+      const all = await this.backend.scanDocumentAccess();
+      const workingSetBytes = sumEstimatedDocumentAccessBytes(all);
+      if (stats.estimatedBytes !== workingSetBytes) {
+        stats.estimatedBytes = workingSetBytes;
+        await this.backend.putCacheStats(stats);
+      }
+      if (workingSetBytes <= stats.budgetBytes) {
+        return 0;
+      }
+      const now = this.clock();
+      const candidates = all.filter((record) => !record.dirty).filter((record) => {
+        if (record.pinReason !== "recently-read") return true;
+        return now - record.lastAccessedAt >= SIDECAR_PIN_RECENT_READ_TTL_MS;
+      }).sort((a, b) => a.lastAccessedAt - b.lastAccessedAt);
+      let removed = 0;
+      let remainingBytes = workingSetBytes;
+      for (const candidate of candidates) {
+        if (remainingBytes <= stats.budgetBytes) break;
+        if (this.primaryDelete) {
+          try {
+            await this.primaryDelete(candidate.collection, candidate.id);
+          } catch {
+            continue;
+          }
+        }
+        await this.backend.deleteDocumentAccess(candidate.collection, candidate.id);
+        remainingBytes -= candidate.estimatedBytes || 0;
+        removed += 1;
+      }
+      if (removed > 0) {
+        const updated = { ...stats, estimatedBytes: remainingBytes, lastEvictionAt: now };
+        await this.backend.putCacheStats(updated);
+      }
+      return removed;
+    });
   }
   async recordEstimatedBytes(bytes) {
-    const stats = await this.getCacheStats();
-    stats.estimatedBytes = Math.max(0, Number(bytes) || 0);
-    await this.backend.putCacheStats(stats);
+    return this.enqueueMetadataMutation(async () => {
+      const stats = await this.readCacheStats();
+      stats.estimatedBytes = Math.max(0, Number(bytes) || 0);
+      await this.backend.putCacheStats(stats);
+    });
   }
   /// Wraps an IDB write attempt in a quota-recovery loop. On
   /// `QuotaExceededError` we run eviction once and retry; on second failure
@@ -2009,6 +2010,24 @@ var QueryMetaStorage = class {
     const evicted = await this.runEvictionIfOverBudget().catch(() => 0);
     const windowsReclaimed = await this.runWindowGc().catch(() => 0);
     return { evicted, windowsReclaimed };
+  }
+  enqueueMetadataMutation(operation) {
+    const result = this._metadataMutationTail.then(() => operation());
+    this._metadataMutationTail = result.catch(() => {
+    });
+    return result;
+  }
+  async readCacheStats() {
+    return await this.backend.getCacheStats(this.databaseName) || {
+      databaseName: this.databaseName,
+      estimatedBytes: 0,
+      budgetBytes: 0,
+      lastEvictionAt: null
+    };
+  }
+  async estimateWorkingSetBytesUnqueued() {
+    const docs = await this.backend.scanDocumentAccess();
+    return sumEstimatedDocumentAccessBytes(docs);
   }
 };
 function changeAffectsWindow(window2, changes, primaryPath) {
