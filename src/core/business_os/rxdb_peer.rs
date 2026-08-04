@@ -4444,7 +4444,7 @@ async fn enqueue_business_command_document_with_database(
         .collection("business_commands")
         .context("business_commands collection is not registered")?;
     let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
-    incremental_upsert_document_with_repair(
+    incremental_upsert_document_with_envelope(
         &commands,
         document.clone(),
         &format!("enqueued business_command {command_id}"),
@@ -4574,7 +4574,7 @@ async fn consume_pending_business_commands(
                         let commands = database
                             .collection("business_commands")
                             .context("business_commands collection is not registered")?;
-                        incremental_upsert_document_with_repair(
+                        incremental_upsert_document_with_envelope(
                             &commands,
                             retry_document,
                             "retryable business_command",
@@ -4608,7 +4608,7 @@ async fn consume_pending_business_commands(
                         let commands = database
                             .collection("business_commands")
                             .context("business_commands collection is not registered")?;
-                        if let Err(write_err) = incremental_upsert_document_with_repair(
+                        if let Err(write_err) = incremental_upsert_document_with_envelope(
                             &commands,
                             failed_patch,
                             "failed business_command",
@@ -4736,25 +4736,17 @@ fn pending_business_command_documents_sync(
     Ok(documents)
 }
 
-async fn incremental_upsert_document_with_repair(
+async fn incremental_upsert_document_with_envelope(
     collection: &Arc<RxCollection>,
     document: Value,
     label: &str,
 ) -> anyhow::Result<()> {
-    match collection.incremental_upsert(document.clone()).await {
-        Ok(_) => Ok(()),
-        Err(err) if is_recoverable_projection_write_error(&err) => {
-            let original_error = err.to_string();
-            repair_projection_document_envelope_and_upsert(collection, document)
-                .await
-                .map_err(|fallback_err| {
-                    anyhow::anyhow!(
-                        "repair {label} after recoverable RxDB write error ({original_error}): {fallback_err}"
-                    )
-                })
-        }
-        Err(err) => Err(anyhow::anyhow!("{err}")),
-    }
+    let document = fill_projection_document_envelope(collection, document, label)?;
+    collection
+        .incremental_upsert(document)
+        .await
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!("upsert {label}: {err}"))
 }
 
 async fn accept_pending_business_command(
@@ -4839,11 +4831,15 @@ async fn accept_pending_business_command(
                     }
                     obj.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
                 }
-                incremental_upsert_document_with_repair(&commands, next, "failed business_command")
-                    .await
-                    .map_err(|err| {
-                        anyhow::anyhow!("upsert failed business_command {command_id}: {err}")
-                    })?;
+                incremental_upsert_document_with_envelope(
+                    &commands,
+                    next,
+                    "failed business_command",
+                )
+                .await
+                .map_err(|err| {
+                    anyhow::anyhow!("upsert failed business_command {command_id}: {err}")
+                })?;
             }
             return Ok(());
         }
@@ -5004,7 +5000,7 @@ async fn accept_pending_business_command(
         .await
         .context("join native command lifecycle projection persistence")??;
     }
-    incremental_upsert_document_with_repair(&commands, next, "accepted business_command")
+    incremental_upsert_document_with_envelope(&commands, next, "accepted business_command")
         .await
         .map_err(|err| anyhow::anyhow!("upsert accepted business_command {command_id}: {err}"))?;
 
@@ -7873,33 +7869,15 @@ async fn sync_knowledge_tables_with_database(
             count += 1;
         }
     }
-    // Stale cleanup must never take the whole knowledge sync down. A document
-    // written through a foreign path (policy-gated MCP upserts are allowed on
-    // knowledge_tables) can leave the peer's doc cache with a conflicting
-    // revision; the query then fails with DOC_CACHE_REV on every cycle and the
-    // sync aborted forever after the upserts above had already succeeded. Skip
-    // cleanup for this cycle instead and keep the fresh projections.
-    let existing = match collection
+    let existing = collection
         .find(Some(MangoQuery {
             limit: Some(10_000),
             ..Default::default()
         }))
-        .map_err(|err| anyhow::anyhow!("query stale knowledge_tables projections: {err}"))
-    {
-        Ok(query) => match query.exec(false).await {
-            Ok(existing) => existing,
-            Err(err) => {
-                eprintln!(
-                    "[business-os] skipping stale knowledge_tables cleanup this cycle: {err}"
-                );
-                return Ok(count);
-            }
-        },
-        Err(err) => {
-            eprintln!("[business-os] skipping stale knowledge_tables cleanup this cycle: {err}");
-            return Ok(count);
-        }
-    };
+        .map_err(|err| anyhow::anyhow!("query stale knowledge_tables projections: {err}"))?
+        .exec(false)
+        .await
+        .map_err(|err| anyhow::anyhow!("exec stale knowledge_tables projection query: {err}"))?;
     for mut stale in existing.as_array().cloned().unwrap_or_default() {
         let Some(id) = stale.get("id").and_then(Value::as_str).map(str::to_string) else {
             continue;
@@ -9112,21 +9090,12 @@ async fn upsert_business_record_projection_document(
         return upsert_business_record_projection_tombstone(collection, document).await;
     }
     normalize_business_record_projection_document(collection, collection_name, &mut document)?;
-    match collection.upsert(document.clone()).await {
-        Ok(_) => Ok(()),
-        Err(err) if is_recoverable_projection_write_error(&err) => match collection.upsert(document.clone()).await
-        {
-            Ok(_) => Ok(()),
-            Err(_) => repair_projection_document_envelope_and_upsert(collection, document)
-                .await
-                .map_err(|fallback_err| {
-                    anyhow::anyhow!(
-                        "projection upsert fallback after document cache envelope repair failed: {fallback_err}"
-                    )
-                }),
-        },
-        Err(err) => Err(anyhow::anyhow!("{err}")),
-    }
+    let document = fill_projection_document_envelope(collection, document, collection_name)?;
+    collection
+        .upsert(document)
+        .await
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!("upsert {collection_name} projection: {err}"))
 }
 
 /// Project a pulled collection batch without turning every record into its own
@@ -9161,7 +9130,11 @@ async fn bulk_upsert_business_record_projection_documents(
             continue;
         }
         normalize_business_record_projection_document(collection, collection_name, &mut document)?;
-        normal_documents.push(document);
+        normal_documents.push(fill_projection_document_envelope(
+            collection,
+            document,
+            collection_name,
+        )?);
     }
 
     let mut existing_by_id = HashMap::<String, Value>::new();
@@ -9209,24 +9182,10 @@ async fn bulk_upsert_business_record_projection_documents(
     let mut changed = 0usize;
     for batch in changed_documents.chunks(BUSINESS_RECORD_PROJECTION_WRITE_BATCH_SIZE) {
         let batch_documents = batch.to_vec();
-        let result = match collection.bulk_upsert(batch_documents.clone()).await {
-            Ok(result) => result,
-            Err(err) if is_recoverable_projection_write_error(&err) => {
-                for document in batch_documents {
-                    upsert_business_record_projection_document(
-                        collection,
-                        collection_name,
-                        document,
-                    )
-                    .await?;
-                    changed = changed.saturating_add(1);
-                }
-                continue;
-            }
-            Err(err) => {
-                return Err(anyhow::anyhow!("bulk upsert projection batch: {err}"));
-            }
-        };
+        let result = collection
+            .bulk_upsert(batch_documents.clone())
+            .await
+            .map_err(|err| anyhow::anyhow!("bulk upsert projection batch: {err}"))?;
         changed = changed.saturating_add(result.success.len());
         if result.error.is_empty() {
             continue;
@@ -9308,6 +9267,37 @@ fn normalize_business_record_projection_document(
             .or_insert(updated_at_ms);
     }
     Ok(())
+}
+
+fn fill_projection_document_envelope(
+    collection: &Arc<RxCollection>,
+    mut document: Value,
+    label: &str,
+) -> anyhow::Result<Value> {
+    if let Some(object) = document.as_object_mut() {
+        if !object.get("_deleted").is_some_and(Value::is_boolean) {
+            object.remove("_deleted");
+        }
+        if !object.get("_attachments").is_some_and(Value::is_object) {
+            object.remove("_attachments");
+        }
+        if !object
+            .get("_rev")
+            .and_then(Value::as_str)
+            .is_some_and(|revision| {
+                revision.split_once('-').is_some_and(|(height, token)| {
+                    !token.is_empty() && height.parse::<u64>().is_ok_and(|height| height > 0)
+                })
+            })
+        {
+            object.remove("_rev");
+        }
+    }
+    let schema = collection
+        .schema_required()
+        .map_err(|err| anyhow::anyhow!("load {label} projection schema: {err}"))?;
+    fill_object_data_before_insert(schema, document)
+        .map_err(|err| anyhow::anyhow!("fill {label} projection document envelope: {err}"))
 }
 
 fn remove_projection_rxdb_envelope(document: &mut Value) {
@@ -9701,93 +9691,6 @@ fn projection_tombstone_required_default(schema: &RxJsonSchema, field: &str) -> 
         Some("object") => Value::Object(serde_json::Map::new()),
         _ => Value::String(String::new()),
     }
-}
-
-fn is_doc_cache_revision_error(error: &rxdb::rx_error::RxError) -> bool {
-    matches!(error.code(), "DOC_CACHE_REV" | "DOC_CACHE_LWT" | "UTL2")
-        || error.to_string().contains("DOC_CACHE_REV")
-        || error.to_string().contains("DOC_CACHE_LWT")
-        || error.to_string().contains("UTL2")
-}
-
-// A tombstone re-delete (incoming `_deleted:true` over an existing tombstone with
-// a divergent `_rev`) surfaces as a 409 `CONFLICT`, because `incremental_upsert`
-// queries exclude deleted docs and fall through to `insert`, which the storage
-// rejects as a duplicate primary key. Route it through the same upsert/envelope
-// repair fallback, which rebases the write onto the existing tombstone instead of
-// failing the projection sync.
-fn is_recoverable_projection_write_error(error: &rxdb::rx_error::RxError) -> bool {
-    let message = error.to_string();
-    is_doc_cache_revision_error(error)
-        || error.code() == "CONFLICT"
-        || message.contains("CONFLICT")
-        || message.contains("UNIQUE constraint failed")
-        || message.contains("PRIMARY KEY constraint failed")
-}
-
-async fn repair_projection_document_envelope_and_upsert(
-    collection: &Arc<RxCollection>,
-    document: Value,
-) -> anyhow::Result<()> {
-    let schema = collection
-        .schema_required()
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-    let primary_path = schema.primary_path.clone();
-    let write_data = fill_object_data_before_insert(schema, document)
-        .map_err(|err| anyhow::anyhow!("fill projection document envelope: {err}"))?;
-    let document_id = write_data
-        .get(&primary_path)
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("projection document missing primary key {primary_path}"))?
-        .to_string();
-
-    let existing = collection
-        .storage_instance
-        .find_documents_by_id(std::slice::from_ref(&document_id), true)
-        .await
-        .map_err(|err| anyhow::anyhow!("load existing projection document for repair: {err}"))?
-        .into_iter()
-        .next();
-
-    let Some(previous) = existing else {
-        collection
-            .insert(write_data)
-            .await
-            .map(|_| ())
-            .map_err(|err| anyhow::anyhow!("insert projection document after repair: {err}"))?;
-        return Ok(());
-    };
-
-    let repaired_previous = fill_object_data_before_insert(schema, previous.clone())
-        .map_err(|err| anyhow::anyhow!("repair existing projection document envelope: {err}"))?;
-    let mut next = repaired_previous.clone();
-    if let (Some(next_obj), Some(write_obj)) = (next.as_object_mut(), write_data.as_object()) {
-        for (key, value) in write_obj {
-            if matches!(key.as_str(), "_rev" | "_attachments") {
-                continue;
-            }
-            next_obj.insert(key.clone(), value.clone());
-        }
-    } else {
-        next = write_data;
-    }
-
-    let result = collection
-        .storage_instance
-        .bulk_write(
-            vec![BulkWriteRow {
-                previous: Some(repaired_previous),
-                document: next,
-            }],
-            "business-os-projection-envelope-repair",
-        )
-        .await
-        .map_err(|err| anyhow::anyhow!("write repaired projection document: {err}"))?;
-    if let Some(err) = result.error.first() {
-        anyhow::bail!("write repaired projection document conflict: {err:?}");
-    }
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -10421,19 +10324,11 @@ async fn incremental_upsert_projection_if_changed(
             return Ok(false);
         }
     }
-    match collection.incremental_upsert(document.clone()).await {
-        Ok(_) => {}
-        Err(err) if is_recoverable_projection_write_error(&err) => {
-            repair_projection_document_envelope_and_upsert(collection, document)
-                .await
-                .map_err(|fallback_err| {
-                    anyhow::anyhow!(
-                        "upsert {label} projection after document cache envelope repair failed: {fallback_err}"
-                    )
-                })?;
-        }
-        Err(err) => return Err(anyhow::anyhow!("upsert {label} projection: {err}")),
-    }
+    let document = fill_projection_document_envelope(collection, document, label)?;
+    collection
+        .incremental_upsert(document)
+        .await
+        .map_err(|err| anyhow::anyhow!("upsert {label} projection: {err}"))?;
     Ok(true)
 }
 
@@ -13712,7 +13607,11 @@ fn load_live_ctox_desktop_file_documents_sync(root: &Path) -> anyhow::Result<Vec
     Ok(documents)
 }
 
-pub(super) use super::hashing::hex_sha256;
+pub(super) fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
 
 pub(super) fn metadata_modified_at_ms(metadata: &fs::Metadata) -> u128 {
     metadata
@@ -16257,32 +16156,72 @@ mod tests {
     }
 
     #[test]
-    fn projection_upsert_detects_doc_cache_revision_errors() {
-        let revision_error = rxdb::rx_error::new_rx_error("DOC_CACHE_REV", Some(json!({})));
-        let lwt_error = rxdb::rx_error::new_rx_error("DOC_CACHE_LWT", Some(json!({})));
-        let other_error = rxdb::rx_error::new_rx_error("COL4", Some(json!({})));
+    fn projection_document_writer_fills_complete_rxdb_envelope_before_write() {
+        let root = tempfile::tempdir().expect("temp root");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
 
-        assert!(is_doc_cache_revision_error(&revision_error));
-        assert!(is_doc_cache_revision_error(&lwt_error));
-        assert!(!is_doc_cache_revision_error(&other_error));
-    }
+        runtime.block_on(async {
+            let database = open_test_database(store::rxdb_store_path(root.path()))
+                .await
+                .expect("open rxdb sqlite");
+            database
+                .add_collections(collection_creators())
+                .await
+                .expect("register collections");
+            let documents = database
+                .collection("documents")
+                .expect("documents collection");
+            let document_id = "projection_envelope_write_path_probe";
 
-    #[test]
-    fn projection_upsert_recovers_from_tombstone_conflict() {
-        let conflict_error = rxdb::rx_error::new_rx_error("CONFLICT", Some(json!({})));
-        let revision_error = rxdb::rx_error::new_rx_error("DOC_CACHE_REV", Some(json!({})));
-        let sqlite_unique_error = rxdb::rx_error::new_rx_error(
-            "SQLITE",
-            Some(json!({
-                "message": "UNIQUE constraint failed: ctox_business_os__business_commands__v0.id"
-            })),
-        );
-        let other_error = rxdb::rx_error::new_rx_error("COL4", Some(json!({})));
+            incremental_upsert_document_with_envelope(
+                &documents,
+                json!({
+                    "id": document_id,
+                    "title": "Projection envelope write-path probe",
+                    "filename": "projection-envelope-probe.txt",
+                    "mime_type": "text/plain",
+                    "status": "imported",
+                    "current_version_id": "",
+                    "index_text": "Projection envelope write-path probe",
+                    "is_deleted": false,
+                    "created_at_ms": 1_000,
+                    "updated_at_ms": 2_000,
+                    "_deleted": null,
+                    "_rev": null,
+                    "_meta": null,
+                    "_attachments": null
+                }),
+                "documents",
+            )
+            .await
+            .expect("write projection document through envelope writer");
 
-        assert!(is_recoverable_projection_write_error(&conflict_error));
-        assert!(is_recoverable_projection_write_error(&revision_error));
-        assert!(is_recoverable_projection_write_error(&sqlite_unique_error));
-        assert!(!is_recoverable_projection_write_error(&other_error));
+            let persisted = documents
+                .storage_instance
+                .find_documents_by_id(&[document_id.to_string()], true)
+                .await
+                .expect("load persisted projection document")
+                .into_iter()
+                .next()
+                .expect("persisted projection document");
+            assert_eq!(
+                persisted.get("_deleted").and_then(Value::as_bool),
+                Some(false)
+            );
+            assert!(persisted
+                .get("_attachments")
+                .and_then(Value::as_object)
+                .is_some_and(serde_json::Map::is_empty));
+            assert!(persisted
+                .get("_meta")
+                .and_then(|meta| meta.get("lwt"))
+                .and_then(Value::as_f64)
+                .is_some());
+            assert!(projection_document_has_valid_revision(&persisted));
+        });
     }
 
     #[test]
