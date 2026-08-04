@@ -16124,7 +16124,106 @@ pub fn fail_business_command_from_queue_error(
             failed_at_ms,
         )?;
     }
+    // Continuation is best-effort bookkeeping on top of the failure: it must
+    // never turn a recorded terminal failure into an error of this function.
+    match maybe_spawn_systematic_research_continuation(root, &conn, &command_id, &command, error) {
+        Ok(Some(next_command_id)) => {
+            eprintln!(
+                "[business-os] spawned research auto-continuation {next_command_id} after transport failure of {command_id}"
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!(
+                "[business-os] research auto-continuation for {command_id} was not spawned: {err}"
+            );
+        }
+    }
     Ok(Some(payload))
+}
+
+/// A systematic research run accumulates evidence across attempts (verified on
+/// the SKF instance: attempt 2 grew the evidence manifest from 9 to 42
+/// admitted sources and attempt 3 inherited all 42), but one queue item has a
+/// finite retry budget: enough transient stream disconnects terminalize the
+/// item and the chain silently stops even though the next attempt would
+/// resume from the accumulated evidence. Re-dispatch the same command payload
+/// as a fresh continuation command when - and only when - the terminal error
+/// is a pure transport failure. Fail-closed validation and every other
+/// terminal cause stay terminal, the chain is capped, and an already-active
+/// run for the same record suppresses the spawn.
+fn maybe_spawn_systematic_research_continuation(
+    root: &Path,
+    conn: &Connection,
+    failed_command_id: &str,
+    command: &BusinessCommand,
+    error: &str,
+) -> anyhow::Result<Option<String>> {
+    const MAX_AUTO_CONTINUATIONS: i64 = 6;
+    if !is_systematic_research_command(command) {
+        return Ok(None);
+    }
+    let lower = error.to_ascii_lowercase();
+    let transport_failure = lower.contains("stream disconnected before completion")
+        || lower.contains("connection reset by peer")
+        || lower.contains("error sending request for url");
+    if !transport_failure {
+        return Ok(None);
+    }
+    let attempt = command
+        .payload
+        .get("auto_continuation_attempt")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if attempt >= MAX_AUTO_CONTINUATIONS {
+        anyhow::bail!(
+            "auto-continuation cap of {MAX_AUTO_CONTINUATIONS} reached (attempt {attempt}); leaving the chain terminal"
+        );
+    }
+    let record_id = command.record_id.clone().unwrap_or_default();
+    if !record_id.is_empty() {
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_records
+             WHERE collection = 'ctox_queue_tasks'
+               AND json_extract(payload_json, '$.command_type') = 'research.systematic.run'
+               AND json_extract(payload_json, '$.route_status') IN ('pending', 'leased')
+               AND payload_json LIKE '%' || ?1 || '%'",
+            params![record_id],
+            |row| row.get(0),
+        )?;
+        if active > 0 {
+            return Ok(None);
+        }
+    }
+    let next_command_id = format!("cmd_auto_{}", Uuid::new_v4());
+    let mut payload = command.payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "auto_continuation_attempt".to_string(),
+            Value::from(attempt + 1),
+        );
+        object.insert(
+            "continued_from_command_id".to_string(),
+            Value::String(failed_command_id.to_string()),
+        );
+    }
+    let document = serde_json::json!({
+        "id": next_command_id,
+        "command_id": next_command_id,
+        "module": command.module.clone(),
+        "command_type": command.command_type.clone(),
+        "record_id": command.record_id.clone(),
+        "status": "pending_sync",
+        "payload": payload,
+        "client_context": {
+            "source": "harness-auto-continuation",
+            "continued_from_command_id": failed_command_id,
+            "auto_continuation_attempt": attempt + 1,
+            "transport_error": error.chars().take(200).collect::<String>(),
+        },
+    });
+    super::command_plane::accept_rxdb_business_command(root, document)?;
+    Ok(Some(next_command_id))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -37607,6 +37706,98 @@ pub(super) mod tests {
         assert!(!prompt.contains("capability_token"));
         assert!(!prompt.contains("access_token"));
         assert!(!prompt.contains("api_key"));
+    }
+
+    #[test]
+    fn research_auto_continuation_spawns_only_for_transport_failures() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let conn = open_store(root).expect("open store");
+        let research_command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_dead_run".to_owned()),
+            module: "research".to_owned(),
+            command_type: "research.systematic.run".to_owned(),
+            record_id: Some("research_baseline_task".to_owned()),
+            payload: serde_json::json!({
+                "research_run_id": "run-continuation-1",
+                "knowledge_domain": "bearing_design_calculation"
+            }),
+            client_context: serde_json::json!({"source": "web-research"}),
+        };
+
+        // Fail-closed validation stays terminal: no continuation.
+        let spawned = maybe_spawn_systematic_research_continuation(
+            root,
+            &conn,
+            "cmd_dead_run",
+            &research_command,
+            "Systematic research evidence validation failed closed: target not met",
+        )
+        .expect("validation failure handled");
+        assert!(spawned.is_none());
+
+        // Non-research commands never chain.
+        let other_command = BusinessCommand {
+            command_type: "business_os.chat.task".to_owned(),
+            ..research_command.clone()
+        };
+        let spawned = maybe_spawn_systematic_research_continuation(
+            root,
+            &conn,
+            "cmd_dead_run",
+            &other_command,
+            "stream disconnected before completion",
+        )
+        .expect("non-research handled");
+        assert!(spawned.is_none());
+
+        // The cap converts an endless chain into a terminal finding.
+        let capped_command = BusinessCommand {
+            payload: serde_json::json!({
+                "research_run_id": "run-continuation-1",
+                "auto_continuation_attempt": 6
+            }),
+            ..research_command.clone()
+        };
+        let err = maybe_spawn_systematic_research_continuation(
+            root,
+            &conn,
+            "cmd_dead_run",
+            &capped_command,
+            "stream disconnected before completion",
+        )
+        .expect_err("cap must refuse");
+        assert!(err.to_string().contains("cap"));
+
+        // A pure transport failure spawns a continuation command that carries
+        // the incremented attempt counter and the origin command id.
+        let spawned = maybe_spawn_systematic_research_continuation(
+            root,
+            &conn,
+            "cmd_dead_run",
+            &research_command,
+            "direct session error: stream disconnected before completion: stream closed before response.completed",
+        )
+        .expect("transport failure spawns")
+        .expect("continuation id");
+        assert!(spawned.starts_with("cmd_auto_"));
+        let stored = load_business_command(&conn, &spawned).expect("load continuation");
+        assert_eq!(stored.command_type, "research.systematic.run");
+        assert_eq!(
+            stored
+                .payload
+                .get("auto_continuation_attempt")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            stored
+                .payload
+                .get("continued_from_command_id")
+                .and_then(Value::as_str),
+            Some("cmd_dead_run")
+        );
     }
 
     #[test]
