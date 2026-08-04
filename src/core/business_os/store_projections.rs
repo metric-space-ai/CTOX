@@ -1384,6 +1384,7 @@ pub(crate) mod tests {
     fn queue_status_detection_ignores_status_note_wording() {
         let mut task = channels::QueueTaskView {
             message_key: "queue:system::structured-status-wording".to_string(),
+            metadata: Value::Null,
             thread_key: "queue/structured-status-wording".to_string(),
             title: "Structured status wording test".to_string(),
             prompt: "Use the structured terminal state.".to_string(),

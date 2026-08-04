@@ -275,6 +275,11 @@ static CHANNEL_DB_OPEN_CALL_COUNTS: OnceLock<Mutex<BTreeMap<PathBuf, usize>>> = 
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueTaskView {
     pub message_key: String,
+    /// Die typisierten Schluessel der Zeile (`business_os_module`,
+    /// `business_os_command_type`, ...). Ohne sie muessten Konsumenten die
+    /// Identitaet eines Tasks aus der Prompt-Prosa zurueckparsen — genau das
+    /// hat die Business-OS-App-Recovery jahrelang getan.
+    pub metadata: Value,
     pub thread_key: String,
     pub title: String,
     pub prompt: String,
@@ -6258,6 +6263,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
     };
     Ok(QueueTaskView {
         message_key: message.message_key,
+        metadata: message.metadata.clone(),
         thread_key: message.thread_key,
         title: message.subject,
         prompt,
@@ -7170,6 +7176,47 @@ fn positional_after_flags(args: &[String]) -> Vec<String> {
 fn print_json(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod queue_task_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn queue_task_metadata_is_carried_by_the_typed_view() {
+        let root = tempfile::tempdir().expect("create queue metadata test root");
+        let task = create_queue_task(
+            root.path(),
+            QueueTaskCreateRequest {
+                title: "Typed queue metadata".to_string(),
+                prompt: "The prompt intentionally contains no typed identity markers.".to_string(),
+                thread_key: "queue/typed-metadata".to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: Some(json!({
+                    "business_os_module": "creator",
+                    "business_os_command_type": "ctox.business_os.app.create",
+                    "business_os_record_id": "contracts",
+                })),
+            },
+        )
+        .expect("create queue task with typed metadata");
+
+        assert_eq!(
+            task.metadata
+                .get("business_os_command_type")
+                .and_then(Value::as_str),
+            Some("ctox.business_os.app.create")
+        );
+        assert_eq!(
+            task.metadata
+                .get("business_os_record_id")
+                .and_then(Value::as_str),
+            Some("contracts")
+        );
+    }
 }
 
 #[cfg(test)]

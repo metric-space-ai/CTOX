@@ -8539,7 +8539,11 @@ mod tests {
                 priority: "urgent".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(serde_json::json!({
+                    "business_os_module": "creator",
+                    "business_os_command_type": "ctox.business_os.app.create",
+                    "business_os_record_id": module_id,
+                })),
             },
         )
         .expect("create queue task");
