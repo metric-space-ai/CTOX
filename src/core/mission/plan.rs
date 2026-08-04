@@ -427,7 +427,6 @@ pub fn complete_step_by_message_key(
 
 pub fn emit_due_steps(root: &Path) -> Result<EmitDuePlansSummary> {
     let conn = open_plan_db(root)?;
-    let _ = reconcile_satisfied_waits_with_conn(root, &conn)?;
     let now = now_utc();
     if should_skip_emit_due_step_scan(root, &now) {
         return Ok(EmitDuePlansSummary::default());
@@ -1698,61 +1697,27 @@ pub(crate) fn satisfy_wait_for_work_item(root: &Path, work_id: &str, state: &str
     let updated = satisfy_wait_for_work_item_tx(&tx, work_id, state)?;
     tx.commit()?;
     drop(conn);
+    finish_satisfied_wait_write(root, updated)?;
+    Ok(updated)
+}
+
+pub(crate) fn ensure_wait_resolution_schema(root: &Path, conn: &Connection) -> Result<()> {
+    let migrated = ensure_plan_schema_once(&resolve_db_path(root), conn)?;
+    if migrated > 0 {
+        touch_plan_state_stamp(root)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn finish_satisfied_wait_write(root: &Path, updated: usize) -> Result<()> {
     if updated > 0 {
         touch_plan_state_stamp(root)?;
         let _ = emit_due_steps(root)?;
     }
-    Ok(updated)
+    Ok(())
 }
 
-pub(crate) fn reconcile_satisfied_waits(root: &Path) -> Result<usize> {
-    let conn = open_plan_db(root)?;
-    reconcile_satisfied_waits_with_conn(root, &conn)
-}
-
-fn reconcile_satisfied_waits_with_conn(root: &Path, conn: &Connection) -> Result<usize> {
-    let ticket_table_exists: i64 = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        params![super::tickets::LEGACY_WORK_ITEM_TABLE],
-        |row| row.get(0),
-    )?;
-    if ticket_table_exists == 0 {
-        return Ok(0);
-    }
-    let mut statement = conn.prepare(&format!(
-        r#"
-        SELECT DISTINCT w.entity_id, i.state
-        FROM planned_goal_waits w
-        JOIN {legacy_table} i ON i.work_id = w.entity_id
-        WHERE w.status = 'pending'
-          AND w.entity_type IN ('approval', 'approval-gate', '{legacy_wait}')
-          AND i.state = w.expected_state
-        "#,
-        legacy_table = super::tickets::LEGACY_WORK_ITEM_TABLE,
-        legacy_wait = super::tickets::LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE,
-    ))?;
-    let ready = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    if ready.is_empty() {
-        return Ok(0);
-    }
-    let tx = conn.unchecked_transaction()?;
-    let mut updated = 0usize;
-    for (work_id, state) in ready {
-        updated += satisfy_wait_for_work_item_tx(&tx, &work_id, &state)?;
-    }
-    tx.commit()?;
-    if updated > 0 {
-        touch_plan_state_stamp(root)?;
-    }
-    Ok(updated)
-}
-
-fn satisfy_wait_for_work_item_tx(
+pub(crate) fn satisfy_wait_for_work_item_tx(
     tx: &Transaction<'_>,
     work_id: &str,
     state: &str,
@@ -2612,6 +2577,7 @@ fn stable_digest(input: &str) -> String {
 mod tests {
     // ctox-allow-direct-state-write: test fixture module
     use super::*;
+    use crate::mission::tickets;
     use std::path::PathBuf;
 
     fn temp_plan_root(name: &str) -> PathBuf {
@@ -2943,6 +2909,93 @@ mod tests {
         assert_eq!(view.goal.status, PlanGoalStatus::Active.as_str());
         assert_eq!(view.steps[0].status, PlanStepStatus::Pending.as_str());
         assert_eq!(view.waits[0].status, "satisfied");
+        Ok(())
+    }
+
+    #[test]
+    fn work_item_wait_writer_resolves_satisfied_wait() -> Result<()> {
+        let root = temp_plan_root("work-item-wait-writer");
+        let gate = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "internal".to_string(),
+                kind: "approval-gate".to_string(),
+                title: "Approve writer-side wait resolution".to_string(),
+                body_text: "The approval transition must carry its plan wait.".to_string(),
+                state: "open".to_string(),
+                metadata: json!({
+                    "dedupe_key": "work-item-wait-writer",
+                    "thread_key": "plan/work-item-wait-writer",
+                }),
+            },
+            false,
+        )?;
+        let created = ingest_goal(
+            &root,
+            PlanIngestRequest {
+                title: "Continue after the approval writer closes the gate".to_string(),
+                prompt: "Continue only after the durable approval gate closes.".to_string(),
+                thread_key: Some("plan/work-item-wait-writer".to_string()),
+                skill: None,
+                auto_advance: false,
+                emit_now: false,
+                wait_for: Some(PlanWaitCondition {
+                    wait_ref: WaitRef {
+                        entity_type: "approval-gate".to_string(),
+                        entity_id: gate.work_id.clone(),
+                    },
+                    expected_state: "closed".to_string(),
+                }),
+            },
+        )?;
+        let message_key = "approval-wait-writer-message";
+        let conn = open_plan_db(&root)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS ticket_approval_reply_ledger (
+                message_key TEXT PRIMARY KEY,
+                work_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                sender_address TEXT NOT NULL,
+                body_sha256 TEXT NOT NULL,
+                residual_text TEXT NOT NULL,
+                decision_status TEXT NOT NULL,
+                followup_message_key TEXT,
+                observed_at TEXT NOT NULL,
+                applied_at TEXT
+            );
+            "#,
+        )?;
+        conn.execute(
+            r#"
+            INSERT INTO ticket_approval_reply_ledger (
+                message_key, work_id, action, sender_address, body_sha256,
+                residual_text, decision_status, followup_message_key, observed_at, applied_at
+            ) VALUES (?1, ?2, 'approve', 'owner@example.com', 'test-body-sha256',
+                      '', 'observed', NULL, ?3, NULL)
+            "#,
+            params![message_key, &gate.work_id, now_iso_string()],
+        )?;
+        drop(conn);
+
+        tickets::set_ticket_approval_gate_state_from_authorized_reply(
+            &root,
+            &gate.work_id,
+            "closed",
+            message_key,
+        )?;
+
+        let view = load_goal_with_steps(&root, &created.goal.goal_id)?.expect("goal reload");
+        assert_eq!(view.goal.status, PlanGoalStatus::Active.as_str());
+        assert_eq!(view.steps[0].status, PlanStepStatus::Pending.as_str());
+        assert_eq!(view.waits[0].status, "satisfied");
+        assert_eq!(
+            view.waits[0].evidence_ref,
+            Some(super::super::tickets::legacy_work_item_wait_evidence_ref(
+                &gate.work_id,
+                "closed"
+            ))
+        );
         Ok(())
     }
 
