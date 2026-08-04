@@ -7873,15 +7873,33 @@ async fn sync_knowledge_tables_with_database(
             count += 1;
         }
     }
-    let existing = collection
+    // Stale cleanup must never take the whole knowledge sync down. A document
+    // written through a foreign path (policy-gated MCP upserts are allowed on
+    // knowledge_tables) can leave the peer's doc cache with a conflicting
+    // revision; the query then fails with DOC_CACHE_REV on every cycle and the
+    // sync aborted forever after the upserts above had already succeeded. Skip
+    // cleanup for this cycle instead and keep the fresh projections.
+    let existing = match collection
         .find(Some(MangoQuery {
             limit: Some(10_000),
             ..Default::default()
         }))
-        .map_err(|err| anyhow::anyhow!("query stale knowledge_tables projections: {err}"))?
-        .exec(false)
-        .await
-        .map_err(|err| anyhow::anyhow!("exec stale knowledge_tables projection query: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("query stale knowledge_tables projections: {err}"))
+    {
+        Ok(query) => match query.exec(false).await {
+            Ok(existing) => existing,
+            Err(err) => {
+                eprintln!(
+                    "[business-os] skipping stale knowledge_tables cleanup this cycle: {err}"
+                );
+                return Ok(count);
+            }
+        },
+        Err(err) => {
+            eprintln!("[business-os] skipping stale knowledge_tables cleanup this cycle: {err}");
+            return Ok(count);
+        }
+    };
     for mut stale in existing.as_array().cloned().unwrap_or_default() {
         let Some(id) = stale.get("id").and_then(Value::as_str).map(str::to_string) else {
             continue;
