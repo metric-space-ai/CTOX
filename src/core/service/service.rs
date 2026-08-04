@@ -19506,12 +19506,11 @@ fn enqueue_prompt(
     };
     if let Some((message_keys, reason)) = deferred_durable_release {
         if let Err(err) = channels::ack_leased_messages(root, &message_keys, "pending") {
-            push_event(
-                state,
-                format!(
-                    "Failed to release deferred durable queue lease(s) back to pending after {reason}: {}",
-                    clip_text(&err.to_string(), 180)
-                ),
+            record_queue_ack_failure_durably(
+                root,
+                &err,
+                &format!("deferred durable queue lease(s) back to pending after {reason}"),
+                &message_keys,
             );
         }
         return;
@@ -24621,6 +24620,36 @@ fn record_ack_failure_locked<T>(shared: &mut SharedState, result: anyhow::Result
     }
 }
 
+fn record_queue_ack_failure_durably(
+    root: &Path,
+    error: &anyhow::Error,
+    what: &str,
+    message_keys: &[String],
+) {
+    let body_text = format!(
+        "Failed to ack {what}: {}",
+        clip_text(&error.to_string(), 180)
+    );
+    for message_key in message_keys {
+        harness_flow::record_harness_flow_event_lossy(
+            root,
+            harness_flow::RecordHarnessFlowEventRequest {
+                event_kind: "queue.ack_failed",
+                title: "Queue acknowledgement failed",
+                body_text: &body_text,
+                message_key: Some(message_key),
+                work_id: None,
+                ticket_key: None,
+                attempt_index: None,
+                metadata: serde_json::json!({
+                    "ack_operation": what,
+                    "error": error.to_string(),
+                }),
+            },
+        );
+    }
+}
+
 fn record_queue_ack_and_refresh_business_os_projections_locked<T>(
     root: &Path,
     shared: &mut SharedState,
@@ -24629,13 +24658,7 @@ fn record_queue_ack_and_refresh_business_os_projections_locked<T>(
     message_keys: &[String],
 ) {
     if let Err(err) = result {
-        push_event_locked(
-            shared,
-            format!(
-                "Failed to ack {what} after completion: {}",
-                clip_text(&err.to_string(), 180)
-            ),
-        );
+        record_queue_ack_failure_durably(root, &err, what, message_keys);
         return;
     }
 
@@ -35810,7 +35833,59 @@ Business OS command:
     }
 
     #[test]
-    fn queue_ack_refreshes_business_os_command_projection() -> anyhow::Result<()> {
+    fn queue_ack_failure_is_recorded_durably_with_message_key() -> anyhow::Result<()> {
+        let root = temp_root("queue-ack-failure-durable-event");
+        let message_keys = vec!["queue:system::ack-failure".to_string()];
+        let mut shared = SharedState::default();
+
+        record_queue_ack_and_refresh_business_os_projections_locked(
+            &root,
+            &mut shared,
+            Err::<(), anyhow::Error>(anyhow::anyhow!("database is locked")),
+            "handled queue lease(s)",
+            &message_keys,
+        );
+
+        assert!(
+            shared.recent_events.is_empty(),
+            "queue ack failure evidence must not live only in the process ring buffer: {:?}",
+            shared.recent_events
+        );
+        let conn = Connection::open(crate::paths::core_db(&root))?;
+        let event = conn.query_row(
+            "SELECT event_kind, title, body_text, message_key, metadata_json
+             FROM ctox_harness_flow_events
+             WHERE event_kind = 'queue.ack_failed' AND message_key = ?1",
+            params![message_keys[0].as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        assert_eq!(event.0, "queue.ack_failed");
+        assert_eq!(event.1, "Queue acknowledgement failed");
+        assert!(event.2.contains("handled queue lease(s)"));
+        assert!(event.2.contains("database is locked"));
+        assert_eq!(event.3, message_keys[0]);
+        let metadata: Value = serde_json::from_str(&event.4)?;
+        assert_eq!(
+            metadata.get("ack_operation").and_then(Value::as_str),
+            Some("handled queue lease(s)")
+        );
+        assert_eq!(
+            metadata.get("error").and_then(Value::as_str),
+            Some("database is locked")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_queue_ack_refreshes_business_os_command_projection() -> anyhow::Result<()> {
         let root = temp_root("business-os-queue-ack-projection");
         let accepted = crate::business_os::store::record_command(
             &root,
