@@ -186,6 +186,30 @@ Zusicherung, die erfüllt aussieht und es nicht ist. Ein Guard, der nur die
 Die alte Tabelle bleibt also nicht wegen einer Rückwärtsmigrations-Entscheidung
 stehen, sondern weil der ausführende Schritt fehlt.
 
+## `rxdb_peer.rs` fertig vermessen: aus fünf Belangen wurden drei, davon einer legitim
+
+Nachzählung am 04.08., je Belang selbst gemessen:
+
+1. **Schema-Sweep** → I-054, erledigt als Befund. Die Ursache ist der fehlende
+   Migrator (eigene Kampagne); der Sweep selbst schützt derzeit sogar korrekt
+   die 238.913 v1-Zeilen davor, als Müll zu gelten.
+2. **Projektionsabgleicher** (Queue-Tasks + Chat-Tracking) → I-057, Runde 1
+   gestellt. Der davorsitzende „Queue-Chat-Stempel" (6 Funktionen) ist **keine
+   Kompensation, sondern ein Sparschalter** — er bildet einen Fingerabdruck des
+   Stores und überspringt den Abgleich, wenn sich nichts geändert hat. Fünf der
+   sechs Funktionen existieren nur, damit dieser Schalter billig ist. Die
+   Dichtemetrik hatte sie als eigenen Belang gezählt; das war ihr dritter
+   Überschätzungsfall.
+3. **Verwaiste Browser-Sitzungen** (`recover_stale_browser_sessions`, `:6989`)
+   → **legitim, kein Auftrag.** Gemessen: null aktive Sitzungen im Bestand
+   (13 `disconnected`, 1 `failed`), der geordnete Teardown schreibt
+   `disconnected` selbst (`:10266`). Die Recovery greift nur, wenn eine Sitzung
+   `active` behauptet und der Laufzeit-Manager sie nicht kennt — der harte
+   Crash. Für den kann kein Schreibpfad den Endzustand garantieren; genau der
+   Fall, für den der Plan das Netz ausdrücklich stehen lässt. (Dasselbe Urteil
+   fiel schon am 31.07., als eine falsch gefilterte Zählung „116 Geister"
+   behauptete — die Funktion arbeitete die ganze Zeit korrekt.)
+
 ## I-056: die Dokumentation sichert einen Lebenszyklus zu, den es nicht gibt
 
 Der schwerste Fund dieser Kampagne, gefunden von I-056 und von mir am Code
