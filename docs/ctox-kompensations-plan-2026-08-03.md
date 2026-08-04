@@ -114,9 +114,66 @@ neu gebaut). Aus den Befunden: I-040 (Command-Bus-Widerspruch), I-041
 - I-006 Datenebene startet korrekt statt sich zu reparieren
 - I-015 Modul-Install schreibt die Verantwortung mit
 
+## Bilanz Welle 2
+
+- I-040 Command-Bus-Quittung sagt nicht mehr „angenommen" und „synchronisiert
+  noch" zugleich (17 Zeilen ersetzten 62, darunter eine 12-Sekunden-Schleife)
+- I-041 eine erfüllte Wartebedingung löst der Schreiber auf, der sie erfüllt hat
+- I-001 Projektionsdokumente bekommen die vollständige Hülle VOR dem Schreiben,
+  keine Reparatur danach — samt Substring-Vergleich auf Fehlertexten
+- I-008 gleichzeitige Metadaten-Schreiber summieren ihre Bytes (`06a4b251e`)
+- I-042 die agentische Queue-Reparatur ist fort (siehe unten)
+
+## Was die zweite Welle über das Verfahren gelehrt hat
+
+**Arbeit laufend als Patch sichern, nicht erst beim Bericht.** Zweimal traf
+eine Notbremse oder eine Räumung einen Worker mitten im Lauf; beim ersten Mal
+waren rund 160 Zeilen fort. Seit die Wache jede Minute `git diff` gegen
+`origin/main` nach `/Volumes/tmp/…/patches/` schreibt, kostet ein Abbruch
+nichts: I-008 und I-042 wurden beide ohne Bericht abgeschlossen, allein aus
+dem gesicherten Patch.
+
+**Die Systemplatte ist kein Regelwerk, das diese Pipeline durchsetzen kann.**
+Der belegende Bau läuft im isolierten Worktree auf `/Volumes/tmp` mit eigenem
+`CARGO_TARGET_DIR`; auf der Systemplatte bleiben nur Git-Operationen. Anders
+ist neben einer fremden Sitzung mit fünfzehn parallelen Cargo-Prozessen kein
+Testurteil zu bekommen.
+
+**Löschung braucht eine Messung an der Persistenz, keine Codelektüre.** Vor
+I-042 wurden vier Datenbanken über drei Wochen geprüft: null `queue.repair_*`
+unter 6452 Ereignissen. Ein toter Pfad ist erst tot, wenn die Daten es sagen.
+
 ## Offen
 
-- **I-040, I-041** — richtig geschnitten aus Welle-1-Befunden, bereit.
-- **I-008** — zurück: Fix korrekt, aber `dist/` nicht neu gebaut, Cache-Buster
-  nicht gebumpt (`docs/ctox-rxdb.md`). Neu stellen mit Testort.
-- **queue.rs / rxdb_peer.rs / service.rs** — nach Dichte, wie oben.
+- **`queue repair` heißt noch so, repariert aber nichts mehr** — der Pfad zählt
+  offene Einträge und zeigt zwanzig davon. Ein ehrlicher Name wäre `status`
+  oder `report`. Umbenennen bricht Skripte, deshalb Owner-Entscheid, nicht
+  einseitig.
+## Nachgemessen am 04.08.: die Reihenfolge kippt
+
+Die Dichtetabelle oben zählt Funktionen. Nach dem `queue.rs`-Befund wurden die
+beiden verbliebenen Dateien nach **unabhängigen Belangen** nachgemessen:
+
+| Datei | Funktionen | unabhängige Belange | je Belang |
+|---|---|---|---|
+| `rxdb_peer.rs` | 13 | 5 | 1:2952 |
+| `service.rs` | 50 | 9 | 1:2908 |
+
+Nach Funktionen sah `service.rs` viermal so belastet aus; nach Belangen sind
+beide gleichauf. Die Metrik überschätzt hier genau wie bei `queue.rs`.
+
+**Der Fund liegt darunter:** In `service.rs` gehören **22 der 50 Funktionen zu
+einem einzigen Belang** — der Business-OS-App-Recovery (Stempel, Idle-Gates,
+eigene Schleife, Preflight-Marker, fünf `recover_*`-Einstiege, verteilt über
+`service.rs:3912–19709`). Das ist die größte einzelne Kompensation, die im Repo
+noch steht — größer als die agentische Queue-Reparatur mit 19 Funktionen.
+
+Damit lautet die Begründung für `service.rs` nicht mehr „zu groß, eigener
+Feldzug", sondern: dort steht ein Belang mit 22 Helfern, und der ist das
+nächste Ziel. Die fünf Belange in `rxdb_peer.rs` — Schema-Drift (4 Funktionen),
+Queue-Chat-Stempel (6), zwei Projektionsabgleiche, verwaiste Browser-Sitzungen
+— sind kleiner und voneinander unabhängig, also gut parallelisierbar.
+
+**Reihenfolge ab hier:** erst der 22-Funktionen-Belang in `service.rs` (Runde 1
+lokalisiert die Ursache: warum bleiben App-Queue-Tasks überhaupt liegen?), dann
+die fünf `rxdb_peer.rs`-Belange als Welle.
