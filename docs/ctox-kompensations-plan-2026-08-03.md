@@ -91,6 +91,14 @@ Welle 1 brach mein Gegenprobe-Skript vor der Änderung ab, der Test lief gegen
 unveränderten Code und meldete grün — bewies nichts. Die Gegenprobe ist erst
 gültig, wenn der Rückbau den Test ROT macht.
 
+**`cargo check --bin ctox` übersetzt keine Tests.** Bei meinem Endschliff zu
+I-050 habe ich eine Signatur geändert, `cargo check` meldete Exit 0, und der
+Testbau brach an drei Stellen mit `E0061`. Meine Regex erwartete `&variable` als
+erstes Argument; drei Teststellen übergaben `prompt` ohne `&`. Bei jeder
+Signaturänderung gehört `--tests` dazu — sonst ist „grün" nur die halbe
+Übersetzungseinheit. Und: was ein regulärer Ausdruck nicht sieht, sieht der
+Compiler; die Arbeitsteilung sollte man nutzen, statt dem Muster zu vertrauen.
+
 ## Infrastruktur (liegt auf dauerhaftem Speicher)
 
 - Pipeline: `/Volumes/tmp/ctox-pipeline/` (NICHT `/private/tmp` — das räumt die
@@ -143,6 +151,83 @@ Testurteil zu bekommen.
 I-042 wurden vier Datenbanken über drei Wochen geprüft: null `queue.repair_*`
 unter 6452 Ereignissen. Ein toter Pfad ist erst tot, wenn die Daten es sagen.
 
+## I-054: der Schema-Sweep ist nicht die Kompensation — der fehlende Migrator ist es
+
+Meine Prämisse war zweimal falsch, und die Messung hat beides umgeworfen.
+
+**Erstens:** Ich schrieb, ein Schema-Bump lasse die alte Tabelle stehen und der
+Startup-Sweep räume sie weg. Der Sweep iteriert aber ausschließlich die
+statische Liste aus `business_os_schema_contract.json`
+(`rxdb_peer.rs:14224-14245`). Die vier auffälligen `sellify_*`-Sammlungen sind
+Runtime-Module und stehen dort nicht — **er sieht sie gar nicht an.** Und das
+ist richtig so: täte er es, würde der Guard die v1-Tabellen mit 238.913 Zeilen
+für Müll halten.
+
+**Zweitens:** Die v0-Tabellen sind nicht Reste eines Upgrades, sondern **leere
+Trümmer eines Rückschritts**. Belegt durch die SQLite-Anlagereihenfolge
+(`rowid` v1 = 711–717, v0 = 719–725, also v0 SPÄTER angelegt) und durch die
+Zeilenzahlen: v0 = 0, v1 = 238.913. Das Log zeigt eine echte, ausgelöste
+Migration mit anschließendem Cleanup — die war legitim. Danach deklarieren die
+installierten Sellify-Dateien dieselben Sammlungen wieder als v0.
+
+**Die eigentliche Ursache ist architektonisch: es gibt keinen Migrator.**
+Ein Schema-Bump ist heute nur „neues versionsabhängiges Metadokument plus neue
+leere Tabelle". Kein Copy, kein Verify, kein Drop. Das native Migrations-Plugin
+ist ein ausdrücklicher Stub (`migration_schema/mod.rs:1-5`), `migration_needed`
+und `start_migration` liefern `PLUGIN_MISSING` (`rx_collection.rs:1013-1028`).
+
+**Und die Browserseite behauptet einen Vertrag, den sie nicht erfüllt.**
+`app.js:5201-5253` hängt `migrationStrategies` an die Collection-Definition, ein
+Guard prüft, dass sie *kompilieren* — aber `addCollections` liest das Feld nie
+(`rx-database.mjs:124-145`). Das ist die schlimmste Sorte Kompensation: eine
+Zusicherung, die erfüllt aussieht und es nicht ist. Ein Guard, der nur die
+Übersetzbarkeit prüft, verstärkt die Täuschung, statt sie aufzudecken.
+
+Die alte Tabelle bleibt also nicht wegen einer Rückwärtsmigrations-Entscheidung
+stehen, sondern weil der ausführende Schritt fehlt.
+
+## I-056: die Dokumentation sichert einen Lebenszyklus zu, den es nicht gibt
+
+Der schwerste Fund dieser Kampagne, gefunden von I-056 und von mir am Code
+nachgeprüft.
+
+`docs/ctox-rxdb.md:289-295` schreibt: „Runtime-installed schema migrations are
+native too … It executes the supported declarative operations, verifies every
+source envelope in the target version, and only then permits stale-table
+cleanup." Die Tabelle bei `:706-707` nennt die durchsetzenden Funktionen und
+die Wächtertests dazu:
+
+| in der Doku genannt | existiert im Repo |
+|---|---|
+| `migrate_additive_native_rxdb_collection_versions` | **nein** |
+| `native_rxdb_additive_migrations` | **nein** |
+| `additive_thread_schema_migration_copies_and_verifies_before_cleanup` | **nein** |
+| `runtime_installed_declarative_migration_is_discovered_and_copied` | **nein** |
+| `runtime_migration_without_strategy_retains_old_table_and_fails_closed` | **nein** |
+| `native_declarative_migration_matches_browser_operations` | ja |
+
+Der eine existierende Wächter prüft `apply_native_declarative_migration`
+isoliert — und diese Funktion hat **genau einen Aufrufer: ihren eigenen Test**
+(`rxdb_peer.rs:16744`). In Produktion läuft sie nie. Der Wächter erzeugt also
+genau die Sicherheit, die er widerlegen sollte.
+
+**Warum das schlimmer ist als fehlender Code:** Wer diese Doku liest, hält
+Datenerhalt beim Schema-Wechsel für zugesichert und geprüft. Beides ist falsch.
+Eine Zusicherung, die niemand einlöst, ist gefährlicher als eine fehlende — sie
+verhindert, dass jemand nachsieht.
+
+**Nicht zu tun: die Doku an den Code angleichen.** Sie beschreibt die richtige
+Absicht; sie zu streichen löschte die Anforderung. Richtig ist, die
+Nicht-Umsetzung ausdrücklich zu kennzeichnen, damit niemand sich darauf
+verlässt, und den Lebenszyklus als eigene Kampagne zu bauen. Sol hat genau das
+vorgeschlagen und ausdrücklich abgelehnt, Variante (a) halb zu bauen — die
+Browser-Storage hat keinen persistenten Versionsmarker und keine Transaktion,
+die migrierte Zeilen und Versionsumschaltung atomar schreibt.
+
+Nebenbei gemessen: drei Module deklarieren Strategien widersprüchlich zwischen
+`schema.js` und `collections.schema.json` (`browser`, `credentials`, `creator`),
+und der App-Starter erzeugt beide Seiten uneinheitlich.
+
 ## Offen
 
 - **`queue repair` heißt noch so, repariert aber nichts mehr** — der Pfad zählt
@@ -177,3 +262,37 @@ Queue-Chat-Stempel (6), zwei Projektionsabgleiche, verwaiste Browser-Sitzungen
 **Reihenfolge ab hier:** erst der 22-Funktionen-Belang in `service.rs` (Runde 1
 lokalisiert die Ursache: warum bleiben App-Queue-Tasks überhaupt liegen?), dann
 die fünf `rxdb_peer.rs`-Belange als Welle.
+
+## Was Runde 1 dazu ergeben hat (I-051, 04.08.)
+
+**Eine Doku-Behauptung ist keine Messung.** `docs/ctox-harness-review-2026-07-10.md`
+schreibt, es gebe kein Lease-TTL und keinen owner-agnostischen Reclaim. Für den
+heutigen Code ist das falsch, am Code gegengeprüft: TTL 15 Minuten
+(`channels/mod.rs:3394`), owner-agnostischer Reclaim (`channels/mod.rs:3494` —
+nimmt `_lease_owner` und ignoriert ihn), dazu 60-Sekunden-Sweep und
+Boot-Reclaim. Der Auftrag verlangte ausdrücklich Nachmessen statt Übernehmen;
+ohne diese Klausel wäre ein Auftrag entstanden, der einen Mechanismus baut, den
+es seit Juli gibt.
+
+**Die Ursache ist ein verschluckter Ack.**
+`record_queue_ack_and_refresh_business_os_projections_locked`
+(`service.rs:24587`) behandelt einen fehlgeschlagenen Ack mit
+`push_event_locked(...)` und `return`. Dieser Puffer hält **24 Einträge im
+Prozessspeicher** und stirbt mit dem Prozess. Der Code gibt es selbst zu:
+„Record *swallowed* lease-ack failures … only makes a *stuck lease*
+diagnosable." Die In-Memory-Ownership fällt zu dem Zeitpunkt bereits, die Zeile
+bleibt `leased`, und nichts davon ist dauerhaft belegt.
+
+**Damit ist auch die Messmethode dieses Plans zu korrigieren.** „Null Ereignisse
+in der Persistenz" beweist nur dann Totsein, wenn der Pfad überhaupt dauerhaft
+schreibt. Hier tut er es nicht — null heißt „wird nicht geschrieben", nicht
+„passiert nicht". Vor jeder Löschung ist deshalb zusätzlich zu prüfen, ob der
+fragliche Pfad seine Wirkung überhaupt persistiert. Ein dauerhafter Nebenbeleg
+fand sich trotzdem: genau ein Marker `...during idle recovery...` vom 23.06. —
+vor dem TTL (10.07.) und vor dem Orphaned-Lease-Fix (23.07.).
+
+**Folge für die Reihenfolge:** Der 22-Funktionen-Belang fällt nicht als
+Nächstes. Zuerst I-052 (der Ack wird dauerhaft festgehalten), danach ist die
+Frage überhaupt erst messbar — I-053 steht bis dahin auf `blockiert`. Offen und
+ungemessen bleibt, ob die Validierung der App-Recovery echten Schaden verhindert
+oder nur wiederholt, was ein neuer Lauf ohnehin tut.

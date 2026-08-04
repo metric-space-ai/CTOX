@@ -286,13 +286,27 @@ cross-process JS↔Rust tests) and `examples/v15_scale_wire_loop.rs`, `tools/`
   (failing *required* collections abort the run; optional ones are skipped),
   then brings up **one** multiplexed replication session for the whole sync
   room via `replicate_web_rtc_rs_multi_with_url_provider`.
-- **Runtime-installed schema migrations are native too.** For collections
-  declared by `installed-modules/` or `local-modules/`, the peer reads the
-  JSON-only `migration_strategies` from the same `collections.schema.json`
-  used by the browser. It executes the supported declarative operations,
-  verifies every source envelope in the target version, and only then permits
-  stale-table cleanup. A missing strategy is tolerated only when the old
-  source table is absent; persisted old rows make bring-up fail closed.
+- **Runtime-installed schema migrations are native too — INTENDED, NOT
+  IMPLEMENTED (measured 2026-08-04).** The paragraph below describes the
+  contract this system is meant to hold. Do not rely on it today: the named
+  enforcement does not exist. `migrate_additive_native_rxdb_collection_versions`
+  and `native_rxdb_additive_migrations` are not defined anywhere in the repo,
+  and neither are the three guard tests cited in the invariant table below.
+  The one helper that does exist, `apply_native_declarative_migration`
+  (`rxdb_peer.rs:14127`), has exactly one caller — its own unit test. A schema
+  version bump therefore creates a new empty versioned table and leaves the old
+  one untouched; no copy, no verify, no fail-closed. The browser half is the
+  same: `addCollections` (`rxdb/src/rx-database.mjs:124-145`) never reads
+  `migrationStrategies`, though `app.js` passes them and a guard checks that
+  they compile.
+
+  *The intended contract:* For collections declared by `installed-modules/` or
+  `local-modules/`, the peer reads the JSON-only `migration_strategies` from
+  the same `collections.schema.json` used by the browser. It executes the
+  supported declarative operations, verifies every source envelope in the
+  target version, and only then permits stale-table cleanup. A missing strategy
+  is tolerated only when the old source table is absent; persisted old rows make
+  bring-up fail closed.
 - **Bring-up failure is fatal, not a zombie.** A 20 s bring-up timeout aborts
   the attempt (the in-flight task is `abort()`ed so it cannot leak a live
   orphan session) and returns an error to the supervisor for a backed-off
@@ -703,8 +717,8 @@ that fails on the pre-fix code.
 | **The desktop-file idle scan must not re-check every chunk of a verified generation.** Newly written or once-verified eager file docs carry `chunk_count` and `generation_verified_at_ms`; unchanged rescans use that marker instead of rebuilding the expected chunk-id list every 15 s. | Materialised large files stayed sticky `available`, but the idle scan still checked every expected chunk id on every pass. Large files therefore created periodic CPU spikes even when no file changed. | `rxdb_peer.rs::desktop_file_generation_verified_by_metadata` / `mark_desktop_file_chunk_generation_verified` | `materialized_large_file_survives_lazy_rescan`; targeted `rxdb_peer.rs` tests |
 | **Active-collection gating must never lose events permanently.** Three sub-rules: (a) a peer that has never reported an active set is fail-open (all relays delivered) until its first report; (b) applying a new active set pushes one resync master-change per re-activated collection (closes the send→apply transit window); (c) the browser runs one checkpoint pull per newly-activated collection on every registry change. | Relays for "inactive" collections are dropped and browser pulls are purely event-driven — each hole left a collection permanently stale (viewer-restart soak mode: the browser file doc stayed `lazy` forever while the native doc was `available`). | `connection_handler_rs.rs::is_collection_active_for_peer` / `apply_active_collections` (+ the resync push in its message loop); relay drop point in `index_mod.rs`; `replication-webrtc.mjs` registry subscription | gating tests in `connection_handler_rs.rs`; `active-collections-catchup-smoke` (browser); viewer-restart soak mode |
 | **The multiplex room handshake carries per-collection checkpoints** (`collectionCheckpoints`, mirroring `collectionSchemas`; key absent for single-collection rooms). | Collections deriving their protocol from the room handshake advertised the REPRESENTATIVE collection's checkpoint epoch — wrong-collection checkpoint evidence after every native restart. | `index_mod.rs::collection_checkpoints_payload`; consumed by `replication-webrtc.mjs::remoteProtocolForCollection` | `handshake_payload_omits_collection_schemas_when_none` |
-| **Native schema-version cleanup runs only after an additive migration copied and verified every source row.** Identity migrations are idempotent, preserve the newer destination row by `lastWriteTime`, and abort peer bring-up when any source id is absent or older in the destination. | Creating v1 metadata/table and crashing before the copy let the next startup classify the non-empty v0 table as stale and delete the only complete thread history. | `rxdb_peer.rs::migrate_additive_native_rxdb_collection_versions`, called after collection registration and before `repair_stale_rxdb_collection_schema_versions` | `additive_thread_schema_migration_copies_and_verifies_before_cleanup` |
-| **Runtime app migrations are declared in JSON and enforced on both peers.** Every runtime collection with `version > 0` must provide every intermediate `migration_strategies.<collection>.<targetVersion>` entry. The native peer supports the same `set_from_first_truthy` and `set_boolean` operations as the browser plus identity migrations (`operations: []`). Missing strategies with persisted source rows abort before cleanup. | Browser-only `schema.js` functions left the native v0 store stranded or tempted operators into destructive same-version cleanup; schema changes made in place could also produce DB6 forever. | `shared/declarative-migrations.js`, `module_static_check.mjs`, `rxdb_peer.rs::native_rxdb_additive_migrations` | `runtime_installed_declarative_migration_is_discovered_and_copied`, `native_declarative_migration_matches_browser_operations`, `runtime_migration_without_strategy_retains_old_table_and_fails_closed` |
+| **NOT IMPLEMENTED (measured 2026-08-04) — intended:** Native schema-version cleanup runs only after an additive migration copied and verified every source row. Identity migrations are idempotent, preserve the newer destination row by `lastWriteTime`, and abort peer bring-up when any source id is absent or older in the destination. | Creating v1 metadata/table and crashing before the copy let the next startup classify the non-empty v0 table as stale and delete the only complete thread history. | `rxdb_peer.rs::migrate_additive_native_rxdb_collection_versions`, called after collection registration and before `repair_stale_rxdb_collection_schema_versions` | `additive_thread_schema_migration_copies_and_verifies_before_cleanup` |
+| **NOT IMPLEMENTED (measured 2026-08-04) — intended:** Runtime app migrations are declared in JSON and enforced on both peers. Every runtime collection with `version > 0` must provide every intermediate `migration_strategies.<collection>.<targetVersion>` entry. The native peer supports the same `set_from_first_truthy` and `set_boolean` operations as the browser plus identity migrations (`operations: []`). Missing strategies with persisted source rows abort before cleanup. | Browser-only `schema.js` functions left the native v0 store stranded or tempted operators into destructive same-version cleanup; schema changes made in place could also produce DB6 forever. | `shared/declarative-migrations.js`, `module_static_check.mjs`, `rxdb_peer.rs::native_rxdb_additive_migrations` | `runtime_installed_declarative_migration_is_discovered_and_copied`, `native_declarative_migration_matches_browser_operations`, `runtime_migration_without_strategy_retains_old_table_and_fails_closed` |
 | **A terminal `completed` command ack without `task_id` is success.** Control commands (`ctox.file.materialize`, `ctox.module.*`, …) are executed directly and intentionally never get a queue-task projection. | The command bus waited 45 s for a task that never comes — every control command dispatched through it failed. | `command-bus.js::waitForAuthoritativeQueueProjection` | `command-bus-projection-smoke` |
 | **The 410 data-plane gate has an explicit control-plane allowlist** (subscription auth, CTOX release check/apply, `sync/native-peer/restart`). Control routes carry no Business OS records; CTOX release actions are admin-gated and only read release metadata or launch the existing installer, and the peer-restart route additionally answers 403 unless `CTOX_BUSINESS_OS_ENABLE_SMOKE_CONTROLS` is set. This is NOT a precedent for HTTP data routes. | The blanket 410 also killed the peer-lifecycle hook the rollover soak mode uses. | `server.rs::is_business_os_control_plane_path` | rollover soak mode |
 
