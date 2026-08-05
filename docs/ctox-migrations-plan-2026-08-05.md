@@ -95,3 +95,35 @@ beide Richtungen, `--tests` nach jeder Signaturänderung.
 
 **Offen:** I-061 Runde 2 (Browser-Invalidationspfad — Sol, eigener Worktree,
 dist-Neubau + Cache-Buster Pflicht) und danach die sechs Browser-Smokes.
+
+## Schlussbilanz (05.08.2026, abends)
+
+SYNC-E ist abgeschlossen. Beide Seiten des Migrationsvertrags existieren und
+sind bewacht:
+
+- **I-060** (`c46499358`): der native Lebenszyklus — registrieren, migrieren,
+  verifizieren, erst dann aufräumen; fail-closed ohne Strategie. Die Wächter
+  tragen die Namen aus der Doku.
+- **I-063** (`24e4f9dc8`): der Browser invalidiert als Replica — persistenter
+  Zweiphasen-Marker (Version + effektiver Hash), Fail-closed auf beiden
+  Unsynced-Signalen, `pushable`-Zählung INNERHALB der destruktiven Transaktion
+  (TOCTOU geschlossen), Web-Lock, typisierte Fehler auch ohne Web-Locks-API.
+- **I-062** (`172e8059d`): Deklarationen deckungsgleich über 34 Module plus
+  Starter; der Wächter prüft Spiegelgleichheit statt Kompilierbarkeit.
+- **Doku** (`8efb91448`): die NOT-IMPLEMENTED-Markierungen sind gefallen — die
+  Zusicherung ist wieder wahr, mit historischer Notiz zum Zeitraum der Lücke.
+- **Abdeckung** (`fd2ccf738`): sechs Browser-Smokes, 67 Assertions gesamt,
+  jede Flanke rot-fähig bewiesen (WAL-pending, Multi-Tab-TOCTOU,
+  Sidecar-Fenster, Full-Pull, Reset/WAL).
+
+**Die Grok-Spur** (Standard-Coding-Worker `claude-grok`, in dieser Kampagne
+etabliert): vier Aufträge, vier verwertbare Ergebnisse — zwei Zähler-Fixes
+(`22cf6406c`, `163fb78e4`, `74f5dc5c3` als Abschluss), eine Musteranalyse,
+ein korrektes Teil-Nein, das den Folgeauftrag präzise anforderte. Eine
+dokumentierte Schwäche: Gateway-Ausfälle töten den Worker stumm nach getaner
+Arbeit — die Wache erkennt sie seither im Log, und die Patch-Sicherung macht
+den Verlust zu null.
+
+**Bewusst offen, mit Bedingung:** I-053 (App-Recovery-Löschung) wartet auf
+`queue.ack_failed`-Messdaten über Zeit; die Pro-Key-Ack-Reihenfolge ist nur
+nötig, falls die Messung sie rechtfertigt. Sonst ist nichts offen.
