@@ -2387,29 +2387,6 @@ async fn run_native_peer(
         peer_session_id.clone(),
         database_path.clone(),
     );
-    match repair_stale_rxdb_collection_schema_versions(&root) {
-        Ok(result) => {
-            let repaired_tables = result
-                .get("repaired_tables")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let repaired_triggers = result
-                .get("repaired_triggers")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if repaired_tables > 0 || repaired_triggers > 0 {
-                eprintln!(
-                    "[business-os] repaired {repaired_tables} stale RxDB collection schema table(s) \
-                     and {repaired_triggers} trigger(s) before native peer startup"
-                );
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "[business-os] stale RxDB schema table repair failed before peer startup: {err:#}"
-            );
-        }
-    }
     let database = open_database(database_path.clone()).await?;
     let database_write_lock = Arc::new(AsyncMutex::new(()));
 
@@ -2433,6 +2410,36 @@ async fn run_native_peer(
             "[business-os] skipping optional Business OS RxDB collection `{collection_name}` \
             (registration failed: {err})"
         );
+    }
+
+    // Registration materializes the target-version tables. Only after every
+    // persisted source row has been migrated and verified may the legacy sweep
+    // remove old version tables. Migration failures are fatal: continuing would
+    // publish a live heartbeat for a peer whose runtime collections are empty.
+    migrate_additive_native_rxdb_collection_versions(&root)
+        .context("migrate native Business OS RxDB collection schema versions")?;
+    match repair_stale_rxdb_collection_schema_versions(&root) {
+        Ok(result) => {
+            let repaired_tables = result
+                .get("repaired_tables")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let repaired_triggers = result
+                .get("repaired_triggers")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if repaired_tables > 0 || repaired_triggers > 0 {
+                eprintln!(
+                    "[business-os] repaired {repaired_tables} stale RxDB collection schema table(s) \
+                     and {repaired_triggers} trigger(s) after verified native migration"
+                );
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "[business-os] stale RxDB schema table repair failed after verified migration: {err:#}"
+            );
+        }
     }
     match compact_desktop_file_index_store(&root).await {
         Ok(stats) if stats.changed() => {
@@ -13407,6 +13414,7 @@ struct RuntimeModuleCollectionEntry {
     name: String,
     schema: RxJsonSchema,
     sync_profile: RuntimeModuleSyncProfile,
+    migration_strategies: BTreeMap<i64, Value>,
 }
 
 /// SYNC-32: per-collection sync profile a runtime-installed module declares in
@@ -13484,6 +13492,30 @@ fn demand_chunk_key_field_for_schema(name: &str, schema_value: &Value) -> anyhow
         "demand-chunks collection `{name}` schema is missing the owner key field \
          (`file_id` or `blob_id`)"
     )
+}
+
+fn runtime_module_migration_strategies_for_collection(
+    schema_doc: &Value,
+    collection: &str,
+) -> BTreeMap<i64, Value> {
+    schema_doc
+        .get("migration_strategies")
+        .and_then(Value::as_object)
+        .and_then(|strategies| strategies.get(collection))
+        .and_then(Value::as_object)
+        .map(|strategies| {
+            strategies
+                .iter()
+                .filter_map(|(target, spec)| {
+                    target
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|target| *target > 0)
+                        .map(|target| (target, spec.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn module_dir_collection_entries(
@@ -13602,6 +13634,8 @@ fn module_dir_collection_entries(
                     name: name.clone(),
                     schema,
                     sync_profile,
+                    migration_strategies:
+                        runtime_module_migration_strategies_for_collection(&schema_doc, name),
                 }),
                 Err(err) => {
                     eprintln!(
@@ -13698,7 +13732,9 @@ fn native_declarative_migration_operations(spec: &Value) -> anyhow::Result<Vec<V
         spec.get("operations")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default()
+            .ok_or_else(|| {
+                anyhow::anyhow!("declarative migration spec must contain an operations array")
+            })?
     };
     for operation in &operations {
         let object = operation
@@ -13727,6 +13763,13 @@ fn native_declarative_migration_operations(spec: &Value) -> anyhow::Result<Vec<V
 
 fn apply_native_declarative_migration(old_doc: &Value, spec: &Value) -> anyhow::Result<Value> {
     let operations = native_declarative_migration_operations(spec)?;
+    apply_native_declarative_migration_operations(old_doc, &operations)
+}
+
+fn apply_native_declarative_migration_operations(
+    old_doc: &Value,
+    operations: &[Value],
+) -> anyhow::Result<Value> {
     let mut migrated = old_doc.as_object().cloned().unwrap_or_default();
     for operation in operations {
         let object = operation
@@ -13789,6 +13832,268 @@ fn native_declarative_value_is_truthy(value: &Value) -> bool {
         Value::Array(value) => !value.is_empty(),
         Value::Object(value) => !value.is_empty(),
     }
+}
+
+#[derive(Debug)]
+struct NativeMigrationRow {
+    id: String,
+    revision: Option<String>,
+    deleted: i64,
+    last_write_time: f64,
+    data: Value,
+}
+
+/// Migrate runtime-installed/local module collections after registration has
+/// created the target tables and before stale-version cleanup is allowed.
+///
+/// A non-empty source table requires every declarative step from its version to
+/// the registered target version. Empty legacy tables deliberately require no
+/// chain so currently deployed zero-row leftovers can be swept safely.
+fn migrate_additive_native_rxdb_collection_versions(root: &Path) -> anyhow::Result<Value> {
+    let database_path = store::rxdb_store_path(root);
+    if !database_path.is_file() {
+        return Ok(json!({
+            "ok": true,
+            "migrated_tables": 0,
+            "migrated_rows": 0,
+            "verified_rows": 0
+        }));
+    }
+    let mut conn = Connection::open(&database_path).with_context(|| {
+        format!(
+            "open native Business OS RxDB store {} for schema migration",
+            database_path.display()
+        )
+    })?;
+    conn.busy_timeout(Duration::from_secs(10))
+        .context("configure native RxDB migration busy_timeout")?;
+
+    let mut migrated_tables = 0usize;
+    let mut migrated_rows = 0usize;
+    let mut verified_rows = 0usize;
+    for entry in runtime_module_collection_entries_for_root(root) {
+        let target_version = i64::from(entry.schema.version);
+        let target_table = rxdb_collection_version_table_name(&entry.name, target_version);
+        let version_tables = rxdb_collection_version_tables(&conn, &entry.name)?;
+        for (source_version, source_table) in version_tables {
+            if source_version == target_version {
+                continue;
+            }
+            let source_rows = sqlite_table_row_count(&conn, &source_table)?;
+            if source_rows == 0 {
+                continue;
+            }
+            anyhow::ensure!(
+                source_version < target_version,
+                "runtime migration fail-closed for collection `{}`: source version {} has {} row(s), but registered target version {} cannot apply a reverse migration",
+                entry.name,
+                source_version,
+                source_rows,
+                target_version
+            );
+            anyhow::ensure!(
+                sqlite_table_exists(&conn, &target_table)?,
+                "runtime migration fail-closed for collection `{}`: target version {} table `{}` was not registered while source version {} contains {} row(s)",
+                entry.name,
+                target_version,
+                target_table,
+                source_version,
+                source_rows
+            );
+
+            let mut operation_steps = Vec::new();
+            for step in (source_version + 1)..=target_version {
+                let spec = entry.migration_strategies.get(&step).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "runtime migration fail-closed for collection `{}` from version {} to {}: missing migration_strategies.{}.{}",
+                        entry.name,
+                        source_version,
+                        target_version,
+                        entry.name,
+                        step
+                    )
+                })?;
+                let operations = native_declarative_migration_operations(spec).with_context(|| {
+                    format!(
+                        "runtime migration fail-closed for collection `{}`: invalid migration_strategies.{}.{}",
+                        entry.name, entry.name, step
+                    )
+                })?;
+                operation_steps.push(operations);
+            }
+
+            let copied = migrate_native_rxdb_version_table(
+                &mut conn,
+                &entry.name,
+                source_version,
+                &source_table,
+                target_version,
+                &target_table,
+                &operation_steps,
+            )?;
+            migrated_tables += 1;
+            migrated_rows += copied;
+            verified_rows += source_rows as usize;
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "migrated_tables": migrated_tables,
+        "migrated_rows": migrated_rows,
+        "verified_rows": verified_rows
+    }))
+}
+
+fn rxdb_collection_version_tables(
+    conn: &Connection,
+    collection: &str,
+) -> anyhow::Result<Vec<(i64, String)>> {
+    let prefix = rxdb_collection_version_table_prefix(collection);
+    let pattern = format!("{prefix}%");
+    let mut statement = conn.prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE ?1
+         ORDER BY name ASC",
+    )?;
+    let rows = statement.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+    let mut tables = Vec::new();
+    for row in rows {
+        let table = row?;
+        if let Some(version) = rxdb_collection_version_from_table_name(&table, &prefix) {
+            tables.push((version, table));
+        }
+    }
+    tables.sort_by_key(|(version, _)| *version);
+    Ok(tables)
+}
+
+fn migrate_native_rxdb_version_table(
+    conn: &mut Connection,
+    collection: &str,
+    source_version: i64,
+    source_table: &str,
+    target_version: i64,
+    target_table: &str,
+    operation_steps: &[Vec<Value>],
+) -> anyhow::Result<usize> {
+    let source_revision = if sqlite_table_has_column(conn, source_table, "revision")? {
+        "revision"
+    } else {
+        "json_extract(data, '$._rev')"
+    };
+    let source_deleted = if sqlite_table_has_column(conn, source_table, "deleted")? {
+        "COALESCE(deleted, 0)"
+    } else {
+        "COALESCE(json_extract(data, '$._deleted'), 0)"
+    };
+    let source_has_lwt = sqlite_table_has_column(conn, source_table, "lastWriteTime")?;
+    let source_lwt = if source_has_lwt {
+        "COALESCE(lastWriteTime, 0)"
+    } else {
+        "CAST(COALESCE(json_extract(data, '$._meta.lwt'), json_extract(data, '$.updated_at_ms'), 0) AS REAL)"
+    };
+    let verification_source_lwt = if source_has_lwt {
+        "COALESCE(source.lastWriteTime, 0)"
+    } else {
+        "CAST(COALESCE(json_extract(source.data, '$._meta.lwt'), json_extract(source.data, '$.updated_at_ms'), 0) AS REAL)"
+    };
+    for column in ["revision", "deleted", "lastWriteTime", "data"] {
+        anyhow::ensure!(
+            sqlite_table_has_column(conn, target_table, column)?,
+            "runtime migration fail-closed for collection `{collection}`: target version {target_version} table `{target_table}` is missing required column `{column}`"
+        );
+    }
+
+    let transaction = conn.transaction().with_context(|| {
+        format!("begin runtime migration for `{collection}` v{source_version}->v{target_version}")
+    })?;
+    let source_sql = format!(
+        "SELECT id, {source_revision}, {source_deleted}, {source_lwt}, data FROM {} ORDER BY id",
+        sqlite_quote_identifier(source_table)
+    );
+    let quoted_target_table = sqlite_quote_identifier(target_table);
+    let target_sql = format!(
+        "INSERT INTO {quoted_target_table} (id, revision, deleted, lastWriteTime, data)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+             revision = excluded.revision,
+             deleted = excluded.deleted,
+             lastWriteTime = excluded.lastWriteTime,
+             data = excluded.data
+         WHERE COALESCE(excluded.lastWriteTime, 0) >= COALESCE({quoted_target_table}.lastWriteTime, 0)"
+    );
+    let mut source_statement = transaction
+        .prepare(&source_sql)
+        .with_context(|| format!("prepare runtime migration source table `{source_table}`"))?;
+    let mut source_rows = source_statement
+        .query([])
+        .with_context(|| format!("read runtime migration source table `{source_table}`"))?;
+    let mut copied = 0usize;
+    while let Some(row) = source_rows.next()? {
+        let raw_data: String = row.get(4)?;
+        let mut migrated = serde_json::from_str::<Value>(&raw_data).with_context(|| {
+            format!(
+                "parse runtime migration document in `{source_table}` for collection `{collection}`"
+            )
+        })?;
+        for operations in operation_steps {
+            migrated = apply_native_declarative_migration_operations(&migrated, operations)
+                .with_context(|| {
+                    format!(
+                        "apply runtime migration for collection `{collection}` v{source_version}->v{target_version}"
+                    )
+                })?;
+        }
+        let migration_row = NativeMigrationRow {
+            id: row.get(0)?,
+            revision: row.get(1)?,
+            deleted: row.get(2)?,
+            last_write_time: row.get(3)?,
+            data: migrated,
+        };
+        copied += transaction.execute(
+            &target_sql,
+            params![
+                migration_row.id,
+                migration_row.revision,
+                migration_row.deleted,
+                migration_row.last_write_time,
+                migration_row.data.to_string()
+            ],
+        )?;
+    }
+    drop(source_rows);
+    drop(source_statement);
+
+    let missing_or_older: i64 = transaction
+        .query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM {} AS source
+                 LEFT JOIN {} AS target ON target.id = source.id
+                 WHERE target.id IS NULL
+                    OR COALESCE(target.lastWriteTime, 0) < {verification_source_lwt}",
+                sqlite_quote_identifier(source_table),
+                sqlite_quote_identifier(target_table)
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .with_context(|| {
+            format!(
+                "verify runtime migration for collection `{collection}` v{source_version}->v{target_version}"
+            )
+        })?;
+    anyhow::ensure!(
+        missing_or_older == 0,
+        "runtime migration verification failed for collection `{collection}` v{source_version}->v{target_version}: {missing_or_older} source id(s) are absent or older in `{target_table}`"
+    );
+    transaction.commit().with_context(|| {
+        format!(
+            "commit verified runtime migration for collection `{collection}` v{source_version}->v{target_version}"
+        )
+    })?;
+    Ok(copied)
 }
 
 fn business_os_schema(name: &str, primary_key: &str) -> RxJsonSchema {
@@ -13968,11 +14273,22 @@ fn repair_stale_rxdb_collection_schema_versions(root: &Path) -> anyhow::Result<V
     let mut results = Vec::new();
     let mut repaired_tables = 0usize;
     let mut repaired_triggers = 0usize;
-    for (collection, _) in business_os_collections() {
-        let result = repair_rxdb_collection_schema_version_drift_with_connection(
+    let mut collections = business_os_collections()
+        .into_iter()
+        .map(|(collection, _)| {
+            let version = expected_rxdb_collection_version(&collection);
+            (collection, version)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for entry in runtime_module_collection_entries_for_root(root) {
+        collections.insert(entry.name, i64::from(entry.schema.version));
+    }
+    for (collection, expected_version) in collections {
+        let result = repair_rxdb_collection_schema_version_drift_at_version_with_connection(
             &conn,
             &database_path,
             &collection,
+            expected_version,
             false,
             true,
         )?;
@@ -14051,7 +14367,24 @@ fn repair_rxdb_collection_schema_version_drift_with_connection(
     dry_run: bool,
     force: bool,
 ) -> anyhow::Result<Value> {
-    let expected_version = expected_rxdb_collection_version(collection);
+    repair_rxdb_collection_schema_version_drift_at_version_with_connection(
+        conn,
+        database_path,
+        collection,
+        expected_rxdb_collection_version(collection),
+        dry_run,
+        force,
+    )
+}
+
+fn repair_rxdb_collection_schema_version_drift_at_version_with_connection(
+    conn: &Connection,
+    database_path: &Path,
+    collection: &str,
+    expected_version: i64,
+    dry_run: bool,
+    force: bool,
+) -> anyhow::Result<Value> {
     let active_version = active_rxdb_collection_version(conn, collection)?;
     let expected_table = rxdb_collection_version_table_name(collection, expected_version);
     let expected_table_exists = sqlite_table_exists(conn, &expected_table)?;
@@ -15328,6 +15661,344 @@ mod tests {
         assert_eq!(schema.version, 0);
         assert_eq!(schema.primary_key.primary_field(), "id");
         assert_eq!(schema.schema_type, "object");
+        Ok(())
+    }
+
+    fn write_runtime_migration_test_module(
+        root: &Path,
+        collection: &str,
+        version: i64,
+        migration_strategies: Value,
+    ) -> anyhow::Result<()> {
+        let module_dir = root.join("runtime/business-os/installed-modules/runtime-migration-test");
+        fs::create_dir_all(&module_dir)?;
+        fs::write(
+            module_dir.join("module.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "runtime-migration-test",
+                "entry": "installed-modules/runtime-migration-test/index.html",
+                "install_scope": "installed",
+                "collections": [collection]
+            }))?,
+        )?;
+        fs::write(
+            module_dir.join("collections.schema.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_format": "ctox-business-os-module-collections-v1",
+                "collections": {
+                    (collection): {
+                        "version": version,
+                        "primaryKey": "id",
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "maxLength": 180 },
+                            "module": { "type": "string" },
+                            "inbound_channel": { "type": "string" },
+                            "title": { "type": "string" },
+                            "updated_at_ms": { "type": "number" }
+                        },
+                        "required": ["id", "title", "updated_at_ms"],
+                        "additionalProperties": true
+                    }
+                },
+                "migration_strategies": migration_strategies
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn register_runtime_migration_test_collection(root: &Path) -> anyhow::Result<()> {
+        let database_path = store::rxdb_store_path(root);
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(database_path)?;
+        let internal_table = format!("{RXDB_SQLITE_DATABASE_NAME}___rxdb_internal__v0");
+        conn.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS {} (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0
+            )",
+            sqlite_quote_identifier(&internal_table)
+        ))?;
+        for entry in runtime_module_collection_entries_for_root(root) {
+            let version = i64::from(entry.schema.version);
+            let table = rxdb_collection_version_table_name(&entry.name, version);
+            conn.execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    id TEXT NOT NULL PRIMARY KEY UNIQUE,
+                    revision TEXT,
+                    deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                    lastWriteTime REAL NOT NULL,
+                    data TEXT NOT NULL
+                )",
+                sqlite_quote_identifier(&table)
+            ))?;
+            conn.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO {} (id, data, deleted) VALUES (?1, ?2, 0)",
+                    sqlite_quote_identifier(&internal_table)
+                ),
+                params![
+                    format!("collection|{}-{version}", entry.name),
+                    json!({
+                        "id": format!("collection|{}-{version}", entry.name),
+                        "key": format!("{}-{version}", entry.name),
+                        "context": "collection",
+                        "data": { "name": entry.name, "version": version, "schemaHash": "test" },
+                        "_deleted": false
+                    })
+                    .to_string()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn create_runtime_migration_source_table(
+        root: &Path,
+        collection: &str,
+        version: i64,
+    ) -> anyhow::Result<()> {
+        let conn = Connection::open(store::rxdb_store_path(root))?;
+        conn.execute_batch(&format!(
+            "CREATE TABLE {} (
+                id TEXT NOT NULL PRIMARY KEY UNIQUE,
+                revision TEXT,
+                deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                lastWriteTime REAL NOT NULL,
+                data TEXT NOT NULL
+            )",
+            sqlite_quote_identifier(&rxdb_collection_version_table_name(collection, version))
+        ))?;
+        Ok(())
+    }
+
+    fn insert_runtime_migration_row(
+        root: &Path,
+        collection: &str,
+        version: i64,
+        id: &str,
+        last_write_time: f64,
+        document: Value,
+    ) -> anyhow::Result<()> {
+        let conn = Connection::open(store::rxdb_store_path(root))?;
+        conn.execute(
+            &format!(
+                "INSERT INTO {} (id, revision, deleted, lastWriteTime, data)
+                 VALUES (?1, ?2, 0, ?3, ?4)",
+                sqlite_quote_identifier(&rxdb_collection_version_table_name(collection, version))
+            ),
+            params![
+                id,
+                "1-runtime-migration-test",
+                last_write_time,
+                document.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_installed_declarative_migration_is_discovered_and_copied() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let collection = "runtime_subscription_records";
+        write_runtime_migration_test_module(
+            root.path(),
+            collection,
+            1,
+            json!({
+                (collection): {
+                    "1": {
+                        "operations": [{
+                            "op": "set_from_first_truthy",
+                            "field": "inbound_channel",
+                            "paths": ["inbound_channel", "module"],
+                            "default": ""
+                        }]
+                    }
+                }
+            }),
+        )?;
+        let entries = runtime_module_collection_entries_for_root(root.path());
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == collection)
+            .context("runtime migration collection is parsed")?;
+        assert!(entry.migration_strategies.contains_key(&1));
+
+        register_runtime_migration_test_collection(root.path())?;
+        create_runtime_migration_source_table(root.path(), collection, 0)?;
+        insert_runtime_migration_row(
+            root.path(),
+            collection,
+            0,
+            "subscription-1",
+            100.0,
+            json!({
+                "id": "subscription-1",
+                "module": "subscriptions",
+                "title": "Pro",
+                "updated_at_ms": 100
+            }),
+        )?;
+
+        let result = migrate_additive_native_rxdb_collection_versions(root.path())?;
+        assert_eq!(result["verified_rows"], 1);
+        let retry = migrate_additive_native_rxdb_collection_versions(root.path())?;
+        assert_eq!(retry["verified_rows"], 1);
+        let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+        let migrated: String = conn.query_row(
+            &format!(
+                "SELECT data FROM {} WHERE id = 'subscription-1'",
+                sqlite_quote_identifier(&rxdb_collection_version_table_name(collection, 1))
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let migrated: Value = serde_json::from_str(&migrated)?;
+        assert_eq!(
+            migrated.get("inbound_channel").and_then(Value::as_str),
+            Some("subscriptions")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_migration_without_strategy_retains_old_table_and_fails_closed() -> anyhow::Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let collection = "runtime_missing_strategy_records";
+        write_runtime_migration_test_module(root.path(), collection, 1, json!({}))?;
+        register_runtime_migration_test_collection(root.path())?;
+        create_runtime_migration_source_table(root.path(), collection, 0)?;
+        insert_runtime_migration_row(
+            root.path(),
+            collection,
+            0,
+            "retained-1",
+            100.0,
+            json!({ "id": "retained-1", "title": "Keep me", "updated_at_ms": 100 }),
+        )?;
+
+        let err = migrate_additive_native_rxdb_collection_versions(root.path())
+            .expect_err("persisted source rows without a complete strategy chain must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(collection),
+            "error names collection: {message}"
+        );
+        assert!(
+            message.contains("version 0"),
+            "error names source version: {message}"
+        );
+        assert!(
+            message.contains(&format!("migration_strategies.{collection}.1")),
+            "error names missing step: {message}"
+        );
+        let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+        let source_table = rxdb_collection_version_table_name(collection, 0);
+        assert!(sqlite_table_exists(&conn, &source_table)?);
+        assert_eq!(sqlite_table_row_count(&conn, &source_table)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_empty_legacy_table_without_strategy_is_tolerated_and_cleaned() -> anyhow::Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let collection = "runtime_empty_legacy_records";
+        write_runtime_migration_test_module(root.path(), collection, 1, json!({}))?;
+        register_runtime_migration_test_collection(root.path())?;
+        create_runtime_migration_source_table(root.path(), collection, 0)?;
+
+        let migration = migrate_additive_native_rxdb_collection_versions(root.path())?;
+        assert_eq!(migration["verified_rows"], 0);
+        let cleanup = repair_stale_rxdb_collection_schema_versions(root.path())?;
+        assert_eq!(cleanup["repaired"], true);
+        let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+        assert!(!sqlite_table_exists(
+            &conn,
+            &rxdb_collection_version_table_name(collection, 0)
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn additive_thread_schema_migration_copies_and_verifies_before_cleanup() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let collection = "runtime_thread_records";
+        write_runtime_migration_test_module(
+            root.path(),
+            collection,
+            1,
+            json!({ (collection): { "1": { "operations": [] } } }),
+        )?;
+        register_runtime_migration_test_collection(root.path())?;
+        create_runtime_migration_source_table(root.path(), collection, 0)?;
+        insert_runtime_migration_row(
+            root.path(),
+            collection,
+            0,
+            "thread-copy",
+            100.0,
+            json!({ "id": "thread-copy", "title": "copy", "updated_at_ms": 100 }),
+        )?;
+        insert_runtime_migration_row(
+            root.path(),
+            collection,
+            0,
+            "thread-newer-wins",
+            100.0,
+            json!({ "id": "thread-newer-wins", "title": "old", "updated_at_ms": 100 }),
+        )?;
+        insert_runtime_migration_row(
+            root.path(),
+            collection,
+            1,
+            "thread-newer-wins",
+            200.0,
+            json!({ "id": "thread-newer-wins", "title": "new", "updated_at_ms": 200 }),
+        )?;
+
+        let migration = migrate_additive_native_rxdb_collection_versions(root.path())?;
+        assert_eq!(migration["verified_rows"], 2);
+        let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+        let target_table = rxdb_collection_version_table_name(collection, 1);
+        let copied_lwt: f64 = conn.query_row(
+            &format!(
+                "SELECT lastWriteTime FROM {} WHERE id = 'thread-copy'",
+                sqlite_quote_identifier(&target_table)
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(copied_lwt, 100.0);
+        let newer: String = conn.query_row(
+            &format!(
+                "SELECT data FROM {} WHERE id = 'thread-newer-wins'",
+                sqlite_quote_identifier(&target_table)
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&newer)?
+                .get("title")
+                .and_then(Value::as_str),
+            Some("new")
+        );
+        drop(conn);
+
+        let cleanup = repair_stale_rxdb_collection_schema_versions(root.path())?;
+        assert_eq!(cleanup["repaired"], true);
+        let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+        assert!(!sqlite_table_exists(
+            &conn,
+            &rxdb_collection_version_table_name(collection, 0)
+        )?);
+        assert!(sqlite_table_exists(&conn, &target_table)?);
         Ok(())
     }
 
