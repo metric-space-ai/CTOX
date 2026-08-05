@@ -48,7 +48,8 @@ const QUEUE_USAGE: &str = "usage:
   ctox queue restore --message-key <key> [--priority <urgent|high|normal|low>] [--note <text>]
   ctox queue cleanup-scope [--all-open] [--match-run-id <id>] [--match-thread-prefix <prefix>] [--match-workspace-prefix <path>] [--match-title-prefix <prefix>] [--source-label <label>] [--message-key <key>] [--status <pending|leased|blocked|failed|handled|cancelled|review_rework>]... [--limit <n>] [--dry-run] [--cancel-open|--release-open|--block-open] [--stop-watchers] [--watcher-pattern <text>] [--reason <text>]
   ctox queue assert-clean-scope [--all-open] [--match-run-id <id>] [--match-thread-prefix <prefix>] [--match-workspace-prefix <path>] [--match-title-prefix <prefix>] [--source-label <label>] [--message-key <key>] [--status <pending|leased|blocked|failed|handled|cancelled|review_rework>]... [--limit <n>] [--empty]
-  ctox queue repair";
+  ctox queue status
+  ctox queue repair (deprecated alias of status)";
 
 #[cfg(test)]
 static QUEUE_BRIDGE_DB_OPEN_COUNTS: OnceLock<Mutex<HashMap<std::path::PathBuf, u64>>> =
@@ -449,7 +450,16 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             anyhow::ensure!(ok, "queue scope assertion failed");
             Ok(())
         }
+        // `status` ist der ehrliche Name: der Pfad zaehlt offene Eintraege und
+        // zeigt die ersten zwanzig. `repair` bleibt als Alias, weil Skripte den
+        // Namen kennen — der Hinweis geht nach stderr, das stdout-JSON bleibt
+        // byte-gleich.
+        "status" => {
+            let repaired = repair_queue_state(root)?;
+            print_json(&json!({"ok": true, "repair": repaired}))
+        }
         "repair" => {
+            eprintln!("hint: `ctox queue repair` only reports; prefer `ctox queue status`");
             let repaired = repair_queue_state(root)?;
             print_json(&json!({"ok": true, "repair": repaired}))
         }
