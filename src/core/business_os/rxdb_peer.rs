@@ -21747,11 +21747,19 @@ mod tests {
             .expect("insert chunk");
 
         assert!(
-            desktop_file_chunk_generation_is_complete(&database, "file_a", "gen_a", 1).await,
+            desktop_file_chunk_generation_is_complete(root.path(), &database, "file_a", "gen_a", 1)
+                .await,
             "the deterministic primary-key chunk set is complete"
         );
         assert!(
-            !desktop_file_chunk_generation_is_complete(&database, "file_a", "missing_gen", 1).await,
+            !desktop_file_chunk_generation_is_complete(
+                root.path(),
+                &database,
+                "file_a",
+                "missing_gen",
+                1
+            )
+            .await,
             "a missing deterministic primary-key chunk set is incomplete"
         );
     }
@@ -22469,10 +22477,10 @@ mod tests {
         }
         assert!(!first_chunks.is_empty(), "first scan produced chunks");
 
-        DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.store(0, Ordering::Relaxed);
+        reset_desktop_file_chunk_completeness_checks(root.path());
         sync_desktop_files_from_workspace_root(root.path(), &workspace).expect("rescan");
         assert_eq!(
-            DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.load(Ordering::Relaxed),
+            desktop_file_chunk_completeness_check_count(root.path()),
             0,
             "verified unchanged file rescan must not re-check every chunk id"
         );
@@ -22592,10 +22600,10 @@ mod tests {
 
         // The periodic index scan revisits the file with its size policy
         // (lazy). It must keep the materialized state, not demote it.
-        DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.store(0, Ordering::Relaxed);
+        reset_desktop_file_chunk_completeness_checks(root.path());
         sync_desktop_file_from_path(root.path(), &file_path).expect("rescan");
         assert_eq!(
-            DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.load(Ordering::Relaxed),
+            desktop_file_chunk_completeness_check_count(root.path()),
             0,
             "verified materialized file rescan must not re-check every chunk id"
         );
