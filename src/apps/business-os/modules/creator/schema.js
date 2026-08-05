@@ -21,3 +21,12 @@ const commandSchema = {
 export const collections = {
   business_commands: commandSchema
 };
+
+export const migrationStrategies = {
+  business_commands: {
+    1: (oldDoc) => ({
+      ...oldDoc,
+      inbound_channel: oldDoc.inbound_channel || oldDoc.module || ''
+    })
+  }
+};
