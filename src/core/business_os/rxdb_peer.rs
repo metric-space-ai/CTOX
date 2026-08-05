@@ -2276,13 +2276,13 @@ pub(crate) fn sync_business_record_projections(root: &Path) -> anyhow::Result<us
         |_peer, database| async move {
             let database_write_lock = Arc::new(AsyncMutex::new(()));
             let mut since_by_collection = HashMap::new();
-            let mut queue_chat_repair_stamp = None;
+            let mut chat_tracking_repair_stamp = None;
             sync_business_record_projections_with_database(
                 root,
                 &database,
                 &database_write_lock,
                 &mut since_by_collection,
-                &mut queue_chat_repair_stamp,
+                &mut chat_tracking_repair_stamp,
             )
             .await
         },
@@ -2293,7 +2293,7 @@ pub(crate) fn sync_business_record_projections(root: &Path) -> anyhow::Result<us
 fn sync_business_record_projections_if_changed(
     root: &Path,
     since_by_collection: &mut HashMap<String, i64>,
-    queue_chat_repair_stamp: &mut Option<QueueChatRepairProjectionStamp>,
+    chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
     last_source_stamp: &mut Option<BusinessRecordProjectionSourceStamp>,
 ) -> anyhow::Result<usize> {
     with_business_os_database(
@@ -2308,7 +2308,7 @@ fn sync_business_record_projections_if_changed(
                 &database,
                 &database_write_lock,
                 since_by_collection,
-                queue_chat_repair_stamp,
+                chat_tracking_repair_stamp,
                 last_source_stamp,
             )
             .await
@@ -4020,7 +4020,7 @@ async fn sync_business_record_projections_background_loop(
     let mut since_by_collection = persisted_progress.since_by_collection;
     let mut after_record_id_by_collection = persisted_progress.after_record_id_by_collection;
     let mut next_collection_index = persisted_progress.next_collection_index;
-    let mut queue_chat_repair_stamp = None;
+    let mut chat_tracking_repair_stamp = None;
     let mut last_source_stamp = None;
     let mut consecutive_idle_rounds = 0u32;
     let mut consecutive_failure_rounds = 0u32;
@@ -4040,7 +4040,7 @@ async fn sync_business_record_projections_background_loop(
                 &mut since_by_collection,
                 &mut after_record_id_by_collection,
                 &mut next_collection_index,
-                &mut queue_chat_repair_stamp,
+                &mut chat_tracking_repair_stamp,
                 Some(BUSINESS_RECORD_PROJECTION_SYNC_LIMIT),
             )
             .await?;
@@ -8067,7 +8067,7 @@ async fn sync_business_record_projections_with_database_if_changed(
     database: &Arc<RxDatabase>,
     database_write_lock: &Arc<AsyncMutex<()>>,
     since_by_collection: &mut HashMap<String, i64>,
-    queue_chat_repair_stamp: &mut Option<QueueChatRepairProjectionStamp>,
+    chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
     last_source_stamp: &mut Option<BusinessRecordProjectionSourceStamp>,
 ) -> anyhow::Result<usize> {
     let source_stamp = business_record_projection_source_stamp(root).await?;
@@ -8080,7 +8080,7 @@ async fn sync_business_record_projections_with_database_if_changed(
         database,
         database_write_lock,
         since_by_collection,
-        queue_chat_repair_stamp,
+        chat_tracking_repair_stamp,
     )
     .await?;
     *last_source_stamp = Some(source_stamp);
@@ -8090,11 +8090,12 @@ async fn sync_business_record_projections_with_database_if_changed(
 async fn business_record_projection_source_stamp(
     root: &Path,
 ) -> anyhow::Result<BusinessRecordProjectionSourceStamp> {
-    let queue_stamp_root = root.to_path_buf();
+    let chat_stamp_root = root.to_path_buf();
     let store_stamp_root = root.to_path_buf();
     let knowledge_stamp_root = root.to_path_buf();
     let collections = business_record_projection_collections_for_root(root);
-    let queue_chat_repair = queue_chat_repair_projection_stamp_async(&queue_stamp_root).await?;
+    let chat_tracking_repair =
+        chat_tracking_repair_projection_stamp_async(&chat_stamp_root).await?;
     let (records, communication, knowledge) = tokio::task::spawn_blocking(move || {
         Ok::<_, anyhow::Error>((
             store::business_records_projection_stamp(&store_stamp_root, &collections)?,
@@ -8107,7 +8108,7 @@ async fn business_record_projection_source_stamp(
     Ok(BusinessRecordProjectionSourceStamp {
         records,
         communication,
-        queue_chat_repair,
+        chat_tracking_repair,
         knowledge,
     })
 }
@@ -8171,7 +8172,7 @@ async fn sync_business_record_projections_with_database(
     database: &Arc<RxDatabase>,
     database_write_lock: &Arc<AsyncMutex<()>>,
     since_by_collection: &mut HashMap<String, i64>,
-    queue_chat_repair_stamp: &mut Option<QueueChatRepairProjectionStamp>,
+    chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
 ) -> anyhow::Result<usize> {
     let mut after_record_id_by_collection = HashMap::<String, String>::new();
     let mut next_collection_index = 0usize;
@@ -8184,7 +8185,7 @@ async fn sync_business_record_projections_with_database(
             since_by_collection,
             &mut after_record_id_by_collection,
             &mut next_collection_index,
-            queue_chat_repair_stamp,
+            chat_tracking_repair_stamp,
             None,
         )
         .await?;
@@ -8202,7 +8203,7 @@ async fn sync_business_record_projections_slice_with_database(
     since_by_collection: &mut HashMap<String, i64>,
     after_record_id_by_collection: &mut HashMap<String, String>,
     next_collection_index: &mut usize,
-    queue_chat_repair_stamp: &mut Option<QueueChatRepairProjectionStamp>,
+    chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
     document_budget: Option<usize>,
 ) -> anyhow::Result<(usize, bool)> {
     let mut count = sync_knowledge_catalog_with_database(root, database).await?;
@@ -8401,283 +8402,11 @@ async fn sync_business_record_projections_slice_with_database(
         count += reconcile_queue_chat_tracking_projections_if_changed(
             root.as_path(),
             database,
-            queue_chat_repair_stamp,
+            chat_tracking_repair_stamp,
         )
         .await?;
     }
     Ok((count, true))
-}
-
-async fn reconcile_ctox_queue_task_projections(
-    root: &Path,
-    database: &Arc<RxDatabase>,
-) -> anyhow::Result<usize> {
-    let queue = database
-        .collection("ctox_queue_tasks")
-        .context("ctox_queue_tasks collection is not registered")?;
-    let queue_docs = queue
-        .find(Some(MangoQuery {
-            selector: Some(json!({
-                "status": { "$in": ["queued", "running", "accepted"] }
-            })),
-            limit: Some(500),
-            ..Default::default()
-        }))
-        .map_err(|err| anyhow::anyhow!("query ctox_queue_tasks for reconciliation: {err}"))?
-        .exec(false)
-        .await
-        .map_err(|err| anyhow::anyhow!("exec ctox_queue_tasks reconciliation query: {err}"))?;
-    let Some(queue_docs) = queue_docs.as_array() else {
-        return Ok(0);
-    };
-
-    let mut repaired_documents = Vec::new();
-    let mut orphaned_commands = Vec::new();
-    for queue_doc in queue_docs {
-        if queue_doc
-            .get("_deleted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let queue_status = queue_doc
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !matches!(queue_status, "queued" | "running" | "accepted") {
-            continue;
-        }
-        let command_id = queue_doc
-            .get("command_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let Some(command_id) = command_id else {
-            continue;
-        };
-        // This is an exact primary-key lookup. Routing it through Mango
-        // needlessly enters the query/doc-cache path and can surface UTL2
-        // when a long-lived cache still holds an older envelope revision.
-        // A single poisoned command then made the whole projection loop retry
-        // every three seconds forever. Read the authoritative storage row
-        // directly; reconciliation writes still use the collection API below.
-        let Some(command_doc) =
-            find_rxdb_document_by_id(database, "business_commands", command_id, false).await?
-        else {
-            continue;
-        };
-
-        let canonical_task = queue_doc
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .and_then(|task_id| channels::load_queue_task(root, task_id).ok().flatten());
-
-        let command_status = command_doc
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let command_updated_at_ms = command_doc
-            .get("updated_at_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or_else(|| now_ms() as i64);
-        let repaired_status = if let Some(task) = canonical_task.as_ref() {
-            let canonical_status = queue_projection_status_for_route_status(&task.route_status);
-            let projection_route_status = queue_doc
-                .get("route_status")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if queue_status != canonical_status || projection_route_status != task.route_status {
-                Some((
-                    canonical_status,
-                    now_ms() as i64,
-                    task.status_note.as_deref(),
-                    Some(task.route_status.as_str()),
-                    canonical_task.as_ref(),
-                ))
-            } else {
-                None
-            }
-        } else if let Some(status) = terminal_queue_status_for_command(command_status) {
-            Some((status, command_updated_at_ms, None, None, None))
-        } else if matches!(command_status, "accepted" | "pending" | "pending_sync")
-            && projection_queue_task_is_orphaned(root, queue_doc)
-            && projection_document_age_ms(queue_doc, command_updated_at_ms)
-                > QUEUE_CHAT_REPAIR_ORPHAN_EPOCH_MS
-        {
-            Some((
-                "failed",
-                now_ms() as i64,
-                Some(
-                    "Queue task is no longer present in the CTOX harness queue; marking the orphaned Business OS projection as failed.",
-                ),
-                Some("failed"),
-                None,
-            ))
-        } else {
-            None
-        };
-        let Some((repaired_status, repaired_at_ms, error_note, route_status, canonical_task)) =
-            repaired_status
-        else {
-            continue;
-        };
-        let mut next = queue_doc.clone();
-        if let Some(object) = next.as_object_mut() {
-            object.remove("_rev");
-            object.remove("_meta");
-            object.remove("_attachments");
-            object.insert(
-                "status".to_string(),
-                Value::String(repaired_status.to_string()),
-            );
-            object.insert(
-                "route_status".to_string(),
-                Value::String(
-                    route_status
-                        .unwrap_or_else(|| route_status_for_queue_projection(repaired_status))
-                        .to_string(),
-                ),
-            );
-            object.insert(
-                "task_status".to_string(),
-                Value::String(repaired_status.to_string()),
-            );
-            object.insert("updated_at_ms".to_string(), Value::from(repaired_at_ms));
-            if let Some(error_note) = error_note {
-                object.insert(
-                    "status_note".to_string(),
-                    Value::String(error_note.to_string()),
-                );
-                if repaired_status == "failed" {
-                    object.insert("error".to_string(), Value::String(error_note.to_string()));
-                }
-            }
-            if let Some(task) = canonical_task {
-                if let Some(owner) = task
-                    .lease_owner
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    object.insert("lease_owner".to_string(), Value::String(owner.to_string()));
-                }
-                if let Some(leased_at) = task
-                    .leased_at
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    object.insert(
-                        "leased_at".to_string(),
-                        Value::String(leased_at.to_string()),
-                    );
-                }
-                if let Some(acked_at) = task
-                    .acked_at
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    object.insert("acked_at".to_string(), Value::String(acked_at.to_string()));
-                }
-            }
-        }
-        upsert_business_record_projection_document(&queue, "ctox_queue_tasks", next.clone())
-            .await
-            .map_err(|err| anyhow::anyhow!("repair ctox_queue_tasks projection: {err}"))?;
-        repaired_documents.push(next);
-        if command_status == "accepted" && repaired_status == "failed" {
-            orphaned_commands.push((command_id.to_string(), repaired_at_ms));
-        }
-    }
-
-    if !repaired_documents.is_empty() {
-        let root_for_writeback = root.to_path_buf();
-        let documents = repaired_documents.clone();
-        tokio::task::spawn_blocking(move || {
-            store::push_collection_records(
-                &root_for_writeback,
-                json!({
-                    "collection": "ctox_queue_tasks",
-                    "documents": documents
-                }),
-            )
-        })
-        .await
-        .context("join ctox_queue_tasks reconciliation writeback")??;
-    }
-    for (command_id, failed_at_ms) in orphaned_commands {
-        let root = root.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            store::mark_business_command_failed(
-                &root,
-                &command_id,
-                "Queue task is no longer present in the CTOX harness queue; no tracked execution is available.",
-                failed_at_ms,
-            )
-        })
-        .await
-        .context("join orphaned business command repair")??;
-    }
-    Ok(repaired_documents.len())
-}
-
-fn terminal_queue_status_for_command(status: &str) -> Option<&'static str> {
-    match status {
-        "completed" | "handled" | "done" => Some("completed"),
-        "failed" | "error" => Some("failed"),
-        "cancelled" | "canceled" => Some("cancelled"),
-        "blocked" => Some("blocked"),
-        _ => None,
-    }
-}
-
-fn route_status_for_queue_projection(status: &str) -> &str {
-    match status {
-        "completed" => "handled",
-        "cancelled" => "cancelled",
-        "failed" => "failed",
-        "blocked" => "blocked",
-        "running" => "leased",
-        _ => "pending",
-    }
-}
-
-fn queue_projection_status_for_route_status(route_status: &str) -> &'static str {
-    match route_status {
-        "pending" => "queued",
-        "leased" => "running",
-        "handled" => "completed",
-        "cancelled" => "cancelled",
-        "failed" => "failed",
-        "blocked" => "blocked",
-        _ => "queued",
-    }
-}
-
-fn projection_queue_task_is_orphaned(root: &Path, document: &Value) -> bool {
-    let task_id = document
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let Some(task_id) = task_id else {
-        return false;
-    };
-    channels::load_queue_task(root, task_id)
-        .map(|task| task.is_none())
-        .unwrap_or(false)
-}
-
-fn projection_document_age_ms(document: &Value, fallback_updated_at_ms: i64) -> i64 {
-    let updated_at_ms = document
-        .get("updated_at_ms")
-        .and_then(Value::as_i64)
-        .unwrap_or(fallback_updated_at_ms);
-    (now_ms() as i64).saturating_sub(updated_at_ms)
 }
 
 async fn reconcile_business_chat_tracking_projections(
@@ -9743,7 +9472,7 @@ struct BusinessCommandsTableStamp {
 struct BusinessRecordProjectionSourceStamp {
     records: store::BusinessRecordsProjectionStamp,
     communication: channels::CommunicationIntakeSourceStamp,
-    queue_chat_repair: QueueChatRepairProjectionStamp,
+    chat_tracking_repair: ChatTrackingRepairProjectionStamp,
     knowledge: KnowledgeCatalogProjectionStamp,
 }
 
@@ -9760,11 +9489,10 @@ struct KnowledgeCatalogProjectionStamp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QueueChatRepairProjectionStamp {
+struct ChatTrackingRepairProjectionStamp {
     rxdb_queue_tasks: RxdbCollectionSummaryStamp,
     rxdb_business_commands: RxdbCollectionSummaryStamp,
     rxdb_business_chats: RxdbCollectionSummaryStamp,
-    canonical_queue: CanonicalQueueRepairStamp,
     orphan_repair_epoch: u64,
 }
 
@@ -9774,24 +9502,6 @@ struct RxdbCollectionSummaryStamp {
     row_count: i64,
     deleted_count: i64,
     latest_lwt_bits: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CanonicalQueueRepairStamp {
-    database: SqliteProjectionFilesStamp,
-    queue_message_count: i64,
-    routing_count: i64,
-    latest_queue_observed_at: String,
-    latest_routing_updated_at: String,
-    routing_status_hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SqliteProjectionFilesStamp {
-    db: ProjectionFileStamp,
-    wal: ProjectionFileStamp,
-    shm: ProjectionFileStamp,
-    journal: ProjectionFileStamp,
 }
 
 async fn business_commands_source_change(
@@ -9888,46 +9598,44 @@ fn empty_business_commands_table_stamp(table_name: Option<String>) -> BusinessCo
 async fn reconcile_queue_chat_tracking_projections_if_changed(
     root: &Path,
     database: &Arc<RxDatabase>,
-    last_projection_stamp: &mut Option<QueueChatRepairProjectionStamp>,
+    last_projection_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let projection_stamp = queue_chat_repair_projection_stamp_async(root).await?;
+    let projection_stamp = chat_tracking_repair_projection_stamp_async(root).await?;
     if last_projection_stamp.as_ref() == Some(&projection_stamp) {
         return Ok(0);
     }
 
-    let mut count = reconcile_ctox_queue_task_projections(root, database).await?;
-    count += reconcile_business_chat_tracking_projections(database).await?;
-    *last_projection_stamp = Some(queue_chat_repair_projection_stamp_async(root).await?);
+    let count = reconcile_business_chat_tracking_projections(database).await?;
+    *last_projection_stamp = Some(chat_tracking_repair_projection_stamp_async(root).await?);
     Ok(count)
 }
 
-async fn queue_chat_repair_projection_stamp_async(
+async fn chat_tracking_repair_projection_stamp_async(
     root: &Path,
-) -> anyhow::Result<QueueChatRepairProjectionStamp> {
+) -> anyhow::Result<ChatTrackingRepairProjectionStamp> {
     let root = root.to_path_buf();
-    tokio::task::spawn_blocking(move || queue_chat_repair_projection_stamp(&root))
+    tokio::task::spawn_blocking(move || chat_tracking_repair_projection_stamp(&root))
         .await
-        .context("join queue/chat repair projection stamp")?
+        .context("join chat tracking repair projection stamp")?
 }
 
-fn queue_chat_repair_projection_stamp(
+fn chat_tracking_repair_projection_stamp(
     root: &Path,
-) -> anyhow::Result<QueueChatRepairProjectionStamp> {
+) -> anyhow::Result<ChatTrackingRepairProjectionStamp> {
     let now = now_ms() as i64;
     let orphan_repair_epoch = (now / QUEUE_CHAT_REPAIR_ORPHAN_EPOCH_MS.max(1)).max(0) as u64;
     let rxdb_path = store::rxdb_store_path(root);
     let (rxdb_queue_tasks, rxdb_business_commands, rxdb_business_chats) =
-        rxdb_queue_chat_repair_stamps(&rxdb_path)?;
-    Ok(QueueChatRepairProjectionStamp {
+        rxdb_chat_tracking_repair_stamps(&rxdb_path)?;
+    Ok(ChatTrackingRepairProjectionStamp {
         rxdb_queue_tasks,
         rxdb_business_commands,
         rxdb_business_chats,
-        canonical_queue: canonical_queue_repair_stamp(root)?,
         orphan_repair_epoch,
     })
 }
 
-fn rxdb_queue_chat_repair_stamps(
+fn rxdb_chat_tracking_repair_stamps(
     rxdb_path: &Path,
 ) -> anyhow::Result<(
     RxdbCollectionSummaryStamp,
@@ -9947,12 +9655,12 @@ fn rxdb_queue_chat_repair_stamps(
     )
     .with_context(|| {
         format!(
-            "open Business OS RxDB store for queue/chat repair stamp {}",
+            "open Business OS RxDB store for chat tracking repair stamp {}",
             rxdb_path.display()
         )
     })?;
     conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
-        .context("configure queue/chat repair stamp busy_timeout")?;
+        .context("configure chat tracking repair stamp busy_timeout")?;
     Ok((
         rxdb_collection_summary_stamp(&conn, "ctox_queue_tasks")?,
         rxdb_collection_summary_stamp(&conn, "business_commands")?,
@@ -10003,113 +9711,6 @@ fn empty_rxdb_collection_summary_stamp(table_name: Option<String>) -> RxdbCollec
         deleted_count: 0,
         latest_lwt_bits: 0,
     }
-}
-
-fn canonical_queue_repair_stamp(root: &Path) -> anyhow::Result<CanonicalQueueRepairStamp> {
-    let db_path = crate::paths::core_db(root);
-    let database = sqlite_projection_files_stamp(&db_path);
-    if !db_path.exists() {
-        return Ok(empty_canonical_queue_repair_stamp(database));
-    }
-    let conn = Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("open core DB for queue repair stamp {}", db_path.display()))?;
-    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
-        .context("configure canonical queue repair stamp busy_timeout")?;
-    if !sqlite_table_exists(&conn, "communication_messages")?
-        || !sqlite_table_exists(&conn, "communication_routing_state")?
-    {
-        return Ok(empty_canonical_queue_repair_stamp(database));
-    }
-
-    let (queue_message_count, latest_queue_observed_at): (i64, Option<String>) = conn
-        .query_row(
-            "SELECT COUNT(*), MAX(observed_at)
-             FROM communication_messages
-             WHERE channel = 'queue'
-               AND direction = 'inbound'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .context("stamp canonical queue messages")?;
-    let (routing_count, latest_routing_updated_at): (i64, Option<String>) = conn
-        .query_row(
-            "SELECT COUNT(*), MAX(r.updated_at)
-             FROM communication_routing_state r
-             JOIN communication_messages m ON m.message_key = r.message_key
-             WHERE m.channel = 'queue'
-               AND m.direction = 'inbound'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .context("stamp canonical queue routing")?;
-    let routing_status_hash = canonical_queue_routing_status_hash(&conn)?;
-
-    Ok(CanonicalQueueRepairStamp {
-        database,
-        queue_message_count,
-        routing_count,
-        latest_queue_observed_at: latest_queue_observed_at.unwrap_or_default(),
-        latest_routing_updated_at: latest_routing_updated_at.unwrap_or_default(),
-        routing_status_hash,
-    })
-}
-
-fn canonical_queue_routing_status_hash(conn: &Connection) -> anyhow::Result<String> {
-    let mut hasher = sha2::Sha256::new();
-    let mut stmt = conn
-        .prepare(
-            "SELECT r.route_status, COUNT(*), COALESCE(MAX(r.updated_at), '')
-             FROM communication_routing_state r
-             JOIN communication_messages m ON m.message_key = r.message_key
-             WHERE m.channel = 'queue'
-               AND m.direction = 'inbound'
-             GROUP BY r.route_status
-             ORDER BY r.route_status ASC",
-        )
-        .context("prepare canonical queue routing status stamp")?;
-    let mut rows = stmt
-        .query([])
-        .context("query canonical queue routing status stamp")?;
-    while let Some(row) = rows.next()? {
-        let route_status: String = row.get(0)?;
-        let count: i64 = row.get(1)?;
-        let latest_updated_at: String = row.get(2)?;
-        update_hash_with_string(&mut hasher, &route_status);
-        hasher.update(count.to_le_bytes());
-        update_hash_with_string(&mut hasher, &latest_updated_at);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn empty_canonical_queue_repair_stamp(
-    database: SqliteProjectionFilesStamp,
-) -> CanonicalQueueRepairStamp {
-    CanonicalQueueRepairStamp {
-        database,
-        queue_message_count: 0,
-        routing_count: 0,
-        latest_queue_observed_at: String::new(),
-        latest_routing_updated_at: String::new(),
-        routing_status_hash: String::new(),
-    }
-}
-
-fn sqlite_projection_files_stamp(path: &Path) -> SqliteProjectionFilesStamp {
-    SqliteProjectionFilesStamp {
-        db: projection_file_stamp(path),
-        wal: projection_file_stamp(&sqlite_sidecar_path(path, "-wal")),
-        shm: projection_file_stamp(&sqlite_sidecar_path(path, "-shm")),
-        journal: projection_file_stamp(&sqlite_sidecar_path(path, "-journal")),
-    }
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut os = path.as_os_str().to_owned();
-    os.push(suffix);
-    PathBuf::from(os)
 }
 
 fn latest_rxdb_collection_table(
@@ -19990,12 +19591,12 @@ mod tests {
         drop(conn);
 
         let mut since_by_collection = HashMap::new();
-        let mut queue_chat_repair_stamp = None;
+        let mut chat_tracking_repair_stamp = None;
         let mut last_source_stamp = None;
         let first = sync_business_record_projections_if_changed(
             root.path(),
             &mut since_by_collection,
-            &mut queue_chat_repair_stamp,
+            &mut chat_tracking_repair_stamp,
             &mut last_source_stamp,
         )
         .expect("first business record projection sync");
@@ -20005,7 +19606,7 @@ mod tests {
         let second = sync_business_record_projections_if_changed(
             root.path(),
             &mut since_by_collection,
-            &mut queue_chat_repair_stamp,
+            &mut chat_tracking_repair_stamp,
             &mut last_source_stamp,
         )
         .expect("unchanged business record projection sync");
@@ -20037,7 +19638,7 @@ mod tests {
         let third = sync_business_record_projections_if_changed(
             root.path(),
             &mut since_by_collection,
-            &mut queue_chat_repair_stamp,
+            &mut chat_tracking_repair_stamp,
             &mut last_source_stamp,
         )
         .expect("changed business record projection sync");
@@ -20046,7 +19647,7 @@ mod tests {
         let fourth = sync_business_record_projections_if_changed(
             root.path(),
             &mut since_by_collection,
-            &mut queue_chat_repair_stamp,
+            &mut chat_tracking_repair_stamp,
             &mut last_source_stamp,
         )
         .expect("unchanged business record projection resync");
@@ -20507,354 +20108,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_ctox_queue_task_projections_completes_stale_completed_commands() {
-        let root = tempfile::tempdir().expect("temp root");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let database = open_test_database(store::rxdb_store_path(root.path()))
-                .await
-                .expect("open rxdb sqlite");
-            database
-                .add_collections(collection_creators())
-                .await
-                .expect("register collections");
-            let commands = database
-                .collection("business_commands")
-                .expect("business_commands collection");
-            commands
-                .insert(json!({
-                    "id": "cmd_queue_completed",
-                    "command_id": "cmd_queue_completed",
-                    "module": "ctox",
-                    "command_type": "ctox.test.completed",
-                    "record_id": "cmd_queue_completed",
-                    "status": "completed",
-                    "inbound_channel": "ctox",
-                    "payload": { "ok": true },
-                    "client_context": {},
-                    "updated_at_ms": 2_000
-                }))
-                .await
-                .expect("insert completed command");
-
-            let queue = database
-                .collection("ctox_queue_tasks")
-                .expect("ctox_queue_tasks collection");
-            queue
-                .insert(json!({
-                    "id": "task_queue_completed",
-                    "command_id": "cmd_queue_completed",
-                    "title": "completed task",
-                    "status": "queued",
-                    "route_status": "queued",
-                    "task_status": "queued",
-                    "module": "ctox",
-                    "source_module": "ctox",
-                    "inbound_channel": "ctox",
-                    "updated_at_ms": 1_000
-                }))
-                .await
-                .expect("insert stale queue projection");
-
-            assert_eq!(
-                reconcile_ctox_queue_task_projections(root.path(), &database)
-                    .await
-                    .expect("reconcile queue projections"),
-                1
-            );
-
-            let repaired = queue
-                .find_one(Some(MangoQuery {
-                    selector: Some(json!({ "id": { "$eq": "task_queue_completed" } })),
-                    ..Default::default()
-                }))
-                .expect("queue task query")
-                .exec(false)
-                .await
-                .expect("queue task document");
-            assert_eq!(
-                repaired.get("status").and_then(Value::as_str),
-                Some("completed")
-            );
-            assert_eq!(
-                repaired.get("route_status").and_then(Value::as_str),
-                Some("handled")
-            );
-
-            let conn = store::open_store(root.path()).expect("open business store");
-            let payload_json: String = conn
-                .query_row(
-                    "SELECT payload_json
-                     FROM business_records
-                     WHERE collection = 'ctox_queue_tasks' AND record_id = 'task_queue_completed'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("queue task business record");
-            let payload: Value = serde_json::from_str(&payload_json).expect("queue payload");
-            assert_eq!(
-                payload.get("status").and_then(Value::as_str),
-                Some("completed")
-            );
-            assert_eq!(
-                payload.get("route_status").and_then(Value::as_str),
-                Some("handled")
-            );
-        });
-    }
-
-    #[test]
-    fn reconcile_ctox_queue_task_projections_filters_to_active_queue_statuses() {
-        let root = tempfile::tempdir().expect("temp root");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let database = open_test_database(store::rxdb_store_path(root.path()))
-                .await
-                .expect("open rxdb sqlite");
-            database
-                .add_collections(collection_creators())
-                .await
-                .expect("register collections");
-            let commands = database
-                .collection("business_commands")
-                .expect("business_commands collection");
-            commands
-                .insert(json!({
-                    "id": "cmd_queue_active_after_terminals",
-                    "command_id": "cmd_queue_active_after_terminals",
-                    "module": "ctox",
-                    "command_type": "ctox.test.completed",
-                    "record_id": "cmd_queue_active_after_terminals",
-                    "status": "completed",
-                    "inbound_channel": "ctox",
-                    "payload": { "ok": true },
-                    "client_context": {},
-                    "updated_at_ms": 5_000
-                }))
-                .await
-                .expect("insert completed command");
-
-            let queue = database
-                .collection("ctox_queue_tasks")
-                .expect("ctox_queue_tasks collection");
-            let mut rxdb_conn =
-                Connection::open(store::rxdb_store_path(root.path())).expect("open rxdb sqlite");
-            let queue_table = rxdb_test_table_name(&rxdb_conn, "ctox_queue_tasks");
-            let queue_table_sql = sqlite_quote_identifier(&queue_table);
-            let insert_sql = format!(
-                "INSERT INTO {queue_table_sql} (id, revision, deleted, lastWriteTime, data)
-                 VALUES (?1, ?2, 0, ?3, ?4)"
-            );
-            let tx = rxdb_conn.transaction().expect("seed terminal queue tx");
-            for index in 0..600 {
-                let id = format!("task_terminal_{index:03}");
-                let payload = json!({
-                    "id": id.clone(),
-                    "command_id": format!("cmd_terminal_{index:03}"),
-                    "title": "terminal filler",
-                    "status": "completed",
-                    "route_status": "handled",
-                    "task_status": "completed",
-                    "module": "ctox",
-                    "source_module": "ctox",
-                    "inbound_channel": "ctox",
-                    "updated_at_ms": index,
-                    "_deleted": false,
-                    "_rev": "1-terminal",
-                    "_meta": { "lwt": index as f64 }
-                });
-                tx.execute(
-                    &insert_sql,
-                    params![
-                        id,
-                        "1-terminal",
-                        index as f64,
-                        serde_json::to_string(&payload).expect("serialize terminal queue payload")
-                    ],
-                )
-                .expect("insert terminal filler queue projection");
-            }
-            tx.commit().expect("commit terminal queue seed");
-            queue
-                .insert(json!({
-                    "id": "task_active_after_terminals",
-                    "command_id": "cmd_queue_active_after_terminals",
-                    "title": "active after terminals",
-                    "status": "queued",
-                    "route_status": "queued",
-                    "task_status": "queued",
-                    "module": "ctox",
-                    "source_module": "ctox",
-                    "inbound_channel": "ctox",
-                    "updated_at_ms": 6_000
-                }))
-                .await
-                .expect("insert active queue projection");
-
-            assert_eq!(
-                reconcile_ctox_queue_task_projections(root.path(), &database)
-                    .await
-                    .expect("reconcile queue projections"),
-                1,
-                "active queue docs must be selected even when terminal docs fill the first page"
-            );
-
-            let repaired = queue
-                .find_one(Some(MangoQuery {
-                    selector: Some(json!({ "id": { "$eq": "task_active_after_terminals" } })),
-                    ..Default::default()
-                }))
-                .expect("queue task query")
-                .exec(false)
-                .await
-                .expect("queue task document");
-            assert_eq!(
-                repaired.get("status").and_then(Value::as_str),
-                Some("completed")
-            );
-            assert_eq!(
-                repaired.get("route_status").and_then(Value::as_str),
-                Some("handled")
-            );
-        });
-    }
-
-    #[test]
-    fn reconcile_ctox_queue_task_projections_does_not_run_global_queue_repair() {
-        let root = tempfile::tempdir().expect("temp root");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let database = open_test_database(store::rxdb_store_path(root.path()))
-                .await
-                .expect("open rxdb sqlite");
-            database
-                .add_collections(collection_creators())
-                .await
-                .expect("register collections");
-            let commands = database
-                .collection("business_commands")
-                .expect("business_commands collection");
-            commands
-                .insert(json!({
-                    "id": "cmd_queue_local_completed",
-                    "command_id": "cmd_queue_local_completed",
-                    "module": "ctox",
-                    "command_type": "ctox.test.completed",
-                    "record_id": "cmd_queue_local_completed",
-                    "status": "completed",
-                    "inbound_channel": "ctox",
-                    "payload": { "ok": true },
-                    "client_context": {},
-                    "updated_at_ms": 2_000
-                }))
-                .await
-                .expect("insert completed command");
-
-            let queue = database
-                .collection("ctox_queue_tasks")
-                .expect("ctox_queue_tasks collection");
-            queue
-                .insert(json!({
-                    "id": "task_queue_local_completed",
-                    "command_id": "cmd_queue_local_completed",
-                    "title": "completed task",
-                    "status": "queued",
-                    "route_status": "queued",
-                    "task_status": "queued",
-                    "module": "ctox",
-                    "source_module": "ctox",
-                    "inbound_channel": "ctox",
-                    "updated_at_ms": 1_000
-                }))
-                .await
-                .expect("insert stale queue projection");
-
-            store::push_collection_records(
-                root.path(),
-                json!({
-                    "collection": "ctox_queue_tasks",
-                    "documents": [
-                        {
-                            "id": "task_unrelated_old_orphan",
-                            "command_id": "cmd_unrelated_missing",
-                            "title": "unrelated old orphan",
-                            "status": "queued",
-                            "route_status": "queued",
-                            "task_status": "queued",
-                            "module": "ctox",
-                            "source_module": "ctox",
-                            "inbound_channel": "ctox",
-                            "updated_at_ms": 1
-                        }
-                    ]
-                }),
-            )
-            .expect("seed unrelated stale queue business record");
-
-            assert_eq!(
-                reconcile_ctox_queue_task_projections(root.path(), &database)
-                    .await
-                    .expect("reconcile queue projections"),
-                1
-            );
-
-            let conn = store::open_store(root.path()).expect("open business store");
-            let local_payload_json: String = conn
-                .query_row(
-                    "SELECT payload_json
-                     FROM business_records
-                     WHERE collection = 'ctox_queue_tasks' AND record_id = 'task_queue_local_completed'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("local queue task business record");
-            let local_payload: Value =
-                serde_json::from_str(&local_payload_json).expect("local queue payload");
-            assert_eq!(
-                local_payload.get("status").and_then(Value::as_str),
-                Some("completed")
-            );
-
-            let unrelated_payload_json: String = conn
-                .query_row(
-                    "SELECT payload_json
-                     FROM business_records
-                     WHERE collection = 'ctox_queue_tasks' AND record_id = 'task_unrelated_old_orphan'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("unrelated queue task business record");
-            let unrelated_payload: Value =
-                serde_json::from_str(&unrelated_payload_json).expect("unrelated queue payload");
-            assert_eq!(
-                unrelated_payload.get("status").and_then(Value::as_str),
-                Some("queued"),
-                "local queue reconciliation must not run global orphan repair"
-            );
-            assert!(
-                unrelated_payload.get("repair_note").is_none(),
-                "global queue repair would have marked unrelated records"
-            );
-            assert!(
-                unrelated_payload.get("error").is_none(),
-                "global queue repair would have failed the unrelated orphan"
-            );
-        });
-    }
-
-    #[test]
     fn queue_chat_repair_idle_gate_skips_unchanged_sources() {
         let root = tempfile::tempdir().expect("temp root");
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -20872,7 +20125,7 @@ mod tests {
                 .expect("register collections");
 
             let mut last_projection_stamp =
-                Some(queue_chat_repair_projection_stamp(root.path()).expect("initial stamp"));
+                Some(chat_tracking_repair_projection_stamp(root.path()).expect("initial stamp"));
             let unchanged_stamp = last_projection_stamp.clone();
             assert_eq!(
                 reconcile_queue_chat_tracking_projections_if_changed(
@@ -20881,7 +20134,7 @@ mod tests {
                     &mut last_projection_stamp
                 )
                 .await
-                .expect("idle queue/chat repair gate"),
+                .expect("idle chat tracking repair gate"),
                 0
             );
             assert_eq!(last_projection_stamp, unchanged_stamp);
@@ -20891,11 +20144,11 @@ mod tests {
                 .expect("business_commands collection");
             commands
                 .insert(json!({
-                    "id": "cmd_queue_idle_gate",
-                    "command_id": "cmd_queue_idle_gate",
+                    "id": "cmd_chat_idle_gate",
+                    "command_id": "cmd_chat_idle_gate",
                     "module": "ctox",
-                    "command_type": "ctox.test.idle_gate",
-                    "record_id": "cmd_queue_idle_gate",
+                    "command_type": "business_os.chat.task",
+                    "record_id": "chat_idle_gate",
                     "status": "completed",
                     "inbound_channel": "ctox",
                     "payload": { "ok": true },
@@ -20903,26 +20156,37 @@ mod tests {
                     "updated_at_ms": 2_000
                 }))
                 .await
-                .expect("insert completed command");
+                .expect("insert completed chat command");
 
-            let queue = database
-                .collection("ctox_queue_tasks")
-                .expect("ctox_queue_tasks collection");
-            queue
+            let chats = database
+                .collection("business_chats")
+                .expect("business_chats collection");
+            chats
                 .insert(json!({
-                    "id": "task_queue_idle_gate",
-                    "command_id": "cmd_queue_idle_gate",
-                    "title": "idle gate task",
-                    "status": "queued",
-                    "route_status": "queued",
-                    "task_status": "queued",
-                    "module": "ctox",
-                    "source_module": "ctox",
-                    "inbound_channel": "ctox",
+                    "id": "chat_idle_gate",
+                    "title": "idle gate chat",
+                    "open": true,
+                    "tracking_active": true,
+                    "tracking_status": "queued",
+                    "tracking_id": "cmd_chat_idle_gate",
+                    "tracking_command_id": "cmd_chat_idle_gate",
+                    "tracking_task_id": "",
+                    "tracking_message_id": "status_cmd_chat_idle_gate",
+                    "messages": [
+                        {
+                            "id": "status_cmd_chat_idle_gate",
+                            "role": "ctox",
+                            "text": "Task angelegt und in der CTOX Queue.",
+                            "commandId": "cmd_chat_idle_gate",
+                            "taskId": "",
+                            "status": "queued",
+                            "createdAt": 1_000
+                        }
+                    ],
                     "updated_at_ms": 1_000
                 }))
                 .await
-                .expect("insert stale queue projection");
+                .expect("insert stale chat tracking projection");
 
             assert_eq!(
                 reconcile_queue_chat_tracking_projections_if_changed(
@@ -20931,22 +20195,35 @@ mod tests {
                     &mut last_projection_stamp
                 )
                 .await
-                .expect("changed queue/chat repair gate"),
+                .expect("changed chat tracking repair gate"),
                 1
             );
-            let repaired = queue
+            let repaired = chats
                 .find_one(Some(MangoQuery {
-                    selector: Some(json!({ "id": { "$eq": "task_queue_idle_gate" } })),
+                    selector: Some(json!({ "id": { "$eq": "chat_idle_gate" } })),
                     ..Default::default()
                 }))
-                .expect("queue task query")
+                .expect("chat query")
                 .exec(false)
                 .await
-                .expect("queue task document");
+                .expect("chat document");
+            let message = repaired
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.first())
+                .expect("chat tracking message");
             assert_eq!(
-                repaired.get("status").and_then(Value::as_str),
+                message.get("status").and_then(Value::as_str),
                 Some("completed")
             );
+            assert_eq!(
+                repaired.get("tracking_status").and_then(Value::as_str),
+                Some("completed")
+            );
+            assert_eq!(
+                repaired.get("tracking_active").and_then(Value::as_bool),
+                Some(false)
+            );
 
             assert_eq!(
                 reconcile_queue_chat_tracking_projections_if_changed(
@@ -20955,113 +20232,9 @@ mod tests {
                     &mut last_projection_stamp
                 )
                 .await
-                .expect("unchanged queue/chat repair gate"),
+                .expect("unchanged chat tracking repair gate"),
                 0
             );
-        });
-    }
-
-    #[test]
-    fn reconcile_ctox_queue_task_projections_fails_orphaned_accepted_commands() {
-        let root = tempfile::tempdir().expect("temp root");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let database = open_test_database(store::rxdb_store_path(root.path()))
-                .await
-                .expect("open rxdb sqlite");
-            database
-                .add_collections(collection_creators())
-                .await
-                .expect("register collections");
-            let stale_at_ms = (now_ms() as i64).saturating_sub(20 * 60 * 1_000);
-            let commands = database
-                .collection("business_commands")
-                .expect("business_commands collection");
-            commands
-                .insert(json!({
-                    "id": "cmd_queue_orphaned",
-                    "command_id": "cmd_queue_orphaned",
-                    "module": "ctox",
-                    "command_type": "ctox.test.orphaned",
-                    "record_id": "cmd_queue_orphaned",
-                    "status": "accepted",
-                    "inbound_channel": "ctox",
-                    "payload": { "ok": true },
-                    "client_context": {},
-                    "updated_at_ms": stale_at_ms
-                }))
-                .await
-                .expect("insert accepted command");
-
-            let queue = database
-                .collection("ctox_queue_tasks")
-                .expect("ctox_queue_tasks collection");
-            queue
-                .insert(json!({
-                    "id": "task_queue_orphaned",
-                    "command_id": "cmd_queue_orphaned",
-                    "title": "orphaned task",
-                    "status": "queued",
-                    "route_status": "queued",
-                    "task_status": "queued",
-                    "module": "ctox",
-                    "source_module": "ctox",
-                    "inbound_channel": "ctox",
-                    "updated_at_ms": stale_at_ms
-                }))
-                .await
-                .expect("insert orphaned queue projection");
-
-            assert_eq!(
-                reconcile_ctox_queue_task_projections(root.path(), &database)
-                    .await
-                    .expect("reconcile queue projections"),
-                1
-            );
-
-            let repaired = queue
-                .find_one(Some(MangoQuery {
-                    selector: Some(json!({ "id": { "$eq": "task_queue_orphaned" } })),
-                    ..Default::default()
-                }))
-                .expect("queue task query")
-                .exec(false)
-                .await
-                .expect("queue task document");
-            assert_eq!(
-                repaired.get("status").and_then(Value::as_str),
-                Some("failed")
-            );
-            assert_eq!(
-                repaired.get("route_status").and_then(Value::as_str),
-                Some("failed")
-            );
-            assert!(repaired.get("error").and_then(Value::as_str).is_some());
-
-            let conn = store::open_store(root.path()).expect("open business store");
-            let command_payload_json: String = conn
-                .query_row(
-                    "SELECT payload_json
-                     FROM business_records
-                     WHERE collection = 'business_commands' AND record_id = 'cmd_queue_orphaned'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("business command repair record");
-            let command_payload: Value =
-                serde_json::from_str(&command_payload_json).expect("command payload");
-            assert_eq!(
-                command_payload.get("status").and_then(Value::as_str),
-                Some("failed")
-            );
-            assert!(command_payload
-                .get("error")
-                .and_then(Value::as_str)
-                .is_some());
         });
     }
 
