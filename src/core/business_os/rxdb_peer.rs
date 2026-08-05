@@ -462,9 +462,40 @@ pub(super) static TEMPORARY_RXDB_DATABASE_LOCK: Mutex<()> = Mutex::new(());
 pub(super) static NATIVE_RXDB_WRITE_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 const SIGNALING_TOKEN_TTL_SECONDS: u64 = 24 * 60 * 60;
+/// Per-database document-lookup counter for chat-tracking batch tests.
+/// Scoped by database name so parallel sister tests cannot inflate the count.
 #[cfg(test)]
-static CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS: OnceLock<Mutex<HashMap<String, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn chat_tracking_batch_document_lookups() -> &'static Mutex<HashMap<String, usize>> {
+    CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_chat_tracking_batch_document_lookup(database_name: &str) {
+    let mut counts = chat_tracking_batch_document_lookups()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(database_name.to_string()).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn reset_chat_tracking_batch_document_lookups(database_name: &str) {
+    let mut counts = chat_tracking_batch_document_lookups()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.insert(database_name.to_string(), 0);
+}
+
+#[cfg(test)]
+fn chat_tracking_batch_document_lookup_count(database_name: &str) -> usize {
+    let counts = chat_tracking_batch_document_lookups()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.get(database_name).copied().unwrap_or(0)
+}
 static NOTES_LOOP_METRICS: NativePeerLoopMetrics = NativePeerLoopMetrics::new("notes");
 static DESKTOP_FILE_INDEX_LOOP_METRICS: NativePeerLoopMetrics =
     NativePeerLoopMetrics::new("desktop_file_index");
@@ -8726,7 +8757,7 @@ async fn find_projection_documents_by_id(
         return Ok(HashMap::new());
     }
     #[cfg(test)]
-    CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    record_chat_tracking_batch_document_lookup(&collection.database.name);
     let ids = ids.into_iter().collect::<Vec<_>>();
     let documents = collection
         .storage_instance
@@ -21230,7 +21261,7 @@ mod tests {
                 .await
                 .expect("insert batch chat projection");
 
-            CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS.store(0, Ordering::Relaxed);
+            reset_chat_tracking_batch_document_lookups(&database.name);
             assert_eq!(
                 reconcile_business_chat_tracking_projections(&database)
                     .await
@@ -21238,7 +21269,7 @@ mod tests {
                 1
             );
             assert_eq!(
-                CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS.load(Ordering::Relaxed),
+                chat_tracking_batch_document_lookup_count(&database.name),
                 2,
                 "active Chat tracking repair must batch command and task lookups"
             );
