@@ -408,14 +408,26 @@ pub fn module_catalog_for_rxdb(root: &Path) -> anyhow::Result<Value> {
 
 pub fn write_module_catalog_projection_to_rxdb(root: &Path) -> anyhow::Result<()> {
     let mut document = module_catalog_for_rxdb(root)?;
+    let now = now_ms();
+    let revision = format!("{now}-ctox-module-catalog");
     if let Some(object) = document.as_object_mut() {
-        object.remove("_rev");
-        object.remove("_meta");
+        // The document JSON must carry the same envelope as the row columns:
+        // the native peer's document cache requires `_rev` and `_meta.lwt` on
+        // every document it touches. This writer used to strip both, so each
+        // catalog refresh re-poisoned the projection loop with DOC_CACHE_REV
+        // even after the stored document had been healed.
+        object.insert("_rev".to_string(), Value::String(revision.clone()));
+        object.insert(
+            "_meta".to_string(),
+            serde_json::json!({ "lwt": now as f64 }),
+        );
+        object.insert(
+            "_attachments".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
         object.insert("_deleted".to_string(), Value::Bool(false));
         object.insert("is_deleted".to_string(), Value::Bool(false));
     }
-    let now = now_ms();
-    let revision = format!("{now}-ctox-module-catalog");
     let path = rxdb_store_path(root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
