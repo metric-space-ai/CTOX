@@ -70,17 +70,64 @@ static INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static CHANGED_DOCUMENTS_SINCE_TABLE_CALLS: OnceLock<StdMutex<HashMap<String, usize>>> =
     OnceLock::new();
+/// Per-database writer-fallback counters for file-backed read-path tests.
+/// Scoped by database path so parallel sister tests cannot inflate the count.
 #[cfg(test)]
-static FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+static FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS: OnceLock<StdMutex<HashMap<String, usize>>> =
+    OnceLock::new();
 #[cfg(test)]
-static CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+static CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS: OnceLock<StdMutex<HashMap<String, usize>>> =
+    OnceLock::new();
 #[cfg(test)]
-static QUERY_WRITER_FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+static QUERY_WRITER_FALLBACKS: OnceLock<StdMutex<HashMap<String, usize>>> = OnceLock::new();
 #[cfg(test)]
 static TEST_EXTERNAL_POLL_SAFETY_INTERVAL_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static TEST_QUERY_STREAM_ROW_DELAY_MS_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
     OnceLock::new();
+
+#[cfg(test)]
+fn writer_fallback_counts(
+    cell: &'static OnceLock<StdMutex<HashMap<String, usize>>>,
+) -> &'static StdMutex<HashMap<String, usize>> {
+    cell.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_writer_fallback(
+    cell: &'static OnceLock<StdMutex<HashMap<String, usize>>>,
+    database_path: &Path,
+) {
+    let key = database_key_for_path(database_path);
+    let mut counts = writer_fallback_counts(cell)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(key).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn reset_writer_fallback_count(
+    cell: &'static OnceLock<StdMutex<HashMap<String, usize>>>,
+    database_path: &Path,
+) {
+    let key = database_key_for_path(database_path);
+    let mut counts = writer_fallback_counts(cell)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.insert(key, 0);
+}
+
+#[cfg(test)]
+fn writer_fallback_count(
+    cell: &'static OnceLock<StdMutex<HashMap<String, usize>>>,
+    database_path: &Path,
+) -> usize {
+    let key = database_key_for_path(database_path);
+    let counts = writer_fallback_counts(cell)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.get(&key).copied().unwrap_or(0)
+}
 
 #[cfg(test)]
 fn set_test_query_stream_row_delay_ms(table_name: &str, delay_ms: u64) {
@@ -465,13 +512,19 @@ impl RxStorageInstanceSqlite {
                 #[cfg(test)]
                 match operation {
                     ReadOperation::FindDocumentsById => {
-                        FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
+                        record_writer_fallback(
+                            &FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS,
+                            &self.database_path,
+                        );
                     }
                     ReadOperation::Query => {
-                        QUERY_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
+                        record_writer_fallback(&QUERY_WRITER_FALLBACKS, &self.database_path);
                     }
                     ReadOperation::ChangedDocumentsSince => {
-                        CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
+                        record_writer_fallback(
+                            &CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS,
+                            &self.database_path,
+                        );
                     }
                     ReadOperation::Count => {}
                 }
@@ -2047,7 +2100,10 @@ mod tests {
             .await
             .unwrap();
 
-        FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS.store(0, Ordering::SeqCst);
+        reset_writer_fallback_count(
+            &FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS,
+            &instance.database_path,
+        );
         let docs = instance
             .find_documents_by_id(
                 &[
@@ -2067,7 +2123,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["b", "a", "b"]);
         assert_eq!(
-            FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS.load(Ordering::SeqCst),
+            writer_fallback_count(
+                &FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS,
+                &instance.database_path,
+            ),
             0,
             "file-backed find_documents_by_id must not use the shared writer connection fallback"
         );
@@ -2078,7 +2137,10 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.len(), 1);
         assert_eq!(
-            FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS.load(Ordering::SeqCst),
+            writer_fallback_count(
+                &FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS,
+                &instance.database_path,
+            ),
             0,
             "with_deleted lookup must also stay on the read-only connection"
         );
@@ -2589,7 +2651,7 @@ mod tests {
         )
         .unwrap();
 
-        QUERY_WRITER_FALLBACKS.store(0, Ordering::SeqCst);
+        reset_writer_fallback_count(&QUERY_WRITER_FALLBACKS, &instance.database_path);
         let fallback_calls_before = runtime_counter("query_fallback_calls");
         let fallback_rows_before = runtime_counter("query_fallback_rows_visited");
         let fallback_decoded_before = runtime_counter("query_fallback_rows_decoded");
@@ -2614,7 +2676,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ages, vec![95, 97]);
         assert_eq!(
-            QUERY_WRITER_FALLBACKS.load(Ordering::SeqCst),
+            writer_fallback_count(&QUERY_WRITER_FALLBACKS, &instance.database_path),
             0,
             "file-backed query fallback must not use the shared writer connection fallback"
         );
@@ -3518,7 +3580,10 @@ mod tests {
             .await
             .unwrap();
 
-        CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS.store(0, Ordering::SeqCst);
+        reset_writer_fallback_count(
+            &CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS,
+            &instance.database_path,
+        );
         let shared_conn = storage.connection().unwrap();
         let _writer_guard = shared_conn.lock();
 
@@ -3539,7 +3604,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["a", "b"]);
         assert_eq!(
-            CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS.load(Ordering::SeqCst),
+            writer_fallback_count(
+                &CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS,
+                &instance.database_path,
+            ),
             0,
             "file-backed get_changed_documents_since must not use the shared writer connection fallback"
         );
