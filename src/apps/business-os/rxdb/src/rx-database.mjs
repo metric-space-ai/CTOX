@@ -16,8 +16,10 @@ import {
 } from './schema.mjs';
 import {
   getConnectionHandlerSimplePeer,
+  invalidateCollectionReplicationPersistence,
   replicateWebRTC,
 } from './replication-webrtc.mjs';
+import { invalidateQueryMetaCollection } from './query-meta-storage.mjs';
 import { registerCollectionSyncProfile } from './sync-profile-registry.mjs';
 import { getActiveCollectionRegistry } from './active-collections.mjs';
 import { getPresenceRegistry } from './presence.mjs';
@@ -125,6 +127,14 @@ class CtoxRxDatabase {
     for (const [name, definition] of Object.entries(collections || {})) {
       if (this.collections[name]) continue;
       const schema = definition?.schema || definition;
+      // `migrationStrategies` is intentionally NOT executed in the browser.
+      // Declarative strategies are mirrored here for the native authoritative
+      // store, which owns migration execution; the browser is only a replica
+      // cache and invalidates/re-pulls on version or effective-hash changes.
+      // Ignoring (rather than rejecting) preserves the shared declaration shape
+      // without silently introducing a second migration engine.
+      const _nativeMigrationStrategies = definition?.migrationStrategies;
+      void _nativeMigrationStrategies;
       // `conflictStrategy` and `deleteStrategy` are SIBLINGS of `schema` in the
       // collection definition ('lww'/'field-merge' updates; 'default'/'final'
       // deletes — SYNC-41) — outside the schema object on purpose, so schema
@@ -138,10 +148,28 @@ class CtoxRxDatabase {
       // startWebRtcReplication, so a runtime-installed module's demand-only /
       // demand-chunks collections are classified correctly browser-side too.
       registerCollectionSyncProfile(name, definition?.syncProfile);
+      const declaredVersion = Number(schema?.version || 0);
+      const effectiveSchemaHash = await schemaHash(schema, name);
+      const versionInvalidation = await this.storage.prepareCollectionSchema?.({
+        collection: name,
+        declaredVersion,
+        effectiveSchemaHash,
+        invalidateExternalState: async () => {
+          await invalidateQueryMetaCollection(name);
+          invalidateCollectionReplicationPersistence(name);
+        },
+      }) || { invalidated: false, marker: null, clearedRows: 0 };
       const collection = new CtoxRxCollection({
         name,
         schema,
-        storageCollection: this.storage.collection(name, { schema, conflictStrategy, deleteStrategy }),
+        versionInvalidation,
+        storageCollection: this.storage.collection(name, {
+          schema,
+          schemaVersion: declaredVersion,
+          effectiveSchemaHash,
+          conflictStrategy,
+          deleteStrategy,
+        }),
       });
       this.collections[name] = collection;
       this[name] = collection;
@@ -192,8 +220,9 @@ function emptyRecoveryStatus(databaseName) {
 }
 
 class CtoxRxCollection {
-  constructor({ name, schema, storageCollection }) {
+  constructor({ name, schema, storageCollection, versionInvalidation = null }) {
     this.name = name;
+    this.versionInvalidation = versionInvalidation;
     this.schema = {
       jsonSchema: schema,
       version: schema?.version || 0,

@@ -362,6 +362,17 @@ export class CtoxRecoveryJournal {
     return rows.filter((row) => (!state || row.state === state) && (!collection || row.collection === collection));
   }
 
+  // Destructive browser-cache invalidation must consult the live IndexedDB WAL,
+  // never the LocalStorage status mirror. The compound state+collection index
+  // keeps this guard collection-scoped and proportional to pending work only.
+  async pendingSummaryForCollection(collection) {
+    const batches = await this.listBatches('pending', collection);
+    return {
+      pendingBatches: batches.length,
+      pendingWrites: batches.reduce((sum, batch) => sum + (batch.documentIds?.length || 0), 0),
+    };
+  }
+
   async gc(now = Date.now()) {
     const rows = await this.listBatches('master_acked');
     for (const row of rows) {

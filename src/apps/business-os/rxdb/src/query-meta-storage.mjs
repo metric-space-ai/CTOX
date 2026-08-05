@@ -5,9 +5,18 @@
 // remains byte-identical to V1.
 
 import { createMemoryMetaBackend } from './query-meta-backend-memory.mjs';
+import { invalidateIndexedDbMetaDatabase } from './query-meta-backend-indexeddb.mjs';
 
 export const SIDECAR_DATABASE_NAME = 'ctox_business_os_v1_5_meta';
 export const SIDECAR_PIN_RECENT_READ_TTL_MS = 60_000;
+
+export async function invalidateQueryMetaCollection(collection) {
+  const normalized = String(collection || '').trim();
+  if (!normalized) throw new TypeError('invalidateQueryMetaCollection requires collection');
+  return invalidateIndexedDbMetaDatabase({
+    databaseName: `${SIDECAR_DATABASE_NAME}_${normalized}`,
+  });
+}
 
 const PIN_RECENT_READ = 'recently-read';
 const evictionSchedulerGroups = new Map();

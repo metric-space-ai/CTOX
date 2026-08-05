@@ -227,6 +227,38 @@ export function createIndexedDbMetaBackend({ databaseName }) {
   };
 }
 
+// Version invalidation runs before the demand loader exists, so it cannot use a
+// live QueryMetaStorage instance. Clear the collection-specific sidecar directly
+// and surface every open/write error; silently falling back to memory here would
+// leave stale completeness windows durable in IndexedDB.
+export async function invalidateIndexedDbMetaDatabase({ databaseName } = {}) {
+  if (!databaseName) throw new TypeError('invalidateIndexedDbMetaDatabase requires databaseName');
+  if (!globalThis.indexedDB?.open) return false;
+  if (typeof globalThis.indexedDB.databases === 'function') {
+    try {
+      const databases = await globalThis.indexedDB.databases();
+      if (!databases.some((entry) => entry?.name === databaseName)) return false;
+    } catch {
+      // Enumeration is an optimization only. Opening below remains fail-closed.
+    }
+  }
+  const db = await openSidecarDatabase(databaseName);
+  try {
+    const stores = [
+      STORE_QUERY_WINDOWS,
+      STORE_QUERY_WINDOW_REFS,
+      STORE_DOCUMENT_ACCESS,
+      STORE_CACHE_STATS,
+    ];
+    await runTransaction(db.transaction(stores, 'readwrite'), (tx) => {
+      for (const store of stores) tx.objectStore(store).clear();
+    });
+    return true;
+  } finally {
+    db.close();
+  }
+}
+
 function openSidecarDatabase(databaseName) {
   if (!globalThis.indexedDB) {
     throw new Error('indexedDB is required for sidecar metadata storage');
