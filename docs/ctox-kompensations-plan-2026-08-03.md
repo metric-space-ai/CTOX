@@ -210,6 +210,32 @@ Nachzählung am 04.08., je Belang selbst gemessen:
    fiel schon am 31.07., als eine falsch gefilterte Zählung „116 Geister"
    behauptete — die Funktion arbeitete die ganze Zeit korrekt.)
 
+## I-057: die Projektionsabgleicher — eine Hälfte trocken, eine nass
+
+Die Messung teilt den Belang exakt an der Ursachengrenze:
+
+**Queue-Hälfte: Netz über trockenem Boden.** Die Ursache — Kern-Mutationen
+ohne Projektions-Update — fiel mit `d0d2d0ca8`: seither laufen kanonische
+Mutation und Projektions-Refresh in DERSELBEN Transaktion, über alle fünf
+Mutationsklassen (Lease, Hold, Ack, Command-Transition, terminale Completion).
+Heute: null Kandidaten in beiden Stores (0 von 942), null terminale Commands
+mit aktiver Route. Und die Null ist belastbar, weil eine Reparatur dauerhafte
+Wirkung hätte — sie schreibt in RxDB UND zurück in den Business-Store. Die 157
+fehlenden Projektionen sind Altbestand (letzte 18.07.) und ohnehin außerhalb
+der Reichweite des Abgleichers: er startet bei RxDB-Dokumenten und kann
+Fehlendes prinzipiell nicht anlegen. → I-058 löscht diese Hälfte.
+
+**Chat-Hälfte: Ursache existiert noch, Netz bleibt.** Der Browser schreibt
+Chat-Tracking asynchron (`business-chat.js:2668-2781`); bei geschlossenem
+Browser oder Failure/Cancel bleibt ein realer nicht-atomarer Pfad. Diese
+Kompensation fällt erst, wenn das Tracking transaktional mitgeschrieben wird.
+
+**Notiert, kein Auftrag:** Ein theoretisches Fenster bei der ERSTEN
+Projektionsanlage — der Claim committet (`command_saga.rs:180-181`), erst
+danach schreibt `record_command` die Projektionszeilen (`store.rs:11057`). Ein
+Crash dazwischen erzeugt eine fehlende (nicht eine stale) Projektion. Seit dem
+18.07. kein einziger Fall; wie bei I-055 gilt: nichts auf Vorrat bauen.
+
 ## I-056: die Dokumentation sichert einen Lebenszyklus zu, den es nicht gibt
 
 Der schwerste Fund dieser Kampagne, gefunden von I-056 und von mir am Code
@@ -251,6 +277,47 @@ die migrierte Zeilen und Versionsumschaltung atomar schreibt.
 Nebenbei gemessen: drei Module deklarieren Strategien widersprüchlich zwischen
 `schema.js` und `collections.schema.json` (`browser`, `credentials`, `creator`),
 und der App-Starter erzeugt beide Seiten uneinheitlich.
+
+## Schlussbilanz (05.08.2026)
+
+Die Kompensationsliste dieser Kampagne ist abgearbeitet: **24 Aufträge, davon
+23 abgeschlossen, 27 Commits** seit Kampagnenstart. Der letzte Schnitt
+(I-058) entfernte 933 Zeilen Queue-Projektionsreparatur, deren Ursache seit
+`d0d2d0ca8` nicht mehr existiert.
+
+**Was gefallen ist (Ursache zuerst, dann das Netz):** die agentische
+Queue-Reparatur samt Schichtverletzung zur Modellausführung (I-042, 809
+Zeilen); die Prosa-Erkennung der Task-Identität über 27 Aufrufstellen (I-050);
+der verschluckte Queue-Ack (I-052); der Queue-Projektionsabgleicher (I-058,
+933 Zeilen); dazu die Welle-1- und Welle-2-Landungen.
+
+**Was bewusst steht:** die Chat-Tracking-Reparatur (Ursache existiert: der
+Browser schreibt asynchron); die Browser-Sitzungs-Recovery (harter Crash);
+der TTL-Sweep und die App-Recovery (bis `queue.ack_failed` über Zeit null
+zeigt — I-053 bleibt blockiert, das ist Absicht, kein Rest).
+
+**Die Zahl, die die Kampagne rechtfertigt:** Von 986 namentlichen
+Kompensations-Verdachtsfällen waren 73 echte Schuld (7,4 %) — und von den
+groß vermessenen Belangen fiel etwa die Hälfte erst nach einer Messung, die
+die Prämisse kippte. Vier Befunde-ohne-Diff (I-051, I-054, I-055, I-057)
+haben mehr Schaden verhindert als die Commits behoben haben: einen Nachbau
+eines existierenden TTL, eine Löschung auf Basis einer Null, die nur einen
+Ringpuffer bewies, Vorratsfelder ohne einen einzigen realen Fall, und eine
+Reparatur an einem Migrator, den es gar nicht gibt.
+
+**Folgekampagnen, beide Owner-Entscheid, beide zu groß für eine Welle:**
+
+1. **Der Migrations-Lebenszyklus** (aus I-054/I-056): Schema-Bumps kopieren,
+   verifizieren und räumen heute nichts; die Doku sichert es zu, fünf genannte
+   Wächter existieren nicht; `migrationStrategies` werden angenommen und nie
+   gelesen. Betroffen: Browser-Storage, nativer Peer, beide Deklarationsseiten,
+   App-Starter, drei widersprüchliche Module.
+2. **Die Pro-Key-Ack-Reihenfolge** (aus I-052): Ownership fällt heute pauschal
+   vor den Acks; erst mit Ack-Erfolg pro Key kann die App-Recovery
+   (22 Funktionen) endgültig fallen.
+
+**Offener Owner-Entscheid:** `ctox queue repair` heißt noch so, zählt aber nur
+noch offene Einträge — ehrlich wäre `status`; ein Umbenennen bricht Skripte.
 
 ## Offen
 
