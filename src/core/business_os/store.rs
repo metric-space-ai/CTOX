@@ -15043,16 +15043,52 @@ fn upsert_rxdb_collection_record_with_writer(
             payload = existing;
         }
     }
-    let rev = format!("rev_{}", Uuid::new_v4());
+    // The document JSON must carry a complete, valid RxDB envelope. This
+    // writer used to stamp the revision only into the table column while the
+    // stored JSON kept no `_rev`/`_meta` at all; every document it touched
+    // then poisoned the native peer's document cache (`revision_cache_key`
+    // requires `_rev` and `_meta.lwt`) and the affected projection loop
+    // failed with DOC_CACHE_REV on every cycle - the knowledge-tables flood
+    // and the module-catalog flood on the SKF instance were both this.
+    let previous_revision_height = payload
+        .get("_rev")
+        .and_then(Value::as_str)
+        .and_then(|revision| revision.split_once('-'))
+        .and_then(|(height, token)| {
+            (!token.is_empty())
+                .then(|| height.parse::<u64>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let rev = format!(
+        "{}-{}",
+        previous_revision_height.saturating_add(1),
+        Uuid::new_v4().simple()
+    );
     if let Some(object) = payload.as_object_mut() {
         object.insert("id".to_string(), Value::String(record_id.to_string()));
         object.insert(
             "updated_at_ms".to_string(),
             Value::Number(serde_json::Number::from(payload_updated_at_ms)),
         );
+        object.insert("_rev".to_string(), Value::String(rev.clone()));
+        let meta = object
+            .entry("_meta".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert("lwt".to_string(), Value::from(replication_lwt_ms as f64));
+        } else {
+            *meta = serde_json::json!({ "lwt": replication_lwt_ms as f64 });
+        }
+        if !object.get("_attachments").is_some_and(Value::is_object) {
+            object.insert(
+                "_attachments".to_string(),
+                Value::Object(serde_json::Map::new()),
+            );
+        }
+        object.insert("_deleted".to_string(), Value::Bool(deleted));
         if deleted {
             object.insert("is_deleted".to_string(), Value::Bool(true));
-            object.insert("_deleted".to_string(), Value::Bool(true));
         }
     }
     // SECURITY: strip bearer credentials from client_context on the FINAL merged
@@ -37760,6 +37796,52 @@ pub(super) mod tests {
         assert!(!prompt.contains("capability_token"));
         assert!(!prompt.contains("access_token"));
         assert!(!prompt.contains("api_key"));
+    }
+
+    #[test]
+    fn rxdb_writer_stamps_a_complete_document_envelope() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::create_dir_all(root.join("runtime")).expect("runtime dir");
+        {
+            let conn = Connection::open(rxdb_store_path(root)).expect("open rxdb store");
+            rxdb::storage::sqlite::sql::ensure_collection_table(
+                &conn,
+                "ctox_business_os__business_module_catalog__v0",
+            )
+            .expect("collection table");
+        }
+        for pass in 1..=2u64 {
+            upsert_rxdb_collection_record(
+                root,
+                "business_module_catalog",
+                "module-catalog",
+                1_785_900_000_000 + pass as i64,
+                serde_json::json!({ "title": format!("catalog pass {pass}") }),
+            )
+            .expect("upsert record");
+            let stored =
+                load_rxdb_collection_record(root, "business_module_catalog", "module-catalog")
+                    .expect("load record")
+                    .expect("record exists");
+            let revision = stored
+                .get("_rev")
+                .and_then(Value::as_str)
+                .expect("document JSON carries _rev");
+            let (height, token) = revision.split_once('-').expect("height-token format");
+            assert_eq!(height.parse::<u64>().expect("numeric height"), pass);
+            assert!(!token.is_empty());
+            assert!(
+                stored
+                    .get("_meta")
+                    .and_then(|meta| meta.get("lwt"))
+                    .and_then(Value::as_f64)
+                    .is_some(),
+                "document JSON carries _meta.lwt"
+            );
+            assert!(stored.get("_attachments").is_some_and(Value::is_object));
+            assert_eq!(stored.get("_deleted").and_then(Value::as_bool), Some(false));
+        }
     }
 
     #[test]
