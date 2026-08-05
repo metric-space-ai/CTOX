@@ -16164,9 +16164,14 @@ fn maybe_spawn_systematic_research_continuation(
         return Ok(None);
     }
     let lower = error.to_ascii_lowercase();
+    // 413 responses count as transport here: they come from an oversized
+    // mid-run fallback request, and a fresh continuation session starts from
+    // the normal bounded prompt again. The cap still bounds a deterministic
+    // repeat.
     let transport_failure = lower.contains("stream disconnected before completion")
         || lower.contains("connection reset by peer")
-        || lower.contains("error sending request for url");
+        || lower.contains("error sending request for url")
+        || lower.contains("payload too large");
     if !transport_failure {
         return Ok(None);
     }
@@ -16182,16 +16187,25 @@ fn maybe_spawn_systematic_research_continuation(
     }
     let record_id = command.record_id.clone().unwrap_or_default();
     if !record_id.is_empty() {
+        // Exclude the dying command's own task: depending on the caller the
+        // projection may still read `leased` at this moment, and counting it
+        // would silently suppress every continuation.
         let active: i64 = conn.query_row(
             "SELECT COUNT(*) FROM business_records
              WHERE collection = 'ctox_queue_tasks'
                AND json_extract(payload_json, '$.command_type') = 'research.systematic.run'
                AND json_extract(payload_json, '$.route_status') IN ('pending', 'leased')
+               AND json_extract(payload_json, '$.command_id') != ?2
                AND payload_json LIKE '%' || ?1 || '%'",
-            params![record_id],
+            params![record_id, failed_command_id],
             |row| row.get(0),
         )?;
         if active > 0 {
+            record_research_continuation_decision(
+                conn,
+                failed_command_id,
+                &format!("suppressed: {active} active run(s) for {record_id}"),
+            );
             return Ok(None);
         }
     }
@@ -16222,8 +16236,48 @@ fn maybe_spawn_systematic_research_continuation(
             "transport_error": error.chars().take(200).collect::<String>(),
         },
     });
-    super::command_plane::accept_rxdb_business_command(root, document)?;
+    if let Err(err) = super::command_plane::accept_rxdb_business_command(root, document) {
+        record_research_continuation_decision(
+            conn,
+            failed_command_id,
+            &format!("dispatch failed: {err}"),
+        );
+        return Err(err);
+    }
+    record_research_continuation_decision(
+        conn,
+        failed_command_id,
+        &format!("spawned {next_command_id} (attempt {})", attempt + 1),
+    );
     Ok(Some(next_command_id))
+}
+
+/// The service journal on a busy instance rotates within hours, so the
+/// continuation decision is also recorded durably next to the command it
+/// belongs to. One row per failed command; greppable via the
+/// `research_continuations` collection.
+fn record_research_continuation_decision(
+    conn: &Connection,
+    failed_command_id: &str,
+    decision: &str,
+) {
+    let now = now_ms() as i64;
+    let payload = serde_json::json!({
+        "id": failed_command_id,
+        "decision": decision,
+        "updated_at_ms": now,
+    });
+    if let Err(err) = upsert_business_record(
+        conn,
+        "research_continuations",
+        failed_command_id,
+        now,
+        payload,
+    ) {
+        eprintln!(
+            "[business-os] could not record continuation decision for {failed_command_id}: {err}"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -37706,6 +37760,68 @@ pub(super) mod tests {
         assert!(!prompt.contains("capability_token"));
         assert!(!prompt.contains("access_token"));
         assert!(!prompt.contains("api_key"));
+    }
+
+    #[test]
+    fn research_auto_continuation_fires_through_the_terminal_failure_path() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        // Dispatch a real research run command through the command plane so a
+        // queue task exists, then terminalize it exactly like the worker does.
+        let accepted = super::super::command_plane::accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_integration_dead_run",
+                "command_id": "cmd_integration_dead_run",
+                "module": "research",
+                "command_type": "research.systematic.run",
+                "record_id": "research_baseline_task",
+                "status": "pending_sync",
+                "payload": {
+                    "title": "Research · Baseline",
+                    "research_run_id": "run-integration-1",
+                    "knowledge_domain": "bearing_design_calculation"
+                },
+                "client_context": { "actor": { "id": "tester", "role": "chef" } }
+            }),
+        )
+        .expect("accept research command");
+        let task_id = accepted
+            .get("task_id")
+            .and_then(Value::as_str)
+            .expect("queue task id")
+            .to_string();
+        let projected = fail_business_command_from_queue_error(
+            root,
+            &task_id,
+            "direct session error: ErrorEvent { message: \"stream disconnected before completion: stream closed before response.completed\", codex_error_info: Some(Other) }",
+        )
+        .expect("terminal failure projected")
+        .expect("command projection");
+        assert_eq!(
+            projected.get("status").and_then(Value::as_str),
+            Some("failed")
+        );
+        let conn = open_store(root).expect("open store");
+        let continuation: Option<String> = conn
+            .query_row(
+                "SELECT command_id FROM business_commands WHERE command_id LIKE 'cmd_auto_%'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query continuation");
+        let continuation = continuation.expect(
+            "a terminal transport failure of a research run must spawn a continuation command",
+        );
+        let stored = load_business_command(&conn, &continuation).expect("load continuation");
+        assert_eq!(
+            stored
+                .payload
+                .get("auto_continuation_attempt")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
     }
 
     #[test]
