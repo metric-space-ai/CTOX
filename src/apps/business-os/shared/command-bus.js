@@ -1134,12 +1134,10 @@ function commandReceipt(command, commandId) {
       ? ''
       : compatibilityTaskId
   );
-  const status = commandReceiptStatus(command);
-  const legacyTaskStatus = String(command?.task_status || '').trim();
   return {
     ok: !commandIsFailed(command),
     command_id: commandId,
-    status,
+    status: String(command?.status || command?.execution_phase || 'accepted'),
     execution_mode: command?.execution_mode || null,
     execution_task_id: taskId,
     task_id: taskId,
@@ -1147,24 +1145,11 @@ function commandReceipt(command, commandId) {
       taskId ? '' : compatibilityTaskId
     ),
     target_record_id: command?.target_record_id || command?.record_id || '',
-    task_status: legacyTaskStatus && legacyTaskStatus !== 'pending_sync' ? legacyTaskStatus : status,
+    task_status: String(command?.task_status || command?.status || ''),
     payload: command?.payload || null,
     result: command?.result || null,
     transport: 'rxdb-command-bus',
   };
-}
-
-function commandReceiptStatus(command) {
-  const executionPhase = String(command?.execution_phase || '').trim();
-  if (executionPhase === 'terminal') {
-    return String(command?.terminal_status || command?.status || 'terminal');
-  }
-  if (executionPhase) return executionPhase;
-  const legacyStatus = String(command?.status || '').trim();
-  if (command?.replication_phase === 'native_observed' && legacyStatus === 'pending_sync') {
-    return 'accepted';
-  }
-  return legacyStatus || 'accepted';
 }
 
 async function findDoc(collection, id, { swallowErrors = true } = {}) {

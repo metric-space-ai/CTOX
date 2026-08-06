@@ -167,7 +167,7 @@ const assert = (condition, message) => {
     },
   });
   const bus = createCommandBus({ db });
-  const result = await bus.dispatch({ type: 'ctox.coding_agent.status', module: 'coding-agents' });
+  const result = await bus.dispatch({ type: 'ctox.coding.turn', module: 'coding-agents' });
   assert(result.ok === true, 'coding-agent direct outcome: ok');
   assert(result.task_id === '', 'coding-agent direct outcome: no task id');
   assert(result.result.outcome.data.provider === 'codex', 'coding-agent direct outcome: structured data preserved');

@@ -19,54 +19,14 @@ use sha2::Digest;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
-/// Per-database completeness-check counter for desktop-file rescan tests.
-/// Scoped by RxDB store path so parallel sister tests cannot inflate the count.
 #[cfg(test)]
-static DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS: OnceLock<Mutex<HashMap<String, usize>>> =
-    OnceLock::new();
-
-#[cfg(test)]
-fn desktop_file_chunk_completeness_checks() -> &'static Mutex<HashMap<String, usize>> {
-    DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(test)]
-fn desktop_file_chunk_completeness_check_key(root: &Path) -> String {
-    store::rxdb_store_path(root).to_string_lossy().into_owned()
-}
-
-#[cfg(test)]
-fn record_desktop_file_chunk_completeness_check(root: &Path) {
-    let key = desktop_file_chunk_completeness_check_key(root);
-    let mut counts = desktop_file_chunk_completeness_checks()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *counts.entry(key).or_insert(0) += 1;
-}
-
-#[cfg(test)]
-pub(super) fn reset_desktop_file_chunk_completeness_checks(root: &Path) {
-    let key = desktop_file_chunk_completeness_check_key(root);
-    let mut counts = desktop_file_chunk_completeness_checks()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    counts.insert(key, 0);
-}
-
-#[cfg(test)]
-pub(super) fn desktop_file_chunk_completeness_check_count(root: &Path) -> usize {
-    let key = desktop_file_chunk_completeness_check_key(root);
-    let counts = desktop_file_chunk_completeness_checks()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    counts.get(&key).copied().unwrap_or(0)
-}
+pub(super) static DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 pub(super) const DESKTOP_FILE_CHUNK_SIZE: usize = 16 * 1024;
 pub(super) const SPREADSHEET_BLOB_CHUNK_SIZE: usize = 256_000;
@@ -496,16 +456,13 @@ pub(super) async fn mark_desktop_file_chunk_generation_verified(
 /// `ctox.file.materialize` repair) just because the file-doc fingerprint
 /// still matches — the index has to stay self-healing.
 pub(super) async fn desktop_file_chunk_generation_is_complete(
-    root: &Path,
     database: &Arc<RxDatabase>,
     file_id: &str,
     generation_id: &str,
     size_bytes: u64,
 ) -> bool {
     #[cfg(test)]
-    record_desktop_file_chunk_completeness_check(root);
-    #[cfg(not(test))]
-    let _ = root;
+    DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.fetch_add(1, Ordering::Relaxed);
     if generation_id.is_empty() {
         return false;
     }
@@ -661,7 +618,6 @@ pub(super) async fn upsert_desktop_file_with_parent(
                     {
                         true
                     } else if desktop_file_chunk_generation_is_complete(
-                        root,
                         database,
                         &file_id,
                         generation,
@@ -719,7 +675,6 @@ pub(super) async fn upsert_desktop_file_with_parent(
                 });
             if !metadata_verified
                 && !desktop_file_chunk_generation_is_complete(
-                    root,
                     database,
                     &file_id,
                     generation,

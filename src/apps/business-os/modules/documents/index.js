@@ -1,6 +1,7 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js';
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260723-office-demand-ready-v217';
+import { preserveScrollDuring } from '../../shared/stable-dom.js';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260726-office-demand-file-loader-v220';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const MARKDOWN_MIME = 'text/markdown';
@@ -8,7 +9,11 @@ const CTOX_DOCUMENTS_LOAD_TIMEOUT_MS = 60000;
 const CTOX_DOCUMENTS_READY_TIMEOUT_MS = 120000;
 const CTOX_DOCUMENTS_RECOVERY_DELAY_MS = 1200;
 const CTOX_DOCUMENTS_MAX_RECOVERY_ATTEMPTS = 3;
+const EDITOR_VERSION_CONTENT_READY_TIMEOUT_MS = 900;
+const EDITOR_VERSION_CONTENT_READY_POLL_MS = 25;
 const CHUNK_SIZE = 256000;
+const DOCUMENT_BLOB_CACHE_MAX_ENTRIES = 64;
+const DOCUMENT_BLOB_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const DOCX_TOOLBAR_VISIBILITY_KEY = 'ctox.businessOs.documents.docxToolbarVisible';
 const DOCUMENT_RENDER_DEBOUNCE_MS = 80;
 const DOCUMENTS_ASSET_REVISION = '20260723-documents-workspace-v1034';
@@ -193,6 +198,9 @@ export async function mount(ctx) {
     contextMenuCleanup: null,
     openFileToken: null,
     openFilePromise: Promise.resolve(),
+    blobByteCache: createDocumentBlobByteCache(),
+    blobPrefetchController: null,
+    blobPrefetchTask: null,
     disposed: false,
     t,
     lang: ctx.locale === 'en' ? 'en' : 'de',
@@ -235,6 +243,7 @@ export async function mount(ctx) {
     state.localSubscriptionCleanup?.();
     state.launchCleanup?.();
     state.paneCleanup?.();
+    clearDocumentBlobByteCache(state);
     flushActiveEditorDraft(state).catch((error) => console.error('[documents] final editor draft save failed', error));
     state.editorHandle?.destroy?.();
   };
@@ -943,6 +952,7 @@ async function refreshMailMergeNavigation(state) {
       .map((version, index) => ({
         documentId: typedMailMergeRecord.id,
         versionId: version.id,
+        blobId: version.blob_id || '',
         recipientId: firstText(version.mail_merge_recipient?.id, version.provenance?.recipient_id, version.id),
         label: firstText(version.mail_merge_recipient?.label, version.provenance?.recipient_label, `Empfänger ${index + 1}`),
         index,
@@ -984,6 +994,17 @@ function renderDocumentStrip(state) {
   const navigation = state.mailMergeNavigation;
   const active = navigation?.entries?.[navigation.activeIndex] || null;
   const hasMailMerge = Boolean(active && navigation.entries.length);
+  const recipientLoading = state.mailMergeRecipientLoading;
+  const isActiveRecipientLoading = Boolean(
+    active
+    && recipientLoading?.documentId === active.documentId
+    && recipientLoading?.versionId === active.versionId,
+  );
+  const recipientPosition = isActiveRecipientLoading
+    ? state.lang === 'en'
+      ? `Loading recipient ${navigation.activeIndex + 1} of ${navigation.entries.length} …`
+      : `Empfänger ${navigation.activeIndex + 1} von ${navigation.entries.length} wird geladen …`
+    : `${navigation?.activeIndex + 1} ${state.t('of', 'von')} ${navigation?.entries?.length}`;
   host.innerHTML = `
     <div class="documents-strip-leading">
       <button class="ctox-pane-icon documents-library-toggle" type="button" data-documents-library-toggle aria-label="${escapeHtml(state.t('showDocuments', 'Dokumentliste öffnen'))}" title="${escapeHtml(state.t('showDocuments', 'Dokumentliste öffnen'))}" aria-expanded="${String(state.libraryOpen)}">${actionIcon(state, 'folder')}</button>
@@ -991,7 +1012,7 @@ function renderDocumentStrip(state) {
         <span class="documents-series-label">${actionIcon(state, 'copy')}<strong>${escapeHtml(state.t('seriesLetter', 'Serienbrief'))}</strong></span>
         <div class="documents-recipient-navigator" data-documents-recipient-navigator>
           <button class="ctox-pane-icon" type="button" data-documents-recipient-previous aria-label="${escapeHtml(state.t('previousRecipient', 'Vorheriger Empfänger'))}" title="${escapeHtml(state.t('previousRecipient', 'Vorheriger Empfänger'))}" ${navigation.activeIndex <= 0 ? 'disabled aria-disabled="true"' : ''}>${actionIcon(state, 'chevronLeft')}</button>
-          <span class="documents-recipient-position">${navigation.activeIndex + 1} ${escapeHtml(state.t('of', 'von'))} ${navigation.entries.length}</span>
+          <span class="documents-recipient-position" ${isActiveRecipientLoading ? 'role="status" aria-live="polite"' : ''}>${escapeHtml(recipientPosition)}</span>
           <label class="documents-recipient-search">
             <span class="sr-only">${escapeHtml(state.t('searchRecipient', 'Empfänger suchen'))}</span>
             <input type="search" data-documents-recipient-search list="documents-recipient-options" value="${escapeHtml(active.label)}" aria-label="${escapeHtml(state.t('searchRecipient', 'Empfänger suchen'))}" autocomplete="off">
@@ -1045,6 +1066,7 @@ function renderDocumentStrip(state) {
     navigateRecipient(navigation.activeIndex + 1, event.currentTarget);
   });
   const search = host.querySelector('[data-documents-recipient-search]');
+  syncMailMergeRecipientSearch(search, active);
   const chooseSearchResult = () => {
     const index = findMailMergeRecipientIndex(navigation.entries, search?.value);
     if (index >= 0 && index !== navigation.activeIndex) {
@@ -1094,14 +1116,110 @@ function findMailMergeRecipientIndex(entries = [], query = '') {
   return entries.findIndex((entry) => normalizeSearchText(entry.label).includes(expected));
 }
 
+function syncMailMergeRecipientSearch(search, activeRecipient) {
+  if (!search || !activeRecipient) return;
+  const label = String(activeRecipient.label || '');
+  if (search.value !== label) search.value = label;
+}
+
+function beginMailMergeRecipientLoading(state, documentId, versionId) {
+  const navigation = state.mailMergeNavigation;
+  const activeIndex = navigation?.entries?.findIndex((entry) => (
+    entry.documentId === documentId && entry.versionId === versionId
+  ));
+  if (!navigation || activeIndex < 0) return false;
+  state.mailMergeNavigation = { ...navigation, activeIndex };
+  state.mailMergeRecipientLoading = { documentId, versionId };
+  return true;
+}
+
+function clearMailMergeRecipientLoading(state, documentId, versionId) {
+  const loading = state.mailMergeRecipientLoading;
+  if (!loading) return;
+  if (documentId && loading.documentId !== documentId) return;
+  if (versionId && loading.versionId !== versionId) return;
+  state.mailMergeRecipientLoading = null;
+}
+
+function documentListSignature(records = []) {
+  // Selection is NOT part of the list signature — selection is an in-place
+  // aria-current flip (applyDocumentListSelection). Including it would rebuild
+  // the well on every click and clamp scrollTop to 0.
+  return JSON.stringify(records.map((record) => ([
+    record.id,
+    record.title || '',
+    record.filename || '',
+    record.status || '',
+    record.document_type || '',
+    record.is_mail_merge ? 1 : 0,
+    record.recipient_count || 0,
+    (record.tags || []).join(','),
+    (record.source_labels || []).join(','),
+    documentDescription(record) || '',
+  ])));
+}
+
+function applyDocumentListSelection(state) {
+  const list = state.ctx?.host?.querySelector('[data-documents-list]');
+  if (!list) return;
+  const groups = visibleDocuments(state);
+  for (const card of list.querySelectorAll('.documents-card')) {
+    const mainId = card.querySelector('[data-document-id]')?.dataset?.documentId || '';
+    const group = groups.find((entry) => entry.id === mainId);
+    const isCurrent = Boolean(group?.record_ids?.includes(state.selectedId));
+    card.setAttribute('aria-current', String(isCurrent));
+  }
+}
+
 function renderLeft(state) {
   const slot = state.ctx.host.querySelector('[data-documents-explorer-slot]');
   if (!slot) return;
-  const wrap = document.createElement('div');
-  wrap.className = 'documents-explorer';
   const visible = visibleDocuments(state);
   const activeFilterCount = documentFilterCount(state);
+  const existing = slot.querySelector('.documents-explorer');
+  const headerSignature = JSON.stringify({
+    // searchQuery is live on the mounted input — never part of shell identity,
+    // or a data tick while typing rebuilds the explorer and steals focus.
+    sortBy: state.sortBy,
+    type: state.typeFilter,
+    status: state.statusFilter,
+    app: state.appFilter,
+    source: state.sourceFilter,
+    tag: state.tagFilter,
+    filtersOpen: Boolean(state.filtersOpen),
+    activeFilterCount,
+    lang: state.lang,
+    canExport: canExportDocument(state),
+  });
+
+  // Fast path: explorer shell already mounted and only list data/selection moved.
+  // Rebuilding the header would recreate the search input and steal focus while
+  // typing; rebuilding the list would clamp scrollTop to 0.
+  if (existing && existing.dataset.headerSig === headerSignature) {
+    const search = existing.querySelector('[data-documents-search]');
+    if (search && document.activeElement !== search && search.value !== (state.searchQuery || '')) {
+      search.value = state.searchQuery || '';
+    }
+    const exportBtn = existing.querySelector('[data-documents-export]');
+    if (exportBtn) {
+      const canExport = canExportDocument(state);
+      exportBtn.disabled = !canExport;
+      exportBtn.setAttribute('aria-disabled', String(!canExport));
+    }
+    const list = existing.querySelector('[data-documents-list]');
+    if (list) {
+      populateDocumentList(state, list, visible);
+      applyDocumentListSelection(state);
+    }
+    renderPaneVisibility(state);
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  wrap.className = 'documents-explorer';
+  wrap.dataset.headerSig = headerSignature;
   wrap.innerHTML = `
+
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
@@ -1165,22 +1283,28 @@ function renderLeft(state) {
 }
 
 function populateDocumentList(state, list, records = visibleDocuments(state)) {
-  list.replaceChildren();
-  for (const record of records) {
-    const card = document.createElement('article');
-    card.className = 'documents-card';
-    card.dataset.contextModule = 'documents';
-    card.dataset.contextRecordType = 'document';
-    card.dataset.contextRecordId = record.id;
-    card.dataset.contextLabel = record.title || record.filename || record.id;
-    card.dataset.documentsColumn = 'documents';
-    card.setAttribute('aria-current', String(record.record_ids.includes(state.selectedId)));
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'documents-card-main';
-    button.dataset.documentId = record.id;
-    const sourceLabel = record.source_labels[0] || '';
-    button.innerHTML = `
+  const signature = documentListSignature(records);
+  if (list.dataset.ctoxRenderSig === signature) {
+    applyDocumentListSelection(state);
+    return;
+  }
+  preserveScrollDuring(list, () => {
+    list.replaceChildren();
+    for (const record of records) {
+      const card = document.createElement('article');
+      card.className = 'documents-card';
+      card.dataset.contextModule = 'documents';
+      card.dataset.contextRecordType = 'document';
+      card.dataset.contextRecordId = record.id;
+      card.dataset.contextLabel = record.title || record.filename || record.id;
+      card.dataset.documentsColumn = 'documents';
+      card.setAttribute('aria-current', String(record.record_ids.includes(state.selectedId)));
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'documents-card-main';
+      button.dataset.documentId = record.id;
+      const sourceLabel = record.source_labels[0] || '';
+      button.innerHTML = `
       <strong>${escapeHtml(record.title)}</strong>
       ${record.is_mail_merge
         ? `<span class="documents-card-bundle">${actionIcon(state, 'copy')} ${escapeHtml(state.t('seriesLetter', 'Serienbrief'))} · ${escapeHtml(String(record.recipient_count))} ${escapeHtml(state.t('recipients', 'Empfänger'))}</span>`
@@ -1189,36 +1313,36 @@ function populateDocumentList(state, list, records = visibleDocuments(state)) {
       <small>${escapeHtml(record.status)} · ${escapeHtml(documentTypeLabel(state, record.document_type))}${sourceLabel ? ` · ${escapeHtml(sourceLabel)}` : ''}</small>
       ${renderTagPills(record)}
     `;
-    button.addEventListener('click', () => {
-      const documentId = record.record_ids.includes(state.selectedId) ? state.selectedId : record.id;
-      switchSelectedDocument(state, documentId).catch((error) => {
-        console.error('[documents] document switch failed', error);
-        renderError(state, `${state.t('documentSwitchFailed', 'Dokumentwechsel fehlgeschlagen:')} ${error?.message || error}`);
+      button.addEventListener('click', () => {
+        const documentId = record.record_ids.includes(state.selectedId) ? state.selectedId : record.id;
+        switchSelectedDocument(state, documentId).catch((error) => {
+          console.error('[documents] document switch failed', error);
+          renderError(state, `${state.t('documentSwitchFailed', 'Dokumentwechsel fehlgeschlagen:')} ${error?.message || error}`);
+        });
       });
-    });
-    const manage = document.createElement('button');
-    manage.type = 'button';
-    manage.className = 'documents-card-manage';
-    manage.dataset.documentManage = record.id;
-    manage.title = `${escapeHtml(record.title)} ${escapeHtml(state.t('manageDocument', 'verwalten'))}`;
-    manage.setAttribute('aria-label', `${escapeHtml(record.title)} ${escapeHtml(state.t('manageDocument', 'verwalten'))}`);
-    manage.innerHTML = actionIcon(state, 'settings');
-    manage.addEventListener('click', () => openManageDocumentDrawer(state, selectedRecordInGroup(state, record)));
-    card.append(button, manage);
-    list.append(card);
-  }
-  if (!records.length) {
-    const empty = document.createElement('div');
-    empty.className = 'documents-empty';
-    empty.innerHTML = state.documents.length
-      ? `
+      const manage = document.createElement('button');
+      manage.type = 'button';
+      manage.className = 'documents-card-manage';
+      manage.dataset.documentManage = record.id;
+      manage.title = `${escapeHtml(record.title)} ${escapeHtml(state.t('manageDocument', 'verwalten'))}`;
+      manage.setAttribute('aria-label', `${escapeHtml(record.title)} ${escapeHtml(state.t('manageDocument', 'verwalten'))}`);
+      manage.innerHTML = actionIcon(state, 'settings');
+      manage.addEventListener('click', () => openManageDocumentDrawer(state, selectedRecordInGroup(state, record)));
+      card.append(button, manage);
+      list.append(card);
+    }
+    if (!records.length) {
+      const empty = document.createElement('div');
+      empty.className = 'documents-empty';
+      empty.innerHTML = state.documents.length
+        ? `
         <strong>${escapeHtml(state.t('noMatches', 'Keine Treffer'))}</strong>
         <span>${escapeHtml(state.t('adjustSearchFilter', 'Suche oder Filter anpassen.'))}</span>
         <div class="documents-empty-actions">
           <button class="ctox-button" type="button" data-documents-clear-filters>${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}</button>
         </div>
       `
-      : `
+        : `
         <strong>${escapeHtml(state.t('noDocuments', 'Keine Dokumente'))}</strong>
         <span>${escapeHtml(state.t('importPrompt', 'DOCX oder Markdown importieren oder ein neues Word-Dokument anlegen.'))}</span>
         <div class="documents-empty-actions">
@@ -1226,76 +1350,169 @@ function populateDocumentList(state, list, records = visibleDocuments(state)) {
           <button class="ctox-button" type="button" data-documents-empty-new>${actionIcon(state, 'add')} ${escapeHtml(state.t('createWordDocument', 'Word-Dokument erstellen'))}</button>
         </div>
       `;
-    empty.querySelector('[data-documents-empty-import]')?.addEventListener('click', () => openImportDrawer(state));
-    empty.querySelector('[data-documents-empty-new]')?.addEventListener('click', () => openNewDocumentDrawer(state));
-    empty.querySelector('[data-documents-clear-filters]')?.addEventListener('click', () => {
-      state.searchQuery = '';
-      state.typeFilter = 'all';
-      state.statusFilter = 'all';
-      state.appFilter = 'all';
-      state.sourceFilter = 'all';
-      state.tagFilter = 'all';
-      state.sortBy = 'updated_desc';
-      renderLeft(state);
-    });
-    list.append(empty);
-  }
+      empty.querySelector('[data-documents-empty-import]')?.addEventListener('click', () => openImportDrawer(state));
+      empty.querySelector('[data-documents-empty-new]')?.addEventListener('click', () => openNewDocumentDrawer(state));
+      empty.querySelector('[data-documents-clear-filters]')?.addEventListener('click', () => {
+        state.searchQuery = '';
+        state.typeFilter = 'all';
+        state.statusFilter = 'all';
+        state.appFilter = 'all';
+        state.sourceFilter = 'all';
+        state.tagFilter = 'all';
+        state.sortBy = 'updated_desc';
+        renderLeft(state);
+      });
+      list.append(empty);
+    }
+  });
+  list.dataset.ctoxRenderSig = signature;
+  applyDocumentListSelection(state);
 }
 
-async function switchSelectedDocument(state, documentId, options = {}) {
+async function switchSelectedDocument(state, documentId, options = {}, lifecycle = {}) {
   if (!documentId) return;
   const versionId = String(options.versionId || '').trim();
+  const sameDocument = documentId === state.selectedId;
+  const flushDraft = lifecycle.flushActiveEditorDraft || flushActiveEditorDraft;
+  const destroyEditor = lifecycle.destroyActiveEditor || destroyActiveEditor;
+  const loadVersion = lifecycle.loadSelectedVersion || loadSelectedVersion;
+  const renderSelection = lifecycle.renderSelection || ((currentState) => {
+    // Selection flips in place on the existing list. Only the right strip /
+    // pane chrome need a cheap refresh — never rebuild the scrollable left well.
+    applyDocumentListSelection(currentState);
+    renderRight(currentState);
+    renderDocumentStrip(currentState);
+    renderPaneVisibility(currentState);
+  });
+  const renderEditor = lifecycle.renderCenter || renderCenter;
+  const renderLoadError = lifecycle.renderError || renderError;
+  const replaceEditorVersion = lifecycle.replaceActiveEditorVersion || replaceActiveEditorVersion;
+  const waitForEditorContent = lifecycle.waitForActiveEditorVersionContent || waitForActiveEditorVersionContent;
   if (
-    documentId === state.selectedId
+    sameDocument
     && state.selectedVersion
     && (!versionId || versionId === state.selectedVersion.id)
   ) {
-    if (state.editorHandle) state.editorHandle.focus?.();
-    else renderCenter(state);
+    if (state.editorHandle) {
+      state.editorHandle.focus?.();
+      scheduleMailMergeBlobPrefetch(state);
+    } else {
+      renderEditor(state);
+    }
     return;
   }
   const switchSerial = (state.switchSerial || 0) + 1;
   state.switchSerial = switchSerial;
   const previousRecord = selectedRecord(state);
-  try {
-    await withTimeout(
-      flushActiveEditorDraft(state, previousRecord, { allowFailure: true }),
-      2500,
-      state.t('draftSaveTimeout', 'Automatische Draft-Speicherung beim Dokumentwechsel hat zu lange gedauert.'),
-    );
-  } catch (error) {
-    console.warn('[documents] continuing document switch after draft save failed', error);
+  const canReplaceEditorVersion = sameDocument && canReplaceActiveEditorVersion(state);
+  if (!canReplaceEditorVersion || state.dirty || state.superdocSavePromise) {
+    try {
+      await withTimeout(
+        flushDraft(state, previousRecord, { allowFailure: true }),
+        2500,
+        state.t('draftSaveTimeout', 'Automatische Draft-Speicherung beim Dokumentwechsel hat zu lange gedauert.'),
+      );
+    } catch (error) {
+      console.warn('[documents] continuing document switch after draft save failed', error);
+    }
   }
   if (state.switchSerial !== switchSerial) return;
+
+  if (canReplaceEditorVersion) {
+    const previousVersion = state.selectedVersion;
+    const previousRequestedVersionId = state.requestedVersionId;
+    const previousRequestedVersionDocumentId = state.requestedVersionDocumentId;
+    const previousNavigation = state.mailMergeNavigation;
+    const previousLoading = state.mailMergeRecipientLoading;
+    const previousDirty = state.dirty;
+    state.requestedVersionId = versionId;
+    state.requestedVersionDocumentId = versionId ? documentId : '';
+    if (beginMailMergeRecipientLoading(state, documentId, versionId)) {
+      state.libraryOpen = false;
+      renderSelection(state);
+    }
+
+    let nextVersion;
+    try {
+      nextVersion = await loadVersion(state);
+      if (state.switchSerial !== switchSerial) return;
+      if (!nextVersion) throw new Error(state.t('noSavedVersionFound', 'Keine gespeicherte Dokumentversion gefunden.'));
+    } catch (error) {
+      if (state.switchSerial !== switchSerial) return;
+      state.selectedVersion = previousVersion;
+      state.requestedVersionId = previousRequestedVersionId;
+      state.requestedVersionDocumentId = previousRequestedVersionDocumentId;
+      state.mailMergeNavigation = previousNavigation;
+      state.mailMergeRecipientLoading = previousLoading;
+      state.dirty = previousDirty;
+      renderSelection(state);
+      throw error;
+    }
+
+    try {
+      await replaceEditorVersion(state, previousRecord, nextVersion);
+      if (state.switchSerial !== switchSerial) return;
+      clearMailMergeRecipientLoading(state, documentId, versionId);
+      state.libraryOpen = false;
+      renderSelection(state);
+      scheduleMailMergeBlobPrefetch(state);
+      return;
+    } catch (replacementError) {
+      if (state.switchSerial !== switchSerial) return;
+      console.warn('[documents] recipient version did not become ready; rebuilding editor', replacementError);
+      state.renderSerial = (state.renderSerial || 0) + 1;
+      try {
+        await destroyEditor(state);
+        if (state.switchSerial !== switchSerial) return;
+        state.libraryOpen = false;
+        renderSelection(state);
+        await renderEditor(state);
+        if (state.switchSerial !== switchSerial) return;
+        await waitForEditorContent(state.editorHandle, previousRecord, nextVersion);
+        if (state.switchSerial !== switchSerial) return;
+        clearMailMergeRecipientLoading(state, documentId, versionId);
+        renderSelection(state);
+        scheduleMailMergeBlobPrefetch(state);
+        return;
+      } catch (rebuildError) {
+        if (state.switchSerial !== switchSerial) return;
+        clearMailMergeRecipientLoading(state, documentId, versionId);
+        renderSelection(state);
+        renderLoadError(
+          state,
+          `${state.t('documentLoadFailed', 'Dokument konnte nicht geladen werden:')} ${rebuildError?.message || rebuildError}`,
+        );
+        return;
+      }
+    }
+  }
+
   state.renderSerial = (state.renderSerial || 0) + 1;
-  await destroyActiveEditor(state);
+  await destroyEditor(state);
   if (state.switchSerial !== switchSerial) return;
   state.selectedId = documentId;
   state.requestedVersionId = versionId;
   state.requestedVersionDocumentId = versionId ? documentId : '';
   state.selectedVersion = null;
   state.mailMergeNavigation = null;
+  state.mailMergeRecipientLoading = null;
   state.libraryOpen = false;
-  renderLeft(state);
-  renderRight(state);
-  renderDocumentStrip(state);
-  renderPaneVisibility(state);
+  bindDocumentBlobByteCache(state, documentId);
+  renderSelection(state);
   const host = state.ctx.host.querySelector('[data-documents-editor]');
   if (host) host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocument', 'Lade Dokument'))}</strong><span>${escapeHtml(state.t('documentSwitchRunning', 'Dokumentwechsel läuft.'))}</span></div>`;
   try {
-    await loadSelectedVersion(state);
+    await loadVersion(state);
   } catch (error) {
     if (state.switchSerial !== switchSerial) return;
     state.selectedVersion = null;
-    renderLeft(state);
-    renderRight(state);
-    renderError(state, `${state.t('documentLoadFailed', 'Dokument konnte nicht geladen werden:')} ${error?.message || error}`);
+    renderSelection(state);
+    renderLoadError(state, `${state.t('documentLoadFailed', 'Dokument konnte nicht geladen werden:')} ${error?.message || error}`);
     return;
   }
   if (state.switchSerial !== switchSerial) return;
-  renderLeft(state);
-  renderRight(state);
-  renderCenter(state);
+  renderSelection(state);
+  renderEditor(state);
 }
 
 function bindLeftControls(state, wrap) {
@@ -3130,6 +3347,69 @@ function isTransientOfficeStartupError(error) {
     || code === 'rpc_closed';
 }
 
+function canReplaceActiveEditorVersion(state) {
+  return typeof state.editorHandle?.openVersion === 'function';
+}
+
+async function replaceActiveEditorVersion(state, record, version, options = {}) {
+  const editorHandle = state.editorHandle;
+  if (!record?.id || !version?.id || !canReplaceActiveEditorVersion(state)) {
+    throw new Error('Der aktive Office-Editor kann diese Dokumentversion nicht direkt öffnen.');
+  }
+  const openResult = await editorHandle.openVersion({ recordId: record.id, versionId: version.id, version });
+  await waitForActiveEditorVersionContent(editorHandle, record, version, { ...options, openResult });
+  editorHandle.renderKey = editorRenderKey(record, version, state.officeEngine);
+  editorHandle.focus?.();
+}
+
+async function waitForActiveEditorVersionContent(editorHandle, record, version, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs ?? EDITOR_VERSION_CONTENT_READY_TIMEOUT_MS));
+  const pollMs = Math.max(0, Number(options.pollIntervalMs ?? EDITOR_VERSION_CONTENT_READY_POLL_MS));
+  const deadline = Date.now() + timeoutMs;
+  let inspection = options.openResult || null;
+  let inspectionError = null;
+
+  while (true) {
+    if (isEditorVersionContentReady(inspection, record, version)) return inspection;
+    if (typeof editorHandle?.inspect === 'function') {
+      try {
+        inspection = await withTimeout(
+          editorHandle.inspect(),
+          Math.max(1, deadline - Date.now()),
+          `Office-Editor-Inspektion für Version ${version?.id || ''} hat zu lange gedauert.`,
+        );
+        inspectionError = null;
+      } catch (error) {
+        inspectionError = error;
+      }
+      if (isEditorVersionContentReady(inspection, record, version)) return inspection;
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(pollMs || 1, Math.max(1, deadline - Date.now())));
+  }
+
+  const error = new Error(
+    inspectionError?.message
+      || `Dokumentversion ${version?.id || ''} wurde vom Office-Editor nicht darstellbar geöffnet.`,
+  );
+  error.code = 'editor_content_not_ready';
+  error.details = { inspection };
+  throw error;
+}
+
+function isEditorVersionContentReady(inspection, record, version) {
+  if (!inspection || typeof inspection !== 'object') return false;
+  const inspectedRecordId = String(inspection.record_id || inspection.recordId || '');
+  const inspectedVersionId = String(inspection.version_id || inspection.versionId || '');
+  if (record?.id && inspectedRecordId !== String(record.id)) return false;
+  if (version?.id && inspectedVersionId !== String(version.id)) return false;
+  return inspection.document_ready === true
+    || inspection.documentReady === true
+    || inspection.content_ready === true
+    || inspection.contentReady === true
+    || inspection.open === true;
+}
+
 async function destroyActiveEditor(state) {
   const editorHandle = state.editorHandle;
   state.editorHandle = null;
@@ -3332,11 +3612,13 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial, re
       await editor.destroy();
       host.replaceChildren();
     },
+    openVersion: (request) => editor.open(request),
     save: (options) => editor.save(options),
     export: async () => (await editor.export({ format: 'docx' })).bytes,
     focus: () => editor.focus(),
     inspect: () => editor.inspect(),
   };
+  scheduleMailMergeBlobPrefetch(state);
 }
 
 async function openOfficeEditorInstance(editor, request, cleanupCallbacks = []) {
@@ -3407,7 +3689,11 @@ function flushActiveEditorDraft(state, record = selectedRecord(state), options =
 }
 
 async function mountSuperDocDocument(state, host, record, version, renderSerial, renderKey) {
-  const bytes = await loadBlobBytes(state.ctx, version.blob_id);
+  const bytes = await loadBlobBytes(
+    state.ctx,
+    version.blob_id,
+    bindDocumentBlobByteCache(state, record.id),
+  );
   if (!isCurrentEditorRender(state, renderSerial)) return;
   if (!bytes) throw new Error(`Missing DOCX blob ${version.blob_id}`);
   const { SuperDoc } = await loadSuperDocModule(state);
@@ -3451,6 +3737,7 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial,
   host.append(frame);
   const file = new File([bytes], version.filename || record.filename || 'document.docx', { type: DOCX_MIME });
   if (!isCurrentEditorRender(state, renderSerial)) return;
+  let replacingVersion = false;
   const superdoc = new SuperDoc({
     selector: mount,
     document: file,
@@ -3484,6 +3771,7 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial,
     },
     telemetry: { enabled: false },
     onEditorUpdate: async () => {
+      if (replacingVersion) return;
       state.dirty = true;
       state.needsFinalSave = true;
       await markRecordDraft(state, record);
@@ -3497,10 +3785,38 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial,
     superdoc.destroy?.();
     return;
   }
+  const replaceFile = superdoc.activeEditor?.replaceFile;
   state.editorHandle = {
     kind: 'superdoc',
     renderKey,
     superdoc,
+    ...(typeof replaceFile === 'function' ? {
+      async openVersion({ version: nextVersion }) {
+        const nextBytes = await loadBlobBytes(
+          state.ctx,
+          nextVersion?.blob_id,
+          bindDocumentBlobByteCache(state, record.id),
+        );
+        if (!nextBytes) throw new Error(`Missing DOCX blob ${nextVersion?.blob_id || ''}`);
+        const nextFile = new File(
+          [nextBytes],
+          nextVersion.filename || record.filename || 'document.docx',
+          { type: DOCX_MIME },
+        );
+        replacingVersion = true;
+        try {
+          await replaceFile.call(superdoc.activeEditor, nextFile);
+          state.dirty = false;
+          return {
+            record_id: record.id,
+            version_id: nextVersion.id,
+            content_ready: true,
+          };
+        } finally {
+          replacingVersion = false;
+        }
+      },
+    } : {}),
     destroy() {
       superdoc.destroy?.();
       host.replaceChildren();
@@ -3511,7 +3827,15 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial,
     focus() {
       host.querySelector('[contenteditable="true"]')?.focus();
     },
+    inspect() {
+      return {
+        record_id: record.id,
+        version_id: state.selectedVersion?.id || version.id,
+        content_ready: true,
+      };
+    },
   };
+  scheduleMailMergeBlobPrefetch(state);
 }
 
 function scheduleSuperDocDraftSave(state, record) {
@@ -3723,16 +4047,136 @@ async function deleteBlobChunks(ctx, blobId) {
   await Promise.all(chunks.map((chunk) => chunk.remove()));
 }
 
-async function loadBlobBytes(ctx, blobId) {
+function createDocumentBlobByteCache(options = {}) {
+  return {
+    documentId: '',
+    entries: new Map(),
+    totalBytes: 0,
+    maxEntries: Math.max(1, Number(options.maxEntries) || DOCUMENT_BLOB_CACHE_MAX_ENTRIES),
+    maxBytes: Math.max(1, Number(options.maxBytes) || DOCUMENT_BLOB_CACHE_MAX_BYTES),
+  };
+}
+
+function bindDocumentBlobByteCache(state, documentId) {
+  if (!state.blobByteCache) state.blobByteCache = createDocumentBlobByteCache();
+  const normalizedDocumentId = String(documentId || '');
+  if (state.blobByteCache.documentId === normalizedDocumentId) return state.blobByteCache;
+  cancelMailMergeBlobPrefetch(state);
+  state.blobByteCache.entries.clear();
+  state.blobByteCache.totalBytes = 0;
+  state.blobByteCache.documentId = normalizedDocumentId;
+  return state.blobByteCache;
+}
+
+function clearDocumentBlobByteCache(state) {
+  cancelMailMergeBlobPrefetch(state);
+  if (!state.blobByteCache) return;
+  state.blobByteCache.entries.clear();
+  state.blobByteCache.totalBytes = 0;
+  state.blobByteCache.documentId = '';
+}
+
+async function loadBlobBytes(ctx, blobId, cache = null) {
   requireDocumentPersistence(ctx);
   if (!blobId) return null;
-  const chunks = await documentCollection(ctx, 'document_blob_chunks').find({
-    selector: { blob_id: blobId },
-    sort: [{ idx: 'asc' }],
-  }).exec();
-  if (!chunks.length) return null;
-  const base64 = chunks.map((chunk) => chunk.toJSON().data || '').join('');
-  return base64ToUint8(base64);
+  const cached = cache?.entries?.get(blobId);
+  if (cached) {
+    cache.entries.delete(blobId);
+    cache.entries.set(blobId, cached);
+    return cached.promise;
+  }
+  const entry = { promise: null, bytes: null, size: 0 };
+  entry.promise = (async () => {
+    const chunks = await documentCollection(ctx, 'document_blob_chunks').find({
+      selector: { blob_id: blobId },
+      sort: [{ idx: 'asc' }],
+    }).exec();
+    if (!chunks.length) {
+      if (cache?.entries?.get(blobId) === entry) cache.entries.delete(blobId);
+      return null;
+    }
+    const base64 = chunks.map((chunk) => chunk.toJSON().data || '').join('');
+    const bytes = base64ToUint8(base64);
+    if (cache?.entries?.get(blobId) === entry) {
+      entry.bytes = bytes;
+      entry.size = bytes.byteLength;
+      cache.totalBytes += entry.size;
+      trimDocumentBlobByteCache(cache);
+    }
+    return bytes;
+  })().catch((error) => {
+    if (cache?.entries?.get(blobId) === entry) cache.entries.delete(blobId);
+    throw error;
+  });
+  if (cache?.entries) cache.entries.set(blobId, entry);
+  return entry.promise;
+}
+
+function trimDocumentBlobByteCache(cache) {
+  while (cache.entries.size > cache.maxEntries || cache.totalBytes > cache.maxBytes) {
+    const oldestResolved = Array.from(cache.entries).find(([, entry]) => entry.bytes);
+    if (!oldestResolved) return;
+    const [blobId, entry] = oldestResolved;
+    cache.entries.delete(blobId);
+    cache.totalBytes = Math.max(0, cache.totalBytes - entry.size);
+  }
+}
+
+function cancelMailMergeBlobPrefetch(state) {
+  state.blobPrefetchController?.abort?.();
+  state.blobPrefetchController = null;
+  state.blobPrefetchTask = null;
+}
+
+function scheduleMailMergeBlobPrefetch(state) {
+  const record = selectedRecord(state);
+  const navigation = state.mailMergeNavigation;
+  const blobIds = Array.from(new Set((navigation?.entries || [])
+    .filter((entry) => entry.documentId === record?.id && entry.blobId)
+    .map((entry) => entry.blobId)))
+    .filter((blobId) => blobId !== state.selectedVersion?.blob_id);
+  cancelMailMergeBlobPrefetch(state);
+  if (!record?.id || !blobIds.length || state.disposed) return null;
+  const cache = bindDocumentBlobByteCache(state, record.id);
+  const controller = new AbortController();
+  state.blobPrefetchController = controller;
+  const task = (async () => {
+    for (const blobId of blobIds) {
+      await waitForDocumentBlobPrefetchSlot(controller.signal);
+      if (controller.signal.aborted || state.disposed || state.selectedId !== record.id) return;
+      await loadBlobBytes(state.ctx, blobId, cache).catch((error) => {
+        if (!controller.signal.aborted) {
+          console.warn('[documents] mail merge recipient blob prefetch failed', error);
+        }
+      });
+    }
+  })().finally(() => {
+    if (state.blobPrefetchTask === task) {
+      state.blobPrefetchController = null;
+      state.blobPrefetchTask = null;
+    }
+  });
+  state.blobPrefetchTask = task;
+  return task;
+}
+
+function waitForDocumentBlobPrefetchSlot(signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener?.('abort', finish);
+      resolve();
+    };
+    signal?.addEventListener?.('abort', finish, { once: true });
+    if (typeof globalThis.requestIdleCallback === 'function') {
+      globalThis.requestIdleCallback(finish, { timeout: 750 });
+    } else {
+      setTimeout(finish, 50);
+    }
+  });
 }
 
 function requireDocumentPersistence(ctx) {
@@ -3980,6 +4424,16 @@ export const __documentsTestHooks = {
   refreshMailMergeNavigation,
   findMailMergeRecipientIndex,
   resolveMailMergeRecipientSelection,
+  switchSelectedDocument,
+  canReplaceActiveEditorVersion,
+  replaceActiveEditorVersion,
+  waitForActiveEditorVersionContent,
+  isEditorVersionContentReady,
+  syncMailMergeRecipientSearch,
+  createDocumentBlobByteCache,
+  bindDocumentBlobByteCache,
+  clearDocumentBlobByteCache,
+  loadBlobBytes,
   documentSourceIdentity,
   documentFilterCount,
   isDocxDocumentRecord,

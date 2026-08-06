@@ -43,6 +43,12 @@ const path = require("path");
 
 const SOURCE_ID = "impressum";
 const NAVIGATION_TIMEOUT_MS = 45_000;
+// A speculative company-name candidate must not consume the outer 120 s
+// scrape budget by itself. Plain legal-notice reads are bounded tightly; only
+// an input-provided origin may escalate to the browser transports below.
+const PLAIN_HTTP_CONNECT_TIMEOUT_SECONDS = 4;
+const PLAIN_HTTP_TIMEOUT_SECONDS = 10;
+const COMPANY_DISCOVERY_BUDGET_MS = 85_000;
 // Transient load failures get one second chance; a loaded page whose
 // extraction yields nothing does NOT (drift contract).
 const MAX_LOAD_ATTEMPTS = 2;
@@ -687,12 +693,18 @@ function plainHttpPage(url) {
       [
         "-sS", "-L",
         "--max-redirs", "3",
-        "--max-time", "25",
+        "--connect-timeout", String(PLAIN_HTTP_CONNECT_TIMEOUT_SECONDS),
+        "--max-time", String(PLAIN_HTTP_TIMEOUT_SECONDS),
         "--max-filesize", String(8 * 1024 * 1024),
         "-H", "Accept: text/html,application/xhtml+xml",
         url,
       ],
-      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+      {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: (PLAIN_HTTP_TIMEOUT_SECONDS + 2) * 1_000,
+      },
     );
     if (!html || html.length < 200) return null;
     return { ok: true, url, final_url: url, title: "", html, raw_html: html, capture_markers: {}, detection: { markers: [] } };
@@ -947,16 +959,25 @@ function main() {
 
   let blocked = false;
   let identityMismatch = false;
+  let discoveryBudgetExhausted = false;
+  const discoveryDeadline = Date.now() + COMPANY_DISCOVERY_BUDGET_MS;
 
-  const loadPage = (url) => {
+  const loadPage = (url, allowBrowserFallback = true) => {
     // A legal notice is static HTML — it needs no JavaScript, so try a plain
     // HTTP read first. It is cheaper, faster, and carries no browser
     // fingerprint: measured on the production tenant, destilla.com answers a
     // plain request with 200 while serving the automated browser an access
-    // challenge. Only fall back to the browser when the plain read yields no
-    // usable notice.
+    // challenge. Speculative hosts derived only from a company name stop here:
+    // launching a 45 s browser capture for every dead guess can exhaust the
+    // outer scrape timeout before later candidates are checked.
+    if (!allowBrowserFallback
+        && Date.now() + ((PLAIN_HTTP_TIMEOUT_SECONDS + 2) * 1_000) > discoveryDeadline) {
+      discoveryBudgetExhausted = true;
+      return null;
+    }
     const plain = plainHttpPage(url);
     if (plain && plain.ok && !isBlockedPage(plain)) return plain;
+    if (!allowBrowserFallback) return plain;
     const capture = browserCapturePage(url);
     // Compatibility only for runtimes that do not expose browser-capture
     // yet. A capture that ran and failed is never retried through another
@@ -966,8 +987,8 @@ function main() {
 
   // Returns the verified extraction for a page, or null. Sets blocked /
   // identityMismatch as side channels for honest failure classification.
-  const consider = (url, loadedRef) => {
-    const page = loadPage(url);
+  const consider = (url, loadedRef, allowBrowserFallback = true) => {
+    const page = loadPage(url, allowBrowserFallback);
     if (!page) return null;
     if (isBlockedPage(page)) { blocked = true; return null; }
     if (!page.ok) return null;
@@ -996,27 +1017,48 @@ function main() {
   // origin as given AND on its www/toggled variant, because a bare host may
   // redirect every path to the (www) homepage while the www host serves the
   // real notice paths.
-  const attemptOrigin = (origin) => {
+  const attemptOrigin = (origin, allowBrowserFallback = true) => {
     const loadedRef = { loaded: false };
     let outcome = null;
     for (const variant of originVariants(origin)) {
+      // For a speculative host, inspect its already-cheap start page first.
+      // Real sites usually publish the exact legal-notice link there (including
+      // <base href> paths such as chemofast.com's /home/rechtliches/...); this
+      // avoids spending the finite budget on three guessed paths first.
+      if (!allowBrowserFallback) {
+        const startPage = loadPage(variant + "/", false);
+        if (startPage && isBlockedPage(startPage)) {
+          blocked = true;
+          break;
+        } else if (startPage && startPage.ok) {
+          loadedRef.loaded = true;
+          const html = startPage.html || startPage.raw_html || "";
+          const link = html ? discoverImpressumLink(html, variant) : null;
+          if (link) {
+            outcome = consider(link, loadedRef, false);
+            if (outcome || blocked) break;
+          }
+        }
+      }
       for (const candidate of CANDIDATE_PATHS) {
-        outcome = consider(variant + candidate, loadedRef);
+        outcome = consider(variant + candidate, loadedRef, allowBrowserFallback);
         if (blocked || outcome) break;
       }
       if (outcome || blocked) break;
-      // Start-page fallback: follow the Impressum/Imprint link.
-      const startPage = loadPage(variant + "/");
-      if (startPage && isBlockedPage(startPage)) {
-        blocked = true;
-        break;
-      } else if (startPage && startPage.ok) {
-        loadedRef.loaded = true;
-        const html = startPage.html || startPage.raw_html || "";
-        const link = html ? discoverImpressumLink(html, variant) : null;
-        if (link) {
-          outcome = consider(link, loadedRef);
-          if (outcome || blocked) break;
+      // Input-provided origins retain the browser-capable start-page fallback.
+      if (allowBrowserFallback) {
+        const startPage = loadPage(variant + "/", true);
+        if (startPage && isBlockedPage(startPage)) {
+          blocked = true;
+          break;
+        } else if (startPage && startPage.ok) {
+          loadedRef.loaded = true;
+          const html = startPage.html || startPage.raw_html || "";
+          const link = html ? discoverImpressumLink(html, variant) : null;
+          if (link) {
+            outcome = consider(link, loadedRef, true);
+            if (outcome || blocked) break;
+          }
         }
       }
     }
@@ -1084,6 +1126,10 @@ function main() {
   let sawBlocked = false;
   let sawMismatch = false;
   for (const candidateHost of candidates) {
+    if (Date.now() + ((PLAIN_HTTP_TIMEOUT_SECONDS + 2) * 1_000) > discoveryDeadline) {
+      discoveryBudgetExhausted = true;
+      break;
+    }
     if (tried.length > 0) sleepMs(CANDIDATE_POLITENESS_MS);
     tried.push(candidateHost);
     const candidateOrigin = "https://" + candidateHost;
@@ -1091,10 +1137,10 @@ function main() {
     // one cheap reachability read instead of a browser launch per dead path.
     // The www variant gets the same cheap read — small-company hosts often
     // answer only one of the two.
-    let reach = plainHttpPage(candidateOrigin + "/");
-    if (!reach) {
+    let reach = loadPage(candidateOrigin + "/", false);
+    if (!reach && !discoveryBudgetExhausted) {
       const wwwVariant = originVariants(candidateOrigin)[1];
-      if (wwwVariant) reach = plainHttpPage(wwwVariant + "/");
+      if (wwwVariant) reach = loadPage(wwwVariant + "/", false);
     }
     if (reach && isBlockedPage(reach)) {
       sawBlocked = true;
@@ -1102,19 +1148,13 @@ function main() {
       continue;
     }
     if (!reach) {
-      const probe = browserCapturePage(candidateOrigin + "/");
-      const probePage = probe.commandUnavailable ? browserAutomationPage(candidateOrigin + "/") : probe.page;
-      if (!probePage || !probePage.ok) {
-        if (probePage && isBlockedPage(probePage)) {
-          sawBlocked = true;
-          recordUnlockSignal(candidateOrigin, ["access_challenge"]);
-        }
-        continue;
-      }
+      // This is only a guessed host. Do not turn one DNS/connect failure into a
+      // long browser launch; later candidates may be the real company domain.
+      continue;
     }
     blocked = false;
     identityMismatch = false;
-    const { outcome } = attemptOrigin(candidateOrigin);
+    const { outcome } = attemptOrigin(candidateOrigin, false);
     if (outcome) {
       // Verified: the notice on this host names the company. firma_domain
       // (with the notice URL as its source) is part of the records, so the
@@ -1133,12 +1173,15 @@ function main() {
 
   process.stdout.write(JSON.stringify({
     records: [],
-    failure_mode: sawBlocked ? "blocked" : "portal_drift",
+    failure_mode: sawBlocked ? "blocked"
+      : discoveryBudgetExhausted ? "temporary_unreachable" : "portal_drift",
     detail: sawBlocked
       ? "access challenge on a discovered candidate domain recorded for web-unlock (tried: " + tried.join(", ") + ")"
-      : "domain discovery for " + JSON.stringify(company) + " found no host whose impressum verifies the company identity"
-        + (sawMismatch ? " (at least one candidate was rejected by the identity gate and discarded)" : "")
-        + " (tried: " + tried.join(", ") + ")",
+      : discoveryBudgetExhausted
+        ? "bounded company-domain discovery budget exhausted before all candidates could be checked (tried: " + tried.join(", ") + ")"
+        : "domain discovery for " + JSON.stringify(company) + " found no host whose impressum verifies the company identity"
+          + (sawMismatch ? " (at least one candidate was rejected by the identity gate and discarded)" : "")
+          + " (tried: " + tried.join(", ") + ")",
   }));
 }
 

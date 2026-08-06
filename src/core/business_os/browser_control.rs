@@ -225,7 +225,16 @@ pub(super) async fn browser_session_automation_with_database(
     let command_created_at_ms = now_ms() as u64;
     let manager = browser_runtime_manager();
     let session = manager
-        .ensure_session(root, request.dir, &session_id, 1920, 947, "ctox", false)
+        .ensure_session(
+            root,
+            request.dir,
+            &session_id,
+            1920,
+            947,
+            "ctox",
+            false,
+            false,
+        )
         .await?;
     let mut output = manager
         .request(

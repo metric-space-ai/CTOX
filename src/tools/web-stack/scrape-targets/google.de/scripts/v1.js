@@ -1,9 +1,8 @@
 // google.de — prospect.v1 extractor (Phase B initial revision).
 //
-// Reads CTOX_SCRAPE_INPUT_JSON for the company + country, drives the
-// CTOX web stack (`ctox web search --source google.de` plus a
-// consent-aware browser pass over the live google.de SERP) to discover
-// the company's own website, then parses that page for the field set
+// Reads CTOX_SCRAPE_INPUT_JSON for the company + country, drives one
+// consent-aware browser pass over the live google.de SERP to discover the
+// company's own website, then parses that page for the field set
 // documented in `tools/web-stack/src/sources/EXCEL_MATRIX.md`.
 //
 // The Google leg only accepts payloads whose provider is verified as
@@ -392,7 +391,15 @@ function main() {
     blockedMarkers.push(...(markers || []));
   };
 
-  // Candidate discovery, provider-verified Google first.
+  // Candidate discovery starts with the provider-owned Google browser pass.
+  // The previous implementation first spawned a generic `ctox web search`
+  // subprocess even though that cascade commonly reports Brave/Bing/etc. as
+  // its provider and therefore cannot satisfy this adapter's Google-only
+  // provenance policy. Keeping that redundant subprocess on the normal path
+  // also let a fallback classification reach scrape auto-heal, whose durable
+  // task spawn can be rejected by the core process graph. The generic search
+  // remains fixture-only so the production adapter has one discovery process
+  // and one unambiguous provider-owned evidence path.
   const candidates = [];
   const seen = new Set();
   const pushCandidate = (hit) => {
@@ -402,14 +409,6 @@ function main() {
     candidates.push(hit);
   };
 
-  const payload = searchGoogle(company, country);
-  for (const hit of payload.results.slice(0, MAX_HITS)) pushCandidate(hit);
-  if (payload.sourceFailures.some((failure) => ["blocked", "access_challenge"].includes(failure?.kind))) {
-    markBlocked("https://www.google.de/", ["access_challenge"]);
-  }
-
-  // Live SERP pass (consent-aware) adds organic results the search API may
-  // have missed and doubles as the challenge detector for the target.
   const serp = serpPage(company);
   if (serp.ok) {
     if (looksChallenged(serp.result.url, serp.result.page_text_excerpt, serp.markers)) {
@@ -421,6 +420,17 @@ function main() {
     }
   } else if (serp.markers.length > 0) {
     markBlocked("https://www.google.de/", serp.markers);
+  }
+
+  let fallbackSearch = { results: [], sourceFailures: [], providerOk: false };
+  const fixtureFallbackEnabled = Boolean(process.env.CTOX_SCRAPE_FIXTURE);
+  if (!serp.ok && !blocked && fixtureFallbackEnabled) {
+    fallbackSearch = searchGoogle(company, country);
+    for (const hit of fallbackSearch.results.slice(0, MAX_HITS)) pushCandidate(hit);
+    if (fallbackSearch.sourceFailures.some((failure) =>
+      ["blocked", "access_challenge"].includes(failure?.kind))) {
+      markBlocked("https://www.google.de/", ["access_challenge"]);
+    }
   }
 
   for (const hit of candidates.slice(0, MAX_HITS)) {
@@ -477,12 +487,20 @@ function main() {
     }));
     return;
   }
+  const providerSerpResults = Array.isArray(serp.result?.results) ? serp.result.results : [];
+  const selectorDrift = serp.ok && providerSerpResults.length === 0;
   process.stdout.write(JSON.stringify({
     records: [],
-    failure_mode: payload.providerOk ? "temporary_unreachable" : "portal_drift",
-    detail: payload.providerOk
-      ? "google.de returned no extractable records (selector drift or no company site result)"
-      : "google.de target rejected results from a non-Google search provider",
+    // Only a successfully loaded provider-owned SERP with no matching result
+    // elements is portal drift. A failed browser command plus a rejected
+    // foreign-provider fallback is transport unavailability, not a reason to
+    // enqueue script-repair work (and therefore not a core task-spawn path).
+    failure_mode: selectorDrift ? "portal_drift" : "temporary_unreachable",
+    detail: selectorDrift
+      ? "google.de loaded without challenge but no organic h3 results matched the selector"
+      : fallbackSearch.providerOk
+        ? "google.de returned no company-matched extractable records"
+        : "provider-owned google.de browser pass was unavailable; non-Google fallback results were rejected",
   }));
 }
 

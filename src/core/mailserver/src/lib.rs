@@ -13,34 +13,9 @@ pub use config::StalwartConfig;
 pub use imap::ImapServer;
 pub use util::errors::{StalwartError, StalwartResult};
 
-use std::sync::{Arc, OnceLock, RwLock};
-
-pub use store::sqlite::DeliveryOutcome;
-
-pub type DeliveryOutcomeSink =
-    Arc<dyn Fn(&DeliveryOutcome) -> Result<(), String> + Send + Sync + 'static>;
-
-static DELIVERY_OUTCOME_SINK: OnceLock<RwLock<Option<DeliveryOutcomeSink>>> = OnceLock::new();
-
-/// Register the process-local consumer for terminal SMTP outcomes. Business OS
-/// installs this before the mailserver thread starts; replacing it is allowed so
-/// tests and restarted service roots do not retain a stale path.
-pub fn register_delivery_outcome_sink(sink: DeliveryOutcomeSink) {
-    let slot = DELIVERY_OUTCOME_SINK.get_or_init(|| RwLock::new(None));
-    let mut guard = slot
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(sink);
-}
-
-fn registered_delivery_outcome_sink() -> Option<DeliveryOutcomeSink> {
-    DELIVERY_OUTCOME_SINK
-        .get()
-        .and_then(|slot| slot.read().ok().and_then(|guard| guard.clone()))
-}
+use std::sync::Arc;
 
 pub fn start_services_thread(db_path: String) {
-    let delivery_outcome_sink = registered_delivery_outcome_sink();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -169,13 +144,10 @@ pub fn start_services_thread(db_path: String) {
             });
 
             // Start SMTP Outbound Queue Runner
-            let queue_runner = Arc::new(
-                smtp::client_queue::SmtpOutboundQueue::new_with_delivery_outcome_sink(
-                    store.clone(),
-                    config.smtp.clone(),
-                    delivery_outcome_sink,
-                ),
-            );
+            let queue_runner = Arc::new(smtp::client_queue::SmtpOutboundQueue::new(
+                store.clone(),
+                config.smtp.clone(),
+            ));
             tokio::spawn(async move {
                 tracing::info!("[ctox-mailserver] SMTP Outbound Queue Runner thread running");
                 queue_runner.start().await;

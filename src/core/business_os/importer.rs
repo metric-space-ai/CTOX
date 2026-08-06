@@ -4116,9 +4116,16 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-use super::hashing::hex_sha256;
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = sha2::Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
-use super::hashing::short_hash;
+fn short_hash(value: &str) -> String {
+    let digest = sha2::Sha256::digest(value.as_bytes());
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &digest)[..10]
+        .to_string()
+}
 
 #[cfg(test)]
 mod outbound_provenance_tests {

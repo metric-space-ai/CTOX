@@ -22,7 +22,7 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260717-knowledge-sync-v130';
+} from './sync-contract.js?v=20260728-sync-readiness-v131';
 import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260714-chat-queue-v56';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
@@ -55,7 +55,25 @@ const ROOM_RETRY_BASE_MS = 1_000;
 const ROOM_RETRY_MAX_MS = 30_000;
 const COLLECTION_START_GAP_MS = 500;
 const COLLECTION_RESTART_GAP_MS = 500;
-const desktopIconReplicationCollections = new WeakMap();
+const DESKTOP_ICON_SAFE_FIELDS = new Set([
+  'id',
+  'target_type',
+  'target_module',
+  'target_record_id',
+  'label',
+  'glyph',
+  'x',
+  'y',
+  'pinned',
+  'hidden',
+  'sort_index',
+  'updated_at_ms',
+  '_deleted',
+  '_rev',
+  '_meta',
+  '_attachments',
+]);
+const desktopIconRepairPromises = new WeakMap();
 const RETRYABLE_CONTROL_PLANE_CODES = new Set([
   'control_plane_token_expired',
   'temporary_unavailable',
@@ -340,7 +358,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260805-collection-version-v90');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260728-catchup-invalidation-v88');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1076,8 +1094,10 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     recordCollection?.(collection, { status: 'pending', reason: 'collection-not-registered' });
     return { mode: 'pending', collection, reason: 'collection-not-registered' };
   }
-  const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260805-collection-version-v90');
+  if (collection === 'desktop_icons') {
+    await repairDesktopIconsBeforeReplication(rxCollection);
+  }
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260728-catchup-invalidation-v88');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -1141,7 +1161,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
   subscriptions.push({ unsubscribe: unregisterSignalingErrorHandler });
   let nativePeerOpenWatchdog = null;
   const replicationState = await rxdb.replicateWebRTC({
-    collection: replicationCollection,
+    collection: rxCollection,
     // Phase 3: pass the BARE sync room so every collection multiplexes onto a
     // single shared CtoxWebRtcNativePeer for this room.
     topic: room,
@@ -1423,87 +1443,87 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
   };
 }
 
-// desktop_icons is a permissive, field-merging browser cache. WebRTC reads the
-// storage collection directly, so passing the app collection through exposed
-// legacy browser-only fields, attachments, and oversized glyph payloads to
-// masterWrite. Project at that boundary in both directions; the local cache no
-// longer needs a destructive delete/upsert preflight merely to satisfy the wire.
-function collectionForReplication(collectionName, collection) {
-  if (collectionName !== 'desktop_icons' || !collection?.storageCollection) return collection;
-  const cached = desktopIconReplicationCollections.get(collection);
-  if (cached) return cached;
-
-  const storage = collection.storageCollection;
-  const replicationStorage = new Proxy(storage, {
-    get(target, property) {
-      if (property === 'getChangedDocumentsSince' && typeof target.getChangedDocumentsSince === 'function') {
-        return async (...args) => {
-          const result = await target.getChangedDocumentsSince(...args);
-          if (!result || typeof result !== 'object') return result;
-          return {
-            ...result,
-            documents: Array.isArray(result.documents)
-              ? result.documents.map(projectDesktopIconForReplication)
-              : [],
-          };
-        };
+async function repairDesktopIconsBeforeReplication(collection) {
+  let repairPromise = desktopIconRepairPromises.get(collection);
+  if (repairPromise) return repairPromise;
+  repairPromise = (async () => {
+    const documents = await collection.find().exec();
+    for (const document of documents || []) {
+      const raw = typeof document?.toJSON === 'function' ? document.toJSON() : document;
+      if (!desktopIconNeedsRepair(raw)) continue;
+      const sanitized = sanitizeDesktopIconForReplication(raw);
+      await removeDesktopIconAttachments(document);
+      // The app-local storage upsert deliberately field-merges documents.
+      // Remove the corrupted cache row first so unknown legacy fields cannot
+      // survive the repair and permanently block WebRTC replication.
+      if (typeof collection?.storageCollection?.hardDeleteByIds === 'function') {
+        await collection.storageCollection.hardDeleteByIds([raw.id]);
       }
-      if (property === 'bulkWrite' && typeof target.bulkWrite === 'function') {
-        return (rows, ...args) => target.bulkWrite(
-          Array.isArray(rows) ? rows.map(projectDesktopIconStorageRow) : rows,
-          ...args,
-        );
+      await collection.upsert(sanitized);
+      const repairedDocument = await collection.findOne(raw.id).exec();
+      const repaired = typeof repairedDocument?.toJSON === 'function'
+        ? repairedDocument.toJSON()
+        : repairedDocument;
+      if (desktopIconNeedsRepair(repaired)) {
+        throw new Error(`Desktop icon ${boundedString(raw.id, 128)} remains unsafe after repair.`);
       }
-      return boundProxyMember(target, property);
-    },
-  });
-  const replicationCollection = new Proxy(collection, {
-    get(target, property) {
-      if (property === 'storageCollection') return replicationStorage;
-      return boundProxyMember(target, property);
-    },
-  });
-  desktopIconReplicationCollections.set(collection, replicationCollection);
-  return replicationCollection;
-}
-
-function boundProxyMember(target, property) {
-  const value = Reflect.get(target, property, target);
-  return typeof value === 'function' ? value.bind(target) : value;
-}
-
-function projectDesktopIconStorageRow(row) {
-  if (row?.document && typeof row.document === 'object') {
-    return { ...row, document: projectDesktopIconForReplication(row.document) };
+    }
+  })();
+  desktopIconRepairPromises.set(collection, repairPromise);
+  try {
+    await repairPromise;
+  } catch (error) {
+    desktopIconRepairPromises.delete(collection);
+    throw error;
   }
-  return projectDesktopIconForReplication(row);
 }
 
-function projectDesktopIconForReplication(raw) {
-  const source = raw && typeof raw === 'object' ? raw : {};
-  const updatedAtMs = boundedPositiveNumber(source.updated_at_ms, source._meta?.lwt);
-  const lwt = boundedPositiveNumber(source._meta?.lwt, updatedAtMs);
+function desktopIconNeedsRepair(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  if (!isSafeDesktopIconGlyph(raw.glyph)) return true;
+  if (raw._attachments && Object.keys(raw._attachments).length > 0) return true;
+  if (encodedJsonSize(raw) > 64 * 1024) return true;
+  return Object.keys(raw).some((key) => !DESKTOP_ICON_SAFE_FIELDS.has(key));
+}
+
+function sanitizeDesktopIconForReplication(raw) {
+  const now = Date.now();
   const icon = {
-    id: boundedString(source.id, 128),
-    target_type: boundedString(source.target_type, 32) || 'app',
-    target_module: boundedString(source.target_module, 128),
-    target_record_id: boundedString(source.target_record_id, 256),
-    label: boundedString(source.label, 256),
-    glyph: isSafeDesktopIconGlyph(source.glyph) ? String(source.glyph).trim() : '◻︎',
-    x: boundedNumber(source.x),
-    y: boundedNumber(source.y),
-    pinned: Boolean(source.pinned),
-    hidden: Boolean(source.hidden),
-    sort_index: boundedNumber(source.sort_index),
-    updated_at_ms: updatedAtMs,
-    _deleted: Boolean(source._deleted),
-    _meta: { lwt },
+    id: boundedString(raw.id, 128),
+    target_type: boundedString(raw.target_type, 32) || 'app',
+    target_module: boundedString(raw.target_module, 128),
+    target_record_id: boundedString(raw.target_record_id, 256),
+    label: boundedString(raw.label, 256),
+    glyph: isSafeDesktopIconGlyph(raw.glyph) ? String(raw.glyph).trim() : '◻︎',
+    x: boundedNumber(raw.x),
+    y: boundedNumber(raw.y),
+    pinned: Boolean(raw.pinned),
+    hidden: Boolean(raw.hidden),
+    sort_index: boundedNumber(raw.sort_index),
+    updated_at_ms: now,
+    _deleted: Boolean(raw._deleted),
   };
-  const revision = boundedString(source._rev, 256);
-  if (revision) icon._rev = revision;
-  const hybridLogicalClock = boundedString(source._meta?.ctoxHlc, 256);
-  if (hybridLogicalClock) icon._meta.ctoxHlc = hybridLogicalClock;
   return icon;
+}
+
+async function removeDesktopIconAttachments(document) {
+  const attachments = typeof document?.allAttachments === 'function'
+    ? document.allAttachments()
+    : [];
+  for (const attachment of attachments || []) {
+    await attachment?.remove?.();
+  }
+}
+
+function encodedJsonSize(value) {
+  try {
+    const json = JSON.stringify(value);
+    return typeof TextEncoder === 'function'
+      ? new TextEncoder().encode(json).byteLength
+      : json.length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 function isSafeDesktopIconGlyph(value) {
@@ -1520,16 +1540,6 @@ function boundedNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.max(-100_000, Math.min(100_000, number));
-}
-
-function boundedPositiveNumber(value, fallback = 1) {
-  const number = Number(value);
-  if (Number.isFinite(number) && number > 0) return Math.min(number, 1_000_000_000_000_000);
-  const fallbackNumber = Number(fallback);
-  if (Number.isFinite(fallbackNumber) && fallbackNumber > 0) {
-    return Math.min(fallbackNumber, 1_000_000_000_000_000);
-  }
-  return 1;
 }
 
 function formatLifecycleError(error) {
@@ -2507,8 +2517,6 @@ export const __ctoxSyncTestHooks = {
   checkpointDiagnosticFields,
   maxCheckpointLwt,
   snapshotDiagnostics,
-  collectionForReplication,
-  projectDesktopIconForReplication,
 };
 
 function replicationIoMessageFor(code) {

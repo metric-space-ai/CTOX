@@ -1210,16 +1210,6 @@ var CtoxRecoveryJournal = class {
     const rows = (state && collection ? await getAllRecordsByIndex(this.db, BATCH_STORE, BATCH_STATE_COLLECTION_INDEX, [state, collection]) : await getAllRecords(this.db, BATCH_STORE)).sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0));
     return rows.filter((row) => (!state || row.state === state) && (!collection || row.collection === collection));
   }
-  // Destructive browser-cache invalidation must consult the live IndexedDB WAL,
-  // never the LocalStorage status mirror. The compound state+collection index
-  // keeps this guard collection-scoped and proportional to pending work only.
-  async pendingSummaryForCollection(collection) {
-    const batches = await this.listBatches("pending", collection);
-    return {
-      pendingBatches: batches.length,
-      pendingWrites: batches.reduce((sum, batch) => sum + (batch.documentIds?.length || 0), 0)
-    };
-  }
   async gc(now = Date.now()) {
     const rows = await this.listBatches("master_acked");
     for (const row of rows) {
@@ -1587,390 +1577,9 @@ function normalizeDocumentIds(ids) {
   return Array.from(new Set(ids.map((id) => String(id || "")).filter(Boolean)));
 }
 
-// src/apps/business-os/rxdb/src/query-meta-backend-indexeddb.mjs
-var SIDECAR_DB_VERSION = 2;
-var STORE_QUERY_WINDOWS = "queryWindows";
-var STORE_QUERY_WINDOW_REFS = "queryWindowRefs";
-var STORE_DOCUMENT_ACCESS = "documentAccess";
-var STORE_CACHE_STATS = "cacheStats";
-var OPEN_TIMEOUT_MS = 4e3;
-function createIndexedDbMetaBackend({ databaseName }) {
-  if (!databaseName) throw new TypeError("createIndexedDbMetaBackend requires databaseName");
-  let dbPromise = null;
-  let fallbackBackend = null;
-  const fallback = () => {
-    if (!fallbackBackend) fallbackBackend = createMemoryMetaBackend();
-    return fallbackBackend;
-  };
-  const open = async () => {
-    if (!dbPromise) {
-      dbPromise = Promise.resolve().then(() => openSidecarDatabase(databaseName)).catch((error) => {
-        dbPromise = null;
-        throw markSidecarOpenError(error);
-      });
-    }
-    return dbPromise;
-  };
-  const withDb = async (method, args, operation) => {
-    if (fallbackBackend) return fallbackBackend[method](...args);
-    try {
-      return await operation(await open());
-    } catch (error) {
-      if (!isSidecarOpenError(error)) throw error;
-      return fallback()[method](...args);
-    }
-  };
-  return {
-    get name() {
-      return fallbackBackend ? "memory-fallback" : "indexeddb";
-    },
-    async putQueryWindow(record) {
-      await withDb(
-        "putQueryWindow",
-        [record],
-        (db) => runRequest(
-          db.transaction(STORE_QUERY_WINDOWS, "readwrite").objectStore(STORE_QUERY_WINDOWS).put(record)
-        )
-      );
-    },
-    async getQueryWindow(key) {
-      return withDb(
-        "getQueryWindow",
-        [key],
-        (db) => runRequest(
-          db.transaction(STORE_QUERY_WINDOWS, "readonly").objectStore(STORE_QUERY_WINDOWS).get(parseQueryWindowKey(key))
-        )
-      );
-    },
-    async deleteQueryWindow(key) {
-      await withDb(
-        "deleteQueryWindow",
-        [key],
-        async (db) => {
-          await deleteQueryWindowRefs(db, stringKey2(parseQueryWindowKey(key)));
-          await runRequest(
-            db.transaction(STORE_QUERY_WINDOWS, "readwrite").objectStore(STORE_QUERY_WINDOWS).delete(parseQueryWindowKey(key))
-          );
-        }
-      );
-    },
-    async scanQueryWindows() {
-      return withDb(
-        "scanQueryWindows",
-        [],
-        (db) => runRequest(
-          db.transaction(STORE_QUERY_WINDOWS, "readonly").objectStore(STORE_QUERY_WINDOWS).getAll()
-        )
-      );
-    },
-    async replaceQueryWindowDocumentRefs(record) {
-      await withDb(
-        "replaceQueryWindowDocumentRefs",
-        [record],
-        async (db) => {
-          const windowKey = queryWindowKey2(record);
-          await deleteQueryWindowRefs(db, windowKey);
-          await putQueryWindowRefs(db, record);
-        }
-      );
-    },
-    async getQueryWindowKeysByDocumentIds(collection, ids) {
-      const normalizedIds = normalizeDocumentIds2(ids);
-      if (!normalizedIds.length) return [];
-      return withDb(
-        "getQueryWindowKeysByDocumentIds",
-        [collection, ids],
-        async (db) => {
-          const tx = db.transaction(STORE_QUERY_WINDOW_REFS, "readonly");
-          const index = tx.objectStore(STORE_QUERY_WINDOW_REFS).index("collection_documentId");
-          const requests = normalizedIds.map((id) => runRequest(index.getAll([collection, id])));
-          const rowsByDocument = await Promise.all(requests);
-          const keys = /* @__PURE__ */ new Set();
-          for (const rows of rowsByDocument) {
-            for (const row of rows || []) {
-              if (row?.windowKey) keys.add(row.windowKey);
-            }
-          }
-          return Array.from(keys);
-        }
-      );
-    },
-    async putDocumentAccess(record) {
-      await withDb(
-        "putDocumentAccess",
-        [record],
-        (db) => runRequest(
-          db.transaction(STORE_DOCUMENT_ACCESS, "readwrite").objectStore(STORE_DOCUMENT_ACCESS).put(record)
-        )
-      );
-    },
-    async getDocumentAccess(collection, id) {
-      return withDb(
-        "getDocumentAccess",
-        [collection, id],
-        (db) => runRequest(
-          db.transaction(STORE_DOCUMENT_ACCESS, "readonly").objectStore(STORE_DOCUMENT_ACCESS).get([collection, id])
-        )
-      );
-    },
-    async deleteDocumentAccess(collection, id) {
-      await withDb(
-        "deleteDocumentAccess",
-        [collection, id],
-        (db) => runRequest(
-          db.transaction(STORE_DOCUMENT_ACCESS, "readwrite").objectStore(STORE_DOCUMENT_ACCESS).delete([collection, id])
-        )
-      );
-    },
-    async scanDocumentAccess() {
-      return withDb(
-        "scanDocumentAccess",
-        [],
-        (db) => runRequest(
-          db.transaction(STORE_DOCUMENT_ACCESS, "readonly").objectStore(STORE_DOCUMENT_ACCESS).getAll()
-        )
-      );
-    },
-    async putCacheStats(record) {
-      await withDb(
-        "putCacheStats",
-        [record],
-        (db) => runRequest(
-          db.transaction(STORE_CACHE_STATS, "readwrite").objectStore(STORE_CACHE_STATS).put(record)
-        )
-      );
-    },
-    async getCacheStats(databaseName2) {
-      return withDb(
-        "getCacheStats",
-        [databaseName2],
-        (db) => runRequest(
-          db.transaction(STORE_CACHE_STATS, "readonly").objectStore(STORE_CACHE_STATS).get(databaseName2)
-        )
-      );
-    },
-    async clear() {
-      await withDb(
-        "clear",
-        [],
-        async (db) => {
-          for (const name of [STORE_QUERY_WINDOWS, STORE_QUERY_WINDOW_REFS, STORE_DOCUMENT_ACCESS, STORE_CACHE_STATS]) {
-            await runRequest(db.transaction(name, "readwrite").objectStore(name).clear());
-          }
-        }
-      );
-    },
-    async close() {
-      const currentDbPromise = dbPromise;
-      dbPromise = null;
-      if (currentDbPromise) {
-        try {
-          const db = await currentDbPromise;
-          db.close();
-        } catch {
-        }
-      }
-      await fallbackBackend?.close?.();
-      fallbackBackend = null;
-    }
-  };
-}
-async function invalidateIndexedDbMetaDatabase({ databaseName } = {}) {
-  if (!databaseName) throw new TypeError("invalidateIndexedDbMetaDatabase requires databaseName");
-  if (!globalThis.indexedDB?.open) return false;
-  if (typeof globalThis.indexedDB.databases === "function") {
-    try {
-      const databases = await globalThis.indexedDB.databases();
-      if (!databases.some((entry) => entry?.name === databaseName)) return false;
-    } catch {
-    }
-  }
-  const db = await openSidecarDatabase(databaseName);
-  try {
-    const stores = [
-      STORE_QUERY_WINDOWS,
-      STORE_QUERY_WINDOW_REFS,
-      STORE_DOCUMENT_ACCESS,
-      STORE_CACHE_STATS
-    ];
-    await runTransaction(db.transaction(stores, "readwrite"), (tx) => {
-      for (const store of stores) tx.objectStore(store).clear();
-    });
-    return true;
-  } finally {
-    db.close();
-  }
-}
-function openSidecarDatabase(databaseName) {
-  if (!globalThis.indexedDB) {
-    throw new Error("indexedDB is required for sidecar metadata storage");
-  }
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (fn, value) => {
-      if (settled) return false;
-      settled = true;
-      clearTimeout(timer);
-      fn(value);
-      return true;
-    };
-    const timer = setTimeout(() => {
-      finish(reject, new Error(`IndexedDB open timed out for sidecar ${databaseName}`));
-    }, OPEN_TIMEOUT_MS);
-    const request = globalThis.indexedDB.open(databaseName, SIDECAR_DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_QUERY_WINDOWS)) {
-        const store = db.createObjectStore(STORE_QUERY_WINDOWS, {
-          keyPath: ["collection", "queryFingerprint", "offset", "limit"]
-        });
-        store.createIndex("collection", "collection", { unique: false });
-        store.createIndex("collection_lastAccessedAt", ["collection", "lastAccessedAt"], {
-          unique: false
-        });
-      }
-      if (!db.objectStoreNames.contains(STORE_QUERY_WINDOW_REFS)) {
-        const store = db.createObjectStore(STORE_QUERY_WINDOW_REFS, {
-          keyPath: ["collection", "documentId", "windowKey"]
-        });
-        store.createIndex("collection_documentId", ["collection", "documentId"], {
-          unique: false
-        });
-        store.createIndex("windowKey", "windowKey", { unique: false });
-      }
-      if (!db.objectStoreNames.contains(STORE_DOCUMENT_ACCESS)) {
-        const store = db.createObjectStore(STORE_DOCUMENT_ACCESS, {
-          keyPath: ["collection", "id"]
-        });
-        store.createIndex("collection_lastAccessedAt", ["collection", "lastAccessedAt"], {
-          unique: false
-        });
-      }
-      if (!db.objectStoreNames.contains(STORE_CACHE_STATS)) {
-        db.createObjectStore(STORE_CACHE_STATS, { keyPath: "databaseName" });
-      }
-    };
-    request.onsuccess = () => {
-      const db = request.result;
-      if (!finish(resolve, db)) {
-        try {
-          db.close();
-        } catch {
-        }
-      }
-    };
-    request.onerror = () => {
-      finish(reject, request.error || new Error(`failed to open sidecar ${databaseName}`));
-    };
-    request.onblocked = () => {
-      finish(reject, new Error(`IndexedDB open blocked for sidecar ${databaseName}`));
-    };
-  });
-}
-function markSidecarOpenError(error) {
-  if (error && typeof error === "object") {
-    try {
-      error.ctoxSidecarOpenError = true;
-    } catch {
-    }
-    return error;
-  }
-  const wrapped = new Error(String(error || "sidecar IndexedDB open failed"));
-  wrapped.ctoxSidecarOpenError = true;
-  return wrapped;
-}
-function isSidecarOpenError(error) {
-  return Boolean(error?.ctoxSidecarOpenError);
-}
-function parseQueryWindowKey(key) {
-  if (Array.isArray(key)) return key;
-  if (typeof key === "string") {
-    const parts = key.split("|");
-    if (parts.length !== 4) throw new TypeError(`invalid query window key: ${key}`);
-    const [collection, fingerprint, offset, limit] = parts;
-    return [collection, fingerprint, Number(offset), Number(limit)];
-  }
-  throw new TypeError("query window key must be array or string");
-}
-function runRequest(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-function queryWindowKey2(record) {
-  return [record.collection, record.queryFingerprint, record.offset, record.limit].join("|");
-}
-function stringKey2(key) {
-  if (Array.isArray(key)) return key.join("|");
-  if (typeof key === "string") return key;
-  throw new TypeError("query window key must be array or string");
-}
-function normalizeDocumentIds2(ids) {
-  if (!Array.isArray(ids)) return [];
-  return Array.from(new Set(ids.map((id) => String(id || "")).filter(Boolean)));
-}
-async function putQueryWindowRefs(db, record) {
-  const documentIds = normalizeDocumentIds2([...record.documentIds || [], ...record.selectorRefIds || []]);
-  if (!documentIds.length) return;
-  const windowKey = queryWindowKey2(record);
-  await runTransaction(
-    db.transaction(STORE_QUERY_WINDOW_REFS, "readwrite"),
-    (tx) => {
-      const store = tx.objectStore(STORE_QUERY_WINDOW_REFS);
-      for (const documentId3 of documentIds) {
-        store.put({
-          collection: record.collection,
-          documentId: documentId3,
-          windowKey
-        });
-      }
-    }
-  );
-}
-async function deleteQueryWindowRefs(db, windowKey) {
-  await runTransaction(
-    db.transaction(STORE_QUERY_WINDOW_REFS, "readwrite"),
-    (tx) => {
-      const index = tx.objectStore(STORE_QUERY_WINDOW_REFS).index("windowKey");
-      const range = globalThis.IDBKeyRange.only(windowKey);
-      const request = index.openCursor(range);
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) return;
-        cursor.delete();
-        cursor.continue();
-      };
-    }
-  );
-}
-function runTransaction(tx, schedule) {
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
-    try {
-      schedule(tx);
-    } catch (error) {
-      try {
-        tx.abort();
-      } catch {
-      }
-      reject(error);
-    }
-  });
-}
-
 // src/apps/business-os/rxdb/src/query-meta-storage.mjs
 var SIDECAR_DATABASE_NAME = "ctox_business_os_v1_5_meta";
 var SIDECAR_PIN_RECENT_READ_TTL_MS = 6e4;
-async function invalidateQueryMetaCollection(collection) {
-  const normalized = String(collection || "").trim();
-  if (!normalized) throw new TypeError("invalidateQueryMetaCollection requires collection");
-  return invalidateIndexedDbMetaDatabase({
-    databaseName: `${SIDECAR_DATABASE_NAME}_${normalized}`
-  });
-}
 var PIN_RECENT_READ = "recently-read";
 var evictionSchedulerGroups = /* @__PURE__ */ new Map();
 var QueryMetaStorage = class {
@@ -1987,13 +1596,12 @@ var QueryMetaStorage = class {
     this.schedulerKey = schedulerKey;
     this.clock = clock;
     this.primaryDelete = typeof primaryDelete === "function" ? primaryDelete : null;
-    this._metadataMutationTail = Promise.resolve();
   }
   setPrimaryDelete(fn) {
     this.primaryDelete = typeof fn === "function" ? fn : null;
   }
   async getQueryWindow(key) {
-    const record = await this.backend.getQueryWindow(stringKey3(key));
+    const record = await this.backend.getQueryWindow(stringKey2(key));
     if (!record) return null;
     record.lastAccessedAt = this.clock();
     await this.backend.putQueryWindow(record);
@@ -2034,7 +1642,7 @@ var QueryMetaStorage = class {
     return record;
   }
   async invalidateQueryWindow(key) {
-    const stringified = stringKey3(key);
+    const stringified = stringKey2(key);
     const existing = await this.backend.getQueryWindow(stringified);
     if (!existing) return;
     existing.everCompleted = Boolean(existing.everCompleted) || Boolean(existing.complete);
@@ -2043,106 +1651,111 @@ var QueryMetaStorage = class {
     await this.backend.putQueryWindow(existing);
   }
   async touchDocuments(collection, ids, { estimatedBytes = 0, pinReason = PIN_RECENT_READ } = {}) {
+    const now = this.clock();
     const normalizedIds = Array.isArray(ids) ? ids.filter(Boolean) : [];
     if (!normalizedIds.length) return;
-    return this.enqueueMetadataMutation(async () => {
-      const now = this.clock();
-      const perDocumentBytes = normalizeEstimatedBytes(estimatedBytes);
-      let deltaBytes = 0;
-      for (const id of normalizedIds) {
-        const previous = await this.backend.getDocumentAccess(collection, id) || {};
-        const nextEstimatedBytes = perDocumentBytes || previous.estimatedBytes || 0;
-        deltaBytes += nextEstimatedBytes - (previous.estimatedBytes || 0);
-        await this.backend.putDocumentAccess({
-          collection,
-          id,
-          lastAccessedAt: now,
-          pinReason: previous.dirty ? "dirty" : pinReason,
-          dirty: Boolean(previous.dirty),
-          estimatedBytes: nextEstimatedBytes
-        });
-      }
-      if (deltaBytes !== 0) {
-        const stats = await this.readCacheStats();
-        stats.estimatedBytes = Math.max(0, (stats.estimatedBytes || 0) + deltaBytes);
-        await this.backend.putCacheStats(stats);
-      }
-    });
-  }
-  async markDirty(collection, id, dirty) {
-    return this.enqueueMetadataMutation(async () => {
-      const previous = await this.backend.getDocumentAccess(collection, id) || {
+    const perDocumentBytes = normalizeEstimatedBytes(estimatedBytes);
+    let deltaBytes = 0;
+    for (const id of normalizedIds) {
+      const previous = await this.backend.getDocumentAccess(collection, id) || {};
+      const nextEstimatedBytes = perDocumentBytes || previous.estimatedBytes || 0;
+      deltaBytes += nextEstimatedBytes - (previous.estimatedBytes || 0);
+      await this.backend.putDocumentAccess({
         collection,
         id,
-        lastAccessedAt: this.clock(),
-        estimatedBytes: 0
-      };
-      await this.backend.putDocumentAccess({
-        ...previous,
-        dirty: Boolean(dirty),
-        pinReason: dirty ? "dirty" : previous.pinReason ?? null
+        lastAccessedAt: now,
+        pinReason: previous.dirty ? "dirty" : pinReason,
+        dirty: Boolean(previous.dirty),
+        estimatedBytes: nextEstimatedBytes
       });
+    }
+    if (deltaBytes !== 0) {
+      const stats = await this.getCacheStats();
+      stats.estimatedBytes = Math.max(0, (stats.estimatedBytes || 0) + deltaBytes);
+      await this.backend.putCacheStats(stats);
+    }
+  }
+  async markDirty(collection, id, dirty) {
+    const previous = await this.backend.getDocumentAccess(collection, id) || {
+      collection,
+      id,
+      lastAccessedAt: this.clock(),
+      estimatedBytes: 0
+    };
+    await this.backend.putDocumentAccess({
+      ...previous,
+      dirty: Boolean(dirty),
+      pinReason: dirty ? "dirty" : previous.pinReason ?? null
     });
   }
   async getDocumentAccess(collection, id) {
-    await this._metadataMutationTail;
     const record = await this.backend.getDocumentAccess(collection, id);
     return record ? { ...record } : null;
   }
   async evictDocuments(ids) {
-    return this.enqueueMetadataMutation(async () => {
-      const now = this.clock();
-      let removed = 0;
-      for (const { collection, id } of ids) {
-        const record = await this.backend.getDocumentAccess(collection, id);
-        if (!record) continue;
-        if (record.dirty) continue;
-        if (record.pinReason === PIN_RECENT_READ && now - record.lastAccessedAt < SIDECAR_PIN_RECENT_READ_TTL_MS) {
+    const now = this.clock();
+    let removed = 0;
+    for (const { collection, id } of ids) {
+      const record = await this.backend.getDocumentAccess(collection, id);
+      if (!record) continue;
+      if (record.dirty) continue;
+      if (record.pinReason === PIN_RECENT_READ && now - record.lastAccessedAt < SIDECAR_PIN_RECENT_READ_TTL_MS) {
+        continue;
+      }
+      if (this.primaryDelete) {
+        try {
+          await this.primaryDelete(collection, id);
+        } catch {
           continue;
         }
-        if (this.primaryDelete) {
-          try {
-            await this.primaryDelete(collection, id);
-          } catch {
-            continue;
-          }
-        }
-        await this.backend.deleteDocumentAccess(collection, id);
-        removed += 1;
       }
-      const stats = await this.readCacheStats();
-      stats.lastEvictionAt = removed > 0 ? now : stats.lastEvictionAt;
-      stats.estimatedBytes = await this.estimateWorkingSetBytesUnqueued();
-      await this.backend.putCacheStats(stats);
-      return removed;
-    });
+      await this.backend.deleteDocumentAccess(collection, id);
+      removed += 1;
+    }
+    const stats = await this.backend.getCacheStats(this.databaseName) || {
+      databaseName: this.databaseName,
+      estimatedBytes: 0,
+      budgetBytes: 0,
+      lastEvictionAt: null
+    };
+    stats.lastEvictionAt = removed > 0 ? now : stats.lastEvictionAt;
+    stats.estimatedBytes = await this.estimateWorkingSetBytes();
+    await this.backend.putCacheStats(stats);
+    return removed;
   }
   async estimateWorkingSetBytes() {
-    await this._metadataMutationTail;
-    return this.estimateWorkingSetBytesUnqueued();
+    const docs = await this.backend.scanDocumentAccess();
+    return docs.reduce((sum, record) => sum + (record.estimatedBytes || 0), 0);
   }
   async setBudgetBytes(budgetBytes) {
-    return this.enqueueMetadataMutation(async () => {
-      const stats = await this.readCacheStats();
-      stats.budgetBytes = Number(budgetBytes) || 0;
-      await this.backend.putCacheStats(stats);
-    });
+    const stats = await this.backend.getCacheStats(this.databaseName) || {
+      databaseName: this.databaseName,
+      estimatedBytes: 0,
+      budgetBytes: 0,
+      lastEvictionAt: null
+    };
+    stats.budgetBytes = Number(budgetBytes) || 0;
+    await this.backend.putCacheStats(stats);
   }
   async getCacheStats() {
-    await this._metadataMutationTail;
-    return this.readCacheStats();
+    return await this.backend.getCacheStats(this.databaseName) || {
+      databaseName: this.databaseName,
+      estimatedBytes: 0,
+      budgetBytes: 0,
+      lastEvictionAt: null
+    };
   }
   async clear() {
-    return this.enqueueMetadataMutation(() => this.backend.clear());
+    await this.backend.clear();
   }
   async invalidateQueryWindowsForDocuments(collection, ids) {
-    const normalizedIds = normalizeDocumentIds3(ids);
+    const normalizedIds = normalizeDocumentIds2(ids);
     if (!collection || !normalizedIds.length) return 0;
     const windowKeys = typeof this.backend.getQueryWindowKeysByDocumentIds === "function" ? await this.backend.getQueryWindowKeysByDocumentIds(collection, normalizedIds) : await this.scanQueryWindowKeysForDocuments(collection, normalizedIds);
     let invalidated = 0;
     const seen = /* @__PURE__ */ new Set();
     for (const key of windowKeys) {
-      const stringified = stringKey3(key);
+      const stringified = stringKey2(key);
       if (seen.has(stringified)) continue;
       seen.add(stringified);
       const window2 = await this.backend.getQueryWindow(stringified);
@@ -2173,7 +1786,7 @@ var QueryMetaStorage = class {
     let invalidated = 0;
     const seen = /* @__PURE__ */ new Set();
     for (const key of windowKeys) {
-      const stringified = stringKey3(key);
+      const stringified = stringKey2(key);
       if (seen.has(stringified)) continue;
       seen.add(stringified);
       const window2 = await this.backend.getQueryWindow(stringified);
@@ -2225,63 +1838,58 @@ var QueryMetaStorage = class {
     return keys;
   }
   async close() {
-    await this._metadataMutationTail;
     await this.backend.close();
   }
   /// Evicts LRU document access entries until the working set fits the budget.
   /// Skips dirty docs and unexpired recently-read pins. Returns the number of
   /// document records removed.
   async runEvictionIfOverBudget({ forceRecount = false } = {}) {
-    return this.enqueueMetadataMutation(async () => {
-      const stats = await this.readCacheStats();
-      if (!stats.budgetBytes) {
-        return 0;
-      }
-      if (!forceRecount && (stats.estimatedBytes || 0) <= stats.budgetBytes) {
-        return 0;
-      }
-      const all = await this.backend.scanDocumentAccess();
-      const workingSetBytes = sumEstimatedDocumentAccessBytes(all);
-      if (stats.estimatedBytes !== workingSetBytes) {
-        stats.estimatedBytes = workingSetBytes;
-        await this.backend.putCacheStats(stats);
-      }
-      if (workingSetBytes <= stats.budgetBytes) {
-        return 0;
-      }
-      const now = this.clock();
-      const candidates = all.filter((record) => !record.dirty).filter((record) => {
-        if (record.pinReason !== "recently-read") return true;
-        return now - record.lastAccessedAt >= SIDECAR_PIN_RECENT_READ_TTL_MS;
-      }).sort((a, b) => a.lastAccessedAt - b.lastAccessedAt);
-      let removed = 0;
-      let remainingBytes = workingSetBytes;
-      for (const candidate of candidates) {
-        if (remainingBytes <= stats.budgetBytes) break;
-        if (this.primaryDelete) {
-          try {
-            await this.primaryDelete(candidate.collection, candidate.id);
-          } catch {
-            continue;
-          }
+    const stats = await this.getCacheStats();
+    if (!stats.budgetBytes) {
+      return 0;
+    }
+    if (!forceRecount && (stats.estimatedBytes || 0) <= stats.budgetBytes) {
+      return 0;
+    }
+    const all = await this.backend.scanDocumentAccess();
+    const workingSetBytes = sumEstimatedDocumentAccessBytes(all);
+    if (stats.estimatedBytes !== workingSetBytes) {
+      stats.estimatedBytes = workingSetBytes;
+      await this.backend.putCacheStats(stats);
+    }
+    if (workingSetBytes <= stats.budgetBytes) {
+      return 0;
+    }
+    const now = this.clock();
+    const candidates = all.filter((record) => !record.dirty).filter((record) => {
+      if (record.pinReason !== "recently-read") return true;
+      return now - record.lastAccessedAt >= SIDECAR_PIN_RECENT_READ_TTL_MS;
+    }).sort((a, b) => a.lastAccessedAt - b.lastAccessedAt);
+    let removed = 0;
+    let remainingBytes = workingSetBytes;
+    for (const candidate of candidates) {
+      if (remainingBytes <= stats.budgetBytes) break;
+      if (this.primaryDelete) {
+        try {
+          await this.primaryDelete(candidate.collection, candidate.id);
+        } catch {
+          continue;
         }
-        await this.backend.deleteDocumentAccess(candidate.collection, candidate.id);
-        remainingBytes -= candidate.estimatedBytes || 0;
-        removed += 1;
       }
-      if (removed > 0) {
-        const updated = { ...stats, estimatedBytes: remainingBytes, lastEvictionAt: now };
-        await this.backend.putCacheStats(updated);
-      }
-      return removed;
-    });
+      await this.backend.deleteDocumentAccess(candidate.collection, candidate.id);
+      remainingBytes -= candidate.estimatedBytes || 0;
+      removed += 1;
+    }
+    if (removed > 0) {
+      const updated = { ...stats, estimatedBytes: remainingBytes, lastEvictionAt: now };
+      await this.backend.putCacheStats(updated);
+    }
+    return removed;
   }
   async recordEstimatedBytes(bytes) {
-    return this.enqueueMetadataMutation(async () => {
-      const stats = await this.readCacheStats();
-      stats.estimatedBytes = Math.max(0, Number(bytes) || 0);
-      await this.backend.putCacheStats(stats);
-    });
+    const stats = await this.getCacheStats();
+    stats.estimatedBytes = Math.max(0, Number(bytes) || 0);
+    await this.backend.putCacheStats(stats);
   }
   /// Wraps an IDB write attempt in a quota-recovery loop. On
   /// `QuotaExceededError` we run eviction once and retry; on second failure
@@ -2402,24 +2010,6 @@ var QueryMetaStorage = class {
     const windowsReclaimed = await this.runWindowGc().catch(() => 0);
     return { evicted, windowsReclaimed };
   }
-  enqueueMetadataMutation(operation) {
-    const result = this._metadataMutationTail.then(() => operation());
-    this._metadataMutationTail = result.catch(() => {
-    });
-    return result;
-  }
-  async readCacheStats() {
-    return await this.backend.getCacheStats(this.databaseName) || {
-      databaseName: this.databaseName,
-      estimatedBytes: 0,
-      budgetBytes: 0,
-      lastEvictionAt: null
-    };
-  }
-  async estimateWorkingSetBytesUnqueued() {
-    const docs = await this.backend.scanDocumentAccess();
-    return sumEstimatedDocumentAccessBytes(docs);
-  }
 };
 function changeAffectsWindow(window2, changes, primaryPath) {
   const members = new Set((window2.documentIds || []).map(String));
@@ -2530,7 +2120,7 @@ function sumEstimatedDocumentAccessBytes(records) {
     0
   );
 }
-function normalizeDocumentIds3(ids) {
+function normalizeDocumentIds2(ids) {
   if (!Array.isArray(ids)) return [];
   return Array.from(new Set(ids.map((id) => String(id || "")).filter(Boolean)));
 }
@@ -2544,17 +2134,15 @@ function isQuotaExceeded2(err) {
 function createSidecarWithMemoryBackend({ databaseName = SIDECAR_DATABASE_NAME, clock = Date.now } = {}) {
   return new QueryMetaStorage(createMemoryMetaBackend(), { databaseName, clock });
 }
-function stringKey3(key) {
+function stringKey2(key) {
   if (Array.isArray(key)) return key.join("|");
   if (typeof key === "string") return key;
   throw new TypeError("query window key must be array or string");
 }
 
 // src/apps/business-os/rxdb/src/storage-indexeddb.mjs
-var DB_VERSION = 4;
+var DB_VERSION = 3;
 var DOCUMENT_STORE = "documents";
-var COLLECTION_SCHEMA_MARKER_STORE = "collectionSchemaMarkers";
-var COLLECTION_SCHEMA_MARKER_FORMAT = "ctox.collection-schema-marker.v1";
 var SCHEMA_INDEX_ENTRIES = "schemaIndexEntries";
 var PUSHABLE_LWT_INDEX = "collectionPushableLwtId";
 var OPEN_DATABASE_TIMEOUT_MS = 4e3;
@@ -2563,7 +2151,6 @@ var REPLICATION_MIN_SCAN_LIMIT = 1;
 var REPLICATION_MAX_SCAN_LIMIT = 5e3;
 var INDEX_HIGH_KEY = "\uFFFF";
 var unsyncedCountScheduled = /* @__PURE__ */ new WeakSet();
-var collectionMutationTails = /* @__PURE__ */ new Map();
 async function openCtoxIndexedDbStorage({ databaseName = "ctox_business_os_js_v1" } = {}) {
   if (!globalThis.indexedDB) {
     throw new Error("indexedDB is required for ctox-rxdb-js storage");
@@ -2585,76 +2172,17 @@ var CtoxIndexedDbStorage = class {
     this.recoveryJournal = recoveryJournal;
     this.quotaCoordinator = quotaCoordinator;
   }
-  collection(name, {
-    schema = null,
-    schemaVersion = null,
-    effectiveSchemaHash = "",
-    conflictStrategy = "lww",
-    deleteStrategy = "default"
-  } = {}) {
+  collection(name, { schema = null, conflictStrategy = "lww", deleteStrategy = "default" } = {}) {
     if (!name || typeof name !== "string") {
       throw new TypeError("collection name must be a non-empty string");
     }
     return new CtoxIndexedDbCollection(this.db, name, {
       schema,
-      schemaVersion,
-      effectiveSchemaHash,
       conflictStrategy,
       deleteStrategy,
       recoveryJournal: this.recoveryJournal,
       quotaCoordinator: this.quotaCoordinator
     });
-  }
-  async prepareCollectionSchema({
-    collection,
-    declaredVersion,
-    effectiveSchemaHash,
-    invalidateExternalState = null
-  } = {}) {
-    const desired = collectionSchemaMarker({
-      collection,
-      declaredVersion,
-      effectiveSchemaHash,
-      state: "ready"
-    });
-    return runSerializedCollectionMutation(this.db, collection, async () => {
-      const snapshot = await readCollectionSchemaSnapshot(this.db, collection);
-      const pending = await readPendingRecoverySummary(this.recoveryJournal, collection);
-      const markerMatches = collectionSchemaMarkerMatches(snapshot.marker, desired);
-      if (markerMatches && snapshot.marker?.state === "ready") {
-        return { invalidated: false, marker: snapshot.marker, clearedRows: 0 };
-      }
-      requireCrossContextCollectionLock(this.db, collection);
-      const destructive = await guardAndInvalidateCollection(this.db, {
-        collection,
-        desired,
-        pending
-      });
-      try {
-        await invalidateExternalState?.({
-          collection,
-          previousMarker: destructive.previousMarker,
-          marker: destructive.marker,
-          clearedRows: destructive.clearedRows
-        });
-      } catch (cause) {
-        throw collectionVersionError(
-          "collection_version_invalidation_failed",
-          `Browser cache invalidation for ${collection} did not finish; the collection remains fail-closed.`,
-          { collection, cause, marker: destructive.marker }
-        );
-      }
-      const ready = await finalizeCollectionSchemaMarker(this.db, desired);
-      return {
-        invalidated: true,
-        previousMarker: destructive.previousMarker,
-        marker: ready,
-        clearedRows: destructive.clearedRows
-      };
-    }, { requireCrossContext: true });
-  }
-  async collectionSchemaMarker(collection) {
-    return readCollectionSchemaMarker(this.db, collection);
   }
   async unsyncedWriteSummary() {
     return countUnsyncedWrites(this.db);
@@ -2667,8 +2195,6 @@ var CtoxIndexedDbStorage = class {
 var CtoxIndexedDbCollection = class {
   constructor(db, name, {
     schema = null,
-    schemaVersion = null,
-    effectiveSchemaHash = "",
     conflictStrategy = "lww",
     deleteStrategy = "default",
     recoveryJournal = null,
@@ -2680,12 +2206,6 @@ var CtoxIndexedDbCollection = class {
     this.conflictStrategy = normalizeConflictStrategy(conflictStrategy);
     this.deleteStrategy = normalizeDeleteStrategy(deleteStrategy);
     this.primaryPath = primaryPathFromSchema(schema);
-    this.schemaMarker = Number.isInteger(Number(schemaVersion)) && effectiveSchemaHash ? collectionSchemaMarker({
-      collection: name,
-      declaredVersion: Number(schemaVersion),
-      effectiveSchemaHash,
-      state: "ready"
-    }) : null;
     this.indexes = normalizeSchemaIndexes(schema, this.primaryPath);
     this.indexSignature = schemaIndexSignature(this.indexes);
     this.schemaIndexReady = null;
@@ -2715,8 +2235,7 @@ var CtoxIndexedDbCollection = class {
   async initializeRecovery() {
     if (!this.recoveryJournal) return;
     if (!this.recoveryReady) {
-      this.recoveryReady = runSerializedCollectionMutation(this.db, this.name, async () => {
-        await this.assertCollectionSchemaReady();
+      this.recoveryReady = (async () => {
         this.recoverySchemaHash = await schemaHash(this.schema || {}, this.name);
         this.recoveryJournal.registerCollection(this.name, {
           schemaHash: this.recoverySchemaHash,
@@ -2747,22 +2266,9 @@ var CtoxIndexedDbCollection = class {
         });
         await this.acknowledgePersistedMasterRecovery();
         await this.recoveryJournal.replayRegisteredCollections(this.name);
-      });
+      })();
     }
     return this.recoveryReady;
-  }
-  async assertCollectionSchemaReady() {
-    if (!this.schemaMarker) return;
-    const persisted = await readCollectionSchemaMarker(this.db, this.name);
-    if (collectionSchemaMarkerMatches(persisted, this.schemaMarker) && persisted?.state === "ready") return;
-    throw collectionVersionError(
-      "collection_version_not_ready",
-      `Collection ${this.name} is not writable until browser cache version invalidation finishes.`,
-      { collection: this.name, expectedMarker: this.schemaMarker, persistedMarker: persisted }
-    );
-  }
-  async collectionSchemaMarker() {
-    return readCollectionSchemaMarker(this.db, this.name);
   }
   async acknowledgePersistedMasterRecovery() {
     const batches = await this.recoveryJournal?.listBatches?.("pending", this.name) || [];
@@ -2845,19 +2351,13 @@ var CtoxIndexedDbCollection = class {
     const { success } = await this.bulkUpsert([doc]);
     return success[id] || null;
   }
-  async bulkUpsert(docs, options = {}) {
-    await this.initializeRecovery();
-    return runSerializedCollectionMutation(this.db, this.name, async () => {
-      await this.assertCollectionSchemaReady();
-      return this._bulkUpsertJournaled(docs, options);
-    });
-  }
-  async _bulkUpsertJournaled(docs, {
+  async bulkUpsert(docs, {
     now = Date.now(),
     replicationOrigin = null,
     skipJournal = false,
     recoveryReplay = false
   } = {}) {
+    await this.initializeRecovery();
     const journalWrite = Boolean(this.recoveryJournal) && !skipJournal && !replicationOrigin?.role && Array.isArray(docs);
     const prepared = journalWrite ? await this.prepareJournalRows(docs) : { rows: docs, baseById: null };
     const writeDocs = prepared.rows;
@@ -2990,14 +2490,7 @@ var CtoxIndexedDbCollection = class {
     }
     return { success, error, overwrittenLocalConflicts, structuredConflicts };
   }
-  async bulkWrite(rows, options = {}) {
-    await this.initializeRecovery();
-    return runSerializedCollectionMutation(this.db, this.name, async () => {
-      await this.assertCollectionSchemaReady();
-      return this._bulkWriteJournaled(rows, options);
-    });
-  }
-  async _bulkWriteJournaled(rows, {
+  async bulkWrite(rows, {
     now = Date.now(),
     replicationOrigin = null,
     baseById = null,
@@ -3006,6 +2499,7 @@ var CtoxIndexedDbCollection = class {
     force = false,
     authoritativeMaster = false
   } = {}) {
+    await this.initializeRecovery();
     const journalWrite = Boolean(this.recoveryJournal) && !skipJournal && !replicationOrigin?.role && Array.isArray(rows);
     const prepared = journalWrite ? await this.prepareJournalRows(rows) : { rows, baseById: null };
     const writeRows = prepared.rows;
@@ -3312,18 +2806,15 @@ var CtoxIndexedDbCollection = class {
   /// this on dirty docs; the sidecar enforces that.
   async hardDeleteByIds(ids) {
     if (!Array.isArray(ids) || !ids.length) return 0;
-    return runSerializedCollectionMutation(this.db, this.name, async () => {
-      await this.assertCollectionSchemaReady();
-      const tx = this.db.transaction(DOCUMENT_STORE, "readwrite");
-      const store = tx.objectStore(DOCUMENT_STORE);
-      let removed = 0;
-      for (const id of ids) {
-        await idbRequest(store.delete([this.name, String(id)]));
-        removed += 1;
-      }
-      await idbTransactionDone(tx);
-      return removed;
-    });
+    const tx = this.db.transaction(DOCUMENT_STORE, "readwrite");
+    const store = tx.objectStore(DOCUMENT_STORE);
+    let removed = 0;
+    for (const id of ids) {
+      await idbRequest(store.delete([this.name, String(id)]));
+      removed += 1;
+    }
+    await idbTransactionDone(tx);
+    return removed;
   }
   async findDocumentsById(ids, { withDeleted = false } = {}) {
     const tx = this.db.transaction(DOCUMENT_STORE, "readonly");
@@ -3633,10 +3124,7 @@ var CtoxIndexedDbCollection = class {
   ensureSchemaIndexEntries() {
     if (!this.indexes.length) return Promise.resolve(0);
     if (!this.schemaIndexReady) {
-      this.schemaIndexReady = runSerializedCollectionMutation(this.db, this.name, async () => {
-        await this.assertCollectionSchemaReady();
-        return this.rebuildMissingSchemaIndexEntries();
-      });
+      this.schemaIndexReady = this.rebuildMissingSchemaIndexEntries();
     }
     return this.schemaIndexReady;
   }
@@ -3664,200 +3152,6 @@ var CtoxIndexedDbCollection = class {
     return updated;
   }
 };
-function collectionSchemaMarker({ collection, declaredVersion, effectiveSchemaHash, state = "ready" }) {
-  if (!collection || typeof collection !== "string") {
-    throw new TypeError("Collection schema marker requires a collection name");
-  }
-  const version = Number(declaredVersion);
-  const hash = String(effectiveSchemaHash || "").trim();
-  if (!Number.isInteger(version) || version < 0 || !hash) {
-    throw new TypeError(`Collection schema marker for ${collection} requires a non-negative version and effective schema hash`);
-  }
-  return {
-    collection,
-    schema: COLLECTION_SCHEMA_MARKER_FORMAT,
-    declaredVersion: version,
-    effectiveSchemaHash: hash,
-    state: state === "invalidating" ? "invalidating" : "ready",
-    updatedAtMs: Date.now()
-  };
-}
-function collectionSchemaMarkerMatches(persisted, desired) {
-  return Boolean(
-    persisted && desired && persisted.schema === COLLECTION_SCHEMA_MARKER_FORMAT && persisted.collection === desired.collection && Number(persisted.declaredVersion) === Number(desired.declaredVersion) && String(persisted.effectiveSchemaHash || "") === String(desired.effectiveSchemaHash || "")
-  );
-}
-async function readCollectionSchemaMarker(db, collection) {
-  const tx = db.transaction(COLLECTION_SCHEMA_MARKER_STORE, "readonly");
-  const done = idbTransactionDone(tx);
-  const marker = await idbRequest(tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE).get(collection));
-  await done;
-  return marker || null;
-}
-async function readCollectionSchemaSnapshot(db, collection) {
-  const tx = db.transaction([DOCUMENT_STORE, COLLECTION_SCHEMA_MARKER_STORE], "readonly");
-  const done = idbTransactionDone(tx);
-  const markerRequest = idbRequest(tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE).get(collection));
-  const documentStore = tx.objectStore(DOCUMENT_STORE);
-  const rowsRequest = idbRequest(documentStore.index("collection").count(IDBKeyRange.only(collection)));
-  const pushableRange = IDBKeyRange.bound(
-    [collection, 1, 0, ""],
-    [collection, 1, Number.MAX_SAFE_INTEGER, INDEX_HIGH_KEY]
-  );
-  const pushableRequest = idbRequest(documentStore.index(PUSHABLE_LWT_INDEX).count(pushableRange));
-  const [marker, rows, pushable] = await Promise.all([markerRequest, rowsRequest, pushableRequest]);
-  await done;
-  return {
-    marker: marker || null,
-    rows: Number(rows || 0),
-    pushable: Number(pushable || 0)
-  };
-}
-async function readPendingRecoverySummary(recoveryJournal, collection) {
-  try {
-    if (typeof recoveryJournal?.pendingSummaryForCollection === "function") {
-      return recoveryJournal.pendingSummaryForCollection(collection);
-    }
-    const batches = await recoveryJournal?.listBatches?.("pending", collection) || [];
-    return {
-      pendingBatches: batches.length,
-      pendingWrites: batches.reduce((sum, batch) => sum + (batch.documentIds?.length || 0), 0)
-    };
-  } catch (cause) {
-    throw collectionVersionError(
-      "collection_version_invalidation_guard_failed",
-      `Cannot read the live recovery WAL for ${collection}; browser cache invalidation is blocked.`,
-      { collection, cause }
-    );
-  }
-}
-async function guardAndInvalidateCollection(db, { collection, desired, pending }) {
-  const tx = db.transaction([DOCUMENT_STORE, COLLECTION_SCHEMA_MARKER_STORE], "readwrite");
-  const done = idbTransactionDone(tx);
-  const documentStore = tx.objectStore(DOCUMENT_STORE);
-  const markerStore = tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE);
-  try {
-    const previousMarker = await idbRequest(markerStore.get(collection));
-    const pushableRange = IDBKeyRange.bound(
-      [collection, 1, 0, ""],
-      [collection, 1, Number.MAX_SAFE_INTEGER, INDEX_HIGH_KEY]
-    );
-    const pushable = Number(await idbRequest(documentStore.index(PUSHABLE_LWT_INDEX).count(pushableRange)) || 0);
-    if (pushable > 0 || Number(pending?.pendingBatches || 0) > 0) {
-      await done;
-      throw collectionVersionError(
-        "collection_version_invalidation_blocked",
-        `Collection ${collection} changed version/schema but has ${pushable} pushable row(s) and ${Number(pending?.pendingBatches || 0)} pending recovery WAL batch(es). Nothing was discarded; sync or recover these writes before retrying.`,
-        {
-          collection,
-          previousMarker: previousMarker || null,
-          desiredMarker: desired,
-          pushableRows: pushable,
-          pendingBatches: Number(pending?.pendingBatches || 0),
-          pendingWrites: Number(pending?.pendingWrites || 0)
-        }
-      );
-    }
-    let clearedRows = 0;
-    const collectionIndex = documentStore.index("collection");
-    await iterateCursor(collectionIndex.openCursor(IDBKeyRange.only(collection)), (cursor) => {
-      if (!cursor) return false;
-      cursor.delete();
-      clearedRows += 1;
-      return true;
-    });
-    const invalidatingMarker = collectionSchemaMarker({
-      collection,
-      declaredVersion: desired.declaredVersion,
-      effectiveSchemaHash: desired.effectiveSchemaHash,
-      state: "invalidating"
-    });
-    await idbRequest(markerStore.put(invalidatingMarker));
-    await done;
-    return {
-      previousMarker: previousMarker || null,
-      marker: invalidatingMarker,
-      clearedRows
-    };
-  } catch (error) {
-    try {
-      tx.abort();
-    } catch {
-    }
-    try {
-      await done;
-    } catch {
-    }
-    throw error;
-  }
-}
-async function finalizeCollectionSchemaMarker(db, desired) {
-  const tx = db.transaction(COLLECTION_SCHEMA_MARKER_STORE, "readwrite");
-  const done = idbTransactionDone(tx);
-  const store = tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE);
-  try {
-    const persisted = await idbRequest(store.get(desired.collection));
-    if (!collectionSchemaMarkerMatches(persisted, desired) || persisted?.state !== "invalidating") {
-      throw collectionVersionError(
-        "collection_version_invalidation_failed",
-        `Collection ${desired.collection} schema marker changed while invalidation was finishing.`,
-        { collection: desired.collection, desiredMarker: desired, persistedMarker: persisted || null }
-      );
-    }
-    const ready = collectionSchemaMarker({
-      collection: desired.collection,
-      declaredVersion: desired.declaredVersion,
-      effectiveSchemaHash: desired.effectiveSchemaHash,
-      state: "ready"
-    });
-    await idbRequest(store.put(ready));
-    await done;
-    return ready;
-  } catch (error) {
-    try {
-      tx.abort();
-    } catch {
-    }
-    try {
-      await done;
-    } catch {
-    }
-    throw error;
-  }
-}
-function runSerializedCollectionMutation(db, collection, operation, { requireCrossContext = false } = {}) {
-  const key = `${String(db?.name || "")}
-${String(collection || "")}`;
-  const previous = collectionMutationTails.get(key) || Promise.resolve();
-  const run = previous.catch(() => {
-  }).then(async () => {
-    const locks = globalThis.navigator?.locks;
-    if (typeof locks?.request !== "function") {
-      if (requireCrossContext) requireCrossContextCollectionLock(db, collection);
-      return operation();
-    }
-    return locks.request(`ctox-rxdb:collection-mutation:${key}`, { mode: "exclusive" }, operation);
-  });
-  collectionMutationTails.set(key, run);
-  return run.finally(() => {
-    if (collectionMutationTails.get(key) === run) collectionMutationTails.delete(key);
-  });
-}
-function requireCrossContextCollectionLock(db, collection) {
-  if (typeof globalThis.navigator?.locks?.request === "function") return;
-  throw collectionVersionError(
-    "collection_version_lock_unavailable",
-    `Cannot safely invalidate ${collection} in ${db?.name || "IndexedDB"} because the browser Web Locks API is unavailable. Nothing was discarded.`,
-    { collection, databaseName: db?.name || "" }
-  );
-}
-function collectionVersionError(code, message, detail = {}) {
-  const error = new Error(message, detail.cause ? { cause: detail.cause } : void 0);
-  error.name = "CtoxCollectionVersionError";
-  error.code = code;
-  Object.assign(error, detail);
-  return error;
-}
 function openDatabase(databaseName) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -3891,9 +3185,6 @@ function openDatabase(databaseName) {
       if (store && !store.indexNames.contains(PUSHABLE_LWT_INDEX)) {
         store.createIndex(PUSHABLE_LWT_INDEX, ["collection", "pushable", "lwt", "id"], { unique: false });
         migrateStoredReplicationFlags(store);
-      }
-      if (!db.objectStoreNames.contains(COLLECTION_SCHEMA_MARKER_STORE)) {
-        db.createObjectStore(COLLECTION_SCHEMA_MARKER_STORE, { keyPath: "collection" });
       }
     };
     request.onsuccess = () => {
@@ -8322,6 +7613,354 @@ function dedupeSorted(values) {
   return out;
 }
 
+// src/apps/business-os/rxdb/src/query-meta-backend-indexeddb.mjs
+var SIDECAR_DB_VERSION = 2;
+var STORE_QUERY_WINDOWS = "queryWindows";
+var STORE_QUERY_WINDOW_REFS = "queryWindowRefs";
+var STORE_DOCUMENT_ACCESS = "documentAccess";
+var STORE_CACHE_STATS = "cacheStats";
+var OPEN_TIMEOUT_MS = 4e3;
+function createIndexedDbMetaBackend({ databaseName }) {
+  if (!databaseName) throw new TypeError("createIndexedDbMetaBackend requires databaseName");
+  let dbPromise = null;
+  let fallbackBackend = null;
+  const fallback = () => {
+    if (!fallbackBackend) fallbackBackend = createMemoryMetaBackend();
+    return fallbackBackend;
+  };
+  const open = async () => {
+    if (!dbPromise) {
+      dbPromise = Promise.resolve().then(() => openSidecarDatabase(databaseName)).catch((error) => {
+        dbPromise = null;
+        throw markSidecarOpenError(error);
+      });
+    }
+    return dbPromise;
+  };
+  const withDb = async (method, args, operation) => {
+    if (fallbackBackend) return fallbackBackend[method](...args);
+    try {
+      return await operation(await open());
+    } catch (error) {
+      if (!isSidecarOpenError(error)) throw error;
+      return fallback()[method](...args);
+    }
+  };
+  return {
+    get name() {
+      return fallbackBackend ? "memory-fallback" : "indexeddb";
+    },
+    async putQueryWindow(record) {
+      await withDb(
+        "putQueryWindow",
+        [record],
+        (db) => runRequest(
+          db.transaction(STORE_QUERY_WINDOWS, "readwrite").objectStore(STORE_QUERY_WINDOWS).put(record)
+        )
+      );
+    },
+    async getQueryWindow(key) {
+      return withDb(
+        "getQueryWindow",
+        [key],
+        (db) => runRequest(
+          db.transaction(STORE_QUERY_WINDOWS, "readonly").objectStore(STORE_QUERY_WINDOWS).get(parseQueryWindowKey(key))
+        )
+      );
+    },
+    async deleteQueryWindow(key) {
+      await withDb(
+        "deleteQueryWindow",
+        [key],
+        async (db) => {
+          await deleteQueryWindowRefs(db, stringKey3(parseQueryWindowKey(key)));
+          await runRequest(
+            db.transaction(STORE_QUERY_WINDOWS, "readwrite").objectStore(STORE_QUERY_WINDOWS).delete(parseQueryWindowKey(key))
+          );
+        }
+      );
+    },
+    async scanQueryWindows() {
+      return withDb(
+        "scanQueryWindows",
+        [],
+        (db) => runRequest(
+          db.transaction(STORE_QUERY_WINDOWS, "readonly").objectStore(STORE_QUERY_WINDOWS).getAll()
+        )
+      );
+    },
+    async replaceQueryWindowDocumentRefs(record) {
+      await withDb(
+        "replaceQueryWindowDocumentRefs",
+        [record],
+        async (db) => {
+          const windowKey = queryWindowKey2(record);
+          await deleteQueryWindowRefs(db, windowKey);
+          await putQueryWindowRefs(db, record);
+        }
+      );
+    },
+    async getQueryWindowKeysByDocumentIds(collection, ids) {
+      const normalizedIds = normalizeDocumentIds3(ids);
+      if (!normalizedIds.length) return [];
+      return withDb(
+        "getQueryWindowKeysByDocumentIds",
+        [collection, ids],
+        async (db) => {
+          const tx = db.transaction(STORE_QUERY_WINDOW_REFS, "readonly");
+          const index = tx.objectStore(STORE_QUERY_WINDOW_REFS).index("collection_documentId");
+          const requests = normalizedIds.map((id) => runRequest(index.getAll([collection, id])));
+          const rowsByDocument = await Promise.all(requests);
+          const keys = /* @__PURE__ */ new Set();
+          for (const rows of rowsByDocument) {
+            for (const row of rows || []) {
+              if (row?.windowKey) keys.add(row.windowKey);
+            }
+          }
+          return Array.from(keys);
+        }
+      );
+    },
+    async putDocumentAccess(record) {
+      await withDb(
+        "putDocumentAccess",
+        [record],
+        (db) => runRequest(
+          db.transaction(STORE_DOCUMENT_ACCESS, "readwrite").objectStore(STORE_DOCUMENT_ACCESS).put(record)
+        )
+      );
+    },
+    async getDocumentAccess(collection, id) {
+      return withDb(
+        "getDocumentAccess",
+        [collection, id],
+        (db) => runRequest(
+          db.transaction(STORE_DOCUMENT_ACCESS, "readonly").objectStore(STORE_DOCUMENT_ACCESS).get([collection, id])
+        )
+      );
+    },
+    async deleteDocumentAccess(collection, id) {
+      await withDb(
+        "deleteDocumentAccess",
+        [collection, id],
+        (db) => runRequest(
+          db.transaction(STORE_DOCUMENT_ACCESS, "readwrite").objectStore(STORE_DOCUMENT_ACCESS).delete([collection, id])
+        )
+      );
+    },
+    async scanDocumentAccess() {
+      return withDb(
+        "scanDocumentAccess",
+        [],
+        (db) => runRequest(
+          db.transaction(STORE_DOCUMENT_ACCESS, "readonly").objectStore(STORE_DOCUMENT_ACCESS).getAll()
+        )
+      );
+    },
+    async putCacheStats(record) {
+      await withDb(
+        "putCacheStats",
+        [record],
+        (db) => runRequest(
+          db.transaction(STORE_CACHE_STATS, "readwrite").objectStore(STORE_CACHE_STATS).put(record)
+        )
+      );
+    },
+    async getCacheStats(databaseName2) {
+      return withDb(
+        "getCacheStats",
+        [databaseName2],
+        (db) => runRequest(
+          db.transaction(STORE_CACHE_STATS, "readonly").objectStore(STORE_CACHE_STATS).get(databaseName2)
+        )
+      );
+    },
+    async clear() {
+      await withDb(
+        "clear",
+        [],
+        async (db) => {
+          for (const name of [STORE_QUERY_WINDOWS, STORE_QUERY_WINDOW_REFS, STORE_DOCUMENT_ACCESS, STORE_CACHE_STATS]) {
+            await runRequest(db.transaction(name, "readwrite").objectStore(name).clear());
+          }
+        }
+      );
+    },
+    async close() {
+      const currentDbPromise = dbPromise;
+      dbPromise = null;
+      if (currentDbPromise) {
+        try {
+          const db = await currentDbPromise;
+          db.close();
+        } catch {
+        }
+      }
+      await fallbackBackend?.close?.();
+      fallbackBackend = null;
+    }
+  };
+}
+function openSidecarDatabase(databaseName) {
+  if (!globalThis.indexedDB) {
+    throw new Error("indexedDB is required for sidecar metadata storage");
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+      return true;
+    };
+    const timer = setTimeout(() => {
+      finish(reject, new Error(`IndexedDB open timed out for sidecar ${databaseName}`));
+    }, OPEN_TIMEOUT_MS);
+    const request = globalThis.indexedDB.open(databaseName, SIDECAR_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_QUERY_WINDOWS)) {
+        const store = db.createObjectStore(STORE_QUERY_WINDOWS, {
+          keyPath: ["collection", "queryFingerprint", "offset", "limit"]
+        });
+        store.createIndex("collection", "collection", { unique: false });
+        store.createIndex("collection_lastAccessedAt", ["collection", "lastAccessedAt"], {
+          unique: false
+        });
+      }
+      if (!db.objectStoreNames.contains(STORE_QUERY_WINDOW_REFS)) {
+        const store = db.createObjectStore(STORE_QUERY_WINDOW_REFS, {
+          keyPath: ["collection", "documentId", "windowKey"]
+        });
+        store.createIndex("collection_documentId", ["collection", "documentId"], {
+          unique: false
+        });
+        store.createIndex("windowKey", "windowKey", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_DOCUMENT_ACCESS)) {
+        const store = db.createObjectStore(STORE_DOCUMENT_ACCESS, {
+          keyPath: ["collection", "id"]
+        });
+        store.createIndex("collection_lastAccessedAt", ["collection", "lastAccessedAt"], {
+          unique: false
+        });
+      }
+      if (!db.objectStoreNames.contains(STORE_CACHE_STATS)) {
+        db.createObjectStore(STORE_CACHE_STATS, { keyPath: "databaseName" });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!finish(resolve, db)) {
+        try {
+          db.close();
+        } catch {
+        }
+      }
+    };
+    request.onerror = () => {
+      finish(reject, request.error || new Error(`failed to open sidecar ${databaseName}`));
+    };
+    request.onblocked = () => {
+      finish(reject, new Error(`IndexedDB open blocked for sidecar ${databaseName}`));
+    };
+  });
+}
+function markSidecarOpenError(error) {
+  if (error && typeof error === "object") {
+    try {
+      error.ctoxSidecarOpenError = true;
+    } catch {
+    }
+    return error;
+  }
+  const wrapped = new Error(String(error || "sidecar IndexedDB open failed"));
+  wrapped.ctoxSidecarOpenError = true;
+  return wrapped;
+}
+function isSidecarOpenError(error) {
+  return Boolean(error?.ctoxSidecarOpenError);
+}
+function parseQueryWindowKey(key) {
+  if (Array.isArray(key)) return key;
+  if (typeof key === "string") {
+    const parts = key.split("|");
+    if (parts.length !== 4) throw new TypeError(`invalid query window key: ${key}`);
+    const [collection, fingerprint, offset, limit] = parts;
+    return [collection, fingerprint, Number(offset), Number(limit)];
+  }
+  throw new TypeError("query window key must be array or string");
+}
+function runRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+function queryWindowKey2(record) {
+  return [record.collection, record.queryFingerprint, record.offset, record.limit].join("|");
+}
+function stringKey3(key) {
+  if (Array.isArray(key)) return key.join("|");
+  if (typeof key === "string") return key;
+  throw new TypeError("query window key must be array or string");
+}
+function normalizeDocumentIds3(ids) {
+  if (!Array.isArray(ids)) return [];
+  return Array.from(new Set(ids.map((id) => String(id || "")).filter(Boolean)));
+}
+async function putQueryWindowRefs(db, record) {
+  const documentIds = normalizeDocumentIds3([...record.documentIds || [], ...record.selectorRefIds || []]);
+  if (!documentIds.length) return;
+  const windowKey = queryWindowKey2(record);
+  await runTransaction(
+    db.transaction(STORE_QUERY_WINDOW_REFS, "readwrite"),
+    (tx) => {
+      const store = tx.objectStore(STORE_QUERY_WINDOW_REFS);
+      for (const documentId3 of documentIds) {
+        store.put({
+          collection: record.collection,
+          documentId: documentId3,
+          windowKey
+        });
+      }
+    }
+  );
+}
+async function deleteQueryWindowRefs(db, windowKey) {
+  await runTransaction(
+    db.transaction(STORE_QUERY_WINDOW_REFS, "readwrite"),
+    (tx) => {
+      const index = tx.objectStore(STORE_QUERY_WINDOW_REFS).index("windowKey");
+      const range = globalThis.IDBKeyRange.only(windowKey);
+      const request = index.openCursor(range);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+    }
+  );
+}
+function runTransaction(tx, schedule) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
+    try {
+      schedule(tx);
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+      }
+      reject(error);
+    }
+  });
+}
+
 // src/apps/business-os/rxdb/src/active-collections.mjs
 var RECENT_EXEC_ACTIVE_MS = 15e3;
 var ACTIVE_NOTIFY_DEBOUNCE_MS = 100;
@@ -8844,31 +8483,6 @@ var GLOBAL_QUERY_META_BUDGET_BYTES = 512 * 1024 * 1024;
 var DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
 var KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 var LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
-function invalidateCollectionReplicationPersistence(collection) {
-  const normalized = String(collection || "").trim();
-  if (!normalized) throw new TypeError("invalidateCollectionReplicationPersistence requires collection");
-  const storage = globalThis.localStorage;
-  const suffix = `.${encodeURIComponent(normalized)}`;
-  const prefix = "ctox.rxdb.checkpoints.v1.";
-  const keys = [];
-  if (storage) {
-    for (let index = 0; index < Number(storage.length || 0); index += 1) {
-      const key = storage.key(index);
-      if (typeof key === "string" && key.startsWith(prefix) && key.endsWith(suffix)) keys.push(key);
-    }
-    for (const key of keys) {
-      storage.removeItem(key);
-      if (storage.getItem(key) != null) {
-        throw new Error(`Failed to clear retained replication checkpoint ${key}`);
-      }
-    }
-  }
-  for (const shared of SHARED_ROOM_PEERS.values()) {
-    const state = shared.collections.get(normalized)?.state;
-    state?.invalidateForCollectionVersionChange?.();
-  }
-  return keys.length;
-}
 var BROWSER_CAPABILITIES = [
   "ctox-rxdb-browser-v1",
   "ctox-file-chunks-v1",
@@ -9582,10 +9196,6 @@ var CtoxWebRtcReplicationState = class {
     this.localPushTimer = null;
     this.checkpointStorageKey = persistentCheckpointStorageKey(topic, collection.name);
     this.retainedCheckpoints = readPersistentCheckpoints(this.checkpointStorageKey);
-    if (collection.versionInvalidation?.invalidated) {
-      this.retainedCheckpoints = null;
-      clearPersistentCheckpoints(this.checkpointStorageKey);
-    }
     this.firstPullCompletedAtMs = 0;
     this.localCheckpointValidityKey = "";
     this.readPermissionDigest = "";
@@ -10447,20 +10057,6 @@ var CtoxWebRtcReplicationState = class {
     this.demandLoaderActive = true;
     this.demandStatus.queryDemandLoadingActive = queryDemandEnabled || fileDemandEnabled;
     return this.demandLoader;
-  }
-  invalidateForCollectionVersionChange() {
-    this.pullCheckpointsByPeer.clear();
-    this.pushCheckpointsByPeer.clear();
-    this.retainedCheckpoints = null;
-    this.firstPullCompletedAtMs = 0;
-    this.localCheckpointValidityKey = "";
-    clearPersistentCheckpoints(this.checkpointStorageKey);
-    if (this.pullInProgressPromise) {
-      this.pullAgainAfterCurrent = true;
-    } else if (this.openPeerIds().length > 0) {
-      queueMicrotask(() => this.pullFromRemotePeers().catch((error) => this.error$.next(error)));
-    }
-    this.publishTransportStatus();
   }
   markFirstPullCompleted() {
     if (this.firstPullCompletedAtMs > 0) return;
@@ -11473,33 +11069,13 @@ var CtoxRxDatabase = class {
     for (const [name, definition] of Object.entries(collections || {})) {
       if (this.collections[name]) continue;
       const schema = definition?.schema || definition;
-      const _nativeMigrationStrategies = definition?.migrationStrategies;
-      void _nativeMigrationStrategies;
       const conflictStrategy = definition?.conflictStrategy;
       const deleteStrategy = definition?.deleteStrategy;
       registerCollectionSyncProfile(name, definition?.syncProfile);
-      const declaredVersion = Number(schema?.version || 0);
-      const effectiveSchemaHash = await schemaHash(schema, name);
-      const versionInvalidation = await this.storage.prepareCollectionSchema?.({
-        collection: name,
-        declaredVersion,
-        effectiveSchemaHash,
-        invalidateExternalState: async () => {
-          await invalidateQueryMetaCollection(name);
-          invalidateCollectionReplicationPersistence(name);
-        }
-      }) || { invalidated: false, marker: null, clearedRows: 0 };
       const collection = new CtoxRxCollection({
         name,
         schema,
-        versionInvalidation,
-        storageCollection: this.storage.collection(name, {
-          schema,
-          schemaVersion: declaredVersion,
-          effectiveSchemaHash,
-          conflictStrategy,
-          deleteStrategy
-        })
+        storageCollection: this.storage.collection(name, { schema, conflictStrategy, deleteStrategy })
       });
       this.collections[name] = collection;
       this[name] = collection;
@@ -11540,9 +11116,8 @@ function emptyRecoveryStatus(databaseName) {
   };
 }
 var CtoxRxCollection = class {
-  constructor({ name, schema, storageCollection, versionInvalidation = null }) {
+  constructor({ name, schema, storageCollection }) {
     this.name = name;
-    this.versionInvalidation = versionInvalidation;
     this.schema = {
       jsonSchema: schema,
       version: schema?.version || 0,

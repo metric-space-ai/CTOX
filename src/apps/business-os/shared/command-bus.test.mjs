@@ -111,7 +111,7 @@ test('command client context normalizer does not overwrite caller actor', () => 
   const context = normalizeCommandClientContext({
     command: {
       module: 'coding-agents',
-      command_type: 'ctox.coding_agent.session.prompt',
+      command_type: 'ctox.coding.turn',
       client_context: {
         actor: callerActor,
         source_module: 'coding-agents',
@@ -119,7 +119,7 @@ test('command client context normalizer does not overwrite caller actor', () => 
       },
     },
     moduleId: 'coding-agents',
-    commandType: 'ctox.coding_agent.session.prompt',
+    commandType: 'ctox.coding.turn',
     recordId: 'cmd_1',
     inboundChannel: 'business_os.coding_agents',
     actor: sessionActor,
@@ -131,7 +131,7 @@ test('command client context normalizer does not overwrite caller actor', () => 
   assert.equal(context.app_id, 'coding-agents');
   assert.equal(context.target, 'external-agent');
   assert.equal(context.scope.app.module_id, 'coding-agents');
-  assert.equal(context.scope.command.type, 'ctox.coding_agent.session.prompt');
+  assert.equal(context.scope.command.type, 'ctox.coding.turn');
 });
 
 test('command bus scopes demand-only desktop chunk dependencies with leases', () => {

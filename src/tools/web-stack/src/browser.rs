@@ -1544,6 +1544,23 @@ pub struct PersistentBrowserHandle {
 }
 
 impl PersistentBrowserHandle {
+    /// Process id of the persistent runner that owns the Chromium process tree.
+    pub fn process_id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// True while the persistent runner process is still alive.
+    ///
+    /// The generated runner exits when its Chromium context closes, so this is
+    /// also the native registry's cheap liveness check for the browser itself.
+    pub fn is_running(&mut self) -> Result<bool> {
+        Ok(self
+            .child
+            .try_wait()
+            .context("failed to inspect persistent browser runtime")?
+            .is_none())
+    }
+
     fn wait_until_ready(&mut self, timeout: Duration) -> Result<()> {
         let pid = self.child.id();
         let timed_out = Arc::new(AtomicBool::new(false));
@@ -2040,12 +2057,18 @@ if (hostLocale) contextOptions.locale = hostLocale;
 
 let context;
 let page;
+let closing = false;
 try {{
   context = await chromium.launchPersistentContext(profileDir, {{ ...launchOptions, ...contextOptions }});
   try {{
     await context.addInitScript({{ path: path.join(process.cwd(), "stealth_init.js") }});
   }} catch {{}}
   page = context.pages()[0] || await context.newPage();
+  context.on("close", () => {{
+    if (closing) return;
+    process.stderr.write("[live] Chromium context closed unexpectedly; persistent runner exits.\n");
+    process.exit(1);
+  }});
 }} catch (error) {{
   respond({{ ok: false, error: (error && error.message) || String(error) }});
   process.exit(1);
@@ -2708,6 +2731,7 @@ for await (const line of rl) {{
 	      const result = await runAutomation(message.source, automationTimeoutMs);
 	      respond({{ id, ...result }});
 	    }} else if (op === "close") {{
+	      closing = true;
 	      respond({{ id, ok: true }});
 	      try {{ await context.close(); }} catch {{}}
       process.exit(0);
@@ -3138,6 +3162,8 @@ mod tests {
         assert!(script.contains("globalThis.ctoxBrowser = ctoxBrowserApi;"));
         assert!(script.contains("async observe(options = {})"));
         assert!(script.contains("launchPersistentContext"));
+        assert!(script.contains("context.on(\"close\""));
+        assert!(script.contains("Chromium context closed unexpectedly"));
         assert!(script.contains("blocked browser egress host"));
         assert!(script.contains("op === \"webauthn_respond\""));
         assert!(script.contains("op === \"credential_fill\""));
@@ -3160,6 +3186,49 @@ mod tests {
             "generated persistent browser runner must parse"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_browser_handle_reports_an_exited_runner_as_not_running() {
+        use std::os::unix::process::CommandExt;
+        use std::thread;
+
+        let runner_path = temp_path("exited-runner");
+        fs::write(&runner_path, b"").unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut handle = PersistentBrowserHandle {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 0,
+            runner_path,
+            profile_dir: None,
+            downloads_dir: None,
+            remove_profile_on_close: false,
+        };
+
+        let exited = (0..50).any(|_| {
+            let running = handle.is_running().unwrap();
+            if running {
+                thread::sleep(Duration::from_millis(10));
+            }
+            !running
+        });
+        assert!(
+            exited,
+            "an exited runner must not remain in the live-session budget"
+        );
     }
 
     #[cfg(unix)]

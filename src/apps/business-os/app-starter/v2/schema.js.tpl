@@ -16,8 +16,4 @@ const recordSchema = {
 };
 
 export const collections = { '__COLLECTION__': recordSchema };
-export const migrationStrategies = {
-  '__COLLECTION__': {
-    1: (oldDoc) => ({ ...oldDoc })
-  }
-};
+export const migrationStrategies = {};

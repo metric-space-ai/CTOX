@@ -6041,6 +6041,20 @@ const fillField = async (kind, value, configuredSelector = "") => {
       const locator = page.locator(candidate.selector).nth(Number(candidate.index || 0));
       if ((await locator.count()) < 1) continue;
       await locator.fill(String(value), { timeout: 3500 });
+      // A React form that has not finished hydrating drops a programmatic
+      // fill: the DOM carries the value, the component state stays empty, and
+      // the submit that follows validates against nothing and re-renders the
+      // same step. Read the value back and, if it did not take, type it the
+      // way a person would.
+      let confirmed = await locator.inputValue().catch(() => null);
+      if (confirmed !== String(value)) {
+        try {
+          await locator.click({ timeout: 2000 });
+          await locator.fill("", { timeout: 2000 }).catch(() => null);
+          await locator.pressSequentially(String(value), { delay: 25, timeout: 5000 });
+          confirmed = await locator.inputValue().catch(() => null);
+        } catch {}
+      }
       return {
         selector: candidate.selector,
         index: Number(candidate.index || 0),
@@ -6051,10 +6065,37 @@ const fillField = async (kind, value, configuredSelector = "") => {
         name: candidate.name || null,
         autocomplete: candidate.autocomplete || null,
         placeholder_present: !!candidate.placeholder_present,
+        value_confirmed: confirmed === String(value),
       };
     } catch {}
   }
   return null;
+};
+// A consent overlay intercepts a click even when the target itself is found
+// and visible — Playwright resolves the element and then times out waiting for
+// it to become actionable. That is exactly how the D&B Hoovers login stalled:
+// the submit button resolved, the click never landed, and a later fallback
+// reported a transition that had not happened. Dismiss and retry once.
+const clickThrough = async (locator, timeout = 3500) => {
+  try {
+    await locator.click({ timeout });
+    return true;
+  } catch (error) {
+    const retried = await dismissConsent();
+    if (retried && retried.clicked) {
+      await page.waitForTimeout(300).catch(() => null);
+      try {
+        await locator.click({ timeout });
+        return true;
+      } catch {}
+    }
+    // Last resort: dispatch the click on the element itself. A cookie banner
+    // that our selectors do not know still covers the button and swallows a
+    // real mouse event, but it cannot intercept this one. Reached only after
+    // a genuine failure, so a truly unclickable target still ends up throwing.
+    await locator.evaluate((element) => element.click());
+    return true;
+  }
 };
 const clickSubmit = async (credentialField) => {
   const submitSelectors = [
@@ -6084,7 +6125,7 @@ const clickSubmit = async (credentialField) => {
         for (const selector of submitSelectors) {
           const locator = form.locator(selector).first();
           if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
-          await locator.click({ timeout: 3500 });
+          await clickThrough(locator);
           return { mode: "click", scope: "field-form", selector };
         }
       }
@@ -6094,7 +6135,7 @@ const clickSubmit = async (credentialField) => {
     try {
       const locator = page.locator(selector).first();
       if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
-      await locator.click({ timeout: 3500 });
+      await clickThrough(locator);
       return { mode: "click", selector };
     } catch {}
   }
@@ -6145,7 +6186,7 @@ const clickLoginEntry = async () => {
     try {
       const locator = page.locator(selector).first();
       if ((await locator.count()) < 1 || !(await locator.isVisible())) continue;
-      await locator.click({ timeout: 3500 });
+      await clickThrough(locator);
       return { mode: "login-button", selector };
     } catch {}
   }
@@ -6153,6 +6194,15 @@ const clickLoginEntry = async () => {
 };
 const dismissConsent = async () => {
   const selectors = [
+    // Reject-only first: it clears the banner just as well as accepting and
+    // keeps the session free of non-essential cookies. TrustArc (D&B Hoovers)
+    // was missing entirely, so its overlay stayed up and swallowed the click
+    // on the login form's own submit button — the login never left step one.
+    "button#truste-consent-required",
+    "button.trustarc-declineall-btn",
+    "button:has-text('Required Only')",
+    "button:has-text('Nur erforderliche')",
+    "button#onetrust-reject-all-handler",
     "button#onetrust-accept-btn-handler",
     "button[data-testid='uc-accept-all-button']",
     "button[aria-label*='Accept all' i]",
@@ -6162,14 +6212,19 @@ const dismissConsent = async () => {
     "button:has-text('Allow all')",
     "button:has-text('Zustimmen')",
   ];
+  // TrustArc and several other CMPs render the banner inside an iframe, where
+  // page.locator() cannot see it: the overlay then stays up and eats the click
+  // meant for the page beneath. Search every frame, main frame first.
   for (const selector of selectors) {
-    try {
-      const locator = page.locator(selector).first();
-      if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
-      await locator.click({ timeout: 2500 });
-      await page.waitForTimeout(150).catch(() => null);
-      return { clicked: true, selector };
-    } catch {}
+    for (const frame of [page, ...page.frames()]) {
+      try {
+        const locator = frame.locator(selector).first();
+        if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
+        await locator.click({ timeout: 2500 });
+        await page.waitForTimeout(150).catch(() => null);
+        return { clicked: true, selector, frame_url: frame === page ? null : frame.url() };
+      } catch {}
+    }
   }
   return { clicked: false };
 };
@@ -6374,8 +6429,25 @@ const beforeSignals = await pageSignals();
 const preAuthenticatedVerifyFound = configuredVerifySelector
   ? await page.locator(configuredVerifySelector).first().isVisible().catch(() => false)
   : false;
+// A stored session sends us straight past the login form: Leadfeeder answers
+// /login with its dashboard, XING with an in-app page. The verify selector is
+// the only thing that used to notice, and once its markup drifts the run walks
+// into the login path, finds no password field precisely because it is already
+// signed in, and reports `credential-field-not-found` on a working session.
+// Landing somewhere other than the login URL with no credential field and no
+// error is the same evidence, and it does not rot when a class name changes.
+const preAuthenticatedByLanding = await (async () => {
+  if (preAuthenticatedVerifyFound) return false;
+  const landedElsewhere = beforeSignals.url && beforeSignals.url !== targetUrl;
+  if (!landedElsewhere) return false;
+  const signals = beforeSignals.auth_signals || emptyAuthSignals();
+  if (signals.mfa_required === true || signals.login_error_detected === true) return false;
+  if (Number(beforeSignals.form_state?.visible_password_fields || 0) > 0) return false;
+  const credentialCandidates = await browserCandidateFields("credential").catch(() => []);
+  return credentialCandidates.length === 0;
+})();
 let loginOutcome = null;
-if (preAuthenticatedVerifyFound) {
+if (preAuthenticatedVerifyFound || preAuthenticatedByLanding) {
   const observed = await ctoxBrowser.observe({ limit: 50, textMax: 140 });
   loginOutcome = {
     ok: true,
@@ -6480,9 +6552,18 @@ const authSignals = afterSignals.auth_signals || emptyAuthSignals();
 const mfaRequired = authSignals.mfa_required === true;
 const loginErrorDetected = authSignals.login_error_detected === true;
 const verifySelectorMissing = !!configuredVerifySelector && verifyFound !== true;
+// A verify selector is a hint, not the only truth. Leadfeeder lands on its
+// dashboard and XING on an in-app page, both plainly authenticated, while the
+// configured selector no longer matches the current markup — reporting those
+// as failed login sent the operator chasing a login that had already worked,
+// and each false failure queued another auth-assist request. The substantive
+// evidence counts too: we submitted, the credential form is gone, and the page
+// has moved off the login URL. MFA and a detected login error still veto.
+const substantiveLoginSignal =
+  !!submit && (formGone || credentialUrlChanged || originAfter !== targetOrigin);
 const baseLoginSignal = configuredVerifySelector
-  ? verifyFound === true
-  : !!submit && (formGone || credentialUrlChanged || originAfter !== targetOrigin);
+  ? verifyFound === true || substantiveLoginSignal
+  : substantiveLoginSignal;
 const ok = baseLoginSignal && !mfaRequired && !loginErrorDetected;
 const loginState = ok
   ? "authenticated"
@@ -8539,11 +8620,7 @@ mod tests {
                 priority: "urgent".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(serde_json::json!({
-                    "business_os_module": "creator",
-                    "business_os_command_type": "ctox.business_os.app.create",
-                    "business_os_record_id": module_id,
-                })),
+                extra_metadata: None,
             },
         )
         .expect("create queue task");

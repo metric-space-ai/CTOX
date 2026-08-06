@@ -134,6 +134,7 @@ const APPSEC_PIPELINE_WORKER_QUEUE_SCAN_LIMIT: usize = 64;
 const APPSEC_PIPELINE_SERVICE_LEASE_OWNER: &str = "ctox-appsec-pipeline-service";
 const IDLE_QUEUE_DISPATCH_POLL_SECS: u64 = 8;
 const WORKER_IDLE_QUEUE_KICK_DELAY_MS: u64 = 250;
+const BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS: u64 = 180;
 const BUSINESS_OS_APP_RECOVERY_STALE_SECS: u64 = 180;
 const BUSINESS_OS_APP_RECOVERY_PREFLIGHT_IDLE_SAFETY_SECS: u64 = 60;
 const BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT: usize = 128;
@@ -994,7 +995,6 @@ impl Default for SharedState {
 /// configured founder/owner/admin address lists.
 #[derive(Debug, Clone)]
 struct QueuedPrompt {
-    metadata: Value,
     prompt: String,
     goal: String,
     preview: String,
@@ -1398,14 +1398,6 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     }
 }
 
-fn state_invariant_check_is_not_ready(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<lcm::MissingStoredContinuityDocument>()
-            .is_some()
-    })
-}
-
 fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) {
     // P2 — flush any mission_state field-clobber attempts that the guard
     // suppressed during pre-boot writes (the previous run may have
@@ -1526,7 +1518,11 @@ fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) 
         }
         Err(err) => {
             let error_text = clip_text(&err.to_string(), 180);
-            let (reason, severity, summary) = if state_invariant_check_is_not_ready(&err) {
+            let (reason, severity, summary) = if error_text
+                .contains("missing stored narrative continuity document")
+                || error_text.contains("missing stored anchors continuity document")
+                || error_text.contains("missing stored focus continuity document")
+            {
                 (
                     "boot_state_invariants_not_ready",
                     "info",
@@ -1808,7 +1804,11 @@ fn run_turn_end_state_invariant_check(
         }
         Err(err) => {
             let error_text = clip_text(&err.to_string(), 180);
-            let (reason, severity, summary) = if state_invariant_check_is_not_ready(&err) {
+            let (reason, severity, summary) = if error_text
+                .contains("missing stored narrative continuity document")
+                || error_text.contains("missing stored anchors continuity document")
+                || error_text.contains("missing stored focus continuity document")
+            {
                 (
                     "turn_state_invariants_not_ready",
                     "info",
@@ -2033,7 +2033,7 @@ fn preserve_stale_service_communication_lease_for_specialized_recovery(
     let Some(task) = channels::load_queue_task(root, message_key)? else {
         return Ok(false);
     };
-    Ok(business_os_app_module_target_from_metadata(&task.metadata).is_some())
+    Ok(business_os_app_module_target_from_prompt(&task.prompt).is_some())
 }
 
 fn is_non_work_tui_probe(prompt: &str) -> bool {
@@ -3171,7 +3171,6 @@ fn handle_service_ipc_request(
                     insert_pending_prompt_ordered(
                         &mut shared.pending_prompts,
                         QueuedPrompt {
-                            metadata: Value::Null,
                             preview: preview_text(&prompt),
                             source_label: "tui".to_string(),
                             goal: prompt.clone(),
@@ -3196,7 +3195,6 @@ fn handle_service_ipc_request(
                     insert_pending_prompt_ordered(
                         &mut shared.pending_prompts,
                         QueuedPrompt {
-                            metadata: Value::Null,
                             preview: preview_text(&prompt),
                             source_label: "tui".to_string(),
                             goal: prompt.clone(),
@@ -3254,7 +3252,6 @@ fn handle_service_ipc_request(
                     root.to_path_buf(),
                     state.clone(),
                     QueuedPrompt {
-                        metadata: Value::Null,
                         preview: preview_text(&prompt),
                         source_label: "tui".to_string(),
                         goal: prompt.clone(),
@@ -3464,7 +3461,6 @@ fn handle_request(
                     insert_pending_prompt_ordered(
                         &mut shared.pending_prompts,
                         QueuedPrompt {
-                            metadata: Value::Null,
                             preview: preview_text(&prompt),
                             source_label: "tui".to_string(),
                             goal: prompt.clone(),
@@ -3489,7 +3485,6 @@ fn handle_request(
                     insert_pending_prompt_ordered(
                         &mut shared.pending_prompts,
                         QueuedPrompt {
-                            metadata: Value::Null,
                             preview: preview_text(&prompt),
                             source_label: "tui".to_string(),
                             goal: prompt.clone(),
@@ -3547,7 +3542,6 @@ fn handle_request(
                     root.to_path_buf(),
                     state.clone(),
                     QueuedPrompt {
-                        metadata: Value::Null,
                         preview: preview_text(&prompt),
                         source_label: "tui".to_string(),
                         goal: prompt.clone(),
@@ -3612,18 +3606,6 @@ fn handle_request(
 // (UDS-only, no TCP), so external inbound webhooks are fronted by the operator's
 // HTTP layer calling `crate::iot::webhook::handle_http` / `ctox iot webhook
 // ingest` — the same tested core, no CTOX-run TCP server.
-fn iot_webhook_http_error_status(error: &anyhow::Error) -> u16 {
-    if error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::iot::webhook::WebhookHttpError>()
-            .is_some()
-    }) {
-        401
-    } else {
-        400
-    }
-}
-
 #[cfg(not(unix))]
 fn handle_iot_webhook_request(
     mut request: tiny_http::Request,
@@ -3669,9 +3651,17 @@ fn handle_iot_webhook_request(
     match crate::iot::webhook::handle_http(root, &id, &token, &payload, 0) {
         Ok(_) => respond_json(request, StatusCode(202), &serde_json::json!({"ok": true})),
         Err(err) => {
+            let msg = err.to_string();
             // Wrong token, missing secret, and unknown id all return 401 with a
             // generic body so an attacker cannot distinguish them.
-            let code = iot_webhook_http_error_status(&err);
+            let code = if msg.contains("rejected")
+                || msg.contains("secret missing")
+                || msg.contains("unknown webhook")
+            {
+                401
+            } else {
+                400
+            };
             respond_json(request, StatusCode(code), &serde_json::json!({"ok": false}))
         }
     }
@@ -3958,8 +3948,7 @@ fn business_os_app_recovery_queue_stamp(
         let route_updated_at: String = row.get(5)?;
         let external_created_at: String = row.get(6)?;
         let observed_at: String = row.get(7)?;
-        let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap_or(Value::Null);
-        let Some(target) = business_os_app_module_target_from_metadata(&metadata) else {
+        let Some(target) = business_os_app_module_target_from_prompt(&prompt) else {
             continue;
         };
         candidate_count = candidate_count.saturating_add(1);
@@ -3986,6 +3975,7 @@ fn business_os_app_recovery_queue_stamp(
         target.install_target.hash(&mut hasher);
         target.artifact_directory.hash(&mut hasher);
 
+        let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap_or(Value::Null);
         let workspace_root =
             channels::workspace_root_from_queue_metadata_or_prompt(&metadata, &prompt)
                 .map(PathBuf::from)
@@ -4708,15 +4698,76 @@ fn status_from_shared_state(root: &Path, state: &Arc<Mutex<SharedState>>) -> Res
     })
 }
 
+fn recover_business_os_app_queue_tasks_for_idle_status_snapshot(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+) {
+    {
+        let mut shared = lock_shared_state(state);
+        if !begin_business_os_app_recovery_locked(&mut shared, "idle status snapshot") {
+            return;
+        }
+    }
+    let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        recover_stale_business_os_app_queue_task_summary(
+            root,
+            state,
+            BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT,
+            0,
+        )
+    }));
+    {
+        let mut shared = lock_shared_state(state);
+        shared.app_recovery_active = false;
+        shared.app_recovery_started_epoch_secs = None;
+    }
+    match recovered {
+        Ok(Ok(summary)) if summary.total() > 0 => {
+            push_event(
+                state,
+                format!(
+                    "Recovered {} abandoned Business OS app queue task(s) during idle status snapshot",
+                    summary.total()
+                ),
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => push_event(
+            state,
+            format!(
+                "Business OS app recovery skipped during idle status snapshot: {}",
+                clip_text(&err.to_string(), 180)
+            ),
+        ),
+        Err(_) => push_event(
+            state,
+            "Business OS app recovery panicked during idle status snapshot; continuing".to_string(),
+        ),
+    }
+}
+
 fn begin_business_os_app_recovery_locked(shared: &mut SharedState, reason: &str) -> bool {
     if shared.busy || shared.worker_active_count > 0 {
         return false;
     }
     if shared.app_recovery_active {
+        if reason == "idle status snapshot" {
+            push_event_locked(
+                shared,
+                "Bypassed active Business OS app recovery guard during idle status snapshot"
+                    .to_string(),
+            );
+            return true;
+        }
         let now = current_epoch_secs();
+        let stale_after_secs = if reason == "idle status snapshot" {
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS
+        } else {
+            BUSINESS_OS_APP_RECOVERY_STALE_SECS
+        };
         let stale = shared
             .app_recovery_started_epoch_secs
-            .map(|started| now.saturating_sub(started) >= BUSINESS_OS_APP_RECOVERY_STALE_SECS)
+            .map(|started| now.saturating_sub(started) >= stale_after_secs)
             .unwrap_or(true);
         if !stale {
             return false;
@@ -5749,7 +5800,7 @@ fn delayed_app_validation_cleanup_should_continue(root: &Path, message_key: &str
         .flatten()
         .map(|task| {
             matches!(task.route_status.as_str(), "leased" | "pending")
-                && business_os_app_module_target_from_metadata(&task.metadata).is_some()
+                && business_os_app_module_target_from_prompt(&task.prompt).is_some()
         })
         .unwrap_or(false)
 }
@@ -6064,8 +6115,7 @@ fn start_prompt_worker(
                     ),
                 }
             }
-            let app_module_job =
-                business_os_app_module_target_from_metadata(&job.metadata).is_some();
+            let app_module_job = business_os_app_module_target_from_prompt(&job.prompt).is_some();
             let base_execution_prompt = if is_cv_print_parser_queue_job(&job) {
                 business_os_cv_print_execution_prompt(&job)
             } else if is_business_os_chat_queue_job(&root, &job) {
@@ -7069,7 +7119,6 @@ fn start_prompt_worker(
                                     && outbound_in_process_review_retry_allowed(&job)
                                 {
                                     outcome_recovery_prompt = Some(QueuedPrompt {
-                                        metadata: job.metadata.clone(),
                                         prompt: feedback_prompt.clone(),
                                         goal: format!(
                                             "Outcome-witness feedback retry for {}",
@@ -7117,7 +7166,6 @@ fn start_prompt_worker(
                                             )
                                         });
                                     outcome_recovery_prompt = Some(QueuedPrompt {
-                                        metadata: job.metadata.clone(),
                                         prompt: recovery.clone(),
                                         goal: format!(
                                             "Complete reviewed send for {}",
@@ -7153,7 +7201,6 @@ fn start_prompt_worker(
                                             )
                                         });
                                     outcome_recovery_prompt = Some(QueuedPrompt {
-                                        metadata: job.metadata.clone(),
                                         prompt: recovery.clone(),
                                         goal: format!(
                                             "Complete required artifacts for {}",
@@ -7739,10 +7786,10 @@ fn start_prompt_worker(
                                 timeout_worker_message,
                                 retry_worker_message,
                             );
-                            let retry_kind = if timeout_worker_message {
-                                WorkerRetryKind::TurnTimeout
+                            let retry_reason = if timeout_worker_message {
+                                "turn timeout retry backoff"
                             } else {
-                                WorkerRetryKind::RuntimeApiFailure
+                                "retryable runtime/API failure"
                             };
                             let ack_result = if route_status == "failed" {
                                 channels::ack_leased_messages_with_failure_reason(
@@ -7755,7 +7802,7 @@ fn start_prompt_worker(
                                 release_retryable_worker_messages(
                                     &root,
                                     &job.leased_message_keys,
-                                    retry_kind,
+                                    retry_reason,
                                     &compact_error,
                                 )
                             } else {
@@ -7989,7 +8036,6 @@ fn start_prompt_worker(
                             let retry_prompt =
                                 standalone_outbound_runtime_retry_prompt(&job, &err_text);
                             outcome_recovery_prompt = Some(QueuedPrompt {
-                                metadata: job.metadata.clone(),
                                 prompt: retry_prompt.clone(),
                                 goal: format!("Retry reviewed outbound send for {}", job.goal),
                                 preview: clip_text(&retry_prompt, 180),
@@ -8235,7 +8281,6 @@ fn start_prompt_worker(
                                     ),
                                 );
                                 outcome_recovery_prompt = Some(QueuedPrompt {
-                                    metadata: job.metadata.clone(),
                                     prompt: feedback_prompt.clone(),
                                     goal: format!("Review-feedback retry for {}", job.goal),
                                     preview: clip_text(feedback_prompt, 180),
@@ -9546,15 +9591,11 @@ fn record_typed_business_command_review(
 
 fn command_review_persistence_is_locked(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        let Some(rusqlite::Error::SqliteFailure(sqlite_error, _)) =
-            cause.downcast_ref::<rusqlite::Error>()
-        else {
-            return false;
-        };
-        matches!(
-            sqlite_error.code,
-            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-        )
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("database is locked")
+            || message.contains("database table is locked")
+            || message.contains("sqlite_busy")
+            || message.contains("sqlite_locked")
     })
 }
 
@@ -9599,7 +9640,7 @@ fn complete_cv_print_parser_recovery_to_leased_queue(
     error_text: &str,
 ) -> Result<usize> {
     let reply = cv_print_compact_recovery_reply(&job.prompt, error_text);
-    let command_id = cv_print_prompt_line_value(&job.prompt, "- command_id:");
+    let command_id = prompt_line_value(&job.prompt, "- command_id:");
     let mut last_lock_error: Option<anyhow::Error> = None;
     for attempt in 0..6 {
         match complete_cv_print_parser_recovery_once(root, job, command_id.as_deref(), &reply) {
@@ -9696,7 +9737,7 @@ fn cv_print_is_sqlite_locked_error(error: &anyhow::Error) -> bool {
 
 fn cv_print_compact_recovery_reply(prompt: &str, error_text: &str) -> String {
     let extracted = cv_print_extracted_text_from_prompt(prompt);
-    let filename = cv_print_prompt_line_value(prompt, "- filename:").unwrap_or_default();
+    let filename = prompt_line_value(prompt, "- filename:").unwrap_or_default();
     let email = cv_print_first_email(&extracted);
     let phone = cv_print_first_phone(&extracted);
     let name = cv_print_candidate_name(&extracted, &filename);
@@ -10548,7 +10589,7 @@ fn chat_turn_session_options_for_queue_job(
             required_initial_tool: None,
         };
     }
-    if business_os_app_module_target_from_metadata(&job.metadata).is_some() {
+    if business_os_app_module_target_from_prompt(&job.prompt).is_some() {
         return turn_loop::ChatTurnSessionOptions {
             disable_mcp_servers: true,
             enable_business_os_mcp: false,
@@ -10580,7 +10621,7 @@ fn queue_job_reuses_persistent_session(options: &turn_loop::ChatTurnSessionOptio
 }
 
 fn business_os_app_module_execution_prompt(job: &QueuedPrompt) -> String {
-    let Some(target) = business_os_app_module_target_from_metadata(&job.metadata) else {
+    let Some(target) = business_os_app_module_target_from_prompt(&job.prompt) else {
         return job.prompt.clone();
     };
     format!(
@@ -10602,55 +10643,29 @@ struct BusinessOsAppModuleTarget {
     artifact_directory: String,
 }
 
-fn business_os_app_module_target_from_metadata(
-    metadata: &Value,
-) -> Option<BusinessOsAppModuleTarget> {
-    let command_type = metadata
-        .get("business_os_command_type")
-        .and_then(Value::as_str)?;
-    if !matches!(
-        command_type,
-        "ctox.business_os.app.create" | "ctox.business_os.app.modify"
-    ) {
+fn business_os_app_module_target_from_prompt(prompt: &str) -> Option<BusinessOsAppModuleTarget> {
+    if !prompt.contains("Business OS app task metadata:")
+        && !prompt.contains("Business OS app resource context:")
+        && !prompt.contains("ctox.business_os.app.modify")
+        && !prompt.contains("ctox.business_os.app.create")
+    {
         return None;
     }
-    let module_id = [
-        metadata.get("business_os_record_id"),
-        metadata.pointer("/client_context/module_id"),
-        metadata.pointer("/client_context/app_id"),
-        metadata.get("business_os_module"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(Value::as_str)
-    .map(str::trim)
-    .find(|value| !value.is_empty())?
-    .to_string();
-    let install_target = metadata
-        .get("business_os_install_target")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("runtime-installed-module")
-        .to_string();
+    let module_id = prompt_line_value(prompt, "- module_id:")?;
+    let install_target = prompt_line_value(prompt, "- install_target:")
+        .unwrap_or_else(|| "runtime-installed-module".to_string());
     let mode_flag = if install_target == "runtime-installed-module" {
         "--installed"
     } else {
         "--source"
     };
-    let artifact_directory = metadata
-        .get("business_os_artifact_directory")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            if mode_flag == "--installed" {
-                format!("runtime/business-os/installed-modules/{module_id}")
-            } else {
-                format!("src/apps/business-os/modules/{module_id}")
-            }
-        });
+    let artifact_directory = prompt_line_value(prompt, "- app_directory:").unwrap_or_else(|| {
+        if mode_flag == "--installed" {
+            format!("runtime/business-os/installed-modules/{module_id}")
+        } else {
+            format!("src/apps/business-os/modules/{module_id}")
+        }
+    });
     Some(BusinessOsAppModuleTarget {
         module_id,
         install_target,
@@ -10659,7 +10674,7 @@ fn business_os_app_module_target_from_metadata(
     })
 }
 
-fn cv_print_prompt_line_value(prompt: &str, prefix: &str) -> Option<String> {
+fn prompt_line_value(prompt: &str, prefix: &str) -> Option<String> {
     prompt.lines().find_map(|line| {
         let value = line.trim().strip_prefix(prefix)?.trim();
         (!value.is_empty()).then(|| value.to_string())
@@ -10840,7 +10855,7 @@ fn enforce_business_os_app_validation_feedback_transition(
     let route_status = channels::current_queue_route_status(&conn, message_key)
         .unwrap_or_else(|_| "leased".to_string());
     let from_state = queue_core_state_for_service(&route_status);
-    let target = business_os_app_module_target_from_metadata(&job.metadata);
+    let target = business_os_app_module_target_from_prompt(&job.prompt);
     let mut metadata = BTreeMap::new();
     metadata.insert("validator_rework".to_string(), "true".to_string());
     metadata.insert(
@@ -10927,7 +10942,7 @@ fn complete_business_os_app_validation_success_to_leased_queue(
         "Business OS app validation success had no leased queue task to update"
     );
     let expected_module_id =
-        business_os_app_module_target_from_metadata(&job.metadata).map(|target| target.module_id);
+        business_os_app_module_target_from_prompt(&job.prompt).map(|target| target.module_id);
     let mut fallback_message_keys = Vec::new();
     let mut updated = 0usize;
     for message_key in &job.leased_message_keys {
@@ -11077,7 +11092,7 @@ fn business_os_app_module_validation_feedback(
     root: &Path,
     job: &QueuedPrompt,
 ) -> Result<Option<String>> {
-    let Some(target) = business_os_app_module_target_from_metadata(&job.metadata) else {
+    let Some(target) = business_os_app_module_target_from_prompt(&job.prompt) else {
         return Ok(None);
     };
     let app_workspace_root = business_os_app_workspace_root(root, job);
@@ -11470,7 +11485,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 fn business_os_app_validation_may_own_completion(job: &QueuedPrompt) -> bool {
     !is_systematic_research_job(job)
-        && business_os_app_module_target_from_metadata(&job.metadata).is_some()
+        && business_os_app_module_target_from_prompt(&job.prompt).is_some()
 }
 
 fn systematic_research_binding_from_prompt(prompt: &str) -> Result<(&str, &str)> {
@@ -12957,13 +12972,8 @@ fn validate_systematic_research_workspace(
             || actual_command_id != expected_command_id
             || actual_attempt_id != expected_attempt_id
         {
-            // Four fields are compared but the old message printed only
-            // three of them: a manifest whose `run_id` disagreed with its
-            // own `research_run_id` produced "expected X, found X" and
-            // burned the validation budget with no actionable cause. Print
-            // every compared field so a mismatch names the field at fault.
             anyhow::bail!(
-                "stale or foreign evidence manifest {}: expected run/command/attempt {expected_run_id}/{expected_command_id}/{expected_attempt_id}, found research_run_id={actual_run_id} run_id={manifest_run_id} command={actual_command_id} attempt={actual_attempt_id}",
+                "stale or foreign evidence manifest {}: expected run/command/attempt {expected_run_id}/{expected_command_id}/{expected_attempt_id}, found {actual_run_id}/{actual_command_id}/{actual_attempt_id}",
                 manifest.display()
             );
         }
@@ -14547,7 +14557,7 @@ fn workspace_tree_contains_extension(root: &Path, expected: &str) -> bool {
 }
 
 fn should_sync_full_workspace_root_to_business_os(job: &QueuedPrompt) -> bool {
-    business_os_app_module_target_from_metadata(&job.metadata).is_none()
+    business_os_app_module_target_from_prompt(&job.prompt).is_none()
 }
 
 fn workspace_file_artifacts_require_fresh_write(job: &QueuedPrompt) -> bool {
@@ -14654,7 +14664,7 @@ fn workspace_file_is_fresh_enough(path: &Path, cutoff: Option<SystemTime>) -> bo
 }
 
 fn declared_workspace_file_artifacts_for_job(job: &QueuedPrompt) -> Vec<String> {
-    if business_os_app_module_target_from_metadata(&job.metadata).is_some()
+    if business_os_app_module_target_from_prompt(&job.prompt).is_some()
         || is_systematic_research_job(job)
     {
         return Vec::new();
@@ -15358,7 +15368,7 @@ fn should_queue_artifact_outcome_recovery(job: &QueuedPrompt) -> bool {
     if job.source_label == OUTCOME_WITNESS_RECOVERY_SOURCE_LABEL {
         return false;
     }
-    if business_os_app_module_target_from_metadata(&job.metadata).is_some() {
+    if business_os_app_module_target_from_prompt(&job.prompt).is_some() {
         return false;
     }
     if external_chat_channel_for_job(job).is_some() {
@@ -16504,7 +16514,9 @@ fn maybe_spawn_business_os_app_recovery(
                         "Recovered {updated} abandoned Business OS app queue task(s) during {reason}"
                     ),
                 );
-                maybe_dispatch_after_business_os_app_recovery(root, state, reason);
+                if reason != "idle status snapshot" {
+                    maybe_dispatch_after_business_os_app_recovery(root, state, reason);
+                }
             }
             Ok(Ok(_)) => {
                 mark_business_os_app_recovery_ran(&root);
@@ -17755,7 +17767,6 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
             prompt_body.clone()
         };
         let job = QueuedPrompt {
-            metadata: message.metadata.clone(),
             preview: preview_text(&prompt),
             source_label,
             goal,
@@ -18122,7 +18133,7 @@ fn idle_durable_queue_empty_backoff(consecutive_empty_probes: u32) -> Duration {
 }
 
 fn business_os_queue_task_is_app_module(task: &channels::QueueTaskView) -> bool {
-    business_os_app_module_target_from_metadata(&task.metadata).is_some()
+    business_os_app_module_target_from_prompt(&task.prompt).is_some()
 }
 
 fn leased_business_os_app_queue_task_exists(root: &Path) -> Result<bool> {
@@ -18135,16 +18146,6 @@ fn leased_business_os_app_queue_task_exists_for_stop_guard(root: &Path) -> Resul
         return Ok(true);
     }
     leased_business_os_rxdb_app_queue_task_exists(root)
-}
-
-const BUSINESS_OS_RXDB_QUEUE_TABLE: &str = "ctox_business_os__ctox_queue_tasks__v0";
-
-fn sqlite_schema_object_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?1 AND type IN ('table', 'view'))",
-        [name],
-        |row| row.get(0),
-    )
 }
 
 fn leased_business_os_rxdb_app_queue_task_exists(root: &Path) -> Result<bool> {
@@ -18162,37 +18163,39 @@ fn leased_business_os_rxdb_app_queue_task_exists(root: &Path) -> Result<bool> {
             db_path.display()
         )
     })?;
-    if !sqlite_schema_object_exists(&conn, BUSINESS_OS_RXDB_QUEUE_TABLE).with_context(|| {
-        format!(
-            "failed to inspect Business OS RxDB queue schema {}",
-            db_path.display()
-        )
-    })? {
-        return Ok(false);
-    }
-    conn.query_row(
+    let mut stmt = match conn.prepare(
         r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM ctox_business_os__ctox_queue_tasks__v0
-            WHERE deleted = 0
-              AND json_valid(data)
-              AND COALESCE(json_extract(data, '$.route_status'), '') = 'leased'
-              AND COALESCE(json_extract(data, '$.command_type'), '') IN (
-                  'ctox.business_os.app.create',
-                  'ctox.business_os.app.modify'
-              )
-        )
+        SELECT json_extract(data, '$.prompt')
+        FROM ctox_business_os__ctox_queue_tasks__v0
+        WHERE deleted = 0
+          AND json_valid(data)
+          AND COALESCE(json_extract(data, '$.route_status'), '') = 'leased'
+          AND (
+              COALESCE(json_extract(data, '$.prompt'), '') LIKE '%Business OS app task metadata:%'
+              OR COALESCE(json_extract(data, '$.prompt'), '') LIKE '%ctox.business_os.app.%'
+          )
+        LIMIT 32
         "#,
-        [],
-        |row| row.get::<_, bool>(0),
-    )
-    .with_context(|| {
-        format!(
-            "failed to inspect Business OS RxDB queue table {}",
-            db_path.display()
-        )
-    })
+    ) {
+        Ok(stmt) => stmt,
+        Err(err) if err.to_string().contains("no such table") => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to inspect Business OS RxDB queue table {}",
+                    db_path.display()
+                )
+            });
+        }
+    };
+    let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
+    for row in rows {
+        let prompt = row?.unwrap_or_default();
+        if business_os_app_module_target_from_prompt(&prompt).is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn maybe_lease_next_durable_queue_prompt(
@@ -18291,7 +18294,6 @@ fn maybe_lease_next_durable_queue_prompt(
             channels::lease_queue_task(root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)?;
         clear_idle_durable_queue_empty_gate(root);
         return Ok(Some(QueuedPrompt {
-            metadata: leased.metadata.clone(),
             preview: preview_text(&leased.prompt),
             source_label: "queue".to_string(),
             goal: leased.title.clone(),
@@ -18555,7 +18557,7 @@ fn recover_stale_business_os_app_queue_task_summary(
             continue;
         }
         clear_idle_pending_prompt_shadow_for_recovery(state, &task.message_key);
-        let Some(target) = business_os_app_module_target_from_metadata(&task.metadata) else {
+        let Some(target) = business_os_app_module_target_from_prompt(&task.prompt) else {
             continue;
         };
         if requeue_unstarted_business_os_app_queue_task(root, &task, &target)? {
@@ -18675,7 +18677,7 @@ fn block_repeated_unstarted_business_os_app_queue_task_before_dispatch(
     root: &Path,
     task: &channels::QueueTaskView,
 ) -> Result<bool> {
-    let Some(target) = business_os_app_module_target_from_metadata(&task.metadata) else {
+    let Some(target) = business_os_app_module_target_from_prompt(&task.prompt) else {
         return Ok(false);
     };
     let previous_requeues = business_os_app_unstarted_requeue_count(root, task)?;
@@ -18751,7 +18753,7 @@ fn recover_business_os_app_queue_task_after_worker_finalization(
     phase: &str,
 ) -> usize {
     if job.leased_message_keys.is_empty()
-        || business_os_app_module_target_from_metadata(&job.metadata).is_none()
+        || business_os_app_module_target_from_prompt(&job.prompt).is_none()
     {
         return 0;
     }
@@ -18815,7 +18817,7 @@ fn complete_validated_business_os_app_queue_task(
     ) {
         return Ok(false);
     }
-    if business_os_app_module_target_from_metadata(&task.metadata).is_none() {
+    if business_os_app_module_target_from_prompt(&task.prompt).is_none() {
         return Ok(false);
     }
     let job = queued_prompt_from_queue_task(task);
@@ -18841,7 +18843,7 @@ fn recover_business_os_app_queue_task_from_validation(
     ) {
         return Ok(BusinessOsAppValidationQueueRecovery::Unchanged);
     }
-    if business_os_app_module_target_from_metadata(&task.metadata).is_none() {
+    if business_os_app_module_target_from_prompt(&task.prompt).is_none() {
         return Ok(BusinessOsAppValidationQueueRecovery::Unchanged);
     }
     let route_status = task.route_status.clone();
@@ -18955,12 +18957,11 @@ fn queue_task_is_business_os_app_validation_rework(task: &channels::QueueTaskVie
         || task
             .prompt
             .contains("Business OS app artifact validation failed."))
-        && business_os_app_module_target_from_metadata(&task.metadata).is_some()
+        && business_os_app_module_target_from_prompt(&task.prompt).is_some()
 }
 
 fn queued_prompt_from_queue_task(task: channels::QueueTaskView) -> QueuedPrompt {
     QueuedPrompt {
-        metadata: task.metadata.clone(),
         preview: preview_text(&task.prompt),
         source_label: "queue".to_string(),
         goal: task.title.clone(),
@@ -19355,7 +19356,6 @@ fn route_ticket_events(
             root,
             state,
             QueuedPrompt {
-                metadata: queue_task.metadata.clone(),
                 preview: preview_text(&prompt),
                 source_label: format!("ticket:{}", prepared.source_system),
                 goal: prepared.summary.clone(),
@@ -19506,11 +19506,12 @@ fn enqueue_prompt(
     };
     if let Some((message_keys, reason)) = deferred_durable_release {
         if let Err(err) = channels::ack_leased_messages(root, &message_keys, "pending") {
-            record_queue_ack_failure_durably(
-                root,
-                &err,
-                &format!("deferred durable queue lease(s) back to pending after {reason}"),
-                &message_keys,
+            push_event(
+                state,
+                format!(
+                    "Failed to release deferred durable queue lease(s) back to pending after {reason}: {}",
+                    clip_text(&err.to_string(), 180)
+                ),
             );
         }
         return;
@@ -24620,36 +24621,6 @@ fn record_ack_failure_locked<T>(shared: &mut SharedState, result: anyhow::Result
     }
 }
 
-fn record_queue_ack_failure_durably(
-    root: &Path,
-    error: &anyhow::Error,
-    what: &str,
-    message_keys: &[String],
-) {
-    let body_text = format!(
-        "Failed to ack {what}: {}",
-        clip_text(&error.to_string(), 180)
-    );
-    for message_key in message_keys {
-        harness_flow::record_harness_flow_event_lossy(
-            root,
-            harness_flow::RecordHarnessFlowEventRequest {
-                event_kind: "queue.ack_failed",
-                title: "Queue acknowledgement failed",
-                body_text: &body_text,
-                message_key: Some(message_key),
-                work_id: None,
-                ticket_key: None,
-                attempt_index: None,
-                metadata: serde_json::json!({
-                    "ack_operation": what,
-                    "error": error.to_string(),
-                }),
-            },
-        );
-    }
-}
-
 fn record_queue_ack_and_refresh_business_os_projections_locked<T>(
     root: &Path,
     shared: &mut SharedState,
@@ -24658,7 +24629,13 @@ fn record_queue_ack_and_refresh_business_os_projections_locked<T>(
     message_keys: &[String],
 ) {
     if let Err(err) = result {
-        record_queue_ack_failure_durably(root, &err, what, message_keys);
+        push_event_locked(
+            shared,
+            format!(
+                "Failed to ack {what} after completion: {}",
+                clip_text(&err.to_string(), 180)
+            ),
+        );
         return;
     }
 
@@ -24806,7 +24783,6 @@ fn ensure_queue_guard_locked(root: &Path, shared: &mut SharedState) {
         .max(channels::pending_queue_task_count_uncached(root).unwrap_or(0));
     let guard_prompt = build_queue_guard_prompt(root, pending);
     shared.pending_prompts.push_front(QueuedPrompt {
-        metadata: Value::Null,
         prompt: guard_prompt.clone(),
         goal: guard_prompt,
         preview: "Queue pressure guard".to_string(),
@@ -25246,61 +25222,25 @@ fn runtime_retry_not_before_iso(error_text: &str) -> String {
     chrono_like_iso(current_epoch_secs().saturating_add(cooldown_secs))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerRetryKind {
-    TurnTimeout,
-    RuntimeApiFailure,
-}
-
-impl WorkerRetryKind {
-    fn policy_id(self) -> &'static str {
-        match self {
-            Self::TurnTimeout => "worker-turn-timeout",
-            Self::RuntimeApiFailure => "worker-runtime-api-failure",
-        }
-    }
-}
-
 fn release_retryable_worker_messages(
     root: &Path,
     message_keys: &[String],
-    retry_kind: WorkerRetryKind,
+    reason: &str,
     summary: &str,
 ) -> Result<usize> {
-    let updated = channels::hold_leased_messages(
+    let policy_id = if reason.contains("timeout") {
+        "worker-turn-timeout"
+    } else {
+        "worker-runtime-api-failure"
+    };
+    channels::hold_leased_messages(
         root,
         message_keys,
         &review::HoldReason::Technical {
-            policy_id: retry_kind.policy_id().to_string(),
+            policy_id: policy_id.to_string(),
         },
         summary,
-    )?;
-    // A retryable failure normally returns the item to `pending`, but the fifth
-    // one exhausts the hold budget and terminalizes the queue item inside the
-    // channels transaction - the Business OS command failure path never runs
-    // for it. Every research run on the SKF instance died exactly here, which
-    // is also why no continuation decision was ever recorded. Drive the command
-    // failure projection for the keys that just went terminal; it owns both the
-    // durable failure record and the research auto-continuation.
-    for message_key in message_keys {
-        let terminal = matches!(
-            channels::load_queue_task(root, message_key),
-            Ok(Some(ref task)) if task.route_status == "failed"
-        );
-        if !terminal {
-            continue;
-        }
-        if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
-            root,
-            message_key,
-            summary,
-        ) {
-            eprintln!(
-                "[ctox] could not project the exhausted retry budget of {message_key} onto its Business OS command: {err}"
-            );
-        }
-    }
-    Ok(updated)
+    )
 }
 
 fn is_turn_timeout_blocker(value: &str) -> bool {
@@ -26244,14 +26184,6 @@ mod tests {
     use crate::secrets;
     use serde_json::json;
 
-    fn business_os_app_task_metadata(module_id: &str, command_type: &str) -> Value {
-        serde_json::json!({
-            "business_os_module": "creator",
-            "business_os_command_type": command_type,
-            "business_os_record_id": module_id,
-        })
-    }
-
     static CHANNEL_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static TICKET_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     /// The channel-router preflight gate is process-global, so two tests that
@@ -26262,117 +26194,6 @@ mod tests {
         std::sync::Mutex::new(());
     static DURABLE_STATUS_SNAPSHOT_CACHE_TEST_LOCK: std::sync::Mutex<()> =
         std::sync::Mutex::new(());
-
-    #[test]
-    fn service_state_invariant_readiness_uses_typed_continuity_error() {
-        let cases = [
-            (
-                ContinuityKind::Narrative,
-                "missing stored narrative continuity document",
-            ),
-            (
-                ContinuityKind::Anchors,
-                "missing stored anchors continuity document",
-            ),
-            (
-                ContinuityKind::Focus,
-                "missing stored focus continuity document",
-            ),
-        ];
-        for (kind, legacy_message) in cases {
-            let typed = anyhow::Error::new(lcm::MissingStoredContinuityDocument::new(kind))
-                .context("continuity has not been initialized yet");
-            assert!(state_invariant_check_is_not_ready(&typed));
-            assert_eq!(
-                typed
-                    .chain()
-                    .find_map(|cause| {
-                        cause.downcast_ref::<lcm::MissingStoredContinuityDocument>()
-                    })
-                    .map(|error| error.kind()),
-                Some(kind)
-            );
-
-            let prose_only = anyhow::anyhow!(legacy_message);
-            assert!(!state_invariant_check_is_not_ready(&prose_only));
-        }
-    }
-
-    #[test]
-    fn service_webhook_status_uses_typed_authentication_error() {
-        let typed_errors = [
-            crate::iot::webhook::WebhookHttpError::UnknownWebhook {
-                webhook_id: "missing-id".to_string(),
-            },
-            crate::iot::webhook::WebhookHttpError::SecretMissing {
-                source: anyhow::anyhow!("secret backend unavailable"),
-            },
-            crate::iot::webhook::WebhookHttpError::TokenRejected,
-        ];
-        for typed_error in typed_errors {
-            let error = anyhow::Error::new(typed_error)
-                .context("request credentials could not be accepted");
-            assert_eq!(iot_webhook_http_error_status(&error), 401);
-        }
-
-        for legacy_message in [
-            "webhook token rejected",
-            "webhook secret missing",
-            "unknown webhook: missing-id",
-        ] {
-            assert_eq!(
-                iot_webhook_http_error_status(&anyhow::anyhow!(legacy_message)),
-                400
-            );
-        }
-    }
-
-    #[test]
-    fn service_sqlite_lock_retry_uses_error_code_not_message() {
-        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
-            let error = anyhow::Error::new(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(code),
-                Some("write could not proceed right now".to_string()),
-            ))
-            .context("command review persistence failed");
-            assert!(command_review_persistence_is_locked(&error));
-        }
-
-        for legacy_message in [
-            "database is locked",
-            "database table is locked",
-            "sqlite_busy",
-            "sqlite_locked",
-        ] {
-            let error = anyhow::Error::new(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
-                Some(legacy_message.to_string()),
-            ));
-            assert!(!command_review_persistence_is_locked(&error));
-        }
-    }
-
-    #[test]
-    fn service_rxdb_queue_presence_uses_schema_metadata_not_prepare_error_text() {
-        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
-        assert!(
-            !sqlite_schema_object_exists(&conn, BUSINESS_OS_RXDB_QUEUE_TABLE)
-                .expect("inspect empty schema")
-        );
-
-        conn.execute_batch(&format!(
-            "CREATE TABLE {BUSINESS_OS_RXDB_QUEUE_TABLE} (\
-                 data TEXT NOT NULL,\
-                 deleted INTEGER NOT NULL DEFAULT 0,\
-                 legacy_diagnostic TEXT DEFAULT 'no such table'\
-             );"
-        ))
-        .expect("create queue table");
-        assert!(
-            sqlite_schema_object_exists(&conn, BUSINESS_OS_RXDB_QUEUE_TABLE)
-                .expect("inspect populated schema")
-        );
-    }
 
     #[test]
     fn canonical_business_command_prompt_context_is_compact_and_non_redundant() {
@@ -26533,7 +26354,6 @@ mod tests {
 
     fn systematic_research_test_job(workspace: &Path) -> QueuedPrompt {
         QueuedPrompt {
-            metadata: business_os_app_task_metadata("research", "ctox.business_os.app.create"),
             prompt: "business_os.chat.task\nresearch.systematic.run\nResearch Run ID: run-1\nResearch Command ID: command-1\nBusiness OS app task metadata:\n- module_id: research\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/research".to_string(),
             goal: "Build verified research".to_string(),
             preview: "Build verified research".to_string(),
@@ -26558,7 +26378,7 @@ mod tests {
 
         let (scope, _, _) = completion_review_contract_for_job(&root, &job);
         assert!(matches!(scope, review::ReviewScope::FullEvidence));
-        assert!(business_os_app_module_target_from_metadata(&job.metadata).is_some());
+        assert!(business_os_app_module_target_from_prompt(&job.prompt).is_some());
         assert!(!business_os_app_validation_may_own_completion(&job));
         let expected = expected_outcome_artifacts_for_job(&job);
         assert_eq!(expected.len(), 1);
@@ -28774,10 +28594,7 @@ mod tests {
                 priority: "normal".to_string(),
                 suggested_skill: None,
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "inventory",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("create app queue task");
@@ -29177,7 +28994,6 @@ mod tests {
         );
 
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "do the thing".to_string(),
             goal: "thing".to_string(),
             preview: "thing".to_string(),
@@ -29235,7 +29051,6 @@ mod tests {
         // later compute a per-skill failure rate (otherwise skill invocations
         // are only Codex OTEL counters with no per-task outcome).
         let mut job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Build the subscriptions module.".to_string(),
             goal: "build subscriptions".to_string(),
             preview: "subscriptions".to_string(),
@@ -29289,7 +29104,6 @@ mod tests {
         // assurance stamp MUST resolve the same id, or the gate queries an
         // always-empty conversation and never fires (review-3 reachability).
         let business_job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "business_os.chat.task\n- command_id: cmd-7".to_string(),
             goal: "answer business os chat".to_string(),
             preview: "chat".to_string(),
@@ -29321,7 +29135,6 @@ mod tests {
 
         // A plain (non-business-OS) job resolves straight from its thread key.
         let plain_job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reconcile the pipeline and reply.".to_string(),
             goal: "reconcile".to_string(),
             preview: "reply".to_string(),
@@ -29390,7 +29203,6 @@ mod tests {
         .expect("record command");
         let task_id = accepted.task_id.expect("queue task id");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Work only inside this workspace:\n/tmp/task\n\nExecution contract: If this request asks for files, commands, runtime state, tickets, benchmarks, or verification, do the work with tools.\n\ncontaminated retry prompt".to_string(),
             goal: "runtime-enriched goal".to_string(),
             preview: "bench".to_string(),
@@ -29434,7 +29246,6 @@ mod tests {
     #[test]
     fn cv_print_parser_execution_prompt_allows_required_json_writeback() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "business_os.chat.task\n- command_id: cmd-cv\nCV PDF extracted text:\nJulia Schikore\nPayload JSON:\n{\"writeback_contract\":{\"command_type\":\"ctox.cv_print.apply_parse\"}}".to_string(),
             goal: "parse cv".to_string(),
             preview: "cv".to_string(),
@@ -29615,7 +29426,6 @@ Business OS command:
         )
         .expect("failed to seed queue task");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Acknowledge Jill's Teams update after reconciling pipeline state.".to_string(),
             goal: "Acknowledge external chat task update".to_string(),
             preview: "Teams reply".to_string(),
@@ -29906,7 +29716,6 @@ Business OS command:
         let mut shared = SharedState::default();
         shared.pending_prompts = (0..QUEUE_PRESSURE_GUARD_THRESHOLD)
             .map(|index| QueuedPrompt {
-                metadata: Value::Null,
                 prompt: format!("prompt-{index}"),
                 goal: format!("goal-{index}"),
                 preview: format!("preview-{index}"),
@@ -30396,7 +30205,6 @@ Business OS command:
         let mut shared = SharedState::default();
         shared.pending_prompts = VecDeque::from([
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "a".to_string(),
                 goal: "a".to_string(),
                 preview: "a".to_string(),
@@ -30411,7 +30219,6 @@ Business OS command:
                 outbound_anchor: None,
             },
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "b".to_string(),
                 goal: "b".to_string(),
                 preview: "b".to_string(),
@@ -30440,7 +30247,6 @@ Business OS command:
         let root = temp_root("outcome-recovery-next-prompt");
         let mut shared = SharedState::default();
         shared.pending_prompts.push_back(QueuedPrompt {
-            metadata: Value::Null,
             prompt: "next durable task".to_string(),
             goal: "next durable task".to_string(),
             preview: "next durable task".to_string(),
@@ -30669,7 +30475,6 @@ Business OS command:
         let root = temp_root("ctox-starting-queued-prompt-skill");
         let mut shared = SharedState::default();
         shared.pending_prompts.push_back(QueuedPrompt {
-            metadata: Value::Null,
             preview: "review onboarding".to_string(),
             source_label: "ticket:zammad".to_string(),
             goal: "continue onboarding".to_string(),
@@ -32496,7 +32301,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "legacy".to_string(),
                 goal: "legacy".to_string(),
                 preview: "legacy".to_string(),
@@ -32514,7 +32318,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "owner".to_string(),
                 goal: "owner".to_string(),
                 preview: "owner".to_string(),
@@ -32546,7 +32349,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "legacy".to_string(),
                 goal: "legacy".to_string(),
                 preview: "legacy".to_string(),
@@ -32564,7 +32366,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "founder".to_string(),
                 goal: "founder".to_string(),
                 preview: "founder".to_string(),
@@ -32596,7 +32397,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "founder".to_string(),
                 goal: "founder".to_string(),
                 preview: "founder".to_string(),
@@ -32614,7 +32414,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "send".to_string(),
                 goal: "send".to_string(),
                 preview: "send".to_string(),
@@ -32657,7 +32456,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "founder".to_string(),
                 goal: "founder".to_string(),
                 preview: "founder".to_string(),
@@ -32675,7 +32473,6 @@ Business OS command:
         insert_pending_prompt_ordered(
             &mut pending,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "retry reviewed send".to_string(),
                 goal: "retry reviewed send".to_string(),
                 preview: "retry reviewed send".to_string(),
@@ -32800,7 +32597,6 @@ Business OS command:
         )
         .expect("failed to seed follow-up");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Add mobile-first search".to_string(),
             goal:
                 "Add mobile-first search expectations, map-based discovery, and a saved-search path"
@@ -32855,7 +32651,6 @@ Business OS command:
         )
         .expect("failed to seed workspace follow-up");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Restore monitoring follow-up".to_string(),
             goal: "Restore monitoring follow-up from the latest durable spill state".to_string(),
             preview: "Restore monitoring follow-up".to_string(),
@@ -32893,7 +32688,6 @@ Business OS command:
         ));
         std::fs::create_dir_all(&root).expect("failed to create temp root");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Add mobile-first search".to_string(),
             goal:
                 "Add mobile-first search expectations, map-based discovery, and a saved-search path"
@@ -32936,7 +32730,6 @@ Business OS command:
         let controller = workspace.join("controller.json");
         let logbook = workspace.join("run-log.md");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Generic artifact controller.\n\nOnly required durable files for this controller turn:\n- {}\n- {}\n\nKeep these artifacts updated while running the queued work.",
                 controller.display(),
@@ -32994,7 +32787,6 @@ Business OS command:
             attachments: Vec::new(),
         };
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Schreibe und sende per reviewed-founder-send eine Mail an Julia.".to_string(),
             goal: "Tag-Proposal-Mail an Julia final senden".to_string(),
             preview: "reviewed-founder-send Julia".to_string(),
@@ -33050,7 +32842,6 @@ Business OS command:
         channels::lease_queue_task(&root, &current.message_key, "ctox-service-test")
             .expect("failed to mark current task leased");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: current.prompt.clone(),
             goal: current.title.clone(),
             preview: current.title.clone(),
@@ -33083,7 +32874,6 @@ Business OS command:
     fn timeout_blocker_suppresses_recursive_timeout_continuation() {
         let root = temp_root("ctox-timeout-recursive-continuation");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.\nTitel: Continue send mail after timeout\nArt: timeout-continuation\nWork-ID: self-work:local:loop\n\nContinue the interrupted task."
                 .to_string(),
             goal: "Continue send mail after timeout".to_string(),
@@ -33130,7 +32920,6 @@ Business OS command:
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease legacy timeout continuation");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -33195,11 +32984,18 @@ Business OS command:
     }
 
     #[test]
-    fn business_os_app_module_target_reads_typed_metadata() {
-        let metadata = business_os_app_task_metadata("contracts", "ctox.business_os.app.modify");
+    fn business_os_app_module_target_parses_installed_task_metadata() {
+        let prompt = "\
+Business OS app task metadata:
+- module_id: contracts
+- install_target: runtime-installed-module
+- app_directory: runtime/business-os/installed-modules/contracts
+Business OS command:
+- type: ctox.business_os.app.modify
+";
 
-        let target = business_os_app_module_target_from_metadata(&metadata)
-            .expect("typed app metadata should identify the target");
+        let target = business_os_app_module_target_from_prompt(prompt)
+            .expect("app target should parse from prompt");
 
         assert_eq!(target.module_id, "contracts");
         assert_eq!(target.install_target, "runtime-installed-module");
@@ -33208,27 +33004,11 @@ Business OS command:
             target.artifact_directory,
             "runtime/business-os/installed-modules/contracts"
         );
-
-        // Ohne typisierte Metadaten gibt es keine Identitaet mehr — frueher haette
-        // die Prompt-Prosa hier ausgereicht.
-        let no_metadata = Value::Null;
-        assert!(business_os_app_module_target_from_metadata(&no_metadata).is_none());
-    }
-
-    #[test]
-    fn business_os_app_module_target_reads_metadata_without_prompt_markers() {
-        let prompt = "Improve the contracts workflow without changing its task identity.";
-        let metadata = business_os_app_task_metadata("contracts", "ctox.business_os.app.modify");
-
-        assert!(!prompt.contains("Business OS app task metadata:"));
-        assert!(!prompt.contains("ctox.business_os.app.modify"));
-        assert!(business_os_app_module_target_from_metadata(&metadata).is_some());
     }
 
     #[test]
     fn business_os_app_validation_feedback_is_repair_oriented() {
         let job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("contracts", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\n".to_string(),
             goal: "Build contracts app".to_string(),
             preview: "Build contracts app".to_string(),
@@ -33286,7 +33066,6 @@ Business OS command:
     #[test]
     fn business_os_app_execution_context_uses_resources_not_rule_prompt() {
         let job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("contracts", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
             goal: "Build contracts app".to_string(),
             preview: "Build contracts app".to_string(),
@@ -33355,7 +33134,6 @@ Business OS command:
     #[test]
     fn business_os_app_queue_jobs_use_lean_mcp_free_session() {
         let mut job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("contracts", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
             goal: "Build contracts app".to_string(),
             preview: "Build contracts app".to_string(),
@@ -33417,7 +33195,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("contracts", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -33496,7 +33274,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create canonical app queue task");
@@ -33541,7 +33319,6 @@ Business OS command:
                 .join("\n")
         );
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: huge_prompt,
             goal: "Build office assets app".to_string(),
             preview: "Build office assets app".to_string(),
@@ -33606,17 +33383,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "contracts",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt,
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -33711,17 +33484,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "projects",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt,
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -33793,17 +33562,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "subscriptions",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt,
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -33841,14 +33606,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -33909,14 +33673,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -33972,14 +33735,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("contracts", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -34031,7 +33793,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34045,17 +33807,13 @@ Business OS command:
                 priority: "normal".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "inventory",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("failed to create next app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -34150,14 +33908,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -34241,14 +33998,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -34291,7 +34047,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34337,7 +34093,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34374,7 +34130,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34420,7 +34176,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34455,7 +34211,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34513,7 +34269,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34575,7 +34331,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34621,7 +34377,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34666,14 +34422,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -34710,8 +34465,8 @@ Business OS command:
     }
 
     #[test]
-    fn idle_status_snapshot_reads_expired_queue_lease_without_repair() {
-        let root = temp_root("idle-status-snapshot-read-only");
+    fn status_snapshot_does_not_run_business_os_app_recovery() {
+        let root = temp_root("status-snapshot-no-app-recovery");
         let script_dir = root.join("src/apps/business-os/scripts");
         std::fs::create_dir_all(&script_dir).expect("create validator script dir");
         std::fs::write(
@@ -34729,7 +34484,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("projects", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34739,38 +34494,422 @@ Business OS command:
         age_queue_task_lease(
             &root,
             &task.message_key,
-            BUSINESS_OS_APP_RECOVERY_STALE_SECS + 5,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
         );
         let state = Arc::new(Mutex::new(SharedState::default()));
-        let before = channels::load_queue_task(&root, &task.message_key)
-            .expect("load expired lease before status snapshot")
-            .expect("expired lease exists before status snapshot");
 
-        let status = status_from_shared_state(&root, &state).expect("status snapshot failed");
+        status_from_shared_state(&root, &state).expect("status snapshot failed");
 
-        assert!(
-            status.pending_count >= 1,
-            "leased task remains visible to the reader"
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
+        let shared = lock_shared_state(&state);
+        assert!(!shared.recent_events.iter().any(|event| {
+            event.contains("Recovered green Business OS app queue task")
+                || event.contains("Recovered 1 abandoned Business OS app queue task")
+        }));
+    }
+
+    #[test]
+    fn explicit_idle_recovery_completes_green_business_os_app_queue_lease() {
+        let root = temp_root("status-snapshot-green-app-recovery");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "process.exit(0);\n",
+        )
+        .expect("write green validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create projects app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: projects\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/projects\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/projects".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "projects");
+        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        age_queue_task_lease(
+            &root,
+            &task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
         );
-        let after = channels::load_queue_task(&root, &task.message_key)
-            .expect("load expired lease after status snapshot")
-            .expect("expired lease exists after status snapshot");
-        assert_eq!(after.route_status, before.route_status);
-        assert_eq!(after.leased_at, before.leased_at);
-        assert_eq!(after.status_note, before.status_note);
-        assert_eq!(after.prompt, before.prompt);
-        {
-            let shared = lock_shared_state(&state);
-            assert!(!shared.recent_events.iter().any(|event| {
-                event.contains("Recovered green Business OS app queue task")
-                    || event.contains("Recovered 1 abandoned Business OS app queue task")
-            }));
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+        for _ in 0..40 {
+            if route_status_for(&root, &task.message_key) == "handled" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
         }
 
-        let recovered = recover_stale_business_os_app_queue_tasks(&root, &state, 10)
-            .expect("dedicated maintenance should recover the expired lease");
-        assert_eq!(recovered, 1);
         assert_eq!(route_status_for(&root, &task.message_key), "handled");
+    }
+
+    #[test]
+    fn status_snapshot_recovery_completes_fresh_abandoned_written_app_queue_lease() {
+        let root = temp_root("status-snapshot-fresh-written-app-complete");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "process.exit(0);\n",
+        )
+        .expect("write green validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create subscriptions app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/subscriptions".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "subscriptions");
+        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        let shared = lock_shared_state(&state);
+        assert!(shared.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn status_snapshot_recovery_does_not_prefetch_next_app_queue_task_after_green_lease() {
+        let root = temp_root("status-snapshot-green-app-dispatch-next");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "process.exit(0);\n",
+        )
+        .expect("write green validator script fixture");
+        let completed_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create subscriptions app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/subscriptions".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create completed app queue task");
+        seed_business_os_app_artifacts(&root, "subscriptions");
+        channels::lease_queue_task(&root, &completed_task.message_key, "ctox-service-test")
+            .expect("failed to lease completed app queue task");
+        age_queue_task_lease(
+            &root,
+            &completed_task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let next_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create inventory app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: inventory\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/inventory\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/inventory".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create next app queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(
+            route_status_for(&root, &completed_task.message_key),
+            "handled"
+        );
+        assert_eq!(route_status_for(&root, &next_task.message_key), "pending");
+        let shared = lock_shared_state(&state);
+        assert!(shared.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn idle_status_snapshot_does_not_lease_pending_business_os_app_task() {
+        let root = temp_root("status-snapshot-pending-app-dispatch");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create inventory app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: inventory\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/inventory\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/inventory".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create pending app queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(route_status_for(&root, &task.message_key), "pending");
+        let shared = lock_shared_state(&state);
+        assert!(shared.pending_prompts.is_empty());
+        assert!(!shared.recent_events.iter().any(|event| {
+            event.contains("Queued durable queue task after Business OS app recovery")
+        }));
+    }
+
+    #[test]
+    fn status_snapshot_recovery_requeues_missing_app_target_without_prefetch() {
+        let root = temp_root("status-snapshot-missing-app-target-requeue");
+        let leased_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create subscriptions app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/subscriptions".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create leased app queue task");
+        channels::lease_queue_task(&root, &leased_task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        age_queue_task_lease(
+            &root,
+            &leased_task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let pending_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create contracts app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/contracts".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create pending app queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        let reloaded = channels::load_queue_task(&root, &leased_task.message_key)
+            .expect("load leased task")
+            .expect("leased task exists");
+        assert_eq!(reloaded.route_status, "pending");
+        assert_eq!(
+            reloaded.status_note.as_deref(),
+            Some("business-os:requeued-unstarted-app: app target missing or empty")
+        );
+        assert_eq!(
+            route_status_for(&root, &pending_task.message_key),
+            "pending"
+        );
+        let shared = lock_shared_state(&state);
+        assert!(shared.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn status_snapshot_recovery_resets_stale_app_recovery_guard() {
+        let root = temp_root("status-snapshot-stale-app-recovery-guard");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "process.exit(0);\n",
+        )
+        .expect("write green validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create contracts app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/contracts".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "contracts");
+        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        age_queue_task_lease(
+            &root,
+            &task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.app_recovery_active = true;
+            shared.app_recovery_started_epoch_secs =
+                Some(current_epoch_secs().saturating_sub(BUSINESS_OS_APP_RECOVERY_STALE_SECS + 1));
+        }
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        let shared = lock_shared_state(&state);
+        assert!(
+            shared
+                .recent_events
+                .iter()
+                .any(|event| event.contains("Bypassed active Business OS app recovery guard")),
+            "idle status recovery guard bypass should be observable: {:?}",
+            shared.recent_events
+        );
+    }
+
+    #[test]
+    fn status_snapshot_recovery_resets_idle_stale_app_recovery_guard() {
+        let root = temp_root("status-snapshot-idle-stale-app-recovery-guard");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "process.exit(0);\n",
+        )
+        .expect("write green validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create subscriptions app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/subscriptions".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "subscriptions");
+        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        age_queue_task_lease(
+            &root,
+            &task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.app_recovery_active = true;
+            shared.app_recovery_started_epoch_secs = Some(
+                current_epoch_secs().saturating_sub(BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 1),
+            );
+        }
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        let shared = lock_shared_state(&state);
+        assert!(
+            shared
+                .recent_events
+                .iter()
+                .any(|event| event.contains("Bypassed active Business OS app recovery guard")),
+            "idle stale recovery guard bypass should be observable: {:?}",
+            shared.recent_events
+        );
+    }
+
+    #[test]
+    fn status_snapshot_recovery_bypasses_fresh_idle_guard_for_stale_app_lease() {
+        let root = temp_root("status-snapshot-fresh-app-recovery-guard");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "process.exit(0);\n",
+        )
+        .expect("write green validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create projects app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: projects\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/projects\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/projects".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "projects");
+        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        age_queue_task_lease(
+            &root,
+            &task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.app_recovery_active = true;
+            shared.app_recovery_started_epoch_secs = Some(current_epoch_secs());
+        }
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        let shared = lock_shared_state(&state);
+        assert!(
+            shared
+                .recent_events
+                .iter()
+                .any(|event| event.contains("Bypassed active Business OS app recovery guard")),
+            "fresh idle recovery guard bypass should be observable: {:?}",
+            shared.recent_events
+        );
+    }
+
+    #[test]
+    fn idle_status_recovery_bypass_does_not_extend_active_guard_start_time() {
+        let started = current_epoch_secs().saturating_sub(7);
+        let mut shared = SharedState::default();
+        shared.app_recovery_active = true;
+        shared.app_recovery_started_epoch_secs = Some(started);
+
+        assert!(begin_business_os_app_recovery_locked(
+            &mut shared,
+            "idle status snapshot"
+        ));
+
+        assert_eq!(shared.app_recovery_started_epoch_secs, Some(started));
     }
 
     #[test]
@@ -34795,6 +34934,161 @@ Business OS command:
     }
 
     #[test]
+    fn status_snapshot_recovery_marks_red_business_os_app_queue_lease_for_rework_without_prefetch()
+    {
+        let root = temp_root("status-snapshot-red-app-recovery");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "console.error('module tests failed'); process.exit(1);\n",
+        )
+        .expect("write red validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create subscriptions app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/subscriptions".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "subscriptions");
+        channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        age_queue_task_lease(
+            &root,
+            &task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+        assert_eq!(route_status_for(&root, &task.message_key), "review_rework");
+        let shared = lock_shared_state(&state);
+        assert!(shared.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn status_snapshot_recovery_leaves_a_locally_owned_app_lease_alone() {
+        let root = temp_root("status-snapshot-red-app-idle-shadow");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "console.error('missing index.js'); process.exit(1);\n",
+        )
+        .expect("write red validator script fixture");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Create contracts app".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/contracts".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create app queue task");
+        seed_business_os_app_artifacts(&root, "contracts");
+        let leased = channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
+            .expect("failed to lease app queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared
+                .pending_prompts
+                .push_back(queued_prompt_from_queue_task(leased));
+        }
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
+        let shared = lock_shared_state(&state);
+        assert_eq!(shared.pending_prompts.len(), 1);
+        assert!(shared.pending_prompts.iter().any(|prompt| {
+            prompt
+                .leased_message_keys
+                .iter()
+                .any(|message_key| message_key == &task.message_key)
+        }));
+        assert!(!shared.recent_events.iter().any(|event| {
+            event.contains("Cleared idle pending prompt shadow")
+                && event.contains(task.message_key.as_str())
+        }));
+    }
+
+    #[test]
+    fn status_snapshot_recovery_prioritizes_red_app_rework_before_pending_app() {
+        let root = temp_root("status-snapshot-red-app-rework-before-pending");
+        let script_dir = root.join("src/apps/business-os/scripts");
+        std::fs::create_dir_all(&script_dir).expect("create validator script dir");
+        std::fs::write(
+            script_dir.join("validate-app-module.mjs"),
+            "console.error('missing module directory'); process.exit(1);\n",
+        )
+        .expect("write red validator script fixture");
+        let red_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Projects Bench".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: projects\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/projects\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/projects".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create red app queue task");
+        seed_business_os_app_artifacts(&root, "projects");
+        channels::lease_queue_task(&root, &red_task.message_key, "ctox-service-test")
+            .expect("failed to lease red app queue task");
+        age_queue_task_lease(
+            &root,
+            &red_task.message_key,
+            BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS + 5,
+        );
+        let pending_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Quality Bench".to_string(),
+                prompt: "Business OS app task metadata:\n- module_id: quality\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/quality\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
+                thread_key: "business-os/apps/quality".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create pending app queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
+
+        assert_eq!(
+            route_status_for(&root, &red_task.message_key),
+            "review_rework"
+        );
+        assert_eq!(
+            route_status_for(&root, &pending_task.message_key),
+            "pending"
+        );
+        let shared = lock_shared_state(&state);
+        assert!(shared.pending_prompts.is_empty());
+    }
+
+    #[test]
     fn router_reconcile_completes_green_leased_business_os_app_task() {
         let root = temp_root("router-reconcile-green-app-task");
         let script_dir = root.join("src/apps/business-os/scripts");
@@ -34814,7 +35108,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34861,7 +35155,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34916,7 +35210,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("projects", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -34967,7 +35261,6 @@ Business OS command:
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -35048,7 +35341,6 @@ Business OS command:
     fn pending_prompt_owns_message_key_even_while_service_is_idle() {
         let mut shared = SharedState::default();
         shared.pending_prompts.push_back(QueuedPrompt {
-            metadata: Value::Null,
             prompt: "reply".to_string(),
             goal: "reply".to_string(),
             preview: "reply".to_string(),
@@ -35140,7 +35432,6 @@ Business OS command:
             .expect("failed to load app queue task")
             .expect("missing app queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -35244,7 +35535,6 @@ Business OS command:
             .expect("failed to load app queue task")
             .expect("missing app queue task");
         let job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("inventory", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: inventory\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/inventory\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -35299,17 +35589,13 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "contracts",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
         channels::lease_queue_task(&root, &rework_task.message_key, "ctox-service-test")
             .expect("failed to lease app queue task");
         let mut job = QueuedPrompt {
-            metadata: rework_task.metadata.clone(),
             prompt,
             goal: rework_task.title.clone(),
             preview: rework_task.title.clone(),
@@ -35323,7 +35609,7 @@ Business OS command:
             outbound_email: None,
             outbound_anchor: None,
         };
-        let target = business_os_app_module_target_from_metadata(&job.metadata)
+        let target = business_os_app_module_target_from_prompt(&job.prompt)
             .expect("expected app module target");
         let feedback = render_business_os_app_module_validation_feedback(
             &job,
@@ -35363,7 +35649,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create pending app queue task");
@@ -35408,10 +35694,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata(
-                    "contracts",
-                    "ctox.business_os.app.create",
-                )),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -35419,7 +35702,7 @@ Business OS command:
             .expect("failed to lease app queue task");
         let mut job = queued_prompt_from_queue_task(rework_task.clone());
         job.source_label = "business-os:app-create".to_string();
-        let target = business_os_app_module_target_from_metadata(&job.metadata)
+        let target = business_os_app_module_target_from_prompt(&job.prompt)
             .expect("expected app module target");
         let feedback = render_business_os_app_module_validation_feedback(
             &job,
@@ -35450,7 +35733,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create pending app queue task");
@@ -35481,7 +35764,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("quality", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create current app queue task");
@@ -35497,7 +35780,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create next app queue task");
@@ -35571,7 +35854,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create next app queue task");
@@ -35622,7 +35905,7 @@ Business OS command:
                 priority: "normal".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create pending app rework task");
@@ -35685,7 +35968,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create pending app queue task");
@@ -35728,7 +36011,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("contracts", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create stale app queue task");
@@ -35750,7 +36033,7 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("inventory", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create fresh app queue task");
@@ -35805,7 +36088,6 @@ Business OS command:
             track_leased_keys_locked(&mut shared, std::slice::from_ref(&task_id), &[]);
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Answer OK".to_string(),
             goal: "Context task".to_string(),
             preview: "Answer OK".to_string(),
@@ -35859,59 +36141,7 @@ Business OS command:
     }
 
     #[test]
-    fn queue_ack_failure_is_recorded_durably_with_message_key() -> anyhow::Result<()> {
-        let root = temp_root("queue-ack-failure-durable-event");
-        let message_keys = vec!["queue:system::ack-failure".to_string()];
-        let mut shared = SharedState::default();
-
-        record_queue_ack_and_refresh_business_os_projections_locked(
-            &root,
-            &mut shared,
-            Err::<(), anyhow::Error>(anyhow::anyhow!("database is locked")),
-            "handled queue lease(s)",
-            &message_keys,
-        );
-
-        assert!(
-            shared.recent_events.is_empty(),
-            "queue ack failure evidence must not live only in the process ring buffer: {:?}",
-            shared.recent_events
-        );
-        let conn = Connection::open(crate::paths::core_db(&root))?;
-        let event = conn.query_row(
-            "SELECT event_kind, title, body_text, message_key, metadata_json
-             FROM ctox_harness_flow_events
-             WHERE event_kind = 'queue.ack_failed' AND message_key = ?1",
-            params![message_keys[0].as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )?;
-        assert_eq!(event.0, "queue.ack_failed");
-        assert_eq!(event.1, "Queue acknowledgement failed");
-        assert!(event.2.contains("handled queue lease(s)"));
-        assert!(event.2.contains("database is locked"));
-        assert_eq!(event.3, message_keys[0]);
-        let metadata: Value = serde_json::from_str(&event.4)?;
-        assert_eq!(
-            metadata.get("ack_operation").and_then(Value::as_str),
-            Some("handled queue lease(s)")
-        );
-        assert_eq!(
-            metadata.get("error").and_then(Value::as_str),
-            Some("database is locked")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn record_queue_ack_refreshes_business_os_command_projection() -> anyhow::Result<()> {
+    fn queue_ack_refreshes_business_os_command_projection() -> anyhow::Result<()> {
         let root = temp_root("business-os-queue-ack-projection");
         let accepted = crate::business_os::store::record_command(
             &root,
@@ -36066,7 +36296,6 @@ Business OS command:
 
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Repair the Kunstmen CRM tasks workflow.".to_string(),
             goal: "Make CRM tasks usable".to_string(),
             preview: "CRM task workflow".to_string(),
@@ -36160,7 +36389,6 @@ Business OS command:
         )
         .expect("failed to create queue task");
         let mut job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -36296,7 +36524,6 @@ Business OS command:
         )
         .expect("failed to create queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -36397,7 +36624,6 @@ Business OS command:
         )
         .expect("failed to create queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -36527,7 +36753,6 @@ Business OS command:
         .expect("claim typed research command");
         let task = claimed.task;
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -36611,7 +36836,6 @@ Business OS command:
         let root = temp_root("ctox-review-feedback-no-durable-target");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Do an ad-hoc task.".to_string(),
             goal: "Ad-hoc task".to_string(),
             preview: "ad-hoc".to_string(),
@@ -36649,7 +36873,6 @@ Business OS command:
         let root = temp_root("ctox-proactive-outbound-review-feedback");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Schreibe eine kurze Mail an Olaf.".to_string(),
             goal: "Founder mail".to_string(),
             preview: "Founder mail".to_string(),
@@ -36715,7 +36938,6 @@ Business OS command:
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -36771,7 +36993,6 @@ Business OS command:
     #[test]
     fn review_feedback_retry_clips_prior_reply_before_requeue_prompt() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Create /tmp/result.txt and verify it.".to_string(),
             goal: "Create durable artifact".to_string(),
             preview: "Create durable artifact".to_string(),
@@ -36826,7 +37047,6 @@ Business OS command:
         )
         .expect("create queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: original_prompt.to_string(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -37036,7 +37256,6 @@ Business OS command:
         .expect("failed to create review self-work");
 
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "External review rejected the last slice.".to_string(),
             goal: "Repair the Kunstmen homepage".to_string(),
             preview: "Review rework".to_string(),
@@ -37665,7 +37884,6 @@ Business OS command:
             track_leased_keys_locked(&mut shared, &["queue-key-1".to_string()], &[]);
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Repair the failed homepage review.".to_string(),
             goal: "Repair the Kunstmen homepage".to_string(),
             preview: "Review rework".to_string(),
@@ -37802,7 +38020,6 @@ Business OS command:
                 .insert("queue-key-1".to_string());
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Monitor inbound approval".to_string(),
             goal: "Continue mission Monitor inbound non-queue channels for explicit owner approval"
                 .to_string(),
@@ -37866,7 +38083,6 @@ Business OS command:
             );
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
                 .to_string(),
             goal: "Kunstmen platform homepage reset".to_string(),
@@ -37945,7 +38161,6 @@ Business OS command:
             );
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
                 .to_string(),
             goal: "Kunstmen platform homepage reset".to_string(),
@@ -38012,7 +38227,6 @@ Business OS command:
         .expect("failed to seed scoped CRM queue task");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: queue_task.metadata.clone(),
             prompt: queue_task.prompt.clone(),
             goal: queue_task.title.clone(),
             preview: queue_task.title.clone(),
@@ -38083,7 +38297,6 @@ Build the public platform server required by the queued task."
         .expect("failed to seed same-thread task");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: queue_task.metadata.clone(),
             prompt: queue_task.prompt.clone(),
             goal: queue_task.title.clone(),
             preview: queue_task.title.clone(),
@@ -38136,7 +38349,6 @@ Keep the work bounded to project preparation."
         .expect("failed to seed prep queue task");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: queue_task.metadata.clone(),
             prompt: queue_task.prompt.clone(),
             goal: queue_task.title.clone(),
             preview: queue_task.title.clone(),
@@ -38201,7 +38413,6 @@ Use shell tools to create or update these files."
         .expect("failed to seed queue task");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: queue_task.metadata.clone(),
             prompt: queue_task.prompt.clone(),
             goal: queue_task.title.clone(),
             preview: queue_task.title.clone(),
@@ -38258,7 +38469,6 @@ Use shell tools to create or update these files."
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease queue task");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "RUN_DIR=\"/tmp/ctox-smoke\". Initialisiere die Datei required-smoke.json."
                 .to_string(),
             goal: "smoke artifact".to_string(),
@@ -38318,7 +38528,6 @@ Use shell tools to create or update these files."
     #[test]
     fn reviewer_limited_internal_queue_review_is_detected_for_hold_path() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Work in /tmp/workspace and implement the requested CLI.".to_string(),
             goal: "internal queue work".to_string(),
             preview: "internal queue work".to_string(),
@@ -38358,7 +38567,6 @@ Use shell tools to create or update these files."
     #[test]
     fn reviewer_limited_detection_does_not_bypass_structured_rework_findings() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Work in /tmp/workspace and implement the requested CLI.".to_string(),
             goal: "internal queue work".to_string(),
             preview: "internal queue work".to_string(),
@@ -38407,7 +38615,6 @@ Use shell tools to create or update these files."
         let root = temp_root("ctox-proactive-founder-outbound-no-strategy-reroute");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Write the honest Kunstmen CRM interim update for the founders.".to_string(),
             goal: "Kunstmen CRM founder interim mail".to_string(),
             preview: "Founder outbound mail about Kunstmen CRM".to_string(),
@@ -38462,7 +38669,6 @@ Use shell tools to create or update these files."
             );
         }
         let source_job = QueuedPrompt {
-            metadata: source_task.metadata.clone(),
             prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
                 .to_string(),
             goal: source_task.title.clone(),
@@ -38488,7 +38694,6 @@ Use shell tools to create or update these files."
                 .find(|task| task.title == "Strategic direction setup")
                 .expect("strategic direction task missing");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -38519,7 +38724,6 @@ Use shell tools to create or update these files."
         let root = temp_root("ctox-internal-harness-smoke-no-strategy-reroute");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Interner CTOX-Harness-Smoke-Test. Keine externe Kommunikation. Pruefe Process-Mining-Selbstdiagnose und Founder review warnings.".to_string(),
             goal: "Process-mining harness smoke".to_string(),
             preview: "Codex harness smoke: process mining and no external communication".to_string(),
@@ -38542,7 +38746,6 @@ Use shell tools to create or update these files."
     #[test]
     fn founder_email_sqlite_lock_is_retryable() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reply to founder".to_string(),
             goal: "Founder communication".to_string(),
             preview: "Founder mail".to_string(),
@@ -38566,7 +38769,6 @@ Use shell tools to create or update these files."
     #[test]
     fn proactive_outbound_sqlite_lock_is_retryable_once() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Send reviewed founder update.".to_string(),
             goal: "Send reviewed founder update".to_string(),
             preview: "Founder outbound".to_string(),
@@ -38605,7 +38807,6 @@ Use shell tools to create or update these files."
     #[test]
     fn proactive_outbound_sqlite_lock_retry_is_bounded() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "A {} before completion. Original task follows.",
                 STANDALONE_OUTBOUND_DB_LOCK_RETRY_MARKER
@@ -38639,7 +38840,6 @@ Use shell tools to create or update these files."
     #[test]
     fn non_founder_sqlite_lock_is_not_founder_retryable() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Run platform work".to_string(),
             goal: "Platform work".to_string(),
             preview: "Queue task".to_string(),
@@ -38661,82 +38861,8 @@ Use shell tools to create or update these files."
     }
 
     #[test]
-    fn exhausted_retry_budget_reaches_the_business_os_command_failure_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-        let accepted = crate::business_os::store::accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_budget_exhaustion",
-                "command_id": "cmd_budget_exhaustion",
-                "module": "research",
-                "command_type": "research.systematic.run",
-                "record_id": "research_budget_task",
-                "status": "pending_sync",
-                "payload": {
-                    "title": "Research · Budget",
-                    "research_run_id": "run-budget-1",
-                    "knowledge_domain": "bearing_design_calculation"
-                },
-                "client_context": { "actor": { "id": "tester", "role": "chef" } }
-            }),
-        )
-        .expect("accept research command");
-        let task_id = accepted
-            .get("task_id")
-            .and_then(Value::as_str)
-            .expect("queue task id")
-            .to_string();
-        let keys = vec![task_id.clone()];
-        let error = "direct session error: ErrorEvent { message: \"stream disconnected before completion: stream closed before response.completed\", codex_error_info: Some(Other) }";
-        // Five retryable failures: the fifth exhausts the hold budget and
-        // terminalizes the queue item inside the channels transaction.
-        for _ in 0..5 {
-            channels::lease_pending_inbound_messages(root, 8, "test-worker").ok();
-            release_retryable_worker_messages(
-                root,
-                &keys,
-                WorkerRetryKind::RuntimeApiFailure,
-                error,
-            )
-            .expect("hold leased message");
-        }
-        let task = channels::load_queue_task(root, &task_id)
-            .expect("load task")
-            .expect("task exists");
-        assert_eq!(task.route_status, "failed", "budget must terminalize");
-        let conn = crate::business_os::store::open_store(root).expect("open store");
-        let status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM business_commands WHERE command_id = ?1",
-                rusqlite::params!["cmd_budget_exhaustion"],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("query command");
-        assert_eq!(
-            status.as_deref(),
-            Some("failed"),
-            "the exhausted budget must reach the Business OS command"
-        );
-        let continuation: Option<String> = conn
-            .query_row(
-                "SELECT command_id FROM business_commands WHERE command_id LIKE 'cmd_auto_%'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("query continuation");
-        assert!(
-            continuation.is_some(),
-            "a research run terminalized by an exhausted retry budget must continue itself"
-        );
-    }
-
-    #[test]
     fn queue_sqlite_lock_is_retryable_runtime_failure() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Bitte antworte exakt mit SKF_CHAT_E2E.".to_string(),
             goal: "Business OS chat task".to_string(),
             preview: "Business OS chat task".to_string(),
@@ -38785,7 +38911,6 @@ Use shell tools to create or update these files."
         channels::lease_queue_task(&root, &task.message_key, "ctox-service-test")
             .expect("failed to lease cv parser queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: original_prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -38885,7 +39010,6 @@ Use shell tools to create or update these files."
     #[test]
     fn no_assistant_retry_prompt_explains_missing_final_message() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Create and verify /tmp/result.txt.".to_string(),
             goal: "Create and verify /tmp/result.txt.".to_string(),
             preview: "Create result artifact".to_string(),
@@ -39021,7 +39145,6 @@ Use shell tools to create or update these files."
         channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
             .expect("lease queue task");
         let job = QueuedPrompt {
-            metadata: task.metadata.clone(),
             prompt: task.prompt.clone(),
             goal: task.title.clone(),
             preview: task.title.clone(),
@@ -39193,7 +39316,7 @@ Use shell tools to create or update these files."
     }
 
     #[test]
-    fn service_runtime_retry_kind_controls_policy_independently_of_summary() {
+    fn runtime_retry_moves_business_command_to_retry_wait_before_releasing_queue() {
         let root = temp_root("business-command-runtime-retry-wait");
         let accepted = crate::business_os::store::record_command(
             &root,
@@ -39250,8 +39373,8 @@ Use shell tools to create or update these files."
         release_retryable_worker_messages(
             &root,
             std::slice::from_ref(&task_id),
-            WorkerRetryKind::RuntimeApiFailure,
-            "turn timeout retry backoff",
+            "retryable runtime/API failure",
+            "provider stream disconnected before completion",
         )
         .expect("release retryable command");
 
@@ -39384,7 +39507,6 @@ Use shell tools to create or update these files."
         channels::ensure_routing_rows_for_inbound(&conn).expect("routing rows");
 
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Please research drone load data".to_string(),
             goal: "Research request".to_string(),
             preview: "Research request".to_string(),
@@ -39416,7 +39538,6 @@ Use shell tools to create or update these files."
             "HARNESS FEEDBACK\nProblem: x\n\nCURRENT TASK\n{original}\n\nRUNTIME FAILURE\ny\n\nREQUIRED ACTIONS\n- z"
         );
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: nested.clone(),
             goal: nested,
             preview: "Project work".to_string(),
@@ -39443,7 +39564,6 @@ Use shell tools to create or update these files."
     fn runtime_retry_prompt_preserves_complete_systematic_research_contract() {
         let original = "Research Run ID: skf-run-001\nResearch Command ID: skf-command-001\n\n1. Fetch sources through the typed CTOX Web Stack.\n2. Persist hash-bound receipts.\n3. Run independent reviews.\n4. Build Knowledge and reports only after review.";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: original.to_string(),
             goal: "SKF verified legacy source re-research".to_string(),
             preview: "SKF verified legacy source re-research".to_string(),
@@ -39491,7 +39611,6 @@ Use shell tools to create or update these files."
             attachments: Vec::new(),
         };
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Send the reviewed founder email.".to_string(),
             goal: "Send the reviewed founder email to Julia".to_string(),
             preview: "reviewed-founder-send Julia".to_string(),
@@ -39677,7 +39796,7 @@ Use shell tools to create or update these files."
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -39719,7 +39838,7 @@ Use shell tools to create or update these files."
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: Some(business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create")),
+                extra_metadata: None,
             },
         )
         .expect("failed to create app queue task");
@@ -39796,7 +39915,6 @@ Use shell tools to create or update these files."
         .expect("failed to seed queue task");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
                 .to_string(),
             goal: "Kunstmen platform homepage reset".to_string(),
@@ -40266,7 +40384,6 @@ Use shell tools to create or update these files."
         {
             let mut shared = lock_shared_state(&state);
             shared.pending_prompts.push_back(QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "wedged".to_string(),
                 goal: "wedged".to_string(),
                 preview: "wedged".to_string(),
@@ -40342,7 +40459,6 @@ Use shell tools to create or update these files."
             );
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "[E-Mail eingegangen]\nSender: founder@example.com\nBetreff: Homepage\nPlease fix the public platform flow and answer me clearly."
                 .to_string(),
             goal: "Reply to founder".to_string(),
@@ -40400,7 +40516,6 @@ Use shell tools to create or update these files."
             );
         }
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "[E-Mail eingegangen]\nSender: founder@example.com\nBetreff: Homepage\nThis platform is too noisy; simplify the page and make interview flow obvious."
                 .to_string(),
             goal: "Reply to founder".to_string(),
@@ -41138,7 +41253,6 @@ Use shell tools to create or update these files."
             channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
                 .expect("failed to lease durable queue task");
         let prompt = QueuedPrompt {
-            metadata: leased.metadata.clone(),
             preview: preview_text(&leased.prompt),
             source_label: "queue".to_string(),
             goal: leased.title.clone(),
@@ -41757,7 +41871,6 @@ Was jetzt zu tun ist:\n\
         .expect("failed to create completed expertise pass");
 
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Do the platform IA pass.".to_string(),
             goal: "Kunstmen platform homepage reset".to_string(),
             preview: "Kunstmen platform IA pass".to_string(),
@@ -41905,7 +42018,6 @@ Was jetzt zu tun ist:\n\
             &root,
             &state,
             QueuedPrompt {
-                metadata: Value::Null,
                 prompt: "Continue mission".to_string(),
                 goal: "Continue mission".to_string(),
                 preview: "Continue mission".to_string(),
@@ -42330,7 +42442,6 @@ Was jetzt zu tun ist:\n\
     #[test]
     fn queued_prompt_without_outbound_email_yields_no_proactive_action() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Please reach out to founder@external.test about the Kunstmen update."
                 .to_string(),
             goal: "outreach".to_string(),
@@ -42364,7 +42475,6 @@ Was jetzt zu tun ist:\n\
             attachments: Vec::new(),
         };
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Body".to_string(),
             goal: "Body".to_string(),
             preview: "Body".to_string(),
@@ -42402,7 +42512,6 @@ Was jetzt zu tun ist:\n\
             attachments: Vec::new(),
         };
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Draft a quick update for the founder.".to_string(),
             goal: "Draft a quick update for the founder.".to_string(),
             preview: "preview".to_string(),
@@ -42428,7 +42537,6 @@ Was jetzt zu tun ist:\n\
     #[test]
     fn founder_outbound_anchor_key_returns_none_when_unset_and_no_lease() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reach out to the founder about Kunstmen.".to_string(),
             goal: "Reach out to the founder about Kunstmen.".to_string(),
             preview: "preview".to_string(),
@@ -42450,7 +42558,6 @@ Was jetzt zu tun ist:\n\
     #[test]
     fn founder_outbound_anchor_key_falls_back_to_leased_message_key() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Reply to the founder.".to_string(),
             goal: "Reply to the founder.".to_string(),
             preview: "preview".to_string(),
@@ -42570,7 +42677,6 @@ Was jetzt zu tun ist:\n\
         crate::skill_store::bootstrap_embedded_system_skills(&root)
             .expect("bootstrap embedded system skills");
         let make_job = |skill: &str| QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Build the complete exhibitor-list workbook.".to_string(),
             goal: "complete list".to_string(),
             preview: "list".to_string(),
@@ -42659,7 +42765,6 @@ Was jetzt zu tun ist:\n\
         let tiny = root.join("tiny.xlsx");
         write_minimal_xlsx(&tiny, &["company", "PLZ"], 19);
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Bitte alle Aussteller der Intersolar mit PLZ als komplette Excel.".to_string(),
             goal: "Intersolar alle Aussteller".to_string(),
             preview: "list".to_string(),
@@ -42689,7 +42794,6 @@ Was jetzt zu tun ist:\n\
         // A generic scraping artifact (no complete-list signal) bound to the same
         // no-contract skill is NOT gated -> the fallback does not over-gate.
         let job_generic = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Bitte die Tabelle von example.com auslesen.".to_string(),
             goal: "scrape".to_string(),
             ..job.clone()
@@ -42777,7 +42881,6 @@ Was jetzt zu tun ist:\n\
     #[test]
     fn reviewed_founder_send_prompt_declares_outcome_artifact() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt:
                 "Schreibe und sende per reviewed-founder-send eine Mail an j.kienzler@example.test."
                     .to_string(),
@@ -42806,7 +42909,6 @@ Was jetzt zu tun ist:\n\
     fn outcome_witness_blocks_claimed_mail_completion_without_delivery_ref() {
         let root = temp_root("outcome-witness-missing-delivery");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt:
                 "Schreibe und sende per reviewed-founder-send eine Mail an j.kienzler@example.test."
                     .to_string(),
@@ -42856,7 +42958,6 @@ Was jetzt zu tun ist:\n\
     fn outcome_witness_recovery_job_cannot_queue_another_outbound_recovery() {
         let root = temp_root("outcome-witness-outbound-recovery-loop-stop");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Sende den freigegebenen Body.".to_string(),
             goal: "send mail".to_string(),
             preview: "send mail".to_string(),
@@ -42886,7 +42987,6 @@ Was jetzt zu tun ist:\n\
     #[test]
     fn queue_prompt_declares_required_workspace_file_artifacts() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "RUN_DIR=\"/tmp/ctox-tb2-run\"\nInitialisiere die Dateien logbook.md, controller.json, results.jsonl und blogpost-notes.md.".to_string(),
             goal: "bootstrap artifacts".to_string(),
             preview: "bootstrap artifacts".to_string(),
@@ -42920,7 +43020,6 @@ Was jetzt zu tun ist:\n\
     #[test]
     fn queue_prompt_declares_smoke_workspace_file_artifact() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "RUN_DIR=\"/tmp/ctox-smoke\". Initialisiere die Datei required-smoke.json."
                 .to_string(),
             goal: "smoke artifact".to_string(),
@@ -42948,7 +43047,6 @@ Was jetzt zu tun ist:\n\
     fn chat_prompt_declares_workspace_relative_smoke_artifact() {
         let run_dir = "/tmp/ctox-model-smoke/20260506T195937-hy3-responses-id-smoke";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Work only inside this workspace: {run_dir}\n\
 Create a file named smoke.txt inside that workspace containing exactly HY3_CTOX_OK.\n\
@@ -42996,7 +43094,6 @@ Use shell tools and verify with `test -f {run_dir}/smoke.txt` before claiming co
             .expect("failed to write lazy large output");
 
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Create workspace files.".to_string(),
             goal: "workspace outputs".to_string(),
             preview: "workspace outputs".to_string(),
@@ -43080,7 +43177,6 @@ Use shell tools and verify with `test -f {run_dir}/smoke.txt` before claiming co
         let root = temp_root("business-os-app-skip-workspace-sync");
         let workspace = root.join("workspace");
         let app_job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
             goal: "Build Subscriptions app".to_string(),
             preview: "Build Subscriptions app".to_string(),
@@ -43095,7 +43191,6 @@ Use shell tools and verify with `test -f {run_dir}/smoke.txt` before claiming co
             outbound_anchor: None,
         };
         let normal_job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Create workspace files.".to_string(),
             goal: "workspace outputs".to_string(),
             preview: "workspace outputs".to_string(),
@@ -43123,7 +43218,6 @@ Use shell tools and verify with `test -f {run_dir}/smoke.txt` before claiming co
         std::fs::write(wrong_dir.join("smoke.txt"), "HY3_CTOX_OK\n")
             .expect("failed to write wrong smoke file");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Work only inside this workspace: {}\n\
 Create a file named smoke.txt inside that workspace containing exactly HY3_CTOX_OK.",
@@ -43164,7 +43258,6 @@ Create a file named smoke.txt inside that workspace containing exactly HY3_CTOX_
     fn only_required_durable_files_section_limits_workspace_artifacts() {
         let run_dir = "/tmp/ctox-artifact-run";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Runtime requirements:\n- record context_window in summary.md.\n\n\
 Only required durable files for this controller turn:\n\
@@ -43217,7 +43310,6 @@ Initial completion criteria:\n\
     fn durable_artifact_contract_section_limits_workspace_artifacts() {
         let run_dir = "/tmp/ctox-artifact-run";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "DURABLE ARTIFACT CONTRACT\n\
 Create these five files immediately:\n\
@@ -43264,7 +43356,6 @@ Write {run_dir}/controller.json as valid JSON after planning. Helper files like 
     fn artifact_first_prompt_front_loads_declared_workspace_files() {
         let run_dir = "/tmp/ctox-artifact-run";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Only required durable files for this controller turn:\n\
 - {run_dir}/controller.json\n\
@@ -43304,7 +43395,6 @@ Start by discovering project tasks."
         let run_dir = root.join("artifact-runs/feedback-retry");
         let run_dir = run_dir.to_string_lossy().into_owned();
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "HARNESS FEEDBACK\n\
 Only required durable files for this controller turn:\n\
@@ -43345,7 +43435,6 @@ The controller must create preparation queue/tickets and record queue:system::* 
         let run_dir = root.join("artifact-runs/feedback-no-circuit-block");
         let run_dir = run_dir.to_string_lossy().into_owned();
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "HARNESS FEEDBACK\n\
 Only required durable files for this controller turn:\n\
@@ -43395,7 +43484,6 @@ The controller must update stale files itself."
         let run_dir = root.join("artifact-runs/controller-no-circuit-block");
         let run_dir = run_dir.to_string_lossy().into_owned();
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Controller artifact contract:\n\
 - {run_dir}/controller.json\n\
@@ -43448,7 +43536,6 @@ The controller must update stale files itself."
         let run_dir_text = run_dir.to_string_lossy().into_owned();
         let controller_text = controller.to_string_lossy().into_owned();
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "HARNESS FEEDBACK\n\
 Only required durable files for this controller turn:\n\
@@ -43516,7 +43603,6 @@ The controller must update stale files itself."
         let run_dir = root.join("artifact-runs/feedback-no-recovery");
         let run_dir = run_dir.to_string_lossy().into_owned();
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "HARNESS FEEDBACK\n\
 Only required durable files for this controller turn:\n\
@@ -43555,7 +43641,6 @@ The controller must create preparation queue/tickets and record queue:system::* 
     #[test]
     fn outcome_witness_recovery_artifact_job_does_not_chain_recovery_prompt() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Create /tmp/ctox-outcome-recovery/result.txt and verify it.".to_string(),
             goal: "Complete required artifact".to_string(),
             preview: "Complete required artifact".to_string(),
@@ -43576,7 +43661,6 @@ The controller must create preparation queue/tickets and record queue:system::* 
     #[test]
     fn business_os_app_tasks_do_not_queue_generic_artifact_outcome_recovery() {
         let job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("contracts", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: contracts\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/contracts\nBusiness OS command:\n- type: ctox.business_os.app.create\n\nOnly required durable files for this controller turn:\n- runtime/business-os/installed-modules/contracts/module.json\n- runtime/business-os/installed-modules/contracts/index.js\n".to_string(),
             goal: "Create contracts app".to_string(),
             preview: "Create contracts app".to_string(),
@@ -43597,7 +43681,6 @@ The controller must create preparation queue/tickets and record queue:system::* 
     #[test]
     fn business_os_app_tasks_do_not_infer_root_workspace_file_artifacts() {
         let job = QueuedPrompt {
-            metadata: business_os_app_task_metadata("subscriptions", "ctox.business_os.app.create"),
             prompt: "Business OS app task metadata:\n- module_id: subscriptions\n- install_target: runtime-installed-module\n- app_directory: runtime/business-os/installed-modules/subscriptions\nBusiness OS command:\n- type: ctox.business_os.app.create\n".to_string(),
             goal: "Create subscriptions app".to_string(),
             preview: "Create subscriptions app".to_string(),
@@ -43620,7 +43703,6 @@ The controller must create preparation queue/tickets and record queue:system::* 
     fn review_feedback_uses_generic_artifact_prompt() {
         let run_dir = "/tmp/ctox-artifact-review-feedback-run";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "HARNESS FEEDBACK\n\
 The previous controller turn is incomplete. Update these files now:\n\
@@ -43659,7 +43741,6 @@ The previous controller turn is incomplete. Update these files now:\n\
     #[test]
     fn queue_guard_slice_does_not_spawn_completion_review_rework() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Use the queue-cleanup skill first. Inspect service state and reduce queue pressure.".to_string(),
             goal: "Queue pressure guard".to_string(),
             preview: "Queue pressure guard".to_string(),
@@ -43854,7 +43935,6 @@ The previous controller turn is incomplete. Update these files now:\n\
     #[test]
     fn synthetic_e2e_bench_queue_tasks_are_quarantined_before_dispatch() {
         let synthetic = channels::QueueTaskView {
-            metadata: serde_json::Value::Null,
             message_key: "queue:system::synthetic".to_string(),
             thread_key: "business-os/bench_contracts_rfix14_thread_isolation".to_string(),
             title: "Contract review follow-up".to_string(),
@@ -43876,7 +43956,6 @@ The previous controller turn is incomplete. Update these files now:\n\
         assert!(queue_task_is_synthetic_e2e_bench_leftover(&synthetic));
 
         let normal = channels::QueueTaskView {
-            metadata: serde_json::Value::Null,
             message_key: "queue:system::normal".to_string(),
             thread_key: "business-os/contracts".to_string(),
             title: "Contract review follow-up".to_string(),
@@ -43942,7 +44021,6 @@ The previous controller turn is incomplete. Update these files now:\n\
     fn artifact_first_prompt_keeps_original_task_for_generic_artifact_jobs() {
         let run_dir = "/tmp/ctox-generic-artifacts";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Only required durable files for this worker turn:\n\
 - {run_dir}/summary.md\n\n\
@@ -43974,7 +44052,6 @@ Start by checking the local service status."
         let workspace = "/tmp/ctox-research/workspace";
         let output = "/tmp/ctox-research/output/report.docx";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Workspace:\n{workspace}\n\n\
 Finaler DOCX-Pfad:\n{output}\n\n\
@@ -44014,7 +44091,6 @@ Im Workspace muss synthesis/helper-run.json existieren."
     #[test]
     fn artifact_first_prompt_leaves_non_artifact_jobs_unchanged() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Summarize the current service status.".to_string(),
             goal: "status".to_string(),
             preview: "status".to_string(),
@@ -44035,7 +44111,6 @@ Im Workspace muss synthesis/helper-run.json existieren."
     #[test]
     fn business_os_chat_prompt_routes_created_files_through_files_app() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Erzeuge aus allen 816 Messungen eine CSV-Datei.".to_string(),
             goal: "csv export".to_string(),
             preview: "csv export".to_string(),
@@ -44066,7 +44141,6 @@ Im Workspace muss synthesis/helper-run.json existieren."
         std::fs::create_dir_all(&nested).expect("nested export dir");
         std::fs::write(nested.join("measurements.csv"), b"rpm;force_n\n1;2\n").expect("CSV export");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Exportiere die Daten.".to_string(),
             goal: "export".to_string(),
             preview: "export".to_string(),
@@ -44093,7 +44167,6 @@ Im Workspace muss synthesis/helper-run.json existieren."
         let root = temp_root("outcome-witness-missing-workspace-file");
         let run_dir = root.join("tb2-run");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "RUN_DIR=\"{}\"\nInitialisiere die Dateien logbook.md und controller.json.",
                 run_dir.display()
@@ -44149,7 +44222,6 @@ Im Workspace muss synthesis/helper-run.json existieren."
         std::fs::write(run_dir.join("controller.json"), "{}\n")
             .expect("failed to write controller");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "RUN_DIR=\"{}\"\nInitialisiere die Dateien logbook.md und controller.json.",
                 run_dir.display()
@@ -44184,7 +44256,6 @@ Im Workspace muss synthesis/helper-run.json existieren."
         std::fs::create_dir_all(&run_dir).expect("failed to create artifact dir");
         let artifact_path = run_dir.join("required-smoke.json");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Only required durable files for this controller turn:\n- {}\n",
                 artifact_path.display()
@@ -44282,7 +44353,6 @@ Exit after the write command.",
         let leased = channels::lease_queue_task(&root, &task.message_key, "test")
             .expect("failed to lease queue task");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt,
             goal: "checkpoint stale".to_string(),
             preview: "checkpoint stale".to_string(),
@@ -44347,7 +44417,6 @@ Exit after the write command.",
             .expect("failed to write fresh controller");
         std::fs::write(&logbook, "# checkpoint\n").expect("failed to write fresh logbook");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt,
             goal: "checkpoint fresh".to_string(),
             preview: "checkpoint fresh".to_string(),
@@ -44375,7 +44444,6 @@ Exit after the write command.",
     #[test]
     fn workspace_file_recovery_prompt_names_missing_paths() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "RUN_DIR=\"/tmp/ctox-artifact-run\"\nInitialisiere die Dateien logbook.md und controller.json.".to_string(),
             goal: "bootstrap artifacts".to_string(),
             preview: "bootstrap artifacts".to_string(),
@@ -44408,7 +44476,6 @@ Exit after the write command.",
         std::fs::create_dir_all(&controller_path)
             .expect("failed to create directory at artifact path");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "Only required durable files for this controller turn:\n- {}\n",
                 controller_path.display()
@@ -44470,7 +44537,6 @@ Exit after the write command.",
         let leased = channels::lease_queue_task(&root, &task.message_key, "test")
             .expect("failed to lease queue task");
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt,
             goal: "checkpoint stale recovery".to_string(),
             preview: "checkpoint stale recovery".to_string(),
@@ -44498,7 +44564,6 @@ Exit after the write command.",
     fn recovery_artifact_section_does_not_infer_paths_from_original_task() {
         let run_dir = "/tmp/ctox-tb2-run";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: format!(
                 "HARNESS FEEDBACK\n\
 Problem: expected artifacts are missing.\n\n\
@@ -44577,7 +44642,6 @@ Those are not durable artifact requirements."
         .expect("failed to insert accepted outbound row");
         drop(conn);
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Schreibe den finalen Body.".to_string(),
             goal: "send mail".to_string(),
             preview: "send mail".to_string(),
@@ -44621,7 +44685,6 @@ Those are not durable artifact requirements."
         let approved_body =
             "Hallo Julia,\n\ndas ist der freigegebene Text.\n\nViele Gruesse\nINF Yoda";
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Schreibe eine Mail an Julia.".to_string(),
             goal: "send mail".to_string(),
             preview: "send mail".to_string(),
@@ -44661,7 +44724,6 @@ Those are not durable artifact requirements."
     #[test]
     fn proactive_founder_outbound_status_reply_is_rewrite_blocked() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Sende Jill die korrigierte Excel per E-Mail.".to_string(),
             goal: "send corrected Excel".to_string(),
             preview: "send corrected Excel".to_string(),
@@ -44708,7 +44770,6 @@ Those are not durable artifact requirements."
     #[test]
     fn proactive_founder_outbound_body_prompt_requires_body_only() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Sende Jill die korrigierte Excel per E-Mail.".to_string(),
             goal: "send corrected Excel".to_string(),
             preview: "send corrected Excel".to_string(),
@@ -44743,7 +44804,6 @@ Those are not durable artifact requirements."
     #[test]
     fn outcome_witness_recovery_keeps_worker_out_of_manual_send_path() {
         let job = QueuedPrompt {
-            metadata: Value::Null,
             prompt:
                 "Communication recovery: re-check context and produce a corrected draft if needed."
                     .to_string(),
@@ -44778,7 +44838,6 @@ Those are not durable artifact requirements."
     #[test]
     fn outbound_in_process_review_retry_does_not_chain_retry_sources() {
         let mut job = QueuedPrompt {
-            metadata: Value::Null,
             prompt: "Schreibe eine Mail an Jill.".to_string(),
             goal: "send mail".to_string(),
             preview: "send mail".to_string(),
@@ -45215,7 +45274,6 @@ Those are not durable artifact requirements."
 
     fn self_work_job() -> QueuedPrompt {
         QueuedPrompt {
-            metadata: Value::Null,
             prompt: "work on CRM".to_string(),
             goal: "finish CRM integration".to_string(),
             preview: "CRM integration".to_string(),

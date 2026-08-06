@@ -20,11 +20,11 @@ anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 csv = "1"
-flate2 = "1"
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
 ctox-doc-stack = { path = "src/tools/doc-stack" }
+ctox-cliproxyapi = { path = "src/core/execution/cliproxyapi", default-features = false, features = ["codex-http-transport"] }
 ctox-appsec-pentest = { path = "src/tools/appsec-pentest" }
 ctox-pdf-parse = { path = "src/tools/pdf-parse" }
 ctox-qwen3-embedding-0-6b = { path = "src/core/inference/models/qwen3_embedding_0_6b" }
@@ -104,7 +104,10 @@ windows-sys = { version = "0.59", features = [
 tempfile = "3"
 
 [workspace]
-members = ["src/tools/postgres-adapter"]
+members = [
+    "src/core/execution/cliproxyapi",
+    "src/tools/postgres-adapter",
+]
 exclude = [
     "src/core/communication/whatsapp_rust",
     "src/core/harness",

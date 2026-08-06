@@ -120,21 +120,76 @@ impl BrowserRuntimeManager {
         }
     }
 
-    /// Return an existing live session, if any.
+    fn record_crash(&self, session_id: &str) {
+        if let Ok(mut history) = self.crash_history.lock() {
+            history
+                .entry(session_id.to_string())
+                .or_default()
+                .push(Instant::now());
+        }
+    }
+
+    fn clear_crash_history(&self, session_id: &str) {
+        if let Ok(mut history) = self.crash_history.lock() {
+            history.remove(session_id);
+        }
+    }
+
+    /// Remove runner handles whose process has already exited. A dead handle is
+    /// not a browser session and must not consume either runtime budget.
+    fn reap_exited_sessions(&self) -> Vec<String> {
+        let exited = {
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return Vec::new();
+            };
+            let exited = sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    let running = match session.handle.lock() {
+                        Ok(mut handle) => match handle.is_running() {
+                            Ok(running) => running,
+                            Err(err) => {
+                                eprintln!(
+                                    "[business-os] browser session liveness check failed \
+                                     session_id={session_id}: {err:#}"
+                                );
+                                false
+                            }
+                        },
+                        Err(_) => false,
+                    };
+                    (!running).then_some(session_id.clone())
+                })
+                .collect::<Vec<_>>();
+            for session_id in &exited {
+                sessions.remove(session_id);
+            }
+            exited
+        };
+        for session_id in &exited {
+            self.record_crash(session_id);
+            eprintln!(
+                "[business-os] reaped browser session without a live process \
+                 session_id={session_id}"
+            );
+        }
+        exited
+    }
+
+    /// Return an existing process-backed session, if any.
     pub fn get(&self, session_id: &str) -> Option<Arc<LiveBrowserSession>> {
+        self.reap_exited_sessions();
         self.sessions.lock().ok()?.get(session_id).cloned()
     }
 
     /// True when a live process currently backs `session_id`.
     pub fn has_session(&self, session_id: &str) -> bool {
-        self.sessions
-            .lock()
-            .map(|map| map.contains_key(session_id))
-            .unwrap_or(false)
+        self.get(session_id).is_some()
     }
 
-    /// All currently live session ids.
+    /// All currently process-backed session ids.
     pub fn active_session_ids(&self) -> Vec<String> {
+        self.reap_exited_sessions();
         self.sessions
             .lock()
             .map(|map| map.keys().cloned().collect())
@@ -151,6 +206,7 @@ impl BrowserRuntimeManager {
         viewport_h: u64,
         profile_owner: &str,
         private_profile: bool,
+        user_requested_start: bool,
     ) -> Result<Arc<LiveBrowserSession>> {
         if let Some(session) = self.get(session_id) {
             return Ok(session);
@@ -182,7 +238,29 @@ impl BrowserRuntimeManager {
         if let Ok(mut history) = self.crash_history.lock() {
             let crashes = history.entry(session_id.to_string()).or_default();
             crashes.retain(|at| at.elapsed() < Duration::from_secs(5 * 60));
-            anyhow::ensure!(crashes.len() < 3, "browser crash-loop protection is active");
+            if crashes.len() >= 3 {
+                if user_requested_start {
+                    eprintln!(
+                        "[business-os] browser crash-loop guard overridden by explicit start \
+                         session_id={session_id} recent_failures={} ",
+                        crashes.len()
+                    );
+                    crashes.clear();
+                } else {
+                    let detail = format!(
+                        "browser crash-loop protection paused automatic restart for session \
+                         `{session_id}` after {} failures within 5 minutes; start the session \
+                         again to request one fresh attempt",
+                        crashes.len()
+                    );
+                    eprintln!(
+                        "[business-os] browser session start blocked session_id={session_id} \
+                         gate=crash_loop recent_failures={}: {detail}",
+                        crashes.len()
+                    );
+                    anyhow::bail!(detail);
+                }
+            }
         }
         let max_sessions = crate::inference::runtime_env::get_runtime_env_value(
             &root,
@@ -199,18 +277,36 @@ impl BrowserRuntimeManager {
         .unwrap_or(3)
         .clamp(1, 16);
         if let Ok(sessions) = self.sessions.lock() {
-            anyhow::ensure!(
-                sessions.len() < max_sessions,
-                "browser session budget is exhausted"
-            );
-            anyhow::ensure!(
-                sessions
-                    .values()
-                    .filter(|session| session.owner_user_id == profile_owner)
-                    .count()
-                    < max_sessions_per_user,
-                "browser session budget for this user is exhausted"
-            );
+            let live_sessions = sessions.len();
+            if live_sessions >= max_sessions {
+                let detail = format!(
+                    "browser session limit reached: {live_sessions}/{max_sessions} live \
+                     sessions; stop another active session and try again"
+                );
+                eprintln!(
+                    "[business-os] browser session start blocked session_id={session_id} \
+                     gate=global_budget live_sessions={live_sessions} limit={max_sessions}: \
+                     {detail}"
+                );
+                anyhow::bail!(detail);
+            }
+            let live_user_sessions = sessions
+                .values()
+                .filter(|session| session.owner_user_id == profile_owner)
+                .count();
+            if live_user_sessions >= max_sessions_per_user {
+                let detail = format!(
+                    "browser session limit for this user reached: \
+                     {live_user_sessions}/{max_sessions_per_user} live sessions; stop one of \
+                     your active sessions and try again"
+                );
+                eprintln!(
+                    "[business-os] browser session start blocked session_id={session_id} \
+                     gate=user_budget live_user_sessions={live_user_sessions} \
+                     limit={max_sessions_per_user}: {detail}"
+                );
+                anyhow::bail!(detail);
+            }
         }
         let digest = Sha256::digest(profile_key.as_bytes());
         let profile_kind = if private_profile {
@@ -237,9 +333,28 @@ impl BrowserRuntimeManager {
             downloads_dir: Some(downloads_dir.clone()),
         };
         let session_root = root.clone();
-        let handle = tokio::task::spawn_blocking(move || spawn_persistent_browser(&root, &spawn))
-            .await
-            .context("browser runtime spawn worker panicked")??;
+        eprintln!(
+            "[business-os] browser session start requested session_id={session_id} \
+             private_profile={private_profile} viewport={}x{}",
+            viewport_w, viewport_h
+        );
+        let handle =
+            match tokio::task::spawn_blocking(move || spawn_persistent_browser(&root, &spawn))
+                .await
+                .context("browser runtime spawn worker panicked")
+                .and_then(|result| result)
+            {
+                Ok(handle) => handle,
+                Err(err) => {
+                    self.record_crash(session_id);
+                    eprintln!(
+                        "[business-os] browser session start failed session_id={session_id}: \
+                     {err:#}"
+                    );
+                    return Err(err);
+                }
+            };
+        let runner_pid = handle.process_id();
         let session = Arc::new(LiveBrowserSession {
             handle: Mutex::new(handle),
             profile_key,
@@ -254,6 +369,11 @@ impl BrowserRuntimeManager {
         if let Ok(mut map) = self.sessions.lock() {
             map.insert(session_id.to_string(), Arc::clone(&session));
         }
+        self.clear_crash_history(session_id);
+        eprintln!(
+            "[business-os] browser session start succeeded session_id={session_id} \
+             runner_pid={runner_pid}; persistent Chromium reported ready"
+        );
         Ok(session)
     }
 
@@ -315,6 +435,7 @@ impl BrowserRuntimeManager {
             })
             .await;
         }
+        self.clear_crash_history(session_id);
     }
 
     /// Forget a session without a graceful close (used when the process is
@@ -327,12 +448,7 @@ impl BrowserRuntimeManager {
 
     pub fn drop_session_after_crash(&self, session_id: &str) {
         self.drop_session(session_id);
-        if let Ok(mut history) = self.crash_history.lock() {
-            history
-                .entry(session_id.to_string())
-                .or_default()
-                .push(Instant::now());
-        }
+        self.record_crash(session_id);
     }
 }
 

@@ -168,11 +168,18 @@ as the public installer entry point.
 - Browser Business OS module/app work must respect the shell/runtime split:
   apps receive database handles from the shell; they must not import upstream
   `rxdb` or invent their own sync path.
-- Coding-agent provider integration under `src/core/coding_agents/` is a
-  Business OS control surface for external tools such as Codex, Claude Code,
-  Antigravity, and the mock provider. Keep provider command execution bounded,
-  persisted, and reflected through Business OS policy/command status rather
-  than ad hoc background processes.
+- Coding work on a Business OS app runs through CTOX's own embedded pi sidecar
+  under `src/core/coding_agents/` (`pi_sidecar.rs` + `pi-sidecar/`), driven by
+  the `ctox.coding.turn` business command or `ctox coding-agent turn`. The
+  sidecar is a bounded leaf executor: one fresh daemon per turn over
+  LocalTransport, killed on drop, never sharing the CTOX daemon's process
+  authority. Turns must stay bounded, persisted, and reflected through Business
+  OS policy/command status rather than ad hoc background processes.
+- There is deliberately **no vendor-CLI wrapper** any more. Installing and
+  authenticating external `codex`/`claude`/`agy` binaries from here was removed
+  once nothing dispatched to it; provider authentication belongs to the
+  CLIProxyAPI gateway (`src/core/execution/cliproxyapi_host.rs`). Do not
+  reintroduce per-vendor installers or auth flows in this directory.
 
 ## Validation
 

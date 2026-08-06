@@ -12,10 +12,8 @@ import {
 import { masterAcknowledgesLocal, openRecoveryJournal } from './recovery-journal.mjs';
 import { recoverQueryMetaQuota } from './query-meta-storage.mjs';
 
-const DB_VERSION = 4;
+const DB_VERSION = 3;
 const DOCUMENT_STORE = 'documents';
-const COLLECTION_SCHEMA_MARKER_STORE = 'collectionSchemaMarkers';
-const COLLECTION_SCHEMA_MARKER_FORMAT = 'ctox.collection-schema-marker.v1';
 const SCHEMA_INDEX_ENTRIES = 'schemaIndexEntries';
 const PUSHABLE_LWT_INDEX = 'collectionPushableLwtId';
 const OPEN_DATABASE_TIMEOUT_MS = 4000;
@@ -24,7 +22,6 @@ const REPLICATION_MIN_SCAN_LIMIT = 1;
 const REPLICATION_MAX_SCAN_LIMIT = 5000;
 const INDEX_HIGH_KEY = '\uffff';
 const unsyncedCountScheduled = new WeakSet();
-const collectionMutationTails = new Map();
 
 export async function openCtoxIndexedDbStorage({ databaseName = 'ctox_business_os_js_v1' } = {}) {
   if (!globalThis.indexedDB) {
@@ -49,83 +46,17 @@ export class CtoxIndexedDbStorage {
     this.quotaCoordinator = quotaCoordinator;
   }
 
-  collection(name, {
-    schema = null,
-    schemaVersion = null,
-    effectiveSchemaHash = '',
-    conflictStrategy = 'lww',
-    deleteStrategy = 'default',
-  } = {}) {
+  collection(name, { schema = null, conflictStrategy = 'lww', deleteStrategy = 'default' } = {}) {
     if (!name || typeof name !== 'string') {
       throw new TypeError('collection name must be a non-empty string');
     }
     return new CtoxIndexedDbCollection(this.db, name, {
       schema,
-      schemaVersion,
-      effectiveSchemaHash,
       conflictStrategy,
       deleteStrategy,
       recoveryJournal: this.recoveryJournal,
       quotaCoordinator: this.quotaCoordinator,
     });
-  }
-
-  async prepareCollectionSchema({
-    collection,
-    declaredVersion,
-    effectiveSchemaHash,
-    invalidateExternalState = null,
-  } = {}) {
-    const desired = collectionSchemaMarker({
-      collection,
-      declaredVersion,
-      effectiveSchemaHash,
-      state: 'ready',
-    });
-    return runSerializedCollectionMutation(this.db, collection, async () => {
-      const snapshot = await readCollectionSchemaSnapshot(this.db, collection);
-      const pending = await readPendingRecoverySummary(this.recoveryJournal, collection);
-      const markerMatches = collectionSchemaMarkerMatches(snapshot.marker, desired);
-      if (markerMatches && snapshot.marker?.state === 'ready') {
-        return { invalidated: false, marker: snapshot.marker, clearedRows: 0 };
-      }
-
-      // A missing marker is not proof that an empty primary DB is fresh: the
-      // primary may have been reset/evicted while retained checkpoints or demand
-      // windows survived. Treat absence exactly like a version mismatch so the
-      // first marker is established only after every cache sidecar is reset.
-      requireCrossContextCollectionLock(this.db, collection);
-      const destructive = await guardAndInvalidateCollection(this.db, {
-        collection,
-        desired,
-        pending,
-      });
-      try {
-        await invalidateExternalState?.({
-          collection,
-          previousMarker: destructive.previousMarker,
-          marker: destructive.marker,
-          clearedRows: destructive.clearedRows,
-        });
-      } catch (cause) {
-        throw collectionVersionError(
-          'collection_version_invalidation_failed',
-          `Browser cache invalidation for ${collection} did not finish; the collection remains fail-closed.`,
-          { collection, cause, marker: destructive.marker },
-        );
-      }
-      const ready = await finalizeCollectionSchemaMarker(this.db, desired);
-      return {
-        invalidated: true,
-        previousMarker: destructive.previousMarker,
-        marker: ready,
-        clearedRows: destructive.clearedRows,
-      };
-    }, { requireCrossContext: true });
-  }
-
-  async collectionSchemaMarker(collection) {
-    return readCollectionSchemaMarker(this.db, collection);
   }
 
   async unsyncedWriteSummary() {
@@ -141,8 +72,6 @@ export class CtoxIndexedDbStorage {
 export class CtoxIndexedDbCollection {
   constructor(db, name, {
     schema = null,
-    schemaVersion = null,
-    effectiveSchemaHash = '',
     conflictStrategy = 'lww',
     deleteStrategy = 'default',
     recoveryJournal = null,
@@ -161,14 +90,6 @@ export class CtoxIndexedDbCollection {
     // combine 'field-merge' updates with 'final' deletes.
     this.deleteStrategy = normalizeDeleteStrategy(deleteStrategy);
     this.primaryPath = primaryPathFromSchema(schema);
-    this.schemaMarker = Number.isInteger(Number(schemaVersion)) && effectiveSchemaHash
-      ? collectionSchemaMarker({
-        collection: name,
-        declaredVersion: Number(schemaVersion),
-        effectiveSchemaHash,
-        state: 'ready',
-      })
-      : null;
     this.indexes = normalizeSchemaIndexes(schema, this.primaryPath);
     this.indexSignature = schemaIndexSignature(this.indexes);
     this.schemaIndexReady = null;
@@ -205,8 +126,7 @@ export class CtoxIndexedDbCollection {
   async initializeRecovery() {
     if (!this.recoveryJournal) return;
     if (!this.recoveryReady) {
-      this.recoveryReady = runSerializedCollectionMutation(this.db, this.name, async () => {
-        await this.assertCollectionSchemaReady();
+      this.recoveryReady = (async () => {
         this.recoverySchemaHash = await schemaHash(this.schema || {}, this.name);
         this.recoveryJournal.registerCollection(this.name, {
           schemaHash: this.recoverySchemaHash,
@@ -239,24 +159,9 @@ export class CtoxIndexedDbCollection {
         });
         await this.acknowledgePersistedMasterRecovery();
         await this.recoveryJournal.replayRegisteredCollections(this.name);
-      });
+      })();
     }
     return this.recoveryReady;
-  }
-
-  async assertCollectionSchemaReady() {
-    if (!this.schemaMarker) return;
-    const persisted = await readCollectionSchemaMarker(this.db, this.name);
-    if (collectionSchemaMarkerMatches(persisted, this.schemaMarker) && persisted?.state === 'ready') return;
-    throw collectionVersionError(
-      'collection_version_not_ready',
-      `Collection ${this.name} is not writable until browser cache version invalidation finishes.`,
-      { collection: this.name, expectedMarker: this.schemaMarker, persistedMarker: persisted },
-    );
-  }
-
-  async collectionSchemaMarker() {
-    return readCollectionSchemaMarker(this.db, this.name);
   }
 
   async acknowledgePersistedMasterRecovery() {
@@ -361,20 +266,13 @@ export class CtoxIndexedDbCollection {
     return success[id] || null;
   }
 
-  async bulkUpsert(docs, options = {}) {
-    await this.initializeRecovery();
-    return runSerializedCollectionMutation(this.db, this.name, async () => {
-      await this.assertCollectionSchemaReady();
-      return this._bulkUpsertJournaled(docs, options);
-    });
-  }
-
-  async _bulkUpsertJournaled(docs, {
+  async bulkUpsert(docs, {
     now = Date.now(),
     replicationOrigin = null,
     skipJournal = false,
     recoveryReplay = false,
   } = {}) {
+    await this.initializeRecovery();
     const journalWrite = Boolean(this.recoveryJournal)
       && !skipJournal && !replicationOrigin?.role && Array.isArray(docs);
     const prepared = journalWrite ? await this.prepareJournalRows(docs) : { rows: docs, baseById: null };
@@ -513,15 +411,7 @@ export class CtoxIndexedDbCollection {
     return { success, error, overwrittenLocalConflicts, structuredConflicts };
   }
 
-  async bulkWrite(rows, options = {}) {
-    await this.initializeRecovery();
-    return runSerializedCollectionMutation(this.db, this.name, async () => {
-      await this.assertCollectionSchemaReady();
-      return this._bulkWriteJournaled(rows, options);
-    });
-  }
-
-  async _bulkWriteJournaled(rows, {
+  async bulkWrite(rows, {
     now = Date.now(),
     replicationOrigin = null,
     baseById = null,
@@ -530,6 +420,7 @@ export class CtoxIndexedDbCollection {
     force = false,
     authoritativeMaster = false,
   } = {}) {
+    await this.initializeRecovery();
     const journalWrite = Boolean(this.recoveryJournal)
       && !skipJournal && !replicationOrigin?.role && Array.isArray(rows);
     const prepared = journalWrite ? await this.prepareJournalRows(rows) : { rows, baseById: null };
@@ -879,18 +770,15 @@ export class CtoxIndexedDbCollection {
   /// this on dirty docs; the sidecar enforces that.
   async hardDeleteByIds(ids) {
     if (!Array.isArray(ids) || !ids.length) return 0;
-    return runSerializedCollectionMutation(this.db, this.name, async () => {
-      await this.assertCollectionSchemaReady();
-      const tx = this.db.transaction(DOCUMENT_STORE, 'readwrite');
-      const store = tx.objectStore(DOCUMENT_STORE);
-      let removed = 0;
-      for (const id of ids) {
-        await idbRequest(store.delete([this.name, String(id)]));
-        removed += 1;
-      }
-      await idbTransactionDone(tx);
-      return removed;
-    });
+    const tx = this.db.transaction(DOCUMENT_STORE, 'readwrite');
+    const store = tx.objectStore(DOCUMENT_STORE);
+    let removed = 0;
+    for (const id of ids) {
+      await idbRequest(store.delete([this.name, String(id)]));
+      removed += 1;
+    }
+    await idbTransactionDone(tx);
+    return removed;
   }
 
   async findDocumentsById(ids, { withDeleted = false } = {}) {
@@ -1230,10 +1118,7 @@ export class CtoxIndexedDbCollection {
   ensureSchemaIndexEntries() {
     if (!this.indexes.length) return Promise.resolve(0);
     if (!this.schemaIndexReady) {
-      this.schemaIndexReady = runSerializedCollectionMutation(this.db, this.name, async () => {
-        await this.assertCollectionSchemaReady();
-        return this.rebuildMissingSchemaIndexEntries();
-      });
+      this.schemaIndexReady = this.rebuildMissingSchemaIndexEntries();
     }
     return this.schemaIndexReady;
   }
@@ -1261,201 +1146,6 @@ export class CtoxIndexedDbCollection {
     await idbTransactionDone(tx);
     return updated;
   }
-}
-
-function collectionSchemaMarker({ collection, declaredVersion, effectiveSchemaHash, state = 'ready' }) {
-  if (!collection || typeof collection !== 'string') {
-    throw new TypeError('Collection schema marker requires a collection name');
-  }
-  const version = Number(declaredVersion);
-  const hash = String(effectiveSchemaHash || '').trim();
-  if (!Number.isInteger(version) || version < 0 || !hash) {
-    throw new TypeError(`Collection schema marker for ${collection} requires a non-negative version and effective schema hash`);
-  }
-  return {
-    collection,
-    schema: COLLECTION_SCHEMA_MARKER_FORMAT,
-    declaredVersion: version,
-    effectiveSchemaHash: hash,
-    state: state === 'invalidating' ? 'invalidating' : 'ready',
-    updatedAtMs: Date.now(),
-  };
-}
-
-function collectionSchemaMarkerMatches(persisted, desired) {
-  return Boolean(
-    persisted
-      && desired
-      && persisted.schema === COLLECTION_SCHEMA_MARKER_FORMAT
-      && persisted.collection === desired.collection
-      && Number(persisted.declaredVersion) === Number(desired.declaredVersion)
-      && String(persisted.effectiveSchemaHash || '') === String(desired.effectiveSchemaHash || ''),
-  );
-}
-
-async function readCollectionSchemaMarker(db, collection) {
-  const tx = db.transaction(COLLECTION_SCHEMA_MARKER_STORE, 'readonly');
-  const done = idbTransactionDone(tx);
-  const marker = await idbRequest(tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE).get(collection));
-  await done;
-  return marker || null;
-}
-
-async function readCollectionSchemaSnapshot(db, collection) {
-  const tx = db.transaction([DOCUMENT_STORE, COLLECTION_SCHEMA_MARKER_STORE], 'readonly');
-  const done = idbTransactionDone(tx);
-  const markerRequest = idbRequest(tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE).get(collection));
-  const documentStore = tx.objectStore(DOCUMENT_STORE);
-  const rowsRequest = idbRequest(documentStore.index('collection').count(IDBKeyRange.only(collection)));
-  const pushableRange = IDBKeyRange.bound(
-    [collection, 1, 0, ''],
-    [collection, 1, Number.MAX_SAFE_INTEGER, INDEX_HIGH_KEY],
-  );
-  const pushableRequest = idbRequest(documentStore.index(PUSHABLE_LWT_INDEX).count(pushableRange));
-  const [marker, rows, pushable] = await Promise.all([markerRequest, rowsRequest, pushableRequest]);
-  await done;
-  return {
-    marker: marker || null,
-    rows: Number(rows || 0),
-    pushable: Number(pushable || 0),
-  };
-}
-
-async function readPendingRecoverySummary(recoveryJournal, collection) {
-  try {
-    if (typeof recoveryJournal?.pendingSummaryForCollection === 'function') {
-      return recoveryJournal.pendingSummaryForCollection(collection);
-    }
-    const batches = await recoveryJournal?.listBatches?.('pending', collection) || [];
-    return {
-      pendingBatches: batches.length,
-      pendingWrites: batches.reduce((sum, batch) => sum + (batch.documentIds?.length || 0), 0),
-    };
-  } catch (cause) {
-    throw collectionVersionError(
-      'collection_version_invalidation_guard_failed',
-      `Cannot read the live recovery WAL for ${collection}; browser cache invalidation is blocked.`,
-      { collection, cause },
-    );
-  }
-}
-
-async function guardAndInvalidateCollection(db, { collection, desired, pending }) {
-  const tx = db.transaction([DOCUMENT_STORE, COLLECTION_SCHEMA_MARKER_STORE], 'readwrite');
-  const done = idbTransactionDone(tx);
-  const documentStore = tx.objectStore(DOCUMENT_STORE);
-  const markerStore = tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE);
-  try {
-    const previousMarker = await idbRequest(markerStore.get(collection));
-    const pushableRange = IDBKeyRange.bound(
-      [collection, 1, 0, ''],
-      [collection, 1, Number.MAX_SAFE_INTEGER, INDEX_HIGH_KEY],
-    );
-    const pushable = Number(await idbRequest(documentStore.index(PUSHABLE_LWT_INDEX).count(pushableRange)) || 0);
-    if (pushable > 0 || Number(pending?.pendingBatches || 0) > 0) {
-      await done;
-      throw collectionVersionError(
-        'collection_version_invalidation_blocked',
-        `Collection ${collection} changed version/schema but has ${pushable} pushable row(s) and ${Number(pending?.pendingBatches || 0)} pending recovery WAL batch(es). Nothing was discarded; sync or recover these writes before retrying.`,
-        {
-          collection,
-          previousMarker: previousMarker || null,
-          desiredMarker: desired,
-          pushableRows: pushable,
-          pendingBatches: Number(pending?.pendingBatches || 0),
-          pendingWrites: Number(pending?.pendingWrites || 0),
-        },
-      );
-    }
-    let clearedRows = 0;
-    const collectionIndex = documentStore.index('collection');
-    await iterateCursor(collectionIndex.openCursor(IDBKeyRange.only(collection)), (cursor) => {
-      if (!cursor) return false;
-      cursor.delete();
-      clearedRows += 1;
-      return true;
-    });
-    const invalidatingMarker = collectionSchemaMarker({
-      collection,
-      declaredVersion: desired.declaredVersion,
-      effectiveSchemaHash: desired.effectiveSchemaHash,
-      state: 'invalidating',
-    });
-    await idbRequest(markerStore.put(invalidatingMarker));
-    await done;
-    return {
-      previousMarker: previousMarker || null,
-      marker: invalidatingMarker,
-      clearedRows,
-    };
-  } catch (error) {
-    try { tx.abort(); } catch {}
-    try { await done; } catch {}
-    throw error;
-  }
-}
-
-async function finalizeCollectionSchemaMarker(db, desired) {
-  const tx = db.transaction(COLLECTION_SCHEMA_MARKER_STORE, 'readwrite');
-  const done = idbTransactionDone(tx);
-  const store = tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE);
-  try {
-    const persisted = await idbRequest(store.get(desired.collection));
-    if (!collectionSchemaMarkerMatches(persisted, desired) || persisted?.state !== 'invalidating') {
-      throw collectionVersionError(
-        'collection_version_invalidation_failed',
-        `Collection ${desired.collection} schema marker changed while invalidation was finishing.`,
-        { collection: desired.collection, desiredMarker: desired, persistedMarker: persisted || null },
-      );
-    }
-    const ready = collectionSchemaMarker({
-      collection: desired.collection,
-      declaredVersion: desired.declaredVersion,
-      effectiveSchemaHash: desired.effectiveSchemaHash,
-      state: 'ready',
-    });
-    await idbRequest(store.put(ready));
-    await done;
-    return ready;
-  } catch (error) {
-    try { tx.abort(); } catch {}
-    try { await done; } catch {}
-    throw error;
-  }
-}
-
-function runSerializedCollectionMutation(db, collection, operation, { requireCrossContext = false } = {}) {
-  const key = `${String(db?.name || '')}\n${String(collection || '')}`;
-  const previous = collectionMutationTails.get(key) || Promise.resolve();
-  const run = previous.catch(() => {}).then(async () => {
-    const locks = globalThis.navigator?.locks;
-    if (typeof locks?.request !== 'function') {
-      if (requireCrossContext) requireCrossContextCollectionLock(db, collection);
-      return operation();
-    }
-    return locks.request(`ctox-rxdb:collection-mutation:${key}`, { mode: 'exclusive' }, operation);
-  });
-  collectionMutationTails.set(key, run);
-  return run.finally(() => {
-    if (collectionMutationTails.get(key) === run) collectionMutationTails.delete(key);
-  });
-}
-
-function requireCrossContextCollectionLock(db, collection) {
-  if (typeof globalThis.navigator?.locks?.request === 'function') return;
-  throw collectionVersionError(
-    'collection_version_lock_unavailable',
-    `Cannot safely invalidate ${collection} in ${db?.name || 'IndexedDB'} because the browser Web Locks API is unavailable. Nothing was discarded.`,
-    { collection, databaseName: db?.name || '' },
-  );
-}
-
-function collectionVersionError(code, message, detail = {}) {
-  const error = new Error(message, detail.cause ? { cause: detail.cause } : undefined);
-  error.name = 'CtoxCollectionVersionError';
-  error.code = code;
-  Object.assign(error, detail);
-  return error;
 }
 
 function openDatabase(databaseName) {
@@ -1491,9 +1181,6 @@ function openDatabase(databaseName) {
       if (store && !store.indexNames.contains(PUSHABLE_LWT_INDEX)) {
         store.createIndex(PUSHABLE_LWT_INDEX, ['collection', 'pushable', 'lwt', 'id'], { unique: false });
         migrateStoredReplicationFlags(store);
-      }
-      if (!db.objectStoreNames.contains(COLLECTION_SCHEMA_MARKER_STORE)) {
-        db.createObjectStore(COLLECTION_SCHEMA_MARKER_STORE, { keyPath: 'collection' });
       }
     };
     request.onsuccess = () => {

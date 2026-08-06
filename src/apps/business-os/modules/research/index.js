@@ -8,7 +8,7 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260729-research-knowledge-usability-v91';
+const BUILD = '20260728-research-knowledge-usability-v88';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -216,85 +216,6 @@ const RESEARCH_TABLE_CONTRACT = Object.freeze({
   },
 });
 
-const BEARING_MEASUREMENT_TABLE_CONTRACT = Object.freeze({
-  measured_load_points: {
-    title: 'Direct Measurement Points',
-    columns: [
-      'measurement_id',
-      'source_id',
-      'dataset_id',
-      'source_file',
-      'source_row_ref',
-      'propeller_size_original',
-      'prop_diameter_in',
-      'prop_pitch_in',
-      'rpm',
-      'thrust_N',
-      'torque_Nm',
-      'shaft_power_W',
-      'radial_load_N_direct',
-      'axial_load_N_direct',
-      'thrust_coefficient_CT',
-      'power_coefficient_CP',
-      'measurement_kind',
-      'uncertainty',
-      'confidence',
-      'canonical_url',
-      'snapshot_sha256',
-      'is_derived',
-    ],
-  },
-  derived_propeller_load_points: {
-    title: 'Derived Propeller Load Points',
-    columns: [
-      'derivation_id',
-      'source_id',
-      'dataset_id',
-      'source_file',
-      'source_row_ref',
-      'propeller_size_original',
-      'prop_diameter_in',
-      'prop_pitch_in',
-      'diameter_m_input',
-      'rpm_input',
-      'air_density_kg_m3_input',
-      'thrust_coefficient_CT_input',
-      'power_coefficient_CP_input',
-      'thrust_N_derived',
-      'shaft_power_W_derived',
-      'torque_Nm_derived',
-      'formula_thrust',
-      'formula_power',
-      'formula_torque',
-      'assumptions',
-      'uncertainty',
-      'confidence',
-      'derivation_method',
-      'is_derived',
-      'canonical_url',
-      'snapshot_sha256',
-    ],
-  },
-  derived_bearing_loads: {
-    title: 'Derived Bearing Reactions',
-    columns: [
-      'derivation_id',
-      'source_id',
-      'source_row_ref',
-      'bearing_radial_load_N',
-      'axial_load_N',
-      'moment_Nm',
-      'derivation_method',
-      'assumption_text',
-      'uncertainty',
-      'claim_id',
-      'evidence_id',
-      'canonical_url',
-      'snapshot_hash',
-    ],
-  },
-});
-
 const DRONE_SOURCES_METADATA = Object.freeze({
   'nasa-mtb2': {
     group: 'nasa',
@@ -470,7 +391,6 @@ const state = {
   candidateModels: [],
   sourceRows: [],
   curatedRows: [],
-  evidenceRows: [],
   measurementRows: [],
   derivedMeasurementRows: [],
   graphNodeRows: [],
@@ -481,7 +401,6 @@ const state = {
   graphContractErrors: [],
   graphProjectionCache: new Map(),
   graphSurface: null,
-  graphTaskId: '',
   graphMountToken: 0,
   knowledgeRefreshInFlight: false,
   selectedGraphNodeId: '',
@@ -516,7 +435,6 @@ const state = {
   refreshDirty: false,
   researchRefreshTimer: null,
   knowledgeRefreshTimer: null,
-  pendingLocalRefreshCollections: new Set(),
   refreshSequences: {
     research: 0,
     knowledge: 0,
@@ -869,7 +787,12 @@ async function loadLocalState({ mountToken = null } = {}) {
 }
 
 function wireRealtime() {
-  const knowledgeLifecycleCollections = new Set(['research_tasks']);
+  const knowledgeLifecycleCollections = new Set([
+    'research_tasks',
+    'research_runs',
+    'business_commands',
+    'ctox_queue_tasks',
+  ]);
   const collections = [
     ['research_tasks', readableCollection('research_tasks')],
     ['research_runs', readableCollection('research_runs')],
@@ -880,17 +803,10 @@ function wireRealtime() {
   ].filter(([, collection]) => collection);
   for (const [name, collection] of collections) {
     const subscription = collection.$?.subscribe?.(() => {
-      scheduleLocalRefresh(80, name);
+      scheduleLocalRefresh(80);
       if (knowledgeLifecycleCollections.has(name)) scheduleKnowledgeRefresh(250);
     });
     if (subscription?.unsubscribe) state.cleanup.push(() => subscription.unsubscribe());
-  }
-  const subscribeChanges = state.ctx?.sync?.subscribeCollectionChanges;
-  if (typeof subscribeChanges === 'function') {
-    const unsubscribe = subscribeChanges.call(state.ctx.sync, 'knowledge_tables', () => {
-      scheduleKnowledgeRefresh(120);
-    });
-    if (typeof unsubscribe === 'function') state.cleanup.push(unsubscribe);
   }
 }
 
@@ -935,8 +851,7 @@ function schedulePostSyncRefresh(delay = 250) {
   scheduleKnowledgeRefresh(delay);
 }
 
-function scheduleLocalRefresh(delay = 80, collectionName = '') {
-  if (collectionName) state.pendingLocalRefreshCollections.add(collectionName);
+function scheduleLocalRefresh(delay = 80) {
   if (state.researchRefreshTimer) window.clearTimeout(state.researchRefreshTimer);
   const sequence = ++state.refreshSequences.research;
   const mountToken = state.mountToken;
@@ -944,23 +859,9 @@ function scheduleLocalRefresh(delay = 80, collectionName = '') {
     if (sequence !== state.refreshSequences.research) return;
     state.researchRefreshTimer = null;
     if (!mountToken || state.mountToken !== mountToken) return;
-    const changedCollections = new Set(state.pendingLocalRefreshCollections);
-    state.pendingLocalRefreshCollections.clear();
     await loadLocalState({ mountToken });
     if (state.mountToken !== mountToken) return;
-    if (changedCollections.has('research_tasks')) {
-      await loadDashboardData();
-      if (state.mountToken !== mountToken) return;
-      render();
-      return;
-    }
-    if (changedCollections.has('documents')) {
-      renderCenter();
-    }
-    // Queue, command and run documents update while work is active. They only
-    // affect the context pane; rebuilding the center pane here disconnects
-    // tabs, resets nested scroll containers and remounts the graph mid-click.
-    renderRight();
+    render();
   }, delay);
 }
 
@@ -1377,7 +1278,6 @@ async function loadDashboardData() {
   state.candidateModels = [];
   state.sourceRows = [];
   state.curatedRows = [];
-  state.evidenceRows = [];
   state.measurementRows = [];
   state.derivedMeasurementRows = [];
   state.graphNodeRows = [];
@@ -1396,17 +1296,14 @@ async function loadDashboardData() {
     task.source_catalog_key || tableKey(base, ['source_catalog', 'sources', 'curated_sources']),
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
-  const evidenceTable = tableForKey(base, 'evidence_points');
-  const measurementTable = preferredDirectMeasurementTable(base, task);
-  const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
-    || tableForKey(base, 'derived_bearing_loads');
+  const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
+  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
-  const [candidateRows, sourceRows, curatedRows, evidenceRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
+  const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
     candidateTable ? fetchTableRows(candidateTable.id) : Promise.resolve([]),
     sourceTable ? fetchTableRows(sourceTable.id) : Promise.resolve([]),
     curatedTable && curatedTable.id !== sourceTable?.id ? fetchTableRows(curatedTable.id) : Promise.resolve([]),
-    evidenceTable ? fetchTableRows(evidenceTable.id) : Promise.resolve([]),
     measurementTable && measurementTable.id !== sourceTable?.id && measurementTable.id !== curatedTable?.id ? fetchTableRows(measurementTable.id) : Promise.resolve([]),
     derivedMeasurementTable ? fetchTableRows(derivedMeasurementTable.id) : Promise.resolve([]),
     graphNodeTable ? fetchTableRows(graphNodeTable.id) : Promise.resolve([]),
@@ -1415,21 +1312,14 @@ async function loadDashboardData() {
   state.candidateRows = candidateRows;
   state.sourceRows = sourceRows;
   state.curatedRows = curatedRows;
-  state.evidenceRows = evidenceRows;
   state.measurementRows = measurementRows;
   state.derivedMeasurementRows = derivedMeasurementRows;
   state.graphNodeRows = graphNodeRows;
   state.graphEdgeRows = graphEdgeRows;
   state.candidateModels = buildSourceModels(task, candidateRows, [], []);
-  state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows);
+  state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows);
   const evidenceMeasurementRows = filterMeasurementRowsForEvidence(measurementRows, state.sourceModels);
-  state.sourceCatalogComplete = sourceCatalogRowsComplete(sourceTable, sourceRows);
-  const evidenceGraphRows = filterGraphRowsForEvidence(
-    graphNodeRows,
-    graphEdgeRows,
-    evidenceSourceIds(state.sourceModels),
-    state.sourceCatalogComplete,
-  );
+  const evidenceGraphRows = filterGraphRowsForEvidence(graphNodeRows, graphEdgeRows, evidenceSourceIds(state.sourceModels));
   state.graphContractStatus = evidenceGraphRows.status || '';
   state.graphContractErrors = evidenceGraphRows.errors || [];
   state.graphProjection = buildResearchGraphProjection({
@@ -1625,19 +1515,11 @@ function finitePositive(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows = []) {
+function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
   const curatedBySource = new Map();
   for (const row of curatedRows) {
     const id = sourceId(row);
     if (id) curatedBySource.set(id, row);
-  }
-  const evidenceBySource = new Map();
-  for (const row of evidenceRows) {
-    const id = sourceId(row);
-    if (!id) continue;
-    const sourceEvidence = evidenceBySource.get(id) || [];
-    if (sourceEvidence.length < 12) sourceEvidence.push(row);
-    evidenceBySource.set(id, sourceEvidence);
   }
   const raw = (sourceRows.length ? sourceRows : curatedRows).filter((row) => sourceModelId(row));
   const initialModels = raw.map((row) => {
@@ -1670,7 +1552,6 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows, evide
       note,
       row,
       curated,
-      evidenceRows: evidenceBySource.get(id) || [],
       measurements: agg,
       evidenceEligible: gate.eligible,
       evidenceStatus: gate.status,
@@ -1713,22 +1594,8 @@ function filterMeasurementRowsForEvidence(rows, sourceModels = state.sourceModel
   });
 }
 
-function sourceCatalogRowsComplete(sourceTable, sourceRows) {
-  if (!sourceTable) return true;
-  const payload = sourceTable.payload && typeof sourceTable.payload === 'object' ? sourceTable.payload : {};
-  if ((payload.rows_complete ?? sourceTable.rows_complete) === false) return false;
-  const expected = Number(payload.row_count ?? sourceTable.row_count ?? 0);
-  if (!Number.isFinite(expected) || expected <= 0) return true;
-  return (sourceRows || []).length >= Math.min(expected, ROW_LIMIT);
-}
-
-function filterGraphRowsForEvidence(nodeRows, edgeRows, eligibleIds, sourcesComplete = true) {
+function filterGraphRowsForEvidence(nodeRows, edgeRows, eligibleIds) {
   if (!(nodeRows || []).length && !(edgeRows || []).length) return { nodes: [], edges: [], status: '', errors: [] };
-  // The contract can only be judged once the source catalogue is fully loaded.
-  // While chunks are still arriving, every not-yet-known source id looks like a
-  // violation — that turned a normal loading window into a permanent
-  // `invalid_graph_contract` panel even though the stored graph was intact.
-  if (!sourcesComplete) return { nodes: [], edges: [], status: 'pending_sources', errors: [] };
   const errors = [];
   const nodes = (nodeRows || []).map((row) => {
     const nodeId = firstString(row, ['node_id', 'id', 'concept_id', 'key']);
@@ -1991,22 +1858,13 @@ function aggregateMeasurements(rows, sourceModels = null) {
       count: 0,
       maxAxial: 0,
       maxTangentialEquivalent: 0,
-      minRpm: Number.POSITIVE_INFINITY,
       maxRpm: 0,
-      hasCt: false,
-      hasCp: false,
       files: new Set(),
     };
     current.count += 1;
     current.maxAxial = Math.max(current.maxAxial, numberValue(row.force_N ?? row.axial_load_N ?? row.thrust_N));
     current.maxTangentialEquivalent = Math.max(current.maxTangentialEquivalent, numberValue(tangentialEquivalentForce(row)));
-    const rpm = optionalNumberValue(row.rpm);
-    if (rpm !== null) {
-      current.minRpm = Math.min(current.minRpm, rpm);
-      current.maxRpm = Math.max(current.maxRpm, rpm);
-    }
-    current.hasCt ||= optionalNumberValue(row.thrust_coefficient_CT) !== null;
-    current.hasCp ||= optionalNumberValue(row.power_coefficient_CP) !== null;
+    current.maxRpm = Math.max(current.maxRpm, numberValue(row.rpm));
     if (row.source_file) current.files.add(String(row.source_file));
     bySource.set(id, current);
   }
@@ -2262,12 +2120,6 @@ function renderCenter() {
   }
   const projection = currentGraphProjection(task);
   const visibleStatus = visibleResearchStatus();
-  const preservedGraphHost = state.showDiagram
-    && state.graphSurface
-    && state.graphTaskId === task.id
-    ? root.querySelector('[data-research-graph-host]')
-    : null;
-  preservedGraphHost?.remove();
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band research-center-header">
       <div class="ctox-pane-title-row">
@@ -2327,16 +2179,8 @@ function renderCenter() {
       </section>
     </div>
   `;
-  if (state.showDiagram && preservedGraphHost) {
-    const replacementHost = root.querySelector('[data-research-graph-host]');
-    replacementHost?.replaceWith(preservedGraphHost);
-    root.querySelector('[data-research-graph-loading]')?.remove();
-    state.graphSurface.setData(projection);
-  } else if (state.showDiagram) {
-    scheduleResearchGraphMount(task, projection);
-  } else {
-    disposeResearchGraph();
-  }
+  if (state.showDiagram) scheduleResearchGraphMount(task, projection);
+  else disposeResearchGraph();
   restorePaneScroll(root, scrollState);
 }
 
@@ -2460,12 +2304,7 @@ function formatGraphProvenance(value) {
 }
 
 function currentGraphProjection(task = selectedTask()) {
-  const evidenceGraphRows = filterGraphRowsForEvidence(
-    state.graphNodeRows,
-    state.graphEdgeRows,
-    evidenceSourceIds(state.sourceModels),
-    state.sourceCatalogComplete !== false,
-  );
+  const evidenceGraphRows = filterGraphRowsForEvidence(state.graphNodeRows, state.graphEdgeRows, evidenceSourceIds(state.sourceModels));
   const key = graphProjectionFingerprint(task, evidenceGraphRows, state.graph.layer, state.sourceModels, state.measurementRows);
   const cached = state.graphProjectionCache.get(key);
   const baseProjection = cached || enrichGraphSemanticMetadata(buildResearchGraphProjection({
@@ -2571,9 +2410,7 @@ async function scheduleResearchGraphMount(task, projection) {
   const token = ++state.graphMountToken;
   const loading = root.querySelector('[data-research-graph-loading]');
   if (!projection.nodes.length) {
-    if (loading) loading.innerHTML = projection.status === 'pending_sources'
-      ? `<span class="research-spinner" aria-hidden="true"></span><span>${escapeHtml(state.t('graphAwaitingSources', 'Quellen werden geladen — der Graph erscheint, sobald der Quellenkatalog vollständig ist.'))}</span>`
-      : projection.status === 'invalid_graph_contract'
+    if (loading) loading.innerHTML = projection.status === 'invalid_graph_contract'
       ? '<strong>invalid_graph_contract</strong><span>Persistierte Graphdaten erfüllen den Evidence-/Provenienzvertrag nicht.</span>'
       : `<span>${escapeHtml(state.t('graphNoData', 'Noch keine Begriffe. Starte eine Nachrecherche oder füge Quellen hinzu.'))}</span>`;
     return;
@@ -2599,7 +2436,6 @@ async function scheduleResearchGraphMount(task, projection) {
         loading?.remove();
       },
     });
-    state.graphTaskId = task.id;
     state.graph.status = 'ready';
     loading?.remove();
   } catch (error) {
@@ -2622,7 +2458,6 @@ function disposeResearchGraph() {
   state.graphMountToken += 1;
   state.graphSurface?.dispose?.();
   state.graphSurface = null;
-  state.graphTaskId = '';
 }
 
 function selectGraphNode(node) {
@@ -3572,32 +3407,13 @@ function selectSourceFromUi(sourceId) {
 
   const centerMatch = [...(pane('center')?.querySelectorAll('[data-source-id]') || [])]
     .find((node) => node.dataset.sourceId === nextId && node.closest('.research-table-host'));
-  scrollElementWithinNearestList(centerMatch);
+  centerMatch?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
 
   renderRight();
-  scrollElementWithinNearestList(
-    pane('right')?.querySelector('[data-selected-source-section]'),
-  );
-}
-
-function scrollElementWithinNearestList(element) {
-  if (!element) return;
-  const container = element.closest(
-    '.research-sources-shards-scroll, .research-table-host, .research-left-scroll, .research-right-scroll',
-  );
-  if (!container || container === element) return;
-  const elementRect = element.getBoundingClientRect();
-  const containerRect = container.getBoundingClientRect();
-  if (elementRect.top < containerRect.top) {
-    container.scrollTop -= containerRect.top - elementRect.top;
-  } else if (elementRect.bottom > containerRect.bottom) {
-    container.scrollTop += elementRect.bottom - containerRect.bottom;
-  }
-  if (elementRect.left < containerRect.left) {
-    container.scrollLeft -= containerRect.left - elementRect.left;
-  } else if (elementRect.right > containerRect.right) {
-    container.scrollLeft += elementRect.right - containerRect.right;
-  }
+  pane('right')?.querySelector('[data-selected-source-section]')?.scrollIntoView?.({
+    block: 'start',
+    inline: 'nearest',
+  });
 }
 
 function capturePaneScroll(root) {
@@ -3681,24 +3497,6 @@ function sourceDataSummary(source) {
   const row = source?.row || {};
   const direct = firstString(row, ['data_fields', 'fields', 'measurement_fields', 'summary', 'abstract']);
   if (direct) return direct;
-  const measurements = source?.measurements;
-  if (measurements?.count) {
-    const channels = [
-      measurements.hasCt ? 'CT' : '',
-      measurements.hasCp ? 'CP' : '',
-      measurements.maxAxial > 0 ? 'Schub (N)' : '',
-      measurements.maxTangentialEquivalent > 0 ? 'Tangentialkraft (N)' : '',
-    ].filter(Boolean);
-    const rpmRange = Number.isFinite(measurements.minRpm) && measurements.maxRpm > 0
-      ? `; ${formatMeasurementNumber(measurements.minRpm, 0)}–${formatMeasurementNumber(measurements.maxRpm, 0)} RPM`
-      : '';
-    return `${Number(measurements.count).toLocaleString(state.lang === 'de' ? 'de-DE' : 'en-US')} Messzeilen${channels.length ? `; ${channels.join(', ')}` : ''}${rpmRange}`;
-  }
-  const evidence = source?.evidenceRows?.find((item) => (
-    firstString(item, ['exact_quote_or_value', 'fact_value', 'quote'])
-  ));
-  const excerpt = compactSourceExcerpt(firstString(evidence, ['exact_quote_or_value', 'fact_value', 'quote']));
-  if (excerpt) return excerpt;
   const bibliographic = [
     firstString(row, ['authors_or_institution', 'authors', 'institution', 'publisher']),
     firstString(row, ['publication_year', 'year']),
@@ -3713,14 +3511,7 @@ function sourceDataSummary(source) {
 function sourceContributionSummary(source) {
   const row = source?.row || {};
   const direct = firstString(row, ['contribution_note', 'contribution', 'use', 'verification_notes', 'evidence_note']);
-  if (direct && !/original content read|snapshot retained|sha-256 verified/i.test(direct)) return direct;
-  const evidence = source?.evidenceRows?.find((item) => firstString(item, ['claim_id']))
-    || source?.evidenceRows?.[0];
-  const evidenceValue = compactSourceExcerpt(firstString(evidence, ['fact_value', 'exact_quote_or_value', 'quote']));
-  if (evidenceValue) {
-    const label = firstString(evidence, ['fact_label', 'statement_type', 'criterion_id']);
-    return `${label && label !== 'source_relevance' ? `${label}: ` : ''}${evidenceValue}`;
-  }
+  if (direct) return direct;
   const relevance = firstString(row, ['evidence_relevance_score', 'relevance_score']);
   return relevance
     ? `Evidence-Relevanz ${relevance}/100; Originalinhalt und Snapshot verifiziert.`
@@ -3735,18 +3526,7 @@ function sourceLimitationsSummary(source) {
     'limitations',
     'uncertainty',
     'independence_note',
-  ]) || firstString(source?.evidenceRows?.find((item) => firstString(item, ['limitations'])), [
-    'limitations',
   ]) || 'Geltungsbereich und Übertragbarkeit müssen für den konkreten Betriebspunkt geprüft werden.';
-}
-
-function compactSourceExcerpt(value, maxLength = 260) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  if (text.length <= maxLength) return text;
-  const cut = text.slice(0, maxLength);
-  const boundary = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('; '), cut.lastIndexOf(' '));
-  return `${cut.slice(0, Math.max(boundary, Math.floor(maxLength * 0.7))).trim()}…`;
 }
 
 function sourceTags(source) {
@@ -3792,10 +3572,7 @@ function formatDimensionScore(value) {
 
 function renderMeasurementsTable() {
   const directRows = filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels);
-  const derivedRows = derivedMeasurementDisplayRows(
-    filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels),
-    directRows,
-  );
+  const derivedRows = filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels);
   const mode = state.measurementMode === 'direct' ? 'direct' : 'derived';
   const rows = mode === 'direct' ? directRows : derivedRows;
   return `
@@ -3804,7 +3581,7 @@ function renderMeasurementsTable() {
         Direkte Messwerte <span>${directRows.length}</span>
       </button>
       <button type="button" class="ctox-pane-tab${mode === 'derived' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="derived" role="tab" aria-selected="${mode === 'derived'}">
-        Abgeleitete Propellerlasten <span>${derivedRows.length}</span>
+        Abgeleitete Kräfte &amp; Momente <span>${derivedRows.length}</span>
       </button>
     </div>
     <p class="research-measurement-note">${mode === 'direct'
@@ -3812,16 +3589,6 @@ function renderMeasurementsTable() {
       : 'Aus CT/CP mit dokumentierter Luftdichte und Propellergeometrie abgeleitet. Diese Werte sind keine direkt gemessenen Lagerkräfte.'}</p>
     ${mode === 'direct' ? renderDirectMeasurements(rows) : renderDerivedMeasurements(rows)}
   `;
-}
-
-function derivedMeasurementDisplayRows(derivedRows, directRows) {
-  const directRowsById = new Map((directRows || [])
-    .map((row) => [String(row.measurement_id || '').trim(), row])
-    .filter(([id]) => id));
-  return (derivedRows || []).map((row) => ({
-    ...(directRowsById.get(String(row.measurement_id || '').trim()) || {}),
-    ...row,
-  }));
 }
 
 function renderDirectMeasurements(rows) {
@@ -3888,11 +3655,11 @@ function renderDerivedMeasurements(rows) {
             <td>${escapeHtml(firstString(row, ['propeller_size_original', 'propeller_size']))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_diameter'))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_pitch'))}</td>
-            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.input_rpm ?? row.rpm, 0)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.derived_thrust_N ?? row.thrust_N)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.derived_torque_Nm ?? row.torque_Nm)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.derived_shaft_power_W ?? row.shaft_power_W)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.input_rho_kg_m3 ?? row.air_density_kg_m3)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.rpm, 0)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.thrust_N)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.torque_Nm)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.shaft_power_W)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.air_density_kg_m3)}</td>
           </tr>
         `).join('') || `<tr><td colspan="9">Keine verifizierten abgeleiteten Kraft-/Momentzeilen vorhanden.</td></tr>`}
       </tbody>
@@ -3920,12 +3687,7 @@ function metricPropellerLength(row, stem) {
   const metric = optionalNumberValue(row[`${stem}_mm`]);
   if (metric !== null) return metric;
   const inches = optionalNumberValue(row[`${stem}_in`]);
-  if (inches !== null) return inches * 25.4;
-  if (stem === 'prop_diameter') {
-    const meters = optionalNumberValue(row.diameter_m_input ?? row.input_D_m);
-    if (meters !== null) return meters * 1000;
-  }
-  return '';
+  return inches === null ? '' : inches * 25.4;
 }
 
 function tangentialEquivalentForce(row) {
@@ -4020,14 +3782,6 @@ function renderRight() {
 function renderRunPanel(runInfo) {
   const task = selectedTask();
   const canRun = canRunResearchTask(task);
-  const isCancelledHistory = runInfo.statusKind === 'cancelled';
-  const visibleStatusKind = isCancelledHistory ? 'idle' : runInfo.statusKind;
-  const visibleStatusLabel = isCancelledHistory
-    ? state.t('lastRunCancelled', 'Letzter Lauf abgebrochen')
-    : runInfo.statusLabel;
-  const visibleRunTitle = isCancelledHistory
-    ? state.t('readyForContinuation', 'Bereit für eine Fortsetzung')
-    : (runInfo.title || runInfo.commandType || 'Systematic Research');
   return `
     <section class="research-run-panel">
       <div class="research-section-head flush">
@@ -4035,14 +3789,18 @@ function renderRunPanel(runInfo) {
         <span>${escapeHtml(runInfo.updatedLabel || state.t('noActiveRun', 'kein Lauf'))}</span>
       </div>
       ${runInfo.run || runInfo.command || runInfo.queueTask ? `
-        <div class="research-run-state research-run-${escapeHtml(visibleStatusKind)}">
+        <div class="research-run-state research-run-${escapeHtml(runInfo.statusKind)}">
           <span></span>
           <div>
-            <strong>${escapeHtml(visibleStatusLabel)}</strong>
-            <small>${escapeHtml(visibleRunTitle)}</small>
+            <strong>${escapeHtml(runInfo.statusLabel)}</strong>
+            <small>${escapeHtml(runInfo.title || runInfo.commandType || 'Systematic Research')}</small>
           </div>
         </div>
-        ${runNoteMarkup(runInfo)}
+        <dl class="ctox-fields">
+          <dt>${escapeHtml(state.t('command', 'Command'))}</dt><dd>${escapeHtml(shortId(runInfo.commandId))}</dd>
+          <dt>${escapeHtml(state.t('queue', 'Queue'))}</dt><dd>${escapeHtml(shortId(runInfo.taskQueueId))}</dd>
+          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
+        </dl>
         <div class="research-run-actions">
           <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" data-task-status="${escapeHtml(runInfo.status)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
         </div>
@@ -4053,22 +3811,6 @@ function renderRunPanel(runInfo) {
         <span aria-hidden="true">▶</span>${escapeHtml(runInfoActionLabel(task))}
       </button>
     </section>
-  `;
-}
-
-// A slice-based run reports hours of real activity that the dashboard tables
-// only see at writeback time. Surface the harness's own status note (already
-// projected into ctox_queue_tasks) so an active run never looks idle.
-function runNoteMarkup(runInfo) {
-  const note = String(runInfo.queueTask?.status_note || '').trim();
-  if (!note) return '';
-  const noteTime = Number(runInfo.queueTask?.updated_at_ms || 0);
-  const stamp = noteTime ? relativeTime(noteTime) : '';
-  return `
-    <p class="research-run-note" title="${escapeHtml(note)}">
-      <small>${escapeHtml(state.t('lastHarnessNote', 'Letzte Harness-Meldung'))}${stamp ? ` · ${escapeHtml(stamp)}` : ''}</small><br>
-      ${escapeHtml(note.length > 220 ? `${note.slice(0, 220)}…` : note)}
-    </p>
   `;
 }
 
@@ -4143,13 +3885,7 @@ function validateSelectedResearchTask(task, knowledgeBases = []) {
   const domain = String(task.knowledge_domain || '').trim();
   if (!domain) return { valid: false, message: state.t('missingDomain', 'Die Research-Aufgabe hat keine Knowledge Domain.') };
   if (!knowledgeBases.some((base) => base.domain === domain)) {
-    // A declared-new domain has no tables until the first run writes them
-    // back server-side; blocking the run here would make new-topic research
-    // impossible. Every other task keeps the guard: a missing base then means
-    // the domain data is simply not loaded in this browser yet.
-    if (task?.payload?.new_domain !== true) {
-      return { valid: false, message: state.t('domainNotLoaded', 'Die Knowledge Domain ist lokal nicht geladen.') };
-    }
+    return { valid: false, message: state.t('domainNotLoaded', 'Die Knowledge Domain ist lokal nicht geladen.') };
   }
   return { valid: true, message: '' };
 }
@@ -4179,12 +3915,7 @@ function validateResearchTaskInput(values, knowledgeBases = [], { isEdit = false
   const prompt = String(values?.prompt || '').trim();
   if (!title) return { valid: false, field: 'title', message: 'Titel ist erforderlich.' };
   if (!domain) return { valid: false, field: 'domain', message: 'Knowledge Domain ist erforderlich.' };
-  if (!isEdit && domain === '__new__') {
-    const newDomain = String(values?.new_domain || '').trim();
-    if (!newDomain) {
-      return { valid: false, field: 'new_domain', message: state.t('newDomainRequired', 'Name für die neue Knowledge Domain ist erforderlich.') };
-    }
-  } else if (!isEdit && !knowledgeBases.some((base) => base.domain === domain)) {
+  if (!isEdit && !knowledgeBases.some((base) => base.domain === domain)) {
     return { valid: false, field: 'domain', message: 'Wähle eine lokal verfügbare Knowledge Domain.' };
   }
   if (!prompt) return { valid: false, field: 'prompt', message: 'Auftrag ist erforderlich.' };
@@ -4196,7 +3927,6 @@ function formValues(form) {
   return {
     title: data.get('title'),
     domain: data.get('domain'),
-    new_domain: data.get('new_domain'),
     prompt: data.get('prompt'),
   };
 }
@@ -4232,17 +3962,12 @@ function openTaskDialog(editTask = null) {
         <label><span class="ctox-field-label">${escapeHtml(state.t('titel', 'Titel'))}</span><input class="ctox-input" name="title" placeholder="${escapeHtml(state.t('neueResearch', 'Neue Research'))}" value="${escapeHtml(editTask?.title || '')}" required></label>
         <label>
           <span class="ctox-field-label">Knowledge Domain</span>
-          <select class="ctox-select" name="${isEdit ? 'domain_display' : 'domain'}" ${isEdit ? 'disabled' : ''} required>
+          <select class="ctox-select" name="${isEdit ? 'domain_display' : 'domain'}" ${isEdit || !state.knowledgeBases.length ? 'disabled' : ''} required>
             <option value="" ${selectedDomain ? '' : 'selected'} disabled>${escapeHtml(state.t('selectKnowledgeDomain', 'Knowledge Domain auswählen'))}</option>
             ${domainOptions}
-            ${isEdit ? '' : `<option value="__new__">${escapeHtml(state.t('newKnowledgeDomain', 'Neue Knowledge Domain anlegen …'))}</option>`}
           </select>
           <small class="research-field-note">${escapeHtml(domainSelectionNote(isEdit))}</small>
         </label>
-        ${isEdit ? '' : `<label data-new-domain-row hidden>
-          <span class="ctox-field-label">${escapeHtml(state.t('newDomainName', 'Name der neuen Domain'))}</span>
-          <input class="ctox-input" name="new_domain" placeholder="${escapeHtml(state.t('newDomainPlaceholder', 'z. B. bearing-condition-monitoring'))}">
-        </label>`}
         <label><span class="ctox-field-label">${escapeHtml(state.t('auftrag', 'Auftrag'))}</span><textarea class="ctox-textarea" name="prompt" placeholder="${escapeHtml(state.t('promptPlaceholder', 'Was soll das Dashboard auswerten?'))}" required>${escapeHtml(editTask?.prompt || '')}</textarea></label>
         <label><span class="ctox-field-label">${escapeHtml(state.t('kriterien', 'Kriterien'))}</span><textarea class="ctox-textarea" name="criteria" placeholder="${escapeHtml(state.t('criteriaPlaceholder', 'Scope, Ausschlüsse, Scoring-Hinweise'))}">${escapeHtml(editTask?.criteria || '')}</textarea></label>
         <label><span class="ctox-field-label">${escapeHtml(state.t('scoringDimensions', 'Scoring Dimensionen'))}</span><textarea class="ctox-textarea" name="scoring_dimensions" placeholder="${escapeHtml(state.t('scoringPlaceholder', 'overlap: Overlap\nbuyer_clarity: Buyer clarity'))}">${escapeHtml(dimensionsText)}</textarea></label>
@@ -4267,14 +3992,8 @@ function openTaskDialog(editTask = null) {
     submit.disabled = !validation.valid;
     status.textContent = validation.valid ? '' : validation.message;
   };
-  const syncNewDomainRow = () => {
-    const select = formEl?.querySelector('select[name="domain"]');
-    const row = formEl?.querySelector('[data-new-domain-row]');
-    if (row) row.hidden = select?.value !== '__new__';
-  };
   formEl?.addEventListener('input', syncFormState);
-  formEl?.addEventListener('change', () => { syncNewDomainRow(); syncFormState(); });
-  syncNewDomainRow();
+  formEl?.addEventListener('change', syncFormState);
   formEl?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const submit = event.currentTarget.querySelector('button[type="submit"]');
@@ -4297,10 +4016,7 @@ function openTaskDialog(editTask = null) {
   });
   root.append(overlay);
   syncFormState();
-  if (!isEdit) {
-    // Always refresh with an unfiltered load: outside the dialog the module
-    // only loads tables for domains its tasks already use, so a domain that
-    // exists server-side but has no task yet would otherwise never appear.
+  if (!isEdit && !state.knowledgeBases.length) {
     refreshTaskDialogKnowledgeOptions().catch((error) => {
       console.warn('[research] task dialog knowledge refresh failed', error);
     });
@@ -4329,12 +4045,10 @@ function refreshOpenTaskDialogDomainOptions() {
   const selectedDomain = state.knowledgeBases.some((base) => base.domain === currentValue)
     ? currentValue
     : state.knowledgeBases[0]?.domain || '';
-  select.disabled = false;
-  if (select.value === '__new__') return;
+  select.disabled = !state.knowledgeBases.length;
   select.innerHTML = `
     <option value="" ${selectedDomain ? '' : 'selected'} disabled>${escapeHtml(state.t('selectKnowledgeDomain', 'Knowledge Domain auswählen'))}</option>
     ${knowledgeDomainOptionsMarkup(selectedDomain)}
-    <option value="__new__">${escapeHtml(state.t('newKnowledgeDomain', 'Neue Knowledge Domain anlegen …'))}</option>
   `;
   if (selectedDomain) select.value = selectedDomain;
   const note = form.querySelector('.research-field-note');
@@ -4379,10 +4093,7 @@ async function createTaskFromForm(form) {
   if (!validation.valid) throw new Error(validation.message);
   const rawDomain = String(form.get('domain') || current?.knowledge_domain || '').trim();
   const rawTitle = String(form.get('title') || '').trim();
-  const isNewDomain = !current && rawDomain === '__new__';
-  const domain = isNewDomain
-    ? normalizeResearchDomain(String(form.get('new_domain') || '').trim() || rawTitle)
-    : researchDomainFromFormValue(rawDomain, state.knowledgeBases, rawTitle || current?.title || 'research');
+  const domain = researchDomainFromFormValue(rawDomain, state.knowledgeBases, rawTitle || current?.title || 'research');
   const base = state.knowledgeBases.find((item) => item.domain === domain);
   const now = Date.now();
   const title = String(rawTitle || base?.title || titleFromDomain(domain) || 'Research').trim();
@@ -4408,11 +4119,6 @@ async function createTaskFromForm(form) {
     payload: {
       ...(current?.payload || {}),
       user_created: current?.payload?.user_created ?? true,
-      // A user-created task may target a domain that has no local knowledge
-      // base yet: the systematic-research writeback creates its tables
-      // server-side and they replicate down afterwards. The flag lets the
-      // run gate distinguish this from "existing domain not synced yet".
-      new_domain: current?.payload?.new_domain ?? isNewDomain,
       scoring_dimensions: scoringDimensions,
       scoring_weights: scoringWeights(scoringDimensions),
       table_contract: RESEARCH_TABLE_CONTRACT,
@@ -4445,19 +4151,12 @@ async function runSelectedResearch() {
   const commandId = `cmd_${crypto.randomUUID()}`;
   const researchRunId = `research_run_${crypto.randomUUID()}`;
   const scoringDimensions = scoringDimensionsForTask(task).filter((axis) => axis.id !== 'portfolio_priority');
-  const baseTableContract = task.payload?.table_contract || RESEARCH_TABLE_CONTRACT;
-  const tableContract = inferResearchKind(task) === 'bearing'
-    ? { ...BEARING_MEASUREMENT_TABLE_CONTRACT, ...baseTableContract }
-    : baseTableContract;
+  const tableContract = task.payload?.table_contract || RESEARCH_TABLE_CONTRACT;
   const existingTables = new Set((base?.tables || []).map((table) => table.table_key));
   const missingTables = Object.keys(tableContract).filter((key) => !existingTables.has(key));
-  const requireMeasuredLoadPoints = inferResearchKind(task) === 'bearing'
-    || task.measurements_table_key === 'measured_load_points'
+  const requireMeasuredLoadPoints = task.measurements_table_key === 'measured_load_points'
     || existingTables.has('measured_load_points')
     || Object.hasOwn(tableContract, 'measured_load_points');
-  const requireDerivedPropellerLoads = inferResearchKind(task) === 'bearing'
-    || existingTables.has('derived_propeller_load_points')
-    || Object.hasOwn(tableContract, 'derived_propeller_load_points');
   const requireDerivedBearingLoads = existingTables.has('derived_bearing_loads')
     || Object.hasOwn(tableContract, 'derived_bearing_loads');
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
@@ -4589,7 +4288,6 @@ async function runSelectedResearch() {
         semantic_graph_nodes: 'semantic_graph_nodes',
         semantic_graph_edges: 'semantic_graph_edges',
         ...(requireMeasuredLoadPoints ? { measured_load_points: 'measured_load_points' } : {}),
-        ...(requireDerivedPropellerLoads ? { derived_propeller_load_points: 'derived_propeller_load_points' } : {}),
         ...(requireDerivedBearingLoads ? { derived_bearing_loads: 'derived_bearing_loads' } : {}),
       },
     },
@@ -5310,26 +5008,17 @@ function latestRunForTask(taskId) {
 function researchRunInfo(task) {
   const run = latestRunForTask(task?.id);
   const fallbackCommand = latestResearchCommandForTask(task?.id);
-  // A run row only records that a run was requested; the command and the queue
-  // task carry its outcome. A run whose command already finished — or that is
-  // older than the newest command for this task — describes a past attempt.
-  // Treating its `queued` as live state left "Research fortsetzen" permanently
-  // disabled with "läuft bereits" while nothing was running at all.
-  const runStale = Boolean(fallbackCommand)
-    && Number(fallbackCommand.updated_at_ms || 0) > Number(run?.updated_at_ms || 0);
-  const commandId = (runStale ? '' : (run?.command_id || run?.payload?.result?.command_id || ''))
-    || fallbackCommand?.command_id || fallbackCommand?.id || '';
-  const taskQueueId = runStale ? '' : (run?.task_queue_id || run?.payload?.result?.task_id || '');
+  const commandId = run?.command_id || run?.payload?.result?.command_id || fallbackCommand?.command_id || fallbackCommand?.id || '';
+  const taskQueueId = run?.task_queue_id || run?.payload?.result?.task_id || '';
   const command = commandId
-    ? (state.commands.find((item) => item.command_id === commandId || item.id === commandId) || fallbackCommand)
+    ? state.commands.find((item) => item.command_id === commandId || item.id === commandId)
     : fallbackCommand;
   const queueTask = taskQueueId
     ? state.queueTasks.find((item) => item.id === taskQueueId)
     : commandId
       ? state.queueTasks.find((item) => item.command_id === commandId)
       : null;
-  const runStatus = runStale ? '' : (run?.status || '');
-  const status = queueTask?.status || command?.task_status || command?.status || runStatus || '';
+  const status = queueTask?.status || command?.task_status || command?.status || run?.status || '';
   const statusKind = statusKindFor(status);
   return {
     run,
@@ -5380,12 +5069,6 @@ function knowledgeBaseForTask(task) {
 function tableForKey(base, key) {
   if (!base || !key) return null;
   return base.tables.find((table) => table.table_key === key) || null;
-}
-
-function preferredDirectMeasurementTable(base, task = null) {
-  return tableForKey(base, 'measured_load_points')
-    || tableForKey(base, task?.measurements_table_key)
-    || firstTableMatching(base, /measure|load|point/i);
 }
 
 function firstTableMatching(base, pattern) {
@@ -5735,12 +5418,6 @@ function reloadStatusText() {
 
 function visibleResearchStatus() {
   if (diagnosticFailures().length) return reloadStatusText();
-  const passiveStatuses = new Set([
-    '',
-    state.t('loadingKnowledge', 'Knowledge wird geladen...'),
-    reloadStatusText(),
-  ]);
-  if (!passiveStatuses.has(String(state.status || ''))) return state.status;
   if (state.initialDataReady && state.tasks.length) return '';
   return state.status;
 }
@@ -6421,7 +6098,6 @@ export const __researchTestHooks = {
   emptyStateForNoTask,
   evidenceGate,
   defaultMeasurementsTableKey,
-  derivedMeasurementDisplayRows,
   eligibleGraphFocusSourceIds,
   filterGraphRowsForEvidence,
   filterMeasurementRowsForEvidence,
@@ -6435,7 +6111,6 @@ export const __researchTestHooks = {
   knowledgeLineageForPayload,
   knowledgeRefreshPayload,
   compactKnowledgeTableReferences,
-  preferredDirectMeasurementTable,
   graphDocumentLineage,
   latestEvidenceRunForTask,
   researchScoringContract,

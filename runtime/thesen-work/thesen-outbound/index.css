@@ -1,0 +1,490 @@
+.thesen-outbound {
+  --thesen-left: 300px;
+  --thesen-right: 360px;
+  container-type: inline-size;
+  container-name: business-app-window;
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  color: var(--text);
+  background: var(--bg);
+  font: 13px/1.4 var(--font-sans);
+}
+
+.thesen-outbound-layout {
+  display: grid;
+  grid-template-columns: var(--thesen-left) 6px minmax(320px, 1fr) 6px var(--thesen-right);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.thesen-pane {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+.thesen-scroll { min-width: 0; overflow: auto; }
+
+.thesen-detail { grid-template-rows: auto minmax(0, 1fr); }
+.thesen-leads { grid-template-rows: auto auto auto minmax(0, 1fr); }
+.thesen-resizer { width: 6px; height: 100%; }
+/* Own the header row instead of inheriting it from the shell: inside the
+   sources dialog the shell's pane-header layout does not apply, so the title
+   and the actions stacked and the close button ended up under the heading
+   instead of at the top right where it belongs. */
+.thesen-header {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.thesen-header > :first-child { min-width: 0; }
+.thesen-header-actions { flex: 0 0 auto; margin-left: auto; }
+.thesen-header .ctox-button { display: inline-flex; align-items: center; gap: 6px; }
+.thesen-header-actions { display: flex; align-items: center; gap: 6px; }
+.thesen-header-actions .ctox-view-toggle { display: flex; align-items: center; gap: 2px; }
+.thesen-header-actions .ctox-pane-icon[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.thesen-pane-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+.thesen-pane-heading .ctox-pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-pane-heading > span { flex: 0 0 auto; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+.thesen-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.thesen-toolbar .ctox-pane-search { min-width: 0; flex: 1; }
+.thesen-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.thesen-campaign-research .thesen-icon { width: 15px; height: 15px; }
+.thesen-campaign-research .thesen-icon path[d^="M20 12"] {
+  transform-origin: center;
+  animation: thesen-spin 1s linear infinite;
+}
+
+.thesen-campaign-progress {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(80px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.thesen-progress-copy { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.thesen-progress-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.thesen-progress-copy span { flex: 0 0 auto; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.thesen-progress-track { height: 3px; overflow: hidden; background: var(--line); }
+.thesen-progress-track i { display: block; height: 100%; background: var(--accent); transition: width 180ms ease; }
+.thesen-progress-states { display: flex; align-items: center; gap: 8px; }
+.thesen-progress-state { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.thesen-progress-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.thesen-progress-state strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.thesen-progress-state.is-running i { background: var(--accent); }
+.thesen-progress-state.is-completed i, .thesen-progress-state.is-validated i { background: var(--success); }
+.thesen-progress-state.is-failed i { background: var(--danger); }
+
+@keyframes thesen-spin { to { transform: rotate(360deg); } }
+
+.thesen-campaigns { grid-template-rows: auto minmax(0, 1fr); }
+.thesen-campaign-list { padding: 6px; }
+.thesen-campaign-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 42px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+.thesen-campaign-select {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 41px;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.thesen-campaign-row:hover,
+.thesen-campaign-row[data-selected="true"] { background: var(--accent-soft); }
+.thesen-campaign-select span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-campaign-select strong { color: var(--muted); font-size: 11px; }
+.thesen-campaign-actions {
+  display: flex;
+  padding-right: 3px;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.thesen-campaign-row:hover .thesen-campaign-actions,
+.thesen-campaign-row:focus-within .thesen-campaign-actions,
+.thesen-campaign-row[data-selected="true"] .thesen-campaign-actions { opacity: 1; }
+.thesen-campaign-actions .ctox-pane-icon { width: 28px; height: 28px; }
+.thesen-campaign-actions .is-danger:hover { color: var(--danger); }
+
+.thesen-source-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+.thesen-source-panel {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  width: min(760px, 100%);
+  max-height: min(760px, 92%);
+  overflow: hidden;
+  border: 1px solid var(--line-strong, var(--line));
+  background: var(--surface);
+  box-shadow: var(--shadow-lg, 0 18px 48px rgba(0, 0, 0, .28));
+}
+
+.thesen-source-tabs {
+  display: flex;
+  min-height: 38px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.thesen-source-tabs button {
+  min-width: 112px;
+  padding: 0 14px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 750;
+}
+
+.thesen-source-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.thesen-source-credential {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.thesen-source-credential.is-available {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  color: var(--accent);
+}
+
+.thesen-source-credential.is-invalid,
+.thesen-source-credential.is-missing {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+  color: var(--danger);
+}
+
+.thesen-source-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 74px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.thesen-source-copy { display: grid; gap: 2px; min-width: 0; }
+.thesen-source-copy > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-source-copy > span { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-source-actions { display: flex; gap: 3px; }
+.thesen-source-actions .ctox-pane-icon { width: 28px; height: 28px; }
+
+.thesen-source-toggle {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface-2);
+}
+
+.thesen-toggle-dot { display: block; width: 8px; height: 8px; margin: auto; border-radius: 50%; background: var(--muted); }
+.thesen-source-toggle[aria-pressed="true"] .thesen-toggle-dot { background: var(--success); }
+
+.thesen-adapter-state { display: inline-flex; align-items: center; gap: 4px; }
+.thesen-source-copy > .thesen-adapter-state { white-space: normal; }
+.thesen-adapter-state i { width: 8px; height: 8px; border: 1px solid var(--muted); border-radius: 50%; }
+.thesen-adapter-state.is-ready { color: var(--success); font-weight: 750; }
+.thesen-icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; flex: 0 0 auto; }
+
+.thesen-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent-soft) 62%, var(--surface));
+}
+.thesen-selection-bar strong { margin-right: auto; font-size: 11px; }
+.thesen-selection-bar .ctox-button { display: inline-flex; align-items: center; gap: 5px; }
+
+.thesen-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.thesen-table th { position: sticky; top: 0; z-index: 1; height: 34px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; }
+.thesen-table th:nth-child(2) { width: 38%; }
+.thesen-table th:nth-child(3) { width: 20%; }
+.thesen-table th:nth-child(4) { width: 22%; }
+.thesen-table td { height: 54px; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.thesen-table tbody tr { cursor: pointer; }
+.thesen-table tbody tr:hover, .thesen-table tbody tr[aria-selected="true"] { background: var(--accent-soft); }
+.thesen-table tbody tr[data-checked="true"] { box-shadow: inset 3px 0 0 var(--accent); }
+.thesen-table td:nth-child(2) { display: grid; gap: 2px; }
+.thesen-table td:nth-child(2) span { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-table .thesen-select-column { width: 38px; padding-right: 2px; text-align: center; }
+.thesen-table input[type="checkbox"],
+.thesen-lead-shard > input[type="checkbox"] { accent-color: var(--accent); }
+
+.thesen-lead-shards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+.thesen-lead-shard {
+  position: relative;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 4px;
+  min-width: 0;
+  min-height: 88px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+.thesen-lead-shard:hover,
+.thesen-lead-shard[data-checked="true"],
+.thesen-lead-shard:has(.thesen-shard-main[aria-pressed="true"]) { border-color: var(--accent); background: var(--accent-soft); }
+.thesen-lead-shard > input { margin-top: 3px; }
+.thesen-shard-main {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.thesen-shard-main > strong,
+.thesen-shard-main > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-shard-main > span { color: var(--muted); font-size: 11px; }
+.thesen-lead-shard footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.thesen-lead-shard footer > span:last-child { color: var(--success); font-size: 10px; }
+.thesen-shard-research { width: 28px; height: 28px; }
+
+.thesen-policy-editor {
+  display: grid;
+  grid-row: 3 / 5;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  padding: 12px;
+}
+.thesen-policy-editor textarea {
+  width: 100%;
+  min-height: 300px;
+  resize: none;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.55;
+  padding: 12px;
+}
+.thesen-policy-editor footer { display: flex; justify-content: flex-end; gap: 6px; padding-top: 10px; }
+
+.thesen-detail-body { padding: 10px; }
+.thesen-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.thesen-detail-actions button { display: inline-flex; align-items: center; gap: 5px; }
+.thesen-detail-section { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.thesen-detail-section h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; color: var(--muted); }
+.thesen-evidence-list { display: grid; gap: 2px; }
+.thesen-evidence-source { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; color: inherit; text-decoration: none; }
+.thesen-evidence-source strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-evidence-source span { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.thesen-evidence-source[href]:hover strong { color: var(--accent); text-decoration: underline; }
+.thesen-contact { display: grid; gap: 1px; padding: 5px 0; }
+.thesen-contact span, .thesen-muted { color: var(--muted); font-size: 11px; }
+.thesen-review-summary { display: grid; gap: 4px; }
+.thesen-review-summary p { margin: 0; }
+.thesen-review-open { color: var(--danger); font-size: 12px; }
+.thesen-review-fields { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.thesen-review-field { display: grid; gap: 2px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; }
+/* Ein Feld traegt genau EIN Statussignal: das Badge. Rahmen bleiben neutral,
+   damit 21 Felder eine ruhige Liste ergeben statt einer Warnwand. */
+.thesen-review-field.is-insufficient { border-color: var(--line); }
+.thesen-review-field.is-missing { border-style: dashed; opacity: 0.65; }
+.thesen-approve-link { border: 0; background: none; color: var(--accent, #7ad0c1); font-size: 12px; cursor: pointer; padding: 0 2px; justify-self: end; }
+.thesen-approve-link:hover { text-decoration: underline; }
+.thesen-review-sources-line { font-size: 12px; color: var(--muted, #8b98a5); }
+.thesen-review-sources-line a { color: inherit; }
+.thesen-approved-chip { color: var(--success); }
+.thesen-review-field-head { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 2px 8px; align-items: baseline; }
+.thesen-review-label { color: var(--muted); font-size: 11px; }
+.thesen-review-value { overflow-wrap: anywhere; font-weight: 600; }
+.thesen-review-value.is-empty { color: var(--muted); font-weight: 400; font-style: italic; }
+.thesen-review-badge { grid-column: 1 / -1; justify-self: start; font-size: 10px; color: var(--muted); }
+.thesen-review-field.is-sufficient .thesen-review-badge { color: var(--success); }
+.thesen-review-field.is-insufficient .thesen-review-badge { color: var(--warning, #e8a23b); }
+.thesen-review-field.is-missing .thesen-review-badge { color: var(--danger); }
+/* Nie recherchiert ist kein Mangel: neutral, ohne Alarmfarbe. */
+.thesen-review-field.is-untouched { border-style: dashed; border-color: var(--line); opacity: 0.55; }
+.thesen-review-field.is-untouched .thesen-review-badge { color: var(--muted, #8b95a5); font-style: italic; }
+.thesen-review-field-head { grid-template-columns: minmax(90px, auto) minmax(0, 1fr) auto auto; }
+.thesen-review-sources { display: grid; gap: 3px; margin: 0; padding: 0 0 0 12px; list-style: none; font-size: 11px; }
+.thesen-review-sources li { display: grid; gap: 1px; }
+.thesen-review-sources a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.thesen-review-sources a:hover { text-decoration: underline; }
+.thesen-review-hint { color: var(--danger); }
+.thesen-review-extra-contacts { margin-top: 8px; }
+.thesen-empty { padding: 28px 12px; color: var(--muted); text-align: center; }
+
+.thesen-lead-editor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(680px, 100%);
+  max-height: min(720px, 92%);
+  overflow: hidden;
+  border: 1px solid var(--line-strong, var(--line));
+  background: var(--surface);
+  box-shadow: var(--shadow-lg, 0 18px 48px rgba(0, 0, 0, .28));
+}
+.thesen-lead-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+.thesen-form-field { display: grid; gap: 5px; min-width: 0; }
+.thesen-form-field.is-wide { grid-column: 1 / -1; }
+.thesen-form-field span { color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.thesen-form-field input {
+  min-width: 0;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0 9px;
+  font: inherit;
+}
+.thesen-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}
+
+@container business-app-window (max-width: 980px) {
+  .thesen-outbound-layout {
+    grid-template-columns: minmax(230px, 32%) 6px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 3fr) minmax(220px, 2fr);
+  }
+  .thesen-campaigns, .thesen-outbound-layout > [data-resizer="left"], .thesen-leads { grid-row: 1; }
+  .thesen-outbound-layout > [data-resizer="right"] { display: none; }
+  .thesen-detail { display: grid; grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line); }
+}
+
+@container business-app-window (max-width: 700px) {
+  .thesen-outbound-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(150px, 30%) minmax(180px, 35%) minmax(180px, 35%);
+  }
+  .thesen-outbound-layout > .thesen-resizer { display: none; }
+  .thesen-campaigns, .thesen-leads, .thesen-detail { grid-column: 1; }
+  .thesen-campaigns { grid-row: 1; }
+  .thesen-leads { grid-row: 2; }
+  .thesen-detail { display: grid; grid-row: 3; }
+  .thesen-campaigns { border-bottom: 1px solid var(--line); }
+  .thesen-source-row { min-height: 58px; }
+  .thesen-toolbar > span { display: none; }
+  .thesen-campaign-progress { grid-template-columns: minmax(0, 1fr) auto; }
+  .thesen-progress-track { grid-column: 1 / -1; grid-row: 2; }
+  .thesen-progress-states { grid-column: 1 / -1; overflow-x: auto; }
+  .thesen-lead-form { grid-template-columns: minmax(0, 1fr); }
+  .thesen-form-field.is-wide { grid-column: 1; }
+  .thesen-selection-bar { overflow-x: auto; }
+  .thesen-selection-bar strong,
+  .thesen-selection-bar .ctox-button { white-space: nowrap; }
+}
+
+
+/* Empfaengerauswahl fuer Sellify: vertikale Liste, Name und Funktion getrennt. */
+.thesen-recipient-selection { display: grid; gap: 6px; margin-top: 8px; }
+.thesen-recipient-selection-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.thesen-recipient-count { color: var(--muted); font-size: 11px; }
+.thesen-recipient { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.thesen-recipient:hover { border-color: var(--accent); background: var(--accent-soft); }
+.thesen-recipient.is-blocked,
+.thesen-recipient.is-review { cursor: not-allowed; background: color-mix(in srgb, var(--danger) 7%, transparent); }
+.thesen-recipient.is-review { background: color-mix(in srgb, var(--warning, #e8a23b) 8%, transparent); }
+.thesen-recipient.is-blocked:hover,
+.thesen-recipient.is-review:hover { border-color: var(--line); }
+.thesen-recipient > input { margin-top: 2px; accent-color: var(--accent); }
+.thesen-recipient > input:disabled { cursor: not-allowed; }
+.thesen-recipient-text { display: grid; gap: 1px; min-width: 0; }
+.thesen-recipient-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-recipient-detail { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thesen-recipient-protection { color: var(--danger); font-size: 11px; }
+.thesen-recipient.is-review .thesen-recipient-protection { color: var(--warning, #b46d00); }
+.thesen-recipient-remark { margin: 2px 0 0; color: var(--muted); font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.thesen-recipient-exclusions { margin: 0 12px 8px; padding: 8px 10px; border: 1px solid var(--warning, #e8a23b); border-radius: 8px; background: color-mix(in srgb, var(--warning, #e8a23b) 7%, transparent); }
+.thesen-recipient-exclusions summary { cursor: pointer; font-weight: 700; }
+.thesen-recipient-exclusions p { margin: 6px 0 0; color: var(--danger); font-size: 12px; }
+.thesen-recipient-exclusions ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.thesen-recipient-exclusions li { display: grid; gap: 1px; font-size: 11px; }
+.thesen-recipient-exclusions li > span,
+.thesen-recipient-exclusions li > q { color: var(--muted); overflow-wrap: anywhere; }
+/* Jeder Wert ist anklickbar — auch ein bereits gefuellter. Vorher liess sich
+   ein einmal ermittelter Wert ueberhaupt nicht mehr korrigieren. */
+button.thesen-review-value {
+  background: none; border: none; padding: 0; margin: 0; font: inherit;
+  color: inherit; text-align: left; cursor: pointer; border-bottom: 1px dashed transparent;
+}
+button.thesen-review-value:hover,
+button.thesen-review-value:focus-visible { border-bottom-color: currentColor; }

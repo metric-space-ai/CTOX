@@ -71,36 +71,6 @@ export const DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
 export const KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 
-// A browser collection version change discards the local replica, so every
-// retained pull/push cursor and the readiness timestamp sharing that record must
-// disappear before the new marker becomes ready. Match by encoded collection
-// suffix because the room/topic is not known yet during addCollections().
-export function invalidateCollectionReplicationPersistence(collection) {
-  const normalized = String(collection || '').trim();
-  if (!normalized) throw new TypeError('invalidateCollectionReplicationPersistence requires collection');
-  const storage = globalThis.localStorage;
-  const suffix = `.${encodeURIComponent(normalized)}`;
-  const prefix = 'ctox.rxdb.checkpoints.v1.';
-  const keys = [];
-  if (storage) {
-    for (let index = 0; index < Number(storage.length || 0); index += 1) {
-      const key = storage.key(index);
-      if (typeof key === 'string' && key.startsWith(prefix) && key.endsWith(suffix)) keys.push(key);
-    }
-    for (const key of keys) {
-      storage.removeItem(key);
-      if (storage.getItem(key) != null) {
-        throw new Error(`Failed to clear retained replication checkpoint ${key}`);
-      }
-    }
-  }
-  for (const shared of SHARED_ROOM_PEERS.values()) {
-    const state = shared.collections.get(normalized)?.state;
-    state?.invalidateForCollectionVersionChange?.();
-  }
-  return keys.length;
-}
-
 const BROWSER_CAPABILITIES = [
   'ctox-rxdb-browser-v1',
   'ctox-file-chunks-v1',
@@ -950,13 +920,6 @@ class CtoxWebRtcReplicationState {
     // so a transport blip does not force a from-scratch resync.
     this.checkpointStorageKey = persistentCheckpointStorageKey(topic, collection.name);
     this.retainedCheckpoints = readPersistentCheckpoints(this.checkpointStorageKey);
-    if (collection.versionInvalidation?.invalidated) {
-      // The primary cache was just cleared under the version guard. Pin this
-      // state to a null cursor even if a topic-specific retained record escaped
-      // a legacy LocalStorage implementation; the first pull drains from null.
-      this.retainedCheckpoints = null;
-      clearPersistentCheckpoints(this.checkpointStorageKey);
-    }
     // Persisted only inside the retained checkpoint record. It becomes trusted
     // after the remote/local validity keys and permission digest match during
     // handshake; until then an old marker must not make this collection live.
@@ -1963,24 +1926,6 @@ class CtoxWebRtcReplicationState {
     this.demandLoaderActive = true;
     this.demandStatus.queryDemandLoadingActive = queryDemandEnabled || fileDemandEnabled;
     return this.demandLoader;
-  }
-
-  invalidateForCollectionVersionChange() {
-    this.pullCheckpointsByPeer.clear();
-    this.pushCheckpointsByPeer.clear();
-    this.retainedCheckpoints = null;
-    this.firstPullCompletedAtMs = 0;
-    this.localCheckpointValidityKey = '';
-    clearPersistentCheckpoints(this.checkpointStorageKey);
-    // If this state is already connected, the next pull pass must begin at null.
-    // addCollections normally invalidates before replication starts; this branch
-    // also keeps a same-realm late registration fail-safe.
-    if (this.pullInProgressPromise) {
-      this.pullAgainAfterCurrent = true;
-    } else if (this.openPeerIds().length > 0) {
-      queueMicrotask(() => this.pullFromRemotePeers().catch((error) => this.error$.next(error)));
-    }
-    this.publishTransportStatus();
   }
 
   markFirstPullCompleted() {

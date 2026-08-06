@@ -876,6 +876,8 @@ pub struct ModuleLifecycleProjectionRepairRequest {
     #[serde(default)]
     pub repair_invalid_version_refs: bool,
     #[serde(default)]
+    pub repair_orphan_private_apps: bool,
+    #[serde(default)]
     pub migrate_legacy_manifest_lifecycle: bool,
 }
 
@@ -1876,7 +1878,7 @@ fn rxdb_collection_table_name_from_tables(
         })
 }
 
-pub(super) fn rxdb_schema_version(collection: &str) -> i64 {
+fn rxdb_schema_version(collection: &str) -> i64 {
     business_os_schema_contract_for_store()
         .get(collection)
         .and_then(|schema| schema.get("version"))
@@ -3600,39 +3602,8 @@ fn backfill_semver_public_release_records(
     Ok(inserted)
 }
 
-fn backfill_legacy_private_app_responsibility(
-    conn: &Connection,
-    session: &BusinessOsSession,
-    modules: &[ModuleManifest],
-    now: i64,
-) -> anyhow::Result<usize> {
-    let recovery_user_id = session_user_id(session)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("authenticated lifecycle migration user is required")?;
-    seed_session_user(conn, session)?;
-    let mut inserted = 0usize;
-    for manifest in modules {
-        if !module_manifest_requires_active_responsibility(manifest)?
-            || module_has_active_responsibility(conn, &manifest.id)?
-        {
-            continue;
-        }
-        upsert_module_founder_assignment_record(
-            conn,
-            session,
-            &manifest.id,
-            recovery_user_id,
-            true,
-            now,
-        )?;
-        inserted += 1;
-    }
-    Ok(inserted)
-}
-
 const LEGACY_MODULE_LIFECYCLE_MIGRATION_ID: &str =
-    "business_os.legacy_module_lifecycle_authority.v2";
+    "business_os.legacy_module_lifecycle_authority.v1";
 
 pub fn migrate_legacy_module_lifecycle_authority(
     root: &Path,
@@ -3665,14 +3636,11 @@ pub fn migrate_legacy_module_lifecycle_authority(
     let tx = conn.transaction()?;
     let preview_grants_inserted = backfill_manifest_preview_audience_grants(&tx, &modules, now)?;
     let release_records_inserted = backfill_semver_public_release_records(&tx, &modules, now)?;
-    let private_app_responsibilities_inserted =
-        backfill_legacy_private_app_responsibility(&tx, session, &modules, now)?;
     let evidence = serde_json::json!({
         "migration_id": LEGACY_MODULE_LIFECYCLE_MIGRATION_ID,
         "actor_id": actor_id,
         "preview_grants_inserted": preview_grants_inserted,
         "release_records_inserted": release_records_inserted,
-        "private_app_responsibilities_inserted": private_app_responsibilities_inserted,
         "applied_at_ms": now,
     });
 
@@ -6423,9 +6391,19 @@ fn business_os_why_policy_payload(decision: &PolicyDecision, source: &str) -> Va
     payload
 }
 
-fn module_manifest_requires_active_responsibility(
-    manifest: &ModuleManifest,
-) -> anyhow::Result<bool> {
+fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow::Result<bool> {
+    let Ok(app_root) = resolve_business_os_app_root(root) else {
+        return Ok(false);
+    };
+    let installed_app_root = resolve_business_os_installed_app_root(root);
+    let module_id = module_id.trim();
+    if module_id.is_empty() {
+        return Ok(false);
+    }
+    let manifests = load_module_manifests(&app_root, &installed_app_root)?;
+    let Some(manifest) = manifests.iter().find(|manifest| manifest.id == module_id) else {
+        return Ok(false);
+    };
     if !module_is_runtime_installed(manifest) {
         return Ok(false);
     }
@@ -6443,22 +6421,6 @@ fn module_manifest_requires_active_responsibility(
         parse_business_app_semver_major(&manifest.version),
         Some(major) if major >= 1
     ))
-}
-
-fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow::Result<bool> {
-    let Ok(app_root) = resolve_business_os_app_root(root) else {
-        return Ok(false);
-    };
-    let installed_app_root = resolve_business_os_installed_app_root(root);
-    let module_id = module_id.trim();
-    if module_id.is_empty() {
-        return Ok(false);
-    }
-    let manifests = load_module_manifests(&app_root, &installed_app_root)?;
-    let Some(manifest) = manifests.iter().find(|manifest| manifest.id == module_id) else {
-        return Ok(false);
-    };
-    module_manifest_requires_active_responsibility(manifest)
 }
 
 fn active_module_founder_count_excluding(
@@ -6529,7 +6491,7 @@ fn sole_responsibility_module_ids_for_user(
     Ok(module_ids)
 }
 
-pub(super) fn upsert_module_founder_assignment_record(
+fn upsert_module_founder_assignment_record(
     conn: &Connection,
     session: &BusinessOsSession,
     module_id: &str,
@@ -7881,6 +7843,66 @@ fn module_has_active_responsibility(conn: &Connection, module_id: &str) -> anyho
     Ok(count > 0)
 }
 
+fn orphan_private_module_ids(
+    root: &Path,
+    conn: &Connection,
+    module_filter: &str,
+) -> anyhow::Result<Vec<String>> {
+    let module_ids = current_business_os_module_ids(root)?;
+    let mut orphan_ids = Vec::new();
+    for module_id in module_ids {
+        if !module_filter.is_empty() && module_id != module_filter {
+            continue;
+        }
+        if module_requires_active_responsibility(root, &module_id)?
+            && !module_has_active_responsibility(conn, &module_id)?
+        {
+            orphan_ids.push(module_id);
+        }
+    }
+    Ok(orphan_ids)
+}
+
+fn repair_orphan_private_app_responsibility(
+    root: &Path,
+    conn: &Connection,
+    session: &BusinessOsSession,
+    module_filter: &str,
+    dry_run: bool,
+    now: i64,
+) -> anyhow::Result<Vec<Value>> {
+    let recovery_user_id = session_user_id(session)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("authenticated recovery user is required")?
+        .to_owned();
+    let orphan_ids = orphan_private_module_ids(root, conn, module_filter)?;
+    if !dry_run && !orphan_ids.is_empty() {
+        seed_session_user(conn, session)?;
+    }
+    let mut actions = Vec::new();
+    for module_id in orphan_ids {
+        actions.push(serde_json::json!({
+            "kind": "orphan_private_app_responsibility",
+            "module_id": module_id.as_str(),
+            "recovery_user_id": recovery_user_id.as_str(),
+            "action": "assign_recovery_responsibility",
+            "apply": !dry_run,
+        }));
+        if !dry_run {
+            upsert_module_founder_assignment_record(
+                conn,
+                session,
+                &module_id,
+                &recovery_user_id,
+                true,
+                now,
+            )?;
+        }
+    }
+    Ok(actions)
+}
+
 fn current_business_os_module_ids(root: &Path) -> anyhow::Result<BTreeSet<String>> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
@@ -8005,6 +8027,18 @@ pub fn repair_module_lifecycle_projections(
     } else {
         Vec::new()
     };
+    let orphan_private_app_actions = if request.repair_orphan_private_apps {
+        repair_orphan_private_app_responsibility(
+            root,
+            &conn,
+            session,
+            &module_filter,
+            request.dry_run,
+            now,
+        )?
+    } else {
+        Vec::new()
+    };
     let mut release_ids = Vec::new();
     for module_id in &module_ids {
         if request.dry_run {
@@ -8060,6 +8094,7 @@ pub fn repair_module_lifecycle_projections(
     }
     let release_projection_count = release_ids.len();
     let version_ref_repair_count = version_ref_actions.len();
+    let orphan_private_app_repair_count = orphan_private_app_actions.len();
     let permission_grant_repair_count = permission_grant_actions.len();
     Ok(serde_json::json!({
         "ok": true,
@@ -8071,6 +8106,8 @@ pub fn repair_module_lifecycle_projections(
         "release_projection_count": release_projection_count,
         "version_ref_actions": version_ref_actions,
         "version_ref_repair_count": version_ref_repair_count,
+        "orphan_private_app_actions": orphan_private_app_actions,
+        "orphan_private_app_repair_count": orphan_private_app_repair_count,
         "permission_grant_actions": permission_grant_actions,
         "permission_grant_repair_count": permission_grant_repair_count,
         "legacy_manifest_migration": legacy_manifest_migration.unwrap_or(Value::Null),
@@ -8094,6 +8131,7 @@ fn module_lifecycle_projection_repair_safe_command(
             "dry_run": request.dry_run,
             "repair_stale_grants": request.repair_stale_grants,
             "repair_invalid_version_refs": request.repair_invalid_version_refs,
+            "repair_orphan_private_apps": request.repair_orphan_private_apps,
             "migrate_legacy_manifest_lifecycle": request.migrate_legacy_manifest_lifecycle,
         }),
         client_context: serde_json::json!({
@@ -15043,52 +15081,16 @@ fn upsert_rxdb_collection_record_with_writer(
             payload = existing;
         }
     }
-    // The document JSON must carry a complete, valid RxDB envelope. This
-    // writer used to stamp the revision only into the table column while the
-    // stored JSON kept no `_rev`/`_meta` at all; every document it touched
-    // then poisoned the native peer's document cache (`revision_cache_key`
-    // requires `_rev` and `_meta.lwt`) and the affected projection loop
-    // failed with DOC_CACHE_REV on every cycle - the knowledge-tables flood
-    // and the module-catalog flood on the SKF instance were both this.
-    let previous_revision_height = payload
-        .get("_rev")
-        .and_then(Value::as_str)
-        .and_then(|revision| revision.split_once('-'))
-        .and_then(|(height, token)| {
-            (!token.is_empty())
-                .then(|| height.parse::<u64>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
-    let rev = format!(
-        "{}-{}",
-        previous_revision_height.saturating_add(1),
-        Uuid::new_v4().simple()
-    );
+    let rev = format!("rev_{}", Uuid::new_v4());
     if let Some(object) = payload.as_object_mut() {
         object.insert("id".to_string(), Value::String(record_id.to_string()));
         object.insert(
             "updated_at_ms".to_string(),
             Value::Number(serde_json::Number::from(payload_updated_at_ms)),
         );
-        object.insert("_rev".to_string(), Value::String(rev.clone()));
-        let meta = object
-            .entry("_meta".to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        if let Some(meta) = meta.as_object_mut() {
-            meta.insert("lwt".to_string(), Value::from(replication_lwt_ms as f64));
-        } else {
-            *meta = serde_json::json!({ "lwt": replication_lwt_ms as f64 });
-        }
-        if !object.get("_attachments").is_some_and(Value::is_object) {
-            object.insert(
-                "_attachments".to_string(),
-                Value::Object(serde_json::Map::new()),
-            );
-        }
-        object.insert("_deleted".to_string(), Value::Bool(deleted));
         if deleted {
             object.insert("is_deleted".to_string(), Value::Bool(true));
+            object.insert("_deleted".to_string(), Value::Bool(true));
         }
     }
     // SECURITY: strip bearer credentials from client_context on the FINAL merged
@@ -16160,182 +16162,7 @@ pub fn fail_business_command_from_queue_error(
             failed_at_ms,
         )?;
     }
-    // Continuation is best-effort bookkeeping on top of the failure: it must
-    // never turn a recorded terminal failure into an error of this function.
-    match maybe_spawn_systematic_research_continuation(root, &conn, &command_id, &command, error) {
-        Ok(Some(next_command_id)) => {
-            eprintln!(
-                "[business-os] spawned research auto-continuation {next_command_id} after transport failure of {command_id}"
-            );
-        }
-        Ok(None) => {}
-        Err(err) => {
-            eprintln!(
-                "[business-os] research auto-continuation for {command_id} was not spawned: {err}"
-            );
-        }
-    }
     Ok(Some(payload))
-}
-
-/// A systematic research run accumulates evidence across attempts (verified on
-/// the SKF instance: attempt 2 grew the evidence manifest from 9 to 42
-/// admitted sources and attempt 3 inherited all 42), but one queue item has a
-/// finite retry budget: enough transient stream disconnects terminalize the
-/// item and the chain silently stops even though the next attempt would
-/// resume from the accumulated evidence. Re-dispatch the same command payload
-/// as a fresh continuation command when - and only when - the terminal error
-/// is a pure transport failure. Fail-closed validation and every other
-/// terminal cause stay terminal, the chain is capped, and an already-active
-/// run for the same record suppresses the spawn.
-fn maybe_spawn_systematic_research_continuation(
-    root: &Path,
-    conn: &Connection,
-    failed_command_id: &str,
-    command: &BusinessCommand,
-    error: &str,
-) -> anyhow::Result<Option<String>> {
-    const MAX_AUTO_CONTINUATIONS: i64 = 6;
-    if !is_systematic_research_command(command) {
-        return Ok(None);
-    }
-    let lower = error.to_ascii_lowercase();
-    // Transport here means "the session died, the work did not": a fresh
-    // continuation session simply starts from the accumulated evidence again.
-    // 413 comes from an oversized mid-run fallback request, and a 404
-    // "response was not found for this tenant" is a gateway that lost the
-    // session handle - both are cured by a new session, neither is a verdict
-    // on the research itself. The cap still bounds a deterministic repeat.
-    let transport_failure = lower.contains("stream disconnected before completion")
-        || lower.contains("connection reset by peer")
-        || lower.contains("error sending request for url")
-        || lower.contains("payload too large")
-        || lower.contains("was not found for this tenant");
-    if !transport_failure {
-        // Record the refusal too. Without it a missing continuation is
-        // ambiguous - "this code never ran" and "this failure was terminal on
-        // purpose" look identical, and that ambiguity already cost a full
-        // debugging round on the SKF instance.
-        record_research_continuation_decision(
-            conn,
-            failed_command_id,
-            &format!(
-                "no continuation: not a transport failure ({})",
-                error.chars().take(120).collect::<String>()
-            ),
-        );
-        return Ok(None);
-    }
-    let attempt = command
-        .payload
-        .get("auto_continuation_attempt")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    if attempt >= MAX_AUTO_CONTINUATIONS {
-        record_research_continuation_decision(
-            conn,
-            failed_command_id,
-            &format!(
-                "no continuation: cap of {MAX_AUTO_CONTINUATIONS} reached at attempt {attempt}"
-            ),
-        );
-        anyhow::bail!(
-            "auto-continuation cap of {MAX_AUTO_CONTINUATIONS} reached (attempt {attempt}); leaving the chain terminal"
-        );
-    }
-    let record_id = command.record_id.clone().unwrap_or_default();
-    if !record_id.is_empty() {
-        // Exclude the dying command's own task: depending on the caller the
-        // projection may still read `leased` at this moment, and counting it
-        // would silently suppress every continuation.
-        let active: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM business_records
-             WHERE collection = 'ctox_queue_tasks'
-               AND json_extract(payload_json, '$.command_type') = 'research.systematic.run'
-               AND json_extract(payload_json, '$.route_status') IN ('pending', 'leased')
-               AND json_extract(payload_json, '$.command_id') != ?2
-               AND payload_json LIKE '%' || ?1 || '%'",
-            params![record_id, failed_command_id],
-            |row| row.get(0),
-        )?;
-        if active > 0 {
-            record_research_continuation_decision(
-                conn,
-                failed_command_id,
-                &format!("suppressed: {active} active run(s) for {record_id}"),
-            );
-            return Ok(None);
-        }
-    }
-    let next_command_id = format!("cmd_auto_{}", Uuid::new_v4());
-    let mut payload = command.payload.clone();
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "auto_continuation_attempt".to_string(),
-            Value::from(attempt + 1),
-        );
-        object.insert(
-            "continued_from_command_id".to_string(),
-            Value::String(failed_command_id.to_string()),
-        );
-    }
-    let document = serde_json::json!({
-        "id": next_command_id,
-        "command_id": next_command_id,
-        "module": command.module.clone(),
-        "command_type": command.command_type.clone(),
-        "record_id": command.record_id.clone(),
-        "status": "pending_sync",
-        "payload": payload,
-        "client_context": {
-            "source": "harness-auto-continuation",
-            "continued_from_command_id": failed_command_id,
-            "auto_continuation_attempt": attempt + 1,
-            "transport_error": error.chars().take(200).collect::<String>(),
-        },
-    });
-    if let Err(err) = super::command_plane::accept_rxdb_business_command(root, document) {
-        record_research_continuation_decision(
-            conn,
-            failed_command_id,
-            &format!("dispatch failed: {err}"),
-        );
-        return Err(err);
-    }
-    record_research_continuation_decision(
-        conn,
-        failed_command_id,
-        &format!("spawned {next_command_id} (attempt {})", attempt + 1),
-    );
-    Ok(Some(next_command_id))
-}
-
-/// The service journal on a busy instance rotates within hours, so the
-/// continuation decision is also recorded durably next to the command it
-/// belongs to. One row per failed command; greppable via the
-/// `research_continuations` collection.
-fn record_research_continuation_decision(
-    conn: &Connection,
-    failed_command_id: &str,
-    decision: &str,
-) {
-    let now = now_ms() as i64;
-    let payload = serde_json::json!({
-        "id": failed_command_id,
-        "decision": decision,
-        "updated_at_ms": now,
-    });
-    if let Err(err) = upsert_business_record(
-        conn,
-        "research_continuations",
-        failed_command_id,
-        now,
-        payload,
-    ) {
-        eprintln!(
-            "[business-os] could not record continuation decision for {failed_command_id}: {err}"
-        );
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -16576,7 +16403,6 @@ pub(super) fn is_rxdb_control_command_type(command_type: &str) -> bool {
             .collect()
     });
     exact_types.contains(command_type)
-        || crate::coding_agents::is_coding_agent_command(command_type)
         || is_customers_active_command(command_type)
         || super::external_sql_sync::is_external_sql_command(command_type)
         || is_outbound_active_command(command_type)
@@ -19443,31 +19269,6 @@ pub fn issue_business_os_capability_token_for_session(
     let role = normalize_business_role(&user.role);
     let conn = open_store(root)?;
     seed_configured_business_users(&conn)?;
-
-    // SEC3. This used to upsert with active = 1, which both provisioned an
-    // unknown user and revived a deactivated one. The two cases deserve
-    // opposite answers, and the codebase had already given them:
-    //
-    // - Provisioning stays. The doc comment above explains why it exists — a
-    //   server-derived loopback session needs a durable actor and capability
-    //   epoch before a token can be bound to it.
-    // - Reviving does not. issue_business_os_capability_token, which this
-    //   function delegates to, already refuses a user who is not active, and
-    //   seed_configured_business_users uses ON CONFLICT DO NOTHING so it never
-    //   revives either. This path was the one place that undid both.
-    //
-    // So the upsert no longer touches `active`. A deactivated user now fails
-    // in the delegate with "no active Business OS user", which is the message
-    // that path already had. Deactivation means what an operator meant by it.
-    let prior_active: Option<bool> = conn
-        .query_row(
-            "SELECT active FROM business_users WHERE user_id = ?1",
-            params![user_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .map(|active| active == 1);
-
     conn.execute(
         "INSERT INTO business_users
             (user_id, display_name, role, active, created_at_ms, updated_at_ms)
@@ -19475,33 +19276,10 @@ pub fn issue_business_os_capability_token_for_session(
          ON CONFLICT(user_id) DO UPDATE SET
             display_name = excluded.display_name,
             role = excluded.role,
+            active = 1,
             updated_at_ms = excluded.updated_at_ms",
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
-
-    // A token for an already-active user changes nothing and would drown the
-    // signal. The refusal is recorded because a deactivated user still trying
-    // is worth seeing.
-    if let Some(effect) = match prior_active {
-        None => Some("provisioned"),
-        Some(false) => Some("refused_inactive"),
-        Some(true) => None,
-    } {
-        insert_business_event(
-            &conn,
-            "business_users",
-            user_id,
-            "ctox.capability.token.issue",
-            serde_json::json!({
-                "effect": effect,
-                "user_id": user_id,
-                "role": role.as_str(),
-                "source": "capability_token_issuance",
-            }),
-            now_ms,
-        )?;
-    }
-
     drop(conn);
     issue_business_os_capability_token(root, user_id, now_ms)
 }
@@ -28921,81 +28699,6 @@ pub(super) mod tests {
         assert_eq!(display_name, "Local CTOX");
         assert_eq!(role, "admin");
         assert_eq!(active, 1);
-
-        // SEC3: the user did not exist before, so the issuance leaves a trace.
-        let effect: String = conn.query_row(
-            "SELECT json_extract(payload_json, '$.effect') FROM business_events
-             WHERE command_type = 'ctox.capability.token.issue' AND record_id = 'local-dev'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(effect, "provisioned");
-        Ok(())
-    }
-
-    /// SEC3: a deactivated user must not get a capability token, and the
-    /// attempt must leave a trace.
-    ///
-    /// Asking for a token used to set active = 1 first, so deactivation could
-    /// be undone by the person it was applied to. The delegate this path calls
-    /// already refused inactive users; only this upsert undid that.
-    #[test]
-    fn capability_token_issuance_refuses_a_deactivated_user() -> anyhow::Result<()> {
-        let _env = EnvRestore::set(&[
-            ("CTOX_AUTH_USERS", ""),
-            ("CTOX_BUSINESS_PASSWORD", ""),
-            ("CTOX_BUSINESS_OS_DESKTOP_DISPLAY_NAME", "Local CTOX"),
-            ("CTOX_BUSINESS_OS_DESKTOP_USER", "local-dev"),
-            ("CTOX_BUSINESS_OS_DESKTOP_ROLE", "admin"),
-            ("CTOX_BUSINESS_OS_LOGIN_URL", ""),
-            ("CTOX_BUSINESS_OS_REQUIRE_LOGIN", "0"),
-            ("CTOX_BUSINESS_OS_SESSION_TOKEN", ""),
-        ]);
-        let temp = tempdir()?;
-        let root = temp.path();
-        let session = session_for_request(None, None, true);
-        let now = now_ms() as i64;
-
-        // Exists and is then deactivated — the case an operator performs on
-        // purpose and would not expect a token request to undo.
-        issue_business_os_capability_token_for_session(root, &session, now)?;
-        let conn = open_store(root)?;
-        conn.execute(
-            "UPDATE business_users SET active = 0 WHERE user_id = 'local-dev'",
-            [],
-        )?;
-        conn.execute(
-            "DELETE FROM business_events WHERE command_type = 'ctox.capability.token.issue'",
-            [],
-        )?;
-        drop(conn);
-
-        let error = issue_business_os_capability_token_for_session(root, &session, now + 1)
-            .expect_err("a deactivated user must not receive a capability token");
-        assert!(
-            format!("{error:#}").contains("no active Business OS user"),
-            "the refusal must come from the active-user guard, not from something \
-             incidental: {error:#}"
-        );
-
-        let conn = open_store(root)?;
-        let active: i64 = conn.query_row(
-            "SELECT active FROM business_users WHERE user_id = 'local-dev'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(active, 0, "the user must stay deactivated");
-
-        let effect: String = conn.query_row(
-            "SELECT json_extract(payload_json, '$.effect') FROM business_events
-             WHERE command_type = 'ctox.capability.token.issue' AND record_id = 'local-dev'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(
-            effect, "refused_inactive",
-            "a deactivated user still trying is worth seeing"
-        );
         Ok(())
     }
 
@@ -37158,7 +36861,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn orphan_private_legacy_drift_is_handled_only_by_explicit_lifecycle_migration(
+    fn module_lifecycle_projection_repair_assigns_orphan_private_app_responsibility(
     ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -37169,14 +36872,17 @@ pub(super) mod tests {
         let dry_run = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_migrate_orphan_private_app_dry_run",
-                "command_id": "cmd_migrate_orphan_private_app_dry_run",
+                "id": "cmd_repair_orphan_private_app_dry_run",
+                "command_id": "cmd_repair_orphan_private_app_dry_run",
                 "module": "ctox",
                 "command_type": "ctox.module.repair_lifecycle_projection",
+                "record_id": "private-orphan",
                 "status": "pending_sync",
                 "payload": {
+                    "module_id": "private-orphan",
                     "dry_run": true,
-                    "migrate_legacy_manifest_lifecycle": true
+                    "repair_orphan_private_apps": true,
+                    "prompt": "SECRET_ORPHAN_REPAIR_PROMPT"
                 },
                 "client_context": {
                     "actor": {
@@ -37188,33 +36894,67 @@ pub(super) mod tests {
         )?;
         assert_eq!(
             dry_run
-                .pointer("/result/legacy_manifest_migration/evidence/private_app_responsibilities_inserted")
+                .pointer("/result/orphan_private_app_repair_count")
                 .and_then(Value::as_u64),
             Some(1)
         );
+        assert_eq!(
+            dry_run
+                .pointer("/result/orphan_private_app_actions/0/module_id")
+                .and_then(Value::as_str),
+            Some("private-orphan")
+        );
+        assert_eq!(
+            dry_run
+                .pointer("/result/orphan_private_app_actions/0/recovery_user_id")
+                .and_then(Value::as_str),
+            Some("ops-admin")
+        );
+        assert_eq!(
+            dry_run
+                .pointer("/result/orphan_private_app_actions/0/apply")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
         let conn = open_store(root)?;
-        let dry_rows: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM business_module_acl
-             WHERE module_id = 'private-orphan' AND role = 'founder' AND active = 1",
+        let dry_responsibility_rows: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM business_module_acl
+             WHERE module_id = 'private-orphan'
+               AND role = 'founder'
+               AND active = 1",
             [],
             |row| row.get(0),
         )?;
         assert_eq!(
-            dry_rows, 0,
-            "migration dry-run must roll back responsibility"
+            dry_responsibility_rows, 0,
+            "dry-run must not assign orphan private app responsibility"
+        );
+        let dry_run_command = outbound_load_record(
+            &conn,
+            "business_commands",
+            "cmd_repair_orphan_private_app_dry_run",
+        )?
+        .context("orphan dry-run command projection")?;
+        let dry_run_command_text = serde_json::to_string(&dry_run_command)?;
+        assert!(
+            !dry_run_command_text.contains("SECRET_ORPHAN_REPAIR_PROMPT"),
+            "orphan repair command projection must be sanitized"
         );
         drop(conn);
 
-        let applied = accept_rxdb_business_command(
+        let repair = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_migrate_orphan_private_app_apply",
-                "command_id": "cmd_migrate_orphan_private_app_apply",
+                "id": "cmd_repair_orphan_private_app_apply",
+                "command_id": "cmd_repair_orphan_private_app_apply",
                 "module": "ctox",
                 "command_type": "ctox.module.repair_lifecycle_projection",
+                "record_id": "private-orphan",
                 "status": "pending_sync",
                 "payload": {
-                    "migrate_legacy_manifest_lifecycle": true
+                    "module_id": "private-orphan",
+                    "repair_orphan_private_apps": true
                 },
                 "client_context": {
                     "actor": {
@@ -37225,19 +36965,60 @@ pub(super) mod tests {
             }),
         )?;
         assert_eq!(
-            applied
-                .pointer("/result/legacy_manifest_migration/evidence/private_app_responsibilities_inserted")
+            repair
+                .pointer("/result/orphan_private_app_repair_count")
                 .and_then(Value::as_u64),
             Some(1)
         );
+        assert_eq!(
+            repair
+                .pointer("/result/orphan_private_app_actions/0/apply")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
         let conn = open_store(root)?;
-        let owner: String = conn.query_row(
-            "SELECT user_id FROM business_module_acl
-             WHERE module_id = 'private-orphan' AND role = 'founder' AND active = 1",
+        let recovery_active: i64 = conn.query_row(
+            "SELECT active
+             FROM business_module_acl
+             WHERE module_id = 'private-orphan'
+               AND user_id = 'ops-admin'
+               AND role = 'founder'",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(owner, "ops-admin");
+        assert_eq!(recovery_active, 1);
+        let recovery_payloads = business_event_payloads(
+            &conn,
+            "business_module_acl",
+            "private-orphan:founder:ops-admin",
+            "business_os.app_responsibility.changed",
+        )?;
+        assert_eq!(recovery_payloads.len(), 1);
+        assert_eq!(
+            recovery_payloads[0]
+                .pointer("/actor/id")
+                .and_then(Value::as_str),
+            Some("ops-admin")
+        );
+        drop(conn);
+
+        let catalog = module_catalog_for_rxdb(root)?;
+        let private_app = catalog
+            .get("modules")
+            .and_then(Value::as_array)
+            .and_then(|modules| {
+                modules.iter().find(|module| {
+                    module.get("id").and_then(Value::as_str) == Some("private-orphan")
+                })
+            })
+            .context("expected private orphan app in catalog")?;
+        assert!(private_app
+            .pointer("/lifecycle/responsible_user_ids")
+            .and_then(Value::as_array)
+            .context("expected responsible ids")?
+            .iter()
+            .any(|id| id.as_str() == Some("ops-admin")));
         Ok(())
     }
 
@@ -37818,240 +37599,6 @@ pub(super) mod tests {
         assert!(!prompt.contains("capability_token"));
         assert!(!prompt.contains("access_token"));
         assert!(!prompt.contains("api_key"));
-    }
-
-    #[test]
-    fn rxdb_writer_stamps_a_complete_document_envelope() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        fs::create_dir_all(root.join("runtime")).expect("runtime dir");
-        {
-            let conn = Connection::open(rxdb_store_path(root)).expect("open rxdb store");
-            rxdb::storage::sqlite::sql::ensure_collection_table(
-                &conn,
-                "ctox_business_os__business_module_catalog__v0",
-            )
-            .expect("collection table");
-        }
-        for pass in 1..=2u64 {
-            upsert_rxdb_collection_record(
-                root,
-                "business_module_catalog",
-                "module-catalog",
-                1_785_900_000_000 + pass as i64,
-                serde_json::json!({ "title": format!("catalog pass {pass}") }),
-            )
-            .expect("upsert record");
-            let stored =
-                load_rxdb_collection_record(root, "business_module_catalog", "module-catalog")
-                    .expect("load record")
-                    .expect("record exists");
-            let revision = stored
-                .get("_rev")
-                .and_then(Value::as_str)
-                .expect("document JSON carries _rev");
-            let (height, token) = revision.split_once('-').expect("height-token format");
-            assert_eq!(height.parse::<u64>().expect("numeric height"), pass);
-            assert!(!token.is_empty());
-            assert!(
-                stored
-                    .get("_meta")
-                    .and_then(|meta| meta.get("lwt"))
-                    .and_then(Value::as_f64)
-                    .is_some(),
-                "document JSON carries _meta.lwt"
-            );
-            assert!(stored.get("_attachments").is_some_and(Value::is_object));
-            assert_eq!(stored.get("_deleted").and_then(Value::as_bool), Some(false));
-        }
-    }
-
-    #[test]
-    fn research_auto_continuation_fires_through_the_terminal_failure_path() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        // Dispatch a real research run command through the command plane so a
-        // queue task exists, then terminalize it exactly like the worker does.
-        let accepted = super::super::command_plane::accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_integration_dead_run",
-                "command_id": "cmd_integration_dead_run",
-                "module": "research",
-                "command_type": "research.systematic.run",
-                "record_id": "research_baseline_task",
-                "status": "pending_sync",
-                "payload": {
-                    "title": "Research · Baseline",
-                    "research_run_id": "run-integration-1",
-                    "knowledge_domain": "bearing_design_calculation"
-                },
-                "client_context": { "actor": { "id": "tester", "role": "chef" } }
-            }),
-        )
-        .expect("accept research command");
-        let task_id = accepted
-            .get("task_id")
-            .and_then(Value::as_str)
-            .expect("queue task id")
-            .to_string();
-        let projected = fail_business_command_from_queue_error(
-            root,
-            &task_id,
-            "direct session error: ErrorEvent { message: \"stream disconnected before completion: stream closed before response.completed\", codex_error_info: Some(Other) }",
-        )
-        .expect("terminal failure projected")
-        .expect("command projection");
-        assert_eq!(
-            projected.get("status").and_then(Value::as_str),
-            Some("failed")
-        );
-        let conn = open_store(root).expect("open store");
-        let continuation: Option<String> = conn
-            .query_row(
-                "SELECT command_id FROM business_commands WHERE command_id LIKE 'cmd_auto_%'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("query continuation");
-        let continuation = continuation.expect(
-            "a terminal transport failure of a research run must spawn a continuation command",
-        );
-        let stored = load_business_command(&conn, &continuation).expect("load continuation");
-        assert_eq!(
-            stored
-                .payload
-                .get("auto_continuation_attempt")
-                .and_then(Value::as_i64),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn research_auto_continuation_spawns_only_for_transport_failures() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        let conn = open_store(root).expect("open store");
-        let research_command = BusinessCommand {
-            origin: CommandOrigin::TrustedLocal,
-            id: Some("cmd_dead_run".to_owned()),
-            module: "research".to_owned(),
-            command_type: "research.systematic.run".to_owned(),
-            record_id: Some("research_baseline_task".to_owned()),
-            payload: serde_json::json!({
-                "research_run_id": "run-continuation-1",
-                "knowledge_domain": "bearing_design_calculation"
-            }),
-            client_context: serde_json::json!({"source": "web-research"}),
-        };
-
-        // Fail-closed validation stays terminal: no continuation, but the
-        // refusal is recorded so a missing continuation is never ambiguous.
-        let spawned = maybe_spawn_systematic_research_continuation(
-            root,
-            &conn,
-            "cmd_dead_run",
-            &research_command,
-            "Systematic research evidence validation failed closed: target not met",
-        )
-        .expect("validation failure handled");
-        assert!(spawned.is_none());
-        let refusal: Option<String> = conn
-            .query_row(
-                "SELECT json_extract(payload_json, '$.decision') FROM business_records
-                 WHERE collection = 'research_continuations' AND record_id = 'cmd_dead_run'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("query refusal");
-        assert!(
-            refusal
-                .unwrap_or_default()
-                .contains("not a transport failure"),
-            "a refused continuation must leave a durable reason"
-        );
-
-        // A gateway that lost the session handle is transport, not a verdict.
-        // Own record id: a spawned continuation is an active run for its
-        // record and would legitimately suppress the later transport case.
-        let lost_session_command = BusinessCommand {
-            record_id: Some("research_lost_session_task".to_owned()),
-            ..research_command.clone()
-        };
-        let spawned = maybe_spawn_systematic_research_continuation(
-            root,
-            &conn,
-            "cmd_lost_session",
-            &lost_session_command,
-            "direct session error: unexpected status 404 Not Found: Response '06c35878' was not found for this tenant.",
-        )
-        .expect("lost session handled")
-        .expect("continuation id");
-        assert!(spawned.starts_with("cmd_auto_"));
-
-        // Non-research commands never chain.
-        let other_command = BusinessCommand {
-            command_type: "business_os.chat.task".to_owned(),
-            ..research_command.clone()
-        };
-        let spawned = maybe_spawn_systematic_research_continuation(
-            root,
-            &conn,
-            "cmd_dead_run",
-            &other_command,
-            "stream disconnected before completion",
-        )
-        .expect("non-research handled");
-        assert!(spawned.is_none());
-
-        // The cap converts an endless chain into a terminal finding.
-        let capped_command = BusinessCommand {
-            payload: serde_json::json!({
-                "research_run_id": "run-continuation-1",
-                "auto_continuation_attempt": 6
-            }),
-            ..research_command.clone()
-        };
-        let err = maybe_spawn_systematic_research_continuation(
-            root,
-            &conn,
-            "cmd_dead_run",
-            &capped_command,
-            "stream disconnected before completion",
-        )
-        .expect_err("cap must refuse");
-        assert!(err.to_string().contains("cap"));
-
-        // A pure transport failure spawns a continuation command that carries
-        // the incremented attempt counter and the origin command id.
-        let spawned = maybe_spawn_systematic_research_continuation(
-            root,
-            &conn,
-            "cmd_dead_run",
-            &research_command,
-            "direct session error: stream disconnected before completion: stream closed before response.completed",
-        )
-        .expect("transport failure spawns")
-        .expect("continuation id");
-        assert!(spawned.starts_with("cmd_auto_"));
-        let stored = load_business_command(&conn, &spawned).expect("load continuation");
-        assert_eq!(stored.command_type, "research.systematic.run");
-        assert_eq!(
-            stored
-                .payload
-                .get("auto_continuation_attempt")
-                .and_then(Value::as_i64),
-            Some(1)
-        );
-        assert_eq!(
-            stored
-                .payload
-                .get("continued_from_command_id")
-                .and_then(Value::as_str),
-            Some("cmd_dead_run")
-        );
     }
 
     #[test]

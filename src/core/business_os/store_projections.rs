@@ -4,14 +4,13 @@
 use super::store::{
     apply_queue_projection_status_fields, browser_context_artifact_for_command, clip_text,
     command_inbound_channel, command_status_for_queue_route_status,
-    count_legacy_http_fallback_records, find_queue_task_for_command, first_string_field,
-    load_rxdb_collection_record, now_ms, open_store, projection_route_status_for_command_status,
-    projection_status_is_active, push_repair_action, queue_status_is_terminal_failure,
-    queue_status_is_terminal_success, redact_document_client_context_secrets,
-    repair_inline_payload_artifacts, upsert_command_projection_from_queue_status,
-    upsert_rxdb_collection_record, upsert_rxdb_collection_record_cached, BusinessCommand,
-    QueueProjectionRepairOptions, RxdbProjectionWriterCache,
-    BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
+    count_legacy_http_fallback_records, find_queue_task_for_command, first_string_field, now_ms,
+    open_store, projection_route_status_for_command_status, projection_status_is_active,
+    push_repair_action, queue_status_is_terminal_failure, queue_status_is_terminal_success,
+    redact_document_client_context_secrets, repair_inline_payload_artifacts,
+    upsert_command_projection_from_queue_status, upsert_rxdb_collection_record,
+    upsert_rxdb_collection_record_cached, BusinessCommand, QueueProjectionRepairOptions,
+    RxdbProjectionWriterCache, BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
 };
 use crate::mission::channels;
 use anyhow::Context;
@@ -604,15 +603,6 @@ pub(super) fn refresh_queue_task_projection(
         updated_at_ms,
         payload.clone(),
     )?;
-    let mut rxdb_writers = rxdb_writers;
-    let route_status = effective_queue_projection_route_status(&task, structured_status.as_deref());
-    refresh_research_run_projection(
-        root,
-        rxdb_writers.as_deref_mut(),
-        command,
-        &route_status,
-        updated_at_ms,
-    )?;
     upsert_rxdb_collection_record_cached(
         root,
         rxdb_writers,
@@ -620,71 +610,6 @@ pub(super) fn refresh_queue_task_projection(
         &task.message_key,
         updated_at_ms,
         payload,
-    )
-}
-
-/// The browser writes a `research_runs` record once when the user starts a
-/// run, and the systematic-research writeback only touches it again at the
-/// very end. In between, the record froze on `queued` while the queue task
-/// advanced through its slices, so a long-lived client kept rendering the
-/// previous finished run for a research that was actively working. Mirror
-/// the queue route status onto the run record on every projection refresh;
-/// the skill's terminal writeback stays the authority for result payloads,
-/// so a stored `completed` is never overwritten here.
-fn refresh_research_run_projection(
-    root: &Path,
-    rxdb_writers: Option<&mut RxdbProjectionWriterCache>,
-    command: &BusinessCommand,
-    route_status: &str,
-    updated_at_ms: i64,
-) -> anyhow::Result<()> {
-    if command.command_type != "research.systematic.run" {
-        return Ok(());
-    }
-    let Some(run_id) = command
-        .payload
-        .get("research_run_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    else {
-        return Ok(());
-    };
-    let next_status = match route_status {
-        "leased" => "running",
-        "failed" => "failed",
-        "handled" => "completed",
-        // `pending` between slices carries no new information for the run
-        // record: either the first slice has not started yet or the next one
-        // is about to re-lease. Leave the stored status untouched.
-        _ => return Ok(()),
-    };
-    // research_runs records are created by the browser and live only in the
-    // replicated RxDB store; the native business_records ledger never carries
-    // this collection, so reading it there would make this projection a no-op.
-    let Some(mut record) = load_rxdb_collection_record(root, "research_runs", &run_id)? else {
-        return Ok(());
-    };
-    let current = record
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if current == "completed" || current == next_status {
-        return Ok(());
-    }
-    let Some(obj) = record.as_object_mut() else {
-        return Ok(());
-    };
-    obj.insert("status".to_string(), Value::String(next_status.to_string()));
-    obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
-    upsert_rxdb_collection_record_cached(
-        root,
-        rxdb_writers,
-        "research_runs",
-        &run_id,
-        updated_at_ms,
-        record,
     )
 }
 
@@ -1384,7 +1309,6 @@ pub(crate) mod tests {
     fn queue_status_detection_ignores_status_note_wording() {
         let mut task = channels::QueueTaskView {
             message_key: "queue:system::structured-status-wording".to_string(),
-            metadata: Value::Null,
             thread_key: "queue/structured-status-wording".to_string(),
             title: "Structured status wording test".to_string(),
             prompt: "Use the structured terminal state.".to_string(),

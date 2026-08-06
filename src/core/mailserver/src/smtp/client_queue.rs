@@ -6,7 +6,6 @@ use crate::smtp::client::SmtpOutboundClient;
 use crate::smtp::dkim::DkimSigner;
 use crate::store::{SqliteStore, SqliteStoreChangeStamp};
 use crate::util::errors::{StalwartError, StalwartResult};
-use crate::DeliveryOutcomeSink;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -18,7 +17,6 @@ const SMTP_QUEUE_IDLE_SAFETY_SECS: u64 = 60;
 pub struct SmtpOutboundQueue {
     store: SqliteStore,
     config: SmtpConfig,
-    delivery_outcome_sink: Option<DeliveryOutcomeSink>,
     idle_gate: Mutex<Option<SmtpQueueIdleGate>>,
 }
 
@@ -30,18 +28,9 @@ struct SmtpQueueIdleGate {
 
 impl SmtpOutboundQueue {
     pub fn new(store: SqliteStore, config: SmtpConfig) -> Self {
-        Self::new_with_delivery_outcome_sink(store, config, None)
-    }
-
-    pub fn new_with_delivery_outcome_sink(
-        store: SqliteStore,
-        config: SmtpConfig,
-        delivery_outcome_sink: Option<DeliveryOutcomeSink>,
-    ) -> Self {
         Self {
             store,
             config,
-            delivery_outcome_sink,
             idle_gate: Mutex::new(None),
         }
     }
@@ -58,10 +47,6 @@ impl SmtpOutboundQueue {
     }
 
     pub async fn process_queue(&self) -> StalwartResult<()> {
-        // Delivery feedback has its own durable retry schedule and must run even
-        // when the SMTP queue itself is idle.
-        self.push_delivery_outcomes()?;
-
         if self.should_skip_idle_poll() {
             return Ok(());
         }
@@ -106,9 +91,9 @@ impl SmtpOutboundQueue {
 
         for (domain, emails) in grouped {
             if domain == "unknown" {
-                for (id, from, to, _body, retry_count) in emails {
+                for (id, _from, to, _body, retry_count) in emails {
                     let err = StalwartError::General(format!("Invalid recipient address: {}", to));
-                    let _ = self.handle_failure(&id, &from, &to, retry_count, err);
+                    let _ = self.handle_failure(&id, retry_count, err);
                 }
                 continue;
             }
@@ -167,12 +152,12 @@ impl SmtpOutboundQueue {
                 if let Some(addr) = resolved_addr {
                     target_addr = addr;
                 } else {
-                    for (id, from, to, _body, retry_count) in emails {
+                    for (id, _from, _to, _body, retry_count) in emails {
                         let err = StalwartError::General(format!(
                             "Failed to resolve mail server for domain {}",
                             domain
                         ));
-                        let _ = self.handle_failure(&id, &from, &to, retry_count, err);
+                        let _ = self.handle_failure(&id, retry_count, err);
                     }
                     continue;
                 }
@@ -188,7 +173,7 @@ impl SmtpOutboundQueue {
                             if let Err(e) = client.send_ehlo(&domain).await {
                                 error!("EHLO failed for domain {}: {:?}", domain, e);
                                 let _ = client.quit().await;
-                                let _ = self.handle_failure(&id, &from, &to, retry_count, e);
+                                let _ = self.handle_failure(&id, retry_count, e);
                                 continue;
                             }
                             connected = true;
@@ -198,7 +183,7 @@ impl SmtpOutboundQueue {
                                 "Failed to connect to SMTP server for domain {} at {}: {:?}",
                                 domain, target_addr, e
                             );
-                            let _ = self.handle_failure(&id, &from, &to, retry_count, e);
+                            let _ = self.handle_failure(&id, retry_count, e);
                             continue;
                         }
                     }
@@ -214,16 +199,15 @@ impl SmtpOutboundQueue {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis() as i64)
                             .unwrap_or(0);
-                        self.store.complete_delivery(
+                        let _ = self.store.record_delivery_outcome(
                             &id,
                             &from,
                             &to,
                             "delivered",
                             None,
                             completed_at,
-                            true,
-                        )?;
-                        self.push_delivery_outcomes()?;
+                        );
+                        let _ = self.store.delete_email(&id);
 
                         // Reset session via RSET to reuse the connection
                         if let Err(e) = client.reset().await {
@@ -237,7 +221,25 @@ impl SmtpOutboundQueue {
                             "Failed to deliver email {} over pooled connection: {:?}",
                             id, e
                         );
-                        self.handle_failure(&id, &from, &to, retry_count, e)?;
+                        let err_text = format!("{:?}", e);
+                        let next_retry = retry_count + 1;
+                        let _ = self.handle_failure(&id, retry_count, e);
+                        if next_retry >= 5 {
+                            // Terminal: log the failure outcome so the outbound
+                            // reconciler can mark the message as failed.
+                            let completed_at = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            let _ = self.store.record_delivery_outcome(
+                                &id,
+                                &from,
+                                &to,
+                                "failed",
+                                Some(&err_text),
+                                completed_at,
+                            );
+                        }
                         connected = false;
                         let _ = client.quit().await;
                     }
@@ -319,35 +321,19 @@ impl SmtpOutboundQueue {
         Ok(())
     }
 
-    fn handle_failure(
-        &self,
-        id: &str,
-        from: &str,
-        to: &str,
-        retry_count: usize,
-        e: StalwartError,
-    ) -> StalwartResult<()> {
+    fn handle_failure(&self, id: &str, retry_count: usize, e: StalwartError) -> StalwartResult<()> {
         let next_retry = retry_count + 1;
         if next_retry >= 5 {
             warn!(
                 "Email {} failed permanently after {} retries: {:?}",
                 id, next_retry, e
             );
-            let error_text = format!("{e:?}");
-            let completed_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis() as i64)
-                .unwrap_or(0);
-            self.store.complete_delivery(
+            self.store.update_email_status(
                 id,
-                from,
-                to,
-                "failed",
-                Some(&error_text),
-                completed_at,
-                false,
+                "failed_permanent",
+                crate::util::now_utc_secs() + 86400,
+                next_retry,
             )?;
-            self.push_delivery_outcomes()?;
         } else {
             let backoff = 60 * (1 << next_retry);
             warn!(
@@ -360,26 +346,6 @@ impl SmtpOutboundQueue {
                 crate::util::now_utc_secs() + backoff,
                 next_retry,
             )?;
-        }
-        Ok(())
-    }
-
-    fn push_delivery_outcomes(&self) -> StalwartResult<()> {
-        let Some(sink) = self.delivery_outcome_sink.as_ref() else {
-            return Ok(());
-        };
-        for outcome in self.store.pending_delivery_outcomes(64)? {
-            match (sink)(&outcome) {
-                Ok(()) => self.store.ack_delivery_outcome(outcome.outbox_id)?,
-                Err(error) => {
-                    warn!(
-                        "delivery outcome {} push failed; retaining outbox row: {}",
-                        outcome.provider_message_id, error
-                    );
-                    self.store
-                        .retry_delivery_outcome(outcome.outbox_id, &error)?;
-                }
-            }
         }
         Ok(())
     }

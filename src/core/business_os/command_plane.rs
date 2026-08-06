@@ -898,36 +898,6 @@ fn dispatch_business_command(
         | "ctox.app_store.install"
         | "ctox.app_store.uninstall" => handle_app_lifecycle_command(root, command_id, command)
             .map(BusinessCommandDispatchOutcome::Returned),
-        command_type if crate::coding_agents::is_coding_agent_command(command_type) => {
-            let outcome = match rxdb_command_session(root, command)
-                .and_then(|_| crate::coding_agents::handle_business_command(root, command))
-            {
-                Ok(outcome) => outcome,
-                Err(error) => serde_json::json!({
-                    "ok": false,
-                    "provider": command
-                        .payload
-                        .get("provider")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown"),
-                    "operation": command.command_type,
-                    "stdout": "",
-                    "stderr": error.to_string(),
-                    "exit_code": 1
-                }),
-            };
-            let status = if outcome.get("ok").and_then(Value::as_bool) == Some(false) {
-                "failed"
-            } else {
-                "completed"
-            };
-            Ok(BusinessCommandDispatchOutcome::Control {
-                status: status.to_string(),
-                task_id: None,
-                task_status: Some(status.to_string()),
-                result: serde_json::json!({ "outcome": outcome }),
-            })
-        }
         "web_stack.person_research" => super::person_research_command::start(root, command.clone())
             .map(BusinessCommandDispatchOutcome::Returned),
         "knowledge.command" => {

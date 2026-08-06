@@ -4953,9 +4953,18 @@ mod tests {
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
                 extra_metadata: Some(serde_json::json!({
+                    "source": "business-os",
+                    "idempotency_key": "test-ctox.business_os.app.create-contracts",
+                    "business_os_command_id": "test-ctox.business_os.app.create-contracts",
                     "business_os_module": "creator",
+                    "business_os_inbound_channel": "creator",
                     "business_os_command_type": "ctox.business_os.app.create",
                     "business_os_record_id": "contracts",
+                    "business_os_attachments": [],
+                    "client_context": {
+                        "source": "business-os-app-creator-test",
+                        "target": "app"
+                    }
                 })),
             },
         )

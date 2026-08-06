@@ -44,7 +44,7 @@ use crate::core_state::{
     CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
 };
 use crate::inference::runtime_env;
-use crate::mission::{channels, tickets};
+use crate::mission::{channels, plan, tickets};
 use crate::service::governance;
 
 const DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
@@ -820,6 +820,7 @@ pub(crate) fn process_inbound_approval_replies(
                         &item.title,
                         &parsed.residual_text,
                     )?;
+                    let _ = plan::satisfy_wait_for_work_item(root, &work_id, new_state)?;
                     if new_state == "closed" {
                         for entity_type in ["approval", "approval-gate", "ticket-self-work"] {
                             let _ =

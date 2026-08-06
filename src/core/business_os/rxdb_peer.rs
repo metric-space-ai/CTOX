@@ -5888,6 +5888,7 @@ async fn apply_browser_runtime_command(
             viewport_h,
             &profile_owner,
             private_profile,
+            matches!(command_type, "browser.session.start" | "browser.reset"),
         )
         .await
     {
@@ -5940,8 +5941,8 @@ async fn apply_browser_runtime_command(
         Ok(value) => value,
         Err(err) => {
             // The runtime process is unusable; drop it so the next command
-            // respawns, and surface a friendly error on the session.
-            manager.drop_session(&session_id);
+            // respawns, and persist the exact failure on the session.
+            manager.drop_session_after_crash(&session_id);
             let detail = format!("{err:#}");
             mark_browser_session_runtime_error(
                 database,
@@ -6014,7 +6015,7 @@ async fn apply_browser_runtime_command(
     let screenshot = match manager.request(&session, "screenshot", json!({})).await {
         Ok(value) => value,
         Err(err) => {
-            manager.drop_session(&session_id);
+            manager.drop_session_after_crash(&session_id);
             let detail = format!("{err:#}");
             mark_browser_session_runtime_error(
                 database,
@@ -6203,9 +6204,18 @@ fn browser_runtime_reference_dir(root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Record a runtime failure on a session/tab in user-friendly terms without
-/// tearing down the row, so the UI can show "needs attention" instead of a
-/// silent stall.
+fn browser_runtime_failure_status(detail: &str) -> &'static str {
+    if detail.starts_with("browser crash-loop protection paused")
+        || detail.starts_with("browser session limit")
+    {
+        "blocked"
+    } else {
+        "error"
+    }
+}
+
+/// Record the unmodified runtime failure on the session/tab so the user sees
+/// the same cause that the native command path logged.
 #[allow(clippy::too_many_arguments)]
 async fn mark_browser_session_runtime_error(
     database: &Arc<RxDatabase>,
@@ -6236,13 +6246,18 @@ async fn mark_browser_session_runtime_error(
         .get("last_frame_seq")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let failure_status = browser_runtime_failure_status(detail);
+    eprintln!(
+        "[business-os] browser session runtime failed session_id={session_id} \
+         command_type={command_type} status={failure_status}: {detail}"
+    );
     upsert_browser_tab(
         database,
         tab_id,
         session_id,
         &title,
         url,
-        "error",
+        failure_status,
         false,
         false,
         false,
@@ -6255,8 +6270,8 @@ async fn mark_browser_session_runtime_error(
         database,
         session_id,
         tab_id,
-        "error",
-        "error",
+        failure_status,
+        failure_status,
         url,
         &title,
         viewport_w,
@@ -6270,6 +6285,27 @@ async fn mark_browser_session_runtime_error(
         None,
     )
     .await?;
+
+    // `last_error` is the operator-facing contract used by deployed browser
+    // stores. Keep it byte-for-byte aligned with `format!("{err:#}")`; the
+    // generic command-failure path must not replace it with a reassurance or a
+    // shortened top-level context.
+    let sessions = database
+        .collection("browser_sessions")
+        .context("browser_sessions collection is not registered")?;
+    let mut marked = find_browser_document(database, "browser_sessions", session_id).await?;
+    if let Some(object) = marked.as_object_mut() {
+        object.remove("_rev");
+        object.remove("_meta");
+        object.insert("last_error".to_string(), Value::String(detail.to_string()));
+        if let Some(payload) = object.get_mut("payload").and_then(Value::as_object_mut) {
+            payload.insert("last_error".to_string(), Value::String(detail.to_string()));
+        }
+    }
+    sessions
+        .incremental_upsert(marked)
+        .await
+        .map_err(|err| anyhow::anyhow!("persist browser session last_error: {err}"))?;
     Ok(())
 }
 
@@ -6527,7 +6563,7 @@ async fn drain_browser_session_inputs(
         Ok(value) => value,
         Err(err) => {
             // Process is dead: drop it, fail the batch, surface the error.
-            manager.drop_session(session_id);
+            manager.drop_session_after_crash(session_id);
             let now = now_ms() as u64;
             for row in rows {
                 if let Some(id) = row.get("id").and_then(Value::as_str) {
@@ -7476,46 +7512,13 @@ async fn mark_browser_runtime_command_completed(
 async fn mark_browser_runtime_command_failed(
     database: &Arc<RxDatabase>,
     command_id: &str,
-    payload: &Value,
+    _payload: &Value,
     error: &anyhow::Error,
 ) -> anyhow::Result<()> {
-    let session_id = payload
-        .get("session_id")
-        .and_then(Value::as_str)
-        .unwrap_or("browser_session_default");
-    let tab_id = payload
-        .get("tab_id")
-        .and_then(Value::as_str)
-        .unwrap_or("browser_tab_default");
-    let message = error.to_string();
-    upsert_browser_session(
-        database,
-        session_id,
-        tab_id,
-        "failed",
-        "failed",
-        payload
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or("https://example.com"),
-        "Remote Browser",
-        payload
-            .get("viewport_w")
-            .and_then(Value::as_u64)
-            .unwrap_or(1280),
-        payload
-            .get("viewport_h")
-            .and_then(Value::as_u64)
-            .unwrap_or(720),
-        None,
-        0,
-        "browser.runtime.failed",
-        now_ms() as u64,
-        Some(&message),
-        None,
-        None,
-    )
-    .await?;
+    // The session-specific handler has already persisted the full runtime
+    // chain. This generic command failure records the same chain on the command
+    // without rewriting the session a second time with `Error::to_string()`.
+    let message = format!("{error:#}");
     let commands = database
         .collection("business_commands")
         .context("business_commands collection is not registered")?;

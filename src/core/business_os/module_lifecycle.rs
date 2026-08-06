@@ -12,16 +12,15 @@ use super::store::{
     materialize_runtime_app_starter_artifacts_at, module_asset_revision, module_catalog_source_id,
     module_governance_map, module_manifest_collection_ids, module_manifest_path,
     module_policy_decision, normalize_source_relative_path, now_ms, open_store,
-    outbound_load_record, parse_business_app_semver_major, remove_module_from_layout_value,
-    resolve_module_source_root, resolve_module_source_root_for_root, runtime_app_starter_is_owned,
-    rxdb_desktop_file_chunks, rxdb_desktop_file_document, sanitize_git_ref, save_module_layout,
-    save_module_source_record, seed_session_user, session_can_modify_module,
-    session_has_workspace_permission, source_relative_subpath, source_sanitize_slug,
-    update_module_catalog_stamp_hash, upsert_module_founder_assignment_record,
-    upsert_rxdb_collection_record, validate_github_repo, validate_runtime_app_starter_artifacts,
-    validate_staged_catalog_module, version_summary_row, write_module_source_snapshot,
-    AppStoreInstallRequest, BusinessCommand, BusinessOsSession, CommandOrigin, ModuleDeleteRequest,
-    ModuleInstallTemplateRequest, ModuleManifest, ModuleReleaseRequest, ModuleRollbackRequest,
+    parse_business_app_semver_major, remove_module_from_layout_value, resolve_module_source_root,
+    resolve_module_source_root_for_root, runtime_app_starter_is_owned, rxdb_desktop_file_chunks,
+    rxdb_desktop_file_document, sanitize_git_ref, save_module_layout, save_module_source_record,
+    seed_session_user, session_can_modify_module, session_has_workspace_permission,
+    source_relative_subpath, source_sanitize_slug, update_module_catalog_stamp_hash,
+    validate_github_repo, validate_runtime_app_starter_artifacts, validate_staged_catalog_module,
+    version_summary_row, write_module_source_snapshot, AppStoreInstallRequest, BusinessCommand,
+    BusinessOsSession, CommandOrigin, ModuleDeleteRequest, ModuleInstallTemplateRequest,
+    ModuleManifest, ModuleReleaseRequest, ModuleRollbackRequest,
     ModuleSourceRollbackSnapshotRequest, ModuleSourceSaveMutation, ModuleVersionListRequest,
     ModuleVersionRollbackRequest, RuntimeAppStarterAction, TemplateManifest,
 };
@@ -220,100 +219,6 @@ pub(super) fn module_is_runtime_installed(manifest: &ModuleManifest) -> bool {
         || manifest.entry.trim().starts_with("installed-modules/")
 }
 
-fn persist_runtime_module_install_boundary(
-    root: &Path,
-    app_root: &Path,
-    session: &BusinessOsSession,
-    module_id: &str,
-    label: &str,
-) -> anyhow::Result<String> {
-    let installer_user_id = session_user_id(session)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("authenticated installer user is required")?
-        .to_owned();
-    let now = now_ms() as i64;
-    let mut conn = open_store(root)?;
-    let tx = conn.transaction()?;
-    seed_session_user(&tx, session)?;
-    let assignment_id = upsert_module_founder_assignment_record(
-        &tx,
-        session,
-        module_id,
-        &installer_user_id,
-        true,
-        now,
-    )?;
-    record_module_version_with_conn(
-        &tx,
-        app_root,
-        module_id,
-        "install",
-        label,
-        &installer_user_id,
-    )?;
-    tx.commit()?;
-    Ok(assignment_id)
-}
-
-fn write_runtime_module_install_projections(
-    root: &Path,
-    assignment_id: &str,
-) -> anyhow::Result<()> {
-    let conn = open_store(root)?;
-    if let Some(payload) = outbound_load_record(&conn, "business_module_acl", assignment_id)? {
-        let updated_at_ms = payload
-            .get("updated_at_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or_else(|| now_ms() as i64);
-        upsert_rxdb_collection_record(
-            root,
-            "business_module_acl",
-            assignment_id,
-            updated_at_ms,
-            payload,
-        )?;
-    }
-    drop(conn);
-    write_module_catalog_projection_to_rxdb(root)
-}
-
-fn remove_failed_runtime_module_install(target: &Path, error: anyhow::Error) -> anyhow::Error {
-    match fs::remove_dir_all(target) {
-        Ok(()) => error.context("runtime module install state failed; activated module removed"),
-        Err(cleanup_error) => anyhow::anyhow!(
-            "{error}; additionally failed to remove activated module {}: {cleanup_error}",
-            target.display()
-        ),
-    }
-}
-
-fn write_module_release_projections(
-    root: &Path,
-    release_ids: &[String],
-    updated_at_ms: i64,
-) -> anyhow::Result<()> {
-    let conn = open_store(root)?;
-    for release_id in release_ids {
-        if let Some(payload) = outbound_load_record(&conn, "business_module_releases", release_id)?
-        {
-            let projection_updated_at_ms = payload
-                .get("updated_at_ms")
-                .and_then(Value::as_i64)
-                .unwrap_or(updated_at_ms);
-            upsert_rxdb_collection_record(
-                root,
-                "business_module_releases",
-                release_id,
-                projection_updated_at_ms,
-                payload,
-            )?;
-        }
-    }
-    drop(conn);
-    write_module_catalog_projection_to_rxdb(root)
-}
-
 pub fn install_template_module_command(
     root: &Path,
     source_app_root: &Path,
@@ -326,20 +231,15 @@ pub fn install_template_module_command(
         "chef or admin role required"
     );
     let manifest = install_template_module(root, source_app_root, installed_app_root, request)?;
-    let target = installed_app_root
-        .join("installed-modules")
-        .join(&manifest.id);
-    let assignment_id = match persist_runtime_module_install_boundary(
+    let created_by = session_user_id(session).unwrap_or("").to_string();
+    record_module_version(
         root,
         installed_app_root,
-        session,
         &manifest.id,
+        "install",
         "Installed from template",
-    ) {
-        Ok(assignment_id) => assignment_id,
-        Err(error) => return Err(remove_failed_runtime_module_install(&target, error)),
-    };
-    write_runtime_module_install_projections(root, &assignment_id)?;
+        &created_by,
+    )?;
     Ok(serde_json::json!({
         "ok": true,
         "module_id": manifest.id,
@@ -663,7 +563,6 @@ pub fn record_module_release(
             return Err(error);
         }
     };
-    write_module_release_projections(root, &release_ids, now)?;
     let mut governance = module_governance_map(root, session)?;
     if let Some(object) = governance.as_object_mut() {
         object.insert(
@@ -734,7 +633,6 @@ pub fn rollback_module_release(
             return Err(error);
         }
     };
-    write_module_release_projections(root, &release_ids, now)?;
     let mut governance = module_governance_map(root, session)?;
     if let Some(object) = governance.as_object_mut() {
         object.insert(
@@ -1967,10 +1865,6 @@ pub fn install_app_module(
     let installed_root = app_root.join("installed-modules");
     fs::create_dir_all(&installed_root)?;
     let dest_dir = installed_root.join(&module_id);
-    anyhow::ensure!(
-        !dest_dir.exists(),
-        "Module '{module_id}' is already installed; use the module update path"
-    );
     let staging = app_root.join(format!(".module-install-{module_id}-{}", Uuid::new_v4()));
     let backup = app_root.join(format!(".module-backup-{module_id}-{}", Uuid::new_v4()));
     let install_result = (|| -> anyhow::Result<()> {
@@ -2009,17 +1903,16 @@ pub fn install_app_module(
         return Err(error);
     }
 
-    let assignment_id = match persist_runtime_module_install_boundary(
+    let created_by = session_user_id(session).unwrap_or("").to_string();
+    record_module_version(
         root,
         app_root,
-        session,
         &module_id,
+        "install",
         "Installed from store",
-    ) {
-        Ok(assignment_id) => assignment_id,
-        Err(error) => return Err(remove_failed_runtime_module_install(&dest_dir, error)),
-    };
-    write_runtime_module_install_projections(root, &assignment_id)?;
+        &created_by,
+    )?;
+    write_module_catalog_projection_to_rxdb(root)?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -2039,19 +1932,16 @@ mod tests {
         write_widget_module,
     };
     use super::super::store::{
-        accept_rxdb_business_command, load_rxdb_collection_record, now_ms, open_store,
-        outbound_load_required, resolve_business_os_installed_app_root, rxdb_schema_version,
-        rxdb_store_path, ModuleDeleteRequest, ModuleReleaseRequest, ModuleRollbackRequest,
+        accept_rxdb_business_command, now_ms, open_store, outbound_load_required,
+        resolve_business_os_installed_app_root, ModuleDeleteRequest, ModuleReleaseRequest,
         ModuleVersionListRequest, ModuleVersionRollbackRequest,
     };
     use super::{
         compute_module_bundle, copy_dir_recursive, delete_installed_module, list_module_versions,
         module_catalog_source_id, module_policy_decision, normalize_catalog_installed_manifest,
-        persist_runtime_module_install_boundary, record_module_release, record_module_version,
-        release_managed_shadow_source, rollback_module_release, rollback_module_to_version,
-        sync_module_version_records, validate_staged_catalog_module,
+        record_module_release, record_module_version, release_managed_shadow_source,
+        rollback_module_to_version, sync_module_version_records, validate_staged_catalog_module,
     };
-    use anyhow::Context;
     use rusqlite::{params, Connection};
     use serde_json::Value;
     use std::fs;
@@ -2128,58 +2018,6 @@ mod tests {
             Some("research")
         );
         assert_eq!(release_managed_shadow_source(&app_root, &bespoke)?, None);
-        Ok(())
-    }
-
-    #[test]
-    fn orphan_private_runtime_install_boundary_persists_installer_responsibility(
-    ) -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        seed_test_business_os_app_root(root)?;
-        let installed_app_root = write_runtime_installed_inventory_module(root, "0.8.0")?;
-        let session = test_session("installer", "admin");
-
-        let assignment_id = persist_runtime_module_install_boundary(
-            root,
-            &installed_app_root,
-            &session,
-            "inventory",
-            "Installed from test",
-        )?;
-        assert_eq!(assignment_id, "inventory:founder:installer");
-
-        let conn = open_store(root)?;
-        let assignment: (i64, i64) = conn.query_row(
-            "SELECT acl.active, COALESCE(user.active, 0)
-             FROM business_module_acl acl
-             LEFT JOIN business_users user ON user.user_id = acl.user_id
-             WHERE acl.module_id = 'inventory'
-               AND acl.user_id = 'installer'
-               AND acl.role = 'founder'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        assert_eq!(assignment, (1, 1));
-        let projected: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM business_records
-             WHERE collection = 'business_module_acl'
-               AND record_id = 'inventory:founder:installer'
-               AND deleted = 0",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(
-            projected, 1,
-            "the ACL projection belongs to the install write"
-        );
-        let install_versions: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM business_module_versions
-             WHERE module_id = 'inventory' AND origin = 'install'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(install_versions, 1);
         Ok(())
     }
 
@@ -2529,152 +2367,6 @@ mod tests {
             read_commits(&conn)?.len(),
             2,
             "commit projection is idempotent"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn module_lifecycle_release_and_rollback_write_rxdb_projections_at_boundary(
-    ) -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        seed_test_business_os_app_root(root)?;
-        let app_root = root.join("src/apps/business-os");
-        write_runtime_installed_inventory_module(root, "0.8.0")?;
-        seed_business_user(root, "release-user", "user")?;
-        seed_permission_grant(
-            root,
-            "grant_inventory_release_projection_boundary",
-            "user",
-            "release-user",
-            BusinessOsPermission::AppsRelease,
-            "module",
-            "inventory",
-        )?;
-        seed_permission_grant(
-            root,
-            "grant_inventory_rollback_projection_boundary",
-            "user",
-            "release-user",
-            BusinessOsPermission::AppsRollback,
-            "module",
-            "inventory",
-        )?;
-
-        let rxdb_conn = Connection::open(rxdb_store_path(root))?;
-        for collection in ["business_module_releases", "business_module_catalog"] {
-            let table = format!(
-                "ctox_business_os__{collection}__v{}",
-                rxdb_schema_version(collection)
-            );
-            rxdb_conn.execute(
-                &format!(
-                    "CREATE TABLE {table} (
-                        id TEXT PRIMARY KEY NOT NULL,
-                        revision TEXT,
-                        deleted INTEGER NOT NULL DEFAULT 0,
-                        lastWriteTime REAL NOT NULL DEFAULT 0,
-                        data TEXT NOT NULL
-                    )"
-                ),
-                [],
-            )?;
-        }
-        drop(rxdb_conn);
-
-        let session = test_session("release-user", "user");
-        let release = record_module_release(
-            root,
-            &app_root,
-            &session,
-            ModuleReleaseRequest {
-                module_id: "inventory".to_owned(),
-                target_version: "1.0.0".to_owned(),
-                release_channel: "team".to_owned(),
-                source_version_id: String::new(),
-                rollback_version_id: String::new(),
-                responsible_user_ids: vec!["release-user".to_owned()],
-                data_access_review: locked_inventory_data_review(),
-                notes: "projection boundary".to_owned(),
-            },
-        )?;
-        let release_id = release
-            .get("version_id")
-            .and_then(Value::as_str)
-            .context("release version id")?
-            .to_owned();
-        let release_projection =
-            load_rxdb_collection_record(root, "business_module_releases", &release_id)?
-                .context("release boundary must write its RxDB projection")?;
-        assert_eq!(
-            release_projection.get("status").and_then(Value::as_str),
-            Some("released")
-        );
-        let catalog =
-            load_rxdb_collection_record(root, "business_module_catalog", "module-catalog")?
-                .context("release boundary must write the catalog projection")?;
-        assert_eq!(
-            catalog
-                .get("modules")
-                .and_then(Value::as_array)
-                .and_then(|modules| modules.iter().find(|module| {
-                    module.get("id").and_then(Value::as_str) == Some("inventory")
-                }))
-                .and_then(|module| module.pointer("/lifecycle/release_status"))
-                .and_then(Value::as_str),
-            Some("released")
-        );
-
-        let second_release = record_module_release(
-            root,
-            &app_root,
-            &session,
-            ModuleReleaseRequest {
-                module_id: "inventory".to_owned(),
-                target_version: "1.1.0".to_owned(),
-                release_channel: "team".to_owned(),
-                source_version_id: String::new(),
-                rollback_version_id: String::new(),
-                responsible_user_ids: vec!["release-user".to_owned()],
-                data_access_review: locked_inventory_data_review(),
-                notes: "second projection boundary".to_owned(),
-            },
-        )?;
-        let second_release_id = second_release
-            .get("version_id")
-            .and_then(Value::as_str)
-            .context("second release version id")?
-            .to_owned();
-        let superseded_projection =
-            load_rxdb_collection_record(root, "business_module_releases", &release_id)?
-                .context("second release must refresh the preceding release projection")?;
-        assert_eq!(
-            superseded_projection.get("status").and_then(Value::as_str),
-            Some("rolled_back")
-        );
-
-        rollback_module_release(
-            root,
-            &app_root,
-            &session,
-            ModuleRollbackRequest {
-                module_id: "inventory".to_owned(),
-                version_id: release_id.clone(),
-            },
-        )?;
-        let rollback_projection =
-            load_rxdb_collection_record(root, "business_module_releases", &release_id)?
-                .context("rollback boundary must refresh its target RxDB projection")?;
-        assert_eq!(
-            rollback_projection.get("status").and_then(Value::as_str),
-            Some("released")
-        );
-        let rolled_back_current =
-            load_rxdb_collection_record(root, "business_module_releases", &second_release_id)?
-                .context("rollback boundary must refresh the displaced RxDB projection")?;
-        assert_eq!(
-            rolled_back_current.get("status").and_then(Value::as_str),
-            Some("rolled_back")
         );
         Ok(())
     }

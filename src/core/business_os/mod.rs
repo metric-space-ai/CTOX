@@ -11,7 +11,6 @@ mod command_plane;
 mod control_command_types;
 mod desktop_files;
 mod external_sql_sync;
-mod hashing;
 mod importer;
 mod inventory_drift_tests;
 mod invoices;
@@ -56,14 +55,5 @@ pub use rxdb_peer::{ensure_native_peer, native_peer_maintenance_health, restart_
 pub use server::serve_business_os;
 pub use server::BusinessOsServeOptions;
 
+pub(crate) use external_sql_sync::start_background_sync;
 pub(crate) use person_research_command::recover_once as recover_person_research_commands_once;
-pub(crate) use store_outbound_commands::apply_outbound_delivery_outcome;
-
-pub(crate) fn start_background_sync(root: &std::path::Path) {
-    let delivery_root = root.to_path_buf();
-    ctox_mailserver::register_delivery_outcome_sink(std::sync::Arc::new(move |delivery| {
-        apply_outbound_delivery_outcome(&delivery_root, delivery)
-            .map_err(|error| format!("{error:#}"))
-    }));
-    external_sql_sync::start_background_sync(root);
-}

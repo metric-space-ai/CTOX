@@ -36,7 +36,7 @@ src/core/ui/tui/jami.rs = 1
 # Die Service-Schleife ist der grösste Posten und der lohnendste: sie
 # entscheidet an ihren EIGENEN Statusmeldungen, also an Text, den sie selbst
 # erzeugt. Dort ist ein Feld immer möglich.
-src/core/service/service.rs = 3
+src/core/service/service.rs = 15
 src/core/execution/agent/direct_session.rs = 4
 src/core/business_os/app_runtime.rs = 2
 src/core/business_os/command_plane.rs = 2

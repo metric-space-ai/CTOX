@@ -35,6 +35,37 @@ assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'active' }), false);
 assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'active' }), true);
 assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'starting' }), false);
+assert.equal(
+  __browserTestHooks.browserSessionError({
+    last_error: 'browser session limit for this user reached: 3/3 live sessions',
+    error: 'shortened fallback',
+  }),
+  'browser session limit for this user reached: 3/3 live sessions',
+  'session truth uses the native last_error without replacing it',
+);
+assert.equal(
+  __browserTestHooks.browserUiState({ runtime_status: 'disconnected' }),
+  'offline',
+  'a disconnected row is not a live browser process',
+);
+assert.equal(
+  __browserTestHooks.browserSessionBand({ runtime_status: 'synthetic' }),
+  'closed',
+  'a synthetic row without Chromium is not active',
+);
+assert.equal(
+  __browserTestHooks.browserStatusLabel({ runtime_status: 'blocked' }),
+  'Aktion erforderlich',
+  'an explainable runtime limit is shown as actionable instead of a generic error',
+);
+assert.equal(
+  __browserTestHooks.frameEmptyText({
+    latestSession: { runtime_status: 'error', last_error: 'Chromium executable is not available' },
+    latestCommand: null,
+  }),
+  'Chromium executable is not available',
+  'the empty browser surface shows the exact native runtime reason',
+);
 assert.equal(__browserTestHooks.browserStartErrorIsRetryable({ code: 'sync_unavailable' }), true);
 assert.equal(__browserTestHooks.browserStartErrorIsRetryable({ code: 'auth_required' }), false);
 assert.equal(__browserTestHooks.browserCommandRequiresController('browser.navigate', { id: 'browser_session_test' }), true);
@@ -234,6 +265,12 @@ assert.match(
   /restartCollection\(collection, \{ forceDirect: true \}\)/,
 );
 assert.match(js, /state\.latestSession = requestedSessionPending\s*\? null/);
+assert.match(js, /browserSessionError\(session\)/, 'the Browser surface renders the persisted runtime reason');
+assert.doesNotMatch(
+  js,
+  /vorübergehend nicht erreichbar|wird neu aufgebaut/i,
+  'the Browser surface must not promise a rebuild that does not exist',
+);
 assert.match(js, /\[refs\.go, refs\.stop,/);
 assert.match(js, /templateUrl\.search = moduleUrl\.search/);
 assert.match(js, /templateUrl\.searchParams\.set\('fragment', STYLE_BUILD\)/);
@@ -358,13 +395,17 @@ assert.match(
 );
 
 // Band counts: zeros included; the band ignores its own selection.
-assert.deepEqual(hooks.browserSessionViewCounts(sampleSessions, { band: 'active' }), { all: 3, active: 2, closed: 1 });
+assert.deepEqual(
+  hooks.browserSessionViewCounts(sampleSessions, { band: 'active' }),
+  { all: 3, active: 1, closed: 2 },
+  'only a process-confirmed active session belongs in the active count',
+);
 assert.deepEqual(hooks.browserSessionViewCounts([], {}), { all: 0, active: 0, closed: 0 });
 assert.equal(hooks.browserSessionBand(sampleSessions[0]), 'active');
 assert.equal(hooks.browserSessionBand(sampleSessions[2]), 'closed');
 
 // Filtering by band / search / profile.
-assert.equal(hooks.filterSessionsForView(sampleSessions, { band: 'closed' }).length, 1);
+assert.equal(hooks.filterSessionsForView(sampleSessions, { band: 'closed' }).length, 2);
 assert.equal(hooks.filterSessionsForView(sampleSessions, { search: 'acme' }).length, 1);
 assert.equal(hooks.filterSessionsForView(sampleSessions, { filters: { profile: 'private' } }).length, 1);
 assert.equal(hooks.filterSessionsForView(sampleSessions, { filters: { profile: 'all' } }).length, 3);

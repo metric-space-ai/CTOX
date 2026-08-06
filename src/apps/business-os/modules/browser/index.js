@@ -674,6 +674,14 @@ function browserStartErrorMessage(error) {
     : 'Die Browser-Anmeldung konnte nicht geöffnet werden.';
 }
 
+function browserSessionError(session) {
+  const direct = String(session?.last_error || session?.error || '').trim();
+  if (direct) return direct;
+  const status = String(session?.runtime_status || session?.status || '').toLowerCase();
+  if (['active', 'running', 'capturing'].includes(status)) return '';
+  return String(session?.payload?.last_error || session?.payload?.error || '').trim();
+}
+
 function browserSessionIsLive(session) {
   const status = String(session?.runtime_status || session?.status || '').toLowerCase();
   return status === 'active';
@@ -1310,13 +1318,16 @@ function browserSessionShardMeta(session, tabCount = 0) {
   const profile = (session.profile_mode || session.payload?.profile_mode) === 'private' ? 'Privat' : 'Persönlich';
   const count = Number(tabCount || 0);
   const parts = [profile, status, `${count} ${count === 1 ? 'Tab' : 'Tabs'}`];
+  const error = browserSessionError(session);
+  if (error) parts.push(error);
   if (session.__imported) parts.push('Import');
   return parts.join(' · ');
 }
 
 function browserSessionBand(session) {
-  const uiState = browserUiState(session);
-  return ['ready', 'starting', 'waiting'].includes(uiState) ? 'active' : 'closed';
+  // "Aktiv" means a native runtime has confirmed a live Chromium-backed
+  // session. Starting, blocked and disconnected rows do not count as active.
+  return browserUiState(session) === 'ready' ? 'active' : 'closed';
 }
 
 function browserSessionMatchesBand(session, band) {
@@ -1360,6 +1371,7 @@ function sessionListSignature(filteredSessions, listView, tabCounts = {}) {
     session.id || '',
     browserUiState(session),
     String(session.title || session.current_url || ''),
+    browserSessionError(session),
     session.profile_mode || session.payload?.profile_mode || '',
     Number(tabCounts[session.id] || 0),
     Number(session.updated_at_ms || 0),
@@ -1493,7 +1505,10 @@ function renderSession(refs, session, tab, frame, command, state) {
   }
   const url = tab?.url || session.current_url || '';
   const commandError = commandErrorMessage(command);
-  const sessionError = session.error ? `<div class="browser-error">${escapeHtml(session.error)}</div>` : '';
+  const runtimeError = browserSessionError(session);
+  const sessionError = runtimeError
+    ? `<div class="browser-error"><strong>Browser-Laufzeit:</strong> ${escapeHtml(runtimeError)}</div>`
+    : '';
   const commandLine = command
     ? `<div class="browser-muted">Letzte Browseraktion: ${escapeHtml(browserActionLabel(command.command_type || command.type || 'browser'))}</div>`
     : '';
@@ -1648,7 +1663,7 @@ function renderStatus(refs, session, tab, frame, command) {
     refs.statusChip.textContent = session ? browserStatusLabel(session) : t('statusDisconnected', 'Nicht verbunden');
     refs.statusChip.dataset.state = state;
     refs.statusChip.classList.toggle('is-success', state === 'ready');
-    refs.statusChip.classList.toggle('is-warning', state === 'starting' || state === 'waiting');
+    refs.statusChip.classList.toggle('is-warning', ['starting', 'waiting', 'blocked'].includes(state));
     refs.statusChip.classList.toggle('is-danger', state === 'error');
   }
   const url = tab?.url || session?.current_url || '';
@@ -1659,8 +1674,8 @@ function renderStatus(refs, session, tab, frame, command) {
   if (url) bits.push(url);
   if (frame?.seq != null) bits.push(`Frame ${frame.seq}`);
   if (session?.frame_rate_target) bits.push(`${session.frame_rate_target} fps`);
-  const error = commandErrorMessage(command) || session?.error || '';
-  if (error) bits.push(`Error: ${error}`);
+  const error = commandErrorMessage(command) || browserSessionError(session);
+  if (error) bits.push(`Grund: ${error}`);
   if (refs.statusMeta) refs.statusMeta.textContent = bits.join(' - ') || '-';
 }
 
@@ -1747,7 +1762,13 @@ function frameEmptyText(state) {
   if (commandError) return commandError;
   if (!session) return t('frameOpenNew', 'Oeffne ein neues Browser-Fenster');
   const status = String(session.runtime_status || session.status || '').toLowerCase();
-  if (status === 'failed' || status === 'error') return session.error || t('frameStartFailed', 'Der Browser konnte nicht gestartet werden');
+  const runtimeError = browserSessionError(session);
+  if (['failed', 'error', 'blocked'].includes(status)) {
+    return runtimeError || t('frameStartFailed', 'Der Browser konnte nicht gestartet werden');
+  }
+  if (['disconnected', 'offline'].includes(status)) {
+    return runtimeError || 'Kein laufender Browser-Prozess. Starten Sie die Sitzung erneut.';
+  }
   if (status === 'stopped' || status === 'closed') return t('frameClosed', 'Browser-Fenster geschlossen');
   if (status === 'requested' || status === 'starting' || status === 'pending_command') return t('frameStarting', 'Browser wird gestartet');
   return t('frameLoading', 'Browser-Inhalt wird geladen');
@@ -1756,9 +1777,10 @@ function frameEmptyText(state) {
 function browserUiState(session) {
   if (!session) return 'offline';
   const raw = String(session.runtime_status || session.status || '').toLowerCase();
-  if (['active', 'running', 'capturing', 'synthetic'].includes(raw)) return 'ready';
+  if (['active', 'running', 'capturing'].includes(raw)) return 'ready';
   if (['requested', 'starting', 'pending_command', 'pending_sync'].includes(raw)) return 'starting';
-  if (['stopped', 'closed'].includes(raw)) return 'offline';
+  if (raw === 'blocked') return 'blocked';
+  if (['stopped', 'closed', 'disconnected', 'offline'].includes(raw)) return 'offline';
   if (['failed', 'error'].includes(raw)) return 'error';
   return raw ? 'waiting' : 'offline';
 }
@@ -1768,6 +1790,7 @@ function browserStatusLabel(session) {
   if (state === 'ready') return t('statusReady', 'Bereit');
   if (state === 'starting') return t('statusStarting', 'Startet');
   if (state === 'waiting') return t('statusConnecting', 'Verbindet');
+  if (state === 'blocked') return 'Aktion erforderlich';
   if (state === 'error') return t('statusError', 'Fehler');
   return t('statusDisconnected', 'Nicht verbunden');
 }
@@ -2000,6 +2023,7 @@ export const __browserTestHooks = {
   browserActorIds,
   mergeRequestedSession,
   mergeRequestedDocument,
+  browserSessionError,
   browserSessionIsLive,
   browserSessionNeedsStart,
   browserStartErrorIsRetryable,
@@ -2007,6 +2031,9 @@ export const __browserTestHooks = {
   filterSessionsForView,
   browserSessionViewCounts,
   browserSessionBand,
+  browserUiState,
+  browserStatusLabel,
+  frameEmptyText,
   sessionListSignature,
   browserWorkbenchVisible,
   browserSessionShardMeta,
