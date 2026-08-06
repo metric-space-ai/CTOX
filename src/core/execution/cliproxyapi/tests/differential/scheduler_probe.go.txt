@@ -1,0 +1,106 @@
+package auth
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"strconv"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+)
+
+type ctoxSchedulerCandidate struct {
+	ID        string `json:"id"`
+	Provider  string `json:"provider"`
+	Priority  int    `json:"priority"`
+	Weight    *int64 `json:"weight"`
+	Websocket bool   `json:"websocket"`
+}
+
+type ctoxSchedulerInput struct {
+	Strategy         string                   `json:"strategy"`
+	Providers        []string                 `json:"providers"`
+	Candidates       []ctoxSchedulerCandidate `json:"candidates"`
+	Picks            int                      `json:"picks"`
+	Mixed            bool                     `json:"mixed"`
+	PreferWebsocket  bool                     `json:"prefer_websocket"`
+	PinnedAuthID     string                   `json:"pinned_auth_id"`
+	TriedAuthIDs     []string                 `json:"tried_auth_ids"`
+	PickModels       []string                 `json:"pick_models"`
+}
+
+type ctoxSchedulerFixture struct {
+	Name      string             `json:"name"`
+	Operation string             `json:"operation"`
+	Model     string             `json:"model"`
+	Input     ctoxSchedulerInput `json:"input"`
+}
+
+type ctoxSchedulerResult struct {
+	Name   string `json:"name"`
+	Output any    `json:"output"`
+}
+
+func TestCtoxSchedulerDifferential(t *testing.T) {
+	raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+	if err != nil { t.Fatal(err) }
+	var fixtures []ctoxSchedulerFixture
+	if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+	results := make([]ctoxSchedulerResult, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		if fixture.Operation != "scheduler_sequence" { t.Fatalf("unknown operation %q", fixture.Operation) }
+		var selector Selector
+		switch fixture.Input.Strategy {
+		case "round-robin": selector = &RoundRobinSelector{}
+		case "fill-first": selector = &FillFirstSelector{}
+		case "weighted-round-robin": selector = &WeightedRoundRobinSelector{}
+		default: t.Fatalf("unknown strategy %q", fixture.Input.Strategy)
+		}
+		auths := make([]*Auth, 0, len(fixture.Input.Candidates))
+		for _, candidate := range fixture.Input.Candidates {
+			attributes := map[string]string{"priority": strconv.Itoa(candidate.Priority)}
+			if candidate.Weight != nil { attributes[AttributeWeight] = strconv.FormatInt(*candidate.Weight, 10) }
+			if candidate.Websocket { attributes["websockets"] = "true" }
+			models := make([]*registry.ModelInfo, 0, 1+len(fixture.Input.PickModels))
+			if fixture.Model != "" { models = append(models, &registry.ModelInfo{ID: fixture.Model}) }
+			for _, model := range fixture.Input.PickModels {
+				if model != "" { models = append(models, &registry.ModelInfo{ID: model}) }
+			}
+			if len(models) > 0 {
+				registry.GetGlobalRegistry().RegisterClient(candidate.ID, candidate.Provider, models)
+				defer registry.GetGlobalRegistry().UnregisterClient(candidate.ID)
+			}
+			auths = append(auths, &Auth{ID: candidate.ID, Provider: candidate.Provider, Attributes: attributes})
+		}
+		scheduler := newAuthScheduler(selector)
+		scheduler.rebuild(auths)
+		ctx := context.Background()
+		if fixture.Input.PreferWebsocket { ctx = cliproxyexecutor.WithDownstreamWebsocket(ctx) }
+		opts := cliproxyexecutor.Options{}
+		if fixture.Input.PinnedAuthID != "" { opts.Metadata = map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: fixture.Input.PinnedAuthID} }
+		tried := make(map[string]struct{}, len(fixture.Input.TriedAuthIDs))
+		for _, authID := range fixture.Input.TriedAuthIDs { tried[authID] = struct{}{} }
+		output := make([]map[string]string, 0, fixture.Input.Picks)
+		for index := 0; index < fixture.Input.Picks; index++ {
+			model := fixture.Model
+			if index < len(fixture.Input.PickModels) { model = fixture.Input.PickModels[index] }
+			if fixture.Input.Mixed {
+				picked, provider, errPick := scheduler.pickMixed(ctx, fixture.Input.Providers, model, opts, tried)
+				if errPick != nil { t.Fatalf("%s pick %d: %v", fixture.Name, index, errPick) }
+				output = append(output, map[string]string{"provider": provider, "auth_id": picked.ID})
+			} else {
+				provider := ""
+				if len(fixture.Input.Providers) > 0 { provider = fixture.Input.Providers[0] }
+				picked, errPick := scheduler.pickSingle(ctx, provider, model, opts, tried)
+				if errPick != nil { t.Fatalf("%s pick %d: %v", fixture.Name, index, errPick) }
+				output = append(output, map[string]string{"provider": provider, "auth_id": picked.ID})
+			}
+		}
+		results = append(results, ctoxSchedulerResult{Name: fixture.Name, Output: output})
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err != nil { t.Fatal(err) }
+	if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

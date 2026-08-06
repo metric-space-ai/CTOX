@@ -1,0 +1,81 @@
+package responses
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "strings"
+    "testing"
+)
+
+type ctoxFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    RawSSE string `json:"raw_sse"`
+    RawSSEChunks []string `json:"raw_sse_chunks"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+}
+type ctoxResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxDifferential(t *testing.T) {
+    fixturesRaw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxFixture; if err = json.Unmarshal(fixturesRaw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        t.Logf("fixture start: %s", fixture.Name)
+        var value any
+        switch fixture.Operation {
+        case "request_to_claude":
+            output := ConvertOpenAIResponsesRequestToClaude(fixture.Model, fixture.Input, fixture.Stream)
+            if err = json.Unmarshal(output, &value); err != nil { t.Fatal(err) }
+        case "claude_to_responses_non_stream":
+            output := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(fixture.RawSSE), nil)
+            if err = json.Unmarshal(output, &value); err != nil { t.Fatal(err) }
+        case "claude_to_responses_stream":
+            events := make([]any, 0)
+            var param any
+            for _, chunk := range fixture.RawSSEChunks {
+                for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &param) {
+                    parsed, parseErr := parseCtoxSSE(output); if parseErr != nil { t.Fatal(parseErr) }
+                    events = append(events, parsed)
+                }
+            }
+            value = events
+        default: t.Fatalf("unknown operation %q", fixture.Operation)
+        }
+        normalizeCtox(value)
+        results = append(results, ctoxResult{Name: fixture.Name, Output: value})
+        t.Logf("fixture done: %s", fixture.Name)
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}
+
+func parseCtoxSSE(raw []byte) (any, error) {
+    eventName := ""
+    data := ""
+    for _, line := range strings.Split(string(raw), "\n") {
+        if strings.HasPrefix(line, "event:") { eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:")) }
+        if strings.HasPrefix(line, "data:") {
+            if data != "" { data += "\n" }
+            data += strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+        }
+    }
+    var payload any
+    if err := json.Unmarshal([]byte(data), &payload); err != nil { return nil, err }
+    return map[string]any{"event": eventName, "data": payload}, nil
+}
+
+func normalizeCtox(value any) {
+    switch current := value.(type) {
+    case map[string]any:
+        delete(current, "created_at")
+        if metadata, ok := current["metadata"].(map[string]any); ok { delete(metadata, "user_id"); if len(metadata) == 0 { delete(current, "metadata") } }
+        for _, child := range current { normalizeCtox(child) }
+    case []any:
+        for _, child := range current { normalizeCtox(child) }
+    }
+}

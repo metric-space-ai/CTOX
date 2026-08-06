@@ -1,0 +1,33 @@
+package chat_completions
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxClaudeChatNonStreamFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawSSE string `json:"raw_sse"`
+}
+type ctoxClaudeChatNonStreamResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxClaudeChatNonStreamDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxClaudeChatNonStreamFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxClaudeChatNonStreamResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var state any
+        output := ConvertClaudeResponseToOpenAINonStream(context.Background(), "", fixture.OriginalRequest, nil, []byte(fixture.RawSSE), &state)
+        var value map[string]any
+        if err = json.Unmarshal(output, &value); err != nil { t.Fatal(err) }
+        delete(value, "created")
+        results = append(results, ctoxClaudeChatNonStreamResult{Name:fixture.Name, Output:value})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

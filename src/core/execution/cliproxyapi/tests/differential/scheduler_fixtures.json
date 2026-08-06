@@ -1,0 +1,161 @@
+[
+  {
+    "name": "round_robin_highest_priority",
+    "operation": "scheduler_sequence",
+    "model": "gemini-3",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["gemini"],
+      "picks": 3,
+      "candidates": [
+        {"id":"low","provider":"gemini","priority":0},
+        {"id":"high-b","provider":"gemini","priority":10},
+        {"id":"high-a","provider":"gemini","priority":10}
+      ]
+    }
+  },
+  {
+    "name": "smooth_weighted_sequence",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "weighted-round-robin",
+      "providers": ["gemini"],
+      "picks": 10,
+      "candidates": [
+        {"id":"a","provider":"gemini","weight":5},
+        {"id":"b","provider":"gemini","weight":3},
+        {"id":"c","provider":"gemini","weight":2}
+      ]
+    }
+  },
+  {
+    "name": "weighted_skips_nonpositive_high_priority",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "weighted-round-robin",
+      "providers": ["gemini"],
+      "picks": 2,
+      "candidates": [
+        {"id":"excluded","provider":"gemini","priority":10,"weight":0},
+        {"id":"available","provider":"gemini","priority":0,"weight":1}
+      ]
+    }
+  },
+  {
+    "name": "fill_first_is_sticky",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "fill-first",
+      "providers": ["gemini"],
+      "picks": 3,
+      "candidates": [
+        {"id":"b","provider":"gemini"},
+        {"id":"a","provider":"gemini"},
+        {"id":"c","provider":"gemini"}
+      ]
+    }
+  },
+  {
+    "name": "codex_websocket_preference_precedes_priority",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["codex"],
+      "prefer_websocket": true,
+      "picks": 3,
+      "candidates": [
+        {"id":"codex-http","provider":"codex","priority":10},
+        {"id":"codex-ws-a","provider":"codex","websocket":true},
+        {"id":"codex-ws-b","provider":"codex","websocket":true}
+      ]
+    }
+  },
+  {
+    "name": "pin_overrides_websocket_preference",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["codex"],
+      "prefer_websocket": true,
+      "pinned_auth_id": "codex-http",
+      "picks": 2,
+      "candidates": [
+        {"id":"codex-http","provider":"codex","priority":10},
+        {"id":"codex-ws","provider":"codex","websocket":true}
+      ]
+    }
+  },
+  {
+    "name": "mixed_single_provider_reuses_websocket_preference",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["codex"],
+      "mixed": true,
+      "prefer_websocket": true,
+      "picks": 2,
+      "candidates": [
+        {"id":"codex-http","provider":"codex","priority":10},
+        {"id":"codex-ws","provider":"codex","websocket":true}
+      ]
+    }
+  },
+  {
+    "name": "mixed_round_robin_ready_account_weight",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["gemini", "claude"],
+      "mixed": true,
+      "picks": 4,
+      "candidates": [
+        {"id":"gemini-a","provider":"gemini"},
+        {"id":"gemini-b","provider":"gemini"},
+        {"id":"claude-a","provider":"claude"}
+      ]
+    }
+  },
+  {
+    "name": "mixed_smooth_weighted",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "weighted-round-robin",
+      "providers": ["gemini", "claude"],
+      "mixed": true,
+      "picks": 10,
+      "candidates": [
+        {"id":"gemini-a","provider":"gemini","weight":5},
+        {"id":"claude-b","provider":"claude","weight":3},
+        {"id":"claude-c","provider":"claude","weight":2}
+      ]
+    }
+  },
+  {
+    "name": "thinking_suffix_shares_cursor",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["gemini"],
+      "picks": 4,
+      "pick_models": ["gemini-3(high)", "gemini-3", "gemini-3(low)", "gemini-3"],
+      "candidates": [
+        {"id":"a","provider":"gemini"},
+        {"id":"b","provider":"gemini"}
+      ]
+    }
+  },
+  {
+    "name": "tried_auth_is_excluded",
+    "operation": "scheduler_sequence",
+    "input": {
+      "strategy": "round-robin",
+      "providers": ["gemini"],
+      "tried_auth_ids": ["a"],
+      "picks": 2,
+      "candidates": [
+        {"id":"a","provider":"gemini"},
+        {"id":"b","provider":"gemini"}
+      ]
+    }
+  }
+]

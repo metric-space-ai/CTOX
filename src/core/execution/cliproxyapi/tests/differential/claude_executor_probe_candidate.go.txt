@@ -1,0 +1,55 @@
+package executor
+
+import (
+    "encoding/json"
+    "os"
+    "testing"
+
+    "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+)
+
+type ctoxClaudeExecutorFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    RawBody json.RawMessage `json:"raw_body"`
+}
+type ctoxClaudeExecutorResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxClaudeExecutorDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxClaudeExecutorFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxClaudeExecutorResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        var body []byte
+        switch fixture.Operation {
+        case "claude_executor_normalize_cache_ttl": body = normalizeCacheControlTTL(fixture.RawBody)
+        case "claude_executor_enforce_cache_limit": body = enforceCacheControlLimit(fixture.RawBody, 4)
+        case "claude_executor_ensure_cache": body = ensureCacheControl(fixture.RawBody)
+        case "claude_executor_remap_oauth_tools":
+            converted, reverse := remapOAuthToolNames(fixture.RawBody)
+            var parsed any; if err = json.Unmarshal(converted, &parsed); err != nil { t.Fatal(err) }
+            output = map[string]any{"body":parsed,"reverse":reverse}
+        case "claude_executor_sign_cch":
+            signed, signErr := signAnthropicMessagesBody(fixture.RawBody)
+            if signErr != nil { t.Fatal(signErr) }
+            output = string(signed)
+        case "claude_executor_usage":
+            detail := helps.ParseClaudeUsage(fixture.RawBody)
+            output = map[string]any{
+                "input_tokens":detail.InputTokens,
+                "output_tokens":detail.OutputTokens,
+                "cached_tokens":detail.CachedTokens,
+                "cache_read_tokens":detail.CacheReadTokens,
+                "cache_creation_tokens":detail.CacheCreationTokens,
+                "total_tokens":detail.TotalTokens,
+            }
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        if body != nil { if err = json.Unmarshal(body, &output); err != nil { t.Fatal(err) } }
+        results = append(results, ctoxClaudeExecutorResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

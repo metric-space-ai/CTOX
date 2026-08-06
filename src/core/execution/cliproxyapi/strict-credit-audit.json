@@ -1,0 +1,99 @@
+{
+  "schema": "ctox.cliproxyapi.strict-credit-audit.v1",
+  "upstream_commit": "a88197f845c979132c8978ea223c6af05cc81536",
+  "generated_at": "2026-08-04",
+  "mechanical_closure": {
+    "production": 617,
+    "production_total": 617,
+    "tests": 442,
+    "tests_total": 442
+  },
+  "strict_closure": {
+    "production": 617,
+    "production_total": 617,
+    "tests": 442,
+    "tests_total": 442
+  },
+  "gap": {
+    "production": 0,
+    "tests": 0,
+    "path_reconstructed_production": 0,
+    "path_reconstructed_tests": 0,
+    "ledger_membership_unresolved_production": 0,
+    "ledger_membership_unresolved_tests": 0
+  },
+  "reconstructed": [],
+  "closed_reconstructed": [
+    {
+      "cluster": "safe-host-adapters",
+      "production": [
+        "internal/browser/browser.go",
+        "internal/httpfetch/httpfetch.go",
+        "internal/util/ssh_helper.go"
+      ],
+      "tests": [
+        "internal/httpfetch/httpfetch_test.go"
+      ],
+      "reason": "Earlier checkpoints explicitly deferred or denied standalone strict credit despite later marker closure."
+    },
+    {
+      "cluster": "config-authority",
+      "production": [
+        "internal/config/config_load.go",
+        "internal/config/config_normalization.go",
+        "internal/config/config_validation.go",
+        "internal/config/config_yaml.go",
+        "internal/config/parse.go",
+        "sdk/config/config.go"
+      ],
+      "tests": [
+        "internal/config/plugin_config_test.go"
+      ],
+      "reason": "The Config cluster was activated mechanically while strict credit remained limited to the already-complete sdk_config mirror; the SDK facade deliberately required injected authority."
+    },
+    {
+      "cluster": "command-host-binding",
+      "production": [
+        "cmd/fetch_antigravity_models/main.go",
+        "cmd/fetch_codex_models/main.go",
+        "cmd/server/main.go"
+      ],
+      "tests": [],
+      "reason": "Worker 18fa classified all three fail-closed command adapters but withheld strict credit until explicit CTOX host authority is bound."
+    },
+    {
+      "cluster": "large-service-integration",
+      "production": [],
+      "tests": [
+        "sdk/cliproxy/service_executionregistry_test.go"
+      ],
+      "reason": "The large Home subscriber/log-forwarder/selector-watcher integration mirror was promoted mechanically without later file-specific strict credit."
+    },
+    {
+      "cluster": "translator-benchmark-ledger",
+      "production": [],
+      "tests": [
+        "internal/translator/request_benchmark_test.go",
+        "internal/translator/response_benchmark_test.go"
+      ],
+      "reason": "Worker 18cv recorded passing behavior gates but no file-credit assignment or strict counter transition."
+    }
+  ],
+  "unresolved_ledger_membership": {
+    "production": 0,
+    "tests": 0,
+    "reason": "Historical per-file membership was not guessed. The former nine-production/fifteen-test arithmetic gap is closed by the validated accepted-pin repository umbrella receipt."
+  },
+  "umbrella_receipt": {
+    "path": "../../../../runtime/cliproxyapi-strict-receipts/a88197f845c979132c8978ea223c6af05cc81536/20260804T2120Z-post-promotion-r4/strict-umbrella-receipt.json",
+    "sha256": "2b41678383a56af9331136dea4ba2d75b0eee33d58aba3ac5bf4be6517c5aa1d",
+    "credited_production": 9,
+    "credited_tests": 15
+  },
+  "closure_policy": [
+    "Gate every reconstructed cluster against the accepted Go pin and the current Rust tree.",
+    "Do not infer strict credit from adapted_to_ctox or ported markers alone.",
+    "Close unresolved membership only with a reproducible umbrella receipt that covers the complete accepted-pin Go module set, both Rust feature matrices, both strict Clippy matrices, formatting, tracking and dashboard generation.",
+    "Nested Go modules are explicit gate inputs; root go test ./... does not cover them."
+  ]
+}

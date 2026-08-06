@@ -1,0 +1,74 @@
+[
+  {
+    "name":"gemini-chat-request-controls-system-media-tools",
+    "operation":"gemini_chat_request",
+    "model":"gemini-3-pro",
+    "stream":true,
+    "input":{
+      "reasoning_effort":"HIGH","temperature":0.2,"top_p":0.8,"top_k":12,"max_tokens":99,"max_completion_tokens":101,"n":2,
+      "response_format":{"type":"json_schema","json_schema":{"schema":{"type":"object","properties":{"answer":{"type":"string"}}}}},
+      "modalities":["text","image","audio"],"image_config":{"aspect_ratio":"16:9","image_size":"2K"},
+      "messages":[
+        {"role":"system","content":[{"type":"text","text":"be exact"}]},
+        {"role":"user","content":[{"type":"text","text":"show"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,BBBB"}},{"type":"input_audio","input_audio":{"format":"mp3","data":"CCCC"}},{"type":"file","file":{"filename":"notes.pdf","file_data":"DDDD"}}]}
+      ],
+      "tools":[
+        {"type":"function","function":{"name":"read file","description":"Read","strict":true,"parameters":{"type":"object","properties":{"path":{"type":"string"}}}}},
+        {"google_search":{}},{"code_execution":{}},{"url_context":{}}
+      ]
+    }
+  },
+  {
+    "name":"gemini-chat-request-history-tool-result",
+    "operation":"gemini_chat_request",
+    "model":"gemini-3-flash",
+    "input":{"messages":[
+      {"role":"user","content":"run"},
+      {"role":"assistant","reasoning_content":"think","content":"calling","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read file","arguments":"{\"path\":\"a\"}"}}]},
+      {"role":"tool","tool_call_id":"call_1","content":"done"},
+      {"role":"user","content":"continue"}
+    ],"tools":[{"type":"function","function":{"name":"read file"}}]}
+  },
+  {
+    "name":"gemini-chat-request-single-system",
+    "operation":"gemini_chat_request",
+    "model":"gemini",
+    "input":{"messages":[{"role":"system","content":{"type":"text","text":"only"}}],"generationConfig":{"seed":7}}
+  },
+  {
+    "name":"gemini-chat-non-stream-multi-candidate",
+    "operation":"gemini_chat_non_stream",
+    "model":"ignored",
+    "original_request":{"tools":[{"type":"function","function":{"name":"read file"}}]},
+    "raw_json":{"responseId":"resp_1","modelVersion":"gemini-3","createTime":"2026-08-03T12:34:56Z","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14,"cachedContentTokenCount":2,"thoughtsTokenCount":1},"candidates":[
+      {"index":0,"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"why"},{"text":"answer"},{"functionCall":{"name":"read_file","args":{"path":"a"}}},{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}},
+      {"index":1,"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"other"}]}}
+    ]}
+  },
+  {
+    "name":"gemini-chat-non-stream-empty",
+    "operation":"gemini_chat_non_stream",
+    "raw_json":{}
+  },
+  {
+    "name":"gemini-chat-stream-state-and-final",
+    "operation":"gemini_chat_stream",
+    "model":"fallback",
+    "original_request":{"tools":[{"type":"function","function":{"name":"read file"}}]},
+    "raw_sse_chunks":[
+      "data: {\"responseId\":\"resp_s\",\"modelVersion\":\"gemini-3\",\"createTime\":\"2026-08-03T12:34:56Z\",\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"thought\":true,\"text\":\"why\"},{\"text\":\"hello\"},{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"a\"}}}]}}]}",
+      "{\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7,\"cachedContentTokenCount\":1},\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\",\"content\":{\"parts\":[]}}]}",
+      "[DONE]"
+    ]
+  },
+  {
+    "name":"gemini-chat-stream-usage-only",
+    "operation":"gemini_chat_stream",
+    "raw_sse_chunks":["{\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":1}}"]
+  },
+  {
+    "name":"gemini-chat-stream-multi-candidate-images",
+    "operation":"gemini_chat_stream",
+    "raw_sse_chunks":["{\"createTime\":\"bad\",\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"inline_data\":{\"mime_type\":\"image/webp\",\"data\":\"EEEE\"}}]}},{\"index\":1,\"content\":{\"parts\":[{\"thoughtSignature\":\"opaque\"},{\"text\":\"two\"}]}}]}"]
+  }
+]

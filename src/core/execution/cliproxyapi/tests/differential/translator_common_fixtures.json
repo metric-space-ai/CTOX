@@ -1,0 +1,21 @@
+[
+  {"name":"common-cache-copy","operation":"translator_common","input":{"kind":"cache","dst":"{\"type\":\"text\",\"text\":\"hi\"}","src":{"cache_control":{"type":"ephemeral","ttl":"5m"}}}},
+  {"name":"common-message-cache-string","operation":"translator_common","input":{"kind":"message_cache","message":"{\"role\":\"user\",\"content\":\"hi\"}","src":{"cache_control":{"type":"ephemeral"}}}},
+  {"name":"common-message-cache-part-precedence","operation":"translator_common","input":{"kind":"message_cache","message":"{\"content\":[{\"type\":\"text\",\"text\":\"hi\",\"cache_control\":{\"type\":\"ephemeral\"}}]}","src":{"cache_control":{"ttl":"1h"}}}},
+  {"name":"common-system-array-filter","operation":"translator_common","input":{"kind":"system","content":[{"type":"text","text":"first"},{"type":"image"},{"type":"text","text":" x-anthropic-billing-header: cch=1"},{"type":"text","text":"second"}]}},
+  {"name":"common-system-whitespace-only","operation":"translator_common","input":{"kind":"system","content":"  \n\t"}},
+  {"name":"common-file-data-url","operation":"translator_common","input":{"kind":"file","filename":"test.txt","data":"DATA:application/pdf;charset=binary;BASE64,JVBERi0xLjQK"}},
+  {"name":"common-file-pdf","operation":"translator_common","input":{"kind":"file","filename":"TEST.PDF","data":"JVBERi0xLjQK"}},
+  {"name":"common-file-docx","operation":"translator_common","input":{"kind":"file","filename":"brief.DOCX","data":"AAAA"}},
+  {"name":"common-file-svg","operation":"translator_common","input":{"kind":"file","filename":"diagram.svg","data":"BBBB"}},
+  {"name":"common-file-wasm","operation":"translator_common","input":{"kind":"file","filename":"module.wasm","data":"CCCC"}},
+  {"name":"common-file-unknown","operation":"translator_common","input":{"kind":"file","filename":"README","data":"DDDD"}},
+  {"name":"common-file-explicit-fallback","operation":"translator_common","input":{"kind":"file","filename":"README","fallback":"application/x-ctox","data":"EEEE"}},
+  {"name":"common-usage-priority","operation":"translator_common","input":{"kind":"usage","root":{"interaction":{"usage":{"input":1}},"usage":{"input":2},"metadata":{"total_usage":{"input":3}}}}},
+  {"name":"common-usage-nested-fallback","operation":"translator_common","input":{"kind":"usage","root":{"interaction":{"metadata":{"usage":{"input":6}}}}}},
+  {"name":"common-safety-root","operation":"translator_common","input":{"kind":"safety","raw":"{}","path":"safetySettings"}},
+  {"name":"common-safety-nested","operation":"translator_common","input":{"kind":"safety","raw":"{\"request\":{}}","path":"request.safetySettings"}},
+  {"name":"common-safety-preserves-null","operation":"translator_common","input":{"kind":"safety","raw":"{\"safetySettings\":null}","path":"safetySettings"}},
+  {"name":"common-attribution-leading-unicode-space","operation":"translator_common","input":{"kind":"attribution","text":" x-anthropic-billing-header: cc_version=2"}},
+  {"name":"common-attribution-regular","operation":"translator_common","input":{"kind":"attribution","text":"You are helpful."}}
+]

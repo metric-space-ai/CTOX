@@ -1,0 +1,28 @@
+package executor
+
+import (
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxReplayFixture struct {
+    Name string `json:"name"`
+    Payload json.RawMessage `json:"payload"`
+    ReplayItems []json.RawMessage `json:"replay_items"`
+}
+
+func TestCtoxAntigravityReplayDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxReplayFixture; if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    output := make([]any, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        items := make([][]byte, len(fixture.ReplayItems))
+        for index := range fixture.ReplayItems { items[index] = fixture.ReplayItems[index] }
+        payload, changed := insertAntigravityReasoningReplayItems(fixture.Payload, items)
+        var value any; if err = json.Unmarshal(payload, &value); err != nil { t.Fatal(err) }
+        output = append(output, map[string]any{"name":fixture.Name,"output":map[string]any{"changed":changed,"output":value}})
+    }
+    encoded, err := json.MarshalIndent(output, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

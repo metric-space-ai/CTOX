@@ -1,0 +1,2475 @@
+// ref: internal/runtime/executor/claude_executor_execute.go @ a88197f845c979132c8978ea223c6af05cc81536
+// Port-Status: adapted_to_ctox
+// License: MIT (upstream); modifications AGPL-3.0-only
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::claude_executor::{
+    parse_claude_stream_usage_line, parse_claude_usage, ClaudeCredentialMode, ClaudeDeviceProfile,
+    ClaudeMessagesRequest, ClaudeMessagesResponse, ClaudeMessagesStreamResponse,
+    ClaudeMessagesStreamingTransport, ClaudeMessagesTransport, ClaudeMessagesTransportFailure,
+    ClaudeTargetError, ClaudeUpstreamTarget, ClaudeUsageSink,
+};
+use super::claude_executor_auth::{
+    ClaudePrepareAuthError, ClaudeRequestAuthPreparer, ClaudeSubscriptionAuth,
+    ClaudeSubscriptionAuthError,
+};
+use super::claude_executor_cloaking::{
+    try_apply_claude_cloaking, ClaudeCallerSystemBlockError, ClaudeCloakPolicy,
+};
+use super::claude_executor_diagnostics::{
+    claude_message_id_from_response, commit_claude_diagnostics, inject_claude_diagnostics,
+    observe_claude_stream_line, ClaudeDiagnosticsRequestState,
+};
+use super::claude_executor_request::{
+    claude_request_uses_fast_mode, claude_requested_betas, extract_and_remove_claude_betas,
+    prepare_claude_upstream_body_with_identity, restore_claude_oauth_tool_names_from_response,
+    restore_claude_oauth_tool_names_from_stream_line,
+};
+use super::claude_executor_tokens::prepare_claude_first_party_token_count_body;
+use super::helps::{
+    apply_claude_credential_metadata, claude_agent_session_uuid_for_request,
+    detect_claude_code_request, ClaudeCodeRequestDetection, ClaudeCredentialIdentityError,
+    ClaudeDeviceProfileCache as ClaudeHelperDeviceProfileCache, ClaudeHeaderDefaults,
+    ClaudeIdentityKvStore, ClaudeIdentityStoreError, SessionIdCache, SessionIdCacheError,
+};
+use crate::internal::registry::lookup_model_info;
+use crate::sdk::cliproxy::auth::{
+    AccountCandidate, AccountExecutionResult, AccountRouter, AccountRoutingError, Auth,
+    CooldownConductor, UnauthorizedReplayDecision, UnauthorizedReplayState,
+};
+use crate::sdk::cliproxy::executor::{ExecutionMetadata, Headers, JsonMetadata};
+use serde_json::Value;
+
+pub trait AccountStateClock: Send + Sync {
+    fn now_ms(&self) -> i64;
+}
+
+#[derive(Debug)]
+struct SystemAccountStateClock;
+
+impl AccountStateClock for SystemAccountStateClock {
+    fn now_ms(&self) -> i64 {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        i64::try_from(millis).unwrap_or(i64::MAX)
+    }
+}
+
+#[derive(Clone)]
+struct AccountStateBinding {
+    auth_id: String,
+    conductor: Arc<CooldownConductor>,
+    clock: Arc<dyn AccountStateClock>,
+}
+
+struct ClaudeRequestAuthPreparationBinding {
+    auth: tokio::sync::Mutex<Auth>,
+    preparer: Arc<ClaudeRequestAuthPreparer>,
+}
+
+/// Request-scoped native-client evidence prepared by the provider adapter.
+/// It never mutates the account-owned executor and therefore cannot leak one
+/// caller's headers, identity, or cloak decision into another request.
+#[derive(Clone)]
+pub struct ClaudeExecutionRequestContext {
+    auth_id: String,
+    headers: Headers,
+    auth_metadata: BTreeMap<String, Value>,
+    auth_attributes: BTreeMap<String, String>,
+    detection: ClaudeCodeRequestDetection,
+    session_id: String,
+    client_user_agent: String,
+    header_defaults: ClaudeHeaderDefaults,
+}
+
+struct ClaudeProviderRequestContextInput<'a> {
+    auth_id: String,
+    headers: Headers,
+    original_payload: &'a [u8],
+    translated_payload: &'a [u8],
+    auth_metadata: BTreeMap<String, Value>,
+    auth_attributes: BTreeMap<String, String>,
+    request_metadata: &'a JsonMetadata,
+}
+
+impl fmt::Debug for ClaudeExecutionRequestContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeExecutionRequestContext")
+            .field("auth_id", &self.auth_id)
+            .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field(
+                "auth_metadata_keys",
+                &self.auth_metadata.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "auth_attribute_keys",
+                &self.auth_attributes.keys().collect::<Vec<_>>(),
+            )
+            .field("detection", &self.detection)
+            .field("session_id", &"[REDACTED]")
+            .field("client_user_agent", &self.client_user_agent)
+            .field("header_defaults", &self.header_defaults)
+            .finish()
+    }
+}
+
+impl ClaudeExecutionRequestContext {
+    pub fn from_provider_request(
+        auth_id: impl Into<String>,
+        headers: Headers,
+        original_payload: &[u8],
+        translated_payload: &[u8],
+        auth_metadata: BTreeMap<String, Value>,
+        auth_attributes: BTreeMap<String, String>,
+    ) -> Self {
+        Self::from_provider_request_with_metadata(
+            auth_id,
+            headers,
+            original_payload,
+            translated_payload,
+            auth_metadata,
+            auth_attributes,
+            &JsonMetadata::new(),
+        )
+    }
+
+    pub fn from_provider_request_with_metadata(
+        auth_id: impl Into<String>,
+        headers: Headers,
+        original_payload: &[u8],
+        translated_payload: &[u8],
+        auth_metadata: BTreeMap<String, Value>,
+        auth_attributes: BTreeMap<String, String>,
+        request_metadata: &JsonMetadata,
+    ) -> Self {
+        Self::from_provider_request_kind(
+            ClaudeProviderRequestContextInput {
+                auth_id: auth_id.into(),
+                headers,
+                original_payload,
+                translated_payload,
+                auth_metadata,
+                auth_attributes,
+                request_metadata,
+            },
+            false,
+        )
+    }
+
+    pub fn from_provider_count_tokens_request(
+        auth_id: impl Into<String>,
+        headers: Headers,
+        original_payload: &[u8],
+        translated_payload: &[u8],
+        auth_metadata: BTreeMap<String, Value>,
+        auth_attributes: BTreeMap<String, String>,
+    ) -> Self {
+        Self::from_provider_count_tokens_request_with_metadata(
+            auth_id,
+            headers,
+            original_payload,
+            translated_payload,
+            auth_metadata,
+            auth_attributes,
+            &JsonMetadata::new(),
+        )
+    }
+
+    pub fn from_provider_count_tokens_request_with_metadata(
+        auth_id: impl Into<String>,
+        headers: Headers,
+        original_payload: &[u8],
+        translated_payload: &[u8],
+        auth_metadata: BTreeMap<String, Value>,
+        auth_attributes: BTreeMap<String, String>,
+        request_metadata: &JsonMetadata,
+    ) -> Self {
+        Self::from_provider_request_kind(
+            ClaudeProviderRequestContextInput {
+                auth_id: auth_id.into(),
+                headers,
+                original_payload,
+                translated_payload,
+                auth_metadata,
+                auth_attributes,
+                request_metadata,
+            },
+            true,
+        )
+    }
+
+    fn from_provider_request_kind(
+        input: ClaudeProviderRequestContextInput<'_>,
+        count_tokens: bool,
+    ) -> Self {
+        let header_defaults = claude_header_defaults(&input.auth_metadata, &input.auth_attributes);
+        let detection = detect_claude_code_request(
+            Some(&input.headers),
+            input.original_payload,
+            count_tokens,
+            &header_defaults,
+        );
+        let execution_metadata = claude_execution_metadata(input.request_metadata);
+        let session_id = claude_agent_session_uuid_for_request(
+            Some(&input.headers),
+            input.original_payload,
+            input.translated_payload,
+            detection.confirmed,
+            &[&execution_metadata],
+        );
+        Self::new(
+            input.auth_id,
+            input.headers,
+            input.auth_metadata,
+            input.auth_attributes,
+            detection,
+            session_id,
+        )
+    }
+
+    pub fn new(
+        auth_id: impl Into<String>,
+        headers: Headers,
+        auth_metadata: BTreeMap<String, Value>,
+        auth_attributes: BTreeMap<String, String>,
+        detection: ClaudeCodeRequestDetection,
+        session_id: impl Into<String>,
+    ) -> Self {
+        let client_user_agent = header_value(&headers, "User-Agent");
+        let header_defaults = claude_header_defaults(&auth_metadata, &auth_attributes);
+        Self {
+            auth_id: auth_id.into(),
+            headers,
+            auth_metadata,
+            auth_attributes,
+            detection,
+            session_id: session_id.into(),
+            client_user_agent,
+            header_defaults,
+        }
+    }
+}
+
+fn claude_execution_metadata(metadata: &JsonMetadata) -> ExecutionMetadata {
+    let value = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    ExecutionMetadata {
+        execution_session_id: value("execution_session_id"),
+        derived_session_id: value("derived_session_id"),
+        ..ExecutionMetadata::default()
+    }
+}
+
+fn header_value(headers: &Headers, name: &str) -> String {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .and_then(|(_, values)| values.first())
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
+}
+
+pub(super) fn claude_header_defaults(
+    metadata: &BTreeMap<String, Value>,
+    attributes: &BTreeMap<String, String>,
+) -> ClaudeHeaderDefaults {
+    let value = |key: &str| {
+        attributes
+            .get(key)
+            .map(String::as_str)
+            .or_else(|| metadata.get(key).and_then(Value::as_str))
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    ClaudeHeaderDefaults {
+        user_agent: value("claude_header_user_agent"),
+        package_version: value("claude_header_package_version"),
+        runtime_version: value("claude_header_runtime_version"),
+        os: value("claude_header_os"),
+        arch: value("claude_header_arch"),
+        stabilize_device_profile: None,
+    }
+}
+
+/// Bounded Claude subscription execution path with exactly one unauthorized
+/// refresh/replay.
+pub struct ClaudeSubscriptionMessagesExecutor {
+    auth: Arc<ClaudeSubscriptionAuth>,
+    transport: Arc<dyn ClaudeMessagesTransport>,
+    stream_transport: Option<Arc<dyn ClaudeMessagesStreamingTransport>>,
+    timeout: Duration,
+    account_state: Option<AccountStateBinding>,
+    device_profile: Option<ClaudeDeviceProfile>,
+    device_profiles: Arc<ClaudeHelperDeviceProfileCache>,
+    session_ids: Arc<SessionIdCache>,
+    session_id_store: Option<Arc<dyn ClaudeIdentityKvStore>>,
+    cloak_policy: ClaudeCloakPolicy,
+    cloak_user_id: String,
+    usage_sink: Option<Arc<dyn ClaudeUsageSink>>,
+    request_auth_preparation: Option<Arc<ClaudeRequestAuthPreparationBinding>>,
+}
+
+impl ClaudeSubscriptionMessagesExecutor {
+    pub fn new(
+        auth: Arc<ClaudeSubscriptionAuth>,
+        transport: Arc<dyn ClaudeMessagesTransport>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            auth,
+            transport,
+            stream_transport: None,
+            timeout,
+            account_state: None,
+            device_profile: None,
+            device_profiles: Arc::new(ClaudeHelperDeviceProfileCache::new()),
+            session_ids: Arc::new(SessionIdCache::new()),
+            session_id_store: None,
+            cloak_policy: ClaudeCloakPolicy::oauth_default(),
+            cloak_user_id: super::helps::generate_fake_user_id(),
+            usage_sink: None,
+            request_auth_preparation: None,
+        }
+    }
+
+    pub fn with_account_state(
+        self,
+        auth_id: impl Into<String>,
+        conductor: Arc<CooldownConductor>,
+    ) -> Result<Self, ClaudeExecutionError> {
+        self.with_account_state_clock(auth_id, conductor, Arc::new(SystemAccountStateClock))
+    }
+
+    pub fn with_account_state_clock(
+        mut self,
+        auth_id: impl Into<String>,
+        conductor: Arc<CooldownConductor>,
+        clock: Arc<dyn AccountStateClock>,
+    ) -> Result<Self, ClaudeExecutionError> {
+        let auth_id = auth_id.into();
+        if auth_id.trim().is_empty() {
+            return Err(ClaudeExecutionError::AccountStateConfiguration);
+        }
+        self.account_state = Some(AccountStateBinding {
+            auth_id,
+            conductor,
+            clock,
+        });
+        Ok(self)
+    }
+
+    pub fn account_state_auth_id(&self) -> Option<&str> {
+        self.account_state
+            .as_ref()
+            .map(|binding| binding.auth_id.as_str())
+    }
+
+    pub fn with_device_profile(mut self, profile: ClaudeDeviceProfile) -> Self {
+        self.device_profile = Some(profile);
+        self
+    }
+
+    pub fn with_cloak_policy(mut self, policy: ClaudeCloakPolicy) -> Self {
+        self.cloak_policy = policy;
+        self
+    }
+
+    pub fn with_usage_sink(mut self, sink: Arc<dyn ClaudeUsageSink>) -> Self {
+        self.usage_sink = Some(sink);
+        self
+    }
+
+    /// Activates Candidate request-auth preparation on the specialized CTOX
+    /// pool without creating a second credential authority. The binding keeps
+    /// only non-secret account/device metadata; access tokens remain owned by
+    /// `ClaudeSubscriptionAuth` and are borrowed for preparation.
+    pub fn with_request_auth_preparer(
+        mut self,
+        auth_id: impl Into<String>,
+        preparer: Arc<ClaudeRequestAuthPreparer>,
+    ) -> Result<Self, ClaudeExecutionError> {
+        let auth_id = auth_id.into();
+        if auth_id.trim().is_empty() {
+            return Err(ClaudeExecutionError::AccountStateConfiguration);
+        }
+        let mut auth = Auth::default();
+        auth.id = auth_id;
+        auth.provider = "claude".to_owned();
+        self.request_auth_preparation = Some(Arc::new(ClaudeRequestAuthPreparationBinding {
+            auth: tokio::sync::Mutex::new(auth),
+            preparer,
+        }));
+        Ok(self)
+    }
+
+    pub fn with_stream_transport(
+        mut self,
+        transport: Arc<dyn ClaudeMessagesStreamingTransport>,
+    ) -> Self {
+        self.stream_transport = Some(transport);
+        self
+    }
+
+    /// Injects the authority that scopes Claude Code session IDs. Sharing the
+    /// cache preserves upstream process-wide reuse without a mutable global;
+    /// an optional durable store preserves reuse across executor instances.
+    pub fn with_session_id_authority(
+        mut self,
+        cache: Arc<SessionIdCache>,
+        store: Option<Arc<dyn ClaudeIdentityKvStore>>,
+    ) -> Self {
+        self.session_ids = cache;
+        self.session_id_store = store;
+        self
+    }
+
+    pub async fn execute(
+        &self,
+        target: ClaudeUpstreamTarget,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<ClaudeExecutionOutcome, ClaudeExecutionError> {
+        self.execute_for_model(target, None, body, stream).await
+    }
+
+    pub async fn prepare_first_party_count_tokens_request(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: &str,
+        body: Vec<u8>,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudeMessagesRequest, ClaudeExecutionError> {
+        let credentials = self.auth.load().await.map_err(ClaudeExecutionError::Auth)?;
+        let _prepared_auth = self
+            .prepare_request_auth(credentials.access_token().expose_secret())
+            .await?;
+        let session_id =
+            self.resolve_session_id(context, credentials.access_token().expose_secret())?;
+        let mut cloak_policy = self.cloak_policy.clone();
+        if let Some(context) = context {
+            cloak_policy.verified_claude_code = context.detection.confirmed;
+            cloak_policy
+                .client_user_agent
+                .clone_from(&context.client_user_agent);
+            if !context.detection.entrypoint.is_empty() {
+                cloak_policy
+                    .entrypoint
+                    .clone_from(&context.detection.entrypoint);
+            }
+        }
+        let prepared = prepare_claude_first_party_token_count_body(
+            &body,
+            model,
+            &cloak_policy,
+            credentials.access_token().expose_secret(),
+        )
+        .map_err(ClaudeExecutionError::CallerSystemBlock)?;
+        let mut request = ClaudeMessagesRequest::new_with_session(
+            target,
+            ClaudeCredentialMode::OAuth,
+            credentials.access_token(),
+            prepared.body,
+            false,
+            session_id,
+        )
+        .map_err(ClaudeExecutionError::Request)?
+        .with_upstream_metadata(prepared.requested_betas, HashMap::new());
+        if let Some(profile) =
+            self.resolve_device_profile(context, credentials.access_token().expose_secret())?
+        {
+            request = request
+                .with_device_profile(profile)
+                .map_err(ClaudeExecutionError::Request)?;
+        }
+        Ok(request)
+    }
+
+    /// Executes first-party token counting through the account's native
+    /// Messages transport. Credential refresh and account outcome persistence
+    /// deliberately mirror Messages, while the transport selects the distinct
+    /// count-token endpoint and measured header order.
+    pub async fn execute_count_tokens_for_model_with_context(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: &str,
+        body: Vec<u8>,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudeExecutionOutcome, ClaudeExecutionError> {
+        if !target.is_anthropic_api() {
+            return Err(ClaudeExecutionError::Request(ClaudeTargetError::Invalid));
+        }
+        let request = self
+            .prepare_first_party_count_tokens_request(target, model, body, context)
+            .await?;
+        let first = self
+            .transport
+            .execute_count_tokens(&request, self.timeout)
+            .await
+            .map_err(ClaudeExecutionError::Transport)?;
+        let mut replay = UnauthorizedReplayState::default();
+        if replay.observe(first.status(), true) != UnauthorizedReplayDecision::RefreshAndReplay {
+            let state_persisted = self.record_account_outcome(Some(model), &first).await;
+            return Ok(ClaudeExecutionOutcome::new(
+                first,
+                replay,
+                state_persisted,
+                false,
+            ));
+        }
+
+        let refreshed = self
+            .auth
+            .refresh_after_status(401)
+            .await
+            .map_err(ClaudeExecutionError::Auth)?;
+        let retry = request
+            .retry_with_credential(refreshed.credentials().access_token())
+            .map_err(ClaudeExecutionError::Request)?;
+        let response = self
+            .transport
+            .execute_count_tokens(&retry, self.timeout)
+            .await
+            .map_err(ClaudeExecutionError::Transport)?;
+        let _ = replay.observe(response.status(), true);
+        let state_persisted = self.record_account_outcome(Some(model), &response).await;
+        Ok(ClaudeExecutionOutcome::new(
+            response,
+            replay,
+            state_persisted,
+            false,
+        ))
+    }
+
+    pub async fn execute_for_model(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: Option<&str>,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<ClaudeExecutionOutcome, ClaudeExecutionError> {
+        self.execute_for_model_with_context(target, model, body, stream, None)
+            .await
+    }
+
+    pub async fn execute_for_model_with_context(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: Option<&str>,
+        body: Vec<u8>,
+        stream: bool,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudeExecutionOutcome, ClaudeExecutionError> {
+        let credentials = self.auth.load().await.map_err(ClaudeExecutionError::Auth)?;
+        let prepared_auth = self
+            .prepare_request_auth(credentials.access_token().expose_secret())
+            .await?;
+        let session_id =
+            self.resolve_session_id(context, credentials.access_token().expose_secret())?;
+        let fast_request = body_requests_fast_mode(&body);
+        let model_info = model.and_then(|model| lookup_model_info(model, "claude"));
+        let mut cloak_policy = self.cloak_policy.clone();
+        if let Some(context) = context {
+            cloak_policy.verified_claude_code = context.detection.confirmed;
+            cloak_policy
+                .client_user_agent
+                .clone_from(&context.client_user_agent);
+            if !context.detection.entrypoint.is_empty() {
+                cloak_policy
+                    .entrypoint
+                    .clone_from(&context.detection.entrypoint);
+            }
+        }
+        let cloaked = cloak_policy.should_cloak_request();
+        let body = try_apply_claude_cloaking(
+            &body,
+            model.unwrap_or_default(),
+            &cloak_policy,
+            Some(&self.cloak_user_id),
+        )
+        .map_err(ClaudeExecutionError::CallerSystemBlock)?;
+        let credential_identity = self
+            .account_state_auth_id()
+            .unwrap_or_else(|| credentials.access_token().expose_secret());
+        let (body, diagnostics_state) = if cloaked && target.is_anthropic_api() {
+            inject_claude_diagnostics(&body, credential_identity, &session_id)
+        } else {
+            (body, ClaudeDiagnosticsRequestState::default())
+        };
+        let body = self.apply_request_credential_identity(
+            context,
+            prepared_auth.as_ref(),
+            &body,
+            &session_id,
+        )?;
+        let (body, betas, reverse_map) = prepare_claude_upstream_body_with_identity(
+            &body,
+            model_info.as_ref(),
+            credentials.access_token().expose_secret(),
+            true,
+        );
+        let mut request = ClaudeMessagesRequest::new_with_session(
+            target,
+            ClaudeCredentialMode::OAuth,
+            credentials.access_token(),
+            body,
+            stream,
+            session_id,
+        )
+        .map_err(ClaudeExecutionError::Request)?
+        .with_upstream_metadata(betas, reverse_map);
+        if let Some(profile) =
+            self.resolve_device_profile(context, credentials.access_token().expose_secret())?
+        {
+            request = request
+                .with_device_profile(profile)
+                .map_err(ClaudeExecutionError::Request)?;
+        }
+        let first = self
+            .transport
+            .execute(&request, self.timeout)
+            .await
+            .map_err(ClaudeExecutionError::Transport)?
+            .map_body(|body| {
+                restore_claude_oauth_tool_names_from_response(
+                    body,
+                    "",
+                    false,
+                    request.tool_name_reverse_map(),
+                )
+            });
+        let mut replay = UnauthorizedReplayState::default();
+        if replay.observe(first.status(), true) != UnauthorizedReplayDecision::RefreshAndReplay {
+            self.publish_usage(model, &first);
+            if (200..300).contains(&first.status()) {
+                commit_claude_diagnostics(
+                    &diagnostics_state,
+                    &claude_message_id_from_response(first.body()),
+                );
+            }
+            let request_scoped = fast_request && !(200..300).contains(&first.status());
+            let state_persisted = if request_scoped {
+                Some(true)
+            } else {
+                self.record_account_outcome(model, &first).await
+            };
+            return Ok(ClaudeExecutionOutcome::new(
+                first,
+                replay,
+                state_persisted,
+                request_scoped,
+            ));
+        }
+
+        let refreshed = self
+            .auth
+            .refresh_after_status(401)
+            .await
+            .map_err(ClaudeExecutionError::Auth)?;
+        let retry = request
+            .retry_with_credential(refreshed.credentials().access_token())
+            .map_err(ClaudeExecutionError::Request)?;
+        let response = self
+            .transport
+            .execute(&retry, self.timeout)
+            .await
+            .map_err(ClaudeExecutionError::Transport)?
+            .map_body(|body| {
+                restore_claude_oauth_tool_names_from_response(
+                    body,
+                    "",
+                    false,
+                    retry.tool_name_reverse_map(),
+                )
+            });
+        let _ = replay.observe(response.status(), true);
+        self.publish_usage(model, &response);
+        if (200..300).contains(&response.status()) {
+            commit_claude_diagnostics(
+                &diagnostics_state,
+                &claude_message_id_from_response(response.body()),
+            );
+        }
+        let request_scoped = fast_request && !(200..300).contains(&response.status());
+        let state_persisted = if request_scoped {
+            Some(true)
+        } else {
+            self.record_account_outcome(model, &response).await
+        };
+        Ok(ClaudeExecutionOutcome::new(
+            response,
+            replay,
+            state_persisted,
+            request_scoped,
+        ))
+    }
+
+    pub async fn execute_stream_for_model(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: Option<&str>,
+        body: Vec<u8>,
+    ) -> Result<ClaudeStreamExecutionOutcome, ClaudeExecutionError> {
+        self.execute_stream_for_model_with_context(target, model, body, None)
+            .await
+    }
+
+    pub async fn execute_stream_for_model_with_context(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: Option<&str>,
+        body: Vec<u8>,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudeStreamExecutionOutcome, ClaudeExecutionError> {
+        let transport = self
+            .stream_transport
+            .as_ref()
+            .ok_or(ClaudeExecutionError::StreamingUnavailable)?;
+        let credentials = self.auth.load().await.map_err(ClaudeExecutionError::Auth)?;
+        let prepared_auth = self
+            .prepare_request_auth(credentials.access_token().expose_secret())
+            .await?;
+        let session_id =
+            self.resolve_session_id(context, credentials.access_token().expose_secret())?;
+        let fast_request = body_requests_fast_mode(&body);
+        let model_info = model.and_then(|model| lookup_model_info(model, "claude"));
+        let mut cloak_policy = self.cloak_policy.clone();
+        if let Some(context) = context {
+            cloak_policy.verified_claude_code = context.detection.confirmed;
+            cloak_policy
+                .client_user_agent
+                .clone_from(&context.client_user_agent);
+            if !context.detection.entrypoint.is_empty() {
+                cloak_policy
+                    .entrypoint
+                    .clone_from(&context.detection.entrypoint);
+            }
+        }
+        let cloaked = cloak_policy.should_cloak_request();
+        let body = try_apply_claude_cloaking(
+            &body,
+            model.unwrap_or_default(),
+            &cloak_policy,
+            Some(&self.cloak_user_id),
+        )
+        .map_err(ClaudeExecutionError::CallerSystemBlock)?;
+        let credential_identity = self
+            .account_state_auth_id()
+            .unwrap_or_else(|| credentials.access_token().expose_secret());
+        let (body, diagnostics_state) = if cloaked && target.is_anthropic_api() {
+            inject_claude_diagnostics(&body, credential_identity, &session_id)
+        } else {
+            (body, ClaudeDiagnosticsRequestState::default())
+        };
+        let body = self.apply_request_credential_identity(
+            context,
+            prepared_auth.as_ref(),
+            &body,
+            &session_id,
+        )?;
+        let (body, betas, reverse_map) = prepare_claude_upstream_body_with_identity(
+            &body,
+            model_info.as_ref(),
+            credentials.access_token().expose_secret(),
+            true,
+        );
+        let mut request = ClaudeMessagesRequest::new_with_session(
+            target,
+            ClaudeCredentialMode::OAuth,
+            credentials.access_token(),
+            body,
+            true,
+            session_id,
+        )
+        .map_err(ClaudeExecutionError::Request)?
+        .with_upstream_metadata(betas, reverse_map);
+        if let Some(profile) =
+            self.resolve_device_profile(context, credentials.access_token().expose_secret())?
+        {
+            request = request
+                .with_device_profile(profile)
+                .map_err(ClaudeExecutionError::Request)?;
+        }
+        let mut response = transport
+            .execute_stream(&request, self.timeout)
+            .await
+            .map_err(ClaudeExecutionError::Transport)?;
+        let mut replay = UnauthorizedReplayState::default();
+        if replay.observe(response.status(), true) == UnauthorizedReplayDecision::RefreshAndReplay {
+            let refreshed = self
+                .auth
+                .refresh_after_status(401)
+                .await
+                .map_err(ClaudeExecutionError::Auth)?;
+            let retry = request
+                .retry_with_credential(refreshed.credentials().access_token())
+                .map_err(ClaudeExecutionError::Request)?;
+            response = transport
+                .execute_stream(&retry, self.timeout)
+                .await
+                .map_err(ClaudeExecutionError::Transport)?;
+            let _ = replay.observe(response.status(), true);
+        }
+
+        if (200..300).contains(&response.status())
+            && response.bootstrap_message_start().await.is_err()
+        {
+            response = ClaudeMessagesStreamResponse::synthetic(502);
+        }
+        let request_scoped = fast_request && !(200..300).contains(&response.status());
+        let state_persisted = if request_scoped {
+            Some(true)
+        } else {
+            self.record_account_status(model, response.status(), response.retry_after())
+                .await
+        };
+        Ok(ClaudeStreamExecutionOutcome {
+            response,
+            attempts: replay.attempts(),
+            refreshed: replay.refreshed(),
+            state_persisted,
+            failure_binding: self.account_state.clone(),
+            model: model.map(str::to_owned),
+            tool_name_reverse_map: request.tool_name_reverse_map().clone(),
+            usage_sink: self.usage_sink.clone(),
+            diagnostics_state,
+            request_scoped,
+        })
+    }
+
+    fn resolve_session_id(
+        &self,
+        context: Option<&ClaudeExecutionRequestContext>,
+        access_token: &str,
+    ) -> Result<String, ClaudeExecutionError> {
+        if let Some(session_id) = context
+            .map(|context| context.session_id.trim())
+            .filter(|session_id| !session_id.is_empty())
+        {
+            return Ok(session_id.to_owned());
+        }
+        self.session_ids
+            .cached_session_id_required(self.session_id_store.as_deref(), access_token)
+            .map_err(ClaudeExecutionError::SessionId)
+    }
+
+    async fn prepare_request_auth(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<Auth>, ClaudeExecutionError> {
+        let Some(binding) = self.request_auth_preparation.as_ref() else {
+            return Ok(None);
+        };
+        let mut auth = binding.auth.lock().await;
+        binding
+            .preparer
+            .prepare_with_access_token(&mut auth, access_token)
+            .await
+            .map_err(ClaudeExecutionError::PrepareAuth)?;
+        Ok(Some(auth.clone()))
+    }
+
+    fn apply_request_credential_identity(
+        &self,
+        context: Option<&ClaudeExecutionRequestContext>,
+        prepared_auth: Option<&Auth>,
+        body: &[u8],
+        session_id: &str,
+    ) -> Result<Vec<u8>, ClaudeExecutionError> {
+        if context.is_none() && prepared_auth.is_none() {
+            return Ok(body.to_vec());
+        }
+        let mut auth = prepared_auth.cloned().unwrap_or_default();
+        if let Some(context) = context {
+            auth.id.clone_from(&context.auth_id);
+            auth.provider = "claude".to_owned();
+            auth.metadata.extend(context.auth_metadata.clone());
+            auth.attributes.extend(context.auth_attributes.clone());
+        }
+        if auth.metadata.is_empty() && auth.attributes.is_empty() {
+            return Ok(body.to_vec());
+        }
+        apply_claude_credential_metadata(body, &mut auth, session_id)
+            .map(|(body, _)| body)
+            .map_err(ClaudeExecutionError::CredentialIdentity)
+    }
+
+    fn resolve_device_profile(
+        &self,
+        context: Option<&ClaudeExecutionRequestContext>,
+        access_token: &str,
+    ) -> Result<Option<ClaudeDeviceProfile>, ClaudeExecutionError> {
+        if self.device_profile.is_some() {
+            return Ok(self.device_profile.clone());
+        }
+        let Some(context) = context else {
+            return Ok(None);
+        };
+        let profile = self
+            .device_profiles
+            .resolve_required(
+                None,
+                Some(&context.auth_id),
+                access_token,
+                Some(&context.headers),
+                &context.header_defaults,
+            )
+            .map_err(ClaudeExecutionError::IdentityStore)?;
+        ClaudeDeviceProfile::new(
+            profile.user_agent,
+            profile.package_version,
+            profile.runtime_version,
+            profile.os,
+            profile.arch,
+        )
+        .map(Some)
+        .map_err(ClaudeExecutionError::Request)
+    }
+
+    async fn record_account_outcome(
+        &self,
+        model: Option<&str>,
+        response: &ClaudeMessagesResponse,
+    ) -> Option<bool> {
+        self.record_account_status(model, response.status(), response.retry_after())
+            .await
+    }
+
+    fn publish_usage(&self, model: Option<&str>, response: &ClaudeMessagesResponse) {
+        if !(200..300).contains(&response.status()) {
+            return;
+        }
+        if let (Some(sink), Some(usage)) = (&self.usage_sink, parse_claude_usage(response.body())) {
+            sink.publish(model, usage);
+        }
+    }
+
+    async fn record_account_status(
+        &self,
+        model: Option<&str>,
+        status: u16,
+        retry_after: Option<Duration>,
+    ) -> Option<bool> {
+        let binding = self.account_state.as_ref()?;
+        let conductor = Arc::clone(&binding.conductor);
+        let result = AccountExecutionResult {
+            provider: "claude".to_owned(),
+            auth_id: binding.auth_id.clone(),
+            model: model.map(str::to_owned),
+            status,
+            retry_delay_ms: retry_after
+                .map(|delay| u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)),
+            observed_at_ms: binding.clock.now_ms(),
+        };
+        Some(
+            tokio::task::spawn_blocking(move || conductor.record(result))
+                .await
+                .is_ok_and(|result| result.is_ok()),
+        )
+    }
+}
+
+fn body_requests_fast_mode(body: &[u8]) -> bool {
+    let (extra, body_without_betas) = extract_and_remove_claude_betas(body);
+    claude_request_uses_fast_mode(&body_without_betas, &claude_requested_betas("", &extra))
+}
+
+impl fmt::Debug for ClaudeSubscriptionMessagesExecutor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeSubscriptionMessagesExecutor")
+            .field("auth", &"[REDACTED]")
+            .field("transport", &"ClaudeMessagesTransport")
+            .field(
+                "stream_transport",
+                &self.stream_transport.as_ref().map(|_| "attached"),
+            )
+            .field("session_ids", &self.session_ids)
+            .field("durable_session_ids", &self.session_id_store.is_some())
+            .field("timeout", &self.timeout)
+            .field(
+                "account_state",
+                &self.account_state.as_ref().map(|_| "attached"),
+            )
+            .field("device_profile", &self.device_profile)
+            .field("request_device_profiles", &"attached")
+            .field("cloak_policy", &self.cloak_policy)
+            .field("usage_sink", &self.usage_sink.as_ref().map(|_| "attached"))
+            .finish()
+    }
+}
+
+pub struct ClaudeExecutionOutcome {
+    response: ClaudeMessagesResponse,
+    attempts: u8,
+    refreshed: bool,
+    state_persisted: Option<bool>,
+    request_scoped: bool,
+}
+
+pub struct ClaudeStreamExecutionOutcome {
+    response: ClaudeMessagesStreamResponse,
+    attempts: u8,
+    refreshed: bool,
+    state_persisted: Option<bool>,
+    failure_binding: Option<AccountStateBinding>,
+    model: Option<String>,
+    tool_name_reverse_map: HashMap<String, String>,
+    usage_sink: Option<Arc<dyn ClaudeUsageSink>>,
+    diagnostics_state: ClaudeDiagnosticsRequestState,
+    request_scoped: bool,
+}
+
+impl ClaudeStreamExecutionOutcome {
+    pub fn response(&self) -> &ClaudeMessagesStreamResponse {
+        &self.response
+    }
+
+    pub fn response_mut(&mut self) -> &mut ClaudeMessagesStreamResponse {
+        &mut self.response
+    }
+
+    pub fn into_response(self) -> ClaudeTrackedMessagesStreamResponse {
+        ClaudeTrackedMessagesStreamResponse {
+            response: self.response,
+            failure_binding: self.failure_binding,
+            model: self.model,
+            failure_recorded: false,
+            tool_name_reverse_map: self.tool_name_reverse_map,
+            usage_sink: self.usage_sink,
+            stream_line_buffer: Vec::new(),
+            stream_eof: false,
+            diagnostics_message_id: String::new(),
+            diagnostics_completed: false,
+            diagnostics_committed: false,
+            diagnostics_state: self.diagnostics_state,
+        }
+    }
+
+    pub fn attempts(&self) -> u8 {
+        self.attempts
+    }
+
+    pub fn refreshed(&self) -> bool {
+        self.refreshed
+    }
+
+    pub fn state_persisted(&self) -> Option<bool> {
+        self.state_persisted
+    }
+
+    pub fn request_scoped(&self) -> bool {
+        self.request_scoped
+    }
+}
+
+impl fmt::Debug for ClaudeStreamExecutionOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeStreamExecutionOutcome")
+            .field("response", &self.response)
+            .field("attempts", &self.attempts)
+            .field("refreshed", &self.refreshed)
+            .field("state_persisted", &self.state_persisted)
+            .field(
+                "failure_binding",
+                &self.failure_binding.as_ref().map(|_| "attached"),
+            )
+            .finish()
+    }
+}
+
+pub struct ClaudeTrackedMessagesStreamResponse {
+    response: ClaudeMessagesStreamResponse,
+    failure_binding: Option<AccountStateBinding>,
+    model: Option<String>,
+    failure_recorded: bool,
+    tool_name_reverse_map: HashMap<String, String>,
+    stream_line_buffer: Vec<u8>,
+    stream_eof: bool,
+    usage_sink: Option<Arc<dyn ClaudeUsageSink>>,
+    diagnostics_state: ClaudeDiagnosticsRequestState,
+    diagnostics_message_id: String,
+    diagnostics_completed: bool,
+    diagnostics_committed: bool,
+}
+
+impl ClaudeTrackedMessagesStreamResponse {
+    pub fn status(&self) -> u16 {
+        self.response.status()
+    }
+
+    pub async fn next_chunk(&mut self) -> Option<Result<Vec<u8>, ClaudeMessagesTransportFailure>> {
+        loop {
+            if let Some(boundary) = complete_sse_frame_len(&self.stream_line_buffer) {
+                let frame: Vec<u8> = self.stream_line_buffer.drain(..boundary).collect();
+                self.publish_stream_usage(&frame);
+                self.observe_diagnostics(&frame);
+                return Some(Ok(restore_claude_oauth_tool_names_from_stream_line(
+                    &frame,
+                    "",
+                    false,
+                    &self.tool_name_reverse_map,
+                )));
+            }
+            if self.stream_eof {
+                if self.stream_line_buffer.is_empty() {
+                    return None;
+                }
+                let line = std::mem::take(&mut self.stream_line_buffer);
+                self.publish_stream_usage(&line);
+                self.observe_diagnostics(&line);
+                return Some(Ok(restore_claude_oauth_tool_names_from_stream_line(
+                    &line,
+                    "",
+                    false,
+                    &self.tool_name_reverse_map,
+                )));
+            }
+            match self.response.next_chunk().await {
+                Some(Ok(chunk)) => self.stream_line_buffer.extend_from_slice(&chunk),
+                Some(Err(error)) => {
+                    if error != ClaudeMessagesTransportFailure::Cancelled {
+                        self.record_terminal_failure().await;
+                    }
+                    return Some(Err(error));
+                }
+                None => self.stream_eof = true,
+            }
+        }
+    }
+
+    fn publish_stream_usage(&self, line: &[u8]) {
+        if let (Some(sink), Some(usage)) = (&self.usage_sink, parse_claude_stream_usage_line(line))
+        {
+            sink.publish(self.model.as_deref(), usage);
+        }
+    }
+
+    fn observe_diagnostics(&mut self, frame: &[u8]) {
+        for line in frame.split(|byte| *byte == b'\n') {
+            observe_claude_stream_line(
+                line,
+                &mut self.diagnostics_message_id,
+                &mut self.diagnostics_completed,
+            );
+        }
+        if self.diagnostics_completed && !self.diagnostics_committed {
+            commit_claude_diagnostics(&self.diagnostics_state, &self.diagnostics_message_id);
+            self.diagnostics_committed = true;
+        }
+    }
+
+    pub async fn record_terminal_failure(&mut self) {
+        if self.failure_recorded {
+            return;
+        }
+        self.failure_recorded = true;
+        let Some(binding) = self.failure_binding.as_ref() else {
+            return;
+        };
+        let conductor = Arc::clone(&binding.conductor);
+        let result = AccountExecutionResult {
+            provider: "claude".to_owned(),
+            auth_id: binding.auth_id.clone(),
+            model: self.model.clone(),
+            status: 502,
+            retry_delay_ms: None,
+            observed_at_ms: binding.clock.now_ms(),
+        };
+        let _ = tokio::task::spawn_blocking(move || conductor.record(result)).await;
+    }
+}
+
+fn complete_sse_frame_len(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| index + 2)
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+        })
+}
+
+impl fmt::Debug for ClaudeTrackedMessagesStreamResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeTrackedMessagesStreamResponse")
+            .field("response", &self.response)
+            .field(
+                "failure_binding",
+                &self.failure_binding.as_ref().map(|_| "attached"),
+            )
+            .field("model", &self.model)
+            .field("failure_recorded", &self.failure_recorded)
+            .finish()
+    }
+}
+
+impl ClaudeExecutionOutcome {
+    fn new(
+        response: ClaudeMessagesResponse,
+        replay: UnauthorizedReplayState,
+        state_persisted: Option<bool>,
+        request_scoped: bool,
+    ) -> Self {
+        Self {
+            response,
+            attempts: replay.attempts(),
+            refreshed: replay.refreshed(),
+            state_persisted,
+            request_scoped,
+        }
+    }
+
+    pub fn response(&self) -> &ClaudeMessagesResponse {
+        &self.response
+    }
+
+    pub fn attempts(&self) -> u8 {
+        self.attempts
+    }
+
+    pub fn refreshed(&self) -> bool {
+        self.refreshed
+    }
+
+    pub fn state_persisted(&self) -> Option<bool> {
+        self.state_persisted
+    }
+
+    pub fn request_scoped(&self) -> bool {
+        self.request_scoped
+    }
+}
+
+impl fmt::Debug for ClaudeExecutionOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeExecutionOutcome")
+            .field("response", &self.response)
+            .field("attempts", &self.attempts)
+            .field("refreshed", &self.refreshed)
+            .field("state_persisted", &self.state_persisted)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeExecutionError {
+    Auth(ClaudeSubscriptionAuthError),
+    PrepareAuth(ClaudePrepareAuthError),
+    SessionId(SessionIdCacheError),
+    IdentityStore(ClaudeIdentityStoreError),
+    CredentialIdentity(ClaudeCredentialIdentityError),
+    Request(ClaudeTargetError),
+    Transport(ClaudeMessagesTransportFailure),
+    AccountStateConfiguration,
+    StreamingUnavailable,
+    CallerSystemBlock(ClaudeCallerSystemBlockError),
+}
+
+impl fmt::Display for ClaudeExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auth(error) => write!(formatter, "Claude execution auth failed: {error}"),
+            Self::PrepareAuth(error) => {
+                write!(formatter, "Claude request-auth preparation failed: {error}")
+            }
+            Self::SessionId(error) => {
+                write!(formatter, "Claude session ID resolution failed: {error}")
+            }
+            Self::IdentityStore(error) => {
+                write!(
+                    formatter,
+                    "Claude device profile resolution failed: {error}"
+                )
+            }
+            Self::CredentialIdentity(error) => {
+                write!(formatter, "Claude credential identity failed: {error}")
+            }
+            Self::Request(error) => write!(formatter, "Claude request is invalid: {error}"),
+            Self::Transport(error) => write!(formatter, "Claude transport failed: {error:?}"),
+            Self::AccountStateConfiguration => {
+                formatter.write_str("Claude account state configuration is invalid")
+            }
+            Self::StreamingUnavailable => {
+                formatter.write_str("Claude streaming transport is unavailable")
+            }
+            Self::CallerSystemBlock(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ClaudeExecutionError {}
+
+/// Bounded multi-account Claude execution loop.
+///
+/// Each account executor owns its typed secret handles and outcome persistence.
+/// The pool only selects an eligible account and advances after an
+/// account-scoped failure.
+pub struct ClaudeSubscriptionAccountPool {
+    router: Arc<AccountRouter>,
+    candidates: Vec<AccountCandidate>,
+    executors: HashMap<String, Arc<ClaudeSubscriptionMessagesExecutor>>,
+    clock: Arc<dyn AccountStateClock>,
+    targets: Option<HashMap<String, ClaudeUpstreamTarget>>,
+}
+
+impl ClaudeSubscriptionAccountPool {
+    #[must_use]
+    pub fn contains_auth(&self, auth_id: &str) -> bool {
+        self.candidates
+            .iter()
+            .any(|candidate| candidate.auth_id == auth_id)
+    }
+
+    pub fn selected_target(&self, auth_id: &str) -> Option<&ClaudeUpstreamTarget> {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(auth_id))
+    }
+
+    pub async fn prepare_selected_authorization(
+        &self,
+        auth_id: &str,
+        target: &ClaudeUpstreamTarget,
+    ) -> Result<super::ClaudePreparedAuthorization, ClaudeAccountPoolError> {
+        let executor = self
+            .executors
+            .get(auth_id)
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let credentials = executor.auth.load().await.map_err(|error| {
+            ClaudeAccountPoolError::Execution(ClaudeExecutionError::Auth(error))
+        })?;
+        super::ClaudePreparedAuthorization::prepare(
+            target,
+            ClaudeCredentialMode::OAuth,
+            credentials.access_token(),
+        )
+        .map_err(|error| ClaudeAccountPoolError::Execution(ClaudeExecutionError::Request(error)))
+    }
+
+    pub async fn prepare_selected_count_tokens_request(
+        &self,
+        auth_id: &str,
+        model: &str,
+        body: Vec<u8>,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudeMessagesRequest, ClaudeAccountPoolError> {
+        if !self.contains_auth(auth_id) {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        let executor = self
+            .executors
+            .get(auth_id)
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(auth_id))
+            .cloned()
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        if !target.is_anthropic_api() {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        executor
+            .prepare_first_party_count_tokens_request(target, model, body, context)
+            .await
+            .map_err(ClaudeAccountPoolError::Execution)
+    }
+
+    /// Selects one eligible Claude account using the same persisted scheduler
+    /// and cooldown authority as Messages. The returned lane remains fixed for
+    /// preparation, transport and an optional 401 replay.
+    pub fn select_configured_auth_id(&self, model: &str) -> Result<String, ClaudeAccountPoolError> {
+        self.router
+            .select("claude", Some(model), self.clock.now_ms(), &self.candidates)
+            .map(|selected| selected.auth_id)
+            .map_err(ClaudeAccountPoolError::Routing)
+    }
+
+    pub async fn execute_count_tokens_selected_with_context(
+        &self,
+        auth_id: &str,
+        model: &str,
+        body: Vec<u8>,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudePooledExecutionOutcome, ClaudeAccountPoolError> {
+        if !self.contains_auth(auth_id) {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        let executor = self
+            .executors
+            .get(auth_id)
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(auth_id))
+            .cloned()
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let outcome = executor
+            .execute_count_tokens_for_model_with_context(target, model, body, context)
+            .await
+            .map_err(ClaudeAccountPoolError::Execution)?;
+        if outcome.state_persisted() != Some(true) {
+            return Err(ClaudeAccountPoolError::OutcomePersistence);
+        }
+        Ok(ClaudePooledExecutionOutcome {
+            selected_auth_id: auth_id.to_owned(),
+            attempted_auth_ids: vec![auth_id.to_owned()],
+            outcome,
+        })
+    }
+
+    pub fn new(
+        router: Arc<AccountRouter>,
+        candidates: Vec<AccountCandidate>,
+        executors: HashMap<String, Arc<ClaudeSubscriptionMessagesExecutor>>,
+    ) -> Result<Self, ClaudeAccountPoolError> {
+        Self::with_clock(
+            router,
+            candidates,
+            executors,
+            Arc::new(SystemAccountStateClock),
+        )
+    }
+
+    pub fn with_clock(
+        router: Arc<AccountRouter>,
+        candidates: Vec<AccountCandidate>,
+        executors: HashMap<String, Arc<ClaudeSubscriptionMessagesExecutor>>,
+        clock: Arc<dyn AccountStateClock>,
+    ) -> Result<Self, ClaudeAccountPoolError> {
+        if candidates.is_empty() {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        let mut seen = HashSet::new();
+        for candidate in &candidates {
+            if candidate.auth_id.trim().is_empty() || !seen.insert(candidate.auth_id.as_str()) {
+                return Err(ClaudeAccountPoolError::Configuration);
+            }
+            let executor = executors
+                .get(&candidate.auth_id)
+                .ok_or(ClaudeAccountPoolError::Configuration)?;
+            if executor.account_state_auth_id() != Some(candidate.auth_id.as_str()) {
+                return Err(ClaudeAccountPoolError::Configuration);
+            }
+        }
+        Ok(Self {
+            router,
+            candidates,
+            executors,
+            clock,
+            targets: None,
+        })
+    }
+
+    pub fn with_targets(
+        mut self,
+        targets: HashMap<String, ClaudeUpstreamTarget>,
+    ) -> Result<Self, ClaudeAccountPoolError> {
+        if self
+            .candidates
+            .iter()
+            .any(|candidate| !targets.contains_key(&candidate.auth_id))
+        {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        self.targets = Some(targets);
+        Ok(self)
+    }
+
+    /// Executes against the auth lane already selected by the manager.
+    ///
+    /// Unlike [`Self::execute_configured`], this entry point deliberately does
+    /// not perform another routing pass or fail over to a different account.
+    /// The manager's scheduler remains the sole authority for provider/auth
+    /// selection when the pool is exposed through a `ProviderExecutor`.
+    pub async fn execute_selected(
+        &self,
+        auth_id: &str,
+        model: &str,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<ClaudePooledExecutionOutcome, ClaudeAccountPoolError> {
+        self.execute_selected_with_context(auth_id, model, body, stream, None)
+            .await
+    }
+
+    pub async fn execute_selected_with_context(
+        &self,
+        auth_id: &str,
+        model: &str,
+        body: Vec<u8>,
+        stream: bool,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudePooledExecutionOutcome, ClaudeAccountPoolError> {
+        if !self.contains_auth(auth_id) {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        let executor = self
+            .executors
+            .get(auth_id)
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(auth_id))
+            .cloned()
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let outcome = executor
+            .execute_for_model_with_context(target, Some(model), body, stream, context)
+            .await
+            .map_err(ClaudeAccountPoolError::Execution)?;
+        if outcome.state_persisted() != Some(true) {
+            return Err(ClaudeAccountPoolError::OutcomePersistence);
+        }
+        Ok(ClaudePooledExecutionOutcome {
+            selected_auth_id: auth_id.to_owned(),
+            attempted_auth_ids: vec![auth_id.to_owned()],
+            outcome,
+        })
+    }
+
+    /// Streaming counterpart to [`Self::execute_selected`].
+    pub async fn execute_stream_selected(
+        &self,
+        auth_id: &str,
+        model: &str,
+        body: Vec<u8>,
+    ) -> Result<ClaudePooledStreamExecutionOutcome, ClaudeAccountPoolError> {
+        self.execute_stream_selected_with_context(auth_id, model, body, None)
+            .await
+    }
+
+    pub async fn execute_stream_selected_with_context(
+        &self,
+        auth_id: &str,
+        model: &str,
+        body: Vec<u8>,
+        context: Option<&ClaudeExecutionRequestContext>,
+    ) -> Result<ClaudePooledStreamExecutionOutcome, ClaudeAccountPoolError> {
+        if !self.contains_auth(auth_id) {
+            return Err(ClaudeAccountPoolError::Configuration);
+        }
+        let executor = self
+            .executors
+            .get(auth_id)
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(auth_id))
+            .cloned()
+            .ok_or(ClaudeAccountPoolError::Configuration)?;
+        let outcome = executor
+            .execute_stream_for_model_with_context(target, Some(model), body, context)
+            .await
+            .map_err(ClaudeAccountPoolError::Execution)?;
+        if outcome.state_persisted() != Some(true) {
+            return Err(ClaudeAccountPoolError::OutcomePersistence);
+        }
+        Ok(ClaudePooledStreamExecutionOutcome {
+            selected_auth_id: auth_id.to_owned(),
+            attempted_auth_ids: vec![auth_id.to_owned()],
+            outcome,
+        })
+    }
+
+    pub async fn execute(
+        &self,
+        target: ClaudeUpstreamTarget,
+        model: &str,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<ClaudePooledExecutionOutcome, ClaudeAccountPoolError> {
+        self.execute_inner(Some(target), model, body, stream).await
+    }
+
+    pub async fn execute_configured(
+        &self,
+        model: &str,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<ClaudePooledExecutionOutcome, ClaudeAccountPoolError> {
+        self.execute_inner(None, model, body, stream).await
+    }
+
+    pub async fn execute_stream_configured(
+        &self,
+        model: &str,
+        body: Vec<u8>,
+    ) -> Result<ClaudePooledStreamExecutionOutcome, ClaudeAccountPoolError> {
+        let mut remaining = self.candidates.clone();
+        let mut attempted_auth_ids = Vec::new();
+        let mut last_execution_error = None;
+        let mut last_outcome = None;
+
+        while !remaining.is_empty() {
+            let selected = self
+                .router
+                .select("claude", Some(model), self.clock.now_ms(), &remaining)
+                .map_err(ClaudeAccountPoolError::Routing)?;
+            remaining.retain(|candidate| candidate.auth_id != selected.auth_id);
+            attempted_auth_ids.push(selected.auth_id.clone());
+            let executor = self
+                .executors
+                .get(&selected.auth_id)
+                .ok_or(ClaudeAccountPoolError::Configuration)?;
+            let target = self
+                .targets
+                .as_ref()
+                .and_then(|targets| targets.get(&selected.auth_id))
+                .cloned()
+                .ok_or(ClaudeAccountPoolError::Configuration)?;
+            match executor
+                .execute_stream_for_model(target, Some(model), body.clone())
+                .await
+            {
+                Ok(outcome) => {
+                    if outcome.state_persisted() != Some(true) {
+                        return Err(ClaudeAccountPoolError::OutcomePersistence);
+                    }
+                    let status = outcome.response().status();
+                    if outcome.request_scoped()
+                        || (200..300).contains(&status)
+                        || matches!(status, 400 | 422)
+                    {
+                        return Ok(ClaudePooledStreamExecutionOutcome {
+                            selected_auth_id: selected.auth_id,
+                            attempted_auth_ids,
+                            outcome,
+                        });
+                    }
+                    last_outcome = Some((selected.auth_id, outcome));
+                }
+                Err(error) => last_execution_error = Some(error),
+            }
+        }
+
+        if let Some((selected_auth_id, outcome)) = last_outcome {
+            return Ok(ClaudePooledStreamExecutionOutcome {
+                selected_auth_id,
+                attempted_auth_ids,
+                outcome,
+            });
+        }
+        Err(last_execution_error.map_or(
+            ClaudeAccountPoolError::Configuration,
+            ClaudeAccountPoolError::Execution,
+        ))
+    }
+
+    async fn execute_inner(
+        &self,
+        fallback_target: Option<ClaudeUpstreamTarget>,
+        model: &str,
+        body: Vec<u8>,
+        stream: bool,
+    ) -> Result<ClaudePooledExecutionOutcome, ClaudeAccountPoolError> {
+        let mut remaining = self.candidates.clone();
+        let mut attempted_auth_ids = Vec::new();
+        let mut last_execution_error = None;
+        let mut last_outcome = None;
+
+        while !remaining.is_empty() {
+            let selected = self
+                .router
+                .select("claude", Some(model), self.clock.now_ms(), &remaining)
+                .map_err(ClaudeAccountPoolError::Routing)?;
+            remaining.retain(|candidate| candidate.auth_id != selected.auth_id);
+            attempted_auth_ids.push(selected.auth_id.clone());
+            let executor = self
+                .executors
+                .get(&selected.auth_id)
+                .ok_or(ClaudeAccountPoolError::Configuration)?;
+            let target = self
+                .targets
+                .as_ref()
+                .and_then(|targets| targets.get(&selected.auth_id))
+                .cloned()
+                .or_else(|| fallback_target.clone())
+                .ok_or(ClaudeAccountPoolError::Configuration)?;
+            match executor
+                .execute_for_model(target, Some(model), body.clone(), stream)
+                .await
+            {
+                Ok(outcome) => {
+                    if outcome.state_persisted() != Some(true) {
+                        return Err(ClaudeAccountPoolError::OutcomePersistence);
+                    }
+                    let status = outcome.response().status();
+                    if outcome.request_scoped()
+                        || (200..300).contains(&status)
+                        || matches!(status, 400 | 422)
+                    {
+                        return Ok(ClaudePooledExecutionOutcome {
+                            selected_auth_id: selected.auth_id,
+                            attempted_auth_ids,
+                            outcome,
+                        });
+                    }
+                    last_outcome = Some((selected.auth_id, outcome));
+                }
+                Err(error) => last_execution_error = Some(error),
+            }
+        }
+
+        if let Some((selected_auth_id, outcome)) = last_outcome {
+            return Ok(ClaudePooledExecutionOutcome {
+                selected_auth_id,
+                attempted_auth_ids,
+                outcome,
+            });
+        }
+        Err(last_execution_error.map_or(
+            ClaudeAccountPoolError::Configuration,
+            ClaudeAccountPoolError::Execution,
+        ))
+    }
+}
+
+impl fmt::Debug for ClaudeSubscriptionAccountPool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeSubscriptionAccountPool")
+            .field("router", &self.router)
+            .field("candidate_count", &self.candidates.len())
+            .field("executors", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub struct ClaudePooledExecutionOutcome {
+    selected_auth_id: String,
+    attempted_auth_ids: Vec<String>,
+    outcome: ClaudeExecutionOutcome,
+}
+
+pub struct ClaudePooledStreamExecutionOutcome {
+    selected_auth_id: String,
+    attempted_auth_ids: Vec<String>,
+    outcome: ClaudeStreamExecutionOutcome,
+}
+
+impl ClaudePooledStreamExecutionOutcome {
+    pub fn selected_auth_id(&self) -> &str {
+        &self.selected_auth_id
+    }
+
+    pub fn attempted_auth_ids(&self) -> &[String] {
+        &self.attempted_auth_ids
+    }
+
+    pub fn outcome(&self) -> &ClaudeStreamExecutionOutcome {
+        &self.outcome
+    }
+
+    pub fn outcome_mut(&mut self) -> &mut ClaudeStreamExecutionOutcome {
+        &mut self.outcome
+    }
+
+    pub fn into_outcome(self) -> ClaudeStreamExecutionOutcome {
+        self.outcome
+    }
+}
+
+impl fmt::Debug for ClaudePooledStreamExecutionOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudePooledStreamExecutionOutcome")
+            .field("selected_auth_id", &self.selected_auth_id)
+            .field("attempted_auth_ids", &self.attempted_auth_ids)
+            .field("outcome", &self.outcome)
+            .finish()
+    }
+}
+
+impl ClaudePooledExecutionOutcome {
+    pub fn selected_auth_id(&self) -> &str {
+        &self.selected_auth_id
+    }
+
+    pub fn attempted_auth_ids(&self) -> &[String] {
+        &self.attempted_auth_ids
+    }
+
+    pub fn outcome(&self) -> &ClaudeExecutionOutcome {
+        &self.outcome
+    }
+}
+
+impl fmt::Debug for ClaudePooledExecutionOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudePooledExecutionOutcome")
+            .field("selected_auth_id", &self.selected_auth_id)
+            .field("attempted_auth_ids", &self.attempted_auth_ids)
+            .field("outcome", &self.outcome)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeAccountPoolError {
+    Configuration,
+    Routing(AccountRoutingError),
+    Execution(ClaudeExecutionError),
+    OutcomePersistence,
+}
+
+impl fmt::Display for ClaudeAccountPoolError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Configuration => formatter.write_str("Claude account pool is invalid"),
+            Self::Routing(error) => write!(formatter, "Claude account routing failed: {error}"),
+            Self::Execution(error) => write!(formatter, "Claude pooled execution failed: {error}"),
+            Self::OutcomePersistence => {
+                formatter.write_str("Claude account outcome persistence failed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ClaudeAccountPoolError {}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    use serde_json::Value;
+    use tokio::sync::mpsc;
+
+    use crate::internal::auth::claude::{
+        ClaudeCredentialHandles, ClaudeRefreshCoordinator, ClaudeRefreshTransport,
+        ClaudeSecretHandle, ClaudeSecretKind, ClaudeSecretStore, ClaudeStoredCredentials,
+        RefreshClock, RefreshHttpResponse, RefreshRequest, RefreshTransportFailure,
+        SecretStoreError, SecretString,
+    };
+    use crate::sdk::cliproxy::auth::{CooldownStateRecord, CooldownStateStore, CooldownStoreError};
+
+    use super::*;
+
+    struct MemoryStore(Mutex<ClaudeStoredCredentials>);
+
+    impl MemoryStore {
+        fn new() -> Self {
+            Self(Mutex::new(ClaudeStoredCredentials::new(
+                SecretString::new("access-old").unwrap(),
+                SecretString::new("refresh-old").unwrap(),
+            )))
+        }
+    }
+
+    impl ClaudeSecretStore for MemoryStore {
+        fn load_credentials(
+            &self,
+            _handles: &ClaudeCredentialHandles,
+        ) -> Result<ClaudeStoredCredentials, SecretStoreError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn store_credentials(
+            &self,
+            _handles: &ClaudeCredentialHandles,
+            credentials: &ClaudeStoredCredentials,
+        ) -> Result<(), SecretStoreError> {
+            *self.0.lock().unwrap() = credentials.clone();
+            Ok(())
+        }
+    }
+
+    struct FixedClock;
+
+    impl RefreshClock for FixedClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
+        }
+
+        fn sleep(
+            &self,
+            _duration: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<(), RefreshTransportFailure>> + Send + '_>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct RefreshTransport;
+
+    impl ClaudeRefreshTransport for RefreshTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a RefreshRequest,
+            _timeout: Duration,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<RefreshHttpResponse, RefreshTransportFailure>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Ok(RefreshHttpResponse::new(
+                    200,
+                    None,
+                    None,
+                    br#"{"access_token":"access-new","refresh_token":"refresh-new","expires_in":3600}"#.to_vec(),
+                ))
+            })
+        }
+    }
+
+    struct SequenceTransport {
+        statuses: Mutex<Vec<u16>>,
+        authorizations: Mutex<Vec<String>>,
+        session_ids: Mutex<Vec<String>>,
+        bodies: Mutex<Vec<Vec<u8>>>,
+        response_body: Vec<u8>,
+        failure: Option<ClaudeMessagesTransportFailure>,
+        retry_after: Option<Duration>,
+    }
+
+    impl SequenceTransport {
+        fn statuses(statuses: Vec<u16>) -> Self {
+            Self {
+                statuses: Mutex::new(statuses.into_iter().rev().collect()),
+                authorizations: Mutex::new(Vec::new()),
+                session_ids: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
+                response_body: b"{}".to_vec(),
+                failure: None,
+                retry_after: None,
+            }
+        }
+
+        fn statuses_with_retry(statuses: Vec<u16>, retry_after: Duration) -> Self {
+            Self {
+                statuses: Mutex::new(statuses.into_iter().rev().collect()),
+                authorizations: Mutex::new(Vec::new()),
+                session_ids: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
+                response_body: b"{}".to_vec(),
+                failure: None,
+                retry_after: Some(retry_after),
+            }
+        }
+
+        fn failing(failure: ClaudeMessagesTransportFailure) -> Self {
+            Self {
+                statuses: Mutex::new(Vec::new()),
+                authorizations: Mutex::new(Vec::new()),
+                session_ids: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
+                response_body: b"{}".to_vec(),
+                failure: Some(failure),
+                retry_after: None,
+            }
+        }
+
+        fn responding(body: &[u8]) -> Self {
+            Self {
+                statuses: Mutex::new(vec![200]),
+                authorizations: Mutex::new(Vec::new()),
+                session_ids: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
+                response_body: body.to_vec(),
+                failure: None,
+                retry_after: None,
+            }
+        }
+    }
+
+    impl ClaudeMessagesTransport for SequenceTransport {
+        fn execute<'a>(
+            &'a self,
+            request: &'a ClaudeMessagesRequest,
+            _timeout: Duration,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<ClaudeMessagesResponse, ClaudeMessagesTransportFailure>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                if let Some(failure) = self.failure {
+                    return Err(failure);
+                }
+                self.authorizations
+                    .lock()
+                    .unwrap()
+                    .push(request.authorization().expose_header_value().to_owned());
+                self.session_ids
+                    .lock()
+                    .unwrap()
+                    .push(request.fingerprint().session_id().to_owned());
+                self.bodies.lock().unwrap().push(request.body().to_vec());
+                let status = self.statuses.lock().unwrap().pop().unwrap();
+                Ok(
+                    ClaudeMessagesResponse::new(status, self.response_body.clone())
+                        .with_retry_after(self.retry_after),
+                )
+            })
+        }
+    }
+
+    struct FixedStreamingTransport {
+        status: u16,
+        chunks: Vec<Result<Vec<u8>, ClaudeMessagesTransportFailure>>,
+    }
+
+    impl ClaudeMessagesStreamingTransport for FixedStreamingTransport {
+        fn execute_stream<'a>(
+            &'a self,
+            _request: &'a ClaudeMessagesRequest,
+            _timeout: Duration,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            ClaudeMessagesStreamResponse,
+                            ClaudeMessagesTransportFailure,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let (sender, receiver) = mpsc::channel(8);
+                let chunks = self.chunks.clone();
+                tokio::spawn(async move {
+                    for chunk in chunks {
+                        if sender.send(chunk).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+                Ok(ClaudeMessagesStreamResponse::new(
+                    self.status,
+                    None,
+                    receiver,
+                ))
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryCooldownStore(Mutex<Vec<CooldownStateRecord>>);
+
+    impl CooldownStateStore for MemoryCooldownStore {
+        fn load(&self) -> Result<Vec<CooldownStateRecord>, CooldownStoreError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn save(&self, records: &[CooldownStateRecord]) -> Result<(), CooldownStoreError> {
+            *self.0.lock().unwrap() = records.to_vec();
+            Ok(())
+        }
+    }
+
+    struct FixedAccountClock;
+
+    impl AccountStateClock for FixedAccountClock {
+        fn now_ms(&self) -> i64 {
+            10_000
+        }
+    }
+
+    fn handles() -> ClaudeCredentialHandles {
+        ClaudeCredentialHandles::new(
+            ClaudeSecretHandle::new("subscriptions", "access", ClaudeSecretKind::AccessToken)
+                .unwrap(),
+            ClaudeSecretHandle::new("subscriptions", "refresh", ClaudeSecretKind::RefreshToken)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn executor(transport: Arc<SequenceTransport>) -> ClaudeSubscriptionMessagesExecutor {
+        let auth = Arc::new(ClaudeSubscriptionAuth::new(
+            handles(),
+            Arc::new(MemoryStore::new()),
+            Arc::new(RefreshTransport),
+            Arc::new(FixedClock),
+            Arc::new(ClaudeRefreshCoordinator::default()),
+        ));
+        ClaudeSubscriptionMessagesExecutor::new(auth, transport, Duration::from_secs(30))
+    }
+
+    fn target() -> ClaudeUpstreamTarget {
+        ClaudeUpstreamTarget::new("https", "api.anthropic.com").unwrap()
+    }
+
+    #[tokio::test]
+    async fn oauth_tool_names_are_request_local_and_round_trip() {
+        let glob_alias = super::super::helps::claude_mcp_tool_alias("access-old", "glob", 0);
+        let transport = Arc::new(SequenceTransport::responding(
+            format!(
+                r#"{{"content":[{{"type":"tool_use","id":"toolu_1","name":"{glob_alias}","input":{{}}}}]}}"#
+            )
+            .as_bytes(),
+        ));
+        let outcome = executor(Arc::clone(&transport))
+            .execute_for_model(
+                target(),
+                Some("unknown-claude-model"),
+                br#"{"model":"unknown-claude-model","messages":[{"role":"user","content":"go"}],"tools":[{"name":"Bash"},{"name":"glob"}]}"#.to_vec(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let upstream: Value = serde_json::from_slice(&transport.bodies.lock().unwrap()[0]).unwrap();
+        assert!(upstream["tools"][0]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcp__"));
+        assert_eq!(upstream["tools"][1]["name"], glob_alias);
+        let downstream: Value = serde_json::from_slice(outcome.response().body()).unwrap();
+        assert_eq!(downstream["content"][0]["name"], "glob");
+    }
+
+    #[tokio::test]
+    async fn fragmented_sse_tool_names_are_restored_only_after_complete_line() {
+        let (sender, receiver) = mpsc::channel(4);
+        sender
+            .send(Ok(b"data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Ba".to_vec()))
+            .await
+            .unwrap();
+        sender.send(Ok(b"sh\"}}\n\n".to_vec())).await.unwrap();
+        drop(sender);
+        let mut stream = ClaudeTrackedMessagesStreamResponse {
+            response: ClaudeMessagesStreamResponse::new(200, None, receiver),
+            failure_binding: None,
+            model: None,
+            failure_recorded: false,
+            tool_name_reverse_map: HashMap::from([("Bash".to_owned(), "bash".to_owned())]),
+            stream_line_buffer: Vec::new(),
+            stream_eof: false,
+            usage_sink: None,
+            diagnostics_state: ClaudeDiagnosticsRequestState::default(),
+            diagnostics_message_id: String::new(),
+            diagnostics_completed: false,
+            diagnostics_committed: false,
+        };
+        let line = stream.next_chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8(line)
+            .unwrap()
+            .contains("\"name\":\"bash\""));
+        assert!(stream.next_chunk().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unauthorized_refreshes_persists_and_replays_once() {
+        let transport = Arc::new(SequenceTransport::statuses(vec![401, 200]));
+        let outcome = executor(Arc::clone(&transport))
+            .execute(target(), b"{}".to_vec(), false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.response().status(), 200);
+        assert_eq!(outcome.attempts(), 2);
+        assert!(outcome.refreshed());
+        assert_eq!(
+            *transport.authorizations.lock().unwrap(),
+            ["Bearer access-old", "Bearer access-new"]
+        );
+        let session_ids = transport.session_ids.lock().unwrap();
+        assert_eq!(session_ids.len(), 2);
+        assert_eq!(session_ids[0], session_ids[1]);
+    }
+
+    #[tokio::test]
+    async fn injected_session_cache_reuses_identity_across_executor_instances() {
+        let session_ids = Arc::new(SessionIdCache::new());
+        let first_transport = Arc::new(SequenceTransport::statuses(vec![200]));
+        let second_transport = Arc::new(SequenceTransport::statuses(vec![200]));
+        executor(Arc::clone(&first_transport))
+            .with_session_id_authority(Arc::clone(&session_ids), None)
+            .execute(target(), b"{}".to_vec(), false)
+            .await
+            .unwrap();
+        executor(Arc::clone(&second_transport))
+            .with_session_id_authority(session_ids, None)
+            .execute(target(), b"{}".to_vec(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            first_transport.session_ids.lock().unwrap()[0],
+            second_transport.session_ids.lock().unwrap()[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn second_unauthorized_is_returned_without_refresh_loop() {
+        let transport = Arc::new(SequenceTransport::statuses(vec![401, 401, 200]));
+        let outcome = executor(Arc::clone(&transport))
+            .execute(target(), b"{}".to_vec(), false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.response().status(), 401);
+        assert_eq!(outcome.attempts(), 2);
+        assert_eq!(transport.authorizations.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn transport_failure_does_not_trigger_refresh() {
+        let transport = Arc::new(SequenceTransport::failing(
+            ClaudeMessagesTransportFailure::Timeout,
+        ));
+        let error = executor(transport)
+            .execute(target(), b"{}".to_vec(), false)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ClaudeExecutionError::Transport(ClaudeMessagesTransportFailure::Timeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn final_quota_response_persists_provider_retry_for_selected_account() {
+        let transport = Arc::new(SequenceTransport::statuses_with_retry(
+            vec![429],
+            Duration::from_secs(7),
+        ));
+        let cooldowns = Arc::new(MemoryCooldownStore::default());
+        let conductor = Arc::new(CooldownConductor::new(cooldowns.clone()));
+        let executor = executor(transport)
+            .with_account_state_clock("account-a", conductor, Arc::new(FixedAccountClock))
+            .unwrap();
+
+        let outcome = executor
+            .execute_for_model(target(), Some("sonnet"), b"{}".to_vec(), false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.response().status(), 429);
+        assert_eq!(outcome.state_persisted(), Some(true));
+        let records = cooldowns.0.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].auth_id, "account-a");
+        assert_eq!(records[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(records[0].next_retry_after_ms, Some(17_000));
+        assert!(records[0].last_error.as_ref().unwrap().message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn account_pool_retries_a_second_account_after_persisted_quota_failure() {
+        let cooldowns = Arc::new(MemoryCooldownStore::default());
+        let conductor = Arc::new(CooldownConductor::new(cooldowns.clone()));
+        let account_a = Arc::new(
+            executor(Arc::new(SequenceTransport::statuses_with_retry(
+                vec![429],
+                Duration::from_secs(7),
+            )))
+            .with_account_state_clock(
+                "account-a",
+                Arc::clone(&conductor),
+                Arc::new(FixedAccountClock),
+            )
+            .unwrap(),
+        );
+        let account_b = Arc::new(
+            executor(Arc::new(SequenceTransport::statuses(vec![200])))
+                .with_account_state_clock(
+                    "account-b",
+                    Arc::clone(&conductor),
+                    Arc::new(FixedAccountClock),
+                )
+                .unwrap(),
+        );
+        let candidates = ["account-a", "account-b"]
+            .into_iter()
+            .map(|auth_id| AccountCandidate {
+                auth_id: auth_id.to_owned(),
+                provider: "claude".to_owned(),
+                priority: 0,
+                weight: 1,
+                websocket_enabled: false,
+                supported_models: Vec::new(),
+                disabled: false,
+            })
+            .collect::<Vec<_>>();
+        let executors = HashMap::from([
+            ("account-a".to_owned(), account_a),
+            ("account-b".to_owned(), account_b),
+        ]);
+        let router = Arc::new(AccountRouter::new(cooldowns.clone()));
+        let pool = ClaudeSubscriptionAccountPool::with_clock(
+            router,
+            candidates,
+            executors,
+            Arc::new(FixedAccountClock),
+        )
+        .unwrap();
+
+        let outcome = pool
+            .execute(target(), "sonnet", b"{}".to_vec(), false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.selected_auth_id(), "account-b");
+        assert_eq!(outcome.attempted_auth_ids(), ["account-a", "account-b"]);
+        assert_eq!(outcome.outcome().response().status(), 200);
+        let records = cooldowns.0.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].auth_id, "account-a");
+        assert_eq!(records[0].next_retry_after_ms, Some(17_000));
+    }
+
+    #[tokio::test]
+    async fn stream_pool_retries_before_message_start_and_returns_bootstrapped_account() {
+        let cooldowns = Arc::new(MemoryCooldownStore::default());
+        let conductor = Arc::new(CooldownConductor::new(cooldowns.clone()));
+        let before_start_error = Arc::new(FixedStreamingTransport {
+            status: 200,
+            chunks: vec![Ok(
+                b"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}\n\n"
+                    .to_vec(),
+            )],
+        });
+        let success = Arc::new(FixedStreamingTransport {
+            status: 200,
+            chunks: vec![
+                Ok(
+                    b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_b\"}}\n\n"
+                        .to_vec(),
+                ),
+                Ok(b"data: {\"type\":\"message_stop\"}\n\n".to_vec()),
+            ],
+        });
+        let account_a = Arc::new(
+            executor(Arc::new(SequenceTransport::statuses(vec![200])))
+                .with_stream_transport(before_start_error)
+                .with_account_state_clock(
+                    "account-a",
+                    Arc::clone(&conductor),
+                    Arc::new(FixedAccountClock),
+                )
+                .unwrap(),
+        );
+        let account_b = Arc::new(
+            executor(Arc::new(SequenceTransport::statuses(vec![200])))
+                .with_stream_transport(success)
+                .with_account_state_clock(
+                    "account-b",
+                    Arc::clone(&conductor),
+                    Arc::new(FixedAccountClock),
+                )
+                .unwrap(),
+        );
+        let candidates = ["account-a", "account-b"]
+            .into_iter()
+            .map(|auth_id| AccountCandidate {
+                auth_id: auth_id.to_owned(),
+                provider: "claude".to_owned(),
+                priority: 0,
+                weight: 1,
+                websocket_enabled: false,
+                supported_models: Vec::new(),
+                disabled: false,
+            })
+            .collect::<Vec<_>>();
+        let targets = HashMap::from([
+            ("account-a".to_owned(), target()),
+            ("account-b".to_owned(), target()),
+        ]);
+        let pool = ClaudeSubscriptionAccountPool::with_clock(
+            Arc::new(AccountRouter::new(cooldowns.clone())),
+            candidates,
+            HashMap::from([
+                ("account-a".to_owned(), account_a),
+                ("account-b".to_owned(), account_b),
+            ]),
+            Arc::new(FixedAccountClock),
+        )
+        .unwrap()
+        .with_targets(targets)
+        .unwrap();
+
+        let mut outcome = pool
+            .execute_stream_configured("sonnet", b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(outcome.selected_auth_id(), "account-b");
+        assert_eq!(outcome.attempted_auth_ids(), ["account-a", "account-b"]);
+        let first = outcome
+            .outcome_mut()
+            .response_mut()
+            .next_chunk()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("message_start"));
+        let records = cooldowns.0.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].auth_id, "account-a");
+        assert_eq!(
+            records[0].last_error.as_ref().unwrap().http_status,
+            Some(502)
+        );
+    }
+
+    #[tokio::test]
+    async fn post_bootstrap_transport_failure_cools_account_for_future_requests() {
+        let cooldowns = Arc::new(MemoryCooldownStore::default());
+        let conductor = Arc::new(CooldownConductor::new(cooldowns.clone()));
+        let streaming = Arc::new(FixedStreamingTransport {
+            status: 200,
+            chunks: vec![
+                Ok(
+                    b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_a\"}}\n\n"
+                        .to_vec(),
+                ),
+                Err(ClaudeMessagesTransportFailure::Protocol),
+            ],
+        });
+        let executor = executor(Arc::new(SequenceTransport::statuses(vec![200])))
+            .with_stream_transport(streaming)
+            .with_account_state_clock(
+                "account-a",
+                Arc::clone(&conductor),
+                Arc::new(FixedAccountClock),
+            )
+            .unwrap();
+        let outcome = executor
+            .execute_stream_for_model(target(), Some("sonnet"), b"{}".to_vec())
+            .await
+            .unwrap();
+        assert!(cooldowns.0.lock().unwrap().is_empty());
+        let mut stream = outcome.into_response();
+        assert!(stream.next_chunk().await.unwrap().is_ok());
+        assert_eq!(
+            stream.next_chunk().await.unwrap(),
+            Err(ClaudeMessagesTransportFailure::Protocol)
+        );
+        let records = cooldowns.0.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].auth_id, "account-a");
+        assert_eq!(records[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(
+            records[0].last_error.as_ref().unwrap().http_status,
+            Some(502)
+        );
+    }
+}

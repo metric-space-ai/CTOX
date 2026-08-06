@@ -1,0 +1,41 @@
+[
+  {
+    "name": "accumulator-split-visible-segment",
+    "operation": "antigravity_accumulate_replay",
+    "model": "gemini-3-flash-agent",
+    "payload": {"request":{"contents":[{"role":"user","parts":[{"text":"ask"}]}]}},
+    "response_payloads": [
+      {"response":{"candidates":[{"content":{"parts":[{"text":"hello "}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"world","thoughtSignature":"visible-signature-123456"}]},"finishReason":"STOP"}]}}
+    ]
+  },
+  {
+    "name": "accumulator-detached-function-signature",
+    "operation": "antigravity_accumulate_replay",
+    "model": "gemini-3-flash-agent",
+    "payload": {"request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}},
+    "response_payloads": [
+      {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-1","name":"run","args":{"x":1}}}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"detached-signature-123456"}]},"finishReason":"STOP"}]}}
+    ]
+  },
+  {
+    "name": "accumulator-thought-then-text",
+    "operation": "antigravity_accumulate_replay",
+    "model": "gemini-3-flash-agent",
+    "payload": {"request":{"systemInstruction":{"parts":[{"text":"system"}]},"contents":[{"role":"user","parts":[{"text":"ask"}]}]}},
+    "response_payloads": [
+      {"response":{"candidates":[{"content":{"parts":[{"text":"reason","thought":true,"thoughtSignature":"thought-signature-123456"}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"answer-signature-123456"}]},"finishReason":"STOP"}]}}
+    ]
+  },
+  {
+    "name": "accumulator-nonterminal-does-not-publish",
+    "operation": "antigravity_accumulate_replay",
+    "model": "gemini-3-flash-agent",
+    "payload": {"request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}},
+    "response_payloads": [
+      {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"partial","name":"run","args":{"x":1}}}]}}]}}
+    ]
+  }
+]

@@ -1,0 +1,63 @@
+[
+  {
+    "name": "request-controls-and-recursive-schema",
+    "operation": "openai_claude_request",
+    "model": "gpt-5",
+    "stream": true,
+    "input": {
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "stop_sequences": ["END", "STOP"],
+      "messages": [{"role":"user","content":"hello"}],
+      "tools": [{"name":"Lookup_Item","description":"lookup","input_schema":{"type":"object","properties":{"nested":{"type":"object"}}}}],
+      "tool_choice": {"type":"tool","name":"Lookup_Item"}
+    }
+  },
+  {
+    "name": "request-thinking-and-tool-results",
+    "operation": "openai_claude_request",
+    "model": "gpt-5",
+    "input": {
+      "thinking": {"type":"enabled","budget_tokens":2048},
+      "messages": [
+        {"role":"assistant","content":[{"type":"thinking","thinking":"why","signature":"gpt:test"},{"type":"tool_use","id":"call_1","name":"lookup","input":{"x":1}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"},{"type":"text","text":"continue"}]}
+      ]
+    }
+  },
+  {
+    "name": "non-stream-text-tools-and-cached-usage",
+    "operation": "openai_claude_non_stream",
+    "model": "gpt-5",
+    "original_request": {"tools":[{"name":"Lookup_Item"}]},
+    "raw_json": {
+      "id":"chat_1",
+      "model":"gpt-5",
+      "choices":[{"message":{"content":"answer","tool_calls":[{"id":"call:1","function":{"name":"lookup_item","arguments":"{'x':1}"}}]},"finish_reason":"tool_calls"}],
+      "usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}
+    }
+  },
+  {
+    "name": "stream-thinking-text-usage",
+    "operation": "openai_claude_stream",
+    "model": "gpt-5",
+    "original_request": {"stream":true},
+    "raw_sse_chunks": [
+      "data: {\"id\":\"chat_2\",\"model\":\"gpt-5\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"why\"}}]}",
+      "data: {\"id\":\"chat_2\",\"model\":\"gpt-5\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}",
+      "data: {\"id\":\"chat_2\",\"model\":\"gpt-5\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":2}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "name": "stream-split-tool-call",
+    "operation": "openai_claude_stream",
+    "model": "gpt-5",
+    "original_request": {"stream":true,"tools":[{"name":"Read_File"}]},
+    "raw_sse_chunks": [
+      "data: {\"id\":\"chat_3\",\"model\":\"gpt-5\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}",
+      "data: {\"id\":\"chat_3\",\"model\":\"gpt-5\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_3\",\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}",
+      "data: [DONE]"
+    ]
+  }
+]

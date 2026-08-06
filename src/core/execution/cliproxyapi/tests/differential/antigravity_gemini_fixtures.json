@@ -1,0 +1,13 @@
+[
+ {"name":"ag-gemini-basic-wrapper","operation":"antigravity_gemini_request","model":"gemini-3","input":{"model":"client","system_instruction":{"parts":[{"text":"rules"}]},"contents":[{"parts":[{"text":"hello"}]},{"role":"bad","parts":[{"text":"hi"}]}]}},
+ {"name":"ag-gemini-group-tool-response","operation":"antigravity_gemini_request","model":"gemini-3","input":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup"}}]},{"role":"user","parts":[{"functionResponse":{"name":"","response":{"result":"ok"}}}]}]}},
+ {"name":"ag-gemini-tools-collision","operation":"antigravity_gemini_request","model":"gemini-3","input":{"contents":[{"role":"user","parts":[{"text":"run"}]}],"tools":[{"functionDeclarations":[{"name":"read file","parameters":{"type":"object"}},{"name":"read/file","parameters":{"type":"object"}},{"name":"read file"}]}],"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":["read/file"]}}}},
+ {"name":"ag-gemini-empty-tools","operation":"antigravity_gemini_request","model":"gemini-3","input":{"contents":[],"tools":[{"functionDeclarations":[]}]}},
+ {"name":"ag-gemini-first-signature-bypass","operation":"antigravity_gemini_request","model":"gemini-3","input":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f"}},{"functionCall":{"name":"g"}}]}]}},
+ {"name":"ag-gemini-response-unwrapped","operation":"antigravity_gemini_non_stream","original_request":{"tools":[{"functionDeclarations":[{"name":"read file"},{"name":"read/file"}]}]},"raw_json":{"response":{"cpaUsageMetadata":{"promptTokenCount":2},"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file_ffffffffffff"}}]}}]}}},
+ {"name":"ag-gemini-response-raw","operation":"antigravity_gemini_non_stream","original_request":{},"raw_json":{"candidates":[],"usageMetadata":{"totalTokenCount":3}}},
+ {"name":"ag-gemini-stream-no-alt","operation":"antigravity_gemini_stream","raw_sse":"data: {\"response\":{\"candidates\":[]}}"},
+ {"name":"ag-gemini-stream-empty-alt","operation":"antigravity_gemini_stream","alt":"","original_request":{},"raw_sse":"data: {\"response\":{\"cpaUsageMetadata\":{\"totalTokenCount\":4},\"candidates\":[]}}"},
+ {"name":"ag-gemini-stream-other-alt","operation":"antigravity_gemini_stream","alt":"sse","raw_sse":"[{\"response\":{\"candidates\":[]}}]"},
+ {"name":"ag-gemini-token-count","operation":"antigravity_gemini_count","input":{"count":9}}
+]

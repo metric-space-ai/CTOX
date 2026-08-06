@@ -1,0 +1,32 @@
+[
+  {
+    "name": "ttl_downgrades_later_one_hour",
+    "operation": "claude_executor_normalize_cache_ttl",
+    "raw_body": {"tools":[{"name":"t","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+  },
+  {
+    "name": "cache_limit_preserves_last_tool",
+    "operation": "claude_executor_enforce_cache_limit",
+    "raw_body": {"tools":[{"name":"a","cache_control":{}},{"name":"b","cache_control":{}}],"system":[{"text":"s","cache_control":{}}],"messages":[{"role":"user","content":[{"text":"x","cache_control":{}},{"text":"y","cache_control":{}}]}]}
+  },
+  {
+    "name": "cache_injection_hierarchy",
+    "operation": "claude_executor_ensure_cache",
+    "raw_body": {"tools":[{"name":"a"},{"name":"deferred","defer_loading":true}],"system":"system","messages":[{"role":"user","content":"one"},{"role":"assistant","content":"ok"},{"role":"user","content":"two"}]}
+  },
+  {
+    "name": "request_local_oauth_tool_map",
+    "operation": "claude_executor_remap_oauth_tools",
+    "raw_body": {"tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"Glob","input_schema":{"type":"object"}}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"1","name":"bash","input":{}}]}]}
+  },
+  {
+    "name": "final_body_cch_signature",
+    "operation": "claude_executor_sign_cch",
+    "raw_body": {"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[]}
+  },
+  {
+    "name": "independent_claude_usage",
+    "operation": "claude_executor_usage",
+    "raw_body": {"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}
+  }
+]

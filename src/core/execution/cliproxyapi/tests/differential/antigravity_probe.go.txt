@@ -1,0 +1,78 @@
+package responses
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "os"
+    "strings"
+    "testing"
+)
+
+type ctoxAntigravityFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawJSON json.RawMessage `json:"raw_json"`
+    RawJSONChunks []json.RawMessage `json:"raw_json_chunks"`
+}
+type ctoxAntigravityResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxAntigravityDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxAntigravityFixture; if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxAntigravityResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output []byte
+        switch fixture.Operation {
+        case "request_to_antigravity":
+            output = ConvertOpenAIResponsesRequestToAntigravity(fixture.Model, fixture.Input, fixture.Stream)
+        case "antigravity_to_responses_non_stream":
+            var state any
+            output = ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, &state)
+        case "antigravity_to_responses_stream":
+            var state any
+            events := make([]any, 0)
+            for _, chunk := range fixture.RawJSONChunks {
+                for _, rawEvent := range ConvertAntigravityResponseToOpenAIResponses(context.Background(), fixture.Model, fixture.OriginalRequest, nil, chunk, &state) {
+                    var eventName string
+                    var data []byte
+                    for _, line := range bytes.Split(rawEvent, []byte("\n")) {
+                        if bytes.HasPrefix(line, []byte("event:")) { eventName = string(bytes.TrimSpace(line[6:])) }
+                        if bytes.HasPrefix(line, []byte("data:")) { data = bytes.TrimSpace(line[5:]) }
+                    }
+                    var eventData any; if err = json.Unmarshal(data, &eventData); err != nil { t.Fatal(err) }
+                    events = append(events, map[string]any{"event":eventName,"data":eventData})
+                }
+            }
+            normalized := any(events); normalizeAntigravity(normalized)
+            results = append(results, ctoxAntigravityResult{Name: fixture.Name, Output: normalized})
+            continue
+        default:
+            t.Fatalf("unknown operation %q", fixture.Operation)
+        }
+        var value any; if err = json.Unmarshal(output, &value); err != nil { t.Fatal(err) }
+        normalizeAntigravity(value)
+        results = append(results, ctoxAntigravityResult{Name: fixture.Name, Output: value})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}
+
+func normalizeAntigravity(value any) {
+    switch typed := value.(type) {
+    case map[string]any:
+        delete(typed, "created_at")
+        if typed["type"] == "function_call" {
+            typed["id"] = "fc_<dynamic>"
+            typed["call_id"] = "call_<dynamic>"
+        }
+        if value, ok := typed["item_id"].(string); ok && strings.HasPrefix(value, "fc_call_") { typed["item_id"] = "fc_<dynamic>" }
+        for _, child := range typed { normalizeAntigravity(child) }
+    case []any:
+        for _, child := range typed { normalizeAntigravity(child) }
+    }
+}

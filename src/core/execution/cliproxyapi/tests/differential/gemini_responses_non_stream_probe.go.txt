@@ -1,0 +1,62 @@
+package responses
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "strings"
+    "testing"
+)
+
+type ctoxGeminiNonStreamFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawJSON json.RawMessage `json:"raw_json"`
+}
+
+type ctoxGeminiNonStreamResult struct {
+    Name string `json:"name"`
+    Output any `json:"output"`
+}
+
+func TestCtoxGeminiResponsesNonStreamDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+    if err != nil { t.Fatal(err) }
+    var fixtures []ctoxGeminiNonStreamFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxGeminiNonStreamResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        if fixture.Operation != "gemini_to_responses_non_stream" {
+            t.Fatalf("unknown operation %q", fixture.Operation)
+        }
+        output := ConvertGeminiResponseToOpenAIResponsesNonStream(
+            context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, nil,
+        )
+        var value any
+        if err = json.Unmarshal(output, &value); err != nil { t.Fatal(err) }
+        normalizeCtoxGeminiNonStream(value)
+        results = append(results, ctoxGeminiNonStreamResult{Name: fixture.Name, Output: value})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  ")
+    if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}
+
+func normalizeCtoxGeminiNonStream(value any) {
+    switch typed := value.(type) {
+    case map[string]any:
+        delete(typed, "created_at")
+        if typed["type"] == "function_call" {
+            typed["id"] = "fc_<dynamic>"
+            typed["call_id"] = "call_<dynamic>"
+        }
+        if itemID, ok := typed["item_id"].(string); ok && strings.HasPrefix(itemID, "fc_call_") {
+            typed["item_id"] = "fc_<dynamic>"
+        }
+        for _, child := range typed { normalizeCtoxGeminiNonStream(child) }
+    case []any:
+        for _, child := range typed { normalizeCtoxGeminiNonStream(child) }
+    }
+}

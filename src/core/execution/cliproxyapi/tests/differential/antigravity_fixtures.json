@@ -1,0 +1,169 @@
+[
+  {
+    "name": "antigravity-simple-string",
+    "operation": "request_to_antigravity",
+    "model": "gemini-3-flash-agent",
+    "stream": false,
+    "input": {"input": "hello"}
+  },
+  {
+    "name": "antigravity-text-tool-generation",
+    "operation": "request_to_antigravity",
+    "model": "gemini-3-flash-agent",
+    "stream": false,
+    "input": {
+      "instructions": "Be precise.",
+      "input": [{"role":"user","content":[{"type":"input_text","text":"Read"}]}],
+      "tools": [{"type":"function","name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}],
+      "max_output_tokens": 42,
+      "temperature": 0.5,
+      "top_p": 0.9
+    }
+  },
+  {
+    "name": "antigravity-claude-reasoning",
+    "operation": "request_to_antigravity",
+    "model": "claude-opus-4-6-thinking",
+    "stream": false,
+    "input": {
+      "input": [
+        {"type":"reasoning","encrypted_content":"EhkKFwgMEAIyEWNsYXVkZS1zb25uZXQtNC02GAE=","summary":[{"type":"summary_text","text":"internal reasoning"}]},
+        {"role":"user","content":[{"type":"input_text","text":"continue"}]}
+      ]
+    }
+  },
+  {
+    "name": "antigravity-drops-cross-provider-reasoning",
+    "operation": "request_to_antigravity",
+    "model": "claude-opus-4-6-thinking",
+    "stream": false,
+    "input": {
+      "input": [
+        {"type":"reasoning","encrypted_content":"gpt#invalid","summary":[{"type":"summary_text","text":"must not leak"}]},
+        {"role":"user","content":[{"type":"input_text","text":"continue"}]}
+      ]
+    }
+  },
+  {
+    "name": "antigravity-empty-reasoning-keeps-later-message",
+    "operation": "request_to_antigravity",
+    "model": "claude-opus-4-6-thinking",
+    "stream": false,
+    "input": {
+      "input": [
+        {"type":"reasoning","encrypted_content":"EhkKFwgMEAIyEWNsYXVkZS1zb25uZXQtNC02GAE=","summary":[]},
+        {"role":"user","content":[{"type":"input_text","text":"continue"}]}
+      ]
+    }
+  },
+  {
+    "name": "antigravity-response-text-echo-usage",
+    "operation": "antigravity_to_responses_non_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {
+      "request": {
+        "model": "gemini-3-flash-agent",
+        "instructions": "Be concise.",
+        "temperature": 0.25,
+        "store": false,
+        "metadata": {"suite":"differential"}
+      }
+    },
+    "raw_json": {
+      "response": {
+        "responseId": "ag-text-1",
+        "createTime": "2026-08-03T12:34:56.123Z",
+        "modelVersion": "gemini-provider-version",
+        "candidates": [{"content":{"parts":[{"text":"hello"}]}}],
+        "usageMetadata": {
+          "promptTokenCount": 8,
+          "cachedContentTokenCount": 3,
+          "candidatesTokenCount": 4,
+          "thoughtsTokenCount": 0,
+          "totalTokenCount": 12
+        }
+      }
+    }
+  },
+  {
+    "name": "antigravity-response-reasoning-order",
+    "operation": "antigravity_to_responses_non_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {"request":{"model":"gemini-3-flash-agent"}},
+    "raw_json": {
+      "response": {
+        "responseId": "ag-reasoning-1",
+        "createTime": "2026-08-03T12:34:56Z",
+        "candidates": [{"content":{"parts":[
+          {"thought":true,"text":"consider","thoughtSignature":"reasoning-signature"},
+          {"text":"answer"}
+        ]}}]
+      }
+    }
+  },
+  {
+    "name": "antigravity-response-function-call",
+    "operation": "antigravity_to_responses_non_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {
+      "request": {
+        "model":"gemini-3-flash-agent",
+        "tools":[{"type":"function","name":"read file"}]
+      }
+    },
+    "raw_json": {
+      "response": {
+        "responseId": "ag-function-1",
+        "createTime": "2026-08-03T12:34:56Z",
+        "candidates": [{"content":{"parts":[
+          {"functionCall":{"name":"read_file","args":{"path":"README.md"}},"thoughtSignature":"function-signature"}
+        ]}}]
+      }
+    }
+  },
+  {
+    "name": "antigravity-response-detached-signature",
+    "operation": "antigravity_to_responses_non_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {"request":{"model":"gemini-3-flash-agent"}},
+    "raw_json": {
+      "response": {
+        "responseId": "ag-detached-1",
+        "createTime": "2026-08-03T12:34:56Z",
+        "candidates": [{"content":{"parts":[
+          {"thoughtSignature":"detached-signature"},
+          {"text":"after carrier"}
+        ]}}]
+      }
+    }
+  },
+  {
+    "name": "antigravity-stream-text-lifecycle",
+    "operation": "antigravity_to_responses_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {"request":{"model":"gemini-3-flash-agent","instructions":"Stream."}},
+    "raw_json_chunks": [
+      {"response":{"responseId":"ag-stream-text-1","createTime":"2026-08-03T12:34:56Z","candidates":[{"content":{"parts":[{"text":"hel"}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"cachedContentTokenCount":2,"candidatesTokenCount":3,"thoughtsTokenCount":0,"totalTokenCount":8}}}
+    ]
+  },
+  {
+    "name": "antigravity-stream-reasoning-text",
+    "operation": "antigravity_to_responses_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {"request":{"model":"gemini-3-flash-agent"}},
+    "raw_json_chunks": [
+      {"response":{"responseId":"ag-stream-reasoning-1","createTime":"2026-08-03T12:34:56Z","candidates":[{"content":{"parts":[{"thought":true,"text":"think","thoughtSignature":"stream-reasoning-signature"}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}]}}
+    ]
+  },
+  {
+    "name": "antigravity-stream-function-call",
+    "operation": "antigravity_to_responses_stream",
+    "model": "gemini-3-flash-agent",
+    "original_request": {"request":{"model":"gemini-3-flash-agent","tools":[{"type":"function","name":"read file"}]}},
+    "raw_json_chunks": [
+      {"response":{"responseId":"ag-stream-function-1","createTime":"2026-08-03T12:34:56Z","candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"README.md"}}}]},"finishReason":"STOP"}]}}
+    ]
+  }
+]

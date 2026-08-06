@@ -1,0 +1,453 @@
+[
+  {
+    "name":"basic system attribution and roles",
+    "operation":"antigravity_claude_request",
+    "model":"claude-sonnet-4-6",
+    "input":{"system":[{"type":"text","text":"rules"},{"type":"text","text":"   x-anthropic-billing-header: hidden"}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"answer"}]},{"role":"system","content":[{"type":"text","text":"reminder"}]}]}
+  },
+  {
+    "name":"tools schemas collisions and specific choice",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "input":{"thinking":{"type":"enabled","budget_tokens":1234},"tools":[{"name":"read file","description":"one","input_schema":{"type":"object","properties":{}}},{"name":"read/file","description":"two","input_schema":{"type":"object","properties":{"path":{"type":"string","format":"uri"}}}},{"name":"read file","description":"duplicate","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"read file"},"messages":[{"role":"user","content":"go"}]}
+  },
+  {
+    "name":"tool call result lookup and raw object",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"weather lookup","input":{"city":"Berlin"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":{"ok":true}}]}],"tools":[{"name":"weather lookup","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]}
+  },
+  {
+    "name":"tool result array nests images",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"paint-call-7","name":"paint","input":null}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"paint-call-7","content":[{"type":"text","text":"ok"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}]}
+  },
+  {
+    "name":"direct image and generation controls",
+    "operation":"antigravity_claude_request",
+    "model":"claude-sonnet",
+    "input":{"temperature":0.2,"top_p":0.8,"top_k":12,"max_tokens":99,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"BBBB"}},{"type":"text","text":"describe"}]}]}
+  },
+  {
+    "name":"claude thinking signature becomes antigravity form",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "input":{"thinking":{"type":"enabled","budget_tokens":2048},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"why","signature":"EhkKFwgMEAIyEWNsYXVkZS1zb25uZXQtNC02GAE="},{"type":"text","text":"answer"}]}]}
+  },
+  {
+    "name":"gemini trailing carrier binds previous text",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"thinking","thinking":"","signature":"cpa-gemini-carrier-v1:previous:text:RWdnS0JnRU1PZGJITkE9PQ"}]}]}
+  },
+  {
+    "name":"gemini leading carrier binds following tool",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa-gemini-carrier-v1:next:function:RWdnS0JnRU1PZGJITkE9PQ"},{"type":"tool_use","id":"tool-1","name":"run","input":{}}]}]}
+  },
+  {
+    "name":"parallel unsigned gemini tools synthesize first only",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"one","input":{}},{"type":"tool_use","id":"b","name":"two","input":{}}]}]}
+  },
+  {
+    "name":"model parts reorder thinking text function",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"run","input":{}},{"type":"text","text":"visible"},{"type":"thinking","thinking":"why","signature":"EhkKFwgMEAIyEWNsYXVkZS1zb25uZXQtNC02GAE="}]}]}
+  },
+  {
+    "name":"present non-object inputs are preserved",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"str","input":"{\"x\":1}"},{"type":"tool_use","id":"b","name":"scalar","input":7},{"type":"tool_use","id":"c","name":"null","input":null},{"type":"tool_use","id":"d","name":"missing"}]}]}
+  },
+  {
+    "name":"adaptive thinking effort and mixed web tool",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "input":{"thinking":{"type":"adaptive"},"output_config":{"effort":" MEDIUM "},"tools":[{"type":"web_search_20250305","name":"web"},{"name":"local","input_schema":{"type":"object"}}],"tool_choice":"auto","messages":[{"role":"user","content":"question"}]}
+  },
+  {
+    "name":"missing tool result content and heuristic name",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3-pro",
+    "input":{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"get-weather-call-123"}]}]}
+  },
+  {
+    "name":"cache mode rejects unprefixed client signature",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "signature_cache_enabled":true,
+    "input":{"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"uncached","signature":"RWhrS0Z3Z01FQUl5RVdOc1lYVmtaUzF6YjI1dVpYUXROQzAyR0FFPQ=="},{"type":"text","text":"answer"}]}]}
+  },
+  {
+    "name":"cache mode accepts matching group client signature",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "signature_cache_enabled":true,
+    "input":{"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"client replay","signature":"claude#RWhrS0Z3Z01FQUl5RVdOc1lYVmtaUzF6YjI1dVpYUXROQzAyR0FFPQ=="},{"type":"text","text":"answer"}]}]}
+  },
+  {
+    "name":"cache mode prefers cached signature over invalid client value",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "signature_cache_enabled":true,
+    "signature_cache_seed":[{"model":"claude-sonnet-4-6","text":"cached replay","signature":"RWhrS0Z3Z01FQUl5RVdOc1lYVmtaUzF6YjI1dVpYUXROQzAyR0FFPQ=="}],
+    "input":{"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"cached replay","signature":"bad"},{"type":"text","text":"answer"}]}]}
+  },
+  {
+    "name":"cache mode rejects mismatched group prefix",
+    "operation":"antigravity_claude_request",
+    "model":"claude-thinking-test",
+    "signature_cache_enabled":true,
+    "input":{"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"wrong group","signature":"gpt#RWhrS0Z3Z01FQUl5RVdOc1lYVmtaUzF6YjI1dVpYUXROQzAyR0FFPQ=="},{"type":"text","text":"answer"}]}]}
+  },
+  {
+    "name":"prefix cleanup retains malformed legacy E form",
+    "operation":"antigravity_claude_signature_policy",
+    "input":{"action":"strip_prefix","payload":{"messages":[{"content":[{"type":"thinking","thinking":"legacy","signature":"E!!!!"},{"type":"text","text":"answer"}]}]}}
+  },
+  {
+    "name":"capable typed web search becomes independent request",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3.1-flash-lite",
+    "supports_web_search":true,
+    "input":{"messages":[{"role":"user","content":"old"},{"role":"assistant","content":"ignore"},{"role":"user","content":[{"type":"text","text":" Berlin "},{"type":"text","text":" weather "}]}],"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8,"allowed_domains":[" example.com ",7,"weather.test"]}]}
+  },
+  {
+    "name":"web search defaults max and accepts forced choice",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3.1-flash-lite",
+    "supports_web_search":true,
+    "input":{"messages":[{"role":"user","content":"query"}],"tools":[{"type":"web_search_20260209","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"}}
+  },
+  {
+    "name":"mixed web and custom tools remain normal request",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3.1-flash-lite",
+    "supports_web_search":true,
+    "input":{"messages":[{"role":"user","content":"query"}],"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"local","input_schema":{"type":"object"}}]}
+  },
+  {
+    "name":"none tool choice disables native web search",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3.1-flash-lite",
+    "supports_web_search":true,
+    "input":{"messages":[{"role":"user","content":"query"}],"tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":"none"}
+  },
+  {
+    "name":"typed web search without route capability remains normal request",
+    "operation":"antigravity_claude_request",
+    "model":"gemini-3.5-flash",
+    "supports_web_search":false,
+    "input":{"messages":[{"role":"user","content":"query"}],"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}]}
+  },
+  {
+    "name":"prefix cleanup drops foreign form",
+    "operation":"antigravity_claude_signature_policy",
+    "input":{"action":"strip_prefix","payload":{"messages":[{"content":[{"type":"thinking","thinking":"foreign","signature":"gAAAA"},{"type":"text","text":"answer"}]}]}}
+  },
+  {
+    "name":"basic bypass retains shallow marker",
+    "operation":"antigravity_claude_signature_policy",
+    "signature_bypass_strict":false,
+    "input":{"action":"strip_bypass","payload":{"messages":[{"content":[{"type":"thinking","thinking":"legacy","signature":"EgA="},{"type":"text","text":"answer"}]}]}}
+  },
+  {
+    "name":"strict bypass drops shallow marker",
+    "operation":"antigravity_claude_signature_policy",
+    "signature_bypass_strict":true,
+    "input":{"action":"strip_bypass","payload":{"messages":[{"content":[{"type":"thinking","thinking":"legacy","signature":"EgA="},{"type":"text","text":"answer"}]}]}}
+  },
+  {
+    "name":"strict validator accepts known Claude tree",
+    "operation":"antigravity_claude_signature_policy",
+    "signature_bypass_strict":true,
+    "input":{"action":"validate","payload":{"messages":[{"content":[{"type":"thinking","thinking":"why","signature":"EhkKFwgMEAIyEWNsYXVkZS1zb25uZXQtNC02GAE="}]}]}}
+  },
+  {
+    "name":"basic normalization wraps E into R form",
+    "operation":"antigravity_claude_signature_policy",
+    "signature_bypass_strict":false,
+    "input":{"action":"normalize","signature":"EgA=","payload":{}}
+  },
+  {
+    "name":"web search aggregate grounding citations usage and duplicate urls",
+    "operation":"antigravity_claude_web_search_response",
+    "model":"gemini-3.1-flash-lite",
+    "original_request":{"tools":[{"type":"web_search_20250305","name":"web_search"}]},
+    "translated_request":{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json":{"response":{"modelVersion":"gemini-3.1-flash-lite","responseId":"resp-search","candidates":[{"content":{"parts":[{"text":"Weather is clear today."}]},"groundingMetadata":{"webSearchQueries":["weather"],"groundingChunks":[{"web":{"uri":"https://example.com/weather","title":"Weather"}},{"web":{"uri":"https://example.com/weather","title":"Duplicate"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":7,"text":"Weather"},"groundingChunkIndices":[0]}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":16,"cachedContentTokenCount":3}}}
+  },
+  {
+    "name":"web search aggregate falls back to total token delta and plain text",
+    "operation":"antigravity_claude_web_search_response",
+    "original_request":{"tools":[{"type":"web_search_20260209"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json":{"response":{"modelVersion":"m","responseId":"r","candidates":[{"content":{"parts":[{"text":"plain"}]},"groundingMetadata":{"webSearchQueries":[],"groundingChunks":[]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":16}}}
+  },
+  {
+    "name":"web search aggregate accepts direct candidate grounding shape",
+    "operation":"antigravity_claude_web_search_response",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json":{"candidates":[{"content":{"parts":[{"text":"direct"}]},"groundingMetadata":{"webSearchQueries":["q"],"groundingChunks":[{"web":{"uri":"https://direct.test","title":"Direct"}}]}}],"usageMetadata":{"promptTokenCount":99,"totalTokenCount":100}}
+  },
+  {
+    "name":"web search aggregate clips overlapping citation byte ranges",
+    "operation":"antigravity_claude_web_search_response",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"text":"abcdefghij"}]},"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://a.test","title":"A"}},{"web":{"uri":"https://b.test","title":"B"}}],"groundingSupports":[{"segment":{"startIndex":2,"endIndex":5},"groundingChunkIndices":[0]},{"segment":{"startIndex":4,"endIndex":8},"groundingChunkIndices":[1]}]}}]}}
+  },
+  {
+    "name":"web search aggregate requires translated native google search",
+    "operation":"antigravity_claude_web_search_response",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"contents":[]}},
+    "raw_json":{"response":{"candidates":[{"groundingMetadata":{"groundingChunks":[]}}]}}
+  },
+  {
+    "name":"web search citation indices are utf8 byte offsets",
+    "operation":"antigravity_claude_web_search_response",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"text":"AéB"}]},"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://unicode.test","title":"Unicode"}}],"groundingSupports":[{"segment":{"startIndex":1,"endIndex":3},"groundingChunkIndices":[0]}]}}]}}
+  },
+  {
+    "name":"web search support without valid chunk consumes its segment",
+    "operation":"antigravity_claude_web_search_response",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"text":"abcXYZ"}]},"groundingMetadata":{"groundingChunks":[],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":3},"groundingChunkIndices":[9]}]}}]}}
+  },
+  {
+    "name":"web search stream emits grounded blocks before terminal usage",
+    "operation":"antigravity_claude_web_search_stream",
+    "model":"gemini-3.1-flash-lite",
+    "original_request":{"tools":[{"type":"web_search_20250305","name":"web_search"}]},
+    "translated_request":{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json_chunks":[{"response":{"modelVersion":"gemini-3.1-flash-lite","responseId":"resp-stream","cpaUsageMetadata":{"promptTokenCount":13,"candidatesTokenCount":99},"candidates":[{"content":{"parts":[{"text":"Weather is clear."}]},"groundingMetadata":{"webSearchQueries":["weather"],"groundingChunks":[{"web":{"uri":"https://example.com/weather","title":"Weather"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":7},"groundingChunkIndices":[0]}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":13,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":19}}}]
+  },
+  {
+    "name":"web search stream buffers pre-grounding visible text",
+    "operation":"antigravity_claude_web_search_stream",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json_chunks":[
+      {"response":{"responseId":"buffered","candidates":[{"content":{"parts":[{"text":"First "},{"thought":true,"text":"hidden"},{"functionCall":{"name":"ignored"}}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"second."}]},"groundingMetadata":{"webSearchQueries":["query"],"groundingChunks":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}}
+    ]
+  },
+  {
+    "name":"web search stream falls back to buffered text without grounding",
+    "operation":"antigravity_claude_web_search_stream",
+    "original_request":{"tools":[{"type":"web_search_20260209"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json_chunks":[
+      {"response":{"modelVersion":"fallback","candidates":[{"content":{"parts":[{"text":"plain fallback"}]}}]}},
+      {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0,"thoughtsTokenCount":1,"totalTokenCount":16,"cachedContentTokenCount":3}}}
+    ]
+  },
+  {
+    "name":"web search stream chunks unicode by runes",
+    "operation":"antigravity_claude_web_search_stream",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"text":"éééééééééééééééééééééééééééééééééééééééééééééééééééé"}]},"groundingMetadata":{"webSearchQueries":[],"groundingChunks":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}]
+  },
+  {
+    "name":"web search stream adjusts cached input and total-token fallback",
+    "operation":"antigravity_claude_web_search_stream",
+    "original_request":{"tools":[{"type":"web_search_20250305"}]},
+    "translated_request":{"request":{"tools":[{"googleSearch":{}}]}},
+    "raw_json_chunks":[{"response":{"cpaUsageMetadata":{"promptTokenCount":20,"candidatesTokenCount":50},"candidates":[{"content":{"parts":[{"text":"answer"}]},"groundingMetadata":{"webSearchQueries":["q"],"groundingChunks":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"totalTokenCount":29,"thoughtsTokenCount":2,"cachedContentTokenCount":5}}}]
+  },
+  {
+    "name":"normal response aggregates adjacent visible text and usage",
+    "operation":"antigravity_claude_response",
+    "original_request":{"tools":[]},
+    "translated_request":{"model":"other-model"},
+    "raw_json":{"response":{"responseId":"resp-normal","modelVersion":"model-v","candidates":[{"content":{"parts":[{"text":"hello "},{"text":"world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"thoughtsTokenCount":2,"totalTokenCount":12,"cachedContentTokenCount":1}}}
+  },
+  {
+    "name":"normal response binds provider signature from thought to following text",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.1-pro"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan"},{"text":"answer","thoughtSignature":"gemini-signature"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}}
+  },
+  {
+    "name":"normal response emits previous carrier after semantic text",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.1-pro"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"text":"answer"},{"thought":true,"thoughtSignature":"detached-signature"}]},"finishReason":"UNKNOWN"}]}}
+  },
+  {
+    "name":"normal response restores tool name and creates stable Gemini tool id",
+    "operation":"antigravity_claude_response",
+    "original_request":{"tools":[{"name":"read file","input_schema":{"type":"object"}}]},
+    "translated_request":{"model":"gemini-3.1-pro"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-1","name":"read_file","args":{"path":"/tmp/a","line":2}},"thoughtSignature":"tool-signature"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}}
+  },
+  {
+    "name":"normal response keeps Claude tool signature and object-only args",
+    "operation":"antigravity_claude_response",
+    "original_request":{"tools":[{"name":"tool"}]},
+    "translated_request":{"model":"claude-sonnet"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool","args":"not-an-object"},"thoughtSignature":"RQ=="}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":3,"totalTokenCount":8}}}
+  },
+  {
+    "name":"normal response prefixes signatures when cache mode is enabled",
+    "operation":"antigravity_claude_response",
+    "signature_cache_enabled":true,
+    "original_request":{},
+    "translated_request":{"model":"claude-sonnet"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"reason","thoughtSignature":"native-signature"},{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"thoughtsTokenCount":1,"candidatesTokenCount":1}}}
+  },
+  {
+    "name":"normal response uses nonnegative total fallback and max tokens",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"other"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":4}}}
+  },
+  {
+    "name":"normal response omits usage only when metadata is absent",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"other"},
+    "raw_json":{"response":{"responseId":"empty","candidates":[{"content":{"parts":[]}}]}}
+  },
+  {
+    "name":"normal stream appends visible text across chunks and finalizes usage",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"other"},
+    "raw_json_chunks":[
+      {"response":{"responseId":"stream-text","modelVersion":"model-v","cpaUsageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2},"candidates":[{"content":{"parts":[{"text":"hello "}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"world"}]}}]}},
+      {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"thoughtsTokenCount":1}}}
+    ]
+  },
+  {
+    "name":"normal stream signs accumulated thinking before visible text",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.1-pro"},
+    "raw_json_chunks":[
+      {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan "}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"more","thoughtSignature":"thinking-signature"}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"thoughtsTokenCount":2}}}
+    ]
+  },
+  {
+    "name":"normal stream carries detached signature toward following text",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.1-pro"},
+    "raw_json_chunks":[
+      {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"detached-signature"}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}}
+    ]
+  },
+  {
+    "name":"normal stream restores Gemini tool and stable provenance id",
+    "operation":"antigravity_claude_stream",
+    "original_request":{"tools":[{"name":"read file"}]},
+    "translated_request":{"model":"gemini-3.1-pro"},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-stream-1","name":"read_file","args":{"path":"/tmp/a"}},"thoughtSignature":"tool-signature"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}}]
+  },
+  {
+    "name":"normal stream keeps Claude signature on tool block",
+    "operation":"antigravity_claude_stream",
+    "original_request":{"tools":[{"name":"run"}]},
+    "translated_request":{"model":"claude-sonnet"},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"cmd":"pwd"}},"thoughtSignature":"RQ=="}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":2,"totalTokenCount":5}}}]
+  },
+  {
+    "name":"normal stream closes consecutive tool blocks in index order",
+    "operation":"antigravity_claude_stream",
+    "original_request":{"tools":[{"name":"a"},{"name":"b"}]},
+    "translated_request":{"model":"other"},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"a","args":{}}},{"functionCall":{"name":"b","args":{"x":1}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}}]
+  },
+  {
+    "name":"normal stream DONE synthesizes empty content and terminal usage",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"other"},
+    "raw_json_chunks":[{"response":{"responseId":"empty-stream","candidates":[]}}]
+  },
+  {
+    "name":"normal stream adjusts cached prompt and total token fallback",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"other"},
+    "raw_json_chunks":[{"response":{"cpaUsageMetadata":{"promptTokenCount":10,"candidatesTokenCount":99},"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":14,"thoughtsTokenCount":1,"cachedContentTokenCount":3}}}]
+  },
+  {
+    "name":"normal response visible signature uses leading text carrier",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"text":"visible answer","thoughtSignature":"visible-signature"}]},"finishReason":"STOP"}]}}
+  },
+  {
+    "name":"normal response preserves distinct thought and visible signatures",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"reason","thoughtSignature":"thought-signature"},{"text":"answer","thoughtSignature":"text-signature"}]},"finishReason":"STOP"}]}}
+  },
+  {
+    "name":"normal stream preserves distinct thought and visible signatures",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"reason","thoughtSignature":"thought-signature"},{"text":"answer","thoughtSignature":"text-signature"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"thoughtsTokenCount":1}}}]
+  },
+  {
+    "name":"normal stream preserves consecutive detached carriers",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json_chunks":[
+      {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]}}]}},
+      {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"first-detached"},{"thoughtSignature":"second-detached"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}}
+    ]
+  },
+  {
+    "name":"normal stream trailing carrier targets previous function",
+    "operation":"antigravity_claude_stream",
+    "original_request":{"tools":[{"name":"run"}]},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-tail","name":"run","args":{}}},{"thoughtSignature":"trailing-signature"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}}]
+  },
+  {
+    "name":"normal stream leading carrier remains before following thought",
+    "operation":"antigravity_claude_stream",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json_chunks":[{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"leading-signature"},{"thought":true,"text":"reason"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"thoughtsTokenCount":1}}}]
+  },
+  {
+    "name":"normal response signature-only part without thought flag is a carrier",
+    "operation":"antigravity_claude_response",
+    "original_request":{},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"leading-signature"},{"text":"answer"}]},"finishReason":"STOP"}]}}
+  },
+  {
+    "name":"normal response thought before signed tool uses one carrier binding",
+    "operation":"antigravity_claude_response",
+    "original_request":{"tools":[{"name":"run"}]},
+    "translated_request":{"model":"gemini-3.6-flash"},
+    "raw_json":{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"reason"},{"functionCall":{"id":"native-bound","name":"run","args":{"cmd":"pwd"}},"thoughtSignature":"bound-signature"}]},"finishReason":"STOP"}]}}
+  }
+]

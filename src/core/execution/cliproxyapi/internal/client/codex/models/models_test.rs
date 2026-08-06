@@ -1,0 +1,183 @@
+// ref: internal/client/codex/models/models_test.go @ a88197f845c979132c8978ea223c6af05cc81536
+// Port-Status: adapted_to_ctox
+// License: MIT (upstream); modifications AGPL-3.0-only
+
+use serde_json::{json, Value};
+
+use super::*;
+
+fn catalog(revision: u64) -> CodexModelCatalog {
+    CodexModelCatalog::parse(
+        br#"{"models":[
+          {"slug":"gpt-5.5","display_name":"GPT 5.5","description":"default","priority":10,"supports_search_tool":true,"supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}],"default_reasoning_level":"ultra","input_modalities":["text","image"],"apply_patch_tool_type":"freeform"},
+          {"slug":"gpt-official","display_name":"Official","priority":20,"supports_search_tool":true}
+        ]}"#,
+        revision,
+    )
+    .unwrap()
+}
+
+fn model(value: Value) -> ModelMap {
+    value.as_object().unwrap().clone()
+}
+
+fn empty_metadata(_: &str) -> Option<ModelMetadata> {
+    None
+}
+
+#[test]
+fn input_modalities_come_from_injected_registry_metadata() {
+    let available = vec![
+        model(json!({"id":"vision"})),
+        model(json!({"id":"text"})),
+        model(json!({"id":"image-endpoint"})),
+    ];
+    let source = |id: &str| {
+        Some(match id {
+            "vision" => ModelMetadata {
+                supported_input_modalities: vec![
+                    "text".into(),
+                    "image".into(),
+                    "audio".into(),
+                    "IMAGE".into(),
+                ],
+                ..Default::default()
+            },
+            "text" => ModelMetadata {
+                supported_input_modalities: vec!["text".into()],
+                ..Default::default()
+            },
+            _ => ModelMetadata {
+                model_type: "openai-image".into(),
+                ..Default::default()
+            },
+        })
+    };
+    let models = catalog(1).build_models(&available, &source, None, false);
+    let by_slug: std::collections::BTreeMap<_, _> = models
+        .iter()
+        .map(|entry| (entry["slug"].as_str().unwrap(), entry))
+        .collect();
+    assert_eq!(
+        by_slug["vision"]["input_modalities"],
+        json!(["text", "image"])
+    );
+    assert_eq!(by_slug["vision"]["supports_image_detail_original"], true);
+    assert_eq!(by_slug["text"]["input_modalities"], json!(["text"]));
+    assert!(by_slug["text"]
+        .get("supports_image_detail_original")
+        .is_none());
+    assert_eq!(by_slug["image-endpoint"]["visibility"], "hide");
+    assert!(by_slug["image-endpoint"].get("input_modalities").is_none());
+}
+
+#[test]
+fn configured_display_name_applies_to_template() {
+    let models = catalog(1).build_models(
+        &[model(json!({"id":"gpt-5.5","display_name":"Configured"}))],
+        &empty_metadata,
+        None,
+        false,
+    );
+    assert_eq!(models[0]["display_name"], "Configured");
+}
+
+#[test]
+fn search_tool_requires_template_and_codex_only_providers() {
+    let available = vec![
+        model(json!({"id":"custom"})),
+        model(json!({"id":"gpt-5.5"})),
+        model(json!({"id":"gpt-official"})),
+    ];
+    let providers = |id: &str| match id {
+        "gpt-5.5" => vec!["codex".to_owned()],
+        "gpt-official" => vec!["codex".to_owned(), "openai".to_owned()],
+        _ => vec!["codex".to_owned()],
+    };
+    let models = catalog(1).build_models(&available, &empty_metadata, Some(&providers), false);
+    let by_slug: std::collections::BTreeMap<_, _> = models
+        .iter()
+        .map(|entry| (entry["slug"].as_str().unwrap(), entry))
+        .collect();
+    assert_eq!(by_slug["custom"]["supports_search_tool"], false);
+    assert_eq!(by_slug["gpt-5.5"]["supports_search_tool"], true);
+    assert_eq!(by_slug["gpt-official"]["supports_search_tool"], false);
+}
+
+#[test]
+fn ultra_reasoning_effort_is_preserved() {
+    let models = catalog(1).build_models(
+        &[model(json!({"id":"gpt-5.5"}))],
+        &empty_metadata,
+        None,
+        false,
+    );
+    assert_eq!(models[0]["default_reasoning_level"], "ultra");
+    assert_eq!(
+        models[0]["supported_reasoning_levels"][1]["effort"],
+        "ultra"
+    );
+}
+
+#[test]
+fn catalog_revision_is_value_scoped_not_global_cache() {
+    assert_eq!(catalog(7).revision(), 7);
+    assert_eq!(catalog(8).revision(), 8);
+}
+
+#[test]
+fn multi_agent_version_is_only_added_when_enabled() {
+    let disabled = catalog(1).build_models(
+        &[model(json!({"id":"custom"}))],
+        &empty_metadata,
+        None,
+        false,
+    );
+    assert!(disabled[0].get("multi_agent_version").is_none());
+    let enabled = catalog(1).build_models(
+        &[model(json!({"id":"custom"}))],
+        &empty_metadata,
+        None,
+        true,
+    );
+    assert_eq!(enabled[0]["multi_agent_version"], "v2");
+}
+
+#[test]
+fn max_context_length_override_wins() {
+    let available = vec![model(
+        json!({"id":"custom","context_length":100,"max_context_length":4096}),
+    )];
+    let metadata = |_: &str| {
+        Some(ModelMetadata {
+            context_length: 2048,
+            ..Default::default()
+        })
+    };
+    let models = catalog(1).build_models(&available, &metadata, None, false);
+    assert_eq!(models[0]["context_window"], 4096);
+    assert_eq!(models[0]["max_context_window"], 4096);
+}
+
+#[test]
+fn non_template_priorities_are_stable_by_display_name() {
+    let available = vec![
+        model(json!({"id":"z","display_name":"Alpha"})),
+        model(json!({"id":"a","display_name":"Beta"})),
+    ];
+    let models = catalog(1).build_models(&available, &empty_metadata, None, false);
+    assert_eq!(models[0]["slug"], "z");
+    assert_eq!(models[1]["slug"], "a");
+    assert!(models[0]["priority"].as_i64() < models[1]["priority"].as_i64());
+}
+
+#[test]
+fn response_has_expected_envelope() {
+    let response = catalog(1).build_response(
+        &[model(json!({"id":"gpt-5.5"}))],
+        &empty_metadata,
+        None,
+        false,
+    );
+    assert_eq!(response["models"].as_array().unwrap().len(), 1);
+}

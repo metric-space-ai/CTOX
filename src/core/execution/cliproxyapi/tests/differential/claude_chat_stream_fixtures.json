@@ -1,0 +1,52 @@
+[
+  {
+    "name":"chat-stream-text-reasoning-usage",
+    "operation":"claude_to_chat_stream",
+    "model":"client-model",
+    "original_request":{"messages":[{"role":"user","content":"hi"}]},
+    "raw_sse_chunks":[
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"ignored-provider-model\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"why\"}}",
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}",
+      "data: {\"type\":\"message_stop\"}",
+      "data: {\"type\":\"ping\"}"
+    ]
+  },
+  {
+    "name":"chat-stream-completed-sparse-tools",
+    "operation":"claude_to_chat_stream",
+    "model":"claude",
+    "raw_sse_chunks":[
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"usage\":{}}}",
+      "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_b\",\"name\":\"second\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"b\\\":\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"2}\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":2}",
+      "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_a\",\"name\":\"first\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":0}",
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}"
+    ]
+  },
+  {
+    "name":"chat-stream-length-and-empty-delta",
+    "operation":"claude_to_chat_stream",
+    "model":"claude",
+    "raw_sse_chunks":[
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_3\"}}",
+      "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}",
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}"
+    ]
+  },
+  {
+    "name":"chat-stream-errors-and-ignored-input",
+    "operation":"claude_to_chat_stream",
+    "model":"claude",
+    "raw_sse_chunks":[
+      "event: ping",
+      "data: not-json",
+      "data: {\"type\":\"unknown\"}",
+      "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}"
+    ]
+  }
+]

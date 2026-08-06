@@ -1,0 +1,80 @@
+[
+  {
+    "name":"antigravity-chat-request-controls-system-media-tools",
+    "operation":"antigravity_chat_request",
+    "model":"gemini-3-pro",
+    "stream":true,
+    "input":{
+      "reasoning_effort":"HIGH","temperature":0.2,"top_p":0.8,"top_k":12,"max_tokens":99,"max_completion_tokens":101,"n":2,
+      "response_format":{"type":"json_schema","json_schema":{"schema":{"type":"object","properties":{"answer":{"type":"string"}}}}},
+      "modalities":["text","image","audio"],"image_config":{"aspect_ratio":"16:9","image_size":"2K"},
+      "messages":[
+        {"role":"system","content":[{"type":"text","text":"be exact"}]},
+        {"role":"user","content":[{"type":"text","text":"show"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,BBBB"}},{"type":"input_audio","input_audio":{"format":"mp3","data":"CCCC"}},{"type":"file","file":{"filename":"notes.pdf","file_data":"DDDD"}}]}
+      ],
+      "tools":[
+        {"type":"function","function":{"name":"read file","description":"Read","strict":true,"parameters":{"type":"object","properties":{"path":{"type":"string"}}}}},
+        {"google_search":{}},{"code_execution":{}},{"url_context":{}}
+      ]
+    }
+  },
+  {
+    "name":"antigravity-chat-request-history-tool-result",
+    "operation":"antigravity_chat_request",
+    "model":"gemini-3-flash",
+    "input":{"messages":[
+      {"role":"user","content":"run"},
+      {"role":"assistant","reasoning_content":"think","content":"calling","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read file","arguments":"{\"path\":\"a\"}"}}]},
+      {"role":"tool","tool_call_id":"call_1","content":"{\"ok\":true}"},
+      {"role":"user","content":"continue"}
+    ],"tools":[{"type":"function","function":{"name":"read file"}}]}
+  },
+  {
+    "name":"antigravity-chat-request-colliding-tools",
+    "operation":"antigravity_chat_request",
+    "model":"gemini-3-flash",
+    "input":{"messages":[{"role":"user","content":"run"}],"tools":[
+      {"type":"function","function":{"name":"read file"}},
+      {"type":"function","function":{"name":"read/file"}},
+      {"type":"function","function":{"name":"read file"}}
+    ],"tool_choice":{"type":"function","function":{"name":"read/file"}}}
+  },
+  {
+    "name":"antigravity-chat-request-legacy-generation-config",
+    "operation":"antigravity_chat_request",
+    "model":"gemini",
+    "input":{"messages":[{"role":"system","content":{"type":"text","text":"only"}}],"generation_config":{"seed":7},"max_completion_tokens":50}
+  },
+  {
+    "name":"antigravity-chat-non-stream-content-tool-image",
+    "operation":"antigravity_chat_non_stream",
+    "model":"ignored",
+    "original_request":{"tools":[{"type":"function","function":{"name":"read file"}},{"type":"function","function":{"name":"read/file"}}]},
+    "raw_json":{"response":{"responseId":"resp_1","modelVersion":"gemini-3","createTime":"2026-08-03T12:34:56Z","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14,"cachedContentTokenCount":2,"thoughtsTokenCount":1},"candidates":[
+      {"index":0,"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"why"},{"text":"answer"},{"functionCall":{"name":"read_file_3d71db33034e","args":{"path":"a"}}},{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}},
+      {"index":1,"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"other"}]}}
+    ]}}
+  },
+  {
+    "name":"antigravity-chat-non-stream-missing-response",
+    "operation":"antigravity_chat_non_stream",
+    "raw_json":{}
+  },
+  {
+    "name":"antigravity-chat-stream-state-final-and-first-candidate",
+    "operation":"antigravity_chat_stream",
+    "model":"fallback",
+    "original_request":{"tools":[{"type":"function","function":{"name":"read file"}}]},
+    "raw_sse_chunks":[
+      "{\"response\":{\"responseId\":\"resp_s\",\"modelVersion\":\"gemini-3\",\"createTime\":\"2026-08-03T12:34:56Z\",\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"thought\":true,\"text\":\"why\"},{\"text\":\"hello\"},{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"a\"}}}]}},{\"index\":1,\"content\":{\"parts\":[{\"text\":\"ignored\"}]}}]}}",
+      "{\"response\":{\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7,\"cachedContentTokenCount\":1},\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\",\"content\":{\"parts\":[]}}]}}",
+      "[DONE]"
+    ]
+  },
+  {
+    "name":"antigravity-chat-stream-empty-response-shell",
+    "operation":"antigravity_chat_stream",
+    "model":"fallback",
+    "raw_sse_chunks":["{\"response\":{}}"]
+  }
+]

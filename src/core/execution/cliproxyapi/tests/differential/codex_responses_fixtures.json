@@ -1,0 +1,63 @@
+[
+  {
+    "name": "codex-responses-string-input",
+    "operation": "codex_responses_request",
+    "model": "gpt-5.6",
+    "input": {"model":"gpt-5.6","input":"hello"}
+  },
+  {
+    "name": "codex-responses-required-fields-and-role",
+    "operation": "codex_responses_request",
+    "model": "gpt-5.6",
+    "stream": true,
+    "input": {"model":"gpt-5.6","stream":"true","store":true,"parallel_tool_calls":false,"include":["file_search_call.results","reasoning.encrypted_content"],"max_output_tokens":4096,"max_completion_tokens":2048,"temperature":0.2,"top_p":0.9,"service_tier":"standard","truncation":"auto","context_management":[{"type":"compaction"}],"user":"owner","input":[{"type":"message","role":"system","content":"rules"},{"type":"message","role":"user","content":"hello"}]}
+  },
+  {
+    "name": "codex-responses-priority-and-normalized",
+    "operation": "codex_responses_request",
+    "model": "gpt-5.6",
+    "stream": true,
+    "input": {"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"service_tier":"priority","input":[{"role":"assistant","content":"ok"}]}
+  },
+  {
+    "name": "codex-responses-tool-aliases",
+    "operation": "codex_responses_request",
+    "model": "gpt-5.4-mini",
+    "input": {"input":"search","tools":[{"type":"web_search_preview_2025_03_11"},{"type":"function","name":"f"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search_preview"},{"type":"web_search_preview_2025_03_11"}]}}
+  },
+  {
+    "name": "codex-responses-top-level-tool-choice",
+    "operation": "codex_responses_request",
+    "input": {"input":[],"tool_choice":{"type":"web_search_preview_2025_03_11"}}
+  },
+  {
+    "name": "codex-responses-stream-data",
+    "operation": "codex_responses_stream",
+    "raw_sse": "data:\n {\"type\":\"response.output_text.delta\"} \n"
+  },
+  {
+    "name": "codex-responses-stream-raw",
+    "operation": "codex_responses_stream",
+    "raw_sse": " data: {\"type\":\"x\"}"
+  },
+  {
+    "name": "codex-responses-completed",
+    "operation": "codex_responses_non_stream",
+    "raw_json": {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}
+  },
+  {
+    "name": "codex-responses-incomplete",
+    "operation": "codex_responses_non_stream",
+    "raw_json": {"type":"response.incomplete","response":{"id":"resp_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}
+  },
+  {
+    "name": "codex-responses-non-terminal",
+    "operation": "codex_responses_non_stream",
+    "raw_json": {"type":"response.output_text.delta","delta":"x","response":{}}
+  },
+  {
+    "name": "codex-responses-terminal-null",
+    "operation": "codex_responses_non_stream",
+    "raw_json": {"type":"response.completed","response":null}
+  }
+]

@@ -1,0 +1,23 @@
+[
+  {
+    "name":"chat-non-stream-text-cache-usage",
+    "operation":"claude_to_chat_non_stream",
+    "original_request":{"messages":[{"role":"user","content":"hi"}]},
+    "raw_sse":"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n"
+  },
+  {
+    "name":"chat-non-stream-reasoning-length",
+    "operation":"claude_to_chat_non_stream",
+    "raw_sse":"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"model\":\"claude\",\"usage\":{\"input_tokens\":1}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":2}}\n"
+  },
+  {
+    "name":"chat-non-stream-ordered-tools",
+    "operation":"claude_to_chat_non_stream",
+    "raw_sse":"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_3\",\"model\":\"claude\",\"usage\":{}}}\n\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_b\",\"name\":\"second\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"b\\\":2}\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_a\",\"name\":\"first\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n"
+  },
+  {
+    "name":"chat-non-stream-empty-defaults",
+    "operation":"claude_to_chat_non_stream",
+    "raw_sse":"event: ping\ndata: {\"type\":\"ping\"}\n\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_4\",\"model\":\"claude\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"stop_sequence\"}}\n"
+  }
+]

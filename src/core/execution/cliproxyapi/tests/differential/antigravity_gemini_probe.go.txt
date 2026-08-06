@@ -1,0 +1,37 @@
+package gemini
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxAGGeminiFixture struct { Name string `json:"name"`; Operation string `json:"operation"`; Model string `json:"model"`; Stream bool `json:"stream"`; Alt *string `json:"alt"`; Input json.RawMessage `json:"input"`; OriginalRequest json.RawMessage `json:"original_request"`; RawJSON json.RawMessage `json:"raw_json"`; RawSSE string `json:"raw_sse"` }
+type ctoxAGGeminiResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxAGGeminiDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxAGGeminiFixture; if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxAGGeminiResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        switch fixture.Operation {
+        case "antigravity_gemini_request":
+            converted := ConvertGeminiRequestToAntigravity(fixture.Model, fixture.Input, fixture.Stream)
+            if len(converted) == 0 { output = nil } else if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "antigravity_gemini_non_stream":
+            converted := ConvertAntigravityResponseToGeminiNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, nil)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "antigravity_gemini_stream":
+            ctx := context.Background(); if fixture.Alt != nil { ctx = context.WithValue(ctx, "alt", *fixture.Alt) }
+            converted := ConvertAntigravityResponseToGemini(ctx, fixture.Model, fixture.OriginalRequest, nil, []byte(fixture.RawSSE), nil)
+            values := make([]any, 0, len(converted)); for _, item := range converted { if len(item)==0 { values=append(values,nil) } else { var value any; if err=json.Unmarshal(item,&value); err!=nil { t.Fatal(err) }; values=append(values,value) } }; output=values
+        case "antigravity_gemini_count":
+            var value struct { Count int64 `json:"count"` }; if err=json.Unmarshal(fixture.Input,&value); err!=nil { t.Fatal(err) }; if err=json.Unmarshal(GeminiTokenCount(context.Background(),value.Count),&output); err!=nil { t.Fatal(err) }
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        results=append(results,ctoxAGGeminiResult{Name:fixture.Name,Output:output})
+    }
+    encoded,err:=json.MarshalIndent(results,"","  "); if err!=nil {t.Fatal(err)}; if err=os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"),encoded,0o600);err!=nil{t.Fatal(err)}
+}

@@ -1,0 +1,14 @@
+[
+  {"name":"gemini-no-contents-safety","operation":"gemini_passthrough_request","input":{"generationConfig":{"temperature":0.2}}},
+  {"name":"gemini-role-alternation","operation":"gemini_passthrough_request","input":{"contents":[{"parts":[{"text":"a"}]},{"role":"bad","parts":[{"text":"b"}]},{"role":"user","parts":[{"text":"c"}]},{"parts":[{"text":"d"}]}]}},
+  {"name":"gemini-tools-and-schema","operation":"gemini_passthrough_request","input":{"tools":[{"functionDeclarations":[{"name":"f","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}]}],"contents":[],"generationConfig":{"responseSchema":{"type":"string"}}}},
+  {"name":"gemini-function-name-backfill","operation":"gemini_passthrough_request","input":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"a","args":{}}},{"functionCall":{"name":"b","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"","response":{}}},{"functionResponse":{"response":{}}}]}],"safetySettings":null}},
+  {"name":"gemini-function-name-index-consumption","operation":"gemini_passthrough_request","input":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"a"}},{"functionCall":{"name":"b"}}]},{"role":"user","parts":[{"functionResponse":{"name":"already"}},{"functionResponse":{"name":" "}}]}]}},
+  {"name":"gemini-signature-first-call-only","operation":"gemini_signature_sanitize","input":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"a"}},{"functionCall":{"name":"b"}}]}]}},
+  {"name":"gemini-signature-response-drop","operation":"gemini_signature_sanitize","input":{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"a","thoughtSignature":"nested"},"thought_signature":"top"}]}]}},
+  {"name":"gemini-stream-data","operation":"gemini_passthrough_stream","raw_sse":"data: {\"candidates\":[]}\n"},
+  {"name":"gemini-stream-done","operation":"gemini_passthrough_stream","raw_sse":"data: [DONE]\n"},
+  {"name":"gemini-stream-raw","operation":"gemini_passthrough_stream","raw_sse":" {\"candidates\":[]} "},
+  {"name":"gemini-non-stream-raw","operation":"gemini_passthrough_non_stream","raw_text":" { \"candidates\" : [] } "},
+  {"name":"gemini-token-count","operation":"gemini_passthrough_count","input":{"count":17}}
+]

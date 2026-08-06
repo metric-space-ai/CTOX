@@ -1,0 +1,40 @@
+package registry
+
+import (
+	"encoding/json"
+	"os"
+	"testing"
+)
+
+type ctoxManagementModelsFixture struct {
+	Name      string `json:"name"`
+	Operation string `json:"operation"`
+	Model     string `json:"model"`
+}
+
+type ctoxManagementModelsResult struct {
+	Name   string `json:"name"`
+	Output any    `json:"output"`
+}
+
+func TestCtoxManagementModelsDifferential(t *testing.T) {
+	raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+	if err != nil { t.Fatal(err) }
+	var fixtures []ctoxManagementModelsFixture
+	if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+	results := make([]ctoxManagementModelsResult, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		if fixture.Operation != "management_static_models" {
+			t.Fatalf("unknown operation %q", fixture.Operation)
+		}
+		models := GetStaticModelDefinitionsByChannel(fixture.Model)
+		if models == nil { t.Fatalf("unknown channel %q", fixture.Model) }
+		results = append(results, ctoxManagementModelsResult{
+			Name: fixture.Name,
+			Output: map[string]any{"channel": fixture.Model, "models": models},
+		})
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err != nil { t.Fatal(err) }
+	if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

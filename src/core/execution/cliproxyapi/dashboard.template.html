@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="15">
+  <title>CLIProxyAPI Rust Port · CTOX</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e9edf5;
+      --muted: #91a0b7;
+      --panel: rgba(19, 27, 42, .82);
+      --line: rgba(157, 178, 211, .15);
+      --blue: #79a8ff;
+      --cyan: #58d3c2;
+      --amber: #f4bc68;
+      --rose: #ef7d91;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .32);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 300px;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 8% 0%, rgba(76, 117, 194, .23), transparent 32rem),
+        radial-gradient(circle at 95% 20%, rgba(48, 180, 156, .12), transparent 28rem),
+        #080d16;
+    }
+    main { width: min(1180px, 100%); margin: 0 auto; padding: 32px clamp(18px, 4vw, 52px) 64px; }
+    .eyebrow { color: var(--cyan); font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; text-transform: uppercase; }
+    h1 { margin: 10px 0 6px; font-size: clamp(28px, 5vw, 52px); line-height: .98; letter-spacing: -.045em; }
+    .subtitle { max-width: 760px; margin: 0; color: var(--muted); font-size: clamp(14px, 2vw, 18px); line-height: 1.5; }
+    .topline { display: flex; justify-content: space-between; gap: 22px; align-items: flex-start; }
+    .stamp { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; white-space: nowrap; }
+    .scope-boundary { margin-top: 22px; padding: 15px 18px; border: 1px solid rgba(244,188,104,.28); border-radius: 14px; color: #d7c29f; background: rgba(244,188,104,.065); font-size: 12px; line-height: 1.55; }
+    .scope-boundary strong { color: var(--amber); }
+    .hero { display: grid; grid-template-columns: minmax(220px, .72fr) minmax(0, 1.6fr); gap: 18px; margin-top: 28px; }
+    .panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); backdrop-filter: blur(16px); }
+    .progress-panel { padding: 26px; display: flex; flex-direction: column; justify-content: space-between; min-height: 250px; }
+    .progress-number { font-size: clamp(58px, 9vw, 92px); font-weight: 750; line-height: .9; letter-spacing: -.07em; }
+    .progress-number small { margin-left: 3px; color: var(--cyan); font-size: .28em; letter-spacing: 0; }
+    .progress-caption { margin-top: 9px; color: var(--ink); font-size: 14px; font-weight: 700; }
+    .bar { height: 8px; margin: 22px 0 12px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.07); }
+    .bar > span { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--cyan)); box-shadow: 0 0 24px rgba(88,211,194,.4); }
+    .bar.closure { height: 6px; margin-top: 10px; }
+    .bar.closure > span { background: linear-gradient(90deg, #ba7845, var(--amber)); box-shadow: 0 0 20px rgba(244,188,104,.28); }
+    .micro { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .checkpoint { padding: 26px; }
+    .checkpoint h2 { margin: 7px 0 20px; font-size: clamp(21px, 3vw, 30px); letter-spacing: -.025em; }
+    .work-list { display: grid; gap: 10px; }
+    .work { display: grid; grid-template-columns: 11px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 13px 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.025); }
+    .dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: #536078; }
+    .work[data-status="in_progress"] .dot { background: var(--cyan); box-shadow: 0 0 0 4px rgba(88,211,194,.12); }
+    .work[data-status="complete"] .dot { background: var(--blue); }
+    .work-title { font-size: 14px; font-weight: 650; }
+    .work-detail { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .status { padding: 4px 7px; border-radius: 999px; color: var(--muted); background: rgba(255,255,255,.05); font: 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+    .work[data-status="in_progress"] .status { color: var(--cyan); background: rgba(88,211,194,.09); }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .metric { padding: 17px 18px; border: 1px solid var(--line); border-radius: 15px; background: rgba(16,24,38,.66); }
+    .metric strong { display: block; font-size: 24px; letter-spacing: -.035em; }
+    .metric span { color: var(--muted); font-size: 11px; }
+    .waves { margin-top: 18px; padding: 23px; }
+    .waves h3 { margin: 4px 0 17px; font-size: 18px; }
+    .wave-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .wave { padding: 13px 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.025); }
+    .wave strong { display: block; color: var(--amber); font-size: 21px; }
+    .wave span { display: block; margin-top: 3px; color: var(--muted); font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .audit-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+    .audit-clusters { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .audit-paths { margin-top: 7px; color: #b9c9e4; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .integration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .provider-mode { padding: 17px 18px; border: 1px solid var(--line); border-radius: 15px; background: rgba(16,24,38,.66); }
+    .provider-mode header { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .provider-mode h4 { margin: 0; font-size: 15px; }
+    .provider-mode header span { color: var(--muted); font-size: 10px; text-align: right; }
+    .gate-list { display: grid; gap: 6px; margin-top: 14px; }
+    .gate { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; }
+    .gate::before { width: 7px; height: 7px; border-radius: 50%; background: #536078; content: ""; }
+    .gate[data-state="verified"]::before { background: var(--cyan); }
+    .gate[data-state="partial"]::before { background: var(--amber); }
+    .gate[data-state="pending"]::before { background: var(--rose); }
+    .gate[data-state="not_applicable"] { opacity: .48; }
+    .gate-state { font: 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+    .next-gate { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line); color: #bdc8d9; font-size: 10px; line-height: 1.45; }
+    .lower { display: grid; grid-template-columns: 1.12fr .88fr; gap: 18px; margin-top: 18px; }
+    .section { padding: 23px; }
+    .section h3 { margin: 4px 0 17px; font-size: 18px; }
+    .timeline { display: grid; gap: 0; }
+    .event { position: relative; display: grid; grid-template-columns: 78px minmax(0,1fr) auto; gap: 12px; padding: 0 0 20px 20px; border-left: 1px solid var(--line); }
+    .event:last-child { padding-bottom: 0; }
+    .event::before { position: absolute; left: -5px; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--blue); content: ""; }
+    .event time { color: var(--muted); font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .event b { display: block; font-size: 13px; }
+    .event p { margin: 3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .points { color: var(--cyan); font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .risk { padding: 12px 0; border-top: 1px solid var(--line); }
+    .risk:first-of-type { border-top: 0; padding-top: 0; }
+    .risk-head { display: flex; gap: 9px; align-items: center; font-size: 13px; font-weight: 650; }
+    .pill { padding: 3px 6px; border-radius: 6px; color: var(--amber); background: rgba(244,188,104,.1); font: 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+    .risk[data-level="high"] .pill { color: var(--rose); background: rgba(239,125,145,.1); }
+    .risk p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .strategy { margin: 18px 0 0; padding: 0; list-style: none; }
+    .strategy li { position: relative; padding: 8px 0 8px 18px; color: #c6d0df; font-size: 12px; line-height: 1.5; border-top: 1px solid var(--line); }
+    .strategy li::before { position: absolute; left: 0; color: var(--cyan); content: "↳"; }
+    footer { margin-top: 22px; color: #637088; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    code { color: #b9c9e4; }
+    @media (max-width: 760px) {
+      main { padding-top: 22px; }
+      .topline { display: block; }
+      .stamp { margin-top: 13px; text-align: left; }
+      .hero, .lower { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .wave-grid { grid-template-columns: repeat(2, 1fr); }
+      .audit-summary, .audit-clusters { grid-template-columns: 1fr; }
+      .integration-grid { grid-template-columns: 1fr; }
+      .event { grid-template-columns: 68px minmax(0,1fr); }
+      .points { grid-column: 2; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topline">
+      <div>
+        <div class="eyebrow">CTOX · Zwei getrennte Tracks</div>
+        <h1 id="title"></h1>
+        <p class="subtitle" id="subtitle"></p>
+      </div>
+      <div class="stamp">Accepted Pin <code id="commit"></code><br><span id="candidate-state"></span> · Dashboard __UPDATED__</div>
+    </div>
+
+    <div class="scope-boundary"><strong>Keine Gesamtprojekt-Prozentzahl:</strong> Track A misst ausschließlich die Freigabe des portablen CLIProxyAPI-Rust-Ports gegen seinen Upstream-Pin. Track B misst separat, welche Provider-Zugangsarten tatsächlich in CTOX, Business OS und Pi integriert sind. 100 % in Track A sagt nichts über den Abschluss von Track B aus.</div>
+
+    <section class="hero">
+      <article class="panel progress-panel">
+        <div>
+          <div class="eyebrow">Track A · Reiner CLIProxy Rust Port</div>
+          <div class="progress-number"><span id="overall-percent"></span><small>%</small></div>
+          <div class="progress-caption">Accepted-Pin-Freigabe: <span id="completion-units-done"></span>/<span id="completion-units-total"></span> überprüfbare Port-Aktionen</div>
+          <div class="bar"><span id="overall-progress-bar"></span></div>
+          <div class="micro">Port-Release-Status: <strong id="project-status"></strong></div>
+          <div class="micro"><span id="candidate-cycle-label"></span>: <strong><span id="candidate-reviewed"></span>/<span id="candidate-total"></span></strong> Dateien reviewed · <span id="candidate-pending"></span> pending · <span id="candidate-gates"></span>/<span id="candidate-gates-total"></span> Promotion-Gates · Promotion <span id="candidate-promoted"></span></div>
+          <div class="micro" id="completion-formula"></div>
+          <div class="micro">Accepted Pin abgeschlossen: <strong><span id="closed-production"></span>/<span id="production-total"></span> Produktion und <span id="verified-tests"></span>/<span id="test-total"></span> Tests strikt</strong></div>
+          <div class="micro">Historischer Semantik-Scope des Accepted Pins: <span id="earned"></span>/<span id="total"></span> Punkte · ausdrücklich kein aktuelles Completionmaß</div>
+          <div class="micro">Accepted-Pin-Evidenz: <span id="verified-production"></span> Produktion · <span id="verified-at"></span></div>
+        </div>
+        <div class="micro">Abschlussbedingung: <strong id="target"></strong></div>
+      </article>
+      <article class="panel checkpoint">
+        <div class="eyebrow">Aktueller Gate</div>
+        <h2 id="checkpoint"></h2>
+        <div class="work-list" id="work-list"></div>
+      </article>
+    </section>
+
+    <section class="metrics" id="metrics"></section>
+
+    <section class="panel waves" id="ctox-provider-integration">
+      <div class="eyebrow">Track B · CTOX Provider Integration</div>
+      <h3>Provider-Accounts, Business OS und Pi · <span id="integration-status"></span></h3>
+      <p class="micro">Eigenständiger boolescher Capability-Ledger aus <code>src/core/execution/cliproxyapi_integration/provider-integration.json</code>. Gate-Zähler sind keine Prozentzahl und werden nicht mit Track A verrechnet.</p>
+      <div class="audit-summary" id="integration-summary"></div>
+      <div class="integration-grid" id="integration-grid"></div>
+    </section>
+
+    <section class="panel waves">
+      <div class="eyebrow">Module-first Porting</div>
+      <h3><span id="closed-modules"></span>/<span id="total-modules"></span> Module live geschlossen · partial zählt offen</h3>
+      <div class="wave-grid" id="module-grid"></div>
+    </section>
+
+    <section class="panel waves">
+      <div class="eyebrow">Checkpoint 18 · Repository Scope</div>
+      <h3>Offene Produktionsdateien nach Closure-Welle</h3>
+      <div class="wave-grid" id="wave-grid"></div>
+    </section>
+
+    <section class="panel waves" id="strict-credit-audit">
+      <div class="eyebrow">Strict-Credit Audit</div>
+      <h3>Mechanische Disposition ist nicht gleich evidenzbasierte Closure</h3>
+      <div class="audit-summary" id="audit-summary"></div>
+      <div class="audit-clusters" id="audit-clusters"></div>
+    </section>
+
+    <section class="lower">
+      <article class="panel section">
+        <div class="eyebrow">Worker-Abschlüsse</div>
+        <h3>Historische Worker-Evidenz · damalige Scopewerte sind kein aktuelles Completionmaß</h3>
+        <div class="timeline" id="timeline"></div>
+      </article>
+      <article class="panel section">
+        <div class="eyebrow">Forensischer Fokus</div>
+        <h3>Risiken & historische Strategieentscheidungen</h3>
+        <div id="risks"></div>
+        <ul class="strategy" id="strategy"></ul>
+      </article>
+    </section>
+    <footer>Track A: project-state.json + port-map.json + mirror-closure.json + strict-credit-audit.json · Track B: src/core/execution/cliproxyapi_integration/provider-integration.json · Generiert als standalone HTML · Kein externer Request<br><span id="artifact-integrity"></span></footer>
+  </main>
+  <script>
+    const decodeJson = (encoded) => JSON.parse(new TextDecoder().decode(
+      Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
+    ));
+    const state = decodeJson('__STATE_B64__');
+    const summary = decodeJson('__SUMMARY_B64__');
+    const closure = decodeJson('__CLOSURE_B64__');
+    const moduleMap = decodeJson('__MODULE_B64__');
+    const strictAudit = decodeJson('__AUDIT_B64__');
+    const integration = decodeJson('__INTEGRATION_B64__');
+    const artifact = decodeJson('__ARTIFACT_B64__');
+    const $ = (id) => document.getElementById(id);
+    $('title').textContent = state.title;
+    $('subtitle').textContent = state.subtitle;
+    $('commit').textContent = state.upstream_commit.slice(0, 8);
+    const candidate = state.upstream_candidate;
+    const hasOpenCandidate = !(candidate.promoted
+      && state.project_completion.post_promotion_full_gate
+      && candidate.commit === state.upstream_commit);
+    $('candidate-state').textContent = hasOpenCandidate
+      ? `Offener Candidate ${candidate.commit.slice(0, 8)}`
+      : `Kein offener Candidate · letzter Zyklus ${candidate.commit.slice(0, 8)}`;
+    $('earned').textContent = state.coverage.earned;
+    $('total').textContent = state.coverage.total.toLocaleString('de-DE');
+    $('target').textContent = hasOpenCandidate
+      ? `${candidate.inventory_total}/${candidate.inventory_total} Candidate-Reviews · ${candidate.gates_total}/${candidate.gates_total} Gates · explizite Pin-Promotion · erneuter Full-Gate`
+      : 'Kein offener Upstream-Candidate · nächster Zyklus beginnt mit einem neuen vollständigen Delta-Inventar';
+    $('checkpoint').textContent = state.checkpoint.name;
+    const strictProduction = state.mirror_verification.strict_production_files;
+    const candidatePercent = candidate.inventory_total === 0
+      ? 0
+      : (candidate.reviewed / candidate.inventory_total) * 100;
+    const completionUnitsTotal = candidate.inventory_total + candidate.gates_total + 2;
+    const completionUnitsDone = candidate.reviewed + candidate.gates_passed
+      + (candidate.promoted ? 1 : 0)
+      + (state.project_completion.post_promotion_full_gate ? 1 : 0);
+    const overallPercent = completionUnitsTotal === 0
+      ? 0
+      : (completionUnitsDone / completionUnitsTotal) * 100;
+    const verifiedProduction = state.mirror_verification.verified_classified_production_files;
+    $('project-status').textContent = state.project_completion.complete ? 'ABGESCHLOSSEN' : 'IN ARBEIT';
+    $('overall-percent').textContent = overallPercent.toLocaleString('de-DE', {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1
+    });
+    $('overall-progress-bar').style.width = `${Math.min(100, Math.max(0, overallPercent))}%`;
+    $('completion-units-done').textContent = completionUnitsDone.toLocaleString('de-DE');
+    $('completion-units-total').textContent = completionUnitsTotal.toLocaleString('de-DE');
+    $('candidate-cycle-label').textContent = hasOpenCandidate ? 'Aktueller Candidate' : 'Letzter abgeschlossener Promotionszyklus';
+    $('completion-formula').textContent = `${hasOpenCandidate ? 'Aktuelle Formel' : 'Historische Freigabeformel'}: ${candidate.reviewed} Reviews + ${candidate.gates_passed} Gates + ${candidate.promoted ? 1 : 0} Promotion + ${state.project_completion.post_promotion_full_gate ? 1 : 0} Post-Full-Gate = ${completionUnitsDone}/${completionUnitsTotal}`;
+    $('candidate-reviewed').textContent = candidate.reviewed.toLocaleString('de-DE');
+    $('candidate-total').textContent = candidate.inventory_total.toLocaleString('de-DE');
+    $('candidate-pending').textContent = candidate.pending.toLocaleString('de-DE');
+    $('candidate-gates').textContent = candidate.gates_passed.toLocaleString('de-DE');
+    $('candidate-gates-total').textContent = candidate.gates_total.toLocaleString('de-DE');
+    $('candidate-promoted').textContent = candidate.promoted ? 'JA' : 'NEIN';
+    $('verified-production').textContent = verifiedProduction.toLocaleString('de-DE');
+    $('verified-tests').textContent = state.mirror_verification.verified_test_files.toLocaleString('de-DE');
+    $('test-total').textContent = summary.test_go_files.toLocaleString('de-DE');
+    $('verified-at').textContent = state.mirror_verification.verified_at;
+    $('closed-production').textContent = strictProduction.toLocaleString('de-DE');
+    $('production-total').textContent = summary.production_go_files.toLocaleString('de-DE');
+    $('work-list').innerHTML = state.work_items.filter(item => item.status !== 'complete').map(item => `
+      <div class="work" data-status="${item.status}">
+        <span class="dot"></span><div><div class="work-title">${item.title}</div>
+        <div class="work-detail">${item.detail}</div></div><span class="status">${item.status.replace('_',' ')}</span>
+      </div>`).join('');
+
+    const metrics = [
+      [`${overallPercent.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %`, 'Track A · Port-Freigabe am Accepted Pin'],
+      [candidate.reviewed, `${hasOpenCandidate ? 'Candidate' : 'Letzter Zyklus'} · Reviews vollständig`],
+      [candidate.pending, `${hasOpenCandidate ? 'Candidate' : 'Letzter Zyklus'} · Reviews pending`],
+      [candidate.gates_passed, `${hasOpenCandidate ? 'Candidate' : 'Letzter Zyklus'} · Gates bestanden`]
+    ];
+    $('metrics').innerHTML = metrics.map(([value, label]) => `<div class="metric"><strong>${typeof value === 'number' ? value.toLocaleString('de-DE') : value}</strong><span>${label}</span></div>`).join('');
+
+    const integrationGateLabels = Object.fromEntries(
+      integration.gate_definitions.map(gate => [gate.id, gate.label])
+    );
+    const integrationEntries = integration.provider_modes.flatMap(mode =>
+      Object.entries(mode.gates).map(([gate, status]) => ({ gate, status }))
+    );
+    const integrationCounts = Object.fromEntries(
+      integration.status_vocabulary.map(status => [
+        status,
+        integrationEntries.filter(entry => entry.status === status).length,
+      ])
+    );
+    $('integration-status').textContent = integration.completion_rule.complete
+      ? 'ABGESCHLOSSEN'
+      : 'OFFENE INTEGRATIONSGATES';
+    $('integration-summary').innerHTML = [
+      [integrationCounts.verified, 'Gates verifiziert'],
+      [integrationCounts.partial, 'Gates partiell'],
+      [integrationCounts.pending, 'Gates pending'],
+      [integrationCounts.not_applicable, 'Gates nicht anwendbar'],
+    ].map(([value, label]) => `<div class="metric"><strong>${value.toLocaleString('de-DE')}</strong><span>${label}</span></div>`).join('');
+    $('integration-grid').innerHTML = integration.provider_modes.map(mode => {
+      const applicable = Object.values(mode.gates).filter(status => status !== 'not_applicable');
+      const verified = applicable.filter(status => status === 'verified').length;
+      const gates = Object.entries(mode.gates).map(([gate, status]) => `
+        <div class="gate" data-state="${status}"><span>${integrationGateLabels[gate]}</span><span class="gate-state">${status.replace('_', ' ')}</span></div>
+      `).join('');
+      return `<article class="provider-mode"><header><h4>${mode.provider}</h4><span>${mode.access_mode}<br>${verified}/${applicable.length} anwendbare Gates verifiziert</span></header><div class="gate-list">${gates}</div><div class="next-gate"><strong>Nächster Gate:</strong> ${mode.next_gate}</div></article>`;
+    }).join('');
+    $('wave-grid').innerHTML = closure.waves.map(item => `<div class="wave"><strong>${item.open.toLocaleString('de-DE')}</strong><span>${item.id}</span></div>`).join('');
+    $('closed-modules').textContent = moduleMap.summary.closed_live.toLocaleString('de-DE');
+    $('total-modules').textContent = moduleMap.summary.modules.toLocaleString('de-DE');
+    $('module-grid').innerHTML = moduleMap.modules
+      .filter(item => item.status !== 'closed_live')
+      .slice(0, 12)
+      .map(item => `<div class="wave"><strong>${item.production_open + item.test_open}</strong><span>${item.id}<br>${item.status} · ${item.production_open} prod / ${item.test_open} tests offen</span></div>`)
+      .join('');
+
+    const auditSummary = [
+      [strictAudit.mechanical_closure.production, 'Produktion mechanisch'],
+      [strictAudit.strict_closure.production, 'Produktion strikt'],
+      [strictAudit.gap.production, 'Produktions-Gap'],
+      [strictAudit.gap.tests, 'Test-Gap']
+    ];
+    $('audit-summary').innerHTML = auditSummary
+      .map(([value, label]) => `<div class="metric"><strong>${Number(value).toLocaleString('de-DE')}</strong><span>${label}</span></div>`)
+      .join('');
+    const renderAuditCluster = (cluster, stateLabel) => {
+      const paths = [...cluster.production, ...cluster.tests];
+      return `<div class="wave"><strong>${cluster.production.length}+${cluster.tests.length}</strong><span>${cluster.cluster} · ${stateLabel} · Produktion + Tests</span><div class="audit-paths">${paths.join('<br>')}</div><div class="micro">${cluster.reason}</div></div>`;
+    };
+    $('audit-clusters').innerHTML = strictAudit.reconstructed
+      .map(cluster => renderAuditCluster(cluster, 'offen rekonstruiert'))
+      .concat(strictAudit.closed_reconstructed.map(cluster => renderAuditCluster(cluster, 'geschlossen rekonstruiert')))
+      .concat([
+      strictAudit.umbrella_receipt
+        ? `<div class="wave"><strong>${strictAudit.umbrella_receipt.credited_production}+${strictAudit.umbrella_receipt.credited_tests}</strong><span>historische Ledgerlücke · per Umbrella-Receipt geschlossen</span><div class="audit-paths">${strictAudit.umbrella_receipt.path}</div><div class="micro">SHA-256 ${strictAudit.umbrella_receipt.sha256}</div></div>`
+        : `<div class="wave"><strong>${strictAudit.unresolved_ledger_membership.production}+${strictAudit.unresolved_ledger_membership.tests}</strong><span>ledger-membership unresolved · Produktion + Tests</span><div class="micro">${strictAudit.unresolved_ledger_membership.reason}</div></div>`
+    ]).join('');
+
+    $('timeline').innerHTML = state.completed_workers.slice().reverse().map(item => `
+      <div class="event"><time>${item.completed}</time><div><b>${item.title}</b><p>${item.evidence}</p></div><span class="points">+${item.points}</span></div>`).join('');
+    $('risks').innerHTML = state.risks.map(item => `<div class="risk" data-level="${item.level}"><div class="risk-head"><span class="pill">${item.level}</span>${item.title}</div><p>${item.detail}</p></div>`).join('');
+    $('strategy').innerHTML = state.strategy.map(item => `<li>${item}</li>`).join('');
+    $('artifact-integrity').textContent = `${artifact.schema} · Inputs ${Object.values(artifact.input_sha256).map(hash => hash.slice(0, 12)).join(' · ')}`;
+  </script>
+</body>
+</html>

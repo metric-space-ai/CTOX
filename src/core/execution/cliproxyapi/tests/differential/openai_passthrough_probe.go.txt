@@ -1,0 +1,35 @@
+package chat_completions
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxOpenAIPassthroughFixture struct { Name string `json:"name"`; Operation string `json:"operation"`; Model string `json:"model"`; Stream bool `json:"stream"`; Input json.RawMessage `json:"input"`; RawSSE string `json:"raw_sse"`; RawText string `json:"raw_text"` }
+type ctoxOpenAIPassthroughResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxOpenAIPassthroughDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxOpenAIPassthroughFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxOpenAIPassthroughResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        switch fixture.Operation {
+        case "openai_passthrough_request":
+            converted := ConvertOpenAIRequestToOpenAI(fixture.Model, fixture.Input, fixture.Stream)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "openai_passthrough_stream":
+            converted := ConvertOpenAIResponseToOpenAI(context.Background(), fixture.Model, nil, nil, []byte(fixture.RawSSE), nil)
+            values := make([]string, 0, len(converted)); for _, item := range converted { values = append(values, string(item)) }; output = values
+        case "openai_passthrough_non_stream":
+            output = string(ConvertOpenAIResponseToOpenAINonStream(context.Background(), fixture.Model, nil, nil, []byte(fixture.RawText), nil))
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        results = append(results, ctoxOpenAIPassthroughResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

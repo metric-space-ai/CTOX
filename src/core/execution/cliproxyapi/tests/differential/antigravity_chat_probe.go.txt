@@ -1,0 +1,68 @@
+package chat_completions
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxAntigravityChatFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawJSON json.RawMessage `json:"raw_json"`
+    RawSSEChunks []string `json:"raw_sse_chunks"`
+}
+type ctoxAntigravityChatResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func normalizeAntigravityChat(value any) {
+    switch typed := value.(type) {
+    case map[string]any:
+        delete(typed, "created")
+        if typed["type"] == "function" && typed["function"] != nil {
+            typed["id"] = "call_<dynamic>"
+        }
+        for _, child := range typed { normalizeAntigravityChat(child) }
+    case []any:
+        for _, child := range typed { normalizeAntigravityChat(child) }
+    }
+}
+
+func TestCtoxAntigravityChatDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxAntigravityChatFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxAntigravityChatResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        switch fixture.Operation {
+        case "antigravity_chat_request":
+            converted := ConvertOpenAIRequestToAntigravity(fixture.Model, fixture.Input, fixture.Stream)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "antigravity_chat_non_stream":
+            var state any
+            converted := ConvertAntigravityResponseToOpenAINonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, &state)
+            if len(converted) == 0 { output = nil } else if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "antigravity_chat_stream":
+            var state any
+            values := make([]any, 0)
+            for _, chunk := range fixture.RawSSEChunks {
+                for _, converted := range ConvertAntigravityResponseToOpenAI(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &state) {
+                    var value any
+                    if err = json.Unmarshal(converted, &value); err != nil { t.Fatal(err) }
+                    values = append(values, value)
+                }
+            }
+            output = values
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        normalizeAntigravityChat(output)
+        results = append(results, ctoxAntigravityChatResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

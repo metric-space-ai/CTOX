@@ -1,0 +1,52 @@
+[
+  {
+    "name": "pinned-claude-static-model-catalog",
+    "operation": "management_static_models",
+    "model": "claude"
+  },
+  {
+    "name": "pinned-gemini-static-model-catalog",
+    "operation": "management_static_models",
+    "model": "gemini"
+  },
+  {
+    "name": "pinned-vertex-static-model-catalog",
+    "operation": "management_static_models",
+    "model": "vertex"
+  },
+  {
+    "name": "pinned-aistudio-static-model-catalog",
+    "operation": "management_static_models",
+    "model": "aistudio"
+  },
+  {
+    "name": "pinned-codex-pro-plus-builtins-catalog",
+    "operation": "management_static_models",
+    "model": "codex"
+  },
+  {
+    "name": "pinned-kimi-static-model-catalog",
+    "operation": "management_static_models",
+    "model": "kimi"
+  },
+  {
+    "name": "pinned-antigravity-static-model-catalog",
+    "operation": "management_static_models",
+    "model": "antigravity"
+  },
+  {
+    "name": "pinned-xai-plus-builtins-catalog",
+    "operation": "management_static_models",
+    "model": "xai"
+  },
+  {
+    "name": "pinned-x-ai-alias-catalog",
+    "operation": "management_static_models",
+    "model": "x-ai"
+  },
+  {
+    "name": "pinned-grok-alias-catalog",
+    "operation": "management_static_models",
+    "model": "grok"
+  }
+]

@@ -1,0 +1,68 @@
+package chat_completions
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxGeminiChatFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawJSON json.RawMessage `json:"raw_json"`
+    RawSSEChunks []string `json:"raw_sse_chunks"`
+}
+type ctoxGeminiChatResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func normalizeGeminiChat(value any) {
+    switch typed := value.(type) {
+    case map[string]any:
+        delete(typed, "created")
+        if typed["type"] == "function" && typed["function"] != nil {
+            typed["id"] = "call_<dynamic>"
+        }
+        for _, child := range typed { normalizeGeminiChat(child) }
+    case []any:
+        for _, child := range typed { normalizeGeminiChat(child) }
+    }
+}
+
+func TestCtoxGeminiChatDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxGeminiChatFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxGeminiChatResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        switch fixture.Operation {
+        case "gemini_chat_request":
+            converted := ConvertOpenAIRequestToGemini(fixture.Model, fixture.Input, fixture.Stream)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "gemini_chat_non_stream":
+            var state any
+            converted := ConvertGeminiResponseToOpenAINonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, &state)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "gemini_chat_stream":
+            var state any
+            values := make([]any, 0)
+            for _, chunk := range fixture.RawSSEChunks {
+                for _, converted := range ConvertGeminiResponseToOpenAI(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &state) {
+                    var value any
+                    if err = json.Unmarshal(converted, &value); err != nil { t.Fatal(err) }
+                    values = append(values, value)
+                }
+            }
+            output = values
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        normalizeGeminiChat(output)
+        results = append(results, ctoxGeminiChatResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

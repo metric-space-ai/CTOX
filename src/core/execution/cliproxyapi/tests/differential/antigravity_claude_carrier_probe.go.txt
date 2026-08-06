@@ -1,0 +1,50 @@
+package claude
+
+import (
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxAGClaudeCarrierFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Input json.RawMessage `json:"input"`
+}
+
+type ctoxAGClaudeCarrierResult struct {
+    Name string `json:"name"`
+    Output any `json:"output"`
+}
+
+func TestCtoxAGClaudeCarrierDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxAGClaudeCarrierFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxAGClaudeCarrierResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var input struct {
+            RawSignature string `json:"raw_signature"`
+            Direction string `json:"direction"`
+            TargetKind string `json:"target_kind"`
+        }
+        var output any
+        switch fixture.Operation {
+        case "antigravity_claude_carrier_encode":
+            if err = json.Unmarshal(fixture.Input, &input); err != nil { t.Fatal(err) }
+            output = encodeGeminiClaudeCarrierSignature(input.RawSignature, input.Direction, input.TargetKind)
+        case "antigravity_claude_carrier_decode":
+            if err = json.Unmarshal(fixture.Input, &input); err != nil { t.Fatal(err) }
+            signature, direction, targetKind, marked, ok := decodeGeminiClaudeCarrierSignature(input.RawSignature)
+            output = map[string]any{"signature": signature, "direction": direction, "target_kind": targetKind, "marked": marked, "ok": ok}
+        case "antigravity_claude_carrier_filter":
+            converted := StripInvalidGeminiSignatureThinkingBlocks(fixture.Input)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        default:
+            t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        results = append(results, ctoxAGClaudeCarrierResult{Name: fixture.Name, Output: output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

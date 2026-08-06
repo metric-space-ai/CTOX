@@ -1,0 +1,90 @@
+package responses
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+)
+
+type ctoxInteractionsFixture struct {
+	Name            string          `json:"name"`
+	Operation       string          `json:"operation"`
+	Model           string          `json:"model"`
+	Stream          bool            `json:"stream"`
+	Input           json.RawMessage `json:"input"`
+	OriginalRequest json.RawMessage `json:"original_request"`
+	RawJSON         json.RawMessage `json:"raw_json"`
+	RawSSEChunks    []string        `json:"raw_sse_chunks"`
+}
+
+type ctoxInteractionsResult struct {
+	Name   string          `json:"name"`
+	Output json.RawMessage `json:"output"`
+}
+
+func TestCtoxInteractionsResponsesDifferential(t *testing.T) {
+	fixturesRaw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+	if err != nil { t.Fatal(err) }
+	var fixtures []ctoxInteractionsFixture
+	if err := json.Unmarshal(fixturesRaw, &fixtures); err != nil { t.Fatal(err) }
+	results := make([]ctoxInteractionsResult, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		var output []byte
+		switch fixture.Operation {
+		case "responses_request_to_interactions":
+			output = ConvertOpenAIResponsesRequestToInteractions(fixture.Model, fixture.Input, fixture.Stream)
+		case "interactions_request_to_responses":
+			output = ConvertInteractionsRequestToOpenAIResponses(fixture.Model, fixture.Input, fixture.Stream)
+		case "interactions_to_responses_non_stream":
+			output = ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, nil)
+		case "interactions_to_responses_stream":
+			var param any
+			events := make([]map[string]any, 0)
+			for _, chunk := range fixture.RawSSEChunks {
+				for _, rawEvent := range ConvertInteractionsResponseToOpenAIResponses(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &param) {
+					events = append(events, ctoxInteractionsEvent(t, rawEvent))
+				}
+			}
+			output, err = json.Marshal(events)
+			if err != nil { t.Fatal(err) }
+		case "responses_to_interactions_non_stream":
+			output = ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, nil)
+		case "responses_to_interactions_stream":
+			var param any
+			events := make([]map[string]any, 0)
+			for _, chunk := range fixture.RawSSEChunks {
+				for _, rawEvent := range ConvertOpenAIResponsesResponseToInteractions(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &param) {
+					events = append(events, ctoxInteractionsEvent(t, rawEvent))
+				}
+			}
+			output, err = json.Marshal(events)
+			if err != nil { t.Fatal(err) }
+		default:
+			t.Fatalf("unknown operation %q", fixture.Operation)
+		}
+		if !json.Valid(output) { t.Fatalf("%s returned invalid JSON: %s", fixture.Name, output) }
+		results = append(results, ctoxInteractionsResult{Name: fixture.Name, Output: output})
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err != nil { t.Fatal(err) }
+	if err := os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}
+
+func ctoxInteractionsEvent(t *testing.T, raw []byte) map[string]any {
+	lines := strings.Split(string(raw), "\n")
+	eventName := ""
+	data := ""
+	for _, line := range lines {
+		if strings.HasPrefix(line, "event:") { eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:")) }
+		if strings.HasPrefix(line, "data:") { data = strings.TrimSpace(strings.TrimPrefix(line, "data:")) }
+	}
+	var decoded any
+	if data == "[DONE]" {
+		decoded = data
+	} else if err := json.Unmarshal([]byte(data), &decoded); err != nil {
+		t.Fatalf("invalid SSE data %q: %v", data, err)
+	}
+	return map[string]any{"event": eventName, "data": decoded}
+}

@@ -1,0 +1,39 @@
+package chat_completions
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxClaudeChatStreamFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawSSEChunks []string `json:"raw_sse_chunks"`
+}
+type ctoxClaudeChatStreamResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxClaudeChatStreamDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxClaudeChatStreamFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxClaudeChatStreamResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var state any
+        output := make([]any, 0)
+        for _, chunk := range fixture.RawSSEChunks {
+            for _, converted := range ConvertClaudeResponseToOpenAI(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &state) {
+                var value map[string]any
+                if err = json.Unmarshal(converted, &value); err != nil { t.Fatal(err) }
+                delete(value, "created")
+                output = append(output, value)
+            }
+        }
+        results = append(results, ctoxClaudeChatStreamResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

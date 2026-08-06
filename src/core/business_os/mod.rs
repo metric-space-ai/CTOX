@@ -5,6 +5,7 @@ mod app_runtime;
 mod ats_gates;
 mod backup_restore;
 mod browser_control;
+mod hashing;
 mod browser_runtime;
 mod capability;
 mod command_plane;

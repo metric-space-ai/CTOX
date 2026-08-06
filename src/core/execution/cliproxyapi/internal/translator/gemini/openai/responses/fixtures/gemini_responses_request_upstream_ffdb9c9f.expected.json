@@ -1,0 +1,1337 @@
+[
+  {
+    "name": "gemini-simple-string",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "hello"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-system-media-generation",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "inspect"
+            },
+            {
+              "inline_data": {
+                "data": "aW1n",
+                "mime_type": "image/png"
+              }
+            },
+            {
+              "inline_data": {
+                "data": "YXVkaW8=",
+                "mime_type": "audio/mpeg"
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 42,
+        "stopSequences": [
+          "END",
+          "STOP"
+        ],
+        "temperature": 0.5,
+        "thinkingConfig": {
+          "thinkingBudget": -1
+        },
+        "topP": 0.9
+      },
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Be precise."
+          },
+          {
+            "text": "Use evidence."
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "gemini-role-split-and-trailing-prefill",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "question"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "historical answer"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "text": "follow-up"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-tools-and-structured-output",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "return JSON"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {
+        "responseJsonSchema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "type": "object"
+        },
+        "responseMimeType": "application/json",
+        "thinkingConfig": {
+          "thinkingLevel": "high"
+        }
+      },
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "Read",
+              "name": "_1_read_file",
+              "parametersJsonSchema": {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-parallel-functions-output-order",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {
+                  "x": 1
+                },
+                "id": "call-a",
+                "name": "first"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            },
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-b",
+                "name": "second"
+              }
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "call-a",
+                "name": "first",
+                "response": {
+                  "result": {
+                    "ok": true
+                  }
+                }
+              }
+            },
+            {
+              "functionResponse": {
+                "id": "call-b",
+                "name": "second",
+                "response": {
+                  "result": "plain"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-reasoning-and-function",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "consider",
+              "thought": true
+            },
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-run",
+                "name": "run"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "call-run",
+                "name": "run",
+                "response": {
+                  "result": "done"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-native-leading-function-signature",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-native",
+                "name": "run"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "call-native",
+                "name": "run",
+                "response": {
+                  "result": "ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-marked-leading-text-carrier-alias",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "answer",
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-marked-leading-function-carrier-alias",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-carrier",
+                "name": "run"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "call-carrier",
+                "name": "run",
+                "response": {
+                  "result": "ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-malformed-carrier-drops-without-crossing-message",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "safe"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-marked-previous-function-carrier",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-prev",
+                "name": "run"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "call-prev",
+                "name": "run",
+                "response": {
+                  "result": "ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-unmarked-post-call-carrier-matching-output",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-raw-prev",
+                "name": "run"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "call-raw-prev",
+                "name": "run",
+                "response": {
+                  "result": "ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-marked-previous-text-carrier",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "signed answer",
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "text": "next"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-standalone-function-carrier-stays-separate",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "",
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            },
+            {
+              "functionCall": {
+                "args": {},
+                "id": "call-standalone",
+                "name": "run"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            }
+          ],
+          "role": "model"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-tool-schema-required-and-metadata",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "clean schema"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "",
+              "name": "search",
+              "parametersJsonSchema": {
+                "properties": {
+                  "$id": {
+                    "type": "string"
+                  },
+                  "country": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "country",
+                  "$id"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-tool-schema-enum-constraints",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "clean enum"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "",
+              "name": "rank",
+              "parametersJsonSchema": {
+                "description": "No extra properties allowed",
+                "properties": {
+                  "priority": {
+                    "description": "Allowed: 0, 1, 2 (format: int32)",
+                    "enum": [
+                      "0",
+                      "1",
+                      "2"
+                    ],
+                    "minimum": 0,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-tool-schema-union-nullable",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "clean union"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "",
+              "name": "choose",
+              "parametersJsonSchema": {
+                "properties": {
+                  "choice": {
+                    "description": "pick (Accepts: string | object | null)",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "maybe": {
+                    "description": "(nullable)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "choice"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-tool-schema-allof-and-ref",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "clean composition"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "",
+              "name": "compose",
+              "parametersJsonSchema": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "nested": {
+                    "description": "old (See: Nested)",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "name",
+                  "nested"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-tool-schema-removes-placeholders",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "clean placeholders"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "",
+              "name": "placeholder",
+              "parametersJsonSchema": {
+                "properties": {
+                  "_": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "_"
+                ],
+                "type": "object"
+              }
+            },
+            {
+              "description": "",
+              "name": "reason",
+              "parametersJsonSchema": {
+                "properties": {
+                  "reason": {
+                    "description": "Brief explanation of why you are calling this tool",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-schema-cleaning-is-path-local",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {
+                  "const": "c",
+                  "default": "x",
+                  "format": "markdown",
+                  "title": "kept",
+                  "x-custom": "keep"
+                },
+                "id": "history",
+                "name": "write"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "history",
+                "name": "write",
+                "response": {
+                  "result": "ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {
+        "responseJsonSchema": {
+          "properties": {
+            "value": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          "title": "response-kept",
+          "type": "object"
+        },
+        "responseMimeType": "application/json"
+      },
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "",
+              "name": "write",
+              "parametersJsonSchema": {
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-alternating-post-call-carriers",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {},
+                "id": "post-a",
+                "name": "a"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            },
+            {
+              "functionCall": {
+                "args": {},
+                "id": "post-b",
+                "name": "b"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "post-a",
+                "name": "a",
+                "response": {
+                  "result": "a-ok"
+                }
+              }
+            },
+            {
+              "functionResponse": {
+                "id": "post-b",
+                "name": "b",
+                "response": {
+                  "result": "b-ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "name": "gemini-alternating-leading-carriers",
+    "output": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {},
+                "id": "lead-a",
+                "name": "a"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            },
+            {
+              "functionCall": {
+                "args": {},
+                "id": "lead-b",
+                "name": "b"
+              },
+              "thoughtSignature": "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "lead-a",
+                "name": "a",
+                "response": {
+                  "result": "a-ok"
+                }
+              }
+            },
+            {
+              "functionResponse": {
+                "id": "lead-b",
+                "name": "b",
+                "response": {
+                  "result": "b-ok"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  }
+]

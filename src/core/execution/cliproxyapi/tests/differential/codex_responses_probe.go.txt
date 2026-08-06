@@ -1,0 +1,46 @@
+package responses
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxCodexResponsesFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    RawJSON json.RawMessage `json:"raw_json"`
+    RawSSE string `json:"raw_sse"`
+}
+type ctoxCodexResponsesResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxCodexResponsesDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxCodexResponsesFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxCodexResponsesResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        switch fixture.Operation {
+        case "codex_responses_request":
+            converted := ConvertOpenAIResponsesRequestToCodex(fixture.Model, fixture.Input, fixture.Stream)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "codex_responses_stream":
+            converted := ConvertCodexResponseToOpenAIResponses(context.Background(), fixture.Model, nil, nil, []byte(fixture.RawSSE), nil)
+            strings := make([]string, 0, len(converted))
+            for _, item := range converted { strings = append(strings, string(item)) }
+            output = strings
+        case "codex_responses_non_stream":
+            converted := ConvertCodexResponseToOpenAIResponsesNonStream(context.Background(), fixture.Model, nil, nil, fixture.RawJSON, nil)
+            if len(converted) == 0 { output = nil } else if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        results = append(results, ctoxCodexResponsesResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

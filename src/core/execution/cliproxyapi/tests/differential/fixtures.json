@@ -1,0 +1,205 @@
+[
+  {
+    "name": "request-text-tool-roundtrip",
+    "operation": "request_to_claude",
+    "model": "claude-test",
+    "stream": false,
+    "input": {
+      "instructions": "Be precise.",
+      "max_output_tokens": 2048,
+      "input": [
+        {"role": "user", "content": [{"type": "input_text", "text": "Read the file"}]},
+        {"type": "function_call", "call_id": "call.with space", "name": "Read", "arguments": "{\"path\":\"README.md\"}"},
+        {"type": "function_call_output", "call_id": "call.with space", "output": "ok"}
+      ],
+      "tools": [
+        {"type": "function", "name": "Read", "description": "Read a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+      ],
+      "tool_choice": "auto"
+    }
+  },
+  {
+    "name": "non-stream-text-and-usage",
+    "operation": "claude_to_responses_non_stream",
+    "original_request": {"model": "gpt-test", "instructions": "Be precise."},
+    "raw_sse": "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\ndata: {\"type\":\"message_stop\"}"
+  },
+  {
+    "name": "request-valid-claude-reasoning",
+    "operation": "request_to_claude",
+    "model": "claude-test",
+    "stream": false,
+    "input": {
+      "input": [
+        {"type": "reasoning", "encrypted_content": "EhkKFwgMEAIyEWNsYXVkZS1zb25uZXQtNC02GAE=", "summary": [{"type": "summary_text", "text": "internal"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "visible"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+      ]
+    }
+  },
+  {
+    "name": "request-rejects-gpt-reasoning-for-claude",
+    "operation": "request_to_claude",
+    "model": "claude-test",
+    "stream": false,
+    "input": {
+      "input": [
+        {"type": "reasoning", "encrypted_content": "gAAAAAAAAAABCQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0BBQkNERUZHSA", "summary": [{"type": "summary_text", "text": "drop"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+      ]
+    }
+  },
+  {
+    "name": "request-reasoning-effort-budget",
+    "operation": "request_to_claude",
+    "model": "claude-test",
+    "stream": false,
+    "input": {
+      "reasoning": {"effort": "high"},
+      "input": [{"role": "user", "content": [{"type": "input_text", "text": "think"}]}]
+    }
+  },
+  {
+    "name": "request-adaptive-reasoning-effort",
+    "operation": "request_to_claude",
+    "model": "claude-sonnet-4-6",
+    "stream": false,
+    "input": {
+      "reasoning": {"effort": "xhigh"},
+      "input": [{"role": "user", "content": [{"type": "input_text", "text": "think adaptively"}]}]
+    }
+  },
+  {
+    "name": "request-media-cache-and-schema",
+    "operation": "request_to_claude",
+    "model": "claude-test",
+    "stream": true,
+    "input": {
+      "input": [{"role": "user", "content": [
+        {"type": "input_text", "text": "cached", "cache_control": {"type": "ephemeral"}},
+        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}
+      ]}],
+      "tools": [{"type": "function", "name": "lookup", "parameters": {"oneOf": [{"type": "object", "properties": {"query": {"type": "string"}}}], "properties": {"id": {"type": "string"}}}}]
+    }
+  },
+  {
+    "name": "non-stream-reasoning-tool-cache-namespace",
+    "operation": "claude_to_responses_non_stream",
+    "original_request": {"model": "gpt-test", "tools": [{"type": "namespace", "name": "mcp__node_repl", "tools": [{"type": "function", "name": "js"}]}]},
+    "raw_sse": "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"usage\":{\"input_tokens\":13,\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":7}}}\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"mcp__node_repl__js\",\"input\":{}}}\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"code\\\":\\\"1+1\\\"}\"}}\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\ndata: {\"type\":\"message_stop\"}"
+  },
+  {
+    "name": "non-stream-preserves-interleaved-content-order",
+    "operation": "claude_to_responses_non_stream",
+    "original_request": {"model": "gpt-test"},
+    "raw_sse": "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_order\"}}\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"signature\":\"sig\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"why\"}}\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"first\"}}\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\ndata: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"second\"}}\ndata: {\"type\":\"message_stop\"}"
+  },
+  {
+    "name": "stream-text-lifecycle",
+    "operation": "claude_to_responses_stream",
+    "model": "gpt-test",
+    "original_request": {"model": "gpt-test"},
+    "raw_sse_chunks": [
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_1\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}",
+      "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}",
+      "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}",
+      "data: {\"type\":\"message_stop\"}"
+    ]
+  },
+  {
+    "name": "stream-reasoning-text-tool-lifecycle",
+    "operation": "claude_to_responses_stream",
+    "model": "gpt-test",
+    "original_request": {"model": "gpt-test", "tools": [{"type": "namespace", "name": "mcp__node_repl", "tools": [{"type": "function", "name": "js"}]}]},
+    "raw_sse_chunks": [
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_2\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
+      "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":0}",
+      "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":1}",
+      "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_2\",\"name\":\"mcp__node_repl__js\",\"input\":{}}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"code\\\":\\\"2+2\\\"}\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":2}",
+      "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":6}}",
+      "data: {\"type\":\"message_stop\"}"
+    ]
+  },
+  {
+    "name": "stream-text-tool-new-text-item",
+    "operation": "claude_to_responses_stream",
+    "model": "gpt-test",
+    "original_request": {"model": "gpt-test"},
+    "raw_sse_chunks": [
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_3\",\"usage\":{\"input_tokens\":2}}}",
+      "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"before\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":0}",
+      "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_3\",\"name\":\"exec_command\",\"input\":{}}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":1}",
+      "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"after\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":2}",
+      "data: {\"type\":\"message_stop\"}"
+    ]
+  },
+  {
+    "name": "stream-multiple-reasoning-and-citations",
+    "operation": "claude_to_responses_stream",
+    "model": "gpt-test",
+    "original_request": {"model": "gpt-test"},
+    "raw_sse_chunks": [
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_4\",\"usage\":{\"input_tokens\":2}}}",
+      "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"first\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":0}",
+      "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"second\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":1}",
+      "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"cited\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"citations_delta\",\"citation\":{\"type\":\"url_citation\",\"url\":\"https://example.com\",\"title\":\"Example\"}}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":2}",
+      "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}",
+      "data: {\"type\":\"message_stop\"}"
+    ]
+  },
+  {
+    "name": "stream-hidden-server-tools-no-index-gap",
+    "operation": "claude_to_responses_stream",
+    "model": "gpt-test",
+    "original_request": {"model": "gpt-test"},
+    "raw_sse_chunks": [
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_5\",\"usage\":{\"input_tokens\":2}}}",
+      "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"searching \"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":0}",
+      "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srv_5\",\"name\":\"web_search\",\"input\":{}}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"Rust\\\"}\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":1}",
+      "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srv_5\",\"content\":[]}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":2}",
+      "data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"found\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":3}",
+      "data: {\"type\":\"content_block_start\",\"index\":4,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_5\",\"name\":\"exec_command\",\"input\":{}}}",
+      "data: {\"type\":\"content_block_delta\",\"index\":4,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}",
+      "data: {\"type\":\"content_block_stop\",\"index\":4}",
+      "data: {\"type\":\"message_stop\"}"
+    ]
+  },
+  {
+    "name": "stream-provider-error-ctox-delta",
+    "operation": "claude_to_responses_stream",
+    "model": "gpt-test",
+    "original_request": {"model": "gpt-test"},
+    "raw_sse_chunks": [
+      "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_error_delta\"}}",
+      "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
+    ]
+  }
+]

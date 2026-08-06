@@ -1,0 +1,68 @@
+[
+  {
+    "name": "empty-default-cl100k",
+    "operation": "codex_count_tokens",
+    "model": "",
+    "raw_body": {}
+  },
+  {
+    "name": "instructions-trim-modern",
+    "operation": "codex_count_tokens",
+    "model": " GPT-5.4-CODEX ",
+    "raw_body": {"instructions":"  be concise  ","input":[]}
+  },
+  {
+    "name": "message-parts-and-default-item",
+    "operation": "codex_count_tokens",
+    "model": "gpt-4.1-mini",
+    "raw_body": {"input":[{"type":"message","content":[{"type":"input_text","text":" first "},{"type":"input_text","text":"second"},{"type":"input_image","image_url":"ignored"}]},{"type":"computer_call","text":" fallback text "}]}
+  },
+  {
+    "name": "function-call-string-arguments",
+    "operation": "codex_count_tokens",
+    "model": "gpt-4o",
+    "raw_body": {"input":[{"type":"function_call","name":" lookup ","arguments":"{\"z\":2,\"a\":1}"},{"type":"function_call_output","output":"  result text  "}]}
+  },
+  {
+    "name": "function-call-object-values",
+    "operation": "codex_count_tokens",
+    "model": "gpt-5",
+    "raw_body": {"input":[{"type":"function_call","name":"calculate","arguments":{"z":2,"a":[true,false]}},{"type":"function_call_output","output":{"status":"ok","value":3}}]}
+  },
+  {
+    "name": "raw-tool-and-format-schema-order",
+    "operation": "codex_count_tokens",
+    "model": "gpt-5",
+    "raw_body": {"tools":[{"type":"function","name":"ordered","description":"Preserve lexical JSON","parameters":{"zeta":{"type":"number"},"alpha":{"enum":["x","y"]},"required":["zeta"]}}],"text":{"format":{"type":"json_schema","name":"answer","schema":{"z":0,"a":{"type":"string"}}}}}
+  },
+  {
+    "name": "string-tool-and-format-schema",
+    "operation": "codex_count_tokens",
+    "model": "gpt-4",
+    "raw_body": {"tools":[{"name":"stringy","description":"schema strings","parameters":" {\"z\":1,\"a\":2} "}],"text":{"format":{"name":"fmt","schema":" {\"b\":true,\"a\":false} "}}}
+  },
+  {
+    "name": "unicode-o200k",
+    "operation": "codex_count_tokens",
+    "model": "gpt-4o-2024-11-20",
+    "raw_body": {"instructions":"こんにちは世界 — Grüße 👋","input":[]}
+  },
+  {
+    "name": "unicode-cl100k-legacy",
+    "operation": "codex_count_tokens",
+    "model": "gpt-3.5-turbo",
+    "raw_body": {"instructions":"こんにちは世界 — Grüße 👋","input":[]}
+  },
+  {
+    "name": "unknown-model-falls-back-cl100k",
+    "operation": "codex_count_tokens",
+    "model": "subscription-special",
+    "raw_body": {"instructions":"こんにちは世界 — Grüße 👋","input":[]}
+  },
+  {
+    "name": "null-and-empty-segments",
+    "operation": "codex_count_tokens",
+    "model": "gpt-5",
+    "raw_body": {"instructions":null,"input":[{"type":"message","content":[{"text":"  "},{"text":null}]},{"type":"function_call","name":"","arguments":""}],"tools":[],"text":{"format":null}}
+  }
+]

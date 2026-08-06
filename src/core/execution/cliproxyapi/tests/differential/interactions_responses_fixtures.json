@@ -1,0 +1,197 @@
+[
+  {
+    "name": "responses-request-rich",
+    "operation": "responses_request_to_interactions",
+    "model": "gpt-test",
+    "stream": true,
+    "input": {
+      "instructions": "be brief",
+      "previous_response_id": "resp_1",
+      "input": [
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]},
+        {"type":"function_call","name":"lookup","call_id":"call_1","arguments":"{\"q\":\"x\"}"},
+        {"type":"function_call_output","call_id":"call_1","output":{"ok":true}}
+      ],
+      "tools": [{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+      "tool_choice": "auto",
+      "reasoning": {"effort":"HIGH","summary":"auto"},
+      "response_format": {"type":"json_object"}
+    }
+  },
+  {
+    "name": "responses-request-explicit-no-stream",
+    "operation": "responses_request_to_interactions",
+    "model": "gpt-test",
+    "stream": true,
+    "input": {"input":"hi","stream":false}
+  },
+  {
+    "name": "interactions-request-rich",
+    "operation": "interactions_request_to_responses",
+    "model": "gpt-test",
+    "stream": false,
+    "input": {
+      "system_instruction": {"parts":[{"text":"be "},{"text":"brief"}]},
+      "previous_interaction_id": "interaction_1",
+      "input": [
+        {"type":"model_output","content":[{"type":"text","text":"hello"},{"type":"image","mime_type":"image/png","data":"aGVsbG8="}]},
+        {"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},
+        {"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}
+      ],
+      "tools": [{"function_declarations":[{"name":"lookup","parameters":{"type":"object"}}]}],
+      "generation_config": {"tool_choice":"auto","thinking_level":"high","thinking_summaries":"auto"},
+      "response_format": {"type":"json_object"},
+      "response_modalities": ["text"],
+      "service_tier": "priority",
+      "stream": true
+    }
+  },
+  {
+    "name": "interactions-request-media",
+    "operation": "interactions_request_to_responses",
+    "model": "gpt-test",
+    "input": {
+      "input": [{"type":"model_output","content":[
+        {"type":"audio","mime_type":"audio/wav","data":"UklGRg=="},
+        {"type":"video","mime_type":"video/mp4","data":"AAAAIGZ0eXA="},
+        {"type":"document","mime_type":"application/pdf","data":"JVBERi0="}
+      ]}]
+    }
+  },
+  {
+    "name": "interactions-response-rich",
+    "operation": "interactions_to_responses_non_stream",
+    "model": "gpt-test",
+    "raw_json": {
+      "id": "interaction_1",
+      "steps": [
+        {"type":"model_output","id":"msg_1","content":[{"text":"ok"}]},
+        {"type":"thought","signature":"sig_1","content":[{"text":"thinking"}]},
+        {"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}}
+      ],
+      "usage": {"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":1,"reasoning_tokens":1}
+    }
+  },
+  {
+    "name": "interactions-response-nested-usage",
+    "operation": "interactions_to_responses_non_stream",
+    "model": "gpt-test",
+    "raw_json": {
+      "interaction": {"id":"interaction_2","steps":[{"type":"model_output","content":"ok"}]},
+      "metadata": {"total_usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_cached_tokens":1,"total_tokens":11}}
+    }
+  },
+  {
+    "name": "responses-response-rich",
+    "operation": "responses_to_interactions_non_stream",
+    "model": "gpt-test",
+    "raw_json": {
+      "id":"resp_1",
+      "output":[
+        {"type":"message","content":[{"type":"output_text","text":"ok"}]},
+        {"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},
+        {"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}}
+      ],
+      "usage":{"input_tokens":11,"output_tokens":13,"total_tokens":24,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":7}}
+    }
+  },
+  {
+    "name": "responses-response-string-arguments",
+    "operation": "responses_to_interactions_non_stream",
+    "model": "gpt-test",
+    "raw_json": {"id":"resp_2","output":[{"type":"function_call","name":"lookup","call_id":"call_2","arguments":"{\"q\":\"x\"}"}]}
+  },
+  {
+    "name": "interactions-stream-text-function-completed",
+    "operation": "interactions_to_responses_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"interaction\":{\"id\":\"interaction_1\"},\"event_type\":\"interaction.created\"}",
+      "{\"index\":0,\"step\":{\"id\":\"msg_1\",\"type\":\"model_output\"},\"event_type\":\"step.start\"}",
+      "{\"index\":0,\"delta\":{\"text\":\"hello\",\"type\":\"text\"},\"event_type\":\"step.delta\"}",
+      "{\"index\":0,\"delta\":{\"text\":\" world\",\"type\":\"text\"},\"event_type\":\"step.delta\"}",
+      "{\"index\":0,\"event_type\":\"step.stop\"}",
+      "{\"index\":1,\"step\":{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":{}},\"event_type\":\"step.start\"}",
+      "{\"index\":1,\"delta\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"type\":\"arguments_delta\"},\"event_type\":\"step.delta\"}",
+      "{\"index\":1,\"event_type\":\"step.stop\"}",
+      "{\"interaction\":{\"id\":\"interaction_1\",\"model\":\"gpt-test\",\"usage\":{\"total_input_tokens\":2,\"total_output_tokens\":6,\"total_thought_tokens\":3,\"total_cached_tokens\":1,\"total_tokens\":11}},\"event_type\":\"interaction.completed\"}",
+      "{\"event_type\":\"done\"}"
+    ]
+  },
+  {
+    "name": "interactions-stream-reasoning-signature",
+    "operation": "interactions_to_responses_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"index\":0,\"step\":{\"id\":\"reason_1\",\"type\":\"thought\"},\"event_type\":\"step.start\"}",
+      "{\"index\":0,\"delta\":{\"content\":{\"text\":\"thinking\"},\"type\":\"thought_summary\"},\"event_type\":\"step.delta\"}",
+      "{\"index\":0,\"delta\":{\"signature\":\"sig_1\",\"type\":\"thought_signature\"},\"event_type\":\"step.delta\"}",
+      "{\"index\":0,\"event_type\":\"step.stop\"}",
+      "{\"interaction\":{\"id\":\"interaction_2\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}},\"event_type\":\"interaction.completed\"}"
+    ]
+  },
+  {
+    "name": "interactions-stream-function-start-args-idempotent",
+    "operation": "interactions_to_responses_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"index\":0,\"step\":{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}},\"event_type\":\"step.start\"}",
+      "{\"index\":0,\"step\":{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}},\"event_type\":\"step.start\"}",
+      "{\"index\":0,\"event_type\":\"step.stop\"}",
+      "{\"index\":0,\"event_type\":\"step.stop\"}"
+    ]
+  },
+  {
+    "name": "interactions-stream-finish-metadata-usage",
+    "operation": "interactions_to_responses_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "data: {\"event_type\":\"finish\",\"id\":\"interaction_3\",\"metadata\":{\"total_usage\":{\"total_input_tokens\":2,\"total_output_tokens\":6,\"total_thought_tokens\":3,\"total_cached_tokens\":1,\"total_tokens\":11}}}"
+    ]
+  },
+  {
+    "name": "responses-stream-text-dedup-completed",
+    "operation": "responses_to_interactions_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\"}}",
+      "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"content\":[]}}",
+      "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}",
+      "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}",
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}"
+    ]
+  },
+  {
+    "name": "responses-stream-function-arguments-dedup",
+    "operation": "responses_to_interactions_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-test\"}}",
+      "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"call_id\":\"call_1\",\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"\"}}",
+      "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"call_id\":\"call_1\",\"delta\":\"{\\\"q\\\":\\\"x\\\"}\"}",
+      "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"call_id\":\"call_1\",\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}",
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens_details\":{\"reasoning_tokens\":1}}}}"
+    ]
+  },
+  {
+    "name": "responses-stream-reasoning-lifecycle",
+    "operation": "responses_to_interactions_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_3\",\"model\":\"gpt-test\"}}",
+      "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"reason_1\",\"type\":\"reasoning\",\"summary\":[]}}",
+      "{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"thinking\"}",
+      "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"reason_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"done\"}]}}",
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_3\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{}}}"
+    ]
+  },
+  {
+    "name": "responses-stream-completion-only-message-fallback",
+    "operation": "responses_to_interactions_stream",
+    "model": "gpt-test",
+    "raw_sse_chunks": [
+      "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_4\",\"model\":\"gpt-test\"}}",
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_4\",\"model\":\"gpt-test\",\"output\":[{\"id\":\"msg_4\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"fallback\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}"
+    ]
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "name": "schema-v2-registration-and-capabilities",
+    "operation": "plugin_rpc_schema",
+    "input": {
+      "lifecycle": {
+        "config_yaml": "bW9kZTogdGVzdA==",
+        "schema_version": 2
+      },
+      "registration": {
+        "schema_version": 2,
+        "metadata": {
+          "Name": "schema-probe",
+          "Version": "1.2.3",
+          "Author": "ctox",
+          "GitHubRepository": "https://example.invalid/schema-probe",
+          "Logo": "",
+          "ConfigFields": [
+            {
+              "Name": "mode",
+              "Type": "enum",
+              "EnumValues": ["safe", "strict"],
+              "Description": "execution mode"
+            }
+          ]
+        },
+        "capabilities": {
+          "model_registrar": true,
+          "model_provider": true,
+          "auth_provider": true,
+          "frontend_auth_provider": true,
+          "frontend_auth_provider_exclusive": true,
+          "scheduler": true,
+          "model_router": true,
+          "executor": true,
+          "executor_model_scope": "both",
+          "executor_input_formats": ["openai-responses"],
+          "executor_output_formats": ["anthropic-messages"],
+          "request_translator": true,
+          "request_normalizer": true,
+          "request_interceptor": true,
+          "request_lifecycle_plugin": true,
+          "response_translator": true,
+          "response_before_translator": true,
+          "response_after_translator": true,
+          "response_interceptor": true,
+          "response_stream_interceptor": true,
+          "thinking_applier": true,
+          "usage_plugin": true,
+          "command_line_plugin": true,
+          "management_api": true
+        }
+      }
+    }
+  }
+]

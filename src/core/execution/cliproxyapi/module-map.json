@@ -1,0 +1,2620 @@
+{
+  "schema": "ctox.cliproxyapi.module-map.v1",
+  "upstream_commit": "a88197f845c979132c8978ea223c6af05cc81536",
+  "policy": "A module is live-closed only when no production or test mirror is scaffold, partial, or missing. Common-gate verification is tracked separately.",
+  "summary": {
+    "modules": 129,
+    "closed_live": 129,
+    "in_progress": 0,
+    "queued": 0
+  },
+  "modules": [
+    {
+      "id": "cmd/fetch_antigravity_models",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "cmd/fetch_antigravity_models/main.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "cmd/fetch_codex_models",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "cmd/fetch_codex_models/main.go",
+        "cmd/fetch_codex_models/main_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "cmd/server",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "cmd/server/main.go",
+        "cmd/server/main_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "cmd/validate_codex_models",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "cmd/validate_codex_models/main.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "examples/custom-provider",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "examples/custom-provider/main.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "examples/http-request",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "examples/http-request/main.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "examples/plugin",
+      "production_total": 31,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 9,
+      "test_open": 0,
+      "files": [
+        "examples/plugin/auth/go/main.go",
+        "examples/plugin/claude-web-search-router/go/claude_response.go",
+        "examples/plugin/claude-web-search-router/go/config_test.go",
+        "examples/plugin/claude-web-search-router/go/detect.go",
+        "examples/plugin/claude-web-search-router/go/detect_test.go",
+        "examples/plugin/claude-web-search-router/go/execute_stream.go",
+        "examples/plugin/claude-web-search-router/go/execution_fallback.go",
+        "examples/plugin/claude-web-search-router/go/execution_route_test.go",
+        "examples/plugin/claude-web-search-router/go/fallback.go",
+        "examples/plugin/claude-web-search-router/go/fallback_test.go",
+        "examples/plugin/claude-web-search-router/go/main.go",
+        "examples/plugin/claude-web-search-router/go/model_resolve.go",
+        "examples/plugin/claude-web-search-router/go/model_resolve_test.go",
+        "examples/plugin/claude-web-search-router/go/penalty.go",
+        "examples/plugin/claude-web-search-router/go/penalty_test.go",
+        "examples/plugin/claude-web-search-router/go/stream_forward.go",
+        "examples/plugin/claude-web-search-router/go/stream_forward_test.go",
+        "examples/plugin/claude-web-search-router/go/tavily.go",
+        "examples/plugin/claude-web-search-router/go/tavily_test.go",
+        "examples/plugin/cli/go/main.go",
+        "examples/plugin/codex-service-tier/go/main.go",
+        "examples/plugin/executor/go/main.go",
+        "examples/plugin/frontend-auth-exclusive/go/main.go",
+        "examples/plugin/frontend-auth/go/main.go",
+        "examples/plugin/host-callback-auth-files/go/main.go",
+        "examples/plugin/host-callback/go/main.go",
+        "examples/plugin/host-model-callback/go/main.go",
+        "examples/plugin/management-api/go/main.go",
+        "examples/plugin/model/go/main.go",
+        "examples/plugin/protocol-format/go/main.go",
+        "examples/plugin/request-lifecycle/go/main.go",
+        "examples/plugin/request-lifecycle/go/main_test.go",
+        "examples/plugin/request-normalizer/go/main.go",
+        "examples/plugin/request-translator/go/main.go",
+        "examples/plugin/response-normalizer/go/main.go",
+        "examples/plugin/response-translator/go/main.go",
+        "examples/plugin/scheduler/go/main.go",
+        "examples/plugin/simple/go/main.go",
+        "examples/plugin/thinking/go/main.go",
+        "examples/plugin/usage/go/main.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "examples/translator",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "examples/translator/main.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/access",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/access/config_access/provider.go",
+        "internal/access/reconcile.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/api",
+      "production_total": 34,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 36,
+      "test_open": 0,
+      "files": [
+        "internal/api/buffered_conn.go",
+        "internal/api/handlers/management/api_key_usage.go",
+        "internal/api/handlers/management/api_key_usage_test.go",
+        "internal/api/handlers/management/api_tools.go",
+        "internal/api/handlers/management/api_tools_test.go",
+        "internal/api/handlers/management/auth_files.go",
+        "internal/api/handlers/management/auth_files_batch_test.go",
+        "internal/api/handlers/management/auth_files_crud.go",
+        "internal/api/handlers/management/auth_files_delete_test.go",
+        "internal/api/handlers/management/auth_files_download_test.go",
+        "internal/api/handlers/management/auth_files_download_windows_test.go",
+        "internal/api/handlers/management/auth_files_fields.go",
+        "internal/api/handlers/management/auth_files_filter_test.go",
+        "internal/api/handlers/management/auth_files_oauth_callback.go",
+        "internal/api/handlers/management/auth_files_patch_fields_test.go",
+        "internal/api/handlers/management/auth_files_plugin_oauth_test.go",
+        "internal/api/handlers/management/auth_files_project_id_test.go",
+        "internal/api/handlers/management/auth_files_provider_oauth.go",
+        "internal/api/handlers/management/auth_files_recent_requests_test.go",
+        "internal/api/handlers/management/auth_files_upload_test.go",
+        "internal/api/handlers/management/config_apikey_disable.go",
+        "internal/api/handlers/management/config_apikey_disable_test.go",
+        "internal/api/handlers/management/config_auth_index.go",
+        "internal/api/handlers/management/config_basic.go",
+        "internal/api/handlers/management/config_basic_weight_test.go",
+        "internal/api/handlers/management/config_codex_alpha_search_test.go",
+        "internal/api/handlers/management/config_lists.go",
+        "internal/api/handlers/management/config_lists_delete_keys_test.go",
+        "internal/api/handlers/management/config_openai_compat_test.go",
+        "internal/api/handlers/management/config_weight_test.go",
+        "internal/api/handlers/management/config_xai_key_test.go",
+        "internal/api/handlers/management/handler.go",
+        "internal/api/handlers/management/handler_test.go",
+        "internal/api/handlers/management/logs.go",
+        "internal/api/handlers/management/logs_test.go",
+        "internal/api/handlers/management/model_definitions.go",
+        "internal/api/handlers/management/oauth_callback.go",
+        "internal/api/handlers/management/oauth_callback_test.go",
+        "internal/api/handlers/management/oauth_codex_concurrency_test.go",
+        "internal/api/handlers/management/oauth_sessions.go",
+        "internal/api/handlers/management/oauth_sessions_test.go",
+        "internal/api/handlers/management/plugin_store.go",
+        "internal/api/handlers/management/plugin_store_test.go",
+        "internal/api/handlers/management/plugins.go",
+        "internal/api/handlers/management/plugins_test.go",
+        "internal/api/handlers/management/quota.go",
+        "internal/api/handlers/management/quota_test.go",
+        "internal/api/handlers/management/test_main_test.go",
+        "internal/api/handlers/management/test_store_test.go",
+        "internal/api/handlers/management/usage.go",
+        "internal/api/handlers/management/usage_test.go",
+        "internal/api/handlers/management/vertex_import.go",
+        "internal/api/middleware/request_logging.go",
+        "internal/api/middleware/request_logging_test.go",
+        "internal/api/middleware/response_writer.go",
+        "internal/api/middleware/response_writer_test.go",
+        "internal/api/mux_listener.go",
+        "internal/api/protocol_multiplexer.go",
+        "internal/api/protocol_multiplexer_test.go",
+        "internal/api/redis_queue_protocol.go",
+        "internal/api/redis_queue_protocol_integration_test.go",
+        "internal/api/server.go",
+        "internal/api/server_keepalive.go",
+        "internal/api/server_management.go",
+        "internal/api/server_middleware.go",
+        "internal/api/server_options.go",
+        "internal/api/server_reload.go",
+        "internal/api/server_routes.go",
+        "internal/api/server_sdk_config_test.go",
+        "internal/api/server_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/antigravity",
+      "production_total": 3,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/auth/antigravity/auth.go",
+        "internal/auth/antigravity/auth_test.go",
+        "internal/auth/antigravity/constants.go",
+        "internal/auth/antigravity/filename.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/claude",
+      "production_total": 10,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 5,
+      "test_open": 0,
+      "files": [
+        "internal/auth/claude/anthropic.go",
+        "internal/auth/claude/anthropic_auth.go",
+        "internal/auth/claude/anthropic_auth_proxy_test.go",
+        "internal/auth/claude/anthropic_auth_test.go",
+        "internal/auth/claude/errors.go",
+        "internal/auth/claude/html_templates.go",
+        "internal/auth/claude/identity.go",
+        "internal/auth/claude/identity_test.go",
+        "internal/auth/claude/oauth_response.go",
+        "internal/auth/claude/oauth_response_test.go",
+        "internal/auth/claude/oauth_server.go",
+        "internal/auth/claude/pkce.go",
+        "internal/auth/claude/token.go",
+        "internal/auth/claude/utls_transport.go",
+        "internal/auth/claude/utls_transport_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/codex",
+      "production_total": 9,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/auth/codex/errors.go",
+        "internal/auth/codex/filename.go",
+        "internal/auth/codex/filename_test.go",
+        "internal/auth/codex/html_templates.go",
+        "internal/auth/codex/jwt_parser.go",
+        "internal/auth/codex/oauth_server.go",
+        "internal/auth/codex/openai.go",
+        "internal/auth/codex/openai_auth.go",
+        "internal/auth/codex/openai_auth_test.go",
+        "internal/auth/codex/pkce.go",
+        "internal/auth/codex/token.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/core",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/auth/models.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/empty",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/auth/empty/token.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/kimi",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/auth/kimi/kimi.go",
+        "internal/auth/kimi/kimi_proxy_test.go",
+        "internal/auth/kimi/kimi_refresh_test.go",
+        "internal/auth/kimi/token.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/vertex",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/auth/vertex/keyutil.go",
+        "internal/auth/vertex/vertex_credentials.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/auth/xai",
+      "production_total": 3,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/auth/xai/token.go",
+        "internal/auth/xai/types.go",
+        "internal/auth/xai/xai.go",
+        "internal/auth/xai/xai_auth_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/browser",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/browser/browser.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/buildinfo",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/buildinfo/buildinfo.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/cache",
+      "production_total": 6,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 6,
+      "test_open": 0,
+      "files": [
+        "internal/cache/antigravity_reasoning_replay_cache.go",
+        "internal/cache/antigravity_reasoning_replay_cache_test.go",
+        "internal/cache/bounded_lru.go",
+        "internal/cache/bounded_lru_test.go",
+        "internal/cache/codex_reasoning_replay_cache.go",
+        "internal/cache/codex_reasoning_replay_cache_test.go",
+        "internal/cache/kimi_thinking_replay_cache.go",
+        "internal/cache/kimi_thinking_replay_cache_test.go",
+        "internal/cache/signature_cache.go",
+        "internal/cache/signature_cache_test.go",
+        "internal/cache/xai_reasoning_replay_cache.go",
+        "internal/cache/xai_reasoning_replay_cache_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/client",
+      "production_total": 7,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 6,
+      "test_open": 0,
+      "files": [
+        "internal/client/claude/models/models.go",
+        "internal/client/claude/models/models_test.go",
+        "internal/client/codex/live/live.go",
+        "internal/client/codex/live/live_test.go",
+        "internal/client/codex/live/media.go",
+        "internal/client/codex/live/media_test.go",
+        "internal/client/codex/live/sideband.go",
+        "internal/client/codex/live/tcp_proxy.go",
+        "internal/client/codex/live/tcp_proxy_test.go",
+        "internal/client/codex/models/models.go",
+        "internal/client/codex/models/models_test.go",
+        "internal/client/codex/optimize-multi-agent-v2/optimize_multi_agent_v2.go",
+        "internal/client/codex/optimize-multi-agent-v2/optimize_multi_agent_v2_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/cmd",
+      "production_total": 10,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/cmd/anthropic_login.go",
+        "internal/cmd/antigravity_login.go",
+        "internal/cmd/auth_manager.go",
+        "internal/cmd/kimi_login.go",
+        "internal/cmd/login_prompt.go",
+        "internal/cmd/openai_device_login.go",
+        "internal/cmd/openai_login.go",
+        "internal/cmd/run.go",
+        "internal/cmd/vertex_import.go",
+        "internal/cmd/xai_login.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/config",
+      "production_total": 18,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 17,
+      "test_open": 0,
+      "files": [
+        "internal/config/claude_code_test.go",
+        "internal/config/claude_header_defaults_test.go",
+        "internal/config/clone.go",
+        "internal/config/clone_test.go",
+        "internal/config/codex_live.go",
+        "internal/config/codex_live_test.go",
+        "internal/config/codex_websocket_header_defaults_test.go",
+        "internal/config/config.go",
+        "internal/config/config_defaults.go",
+        "internal/config/config_load.go",
+        "internal/config/config_normalization.go",
+        "internal/config/config_types.go",
+        "internal/config/config_validation.go",
+        "internal/config/config_yaml.go",
+        "internal/config/credential_concurrency.go",
+        "internal/config/credential_concurrency_fixture_test.go",
+        "internal/config/credential_concurrency_test.go",
+        "internal/config/credential_in_flight.go",
+        "internal/config/credential_in_flight_test.go",
+        "internal/config/disable_image_generation_mode.go",
+        "internal/config/disable_image_generation_mode_test.go",
+        "internal/config/home.go",
+        "internal/config/home_test.go",
+        "internal/config/max_context_length_test.go",
+        "internal/config/model_display_name_test.go",
+        "internal/config/oauth_model_alias_test.go",
+        "internal/config/parse.go",
+        "internal/config/plugin_config_test.go",
+        "internal/config/plugin_path.go",
+        "internal/config/sdk_config.go",
+        "internal/config/vertex_compat.go",
+        "internal/config/weight.go",
+        "internal/config/weight_test.go",
+        "internal/config/xai_alpha_search_test.go",
+        "internal/config/xai_api_key_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/constant",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/constant/constant.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/credentialweight",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/credentialweight/weight.go",
+        "internal/credentialweight/weight_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/home",
+      "production_total": 7,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 5,
+      "test_open": 0,
+      "files": [
+        "internal/home/certificate.go",
+        "internal/home/client.go",
+        "internal/home/client_test.go",
+        "internal/home/concurrency_release.go",
+        "internal/home/concurrency_release_test.go",
+        "internal/home/global.go",
+        "internal/home/in_flight_contract_test.go",
+        "internal/home/kv_helpers.go",
+        "internal/home/kv_helpers_test.go",
+        "internal/home/plugin_status.go",
+        "internal/home/plugin_status_test.go",
+        "internal/home/requests.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/homeplugins",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/homeplugins/sync.go",
+        "internal/homeplugins/sync_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/htmlsanitize",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/htmlsanitize/htmlsanitize.go",
+        "internal/htmlsanitize/htmlsanitize_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/httpfetch",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/httpfetch/httpfetch.go",
+        "internal/httpfetch/httpfetch_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/httpwire",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/httpwire/ordered_conn.go",
+        "internal/httpwire/ordered_conn_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/interfaces",
+      "production_total": 4,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/interfaces/api_handler.go",
+        "internal/interfaces/client_models.go",
+        "internal/interfaces/error_message.go",
+        "internal/interfaces/types.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/logging",
+      "production_total": 13,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 6,
+      "test_open": 0,
+      "files": [
+        "internal/logging/cpa_trace.go",
+        "internal/logging/cpa_trace_test.go",
+        "internal/logging/gin_logger.go",
+        "internal/logging/gin_logger_test.go",
+        "internal/logging/global_logger.go",
+        "internal/logging/global_logger_test.go",
+        "internal/logging/home_app_log_forwarder.go",
+        "internal/logging/home_app_log_forwarder_test.go",
+        "internal/logging/log_dir_cleaner.go",
+        "internal/logging/log_dir_cleaner_test.go",
+        "internal/logging/request_logger.go",
+        "internal/logging/request_logger_body_source.go",
+        "internal/logging/request_logger_format.go",
+        "internal/logging/request_logger_home.go",
+        "internal/logging/request_logger_home_test.go",
+        "internal/logging/request_logger_streaming.go",
+        "internal/logging/request_logger_writer.go",
+        "internal/logging/requestid.go",
+        "internal/logging/requestmeta.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/managementasset",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/managementasset/updater.go",
+        "internal/managementasset/updater_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/misc",
+      "production_total": 7,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/misc/antigravity_version.go",
+        "internal/misc/antigravity_version_test.go",
+        "internal/misc/claude_code_instructions.go",
+        "internal/misc/copy-example-config.go",
+        "internal/misc/credentials.go",
+        "internal/misc/header_utils.go",
+        "internal/misc/mime-type.go",
+        "internal/misc/oauth.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/modelconfig",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/modelconfig/model_hash.go",
+        "internal/modelconfig/model_info.go",
+        "internal/modelconfig/model_info_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/pluginhost",
+      "production_total": 36,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 21,
+      "test_open": 0,
+      "files": [
+        "internal/pluginhost/abi.go",
+        "internal/pluginhost/adapters.go",
+        "internal/pluginhost/adapters_auth.go",
+        "internal/pluginhost/adapters_executors.go",
+        "internal/pluginhost/adapters_interceptors.go",
+        "internal/pluginhost/adapters_test.go",
+        "internal/pluginhost/adapters_usage_translation.go",
+        "internal/pluginhost/auth_callbacks.go",
+        "internal/pluginhost/auth_callbacks_test.go",
+        "internal/pluginhost/auth_provider.go",
+        "internal/pluginhost/auth_provider_test.go",
+        "internal/pluginhost/callback_contexts.go",
+        "internal/pluginhost/client_guard.go",
+        "internal/pluginhost/client_guard_test.go",
+        "internal/pluginhost/command_line.go",
+        "internal/pluginhost/command_line_test.go",
+        "internal/pluginhost/config.go",
+        "internal/pluginhost/config_test.go",
+        "internal/pluginhost/executor_route.go",
+        "internal/pluginhost/host.go",
+        "internal/pluginhost/host_callbacks.go",
+        "internal/pluginhost/host_callbacks_test.go",
+        "internal/pluginhost/host_callbacks_unix.go",
+        "internal/pluginhost/host_model_stream_callbacks.go",
+        "internal/pluginhost/host_model_stream_callbacks_test.go",
+        "internal/pluginhost/host_test.go",
+        "internal/pluginhost/http_bridge.go",
+        "internal/pluginhost/http_stream_bridge.go",
+        "internal/pluginhost/loader_unix.go",
+        "internal/pluginhost/loader_unsupported.go",
+        "internal/pluginhost/loader_windows.go",
+        "internal/pluginhost/loader_windows_test.go",
+        "internal/pluginhost/logging.go",
+        "internal/pluginhost/logging_test.go",
+        "internal/pluginhost/management.go",
+        "internal/pluginhost/management_test.go",
+        "internal/pluginhost/model_router.go",
+        "internal/pluginhost/model_router_test.go",
+        "internal/pluginhost/model_stream_bridge.go",
+        "internal/pluginhost/platform.go",
+        "internal/pluginhost/platform_test.go",
+        "internal/pluginhost/request_lifecycle_test.go",
+        "internal/pluginhost/rpc_client.go",
+        "internal/pluginhost/rpc_client_error_test.go",
+        "internal/pluginhost/rpc_client_stream.go",
+        "internal/pluginhost/rpc_client_stream_test.go",
+        "internal/pluginhost/rpc_schema.go",
+        "internal/pluginhost/rpc_schema_test.go",
+        "internal/pluginhost/scheduler.go",
+        "internal/pluginhost/scheduler_test.go",
+        "internal/pluginhost/snapshot.go",
+        "internal/pluginhost/stream_bridge.go",
+        "internal/pluginhost/stream_bridge_test.go",
+        "internal/pluginhost/support.go",
+        "internal/pluginhost/support_cgo.go",
+        "internal/pluginhost/support_nocgo.go",
+        "internal/pluginhost/test_helpers_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/pluginstore",
+      "production_total": 9,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 6,
+      "test_open": 0,
+      "files": [
+        "internal/pluginstore/auth.go",
+        "internal/pluginstore/auth_test.go",
+        "internal/pluginstore/checksum.go",
+        "internal/pluginstore/direct.go",
+        "internal/pluginstore/github.go",
+        "internal/pluginstore/github_test.go",
+        "internal/pluginstore/home_sync.go",
+        "internal/pluginstore/home_sync_test.go",
+        "internal/pluginstore/install.go",
+        "internal/pluginstore/install_test.go",
+        "internal/pluginstore/manifest.go",
+        "internal/pluginstore/registry.go",
+        "internal/pluginstore/registry_test.go",
+        "internal/pluginstore/version.go",
+        "internal/pluginstore/version_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/redisqueue",
+      "production_total": 3,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/redisqueue/plugin.go",
+        "internal/redisqueue/plugin_test.go",
+        "internal/redisqueue/queue.go",
+        "internal/redisqueue/queue_test.go",
+        "internal/redisqueue/usage_toggle.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/registry",
+      "production_total": 5,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 5,
+      "test_open": 0,
+      "files": [
+        "internal/registry/codex_client_models.go",
+        "internal/registry/codex_client_models_test.go",
+        "internal/registry/codex_client_models_updater.go",
+        "internal/registry/model_definitions.go",
+        "internal/registry/model_definitions_test.go",
+        "internal/registry/model_registry.go",
+        "internal/registry/model_registry_cache_test.go",
+        "internal/registry/model_registry_hook_test.go",
+        "internal/registry/model_registry_safety_test.go",
+        "internal/registry/model_updater.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/antigravity",
+      "production_total": 8,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 8,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/antigravity_executor.go",
+        "internal/runtime/executor/antigravity_executor_auth.go",
+        "internal/runtime/executor/antigravity_executor_buildrequest_test.go",
+        "internal/runtime/executor/antigravity_executor_credits.go",
+        "internal/runtime/executor/antigravity_executor_credits_test.go",
+        "internal/runtime/executor/antigravity_executor_execute.go",
+        "internal/runtime/executor/antigravity_executor_interactions_test.go",
+        "internal/runtime/executor/antigravity_executor_request.go",
+        "internal/runtime/executor/antigravity_executor_signature_test.go",
+        "internal/runtime/executor/antigravity_executor_stream.go",
+        "internal/runtime/executor/antigravity_executor_tokens.go",
+        "internal/runtime/executor/antigravity_reasoning_replay.go",
+        "internal/runtime/executor/antigravity_reasoning_replay_clear_test.go",
+        "internal/runtime/executor/antigravity_reasoning_replay_test.go",
+        "internal/runtime/executor/antigravity_refresh_test.go",
+        "internal/runtime/executor/antigravity_schema_sanitize_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/claude",
+      "production_total": 10,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 11,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/claude_executor.go",
+        "internal/runtime/executor/claude_executor_auth.go",
+        "internal/runtime/executor/claude_executor_auth_race_test.go",
+        "internal/runtime/executor/claude_executor_auth_test.go",
+        "internal/runtime/executor/claude_executor_beta_policy_test.go",
+        "internal/runtime/executor/claude_executor_cloaking.go",
+        "internal/runtime/executor/claude_executor_diagnostics.go",
+        "internal/runtime/executor/claude_executor_diagnostics_test.go",
+        "internal/runtime/executor/claude_executor_execute.go",
+        "internal/runtime/executor/claude_executor_fast_error.go",
+        "internal/runtime/executor/claude_executor_fast_error_test.go",
+        "internal/runtime/executor/claude_executor_request.go",
+        "internal/runtime/executor/claude_executor_request_bench_test.go",
+        "internal/runtime/executor/claude_executor_request_remap_test.go",
+        "internal/runtime/executor/claude_executor_stream.go",
+        "internal/runtime/executor/claude_executor_test.go",
+        "internal/runtime/executor/claude_executor_thinking_signature_test.go",
+        "internal/runtime/executor/claude_executor_tokens.go",
+        "internal/runtime/executor/claude_executor_wire_casing_test.go",
+        "internal/runtime/executor/claude_signing.go",
+        "internal/runtime/executor/claude_signing_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/codex",
+      "production_total": 16,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 18,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/codex_executor.go",
+        "internal/runtime/executor/codex_executor_auth.go",
+        "internal/runtime/executor/codex_executor_cache_test.go",
+        "internal/runtime/executor/codex_executor_compact_test.go",
+        "internal/runtime/executor/codex_executor_execute.go",
+        "internal/runtime/executor/codex_executor_imagegen_test.go",
+        "internal/runtime/executor/codex_executor_input_ids_test.go",
+        "internal/runtime/executor/codex_executor_instructions_test.go",
+        "internal/runtime/executor/codex_executor_parallel_tool_calls_test.go",
+        "internal/runtime/executor/codex_executor_reasoning.go",
+        "internal/runtime/executor/codex_executor_reasoning_replay_cache_test.go",
+        "internal/runtime/executor/codex_executor_request.go",
+        "internal/runtime/executor/codex_executor_retry_test.go",
+        "internal/runtime/executor/codex_executor_signature_test.go",
+        "internal/runtime/executor/codex_executor_spawn_agent_test.go",
+        "internal/runtime/executor/codex_executor_stream.go",
+        "internal/runtime/executor/codex_executor_stream_output_test.go",
+        "internal/runtime/executor/codex_executor_terminal.go",
+        "internal/runtime/executor/codex_executor_tokens.go",
+        "internal/runtime/executor/codex_executor_translate_test.go",
+        "internal/runtime/executor/codex_openai_images.go",
+        "internal/runtime/executor/codex_openai_images_extract_test.go",
+        "internal/runtime/executor/codex_openai_images_test.go",
+        "internal/runtime/executor/codex_websockets_connection.go",
+        "internal/runtime/executor/codex_websockets_errors.go",
+        "internal/runtime/executor/codex_websockets_execute.go",
+        "internal/runtime/executor/codex_websockets_executor.go",
+        "internal/runtime/executor/codex_websockets_executor_store_test.go",
+        "internal/runtime/executor/codex_websockets_executor_test.go",
+        "internal/runtime/executor/codex_websockets_request.go",
+        "internal/runtime/executor/codex_websockets_session.go",
+        "internal/runtime/executor/codex_websockets_spawn_agent_test.go",
+        "internal/runtime/executor/codex_websockets_stream.go",
+        "internal/runtime/executor/home_codex_terminal_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/core",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 4,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/caching_verify_test.go",
+        "internal/runtime/executor/executor_payload_optimization_test.go",
+        "internal/runtime/executor/websocket_lifecycle_bind_test.go",
+        "internal/runtime/executor/websocket_session_target_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/gemini",
+      "production_total": 3,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/aistudio_executor.go",
+        "internal/runtime/executor/aistudio_executor_test.go",
+        "internal/runtime/executor/gemini_executor.go",
+        "internal/runtime/executor/gemini_executor_test.go",
+        "internal/runtime/executor/gemini_vertex_executor.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/helps",
+      "production_total": 32,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 29,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/helps/antigravity_grounding_urls.go",
+        "internal/runtime/executor/helps/antigravity_grounding_urls_test.go",
+        "internal/runtime/executor/helps/cache_helpers.go",
+        "internal/runtime/executor/helps/cache_helpers_test.go",
+        "internal/runtime/executor/helps/claude_builtin_tools.go",
+        "internal/runtime/executor/helps/claude_builtin_tools_test.go",
+        "internal/runtime/executor/helps/claude_client_detection.go",
+        "internal/runtime/executor/helps/claude_client_detection_test.go",
+        "internal/runtime/executor/helps/claude_code_session.go",
+        "internal/runtime/executor/helps/claude_code_session_test.go",
+        "internal/runtime/executor/helps/claude_credential_identity.go",
+        "internal/runtime/executor/helps/claude_credential_identity_race_test.go",
+        "internal/runtime/executor/helps/claude_credential_identity_test.go",
+        "internal/runtime/executor/helps/claude_device_profile.go",
+        "internal/runtime/executor/helps/claude_device_profile_test.go",
+        "internal/runtime/executor/helps/claude_diagnostics.go",
+        "internal/runtime/executor/helps/claude_diagnostics_test.go",
+        "internal/runtime/executor/helps/claude_input_tokens.go",
+        "internal/runtime/executor/helps/claude_input_tokens_test.go",
+        "internal/runtime/executor/helps/claude_mcp_alias.go",
+        "internal/runtime/executor/helps/claude_mcp_alias_test.go",
+        "internal/runtime/executor/helps/claude_upstream.go",
+        "internal/runtime/executor/helps/claude_upstream_test.go",
+        "internal/runtime/executor/helps/cloak_obfuscate.go",
+        "internal/runtime/executor/helps/cloak_utils.go",
+        "internal/runtime/executor/helps/codex_input_ids.go",
+        "internal/runtime/executor/helps/codex_input_ids_test.go",
+        "internal/runtime/executor/helps/codex_multi_agent_v2.go",
+        "internal/runtime/executor/helps/derived_session.go",
+        "internal/runtime/executor/helps/derived_session_test.go",
+        "internal/runtime/executor/helps/home_refresh.go",
+        "internal/runtime/executor/helps/home_refresh_test.go",
+        "internal/runtime/executor/helps/json_retry_helpers.go",
+        "internal/runtime/executor/helps/logging_helpers.go",
+        "internal/runtime/executor/helps/logging_helpers_test.go",
+        "internal/runtime/executor/helps/model_capabilities.go",
+        "internal/runtime/executor/helps/model_capabilities_test.go",
+        "internal/runtime/executor/helps/openai_compat_tool_results.go",
+        "internal/runtime/executor/helps/openai_compat_tool_results_test.go",
+        "internal/runtime/executor/helps/payload_helpers.go",
+        "internal/runtime/executor/helps/payload_helpers_disable_image_generation_test.go",
+        "internal/runtime/executor/helps/payload_mutations.go",
+        "internal/runtime/executor/helps/payload_mutations_test.go",
+        "internal/runtime/executor/helps/proxy_helpers.go",
+        "internal/runtime/executor/helps/proxy_helpers_test.go",
+        "internal/runtime/executor/helps/session_id_cache.go",
+        "internal/runtime/executor/helps/session_id_cache_test.go",
+        "internal/runtime/executor/helps/thinking.go",
+        "internal/runtime/executor/helps/thinking_providers.go",
+        "internal/runtime/executor/helps/thinking_test.go",
+        "internal/runtime/executor/helps/token_helpers.go",
+        "internal/runtime/executor/helps/usage_helpers.go",
+        "internal/runtime/executor/helps/usage_helpers_test.go",
+        "internal/runtime/executor/helps/usage_stream_benchmark_test.go",
+        "internal/runtime/executor/helps/user_id_cache.go",
+        "internal/runtime/executor/helps/user_id_cache_test.go",
+        "internal/runtime/executor/helps/utls_client.go",
+        "internal/runtime/executor/helps/utls_client_resumption_test.go",
+        "internal/runtime/executor/helps/utls_client_test.go",
+        "internal/runtime/executor/helps/vertex_payload_helpers.go",
+        "internal/runtime/executor/helps/vertex_payload_helpers_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/kimi",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/kimi_executor.go",
+        "internal/runtime/executor/kimi_executor_test.go",
+        "internal/runtime/executor/kimi_thinking_replay.go",
+        "internal/runtime/executor/kimi_thinking_replay_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/openai",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/openai_compat_executor.go",
+        "internal/runtime/executor/openai_compat_executor_compact_test.go",
+        "internal/runtime/executor/openai_compat_executor_tool_results_test.go",
+        "internal/runtime/executor/openai_responses_signature.go",
+        "internal/runtime/executor/openai_responses_signature_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/runtime/executor/xai",
+      "production_total": 10,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "internal/runtime/executor/xai_executor.go",
+        "internal/runtime/executor/xai_executor_auth.go",
+        "internal/runtime/executor/xai_executor_execute.go",
+        "internal/runtime/executor/xai_executor_media.go",
+        "internal/runtime/executor/xai_executor_request.go",
+        "internal/runtime/executor/xai_executor_response.go",
+        "internal/runtime/executor/xai_executor_stream.go",
+        "internal/runtime/executor/xai_executor_test.go",
+        "internal/runtime/executor/xai_executor_tokens.go",
+        "internal/runtime/executor/xai_reasoning_replay.go",
+        "internal/runtime/executor/xai_status_err_test.go",
+        "internal/runtime/executor/xai_websockets_executor.go",
+        "internal/runtime/executor/xai_websockets_executor_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/safemode",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/safemode/example_api_keys.go",
+        "internal/safemode/example_api_keys_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/signature",
+      "production_total": 8,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 6,
+      "test_open": 0,
+      "files": [
+        "internal/signature/claude.go",
+        "internal/signature/claude_messages_sanitize.go",
+        "internal/signature/claude_test.go",
+        "internal/signature/claude_validation.go",
+        "internal/signature/gemini_sanitize.go",
+        "internal/signature/gemini_sanitize_test.go",
+        "internal/signature/gemini_validation.go",
+        "internal/signature/gemini_validation_test.go",
+        "internal/signature/gpt_validation.go",
+        "internal/signature/gpt_validation_test.go",
+        "internal/signature/grok_validation.go",
+        "internal/signature/grok_validation_test.go",
+        "internal/signature/provider_compatibility.go",
+        "internal/signature/provider_compatibility_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/store",
+      "production_total": 4,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/store/gitstore.go",
+        "internal/store/gitstore_test.go",
+        "internal/store/objectstore.go",
+        "internal/store/postgres_cooldown_store.go",
+        "internal/store/postgres_cooldown_store_test.go",
+        "internal/store/postgresstore.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/thinking",
+      "production_total": 17,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "internal/thinking/apply.go",
+        "internal/thinking/apply_configured_api_key_test.go",
+        "internal/thinking/convert.go",
+        "internal/thinking/errors.go",
+        "internal/thinking/kimi_max_clamp_repro_test.go",
+        "internal/thinking/provider/antigravity/apply.go",
+        "internal/thinking/provider/claude/apply.go",
+        "internal/thinking/provider/codex/apply.go",
+        "internal/thinking/provider/gemini/apply.go",
+        "internal/thinking/provider/interactions/apply.go",
+        "internal/thinking/provider/kimi/apply.go",
+        "internal/thinking/provider/openai/apply.go",
+        "internal/thinking/provider/xai/apply.go",
+        "internal/thinking/strip.go",
+        "internal/thinking/suffix.go",
+        "internal/thinking/summary.go",
+        "internal/thinking/summary_test.go",
+        "internal/thinking/text.go",
+        "internal/thinking/types.go",
+        "internal/thinking/validate.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/antigravity",
+      "production_total": 17,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 14,
+      "test_open": 0,
+      "files": [
+        "internal/translator/antigravity/claude/antigravity_claude_request.go",
+        "internal/translator/antigravity/claude/antigravity_claude_request_test.go",
+        "internal/translator/antigravity/claude/antigravity_claude_response.go",
+        "internal/translator/antigravity/claude/antigravity_claude_response_test.go",
+        "internal/translator/antigravity/claude/init.go",
+        "internal/translator/antigravity/claude/signature_validation.go",
+        "internal/translator/antigravity/claude/signature_validation_test.go",
+        "internal/translator/antigravity/claude/web_search.go",
+        "internal/translator/antigravity/gemini/antigravity_gemini_request.go",
+        "internal/translator/antigravity/gemini/antigravity_gemini_request_test.go",
+        "internal/translator/antigravity/gemini/antigravity_gemini_response.go",
+        "internal/translator/antigravity/gemini/antigravity_gemini_response_test.go",
+        "internal/translator/antigravity/gemini/init.go",
+        "internal/translator/antigravity/gemini/noop_optimization_test.go",
+        "internal/translator/antigravity/interactions/init.go",
+        "internal/translator/antigravity/interactions/interactions_antigravity_file_data_test.go",
+        "internal/translator/antigravity/interactions/interactions_antigravity_request.go",
+        "internal/translator/antigravity/interactions/interactions_antigravity_response.go",
+        "internal/translator/antigravity/interactions/interactions_antigravity_test.go",
+        "internal/translator/antigravity/interactions/noop_optimization_test.go",
+        "internal/translator/antigravity/openai/chat-completions/antigravity_openai_file_data_test.go",
+        "internal/translator/antigravity/openai/chat-completions/antigravity_openai_request.go",
+        "internal/translator/antigravity/openai/chat-completions/antigravity_openai_request_test.go",
+        "internal/translator/antigravity/openai/chat-completions/antigravity_openai_response.go",
+        "internal/translator/antigravity/openai/chat-completions/antigravity_openai_response_test.go",
+        "internal/translator/antigravity/openai/chat-completions/init.go",
+        "internal/translator/antigravity/openai/chat-completions/noop_optimization_test.go",
+        "internal/translator/antigravity/openai/responses/antigravity_openai-responses_request.go",
+        "internal/translator/antigravity/openai/responses/antigravity_openai-responses_request_test.go",
+        "internal/translator/antigravity/openai/responses/antigravity_openai-responses_response.go",
+        "internal/translator/antigravity/openai/responses/init.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/claude",
+      "production_total": 12,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 10,
+      "test_open": 0,
+      "files": [
+        "internal/translator/claude/gemini/claude_gemini_request.go",
+        "internal/translator/claude/gemini/claude_gemini_request_test.go",
+        "internal/translator/claude/gemini/claude_gemini_response.go",
+        "internal/translator/claude/gemini/claude_gemini_response_test.go",
+        "internal/translator/claude/gemini/init.go",
+        "internal/translator/claude/gemini/noop_optimization_test.go",
+        "internal/translator/claude/interactions/init.go",
+        "internal/translator/claude/interactions/interactions_claude_request.go",
+        "internal/translator/claude/interactions/interactions_claude_response.go",
+        "internal/translator/claude/interactions/interactions_claude_test.go",
+        "internal/translator/claude/openai/chat-completions/claude_openai_request.go",
+        "internal/translator/claude/openai/chat-completions/claude_openai_request_test.go",
+        "internal/translator/claude/openai/chat-completions/claude_openai_response.go",
+        "internal/translator/claude/openai/chat-completions/claude_openai_response_test.go",
+        "internal/translator/claude/openai/chat-completions/init.go",
+        "internal/translator/claude/openai/chat-completions/noop_optimization_test.go",
+        "internal/translator/claude/openai/responses/claude_openai-responses_request.go",
+        "internal/translator/claude/openai/responses/claude_openai-responses_request_test.go",
+        "internal/translator/claude/openai/responses/claude_openai-responses_response.go",
+        "internal/translator/claude/openai/responses/claude_openai-responses_response_test.go",
+        "internal/translator/claude/openai/responses/init.go",
+        "internal/translator/claude/openai/responses/noop_optimization_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/codex",
+      "production_total": 16,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 15,
+      "test_open": 0,
+      "files": [
+        "internal/translator/codex/claude/codex_claude_parallel_function_calls_test.go",
+        "internal/translator/codex/claude/codex_claude_request.go",
+        "internal/translator/codex/claude/codex_claude_request_benchmark_test.go",
+        "internal/translator/codex/claude/codex_claude_request_test.go",
+        "internal/translator/codex/claude/codex_claude_response.go",
+        "internal/translator/codex/claude/codex_claude_response_test.go",
+        "internal/translator/codex/claude/codex_claude_response_web_search.go",
+        "internal/translator/codex/claude/init.go",
+        "internal/translator/codex/claude/noop_optimization_test.go",
+        "internal/translator/codex/gemini/codex_gemini_request.go",
+        "internal/translator/codex/gemini/codex_gemini_request_test.go",
+        "internal/translator/codex/gemini/codex_gemini_response.go",
+        "internal/translator/codex/gemini/codex_gemini_response_test.go",
+        "internal/translator/codex/gemini/init.go",
+        "internal/translator/codex/gemini/noop_optimization_test.go",
+        "internal/translator/codex/interactions/init.go",
+        "internal/translator/codex/interactions/interactions_codex_request.go",
+        "internal/translator/codex/interactions/interactions_codex_response.go",
+        "internal/translator/codex/interactions/interactions_codex_test.go",
+        "internal/translator/codex/interactions/noop_optimization_test.go",
+        "internal/translator/codex/openai/chat-completions/codex_openai_request.go",
+        "internal/translator/codex/openai/chat-completions/codex_openai_request_test.go",
+        "internal/translator/codex/openai/chat-completions/codex_openai_response.go",
+        "internal/translator/codex/openai/chat-completions/codex_openai_response_test.go",
+        "internal/translator/codex/openai/chat-completions/init.go",
+        "internal/translator/codex/openai/chat-completions/noop_optimization_test.go",
+        "internal/translator/codex/openai/responses/codex_openai-responses_request.go",
+        "internal/translator/codex/openai/responses/codex_openai-responses_request_test.go",
+        "internal/translator/codex/openai/responses/codex_openai-responses_response.go",
+        "internal/translator/codex/openai/responses/codex_openai-responses_response_test.go",
+        "internal/translator/codex/openai/responses/init.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/common",
+      "production_total": 5,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "internal/translator/common/bytes.go",
+        "internal/translator/common/bytes_test.go",
+        "internal/translator/common/cache_control.go",
+        "internal/translator/common/cache_control_test.go",
+        "internal/translator/common/claude_system.go",
+        "internal/translator/common/file_data.go",
+        "internal/translator/common/file_data_test.go",
+        "internal/translator/common/interactions_usage.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/gemini",
+      "production_total": 17,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 14,
+      "test_open": 0,
+      "files": [
+        "internal/translator/gemini/claude/gemini_claude_request.go",
+        "internal/translator/gemini/claude/gemini_claude_request_test.go",
+        "internal/translator/gemini/claude/gemini_claude_response.go",
+        "internal/translator/gemini/claude/gemini_claude_response_test.go",
+        "internal/translator/gemini/claude/init.go",
+        "internal/translator/gemini/common/safety.go",
+        "internal/translator/gemini/gemini/gemini_gemini_request.go",
+        "internal/translator/gemini/gemini/gemini_gemini_request_test.go",
+        "internal/translator/gemini/gemini/gemini_gemini_response.go",
+        "internal/translator/gemini/gemini/init.go",
+        "internal/translator/gemini/interactions/init.go",
+        "internal/translator/gemini/interactions/interactions_gemini_common.go",
+        "internal/translator/gemini/interactions/interactions_gemini_common_test.go",
+        "internal/translator/gemini/interactions/interactions_gemini_file_data_test.go",
+        "internal/translator/gemini/interactions/interactions_gemini_response.go",
+        "internal/translator/gemini/openai/chat-completions/gemini_openai_file_data_test.go",
+        "internal/translator/gemini/openai/chat-completions/gemini_openai_request.go",
+        "internal/translator/gemini/openai/chat-completions/gemini_openai_request_test.go",
+        "internal/translator/gemini/openai/chat-completions/gemini_openai_response.go",
+        "internal/translator/gemini/openai/chat-completions/gemini_openai_response_test.go",
+        "internal/translator/gemini/openai/chat-completions/gemini_openai_signature_test.go",
+        "internal/translator/gemini/openai/chat-completions/init.go",
+        "internal/translator/gemini/openai/chat-completions/noop_optimization_test.go",
+        "internal/translator/gemini/openai/responses/gemini_openai-responses_request.go",
+        "internal/translator/gemini/openai/responses/gemini_openai-responses_request_test.go",
+        "internal/translator/gemini/openai/responses/gemini_openai-responses_response.go",
+        "internal/translator/gemini/openai/responses/gemini_openai-responses_response_test.go",
+        "internal/translator/gemini/openai/responses/init.go",
+        "internal/translator/gemini/openai/responses/noop_optimization_test.go",
+        "internal/translator/gemini/openai/responses/signature_carrier.go",
+        "internal/translator/gemini/openai/responses/signature_carrier_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/init.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/translator/init.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/interactions",
+      "production_total": 3,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "internal/translator/interactions/claude/init.go",
+        "internal/translator/interactions/claude/interactions_claude_request.go",
+        "internal/translator/interactions/claude/interactions_claude_response.go",
+        "internal/translator/interactions/claude/interactions_claude_test.go",
+        "internal/translator/interactions/import_boundary_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/openai",
+      "production_total": 21,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 12,
+      "test_open": 0,
+      "files": [
+        "internal/translator/openai/claude/init.go",
+        "internal/translator/openai/claude/openai_claude_request.go",
+        "internal/translator/openai/claude/openai_claude_request_test.go",
+        "internal/translator/openai/claude/openai_claude_response.go",
+        "internal/translator/openai/claude/openai_claude_response_test.go",
+        "internal/translator/openai/gemini/init.go",
+        "internal/translator/openai/gemini/openai_gemini_request.go",
+        "internal/translator/openai/gemini/openai_gemini_request_test.go",
+        "internal/translator/openai/gemini/openai_gemini_response.go",
+        "internal/translator/openai/gemini/openai_gemini_response_test.go",
+        "internal/translator/openai/interactions/chat-completions/init.go",
+        "internal/translator/openai/interactions/chat-completions/interactions_openai_request.go",
+        "internal/translator/openai/interactions/chat-completions/interactions_openai_request_test.go",
+        "internal/translator/openai/interactions/chat-completions/interactions_openai_response.go",
+        "internal/translator/openai/interactions/chat-completions/interactions_openai_response_test.go",
+        "internal/translator/openai/interactions/chat-completions/openai_interactions_file_data_test.go",
+        "internal/translator/openai/interactions/chat-completions/openai_interactions_request.go",
+        "internal/translator/openai/interactions/chat-completions/openai_interactions_response.go",
+        "internal/translator/openai/interactions/responses/init.go",
+        "internal/translator/openai/interactions/responses/interactions_openai_responses_request.go",
+        "internal/translator/openai/interactions/responses/interactions_openai_responses_request_test.go",
+        "internal/translator/openai/interactions/responses/interactions_openai_responses_response.go",
+        "internal/translator/openai/interactions/responses/interactions_openai_responses_response_test.go",
+        "internal/translator/openai/openai/chat-completions/init.go",
+        "internal/translator/openai/openai/chat-completions/openai_openai_request.go",
+        "internal/translator/openai/openai/chat-completions/openai_openai_request_test.go",
+        "internal/translator/openai/openai/chat-completions/openai_openai_response.go",
+        "internal/translator/openai/openai/responses/init.go",
+        "internal/translator/openai/openai/responses/openai_openai-responses_request.go",
+        "internal/translator/openai/openai/responses/openai_openai-responses_request_test.go",
+        "internal/translator/openai/openai/responses/openai_openai-responses_response.go",
+        "internal/translator/openai/openai/responses/openai_openai-responses_response_test.go",
+        "internal/translator/openai/openai/responses/openai_openai-responses_tools.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/request_benchmark_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/translator/request_benchmark_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/response_benchmark_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/translator/response_benchmark_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/translator/translator",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/translator/translator/translator.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/tui",
+      "production_total": 12,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "internal/tui/app.go",
+        "internal/tui/auth_tab.go",
+        "internal/tui/browser.go",
+        "internal/tui/client.go",
+        "internal/tui/config_tab.go",
+        "internal/tui/dashboard.go",
+        "internal/tui/i18n.go",
+        "internal/tui/keys_tab.go",
+        "internal/tui/loghook.go",
+        "internal/tui/logs_tab.go",
+        "internal/tui/oauth_tab.go",
+        "internal/tui/oauth_tab_test.go",
+        "internal/tui/styles.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/util",
+      "production_total": 14,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 8,
+      "test_open": 0,
+      "files": [
+        "internal/util/claude_attribution.go",
+        "internal/util/claude_attribution_test.go",
+        "internal/util/claude_model.go",
+        "internal/util/claude_model_test.go",
+        "internal/util/claude_schema.go",
+        "internal/util/claude_schema_test.go",
+        "internal/util/claude_tool_id.go",
+        "internal/util/claude_tool_id_test.go",
+        "internal/util/claude_tool_result.go",
+        "internal/util/claude_tool_result_test.go",
+        "internal/util/gemini_schema.go",
+        "internal/util/gemini_schema_test.go",
+        "internal/util/gjson.go",
+        "internal/util/gjson_test.go",
+        "internal/util/header_helpers.go",
+        "internal/util/image.go",
+        "internal/util/provider.go",
+        "internal/util/proxy.go",
+        "internal/util/sanitize_test.go",
+        "internal/util/ssh_helper.go",
+        "internal/util/translator.go",
+        "internal/util/util.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/watcher",
+      "production_total": 17,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 9,
+      "test_open": 0,
+      "files": [
+        "internal/watcher/clients.go",
+        "internal/watcher/config_reload.go",
+        "internal/watcher/diff/auth_diff.go",
+        "internal/watcher/diff/config_diff.go",
+        "internal/watcher/diff/config_diff_test.go",
+        "internal/watcher/diff/model_hash.go",
+        "internal/watcher/diff/model_hash_test.go",
+        "internal/watcher/diff/models_summary.go",
+        "internal/watcher/diff/oauth_excluded.go",
+        "internal/watcher/diff/oauth_excluded_test.go",
+        "internal/watcher/diff/oauth_model_alias.go",
+        "internal/watcher/diff/oauth_model_alias_test.go",
+        "internal/watcher/diff/openai_compat.go",
+        "internal/watcher/diff/openai_compat_test.go",
+        "internal/watcher/dispatcher.go",
+        "internal/watcher/events.go",
+        "internal/watcher/synthesizer/config.go",
+        "internal/watcher/synthesizer/config_test.go",
+        "internal/watcher/synthesizer/context.go",
+        "internal/watcher/synthesizer/file.go",
+        "internal/watcher/synthesizer/file_test.go",
+        "internal/watcher/synthesizer/helpers.go",
+        "internal/watcher/synthesizer/helpers_test.go",
+        "internal/watcher/synthesizer/interface.go",
+        "internal/watcher/watcher.go",
+        "internal/watcher/watcher_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "internal/wsrelay",
+      "production_total": 4,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "internal/wsrelay/http.go",
+        "internal/wsrelay/manager.go",
+        "internal/wsrelay/message.go",
+        "internal/wsrelay/session.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/access",
+      "production_total": 4,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/access/errors.go",
+        "sdk/access/manager.go",
+        "sdk/access/registry.go",
+        "sdk/access/registry_test.go",
+        "sdk/access/types.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/api/handlers",
+      "production_total": 27,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 21,
+      "test_open": 0,
+      "files": [
+        "sdk/api/handlers/claude/code_handlers.go",
+        "sdk/api/handlers/claude/code_handlers_error_test.go",
+        "sdk/api/handlers/claude/code_handlers_model_test.go",
+        "sdk/api/handlers/gemini/gemini_handlers.go",
+        "sdk/api/handlers/gemini/gemini_models_display_name_test.go",
+        "sdk/api/handlers/gemini/interactions_handlers.go",
+        "sdk/api/handlers/gemini/interactions_handlers_test.go",
+        "sdk/api/handlers/handlers.go",
+        "sdk/api/handlers/handlers_context.go",
+        "sdk/api/handlers/handlers_error_response_test.go",
+        "sdk/api/handlers/handlers_errors.go",
+        "sdk/api/handlers/handlers_execution.go",
+        "sdk/api/handlers/handlers_interceptors.go",
+        "sdk/api/handlers/handlers_interceptors_test.go",
+        "sdk/api/handlers/handlers_metadata_test.go",
+        "sdk/api/handlers/handlers_model_router_test.go",
+        "sdk/api/handlers/handlers_request_details_test.go",
+        "sdk/api/handlers/handlers_routing.go",
+        "sdk/api/handlers/handlers_stream.go",
+        "sdk/api/handlers/handlers_stream_bootstrap_test.go",
+        "sdk/api/handlers/header_filter.go",
+        "sdk/api/handlers/header_filter_test.go",
+        "sdk/api/handlers/model_execution.go",
+        "sdk/api/handlers/model_execution_test.go",
+        "sdk/api/handlers/openai/codex_client_models.go",
+        "sdk/api/handlers/openai/codex_client_models_test.go",
+        "sdk/api/handlers/openai/openai_handlers.go",
+        "sdk/api/handlers/openai/openai_images_handlers.go",
+        "sdk/api/handlers/openai/openai_images_handlers_test.go",
+        "sdk/api/handlers/openai/openai_responses_compact_test.go",
+        "sdk/api/handlers/openai/openai_responses_handlers.go",
+        "sdk/api/handlers/openai/openai_responses_handlers_stream_error_test.go",
+        "sdk/api/handlers/openai/openai_responses_handlers_stream_test.go",
+        "sdk/api/handlers/openai/openai_responses_signature_test.go",
+        "sdk/api/handlers/openai/openai_responses_websocket.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_forward.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_prewarm.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_requests.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_session.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_test.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_timeline.go",
+        "sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go",
+        "sdk/api/handlers/openai/openai_videos_handlers.go",
+        "sdk/api/handlers/openai/openai_videos_handlers_test.go",
+        "sdk/api/handlers/openai_responses_stream_error.go",
+        "sdk/api/handlers/openai_responses_stream_error_test.go",
+        "sdk/api/handlers/request_body.go",
+        "sdk/api/handlers/stream_forwarder.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/api/management.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/api/management.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/api/options.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/api/options.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/auth/antigravity",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/auth/antigravity.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/auth/claude",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/auth/claude.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/auth/codex",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/auth/codex.go",
+        "sdk/auth/codex_device.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/auth/core",
+      "production_total": 6,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "sdk/auth/errors.go",
+        "sdk/auth/filestore.go",
+        "sdk/auth/filestore_disabled_test.go",
+        "sdk/auth/filestore_test.go",
+        "sdk/auth/interfaces.go",
+        "sdk/auth/manager.go",
+        "sdk/auth/refresh_registry.go",
+        "sdk/auth/store_registry.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/auth/kimi",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/auth/kimi.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/auth/xai",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/auth/xai.go",
+        "sdk/auth/xai_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/antigravity_models.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/antigravity_models.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/auth",
+      "production_total": 36,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 54,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/auth/antigravity_credits.go",
+        "sdk/cliproxy/auth/antigravity_credits_test.go",
+        "sdk/cliproxy/auth/api_key_model_alias_test.go",
+        "sdk/cliproxy/auth/api_key_model_capabilities.go",
+        "sdk/cliproxy/auth/api_key_model_capabilities_test.go",
+        "sdk/cliproxy/auth/auto_refresh_loop.go",
+        "sdk/cliproxy/auth/auto_refresh_loop_test.go",
+        "sdk/cliproxy/auth/classification.go",
+        "sdk/cliproxy/auth/classification_test.go",
+        "sdk/cliproxy/auth/codex_forcemap_ws_forward_test.go",
+        "sdk/cliproxy/auth/conductor.go",
+        "sdk/cliproxy/auth/conductor_availability_test.go",
+        "sdk/cliproxy/auth/conductor_claude_cancellation_test.go",
+        "sdk/cliproxy/auth/conductor_cooldown.go",
+        "sdk/cliproxy/auth/conductor_credits_candidates_test.go",
+        "sdk/cliproxy/auth/conductor_execution.go",
+        "sdk/cliproxy/auth/conductor_executor_replace_test.go",
+        "sdk/cliproxy/auth/conductor_fast_error_test.go",
+        "sdk/cliproxy/auth/conductor_force_mapping_test.go",
+        "sdk/cliproxy/auth/conductor_home.go",
+        "sdk/cliproxy/auth/conductor_home_execution.go",
+        "sdk/cliproxy/auth/conductor_lifecycle.go",
+        "sdk/cliproxy/auth/conductor_models.go",
+        "sdk/cliproxy/auth/conductor_oauth_alias_suspension_test.go",
+        "sdk/cliproxy/auth/conductor_overrides_test.go",
+        "sdk/cliproxy/auth/conductor_recent_requests_test.go",
+        "sdk/cliproxy/auth/conductor_refresh.go",
+        "sdk/cliproxy/auth/conductor_remove_test.go",
+        "sdk/cliproxy/auth/conductor_scheduler_refresh_test.go",
+        "sdk/cliproxy/auth/conductor_selection.go",
+        "sdk/cliproxy/auth/conductor_stream.go",
+        "sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go",
+        "sdk/cliproxy/auth/conductor_update_test.go",
+        "sdk/cliproxy/auth/conductor_usage_test.go",
+        "sdk/cliproxy/auth/conductor_weight_validation_test.go",
+        "sdk/cliproxy/auth/config_apikey.go",
+        "sdk/cliproxy/auth/config_apikey_test.go",
+        "sdk/cliproxy/auth/cooldown_backoff_test.go",
+        "sdk/cliproxy/auth/cooldown_state.go",
+        "sdk/cliproxy/auth/cooldown_state_test.go",
+        "sdk/cliproxy/auth/credential_policy.go",
+        "sdk/cliproxy/auth/custom_headers.go",
+        "sdk/cliproxy/auth/custom_headers_test.go",
+        "sdk/cliproxy/auth/error_events.go",
+        "sdk/cliproxy/auth/error_events_test.go",
+        "sdk/cliproxy/auth/errors.go",
+        "sdk/cliproxy/auth/errors_compat_test.go",
+        "sdk/cliproxy/auth/force_mapping_live_fixtures_test.go",
+        "sdk/cliproxy/auth/home_concurrency.go",
+        "sdk/cliproxy/auth/home_concurrency_test.go",
+        "sdk/cliproxy/auth/home_dispatch_headers_test.go",
+        "sdk/cliproxy/auth/home_execution_paths_test.go",
+        "sdk/cliproxy/auth/home_fallback_audit_test.go",
+        "sdk/cliproxy/auth/home_force_mapping_test.go",
+        "sdk/cliproxy/auth/home_in_flight_publisher.go",
+        "sdk/cliproxy/auth/home_in_flight_publisher_test.go",
+        "sdk/cliproxy/auth/home_result.go",
+        "sdk/cliproxy/auth/home_retry_loop_test.go",
+        "sdk/cliproxy/auth/home_selected_auth_callback_test.go",
+        "sdk/cliproxy/auth/home_selection.go",
+        "sdk/cliproxy/auth/home_selection_attempt_test.go",
+        "sdk/cliproxy/auth/home_selection_test.go",
+        "sdk/cliproxy/auth/home_session_alias.go",
+        "sdk/cliproxy/auth/home_session_alias_test.go",
+        "sdk/cliproxy/auth/home_unauthorized_refresh_test.go",
+        "sdk/cliproxy/auth/home_websocket_reuse_test.go",
+        "sdk/cliproxy/auth/oauth_model_alias.go",
+        "sdk/cliproxy/auth/oauth_model_alias_test.go",
+        "sdk/cliproxy/auth/openai_compat_pool_test.go",
+        "sdk/cliproxy/auth/persist_policy.go",
+        "sdk/cliproxy/auth/persist_policy_test.go",
+        "sdk/cliproxy/auth/request_auth_prepare_test.go",
+        "sdk/cliproxy/auth/request_termination_test.go",
+        "sdk/cliproxy/auth/response_model_rewriter.go",
+        "sdk/cliproxy/auth/response_model_rewriter_antigravity_sim_test.go",
+        "sdk/cliproxy/auth/response_model_rewriter_test.go",
+        "sdk/cliproxy/auth/scheduler.go",
+        "sdk/cliproxy/auth/scheduler_benchmark_test.go",
+        "sdk/cliproxy/auth/scheduler_test.go",
+        "sdk/cliproxy/auth/selected_auth_metadata_test.go",
+        "sdk/cliproxy/auth/selector.go",
+        "sdk/cliproxy/auth/selector_test.go",
+        "sdk/cliproxy/auth/session_cache.go",
+        "sdk/cliproxy/auth/status.go",
+        "sdk/cliproxy/auth/store.go",
+        "sdk/cliproxy/auth/token_fingerprint.go",
+        "sdk/cliproxy/auth/types.go",
+        "sdk/cliproxy/auth/types_test.go",
+        "sdk/cliproxy/auth/weight.go",
+        "sdk/cliproxy/auth/weight_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/builder.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/builder.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/builder_weight_validation_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/builder_weight_validation_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/config_model_display_name_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/config_model_display_name_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/config_model_max_context_length_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/config_model_max_context_length_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/executionregistry",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/executionregistry/concurrency_release_test.go",
+        "sdk/cliproxy/executionregistry/observation.go",
+        "sdk/cliproxy/executionregistry/observation_test.go",
+        "sdk/cliproxy/executionregistry/registry.go",
+        "sdk/cliproxy/executionregistry/registry_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/executor",
+      "production_total": 4,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/executor/context.go",
+        "sdk/cliproxy/executor/lifecycle.go",
+        "sdk/cliproxy/executor/lifecycle_test.go",
+        "sdk/cliproxy/executor/types.go",
+        "sdk/cliproxy/executor/types_test.go",
+        "sdk/cliproxy/executor/websocket.go",
+        "sdk/cliproxy/executor/websocket_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/home_plugins.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/home_plugins.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/home_plugins_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/home_plugins_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/model_registry.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/model_registry.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/openai_compat_config_models_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/openai_compat_config_models_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/pipeline",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/pipeline/context.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/pprof_server.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/pprof_server.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/pprof_server_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/pprof_server_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/providers.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/providers.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/rtprovider.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/rtprovider.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/rtprovider_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/rtprovider_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_auth.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_auth.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_codex_executor_binding_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_codex_executor_binding_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_codex_models_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_codex_models_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_config.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_config.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_config_weight_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_config_weight_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_cooldown_store_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_cooldown_store_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_excluded_models_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_excluded_models_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_executionregistry_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_executionregistry_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_executor_registration_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_executor_registration_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_executors.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_executors.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_home.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_home.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_lifecycle.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_lifecycle.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_models.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_models.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_models_config_index_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_models_config_index_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_oauth_model_alias_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_oauth_model_alias_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_plugin_executor_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_plugin_executor_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_plugin_scheduler_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_plugin_scheduler_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_plugins.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_plugins.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/service_stale_state_test.go",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/service_stale_state_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/session",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/session/identity.go",
+        "sdk/cliproxy/session/identity_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/types.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/types.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/usage",
+      "production_total": 2,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 2,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/usage/accounting.go",
+        "sdk/cliproxy/usage/accounting_test.go",
+        "sdk/cliproxy/usage/manager.go",
+        "sdk/cliproxy/usage/manager_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/cliproxy/watcher.go",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/cliproxy/watcher.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/config",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/config/config.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/logging",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/logging/request_logger.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/pluginabi",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/pluginabi/types.go",
+        "sdk/pluginabi/types_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/pluginapi",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/pluginapi/types.go",
+        "sdk/pluginapi/types_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/pluginhost",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 0,
+      "test_open": 0,
+      "files": [
+        "sdk/pluginhost/host.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/pluginstore",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/pluginstore/pluginstore.go",
+        "sdk/pluginstore/pluginstore_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/proxyutil",
+      "production_total": 1,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 1,
+      "test_open": 0,
+      "files": [
+        "sdk/proxyutil/proxy.go",
+        "sdk/proxyutil/proxy_test.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "sdk/translator",
+      "production_total": 8,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 3,
+      "test_open": 0,
+      "files": [
+        "sdk/translator/builtin/builtin.go",
+        "sdk/translator/format.go",
+        "sdk/translator/formats.go",
+        "sdk/translator/helpers.go",
+        "sdk/translator/pipeline.go",
+        "sdk/translator/plugin_hooks.go",
+        "sdk/translator/registry.go",
+        "sdk/translator/registry_bytes_test.go",
+        "sdk/translator/registry_summary_test.go",
+        "sdk/translator/registry_test.go",
+        "sdk/translator/types.go"
+      ],
+      "status": "closed_live"
+    },
+    {
+      "id": "test",
+      "production_total": 0,
+      "production_open": 0,
+      "production_scaffolds": 0,
+      "production_partial": 0,
+      "test_total": 6,
+      "test_open": 0,
+      "files": [
+        "test/builtin_tools_translation_test.go",
+        "test/claude_code_compatibility_sentinel_test.go",
+        "test/codex_claude_parallel_function_calls_test.go",
+        "test/summary_intent_translation_test.go",
+        "test/thinking_conversion_test.go",
+        "test/usage_logging_test.go"
+      ],
+      "status": "closed_live"
+    }
+  ]
+}

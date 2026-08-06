@@ -1,0 +1,26 @@
+[
+  {
+    "name":"replay-fingerprint-survives-context-drift",
+    "operation":"antigravity_apply_replay_items",
+    "payload":{"request":{"contents":[{"role":"user","parts":[{"text":"new context"}]},{"role":"model","parts":[{"text":"same answer"}]}]}},
+    "replay_items":[{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"fingerprinted-signature-123456","targetKind":"text","targetHash":"0f6be826d17e8649eae3012d158d1cbdf3b31a59f6f0f3a463c3f4fdc410c1dc"}]
+  },
+  {
+    "name":"replay-moves-client-carrier",
+    "operation":"antigravity_apply_replay_items",
+    "payload":{"request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden","thought":true,"thoughtSignature":"client-carried-signature-123456"},{"text":"visible answer"}]}]}},
+    "replay_items":[{"type":"thought_signature","contentIndex":1,"partIndex":1,"thoughtSignature":"client-carried-signature-123456","targetKind":"text","targetHash":"66201a5b62391702bc22ce8380418507133129408224297f24c0aef196fa6866"}]
+  },
+  {
+    "name":"replay-merges-function-signature",
+    "operation":"antigravity_apply_replay_items",
+    "payload":{"request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"native-call","name":"run_command","args":{"command":"same"}}}]}]}},
+    "replay_items":[{"type":"function_call_part","contentIndex":1,"partIndex":0,"call_id":"native-call","name":"run_command","args":{"command":"same"},"thoughtSignature":"function-signature-123456"}]
+  },
+  {
+    "name":"replay-stale-position-does-not-move",
+    "operation":"antigravity_apply_replay_items",
+    "payload":{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"visible answer"}]}]}},
+    "replay_items":[{"type":"thought_signature","contentIndex":8,"partIndex":3,"thoughtSignature":"stale-thought-signature-123456"}]
+  }
+]

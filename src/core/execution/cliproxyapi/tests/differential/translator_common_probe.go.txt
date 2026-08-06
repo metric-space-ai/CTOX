@@ -1,0 +1,56 @@
+package common
+
+import (
+    "encoding/json"
+    "os"
+    "testing"
+
+    geminicommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+    "github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+    "github.com/tidwall/gjson"
+)
+
+type ctoxCommonFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Input json.RawMessage `json:"input"`
+}
+type ctoxCommonResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxTranslatorCommonDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxCommonFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxCommonResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        input := gjson.ParseBytes(fixture.Input)
+        kind := input.Get("kind").String()
+        var output any
+        switch kind {
+        case "cache":
+            converted := AttachCacheControl([]byte(input.Get("dst").String()), input.Get("src"))
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "message_cache":
+            converted := AttachMessageCacheControl([]byte(input.Get("message").String()), input.Get("src"))
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "system":
+            text, ok := ClaudeMessageSystemReminderText(input.Get("content"))
+            output = map[string]any{"text":text,"ok":ok}
+        case "file":
+            mime, data, ok := NormalizeOpenAIFileData(input.Get("filename").String(), input.Get("fallback").String(), input.Get("data").String())
+            output = map[string]any{"mime":mime,"data":data,"ok":ok}
+        case "usage":
+            value := InteractionsUsage(input.Get("root"))
+            if value.Exists() { output = value.Value() } else { output = nil }
+        case "safety":
+            converted := geminicommon.AttachDefaultSafetySettings([]byte(input.Get("raw").String()), input.Get("path").String())
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "attribution":
+            output = util.IsClaudeCodeAttributionSystemText(input.Get("text").String())
+        default: t.Fatalf("unknown common kind %s", kind)
+        }
+        results = append(results, ctoxCommonResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

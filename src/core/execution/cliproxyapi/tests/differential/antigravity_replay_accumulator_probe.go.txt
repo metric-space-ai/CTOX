@@ -1,0 +1,39 @@
+package executor
+
+import (
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxReplayAccumulatorFixture struct {
+    Name string `json:"name"`
+    Payload json.RawMessage `json:"payload"`
+    ResponsePayloads []json.RawMessage `json:"response_payloads"`
+}
+
+func TestCtoxAntigravityReplayAccumulatorDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxReplayAccumulatorFixture; if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    output := make([]any, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        scope := antigravityReasoningReplayScope{modelName:"gemini-3-flash-agent", sessionKey:"differential-session"}
+        acc := newAntigravityReasoningReplayAccumulator(scope, fixture.Payload)
+        for _, response := range fixture.ResponsePayloads { acc.observeResponsePayload(response) }
+        published := acc != nil && acc.terminal && !acc.overflow
+        items := make([]any, 0)
+        if published {
+            acc.appendPendingThoughtSignatures()
+            published = !acc.overflow && len(acc.items) > 0
+            if published {
+                for _, item := range acc.items {
+                    var value any; if err = json.Unmarshal(item, &value); err != nil { t.Fatal(err) }
+                    items = append(items, value)
+                }
+            }
+        }
+        output = append(output, map[string]any{"name":fixture.Name,"output":map[string]any{"published":published,"items":items}})
+    }
+    encoded, err := json.MarshalIndent(output, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

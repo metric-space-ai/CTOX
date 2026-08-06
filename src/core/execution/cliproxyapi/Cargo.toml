@@ -1,0 +1,92 @@
+[package]
+name = "ctox-cliproxyapi"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Rust port of router-for-me/CLIProxyAPI for CTOX"
+autoexamples = false
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["anthropic-fingerprint-transport", "codex-http-transport", "antigravity-http-transport"]
+anthropic-fingerprint-transport = ["dep:wreq", "dep:wreq-util", "wreq/stream"]
+codex-http-transport = ["dep:wreq", "dep:wreq-util", "wreq/stream"]
+antigravity-http-transport = ["dep:wreq", "dep:wreq-util", "wreq/stream"]
+
+[[bin]]
+name = "cliproxy-differential"
+path = "tools/differential.rs"
+
+[[bin]]
+name = "cliproxy-validate-codex-models"
+path = "cmd/validate_codex_models/main.rs"
+
+[[bin]]
+name = "cliproxy-fetch-codex-models"
+path = "cmd/fetch_codex_models/bin.rs"
+
+[[bin]]
+name = "cliproxy-fetch-antigravity-models"
+path = "cmd/fetch_antigravity_models/bin.rs"
+
+[[bin]]
+name = "cliproxy-server"
+path = "cmd/server/bin.rs"
+
+[[example]]
+name = "translator"
+path = "examples/translator/main.rs"
+
+[[example]]
+name = "http-request"
+path = "examples/http-request/main.rs"
+
+[[example]]
+name = "custom-provider"
+path = "examples/custom-provider/main.rs"
+
+[dependencies]
+base64 = "0.22"
+brotli = "8"
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+chrono-tz = "0.10"
+futures-util = "0.3"
+flate2 = "1"
+getrandom = "0.3"
+gjson = "=0.8.1"
+git2 = { version = "0.20", default-features = false }
+httpdate = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
+serde_yaml = "0.9"
+mime = "0.3"
+percent-encoding = "2"
+png = "0.18"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rsa = { version = "0.9", features = ["pem"] }
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "test-util", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = "0.28"
+tiktoken-rs = "0.12"
+url = "2"
+uuid = { version = "1", features = ["v4", "v5"] }
+wreq = { version = "6.0.0-rc.29", default-features = false, features = ["tokio-rt", "webpki-roots"], optional = true }
+wreq-util = { version = "3.0.0-rc.14", default-features = false, features = ["emulation", "tokio-rt"], optional = true }
+webpki-roots = "1"
+weezl = "0.1"
+zeroize = "1.8"
+zstd = "0.13"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+rand = "0.8"
+rcgen = "0.14"
+tempfile = "3"

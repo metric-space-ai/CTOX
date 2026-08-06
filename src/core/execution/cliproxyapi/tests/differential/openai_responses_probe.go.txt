@@ -1,0 +1,90 @@
+package responses
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+)
+
+type ctoxOpenAIResponsesFixture struct {
+	Name              string          `json:"name"`
+	Operation         string          `json:"operation"`
+	Model             string          `json:"model"`
+	Stream            bool            `json:"stream"`
+	Input             json.RawMessage `json:"input"`
+	OriginalRequest   json.RawMessage `json:"original_request"`
+	TranslatedRequest json.RawMessage `json:"translated_request"`
+	RawText           string          `json:"raw_text"`
+	RawSSEChunks      []string        `json:"raw_sse_chunks"`
+}
+type ctoxOpenAIResponsesResult struct {
+	Name   string `json:"name"`
+	Output any    `json:"output"`
+}
+
+func ctoxParseResponsesEvent(raw []byte) map[string]any {
+	result := map[string]any{}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("event:")) {
+			result["event"] = strings.TrimSpace(string(bytes.TrimPrefix(line, []byte("event:"))))
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			var value any
+			if err := json.Unmarshal(data, &value); err != nil {
+				value = string(data)
+			}
+			result["data"] = value
+		}
+	}
+	return result
+}
+
+func TestCtoxOpenAIResponsesDifferential(t *testing.T) {
+	raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures []ctoxOpenAIResponsesFixture
+	if err = json.Unmarshal(raw, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	results := make([]ctoxOpenAIResponsesResult, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		var output any
+		switch fixture.Operation {
+		case "openai_responses_to_chat_request":
+			converted := ConvertOpenAIResponsesRequestToOpenAIChatCompletions(fixture.Model, fixture.Input, fixture.Stream)
+			if err = json.Unmarshal(converted, &output); err != nil {
+				t.Fatal(err)
+			}
+		case "openai_chat_to_responses_non_stream":
+			converted := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, []byte(fixture.RawText), nil)
+			if err = json.Unmarshal(converted, &output); err != nil {
+				t.Fatal(err)
+			}
+		case "openai_chat_to_responses_stream":
+			var param any
+			values := make([]map[string]any, 0)
+			for _, chunk := range fixture.RawSSEChunks {
+				for _, item := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, []byte(chunk), &param) {
+					values = append(values, ctoxParseResponsesEvent(item))
+				}
+			}
+			output = values
+		default:
+			t.Fatalf("unknown operation %s", fixture.Operation)
+		}
+		results = append(results, ctoxOpenAIResponsesResult{Name: fixture.Name, Output: output})
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

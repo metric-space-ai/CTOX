@@ -1,0 +1,42 @@
+package pluginhost
+
+import (
+	"encoding/json"
+	"os"
+	"testing"
+)
+
+type ctoxPluginSchemaFixture struct {
+	Name      string          `json:"name"`
+	Operation string          `json:"operation"`
+	Input     json.RawMessage `json:"input"`
+}
+
+type ctoxPluginSchemaSnapshot struct {
+	Lifecycle    rpcLifecycleRequest `json:"lifecycle"`
+	Registration rpcRegistration     `json:"registration"`
+}
+
+type ctoxPluginSchemaResult struct {
+	Name   string                   `json:"name"`
+	Output ctoxPluginSchemaSnapshot `json:"output"`
+}
+
+func TestCtoxPluginRPCSchemaDifferential(t *testing.T) {
+	raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+	if err != nil { t.Fatal(err) }
+	var fixtures []ctoxPluginSchemaFixture
+	if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+	results := make([]ctoxPluginSchemaResult, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		if fixture.Operation != "plugin_rpc_schema" {
+			t.Fatalf("unknown operation %q", fixture.Operation)
+		}
+		var snapshot ctoxPluginSchemaSnapshot
+		if err = json.Unmarshal(fixture.Input, &snapshot); err != nil { t.Fatal(err) }
+		results = append(results, ctoxPluginSchemaResult{Name: fixture.Name, Output: snapshot})
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err != nil { t.Fatal(err) }
+	if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

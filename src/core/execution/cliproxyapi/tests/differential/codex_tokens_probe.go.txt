@@ -1,0 +1,44 @@
+package executor
+
+import (
+	"encoding/json"
+	"os"
+	"testing"
+)
+
+type ctoxCodexTokensFixture struct {
+	Name      string          `json:"name"`
+	Operation string          `json:"operation"`
+	Model     string          `json:"model"`
+	RawBody   json.RawMessage `json:"raw_body"`
+}
+
+type ctoxCodexTokensResult struct {
+	Name   string `json:"name"`
+	Output struct {
+		Count int64 `json:"count"`
+	} `json:"output"`
+}
+
+func TestCtoxCodexTokensDifferential(t *testing.T) {
+	raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+	if err != nil { t.Fatal(err) }
+	var fixtures []ctoxCodexTokensFixture
+	if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+	results := make([]ctoxCodexTokensResult, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		if fixture.Operation != "codex_count_tokens" {
+			t.Fatalf("unknown operation %q", fixture.Operation)
+		}
+		encoder, err := tokenizerForCodexModel(fixture.Model)
+		if err != nil { t.Fatal(err) }
+		count, err := countCodexInputTokens(encoder, fixture.RawBody)
+		if err != nil { t.Fatal(err) }
+		row := ctoxCodexTokensResult{Name: fixture.Name}
+		row.Output.Count = count
+		results = append(results, row)
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err != nil { t.Fatal(err) }
+	if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

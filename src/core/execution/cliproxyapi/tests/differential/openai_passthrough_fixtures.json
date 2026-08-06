@@ -1,0 +1,9 @@
+[
+  {"name":"openai-model-rewrite","operation":"openai_passthrough_request","model":"gpt-5.6","input":{"model":"old","messages":[{"role":"user","content":"hi"}]}},
+  {"name":"openai-model-insert","operation":"openai_passthrough_request","model":"gpt-5.6","stream":true,"input":{"messages":[]}},
+  {"name":"openai-model-noop","operation":"openai_passthrough_request","model":"gpt-5.6","input":{"model":"gpt-5.6","messages":[]}},
+  {"name":"openai-stream-data","operation":"openai_passthrough_stream","raw_sse":"data:  {\"id\":\"chatcmpl_1\"} \n"},
+  {"name":"openai-stream-done","operation":"openai_passthrough_stream","raw_sse":"data: [DONE]\n"},
+  {"name":"openai-stream-leading-space","operation":"openai_passthrough_stream","raw_sse":" data: [DONE]"},
+  {"name":"openai-non-stream-raw","operation":"openai_passthrough_non_stream","raw_text":" { \"choices\" : [] } "}
+]

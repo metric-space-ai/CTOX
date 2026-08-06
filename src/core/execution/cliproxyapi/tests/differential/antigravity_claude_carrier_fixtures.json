@@ -1,0 +1,65 @@
+[
+  {
+    "name": "encode trims and uses raw base64",
+    "operation": "antigravity_claude_carrier_encode",
+    "input": {"raw_signature":"  EggKBgEMOdbHNA==  ","direction":"next","target_kind":"text"}
+  },
+  {
+    "name": "decode valid directional carrier",
+    "operation": "antigravity_claude_carrier_decode",
+    "input": {"raw_signature":"cpa-gemini-carrier-v1:previous:function:RWdnS0JnRU1PZGJITkE9PQ"}
+  },
+  {
+    "name": "decode legacy raw signature",
+    "operation": "antigravity_claude_carrier_decode",
+    "input": {"raw_signature":"EggKBgEMOdbHNA=="}
+  },
+  {
+    "name": "reject unknown direction",
+    "operation": "antigravity_claude_carrier_decode",
+    "input": {"raw_signature":"cpa-gemini-carrier-v1:sideways:text:RWdnS0JnRU1PZGJITkE9PQ"}
+  },
+  {
+    "name": "reject malformed encoded signature",
+    "operation": "antigravity_claude_carrier_decode",
+    "input": {"raw_signature":"cpa-gemini-carrier-v1:previous:text:invalid"}
+  },
+  {
+    "name": "filter raw carrier from user only",
+    "operation": "antigravity_claude_carrier_filter",
+    "input": {"messages":[
+      {"role":"user","content":[{"type":"thinking","thinking":"","signature":"EggKBgEMOdbHNA=="},{"type":"text","text":"user"}]},
+      {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"EggKBgEMOdbHNA=="},{"type":"text","text":"assistant"}]}
+    ]}
+  },
+  {
+    "name": "previous carrier binds to text",
+    "operation": "antigravity_claude_carrier_filter",
+    "input": {"messages":[{"role":"assistant","content":[
+      {"type":"text","text":"visible"},
+      {"type":"thinking","thinking":"","signature":"cpa-gemini-carrier-v1:previous:text:RWdnS0JnRU1PZGJITkE9PQ"},
+      {"type":"thinking","thinking":"","signature":"cpa-gemini-carrier-v1:previous:function:RWdnS0JnRU1PZGJITkE9PQ"}
+    ]}]}
+  },
+  {
+    "name": "next text carrier admits unsigned thought",
+    "operation": "antigravity_claude_carrier_filter",
+    "input": {"messages":[{"role":"assistant","content":[
+      {"type":"thinking","thinking":"","signature":"cpa-gemini-carrier-v1:next:text:RWdnS0JnRU1PZGJITkE9PQ"},
+      {"type":"thinking","thinking":"signed thought","signature":""}
+    ]}]}
+  },
+  {
+    "name": "mismatched next function carrier drops",
+    "operation": "antigravity_claude_carrier_filter",
+    "input": {"messages":[{"role":"assistant","content":[
+      {"type":"thinking","thinking":"preface","signature":"cpa-gemini-carrier-v1:next:function:RWdnS0JnRU1PZGJITkE9PQ"},
+      {"type":"text","text":"not a tool"}
+    ]}]}
+  },
+  {
+    "name": "non messages payload is unchanged",
+    "operation": "antigravity_claude_carrier_filter",
+    "input": {"contents":[{"role":"model","parts":[]}]}
+  }
+]

@@ -1,0 +1,66 @@
+package claude
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+    "strings"
+    "testing"
+)
+
+type ctoxOpenAIClaudeFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    RawJSON json.RawMessage `json:"raw_json"`
+    RawSSEChunks []string `json:"raw_sse_chunks"`
+}
+type ctoxOpenAIClaudeResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func parseCtoxClaudeSSE(raw []byte) (map[string]any, error) {
+    event := ""
+    data := ""
+    for _, line := range strings.Split(string(raw), "\n") {
+        if strings.HasPrefix(line, "event:") { event = strings.TrimSpace(strings.TrimPrefix(line, "event:")) }
+        if strings.HasPrefix(line, "data:") { data = strings.TrimSpace(strings.TrimPrefix(line, "data:")) }
+    }
+    var payload any
+    if err := json.Unmarshal([]byte(data), &payload); err != nil { return nil, err }
+    return map[string]any{"event":event, "data":payload}, nil
+}
+
+func TestCtoxOpenAIClaudeDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxOpenAIClaudeFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxOpenAIClaudeResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        var output any
+        switch fixture.Operation {
+        case "openai_claude_request":
+            converted := ConvertClaudeRequestToOpenAI(fixture.Model, fixture.Input, fixture.Stream)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "openai_claude_non_stream":
+            var state any
+            converted := ConvertOpenAIResponseToClaudeNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, nil, fixture.RawJSON, &state)
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+        case "openai_claude_stream":
+            var state any
+            events := make([]any, 0)
+            for _, chunk := range fixture.RawSSEChunks {
+                for _, converted := range ConvertOpenAIResponseToClaude(context.Background(), fixture.Model, fixture.OriginalRequest, nil, []byte(chunk), &state) {
+                    event, parseErr := parseCtoxClaudeSSE(converted); if parseErr != nil { t.Fatal(parseErr) }
+                    events = append(events, event)
+                }
+            }
+            output = events
+        default: t.Fatalf("unknown operation %s", fixture.Operation)
+        }
+        results = append(results, ctoxOpenAIClaudeResult{Name:fixture.Name, Output:output})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

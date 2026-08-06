@@ -1,0 +1,40 @@
+package responses
+
+import (
+    "encoding/json"
+    "os"
+    "testing"
+)
+
+type ctoxGeminiResponsesRequestFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+}
+
+type ctoxGeminiResponsesRequestResult struct {
+    Name string `json:"name"`
+    Output any `json:"output"`
+}
+
+func TestCtoxGeminiResponsesRequestDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES"))
+    if err != nil { t.Fatal(err) }
+    var fixtures []ctoxGeminiResponsesRequestFixture
+    if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    results := make([]ctoxGeminiResponsesRequestResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        if fixture.Operation != "responses_request_to_gemini" {
+            t.Fatalf("unknown operation %q", fixture.Operation)
+        }
+        output := ConvertOpenAIResponsesRequestToGemini(fixture.Model, fixture.Input, fixture.Stream)
+        var value any
+        if err = json.Unmarshal(output, &value); err != nil { t.Fatal(err) }
+        results = append(results, ctoxGeminiResponsesRequestResult{Name: fixture.Name, Output: value})
+    }
+    encoded, err := json.MarshalIndent(results, "", "  ")
+    if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}

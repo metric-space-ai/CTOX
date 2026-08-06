@@ -1,0 +1,154 @@
+package claude
+
+import (
+	"bufio"
+	"bytes"
+    "context"
+    "encoding/json"
+    "os"
+	"strings"
+    "testing"
+
+    "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+    "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+    "github.com/tidwall/gjson"
+)
+
+type ctoxAGClaudeRequestFixture struct {
+    Name string `json:"name"`
+    Operation string `json:"operation"`
+    Model string `json:"model"`
+    Stream bool `json:"stream"`
+    Input json.RawMessage `json:"input"`
+    OriginalRequest json.RawMessage `json:"original_request"`
+    TranslatedRequest json.RawMessage `json:"translated_request"`
+    RawJSON json.RawMessage `json:"raw_json"`
+	RawJSONChunks []json.RawMessage `json:"raw_json_chunks"`
+    SignatureCacheEnabled bool `json:"signature_cache_enabled"`
+    SignatureCacheSeed []ctoxAGClaudeSignatureCacheSeed `json:"signature_cache_seed"`
+    SignatureBypassStrict bool `json:"signature_bypass_strict"`
+    SupportsWebSearch bool `json:"supports_web_search"`
+}
+
+type ctoxAGClaudeSignatureCacheSeed struct { Model string `json:"model"`; Text string `json:"text"`; Signature string `json:"signature"` }
+
+type ctoxAGClaudeRequestResult struct { Name string `json:"name"`; Output any `json:"output"` }
+
+func TestCtoxAGClaudeRequestDifferential(t *testing.T) {
+    raw, err := os.ReadFile(os.Getenv("CTOX_DIFF_FIXTURES")); if err != nil { t.Fatal(err) }
+    var fixtures []ctoxAGClaudeRequestFixture; if err = json.Unmarshal(raw, &fixtures); err != nil { t.Fatal(err) }
+    previousCacheMode := cache.SignatureCacheEnabled()
+    defer cache.SetSignatureCacheEnabled(previousCacheMode)
+    results := make([]ctoxAGClaudeRequestResult, 0, len(fixtures))
+    for _, fixture := range fixtures {
+        cache.ClearSignatureCache("")
+        cache.SetSignatureCacheEnabled(fixture.SignatureCacheEnabled)
+        for _, seed := range fixture.SignatureCacheSeed { cache.CacheSignature(seed.Model, seed.Text, seed.Signature) }
+        cache.SetSignatureBypassStrictMode(fixture.SignatureBypassStrict)
+        var output any
+        switch fixture.Operation {
+        case "antigravity_claude_request":
+            registryClientID := ""
+            if fixture.SupportsWebSearch {
+                registryClientID = "ctox-ag-claude-websearch-" + fixture.Name
+                registry.GetGlobalRegistry().RegisterClient(registryClientID, "antigravity", []*registry.ModelInfo{{ID: fixture.Model, SupportsWebSearch: true}})
+            }
+            if err = RequireCachedThinkingSignatures(context.Background(), fixture.Model, fixture.Input); err != nil { t.Fatal(err) }
+            converted := ConvertClaudeRequestToAntigravity(fixture.Model, fixture.Input, fixture.Stream)
+            if registryClientID != "" { registry.GetGlobalRegistry().UnregisterClient(registryClientID) }
+            if err = json.Unmarshal(converted, &output); err != nil { t.Fatalf("%s: %v: %s", fixture.Name, err, converted) }
+        case "antigravity_claude_signature_policy":
+            var policy struct { Action string `json:"action"`; Signature string `json:"signature"`; Payload json.RawMessage `json:"payload"` }
+            if err = json.Unmarshal(fixture.Input, &policy); err != nil { t.Fatal(err) }
+            switch policy.Action {
+            case "strip_prefix":
+                converted := StripEmptySignatureThinkingBlocks(policy.Payload); if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+            case "strip_bypass":
+                converted := StripInvalidBypassSignatureThinkingBlocks(policy.Payload); if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+            case "validate":
+                errValidation := ValidateClaudeBypassSignatures(policy.Payload); output = map[string]any{"ok": errValidation == nil}
+            case "normalize":
+                signature, errNormalize := normalizeClaudeBypassSignature(policy.Signature); output = map[string]any{"signature": signature, "ok": errNormalize == nil}
+            default: t.Fatalf("unknown signature policy action %q", policy.Action)
+            }
+        case "antigravity_claude_web_search_response":
+            if shouldTranslateWebSearchGrounding(fixture.OriginalRequest, fixture.TranslatedRequest) && antigravityGroundingMetadata(gjson.ParseBytes(fixture.RawJSON)).Exists() {
+                converted := ConvertAntigravityResponseToClaudeNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, fixture.RawJSON, nil)
+                if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+                normalizeCtoxWebSearchIDs(output)
+            } else { output = nil }
+		case "antigravity_claude_response":
+			converted := ConvertAntigravityResponseToClaudeNonStream(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, fixture.RawJSON, nil)
+			if err = json.Unmarshal(converted, &output); err != nil { t.Fatal(err) }
+		case "antigravity_claude_stream":
+			var param any
+			events := make([]any, 0)
+			for _, chunk := range fixture.RawJSONChunks {
+				converted := ConvertAntigravityResponseToClaude(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, chunk, &param)
+				for _, batch := range converted { events = append(events, parseCtoxSSEEvents(t, batch)...) }
+			}
+			converted := ConvertAntigravityResponseToClaude(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, []byte("[DONE]"), &param)
+			for _, batch := range converted { events = append(events, parseCtoxSSEEvents(t, batch)...) }
+			output = events
+			normalizeCtoxWebSearchIDs(output)
+		case "antigravity_claude_web_search_stream":
+			var param any
+			events := make([]any, 0)
+			for _, chunk := range fixture.RawJSONChunks {
+				converted := ConvertAntigravityResponseToClaude(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, chunk, &param)
+				for _, batch := range converted { events = append(events, parseCtoxSSEEvents(t, batch)...) }
+			}
+			converted := ConvertAntigravityResponseToClaude(context.Background(), fixture.Model, fixture.OriginalRequest, fixture.TranslatedRequest, []byte("[DONE]"), &param)
+			for _, batch := range converted { events = append(events, parseCtoxSSEEvents(t, batch)...) }
+			output = events
+			normalizeCtoxWebSearchIDs(output)
+        default: t.Fatalf("unknown operation %q", fixture.Operation)
+        }
+        results = append(results, ctoxAGClaudeRequestResult{Name: fixture.Name, Output: output})
+    }
+    cache.ClearSignatureCache("")
+    encoded, err := json.MarshalIndent(results, "", "  "); if err != nil { t.Fatal(err) }
+    if err = os.WriteFile(os.Getenv("CTOX_DIFF_OUTPUT"), encoded, 0o600); err != nil { t.Fatal(err) }
+}
+
+func parseCtoxSSEEvents(t *testing.T, raw []byte) []any {
+	t.Helper()
+	results := make([]any, 0)
+	var event string
+	var data bytes.Buffer
+	flush := func() {
+		if event == "" && data.Len() == 0 { return }
+		var decoded any
+		if data.String() == "[DONE]" { decoded = "[DONE]" } else if err := json.Unmarshal(data.Bytes(), &decoded); err != nil { t.Fatalf("decode SSE %q: %v", data.String(), err) }
+		results = append(results, map[string]any{"event": event, "data": decoded})
+		event = ""
+		data.Reset()
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" { flush(); continue }
+		if bytes.HasPrefix([]byte(line), []byte("event:")) { event = string(bytes.TrimSpace([]byte(line[len("event:"):]))); continue }
+		if bytes.HasPrefix([]byte(line), []byte("data:")) {
+			if data.Len() > 0 { data.WriteByte('\n') }
+			data.Write(bytes.TrimLeft([]byte(line[len("data:"):]), " \t"))
+		}
+	}
+	if err := scanner.Err(); err != nil { t.Fatal(err) }
+	flush()
+	return results
+}
+
+func normalizeCtoxWebSearchIDs(value any) {
+    switch current := value.(type) {
+    case map[string]any:
+        if current["type"] == "server_tool_use" { current["id"] = "srvtoolu_<dynamic>" }
+        if current["type"] == "web_search_tool_result" { current["tool_use_id"] = "srvtoolu_<dynamic>" }
+		if current["type"] == "tool_use" {
+			if id, ok := current["id"].(string); ok && !strings.HasPrefix(id, "cpa_gemini_") { current["id"] = "toolu_<dynamic>" }
+		}
+        for _, nested := range current { normalizeCtoxWebSearchIDs(nested) }
+    case []any:
+        for _, nested := range current { normalizeCtoxWebSearchIDs(nested) }
+    }
+}

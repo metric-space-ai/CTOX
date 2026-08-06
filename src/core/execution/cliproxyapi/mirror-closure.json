@@ -1,0 +1,10 @@
+{
+  "schema": "ctox.cliproxyapi.mirror-closure.v1",
+  "upstream_commit": "a88197f845c979132c8978ea223c6af05cc81536",
+  "policy": "A file leaves this ledger only after a ported, partial, adapted_to_ctox or replaced_by_ctox status is evidenced and tracking gates pass.",
+  "production_total": 617,
+  "production_classified": 617,
+  "production_open": 0,
+  "upstream_test_open": 0,
+  "waves": []
+}
