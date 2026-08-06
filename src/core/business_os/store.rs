@@ -16200,15 +16200,30 @@ fn maybe_spawn_systematic_research_continuation(
         return Ok(None);
     }
     let lower = error.to_ascii_lowercase();
-    // 413 responses count as transport here: they come from an oversized
-    // mid-run fallback request, and a fresh continuation session starts from
-    // the normal bounded prompt again. The cap still bounds a deterministic
-    // repeat.
+    // Transport here means "the session died, the work did not": a fresh
+    // continuation session simply starts from the accumulated evidence again.
+    // 413 comes from an oversized mid-run fallback request, and a 404
+    // "response was not found for this tenant" is a gateway that lost the
+    // session handle - both are cured by a new session, neither is a verdict
+    // on the research itself. The cap still bounds a deterministic repeat.
     let transport_failure = lower.contains("stream disconnected before completion")
         || lower.contains("connection reset by peer")
         || lower.contains("error sending request for url")
-        || lower.contains("payload too large");
+        || lower.contains("payload too large")
+        || lower.contains("was not found for this tenant");
     if !transport_failure {
+        // Record the refusal too. Without it a missing continuation is
+        // ambiguous - "this code never ran" and "this failure was terminal on
+        // purpose" look identical, and that ambiguity already cost a full
+        // debugging round on the SKF instance.
+        record_research_continuation_decision(
+            conn,
+            failed_command_id,
+            &format!(
+                "no continuation: not a transport failure ({})",
+                error.chars().take(120).collect::<String>()
+            ),
+        );
         return Ok(None);
     }
     let attempt = command
@@ -16217,6 +16232,13 @@ fn maybe_spawn_systematic_research_continuation(
         .and_then(Value::as_i64)
         .unwrap_or(0);
     if attempt >= MAX_AUTO_CONTINUATIONS {
+        record_research_continuation_decision(
+            conn,
+            failed_command_id,
+            &format!(
+                "no continuation: cap of {MAX_AUTO_CONTINUATIONS} reached at attempt {attempt}"
+            ),
+        );
         anyhow::bail!(
             "auto-continuation cap of {MAX_AUTO_CONTINUATIONS} reached (attempt {attempt}); leaving the chain terminal"
         );
@@ -37924,7 +37946,8 @@ pub(super) mod tests {
             client_context: serde_json::json!({"source": "web-research"}),
         };
 
-        // Fail-closed validation stays terminal: no continuation.
+        // Fail-closed validation stays terminal: no continuation, but the
+        // refusal is recorded so a missing continuation is never ambiguous.
         let spawned = maybe_spawn_systematic_research_continuation(
             root,
             &conn,
@@ -37934,6 +37957,39 @@ pub(super) mod tests {
         )
         .expect("validation failure handled");
         assert!(spawned.is_none());
+        let refusal: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(payload_json, '$.decision') FROM business_records
+                 WHERE collection = 'research_continuations' AND record_id = 'cmd_dead_run'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query refusal");
+        assert!(
+            refusal
+                .unwrap_or_default()
+                .contains("not a transport failure"),
+            "a refused continuation must leave a durable reason"
+        );
+
+        // A gateway that lost the session handle is transport, not a verdict.
+        // Own record id: a spawned continuation is an active run for its
+        // record and would legitimately suppress the later transport case.
+        let lost_session_command = BusinessCommand {
+            record_id: Some("research_lost_session_task".to_owned()),
+            ..research_command.clone()
+        };
+        let spawned = maybe_spawn_systematic_research_continuation(
+            root,
+            &conn,
+            "cmd_lost_session",
+            &lost_session_command,
+            "direct session error: unexpected status 404 Not Found: Response '06c35878' was not found for this tenant.",
+        )
+        .expect("lost session handled")
+        .expect("continuation id");
+        assert!(spawned.starts_with("cmd_auto_"));
 
         // Non-research commands never chain.
         let other_command = BusinessCommand {
