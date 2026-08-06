@@ -15,8 +15,11 @@ use super::{
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub(crate) fn claim_business_command_with_queue(
     root: &Path,
@@ -1920,7 +1923,52 @@ pub(crate) fn mark_business_command_outbox_failed(
     Ok(())
 }
 
+/// Kurzlebiger Cache fuer die Kern-Diagnose.
+///
+/// Diese Funktion faehrt sechs Abfragen, darunter zwei LEFT JOINs ueber
+/// `business_command_aggregates` x `business_command_task_links` x
+/// `communication_messages`, und oeffnet dafuer je Aufruf eine eigene
+/// DB-Verbindung. Sie haengt an `native_peer_status` und darueber am
+/// `sync_config_for_browser` — also an JEDEM Laden der Business-OS-Shell.
+///
+/// Gemessen am 06.08. auf einer gewachsenen Instanz (Kern-DB 1,1 GB): alle
+/// vier HTTP-Worker standen gleichzeitig in genau diesem `sqlite3Select`,
+/// der Port nahm Verbindungen an und beantwortete keine. Seitenaufbau 33 s,
+/// API-Aufrufe 44 s, Reloads ueber 300 s. Nebenbei war das die Quelle des
+/// Verbindungslecks: 1.366 offene Deskriptoren auf einer einzigen Datei.
+///
+/// Der Wert ist eine Gesundheitsmomentaufnahme, kein autoritativer Zustand —
+/// der einzige Konsument auf dem heissen Pfad liest daraus `oldest_outbox_age_ms`
+/// und toleriert ausdruecklich `null`. Ein paar Sekunden Alter sind fachlich
+/// unerheblich; ein blockierter Seitenaufbau ist es nicht.
+const CORE_DIAGNOSTICS_TTL: Duration = Duration::from_secs(3);
+
+#[allow(clippy::type_complexity)]
+static CORE_DIAGNOSTICS_CACHE: OnceLock<Mutex<HashMap<PathBuf, (Instant, Value)>>> =
+    OnceLock::new();
+
 pub(crate) fn business_command_core_diagnostics(root: &Path) -> Result<Value> {
+    let cache = CORE_DIAGNOSTICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = root.to_path_buf();
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((measured_at, value)) = guard.get(&key) {
+            if measured_at.elapsed() < CORE_DIAGNOSTICS_TTL {
+                return Ok(value.clone());
+            }
+        }
+    }
+    let fresh = business_command_core_diagnostics_uncached(root)?;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.insert(key, (Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+fn business_command_core_diagnostics_uncached(root: &Path) -> Result<Value> {
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
     let aggregate_count = conn.query_row(

@@ -2039,6 +2039,7 @@ dependencies = [
  "ctox-voxtral-4b-tts-2603",
  "ctox-voxtral-mini-4b-realtime-2602",
  "ctox-web-stack",
+ "flate2",
  "futures-util",
  "git2",
  "image",

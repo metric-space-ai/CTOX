@@ -1017,9 +1017,12 @@ fn reconcile_maintenance_runtime(
 pub fn business_os_maintenance_status(root: &Path) -> Result<serde_json::Value> {
     let layout = InstallLayout::resolve(root)?;
     let state = reconcile_maintenance_runtime(root, &layout)?;
-    let active = state
-        .as_ref()
-        .is_some_and(|state| !matches!(state.status.as_str(), "completed" | "rolled_back"));
+    // Ein TERMINALER Zustand — completed, rolled_back ODER failed — darf die
+    // Instanz nicht schreibgeschuetzt halten. Genau das ist am 25.07. passiert:
+    // ein terminal gescheitertes Upgrade hielt den Wartungs-Schreibschutz zwoelf
+    // Tage aufrecht; Desktop-Mounts scheiterten, der Sync wirkte tot. Der Banner
+    // zeigt den Fehlzustand weiterhin (retryable), aber active ist er nicht.
+    let active = state.as_ref().is_some_and(|state| !state.is_terminal());
     Ok(json!({
         "ok": true,
         "scope": "instance",
@@ -3229,6 +3232,49 @@ fn binary_bundle_required_paths() -> impl Iterator<Item = &'static str> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
+/// The manifest a bundle must satisfy: its own, not the installer's.
+///
+/// Every bundle built since 2026-07-29 ships `contracts/binary_bundle_manifest.txt`
+/// alongside its payload, and the packaging workflow refuses to upload a bundle
+/// that does not satisfy it. Validating against the *installer's* compiled-in
+/// copy instead measured a downloaded bundle against a contract written after
+/// it was built. That is how upgrading to v0.3.27 (tagged 2026-06-10, six weeks
+/// before the contract existed) failed with a list of thirty "missing" runtime
+/// paths it was never built to carry — and, because the failure was terminal,
+/// held this instance write-protected for twelve days.
+///
+/// A bundle with no manifest predates the contract, but "it promised nothing"
+/// must not become "anything installs". A bundle whose payload cannot serve the
+/// shell produces an instance that answers every request with 404, which is a
+/// worse outcome than a refused upgrade. Pre-contract bundles are therefore held
+/// to the floor below: the assets the running server dereferences on every
+/// navigation, present in every release that ever worked.
+const LEGACY_BUNDLE_FLOOR: &[&str] = &[
+    "src/apps/business-os/index.html",
+    "src/apps/business-os/app.js",
+    "src/apps/business-os/app.css",
+    "src/apps/business-os/rxdb/dist/ctox-rxdb-js.mjs",
+];
+
+fn bundle_required_paths(source_root: &Path) -> Result<Vec<String>> {
+    let shipped = source_root.join("contracts/binary_bundle_manifest.txt");
+    let manifest = match fs::read_to_string(&shipped) {
+        Ok(manifest) => manifest,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Ok(LEGACY_BUNDLE_FLOOR.iter().map(|p| p.to_string()).collect());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("read {}", shipped.display()));
+        }
+    };
+    Ok(manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
+}
+
 fn validate_binary_bundle(source_root: &Path) -> Result<()> {
     // Either launch-binary name is valid — `ctox-real` (the supervised real
     // binary) or the plain `ctox` the release workflow ships. The check must
@@ -3243,7 +3289,7 @@ fn validate_binary_bundle(source_root: &Path) -> Result<()> {
         );
     }
     let mut missing = Vec::new();
-    for required_path in binary_bundle_required_paths() {
+    for required_path in bundle_required_paths(source_root)? {
         let path = source_root.join(required_path);
         if !path.exists() {
             missing.push(path.display().to_string());
@@ -4516,6 +4562,33 @@ mod tests {
         assert_eq!(payload["state"]["status"], "completed");
     }
 
+    // Der Waechter zum 25.07.-Vorfall: ein terminal GESCHEITERTES Upgrade
+    // hielt die Instanz zwoelf Tage schreibgeschuetzt, weil der Status-
+    // Endpunkt nur completed/rolled_back als inaktiv zaehlte. failed ist
+    // terminal — der Banner bleibt (retryable), der Schreibschutz nicht.
+    #[test]
+    fn failed_maintenance_does_not_keep_the_instance_write_protected() {
+        let temp = tempdir().unwrap();
+        // Wie im Nachbartest: der Status-Endpunkt loest das Layout selbst aus
+        // dem Wurzelpfad auf. Ein handgebautes Layout schreibt den Zustand
+        // woandershin, und der Test misst dann nichts.
+        let layout = InstallLayout::resolve(temp.path()).unwrap();
+        let started = begin_maintenance(&layout, "branch:main").unwrap();
+        fail_maintenance(
+            &layout.state_root,
+            &started.lease_id,
+            "bundle validation failed",
+        )
+        .unwrap();
+
+        let payload = business_os_maintenance_status(temp.path()).unwrap();
+
+        assert_eq!(payload["active"], false);
+        assert_eq!(payload["state"]["status"], "failed");
+        assert_eq!(payload["state"]["retryable"], true);
+        assert_eq!(payload["message"], "");
+    }
+
     #[test]
     fn maintenance_failure_and_rollback_remain_retryable() {
         let temp = tempdir().unwrap();
@@ -4787,9 +4860,51 @@ mod tests {
         let bundle = temp.path().join("bundle");
         ensure_dir(&bundle.join("bin")).unwrap();
         fs::write(bundle.join("bin/ctox-real"), "binary\n").unwrap();
+        ensure_dir(&bundle.join("contracts")).unwrap();
+        fs::write(
+            bundle.join("contracts/binary_bundle_manifest.txt"),
+            BINARY_BUNDLE_MANIFEST,
+        )
+        .unwrap();
 
         let error = validate_binary_bundle(&bundle).unwrap_err().to_string();
 
+        assert!(error.contains("missing required runtime paths"));
+        assert!(error.contains("src/apps/business-os/index.html"));
+    }
+
+    #[test]
+    fn a_bundle_built_before_the_contract_installs_if_it_can_serve() {
+        // v0.3.27 wurde am 10.06.2026 getaggt, der Bundle-Kontrakt entstand am
+        // 29.07. Wer das aeltere Bundle gegen den neueren Kontrakt prueft,
+        // bekommt dreissig fehlende Pfade gemeldet, die es nie versprochen hat —
+        // und weil der Fehlschlag terminal ist, blieb diese Instanz zwoelf Tage
+        // schreibgeschuetzt. Ohne eigenes Manifest gilt der Mindestboden: was der
+        // Server bei jeder Navigation ausliefert, muss da sein.
+        let temp = tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        ensure_dir(&bundle.join("bin")).unwrap();
+        fs::write(bundle.join("bin/ctox-real"), "binary\n").unwrap();
+        for asset in LEGACY_BUNDLE_FLOOR {
+            let path = bundle.join(asset);
+            ensure_dir(path.parent().unwrap()).unwrap();
+            fs::write(path, "asset\n").unwrap();
+        }
+
+        validate_binary_bundle(&bundle).expect("a pre-contract bundle that can serve installs");
+    }
+
+    #[test]
+    fn a_manifestless_bundle_that_cannot_serve_the_shell_is_refused() {
+        // Die Gegenprobe zum Test darueber: "kein Manifest" darf nicht zu
+        // "alles installiert" werden. Eine Instanz, die auf jede Anfrage 404
+        // antwortet, ist schlimmer als ein abgelehntes Upgrade.
+        let temp = tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        ensure_dir(&bundle.join("bin")).unwrap();
+        fs::write(bundle.join("bin/ctox-real"), "binary\n").unwrap();
+
+        let error = validate_binary_bundle(&bundle).unwrap_err().to_string();
         assert!(error.contains("missing required runtime paths"));
         assert!(error.contains("src/apps/business-os/index.html"));
     }
@@ -4802,7 +4917,10 @@ mod tests {
         fs::write(bundle.join("bin/ctox-real"), "binary\n").unwrap();
         for required_path in binary_bundle_required_paths() {
             let path = bundle.join(required_path);
-            if required_path.ends_with(".json")
+            if required_path == "contracts/binary_bundle_manifest.txt" {
+                ensure_dir(path.parent().unwrap()).unwrap();
+                fs::write(path, BINARY_BUNDLE_MANIFEST).unwrap();
+            } else if required_path.ends_with(".json")
                 || required_path.ends_with(".html")
                 || required_path.ends_with(".js")
                 || required_path.ends_with(".css")

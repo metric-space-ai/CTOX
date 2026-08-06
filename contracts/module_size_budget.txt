@@ -1,0 +1,50 @@
+# Größenbudget für CTOX-Produktionsmodule.
+#
+# Gezählt werden physische Quellzeilen: Leerzeilen und Kommentare zählen mit.
+# Der Guard liest die Datei mit Rusts `str::lines()`, sucht die LETZTE Zeile,
+# deren getrimmter Inhalt exakt `#[cfg(test)]` ist, und zählt alle Zeilen davor;
+# die Markerzeile selbst und alles danach zählen nicht. Gibt es keinen solchen
+# Marker, zählt die ganze Datei. Damit stehen Zählweise und Implementierung an
+# genau einer prüfbaren Definition.
+#
+# Warum der LETZTE Marker: In großen Modulen schützen frühere `#[cfg(test)]`
+# einzelne Test-Imports oder Hilfen mitten im Produktionscode. Beim ersten
+# Marker aufzuhören würde zum Beispiel store.rs schon nahe Zeile 228 abschneiden
+# und fast die ganze Datei unsichtbar machen. Der letzte Marker eröffnet in den
+# überwachten Dateien den abschließenden Testbereich. Frühere test-only Zeilen
+# werden dadurch konservativ mitgezählt; das ist absichtlich stabiler als eine
+# zweite, semantische Schätzung dessen, was der Compiler je Konfiguration baut.
+#
+# Jede Zahl ist eine RATSCHE: Sie muss dem heutigen Stand exakt entsprechen und
+# darf nur fallen. Der Guard in src/core/module_size_tests.rs schlägt in beide
+# Richtungen an: Wachstum ist rot, aber ein nach einem Schnitt zu hoch stehen
+# gebliebenes Budget ebenfalls.
+#
+# Warum: Ein Schnitt, den nichts hält, wächst zurück. store.rs wurde im Juli
+# 2026 von rund 69.000 auf rund 27.300 Produktionszeilen geschnitten und stand
+# wenige Wochen später schon wieder bei rund 28.100. Die sichtbare Ratsche hält
+# den nächsten Schnitt fest, statt Größenwachstum still in Reviews versickern
+# zu lassen.
+#
+# Inventar vom 06.08.2026: alle gefundenen Produktionsdateien unter src/core
+# mit mehr als 5.000 Zeilen nach genau der obigen Regel. Eigenständige
+# Testquelldateien und der ausdrücklich nicht produktive Metal-Forschungsprobe
+# sind kein Produktionsmodul und deshalb nicht Teil dieses Inventars.
+
+src/core/business_os/mcp_channel.rs = 6783
+src/core/business_os/office_engine.rs = 13953
+src/core/business_os/rxdb_peer.rs = 14744
+src/core/business_os/store.rs = 27516
+src/core/business_os/store_outbound_commands.rs = 5270
+src/core/communication/meeting_native.rs = 5018
+src/core/context/lcm/mod.rs = 5627
+src/core/execution/models/runtime_plan.rs = 6517
+src/core/harness/app-server/src/codex_message_processor.rs = 7715
+src/core/harness/app-server-protocol/src/protocol/v2.rs = 5796
+src/core/harness/core/src/codex.rs = 7372
+src/core/mission/channels/mod.rs = 7221
+src/core/mission/tickets/mod.rs = 6011
+src/core/service/business_os.rs = 7106
+src/core/service/process_mining.rs = 6064
+src/core/service/service.rs = 26237
+src/core/ui/tui/mod.rs = 6141

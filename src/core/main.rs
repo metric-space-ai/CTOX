@@ -104,6 +104,7 @@ use crate::inference::runtime_state;
 #[path = "model_catalog_boundary_tests.rs"]
 mod model_catalog_boundary_tests;
 mod module_boundary_tests;
+mod module_size_tests;
 mod text_matching_tests;
 
 fn print_help() {

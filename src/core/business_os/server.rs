@@ -220,13 +220,35 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
     // upgrade; failing here keeps that ownership conflict away from SQLite.
     let server = Server::http(&options.addr)
         .map_err(|err| anyhow::anyhow!("failed to bind Business OS server: {err}"))?;
-    let _conn = store::open_store(root)?;
-    match super::rxdb_peer::ensure_native_peer(root) {
-        Ok(()) => {}
-        Err(err) => eprintln!("[business-os] native rxdb peer config failed: {err:#}"),
-    }
-    if let Err(err) = store::write_module_catalog_projection_to_rxdb(root) {
-        eprintln!("[business-os] module catalog refresh failed at serve start: {err:#}");
+    // Der Store-Warm-up und der native Peer-Bring-up laufen im HINTERGRUND.
+    // Vorher standen sie synchron zwischen Bind und Worker-Start: der Port
+    // nahm Verbindungen an, aber bis der Multi-GB-Store geparst und der Peer
+    // oben war — auf gewachsenen Instanzen MINUTEN — wurde kein einziger
+    // Request beantwortet, nicht einmal die statische Shell. Gemessen am
+    // 06.08.: >300 s haengende Loads nach jedem Daemon-Start. Die Shell
+    // braucht den Store nicht; API-Handler oeffnen den Store ohnehin je
+    // Request und warten dann genau dort, wo es fachlich noetig ist.
+    {
+        let root = root.to_path_buf();
+        thread::Builder::new()
+            .name("business-os-store-warmup".to_string())
+            .spawn(move || {
+                if let Err(err) = store::open_store(&root) {
+                    eprintln!("[business-os] store warm-up failed: {err:#}");
+                }
+                match super::rxdb_peer::ensure_native_peer(&root) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        eprintln!("[business-os] native rxdb peer config failed: {err:#}")
+                    }
+                }
+                if let Err(err) = store::write_module_catalog_projection_to_rxdb(&root) {
+                    eprintln!(
+                        "[business-os] module catalog refresh failed at serve start: {err:#}"
+                    );
+                }
+            })
+            .expect("failed to start Business OS store warm-up thread");
     }
     println!("CTOX Business OS listening on http://{}", options.addr);
     println!("Serving {}", app_root.display());
@@ -3562,14 +3584,56 @@ fn add_common_response_headers<R: io::Read>(response: &mut Response<R>) {
     // not leave the ES-module graph stuck on a kept-alive loopback connection.
 }
 
+/// Business OS ships an injected 650 KB index document plus a wide ES-module
+/// graph, and every navigation refetches the shell because the launch context
+/// is personalized. Uncompressed that measured 1.2-7.3 s to first byte on
+/// loopback; gzip takes the same document to roughly a tenth of the bytes.
+/// Only text payloads above a kilobyte are worth the CPU, and only when the
+/// client actually offered gzip.
+const STATIC_COMPRESSION_MIN_BYTES: usize = 1024;
+
+fn accepts_gzip(request: &Request) -> bool {
+    header_value(request, "Accept-Encoding")
+        .map(|value| {
+            value
+                .split(',')
+                .any(|entry| entry.split(';').next().unwrap_or("").trim() == "gzip")
+        })
+        .unwrap_or(false)
+}
+
+fn is_compressible(content_type: &str) -> bool {
+    content_type.starts_with("text/")
+        || content_type.starts_with("application/json")
+        || content_type.starts_with("application/javascript")
+        || content_type.starts_with("image/svg+xml")
+}
+
+fn gzip_static_body(bytes: &[u8]) -> Option<Vec<u8>> {
+    use flate2::{write::GzEncoder, Compression};
+    let mut encoder = GzEncoder::new(Vec::with_capacity(bytes.len() / 2), Compression::fast());
+    encoder.write_all(bytes).ok()?;
+    let encoded = encoder.finish().ok()?;
+    (encoded.len() < bytes.len()).then_some(encoded)
+}
+
 fn respond_static_success(
     request: Request,
     bytes: &[u8],
     content_type: &str,
     cache_control: &str,
 ) -> anyhow::Result<()> {
+    let encoded = (bytes.len() >= STATIC_COMPRESSION_MIN_BYTES
+        && is_compressible(content_type)
+        && accepts_gzip(&request))
+    .then(|| gzip_static_body(bytes))
+    .flatten();
     let mut writer = request.into_writer();
-    match write_static_success_response(&mut writer, bytes, content_type, cache_control) {
+    let (body, encoding) = match encoded.as_deref() {
+        Some(encoded) => (encoded, Some("gzip")),
+        None => (bytes, None),
+    };
+    match write_static_success_response(&mut writer, body, content_type, cache_control, encoding) {
         Ok(()) => Ok(()),
         Err(err)
             if matches!(
@@ -3588,10 +3652,15 @@ fn write_static_success_response<W: Write>(
     bytes: &[u8],
     content_type: &str,
     cache_control: &str,
+    content_encoding: Option<&str>,
 ) -> io::Result<()> {
     write!(writer, "HTTP/1.1 200 OK\r\n")?;
     write!(writer, "Content-Type: {content_type}\r\n")?;
     write!(writer, "Cache-Control: {cache_control}\r\n")?;
+    write!(writer, "Vary: Accept-Encoding\r\n")?;
+    if let Some(encoding) = content_encoding {
+        write!(writer, "Content-Encoding: {encoding}\r\n")?;
+    }
     write!(writer, "Content-Length: {}\r\n", bytes.len())?;
     write!(writer, "Connection: close\r\n")?;
     write!(writer, "\r\n")?;
@@ -3849,6 +3918,7 @@ mod tests {
             b"console.log('ok');",
             "text/javascript; charset=utf-8",
             "public, max-age=300",
+            None,
         )
         .expect("write static response");
 
@@ -3858,7 +3928,48 @@ mod tests {
         assert!(raw.contains("\r\nCache-Control: public, max-age=300\r\n"));
         assert!(raw.contains("\r\nContent-Length: 18\r\n"));
         assert!(raw.contains("\r\nConnection: close\r\n"));
+        assert!(!raw.contains("Content-Encoding"));
+        assert!(raw.contains("\r\nVary: Accept-Encoding\r\n"));
         assert!(raw.ends_with("\r\n\r\nconsole.log('ok');"));
+    }
+
+    #[test]
+    fn gzip_shrinks_the_injected_shell_and_declares_its_encoding() {
+        // Das Live-System lieferte das 651.908-Byte-Shell-Dokument unkomprimiert
+        // aus, bei 1,2-7,3 s bis zum ersten Byte. Der Zaehler haelt fest, dass der
+        // komprimierte Pfad wirklich Bytes spart und sich korrekt deklariert.
+        let shell = "<div class=\"business-os-shell\">launch context</div>".repeat(400);
+        let encoded = gzip_static_body(shell.as_bytes()).expect("gzip encodes the shell");
+        assert!(encoded.len() * 10 < shell.len());
+
+        let mut response = Vec::new();
+        write_static_success_response(
+            &mut response,
+            &encoded,
+            "text/html; charset=utf-8",
+            "no-store",
+            Some("gzip"),
+        )
+        .expect("write static response");
+
+        let head_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("response has a header block");
+        let head = String::from_utf8(response[..head_end].to_vec()).expect("utf8 headers");
+        assert!(head.contains("\r\nContent-Encoding: gzip\r\n"));
+        assert!(head.contains("\r\nVary: Accept-Encoding\r\n"));
+        assert!(head.contains(&format!("\r\nContent-Length: {}\r\n", encoded.len())));
+    }
+
+    #[test]
+    fn only_compressible_text_payloads_are_gzipped() {
+        assert!(is_compressible("text/html; charset=utf-8"));
+        assert!(is_compressible("text/javascript; charset=utf-8"));
+        assert!(is_compressible("application/json; charset=utf-8"));
+        assert!(is_compressible("image/svg+xml"));
+        assert!(!is_compressible("image/png"));
+        assert!(!is_compressible("font/woff2"));
     }
 
     #[test]
