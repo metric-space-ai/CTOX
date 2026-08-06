@@ -1,0 +1,23 @@
+=== Messung 'vorher' — 06.08. 13:17:26 ===
+  Daemon: pid 1354, Laufzeit 22:21, RSS 0.14 GB
+  Verbindungen auf business-os-rxdb: 201
+  FDs gesamt: 471
+--- Shell, fuenf Aufrufe nacheinander (kalt nach warm) ---
+  #1  200  ttfb=4.176187s  gesamt=4.176520s  651692 Bytes
+  #2  200  ttfb=0.405525s  gesamt=0.405728s  651692 Bytes
+  #3  200  ttfb=0.730759s  gesamt=0.730879s  651690 Bytes
+  #4  200  ttfb=0.393975s  gesamt=0.394101s  651691 Bytes
+  #5  200  ttfb=0.442191s  gesamt=0.442308s  651692 Bytes
+--- Kompression: was kommt wirklich ueber die Leitung ---
+  Cache-Control: no-store
+  Content-Length: 651692
+  Connection: close
+--- Sechs gleichzeitige Anfragen (Worker-Pool) ---
+--- Sellify: was der Peer gebunden hat ---
+  sellify_people: v0=0  v1=60639
+  sellify_companies: v0=0  v1=17516
+  sellify_campaigns: v0=0  v1=86549
+  sellify_activities: v0=0  v1=74209
+  ausgelieferte Deklarationen version:1 = 1  (1 = alter Stand, 5 = repariert)
+--- Platte ---
+  frei: 51G  (95% belegt)

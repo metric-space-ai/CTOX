@@ -1,0 +1,479 @@
+<title>CTOX Sync-Engine — Missionstafel</title>
+<style>
+:root{
+  --paper:#F2F1ED; --card:#FBFAF8; --ink:#191C21; --muted:#6B6862;
+  --rule:#D2CFC7; --hair:#E3E0D9;
+  --verified:#2E6B4F; --alert:#9E3A2C; --pending:#8A6A1C; --owner:#40566E;
+  --stripe-done:#2E6B4F; --stripe-work:#8A6A1C; --stripe-todo:#40566E; --stripe-back:#8B8781;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --paper:#15171B; --card:#1B1E23; --ink:#E4E6EA; --muted:#8D9199;
+    --rule:#2B2F36; --hair:#23272D;
+    --verified:#5FA97F; --alert:#D8705E; --pending:#C79B3B; --owner:#7C9BC0;
+    --stripe-done:#5FA97F; --stripe-work:#C79B3B; --stripe-todo:#7C9BC0; --stripe-back:#5C6068;
+  }
+}
+:root[data-theme="light"]{
+  --paper:#F2F1ED; --card:#FBFAF8; --ink:#191C21; --muted:#6B6862;
+  --rule:#D2CFC7; --hair:#E3E0D9;
+  --verified:#2E6B4F; --alert:#9E3A2C; --pending:#8A6A1C; --owner:#40566E;
+  --stripe-done:#2E6B4F; --stripe-work:#8A6A1C; --stripe-todo:#40566E; --stripe-back:#8B8781;
+}
+:root[data-theme="dark"]{
+  --paper:#15171B; --card:#1B1E23; --ink:#E4E6EA; --muted:#8D9199;
+  --rule:#2B2F36; --hair:#23272D;
+  --verified:#5FA97F; --alert:#D8705E; --pending:#C79B3B; --owner:#7C9BC0;
+  --stripe-done:#5FA97F; --stripe-work:#C79B3B; --stripe-todo:#7C9BC0; --stripe-back:#5C6068;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  font-size:15px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+code,.ev,.num{
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-variant-numeric:tabular-nums;
+}
+.wrap{max-width:1680px;margin:0 auto;padding:0 24px 96px}
+
+/* ---- Kopfband: der kritische Pfad in einem Satz ---- */
+header{padding:44px 0 26px;border-bottom:2px solid var(--ink)}
+.eyebrow{
+  font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+  display:flex;gap:18px;flex-wrap:wrap;margin-bottom:14px
+}
+h1{
+  margin:0 0 12px;font-size:clamp(26px,3.4vw,40px);line-height:1.12;
+  letter-spacing:-.022em;font-weight:700;text-wrap:balance;max-width:24ch
+}
+.pfad{font-size:17px;line-height:1.45;max-width:78ch;color:var(--ink)}
+.pfad b{font-weight:600}
+.notenband{
+  margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  font-size:12px;letter-spacing:.02em
+}
+.note{
+  border:1.5px solid var(--alert);color:var(--alert);
+  padding:3px 9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase
+}
+.notenband span.warum{color:var(--muted);max-width:64ch}
+
+/* ---- Kanban ---- */
+.kanban{
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;
+  margin-top:34px;border-top:1px solid var(--rule)
+}
+.spalte{border-right:1px solid var(--rule);padding:0 16px 8px}
+.spalte:last-child{border-right:none}
+.spalte:first-child{padding-left:0}
+.spalte-kopf{
+  position:sticky;top:0;background:var(--paper);z-index:2;
+  padding:14px 0 10px;border-bottom:1px solid var(--ink);
+  display:flex;justify-content:space-between;align-items:baseline;gap:8px
+}
+.spalte-kopf h2{
+  margin:0;font-size:12px;letter-spacing:.13em;text-transform:uppercase;font-weight:700
+}
+.zaehler{font-size:12px;color:var(--muted)}
+
+.karte{
+  background:var(--card);border-bottom:1px solid var(--hair);
+  padding:13px 12px 14px;margin-top:12px;position:relative
+}
+.karte::before{content:"";position:absolute;left:0;right:0;top:0;height:2px}
+.s-done::before{background:var(--stripe-done)}
+.s-work::before{background:var(--stripe-work)}
+.s-todo::before{background:var(--stripe-todo)}
+.s-back::before{background:var(--stripe-back)}
+.karte h3{
+  margin:6px 0 7px;font-size:14.5px;line-height:1.32;font-weight:650;letter-spacing:-.005em
+}
+.karte p{margin:0 0 7px;font-size:13px;line-height:1.5;color:var(--ink)}
+.karte p:last-child{margin-bottom:0}
+.chip{
+  display:inline-block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  font-weight:700;padding:2px 6px;border:1px solid currentColor
+}
+.c-ok{color:var(--verified)} .c-work{color:var(--pending)}
+.c-alert{color:var(--alert)} .c-owner{color:var(--owner)}
+.c-neg{color:var(--muted)}
+.ev{
+  font-size:11.5px;color:var(--muted);display:block;margin-top:7px;
+  padding-top:7px;border-top:1px dotted var(--rule);word-break:break-word;line-height:1.55
+}
+.ev b{color:var(--ink);font-weight:600}
+.ausloeser{
+  font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--owner);
+  font-weight:700;margin-top:8px;display:block
+}
+.ausloeser span{
+  letter-spacing:0;text-transform:none;font-weight:400;color:var(--muted);
+  font-family:inherit
+}
+.num{font-weight:650;color:var(--ink)}
+.korr{color:var(--alert);font-weight:700}
+
+/* ---- Dauerabschnitte ---- */
+.dauer{margin-top:64px}
+.dauer h2{
+  font-size:12px;letter-spacing:.13em;text-transform:uppercase;font-weight:700;
+  margin:0 0 4px;padding-bottom:8px;border-bottom:2px solid var(--ink)
+}
+.dauer .lead{font-size:13px;color:var(--muted);margin:10px 0 18px;max-width:80ch}
+.zwei{columns:2;column-gap:44px;column-rule:1px solid var(--hair)}
+.eintrag{break-inside:avoid;margin:0 0 15px;font-size:13px;line-height:1.5}
+.eintrag b{display:block;font-weight:650;margin-bottom:2px}
+.eintrag span{color:var(--muted)}
+table.karte-tab{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
+table.karte-tab th{
+  text-align:left;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);font-weight:700;padding:7px 10px 7px 0;border-bottom:1px solid var(--rule)
+}
+table.karte-tab td{padding:9px 10px 9px 0;border-bottom:1px solid var(--hair);vertical-align:top}
+table.karte-tab td:last-child,table.karte-tab th:last-child{padding-right:0}
+.tabwrap{overflow-x:auto}
+.zahl{text-align:right;white-space:nowrap}
+footer{
+  margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);
+  font-size:12px;color:var(--muted);display:flex;gap:20px;flex-wrap:wrap
+}
+@media (max-width:1180px){
+  .kanban{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .spalte{border-right:none;padding-left:0;padding-right:16px}
+  .zwei{columns:1}
+}
+@media (max-width:680px){
+  .kanban{grid-template-columns:1fr}
+  .wrap{padding:0 16px 64px}
+}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">
+    <span>CTOX Sync-Engine</span><span>Missionstafel</span>
+    <span>Stand 06.08.2026, 20:05</span><span>Wiederaufnahmedokument</span>
+  </div>
+  <h1>Die Instanz zeigt noch nichts von dem, was repariert ist.</h1>
+  <p class="pfad"><b>Kritischer Pfad:</b> Commit <code>27ca6b205</code> liegt auf <code>main</code>, aber der Daemon läuft das Release vom 24.07. Bis <code>ctox update apply --source</code> und <em>ein</em> Neustart durch sind, ändert sich am laufenden System nichts — und erst die Nachher-Messung gegen <code>messung-vorher.txt</code> entscheidet, ob die Note steigt.</p>
+  <div class="notenband">
+    <span class="note">Note F</span>
+    <span class="warum">Die Note steigt nicht durch Commits. Sie steigt, wenn der Eigentümer am laufenden System merkt, dass es besser ist.</span>
+  </div>
+</header>
+
+<div class="kanban">
+
+<!-- ============ ERLEDIGT ============ -->
+<section class="spalte">
+  <div class="spalte-kopf"><h2>Erledigt</h2><span class="zaehler">12 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Committet</span>
+    <h3>Fünf Live-Fixes plus Größen-Ratsche</h3>
+    <p>Bundle-Vertrag mit Mindestboden, Wartungs-Endzustand, HTTP-Warm-up im Hintergrund, gzip mit <code>Vary</code>, Diagnose-TTL-Cache — dazu 17 Module im Größenbudget mit beidseitigem Wächter.</p>
+    <span class="ev"><b>Commit</b> 27ca6b205 auf 1a0e4b62a · 9 Dateien, +446/−14<br>
+    <b>Tor</b> keine neuen Fehlschläge, seriell verglichen: Basis <span class="num">59</span> rot, meine <span class="num">60</span>, davon einer nachgewiesen flatternd<br>
+    <b>Grün</b> install::tests 36/36 · module_size_tests<br>
+    <b>Log</b> /Volumes/tmp/ctox-pipeline/build-verify.log</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Ursache belegt</span>
+    <h3>Der Upgrade-Pfad war durch Konstruktion kaputt</h3>
+    <p><code>v0.3.27</code> getaggt am 10.06., der Bundle-Vertrag entstand am 29.07. Der Installer prüfte das heruntergeladene Bundle gegen seine <em>eigene</em>, später geschriebene Kopie — 30 „fehlende" Pfade, die es nie versprechen konnte, terminal gescheitert.</p>
+    <span class="ev"><b>Folge</b> 12 Tage Schreibschutz, jedes Upgrade auf ältere Tags unmöglich<br>
+    <b>Fix</b> Prüfung gegen das mitgelieferte Manifest; ohne Manifest gilt ein Mindestboden aus 4 Dateien, damit „kein Manifest“ nicht „alles installiert“ wird</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Live entsperrt</span>
+    <h3>Zwölf Tage Schreibschutz aufgehoben</h3>
+    <p>Ein terminal gescheitertes Upgrade galt dem Status-Endpunkt weiter als aktiv. Live-Zeile <code>business-os-upgrade</code> von <code>failed</code> auf <code>rolled_back</code> gesetzt, Sicherung vorher.</p>
+    <span class="ev"><b>Wirkung</b> Browser fehlerfrei, Desktop mountet, Threads gefüllt (9 Handeln / 10 Wartet)<br>
+    <b>Zusätzlich</b> Daemon-Neustart hat die eingefrorene DNS-Auflösung behoben — jede Upgrade-Wiederholung war zuvor an <code>resolve 'api.github.com'</code> gescheitert, während die Maschine GitHub in 0,3 s erreichte</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Ursache belegt</span>
+    <h3>Sellify: 238.913 Zeilen liegen unerreichbar</h3>
+    <p>Die Daten stehen in <code>__v1</code>, die Manifeste deklarieren <code>version 0</code>, die Registrierung bindet die leeren v0-Tabellen an. Der Beweis steht in der Datei selbst: dieselben vier Collections tragen die Identitäts-Migrationsstrategie <b>nach Version 1</b>.</p>
+    <span class="ev"><b>Gemessen</b> people 60.639 · companies 17.516 · campaigns 86.549 · activities 74.209, alle v0 = 0<br>
+    <b>F-05</b> 363 Collections geprüft, nur diese vier betroffen, außerhalb Sellify null<br>
+    <b>Reparatur</b> gebaut und gesichert, für die Kundenvorführung zurückgenommen — greift erst mit dem Neustart</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Grundlinie</span>
+    <h3>Vorher-Messung als reproduzierbare Datei</h3>
+    <p>Dieselben Befehle laufen nachher wieder. Shell <span class="num">651.692</span> Byte, unkomprimiert, <code>no-store</code>, <code>Connection: close</code>. TTFB 4,18 s kalt / 0,39–0,73 s warm. Sechs gleichzeitige Anfragen zeigen den Vier-Worker-Pool: 4× ~2,85 s, dann 2× ~4,0 s.</p>
+    <span class="ev"><b>Skript</b> /Volumes/tmp/ctox-pipeline/messung.sh<br>
+    <b>Ergebnis</b> /Volumes/tmp/ctox-pipeline/messung-vorher.txt</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-alert">Befund</span>
+    <h3>origin/main ist rot — ohne mein Zutun</h3>
+    <p>Auf der unveränderten Basis fallen seriell <span class="num">59</span> Tests reproduzierbar durch. Bei voller Parallelität kommen ~50 weitere dazu, die allein grün sind.</p>
+    <span class="ev"><b>Gruppen</b> mcp_channel 13 · store 9 · service_loop 6 · tickets 5 · runtime_control 5<br>
+    <b>Namen</b> /Volumes/tmp/ctox-pipeline/rot-basis.txt<br>
+    <b>Folge</b> „grün" ist als Tor unerreichbar; das Tor heißt jetzt „keine neuen Fehlschläge"</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Bereinigt</span>
+    <h3>Platte von 11 GB auf 63 GB befreit</h3>
+    <p>69 GB lagen in Arbeitsbäumen meiner delegierten Läufe. Gelöscht wurden nur Bäume, die gegen den Hauptbaum <b>null eigene Dateien</b> hatten — der 18-GB-Baum meldete 106 „Änderungen", davon 0 eigene.</p>
+    <span class="ev"><b>Warum</b> ENOSPC ist die belegte Ursache hinter Heartbeat-Ausfall und Peer-Respawns (S-01)<br>
+    <b>Warum nicht automatisch</b> der eingebaute Aufräumer verlangt eine Markierung, die ich als Orchestrator nie gesetzt habe</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Entstört</span>
+    <h3>Verwaiste Git-Sperre seit 10:52 entfernt</h3>
+    <p><code>.git/index.lock</code>, 0 Bytes, kein laufender Git-Prozess. Sie blockierte über vier Stunden jedes <code>git add</code>, <code>commit</code> und <code>checkout</code> im Hauptcheckout — auch für den parallelen Strang.</p>
+    <span class="ev"><b>Kopie</b> /Volumes/tmp/ctox-pipeline/index.lock.entfernt-20260806</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Negativergebnis</span>
+    <h3><span class="korr">KORREKTUR:</span> das Verbindungsleck gibt es nicht</h3>
+    <p>Gemeldet waren 2.926 Deskriptoren als Leck. Nachgemessen: <span class="num">205</span> Verbindungen auf <code>business-os-rxdb.sqlite3</code>, über 90 s unverändert, RSS 0,2 GB — eine Verbindung je registrierter Collection, beschränkt, kein Wachstum. Befund zurückgezogen.</p>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Negativergebnis</span>
+    <h3><span class="korr">KORREKTUR:</span> zwei weitere eigene Fehlbefunde</h3>
+    <p><b>Das Log ist nicht defekt.</b> launchd leitet stdout dorthin; der Daemon schreibt nur bei Fehlern. Stille heißt: keine Fehler.</p>
+    <p><b>Der 69-Minuten-Ausfall ist kein Normalfall.</b> Nach dem Neustart um 12:55 antwortete dieselbe Shell nach 4,18 s. Die 4.121 Sekunden waren ein Extremwert bei Last 158 und voller Platte. Der Warm-up-Fix bleibt richtig, die Zahl war keine Konstante.</p>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Negativergebnis</span>
+    <h3>S-02 Runde 1 verloren</h3>
+    <p>Beim Notstopp vor der Kundenvorführung abgebrochen. Der Schnitt an <code>rxdb_peer.rs</code> ging verloren, nur die ausgelagerte Datei blieb.</p>
+    <span class="ev"><b>Rest</b> /Volumes/tmp/ctox-s02/src/core/business_os/rxdb_peer_browser.rs (2.678 Zeilen) — dient S-02b als Vorlage</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Messungen</span>
+    <h3>Vier Messaufträge geliefert</h3>
+    <p><b>F-02</b> Registrierungsausfälle je Modul: 860× <code>user_thread_messages</code> nicht registriert, 22 Modulschemata als <code>unsupported</code> verworfen.<br>
+    <b>S-01</b> Peer-Respawn: volle Platte → Heartbeat unschreibbar → Watchdog hält gesunden Peer für tot; Backoff resettet nicht nach Bring-up.<br>
+    <b>F-04/F-05</b> Sellify-Schreibpfad und Schadensgrenze.</p>
+    <span class="ev"><b>Berichte</b> /Volumes/tmp/ctox-pipeline/reports/{f-02,s-01,f-04,f-05}-frisch.md</span>
+  </article>
+</section>
+
+<!-- ============ IN ARBEIT ============ -->
+<section class="spalte">
+  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">0 laufend · 3 gestoppt</span></div>
+
+  <article class="karte s-work">
+    <span class="chip c-alert">Gestoppt · ENOSPC</span>
+    <h3>Alle drei Aufträge durch Plattennot abgebrochen</h3>
+    <p>Drei parallele Sol-Läufe bauten je einen vollständigen Rust-Zielbaum <em>im Arbeitsbaum</em>. 63 GB waren in unter einer Stunde aufgebraucht; bei 0 Bytes konnte nicht einmal mehr ein Befehlsergebnis geschrieben werden.</p>
+    <span class="ev"><b>Betroffen</b> F-01b (Revisionsformat) · S-02b (Browser-Control-Schnitt) · R-01 (die 59 roten Tests)<br>
+    <b>Läufe</b> 20260806T194506-1403 · 194514-1572 · 194619-3738<br>
+    <b>Quellstände</b> in den Arbeitsbäumen erhalten, nur <code>runtime/build</code> geleert</span>
+    <span class="ausloeser">Neustart erst nach <span>der Bauplatz-Entscheidung im Rückstau — sonst wiederholt sich ENOSPC beim nächsten Anlauf.</span></span>
+  </article>
+
+  <article class="karte s-work">
+    <span class="chip c-alert">Fremdschaden</span>
+    <h3>Ich habe den Lauf des anderen Strangs mitgetötet</h3>
+    <p>Unter ENOSPC-Druck habe ich pauschal alle <code>claude --bare</code>-Prozesse abgeschossen — darunter den Browser-Anmeldungs-Lauf, der seit 10:31 lief. Das war kein Zielfehler, sondern ein zu grober Schnitt.</p>
+    <span class="ev"><b>Lauf</b> 20260806T103149-35252-implementation-hard<br>
+    <b>Verloren</b> der laufende Prozess und die Build-Artefakte<br>
+    <b>Erhalten</b> 102 geänderte + 19 neue Quelldateien im Arbeitsbaum, geprüft</span>
+  </article>
+
+  <article class="karte s-work">
+    <span class="chip c-alert">Anbieter aus</span>
+    <h3>Kimi bis zum nächsten Abrechnungszyklus nicht erreichbar</h3>
+    <p><code>403 You've reached your usage limit for this billing cycle</code>, direkt bestätigt. Der Dispatcher hat R-01 als <code>research</code> korrekt <em>abgelehnt</em> statt still zu degradieren.</p>
+    <span class="ev"><b>Folge</b> unabhängige Review hat keinen Ersatz — sie ist <b>aufgeschoben</b>, nicht erledigt<br>
+    <b>Umplanung</b> R-01 läuft als <code>implementation-hard</code> auf Sol; die Aufgabe ist detailreiche Messarbeit, das Änderungsverbot steht im Auftrag</span>
+  </article>
+</section>
+
+<!-- ============ ALS NÄCHSTES ============ -->
+<section class="spalte">
+  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">8 Karten</span></div>
+
+  <article class="karte s-todo">
+    <h3>Bauplatz der Worker aus dem Arbeitsbaum holen</h3>
+    <p>Jeder Lauf kostet 10–18 GB, workjet räumt unmarkierte Läufe nie auf, und drei parallele Läufe sind eine garantierte Plattennot. Solange das steht, ist jede Delegation ein Risiko für den Daemon.</p>
+    <span class="ausloeser">Auslöser <span>sofort — blockiert alle drei gestoppten Aufträge.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>Installieren, <em>einmal</em> neu starten, nachmessen</h3>
+    <p><code>ctox update apply --source</code> nimmt einen lokalen Quellbaum — kein Remote, kein Push. Im selben Fenster wird Sellify wieder scharf geschaltet, damit ein Neustart beides trägt.</p>
+    <span class="ev"><b>Danach</b> messung.sh nachher · Vergleich gegen messung-vorher.txt<br>
+    <b>Erwartet</b> Bytes über die Leitung fallen um ~90 %, TTFB sinkt, Sellify zeigt 238.913 Zeilen</span>
+    <span class="ausloeser">Auslöser <span>wenn F-01b und S-02b integriert sind — oder früher, wenn der Eigentümer das Ergebnis eher sehen will.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>Die 59 roten Tests klassifizieren</h3>
+    <p>Seit welchem Commit, warum je Gruppe, und alle 59 in echte Regression / veralteter Test / Umgebung einsortiert. Dazu die gemeinsame Ursache der ~50 nur-parallel-roten.</p>
+    <span class="ausloeser">Auslöser <span>R-01 neu gestartet, sobald der Bauplatz steht.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>F-01b: Revisionsformat, ohne store.rs zu mästen</h3>
+    <p>39.478 verworfene <code>rev_&lt;uuid&gt;</code>-Revisionen. Der kanonische Helfer kommt in ein eigenes Modul, die Ratschenzahl für <code>store.rs</code> muss <b>fallen</b>. Am ersten Anlauf gescheitert, weil er die Datei um 132 Zeilen wachsen ließ.</p>
+    <span class="ausloeser">Auslöser <span>Bauplatz steht · Sol-Platz frei.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>S-02b: Browser-Control aus dem Peer schneiden</h3>
+    <p>Reiner Umzug, 28 <code>browser_*</code>-Funktionen aus <code>rxdb_peer.rs</code> (14.744 Produktionszeilen). Kein Umbenennen, keine Signaturänderung — sonst lässt sich der Baum nicht gegen fremde offene Arbeit mischen.</p>
+    <span class="ausloeser">Auslöser <span>Bauplatz steht · Sol-Platz frei.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>Den Peer weiter zerlegen</h3>
+    <p>Verbleibende Nähte nach S-02b: desktop_file 54 Funktionen, Projektion 69, Command 31, Demand 8.</p>
+    <span class="ausloeser">Auslöser <span>S-02b gelandet und die Ratsche gesenkt.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>Die Shell client-first machen</h3>
+    <p>gzip nimmt die Bytes, nicht die Ursache: 650 KB personalisiertes Dokument, deshalb <code>no-store</code>. Der eigentliche Schnitt ist eine kleine cachebare Shell plus winziger Launch-Kontext als JSON, Keep-alive zurück statt <code>Connection: close</code>, Worker-Pool über 4.</p>
+    <span class="ausloeser">Auslöser <span>Nachher-Messung liegt vor — die Reihenfolge muss belegt bleiben.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>Thread-Nachrichten und REM-Schemata</h3>
+    <p>860× <code>user_thread_messages collection is not registered</code> — Browser-Sync und Offline für Nachrichten defekt. 22 Modulschemata als <code>unsupported schema_format</code> still übersprungen; die Prüfung gehört an die Installation, nicht in jeden Start.</p>
+    <span class="ausloeser">Auslöser <span>nach der Nachher-Messung, gemeinsam mit dem Peer-Respawn-Fix aus S-01.</span></span>
+  </article>
+</section>
+
+<!-- ============ RÜCKSTAU + EIGENTÜMER ============ -->
+<section class="spalte">
+  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">7 Karten</span></div>
+
+  <article class="karte s-back">
+    <span class="chip c-owner">Owner</span>
+    <h3>Wohin bauen die Worker?</h3>
+    <p>Drei Möglichkeiten: Zielbaum auf das separate Volume <code>/Volumes/tmp</code> legen (495 GB, aber flüchtig), höchstens ein Worker gleichzeitig, oder nach jedem Lauf <code>runtime/build</code> automatisch leeren. Ich empfehle das separate Volume plus automatisches Leeren — beides zusammen.</p>
+    <span class="ausloeser">Blockiert <span>alle drei gestoppten Aufträge.</span></span>
+  </article>
+
+  <article class="karte s-back">
+    <span class="chip c-owner">Owner</span>
+    <h3>Soll <code>main</code> nach origin geschoben werden?</h3>
+    <p>Commit <code>27ca6b205</code> liegt nur lokal. Der parallele Strang schiebt aktiv nach <code>origin/main</code> (zuletzt <code>1a0e4b62a</code>). Ohne Push sehen die anderen meine Fixes nicht; mit Push landen sie in einem gemeinsamen Zweig, dessen Testtor rot ist.</p>
+  </article>
+
+  <article class="karte s-back">
+    <span class="chip c-owner">Owner</span>
+    <h3>Postgres als externe SQL-Quelle: tragen oder abschalten?</h3>
+    <p><code>unsupported external SQL source kind 'postgres'</code> — 683 Fehler in 6 Stunden, alle 30 Sekunden. Aus dem Übergabedokument des Plattform-Strangs.</p>
+  </article>
+
+  <article class="karte s-back">
+    <span class="chip c-owner">Owner</span>
+    <h3>I-053 App-Recovery bleibt bewusst blockiert</h3>
+    <p>Fällt erst, wenn <code>queue.ack_failed</code> über Zeit null zeigt oder die Pro-Key-Reihenfolge gebaut ist. Der einzige nicht abgearbeitete Auftrag aus SYNC-A..E (23 von 24, 28 Commits).</p>
+  </article>
+
+  <article class="karte s-back">
+    <span class="chip c-alert">Querbezug</span>
+    <h3>„Grün über Nichts" ist derselbe Defekt wie I-066</h3>
+    <p>Der Plattform-Strang misst <code>auth_assist</code>, das <code>completion_claim = false</code> berichtet und als <code>completed</code> erscheint — 48 solcher Erfolge gegen null Anmeldungen. Ich messe in <code>service.rs</code>: 895 Assistant-Zeilen, <b>null</b> mit typisiertem <code>Success</code>. Eine Ursache, zwei Seiten: der Abschluss ist keine atomare Transition.</p>
+    <span class="ev"><b>Auftrag</b> I-071 — dauerhafter Finalisierungsdatensatz, typisiertes Outcome, Zeuge vor Zähler-Reset</span>
+  </article>
+
+  <article class="karte s-back">
+    <span class="chip c-work">Aufgeschoben</span>
+    <h3>Unabhängige Review von 27ca6b205</h3>
+    <p>Kimi ist der Pflichtprüfer und hat keinen Ersatz. Ich habe selbst und gegnerisch geprüft — das zählt, ersetzt die zweite Meinung aber nicht.</p>
+    <span class="ausloeser">Auslöser <span>Kimi wieder erreichbar (nächster Abrechnungszyklus).</span></span>
+  </article>
+
+  <article class="karte s-back">
+    <span class="chip c-alert">Risiko</span>
+    <h3>Die Beweise liegen auf flüchtigem Speicher</h3>
+    <p>Messungen, Testnamenlisten, Worker-Berichte und Build-Logs liegen unter <code>/Volumes/tmp</code>. Dieses Volume wird geleert. Die Tafel verweist darauf und würde beim nächsten Neustart auf Leerstellen zeigen.</p>
+    <span class="ausloeser">Auslöser <span>sofort — die Beweisstücke gehören ins versionierte Repository.</span></span>
+  </article>
+</section>
+</div>
+
+<!-- ============ DAUERABSCHNITT 1 ============ -->
+<section class="dauer">
+  <h2>Umgebungsfallen</h2>
+  <p class="lead">Jede hat mindestens einmal Arbeit gekostet. Vor dem Schreiben eines Auftrags zu lesen.</p>
+  <div class="zwei">
+    <div class="eintrag"><b>claude-fleet kennt kein <code>--include-dirty</code></b><span>Der Hauptcheckout trägt dauerhaft ~155 fremde offene Dateien. Fleet ruft <code>claude-agent</code> ohne die Option auf; alle Aufträge scheitern in null Sekunden. Einzeln über <code>claude-agent --include-dirty &lt;rolle&gt; --brief &lt;datei&gt;</code> starten.</span></div>
+    <div class="eintrag"><b>Nach einem CAS-Commit trägt der Arbeitsbaum noch die alten Dateien</b><span>HEAD zeigt die neue Fassung, der Arbeitsbaum die alte — der nächste Commit aus diesem Checkout nimmt alles zurück, inklusive gelöschter neuer Dateien. Fremde Änderungen als Patch herausheben, <code>git checkout HEAD -- &lt;pfade&gt;</code>, Patch mit <code>--3way</code> wieder auflegen.</span></div>
+    <div class="eintrag"><b>Index-Diff-Pflicht vor <code>commit-tree</code></b><span>Ein leerer Commit entsteht lautlos, wenn die Staging-Schleife nichts geschrieben hat. Immer <code>git diff-index --cached --name-only</code> zählen und bei 0 abbrechen.</span></div>
+    <div class="eintrag"><b><code>.git/index.lock</code> kann verwaisen</b><span>0 Bytes, kein Prozess, und trotzdem blockiert sie stundenlang jedes schreibende Git-Kommando — für alle Sitzungen im selben Checkout. Vor dem Entfernen nachweisen, dass kein echter <code>git</code>-Prozess läuft.</span></div>
+    <div class="eintrag"><b>Die Testsuite ist bei voller Parallelität unsicher</b><span>~50 Tests fallen nur parallel durch: <code>Bad file descriptor</code>, <code>failed to inspect running processes</code>, <code>missing port 1234</code>. Vergleiche immer seriell (<code>--test-threads=1</code>) — und niemals einen parallelen Lauf gegen einen seriellen.</span></div>
+    <div class="eintrag"><b>Sitzungsneustarts töten Builds des Harness</b><span>Zwei vollständige Testläufe sind so verloren gegangen. Lange Builds abgekoppelt starten: <code>nohup … &amp; disown</code>, Ausgabe in eine Datei, Fertigmarke ans Ende.</span></div>
+    <div class="eintrag"><b>Worker-Läufe kosten 10–18 GB und werden nie aufgeräumt</b><span>workjet behält jeden unmarkierten Lauf; <code>claude-agent runs prune</code> verweigert ohne <code>runs mark … integrated|abandoned</code>. Drei parallele Läufe füllen die Platte in einer Stunde.</span></div>
+    <div class="eintrag"><b>ENOSPC bricht mehr als den Build</b><span>Bei 0 Bytes kann nicht einmal mehr ein Befehlsergebnis geschrieben werden, der Peer-Heartbeat wird unschreibbar, und der Watchdog hält den gesunden Peer für tot (S-01).</span></div>
+    <div class="eintrag"><b>Der Server liefert Module aus dem Zustand, Paketdateien aus dem Release</b><span><code>installed-modules/…</code> kommt aus <code>~/.local/state/ctox/business-os/</code>, die gepackten Assets aus <code>~/.local/lib/ctox/current/</code>. Wer die falsche Kopie ändert, arbeitet an einer Datei, die niemand ausführt. Prüfen, indem man die Datei über HTTP abruft.</span></div>
+    <div class="eintrag"><b>Zwei Installationswege</b><span><code>ctox upgrade --dev</code> holt <em>remote</em> von Branch main. <code>ctox update apply --source &lt;pfad&gt;</code> nimmt einen lokalen Baum — das ist der Weg, um eigene Fixes ohne Push auf die laufende Instanz zu bringen.</span></div>
+    <div class="eintrag"><b>Kimi hat keinen Ersatz</b><span>Rolle <code>review</code> fällt nie automatisch weiter. Bei 403 wird die Review <em>aufgeschoben</em> und ausdrücklich als solche gekennzeichnet — niemals als erledigt ausgegeben. Sol maximal 3 parallel.</span></div>
+    <div class="eintrag"><b>Sol-Auth ist Nutzersache</b><span>Läuft die ChatGPT-OAuth ab, hilft nur <code>cliproxyapi -codex-login</code> im Browser. Nicht darum herumrouten, sondern den Befehl nennen.</span></div>
+  </div>
+</section>
+
+<!-- ============ DAUERABSCHNITT 2 ============ -->
+<section class="dauer">
+  <h2>Fehlermuster</h2>
+  <p class="lead">Eigene, wiederkehrende Fehlgriffe mit Zählung. Die Liste existiert, damit Nummer 9 nicht wieder Nummer 1 wird.</p>
+  <div class="tabwrap">
+  <table class="karte-tab">
+    <tr><th style="width:2.5em">#</th><th>Muster</th><th>Was es gekostet hat</th><th class="zahl">Fälle</th></tr>
+    <tr><td class="num">1</td><td>Prozess bewertet statt Produkt</td><td>A−/B/C+ vergeben, während die Instanz ihre Shell nicht auslieferte. Jede Note braucht jetzt einen Beweis am laufenden System.</td><td class="zahl num">2</td></tr>
+    <tr><td class="num">2</td><td>Arbeitsliste aus Suchmustern statt aus Messung</td><td>Eine geschlossene Schleife, die immer Arbeit findet und nie bemerkt, dass das Produkt steht. Jeder Auftrag entsteht jetzt aus einer Messung am laufenden System.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">3</td><td>Befund ohne Gegenprobe gemeldet</td><td>Verbindungsleck, Log-Stillstand, 69 Minuten als feste Zahl — alle drei zurückgezogen. Ein Befund gilt erst nach dem Versuch, ihn zu widerlegen.</td><td class="zahl num">3</td></tr>
+    <tr><td class="num">4</td><td>Zwei Läufe unter verschiedenen Bedingungen verglichen</td><td>109 parallele Namen gegen 59 serielle gehalten und daraus geschlossen. Ergebnis wertlos, Vergleich musste komplett wiederholt werden.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">5</td><td>Selbst zum Hauptarbeiter geworden</td><td>Nach dem Notstopp die Worker nie wieder angeworfen und stundenlang selbst gebaut, gemessen, committet. Der Eigentümer musste darauf hinweisen.</td><td class="zahl num">2</td></tr>
+    <tr><td class="num">6</td><td>Notstopp zu grob geschnitten</td><td>Erst die eigenen fertigen Läufe (S-02), dann der Browser-Anmeldungs-Lauf des anderen Strangs. Ein Notstopp muss Ziele benennen, nicht Muster.</td><td class="zahl num">2</td></tr>
+    <tr><td class="num">7</td><td>Die eigene Maschine ausgehungert</td><td>Zwei Tage Builds bei Last 158, während über Performance geschrieben wurde. Danach drei parallele Läufe bis ENOSPC.</td><td class="zahl num">2</td></tr>
+    <tr><td class="num">8</td><td>Die Tafel vernachlässigt</td><td>Als Statusseite geführt statt als Kanban mit Auslösern und Dauerabschnitten — also ohne den Teil, der eine Kompaktierung überlebt.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">9</td><td>Unerreichbares Tor gesetzt</td><td>„Commit erst, wenn alles grün ist" — auf einer Basis mit 59 roten Tests nie erfüllbar. Ein Tor muss messbar erreichbar sein: keine <em>neuen</em> Fehlschläge.</td><td class="zahl num">1</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============ DAUERABSCHNITT 3 ============ -->
+<section class="dauer">
+  <h2>Beweiskarte</h2>
+  <p class="lead">Wo jedes Beweisstück liegt. <b>Achtung:</b> alles unter <code>/Volumes/tmp</code> ist flüchtig — die Sicherung ins Repository steht im Rückstau.</p>
+  <div class="tabwrap">
+  <table class="karte-tab">
+    <tr><th>Was</th><th>Wo</th><th>Dauerhaft?</th></tr>
+    <tr><td>Diese Tafel</td><td><code>docs/dev/ctox-refactoring-board.html</code></td><td>versioniert</td></tr>
+    <tr><td>Commit der fünf Fixes</td><td><code>27ca6b205</code> auf lokalem <code>main</code></td><td>versioniert</td></tr>
+    <tr><td>Größen-Ratsche</td><td><code>contracts/module_size_budget.txt</code> · <code>src/core/module_size_tests.rs</code></td><td>versioniert</td></tr>
+    <tr><td>Vorher-Messung und Skript</td><td><code>/Volumes/tmp/ctox-pipeline/messung-vorher.txt</code> · <code>messung.sh</code></td><td>flüchtig</td></tr>
+    <tr><td>Rote Tests der Basis (59) und meine (60)</td><td><code>/Volumes/tmp/ctox-pipeline/rot-basis.txt</code> · <code>rot-final.txt</code></td><td>flüchtig</td></tr>
+    <tr><td>Build- und Vergleichsläufe</td><td><code>build-verify.log</code> · <code>grundlinie.log</code> · <code>meine-seite.log</code> · <code>final.log</code></td><td>flüchtig</td></tr>
+    <tr><td>Worker-Berichte F-02 / S-01 / F-04 / F-05</td><td><code>/Volumes/tmp/ctox-pipeline/reports/*-frisch.md</code></td><td>flüchtig</td></tr>
+    <tr><td>Aufträge F-01b / S-02b / R-01</td><td><code>/Volumes/tmp/ctox-pipeline/briefs/*.md</code></td><td>flüchtig</td></tr>
+    <tr><td>Sicherung der Sellify-Manifeste</td><td><code>~/.local/state/ctox/business-os/module-backups/</code></td><td>dauerhaft</td></tr>
+    <tr><td>Übergabedokument des Plattform-Strangs</td><td><code>~/Documents/ctox-dev/output/ctox-business-os-versagen.md</code></td><td>dauerhaft</td></tr>
+    <tr><td>Qualitätsreview der Sync-Engine</td><td><code>docs/ctox-sync-engine-quality-review-2026-07-27-findings.md</code></td><td>versioniert</td></tr>
+    <tr><td>Live-Zustand des Peers</td><td><code>~/.local/state/ctox/business-os-rxdb-peer.status.json</code></td><td>live</td></tr>
+    <tr><td>Store und Kern-DB</td><td><code>~/.local/state/ctox/business-os-rxdb.sqlite3</code> (2,1 GB) · <code>ctox.sqlite3</code> (1,1 GB)</td><td>live</td></tr>
+  </table>
+  </div>
+</section>
+
+<footer>
+  <span>Ereignisgesteuert geführt — jede Landung, jede Entscheidung, jeder Befund ändert sie sofort.</span>
+  <span>Nur geprüfte Tatsachen. Widerlegtes bleibt als KORREKTUR sichtbar stehen.</span>
+</footer>
+</div>
