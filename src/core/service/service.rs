@@ -25267,14 +25267,40 @@ fn release_retryable_worker_messages(
     retry_kind: WorkerRetryKind,
     summary: &str,
 ) -> Result<usize> {
-    channels::hold_leased_messages(
+    let updated = channels::hold_leased_messages(
         root,
         message_keys,
         &review::HoldReason::Technical {
             policy_id: retry_kind.policy_id().to_string(),
         },
         summary,
-    )
+    )?;
+    // A retryable failure normally returns the item to `pending`, but the fifth
+    // one exhausts the hold budget and terminalizes the queue item inside the
+    // channels transaction - the Business OS command failure path never runs
+    // for it. Every research run on the SKF instance died exactly here, which
+    // is also why no continuation decision was ever recorded. Drive the command
+    // failure projection for the keys that just went terminal; it owns both the
+    // durable failure record and the research auto-continuation.
+    for message_key in message_keys {
+        let terminal = matches!(
+            channels::load_queue_task(root, message_key),
+            Ok(Some(ref task)) if task.route_status == "failed"
+        );
+        if !terminal {
+            continue;
+        }
+        if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
+            root,
+            message_key,
+            summary,
+        ) {
+            eprintln!(
+                "[ctox] could not project the exhausted retry budget of {message_key} onto its Business OS command: {err}"
+            );
+        }
+    }
+    Ok(updated)
 }
 
 fn is_turn_timeout_blocker(value: &str) -> bool {
@@ -38632,6 +38658,79 @@ Use shell tools to create or update these files."
             &job,
             "database is locked"
         ));
+    }
+
+    #[test]
+    fn exhausted_retry_budget_reaches_the_business_os_command_failure_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let accepted = crate::business_os::store::accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_budget_exhaustion",
+                "command_id": "cmd_budget_exhaustion",
+                "module": "research",
+                "command_type": "research.systematic.run",
+                "record_id": "research_budget_task",
+                "status": "pending_sync",
+                "payload": {
+                    "title": "Research · Budget",
+                    "research_run_id": "run-budget-1",
+                    "knowledge_domain": "bearing_design_calculation"
+                },
+                "client_context": { "actor": { "id": "tester", "role": "chef" } }
+            }),
+        )
+        .expect("accept research command");
+        let task_id = accepted
+            .get("task_id")
+            .and_then(Value::as_str)
+            .expect("queue task id")
+            .to_string();
+        let keys = vec![task_id.clone()];
+        let error = "direct session error: ErrorEvent { message: \"stream disconnected before completion: stream closed before response.completed\", codex_error_info: Some(Other) }";
+        // Five retryable failures: the fifth exhausts the hold budget and
+        // terminalizes the queue item inside the channels transaction.
+        for _ in 0..5 {
+            channels::lease_pending_inbound_messages(root, 8, "test-worker").ok();
+            release_retryable_worker_messages(
+                root,
+                &keys,
+                WorkerRetryKind::RuntimeApiFailure,
+                error,
+            )
+            .expect("hold leased message");
+        }
+        let task = channels::load_queue_task(root, &task_id)
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(task.route_status, "failed", "budget must terminalize");
+        let conn = crate::business_os::store::open_store(root).expect("open store");
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM business_commands WHERE command_id = ?1",
+                rusqlite::params!["cmd_budget_exhaustion"],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query command");
+        assert_eq!(
+            status.as_deref(),
+            Some("failed"),
+            "the exhausted budget must reach the Business OS command"
+        );
+        let continuation: Option<String> = conn
+            .query_row(
+                "SELECT command_id FROM business_commands WHERE command_id LIKE 'cmd_auto_%'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query continuation");
+        assert!(
+            continuation.is_some(),
+            "a research run terminalized by an exhausted retry budget must continue itself"
+        );
     }
 
     #[test]
