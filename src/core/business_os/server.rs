@@ -346,8 +346,50 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
         return Ok(());
     }
     match (method.clone(), path) {
+        (Method::Get, _) if path.starts_with("/mail/track/o/") && path.ends_with(".gif") => {
+            let token = path
+                .trim_start_matches("/mail/track/o/")
+                .trim_end_matches(".gif");
+            let user_agent = header_value(&request, "User-Agent");
+            match super::store_outbound_commands::record_mail_tracking_event(
+                root,
+                token,
+                "opened",
+                user_agent.as_deref(),
+            )? {
+                Some(_) => respond_mail_tracking_pixel(request)?,
+                None => respond_status(request, 404, "tracking token not found")?,
+            }
+        }
+        (Method::Get, _) if path.starts_with("/mail/track/c/") => {
+            let token = path.trim_start_matches("/mail/track/c/");
+            let user_agent = header_value(&request, "User-Agent");
+            match super::store_outbound_commands::record_mail_tracking_event(
+                root,
+                token,
+                "clicked",
+                user_agent.as_deref(),
+            )? {
+                Some(hit) => {
+                    let target = hit
+                        .get("target_url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if target.is_empty() {
+                        respond_status(request, 404, "tracking target not found")?;
+                    } else {
+                        respond_mail_tracking_redirect(request, target)?;
+                    }
+                }
+                None => respond_status(request, 404, "tracking token not found")?,
+            }
+        }
         (Method::Get, "/api/business-os/status") => {
             respond_json(request, &store::status(root)?)?;
+        }
+        (Method::Get, "/api/business-os/launch-context") => {
+            let session = request_session(root, &request);
+            respond_json_value_no_store(request, launch_context_value(root, &session)?)?;
         }
         (Method::Post, "/api/business-os/auth/capability") => {
             // §9.1: issue a capability token bound to the SERVER-authenticated
@@ -893,7 +935,11 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
 fn is_business_os_control_plane_path(path: &str) -> bool {
     matches!(
         path,
-        "/api/business-os/ctox/subscription-auth/start"
+        // Static-shell bootstrap context: this is exactly the session, launch
+        // config, and design-template metadata that used to be injected into
+        // index.html. It carries no Business OS collection records.
+        "/api/business-os/launch-context"
+            | "/api/business-os/ctox/subscription-auth/start"
             | "/api/business-os/ctox/subscription-auth/callback"
             // Admin-triggered release control-plane: release metadata check
             // and update subprocess launch. No Business OS records flow here.
@@ -3356,6 +3402,15 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
     let mime = mime_for(&target);
     let is_index = target == app_root.join("index.html");
     if is_index {
+        // The launch context is injected server-side, exactly as it was before
+        // the client-first attempt. That attempt shipped a hard cutover: the
+        // shell fetched /api/business-os/launch-context and refused to boot
+        // without it. On ctox.dev subdomains that path is not proxied — the
+        // tenant route answers every non-allowlisted Business OS API path with
+        // 410 — so every managed instance failed at "System-Start
+        // fehlgeschlagen". A separate bootstrap request must never be the only
+        // way the shell can start; the document that carries the shell must
+        // also be able to carry its context.
         let session = request_session(root, &request);
         store::remember_authenticated_session_user(root, &session)?;
         let sync_config = if session.authenticated {
@@ -3375,12 +3430,46 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
             .into_bytes();
     }
     let cache_control = business_os_static_cache_control(is_index, &rel, request.url());
-    respond_static_success(request, &bytes, mime, cache_control)?;
+    if is_index {
+        // Personalized per session: no ETag sharing across users.
+        respond_static_success(request, &bytes, mime, cache_control, None)?;
+    } else {
+        respond_static_success(request, &bytes, mime, cache_control, None)?;
+    }
     Ok(())
+}
+
+fn inject_launch_context(
+    html: String,
+    session: &store::BusinessOsSession,
+    sync_config: Option<&Value>,
+    design_templates: &[DesignTemplateDescriptor],
+) -> anyhow::Result<String> {
+    let html = ensure_shell_stylesheets_in_index(html);
+    let script = format!(
+        "<script>window.CTOX_BUSINESS_OS_SESSION={};window.CTOX_BUSINESS_OS_CONFIG={};window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES={};</script>",
+        script_json(session)?,
+        sync_config
+            .map(script_json)
+            .transpose()?
+            .unwrap_or_else(|| "null".to_owned()),
+        script_json(design_templates)?
+    );
+    if let Some(idx) = html.find("</head>") {
+        let mut injected = String::with_capacity(html.len() + script.len());
+        injected.push_str(&html[..idx]);
+        injected.push_str(&script);
+        injected.push_str(&html[idx..]);
+        Ok(injected)
+    } else {
+        Ok(format!("{script}{html}"))
+    }
 }
 
 fn business_os_static_cache_control(is_index: bool, rel: &str, request_url: &str) -> &'static str {
     if is_index {
+        // The shell document carries the per-session launch context again, so
+        // it must not be shared between users by any cache.
         return "no-store";
     }
 
@@ -3436,31 +3525,25 @@ fn resolve_business_os_static_file(root: &Path, app_root: &Path, rel: &str) -> P
     app_file
 }
 
-fn inject_launch_context(
-    html: String,
-    session: &store::BusinessOsSession,
-    sync_config: Option<&Value>,
-    design_templates: &[DesignTemplateDescriptor],
-) -> anyhow::Result<String> {
-    let html = ensure_shell_stylesheets_in_index(html);
-    let script = format!(
-        "<script>window.CTOX_BUSINESS_OS_SESSION={};window.CTOX_BUSINESS_OS_CONFIG={};window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES={};</script>",
-        script_json(session)?,
-        sync_config
-            .map(script_json)
-            .transpose()?
-            .unwrap_or_else(|| "null".to_owned()),
-        script_json(design_templates)?
-    );
-    if let Some(idx) = html.find("</head>") {
-        let mut injected = String::with_capacity(html.len() + script.len());
-        injected.push_str(&html[..idx]);
-        injected.push_str(&script);
-        injected.push_str(&html[idx..]);
-        Ok(injected)
+fn launch_context_value(root: &Path, session: &store::BusinessOsSession) -> anyhow::Result<Value> {
+    store::remember_authenticated_session_user(root, session)?;
+    let config = if session.authenticated {
+        let turn_session = session
+            .user
+            .as_ref()
+            .map(|user| user.id.clone())
+            .unwrap_or_default();
+        let sync_config = store::sync_config_for_browser(root, &turn_session)?;
+        Some(launch_config_value(root, &sync_config)?)
     } else {
-        Ok(format!("{script}{html}"))
-    }
+        None
+    };
+    let design_templates = load_design_template_manifests(root)?;
+    Ok(serde_json::json!({
+        "session": session,
+        "config": config,
+        "designTemplates": design_templates,
+    }))
 }
 
 fn launch_config_value(
@@ -3503,6 +3586,11 @@ fn ensure_shell_stylesheets_in_index(html: String) -> String {
     }
 }
 
+/// Serialisiert einen Wert fuer die Einbettung in ein `<script>`-Element.
+///
+/// `</` wird maskiert, damit ein `</script>` in den Daten das Element nicht
+/// vorzeitig schliesst. Die Funktion war mit `inject_launch_context`
+/// verschwunden und kehrt mit ihr zurueck.
 fn script_json<T: Serialize + ?Sized>(value: &T) -> anyhow::Result<String> {
     Ok(serde_json::to_string(value)?.replace("</", "<\\/"))
 }
@@ -3556,6 +3644,37 @@ fn respond_status(request: Request, status: u16, body: &str) -> anyhow::Result<(
     Ok(())
 }
 
+fn respond_mail_tracking_pixel(request: Request) -> anyhow::Result<()> {
+    // 1x1 transparent GIF. No cookies and no cache: each fetch remains an
+    // observable event, while the token — not personal data — identifies the
+    // outbound message.
+    const PIXEL: &[u8] = &[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+    ];
+    let mut response = Response::from_data(PIXEL).with_status_code(200);
+    response.add_header(Header::from_bytes("Content-Type", "image/gif").unwrap());
+    response.add_header(Header::from_bytes("Cache-Control", "no-store, max-age=0").unwrap());
+    response.add_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap());
+    request.respond(response)?;
+    Ok(())
+}
+
+fn respond_mail_tracking_redirect(request: Request, target: &str) -> anyhow::Result<()> {
+    let parsed = Url::parse(target).context("stored mail tracking target is invalid")?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "stored mail tracking target is not HTTP(S)"
+    );
+    let mut response = Response::empty(302);
+    response.add_header(Header::from_bytes("Location", target).unwrap());
+    response.add_header(Header::from_bytes("Cache-Control", "no-store, max-age=0").unwrap());
+    response.add_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap());
+    request.respond(response)?;
+    Ok(())
+}
+
 fn respond_options(request: Request) -> anyhow::Result<()> {
     let mut response = Response::empty(204);
     add_cors_headers(&mut response);
@@ -3587,12 +3706,10 @@ fn add_common_response_headers<R: io::Read>(response: &mut Response<R>) {
     // not leave the ES-module graph stuck on a kept-alive loopback connection.
 }
 
-/// Business OS ships an injected 650 KB index document plus a wide ES-module
-/// graph, and every navigation refetches the shell because the launch context
-/// is personalized. Uncompressed that measured 1.2-7.3 s to first byte on
-/// loopback; gzip takes the same document to roughly a tenth of the bytes.
-/// Only text payloads above a kilobyte are worth the CPU, and only when the
-/// client actually offered gzip.
+/// Business OS ships a large static index document plus a wide ES-module graph.
+/// Gzip keeps first loads small; the index ETag makes later revalidations return
+/// a bodyless 304. Only text payloads above a kilobyte are worth the CPU, and
+/// only when the client actually offered gzip.
 const STATIC_COMPRESSION_MIN_BYTES: usize = 1024;
 
 fn accepts_gzip(request: &Request) -> bool {
@@ -3620,11 +3737,26 @@ fn gzip_static_body(bytes: &[u8]) -> Option<Vec<u8>> {
     (encoded.len() < bytes.len()).then_some(encoded)
 }
 
+fn static_response_etag(bytes: &[u8]) -> String {
+    format!("W/\"{}\"", hex_sha256(bytes))
+}
+
+fn request_etag_matches(request: &Request, etag: &str) -> bool {
+    let normalized_etag = etag.strip_prefix("W/").unwrap_or(etag);
+    header_value(request, "If-None-Match").is_some_and(|header| {
+        header.split(',').any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == normalized_etag
+        })
+    })
+}
+
 fn respond_static_success(
     request: Request,
     bytes: &[u8],
     content_type: &str,
     cache_control: &str,
+    etag: Option<&str>,
 ) -> anyhow::Result<()> {
     let encoded = (bytes.len() >= STATIC_COMPRESSION_MIN_BYTES
         && is_compressible(content_type)
@@ -3636,7 +3768,14 @@ fn respond_static_success(
         Some(encoded) => (encoded, Some("gzip")),
         None => (bytes, None),
     };
-    match write_static_success_response(&mut writer, body, content_type, cache_control, encoding) {
+    match write_static_success_response(
+        &mut writer,
+        body,
+        content_type,
+        cache_control,
+        etag,
+        encoding,
+    ) {
         Ok(()) => Ok(()),
         Err(err)
             if matches!(
@@ -3650,16 +3789,54 @@ fn respond_static_success(
     }
 }
 
+fn respond_static_not_modified(
+    request: Request,
+    cache_control: &str,
+    etag: &str,
+) -> anyhow::Result<()> {
+    let mut writer = request.into_writer();
+    match write_static_not_modified_response(&mut writer, cache_control, etag) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn write_static_not_modified_response<W: Write>(
+    mut writer: W,
+    cache_control: &str,
+    etag: &str,
+) -> io::Result<()> {
+    write!(writer, "HTTP/1.1 304 Not Modified\r\n")?;
+    write!(writer, "Cache-Control: {cache_control}\r\n")?;
+    write!(writer, "ETag: {etag}\r\n")?;
+    write!(writer, "Vary: Accept-Encoding\r\n")?;
+    write!(writer, "Connection: close\r\n")?;
+    write!(writer, "\r\n")?;
+    writer.flush()
+}
+
 fn write_static_success_response<W: Write>(
     mut writer: W,
     bytes: &[u8],
     content_type: &str,
     cache_control: &str,
+    etag: Option<&str>,
     content_encoding: Option<&str>,
 ) -> io::Result<()> {
     write!(writer, "HTTP/1.1 200 OK\r\n")?;
     write!(writer, "Content-Type: {content_type}\r\n")?;
     write!(writer, "Cache-Control: {cache_control}\r\n")?;
+    if let Some(etag) = etag {
+        write!(writer, "ETag: {etag}\r\n")?;
+    }
     write!(writer, "Vary: Accept-Encoding\r\n")?;
     if let Some(encoding) = content_encoding {
         write!(writer, "Content-Encoding: {encoding}\r\n")?;
@@ -3850,7 +4027,8 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_shell_does_not_inject_sync_config() {
+    fn unauthenticated_launch_context_has_exact_bootstrap_keys_and_null_config() {
+        let root = tempfile::tempdir().expect("tempdir");
         let session = store::BusinessOsSession {
             ok: true,
             authenticated: false,
@@ -3860,21 +4038,57 @@ mod tests {
             reason: Some("invalid_or_missing_session".to_owned()),
         };
 
-        let html = inject_launch_context(
-            "<html><head></head><body></body></html>".to_owned(),
-            &session,
-            None,
-            &[],
-        )
-        .expect("inject launch context");
+        let context = launch_context_value(root.path(), &session).expect("launch context");
+        let object = context.as_object().expect("launch context object");
+        let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
 
-        assert!(html.contains("window.CTOX_BUSINESS_OS_SESSION="));
-        assert!(html.contains("window.CTOX_BUSINESS_OS_CONFIG=null"));
-        assert!(html.contains("window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES=[]"));
+        assert_eq!(
+            keys,
+            HashSet::from(["session", "config", "designTemplates"])
+        );
+        let expected_session = serde_json::to_value(&session).expect("serialize session");
+        assert_eq!(context.get("session"), Some(&expected_session));
+        assert_eq!(context.get("config"), Some(&Value::Null));
+        assert_eq!(context.get("designTemplates"), Some(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn static_shell_bytes_are_identical_for_different_sessions() {
+        let source = "<html><head></head><body>shell</body></html>";
+        let session_a = store::BusinessOsSession {
+            ok: true,
+            authenticated: false,
+            auth_required: true,
+            user: None,
+            login_url: None,
+            reason: Some("missing".to_owned()),
+        };
+        let session_b = store::BusinessOsSession {
+            ok: true,
+            authenticated: true,
+            auth_required: true,
+            user: Some(store::BusinessOsSessionUser {
+                id: "other@example.com".to_owned(),
+                display_name: "Other User".to_owned(),
+                role: "admin".to_owned(),
+                is_admin: true,
+            }),
+            login_url: None,
+            reason: None,
+        };
+        let render = |_session: &store::BusinessOsSession| {
+            ensure_shell_stylesheets_in_index(source.to_owned()).into_bytes()
+        };
+
+        let bytes_a = render(&session_a);
+        let bytes_b = render(&session_b);
+        assert_eq!(bytes_a, bytes_b);
+        let html = String::from_utf8(bytes_a).expect("static shell is UTF-8");
+        assert!(!html.contains("window.CTOX_BUSINESS_OS_SESSION"));
+        assert!(!html.contains("window.CTOX_BUSINESS_OS_CONFIG"));
+        assert!(!html.contains("window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES"));
         assert!(html.contains(r#"href="app.css?v=20260623-shell-icons""#));
         assert!(html.contains(r#"href="shared/base.css?v=20260609-base1""#));
-        assert!(!html.contains("sync_room"));
-        assert!(!html.contains("signaling_room_password"));
     }
 
     #[test]
@@ -3922,6 +4136,7 @@ mod tests {
             "text/javascript; charset=utf-8",
             "public, max-age=300",
             None,
+            None,
         )
         .expect("write static response");
 
@@ -3929,6 +4144,7 @@ mod tests {
         assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(raw.contains("\r\nContent-Type: text/javascript; charset=utf-8\r\n"));
         assert!(raw.contains("\r\nCache-Control: public, max-age=300\r\n"));
+        assert!(!raw.contains("\r\nETag:"));
         assert!(raw.contains("\r\nContent-Length: 18\r\n"));
         assert!(raw.contains("\r\nConnection: close\r\n"));
         assert!(!raw.contains("Content-Encoding"));
@@ -3937,10 +4153,10 @@ mod tests {
     }
 
     #[test]
-    fn gzip_shrinks_the_injected_shell_and_declares_its_encoding() {
+    fn gzip_shrinks_the_static_shell_and_declares_its_encoding() {
         // Das Live-System lieferte das 651.908-Byte-Shell-Dokument unkomprimiert
-        // aus, bei 1,2-7,3 s bis zum ersten Byte. Der Zaehler haelt fest, dass der
-        // komprimierte Pfad wirklich Bytes spart und sich korrekt deklariert.
+        // aus. Der Zaehler haelt fest, dass der komprimierte statische Pfad Bytes
+        // spart und sich korrekt deklariert.
         let shell = "<div class=\"business-os-shell\">launch context</div>".repeat(400);
         let encoded = gzip_static_body(shell.as_bytes()).expect("gzip encodes the shell");
         assert!(encoded.len() * 10 < shell.len());
@@ -3950,7 +4166,8 @@ mod tests {
             &mut response,
             &encoded,
             "text/html; charset=utf-8",
-            "no-store",
+            "no-cache, must-revalidate",
+            Some("W/\"shell\""),
             Some("gzip"),
         )
         .expect("write static response");
@@ -3963,6 +4180,26 @@ mod tests {
         assert!(head.contains("\r\nContent-Encoding: gzip\r\n"));
         assert!(head.contains("\r\nVary: Accept-Encoding\r\n"));
         assert!(head.contains(&format!("\r\nContent-Length: {}\r\n", encoded.len())));
+    }
+
+    #[test]
+    fn static_index_revalidates_with_a_bodyless_304() {
+        assert_eq!(
+            business_os_static_cache_control(true, "index.html", "/"),
+            "no-cache, must-revalidate"
+        );
+        let mut response = Vec::new();
+        write_static_not_modified_response(
+            &mut response,
+            "no-cache, must-revalidate",
+            "W/\"shell\"",
+        )
+        .expect("write 304 response");
+        let raw = String::from_utf8(response).expect("utf8 response");
+        assert!(raw.starts_with("HTTP/1.1 304 Not Modified\r\n"));
+        assert!(raw.contains("\r\nCache-Control: no-cache, must-revalidate\r\n"));
+        assert!(raw.contains("\r\nETag: W/\"shell\"\r\n"));
+        assert!(raw.ends_with("\r\n\r\n"));
     }
 
     #[test]

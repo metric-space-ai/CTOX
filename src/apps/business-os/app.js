@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260728-research-knowledge-usability-v89';
+const APP_BUILD = '20260807-capability-singleflight-v94';
 
 ensureShellStylesheets();
 
@@ -939,6 +939,7 @@ bootstrap().catch(async (error) => {
 });
 
 async function bootstrap() {
+  await loadLaunchContext();
   resetDataPlaneReady('bootstrap');
   if (!globalThis.crypto?.subtle) {
     throw new Error('WebCrypto is missing (Insecure Origin on Safari 127.0.0.1). Please use http://localhost:8765/');
@@ -4459,31 +4460,41 @@ async function initThreadsAttentionBadge() {
 }
 
 function renderTabs() {
-  els.tabs.replaceChildren();
+  // Elf Aufrufer riefen hier bisher replaceChildren() und bauten die gesamte
+  // Leiste neu — auch wenn sich nichts geaendert hatte. Gemessen: 30 DOM-
+  // Ersetzungen in 20 Sekunden, sichtbar als Zucken. Jetzt wird in ein
+  // Fragment gebaut und nur bei echter Aenderung getauscht.
+  const fragment = document.createDocumentFragment();
+  const tabsTarget = { append: (node) => fragment.append(node) };
   state.moduleLayout = normalizeModuleLayout(state.moduleLayout || readModuleLayout(), state.modules);
   state.taskbarPins = normalizeTaskbarPins(state.taskbarPins, state.modules);
   const rendered = new Set();
   for (const id of state.taskbarPins) {
     const target = launchTargetForId(id);
     if (!target) continue;
-    els.tabs.append(renderModuleTab(target, { pinned: true }));
+    tabsTarget.append(renderModuleTab(target, { pinned: true }));
     rendered.add(target.id);
   }
   const active = state.activeModule && moduleAppearsInSwitcher(state.activeModule)
     ? launchTargetForId(state.activeModule.id)
     : null;
   if (active && !rendered.has(active.id)) {
-    els.tabs.append(renderModuleTab(active, { temporary: true }));
+    tabsTarget.append(renderModuleTab(active, { temporary: true }));
     rendered.add(active.id);
   }
   for (const target of runningDesktopAppTargets()) {
     if (rendered.has(target.id)) continue;
-    els.tabs.append(renderModuleTab(target, { temporary: true, running: true }));
+    tabsTarget.append(renderModuleTab(target, { temporary: true, running: true }));
     rendered.add(target.id);
   }
   // Toggle the trailing-edge fade only when the pinned-app row actually
   // overflows, so a row that fits shows no faded last tab. Measured after
   // layout settles.
+  const signature = [...fragment.children].map((child) => child.outerHTML).join('');
+  if (signature !== renderTabs.lastSignature) {
+    renderTabs.lastSignature = signature;
+    els.tabs.replaceChildren(fragment);
+  }
   requestAnimationFrame(() => {
     if (!els.tabs) return;
     els.tabs.classList.toggle('is-scrollable', els.tabs.scrollWidth > els.tabs.clientWidth + 1);
@@ -9088,6 +9099,44 @@ async function installCtoxUpdateFromShell(event) {
   }
 }
 
+async function loadLaunchContext() {
+  // The server injects the context into the shell document. Managed instances
+  // reach the shell that way and CANNOT reach a separate bootstrap endpoint:
+  // ctox.dev subdomains answer every non-allowlisted Business OS API path with
+  // 410, which is why the fetch-only version failed to start on every tenant.
+  // Injected context wins; the endpoint stays as a fallback for surfaces that
+  // load the shell without it.
+  if (window.CTOX_BUSINESS_OS_SESSION && typeof window.CTOX_BUSINESS_OS_SESSION === 'object') {
+    if (window.CTOX_BUSINESS_OS_CONFIG === undefined) window.CTOX_BUSINESS_OS_CONFIG = null;
+    if (!Array.isArray(window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES)) {
+      window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES = [];
+    }
+    return;
+  }
+  let payload;
+  try {
+    payload = await fetchBusinessOsControlJson('/api/business-os/launch-context');
+  } catch (error) {
+    throw new Error(`Business OS launch context could not be loaded: ${error?.message || error}`);
+  }
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(payload || {}, key);
+  if (!hasOwn('session') || !hasOwn('config') || !hasOwn('designTemplates')) {
+    throw new Error('Business OS launch context is incomplete. Expected session, config, and designTemplates.');
+  }
+  if (!payload.session || typeof payload.session !== 'object') {
+    throw new Error('Business OS launch context contains an invalid session.');
+  }
+  if (payload.config !== null && typeof payload.config !== 'object') {
+    throw new Error('Business OS launch context contains an invalid config.');
+  }
+  if (!Array.isArray(payload.designTemplates)) {
+    throw new Error('Business OS launch context contains invalid designTemplates.');
+  }
+  window.CTOX_BUSINESS_OS_SESSION = payload.session;
+  window.CTOX_BUSINESS_OS_CONFIG = payload.config;
+  window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES = payload.designTemplates;
+}
+
 async function fetchBusinessOsControlJson(url, options = {}) {
   const headers = {
     Accept: 'application/json',
@@ -10746,9 +10795,27 @@ async function normalizeBusinessOsLaunchConfig(config) {
   const syncRoom = explicitSyncRoom || await deriveSyncRoomFromPassword(instanceId, roomPassword);
   const urls = signalingUrls.map((url) => String(url || '').trim()).filter(Boolean);
   if (!syncRoom || !urls.length) return null;
-  const iceServers = Array.isArray(config.ice_servers)
-    ? config.ice_servers
-    : (Array.isArray(config.iceServers) ? config.iceServers : []);
+  // A pairing payload (`?ctox_config=`, `desktop invite`) carries the room and
+  // credentials but no ICE configuration. Without STUN/TURN the peer gathers
+  // host candidates only, so the P2P connection can only ever form inside the
+  // same LAN — across the internet ICE goes checking -> disconnected -> failed,
+  // reconnects forever, and every command dispatch dies with
+  // "collection business_commands was cancelled". Inherit the ICE list the
+  // server already serves in the bootstrap config instead of starting empty.
+  const servedConfig = (typeof window !== 'undefined' && window.CTOX_BUSINESS_OS_CONFIG) || null;
+  const iceServersFrom = (source) => (Array.isArray(source?.ice_servers)
+    ? source.ice_servers
+    : (Array.isArray(source?.iceServers) ? source.iceServers : []));
+  const iceServers = iceServersFrom(config).length
+    ? iceServersFrom(config)
+    : iceServersFrom(servedConfig);
+  const iceServersRefreshUrl = String(
+    config.ice_servers_refresh_url
+      || config.iceServersRefreshUrl
+      || servedConfig?.ice_servers_refresh_url
+      || servedConfig?.iceServersRefreshUrl
+      || '',
+  ).trim();
   return {
     ok: config.ok !== false,
     app_hosting: config.app_hosting || config.appHosting || 'web_deploy',
@@ -10762,6 +10829,8 @@ async function normalizeBusinessOsLaunchConfig(config) {
     signaling_urls: urls,
     ice_servers: iceServers,
     iceServers,
+    ice_servers_refresh_url: iceServersRefreshUrl,
+    iceServersRefreshUrl,
     transport: 'webrtc',
     http_bridge_available: false,
     ctox_instance_required: config.ctox_instance_required !== false,
