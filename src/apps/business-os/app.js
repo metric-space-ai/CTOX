@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260807-capability-singleflight-v94';
+const APP_BUILD = '20260807-poll-registry-singleflight-v95';
 
 ensureShellStylesheets();
 
@@ -87,6 +87,27 @@ const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v3-browser-contract';
 const RXDB_BOOTSTRAP_VERSION = `${BUSINESS_DB_NAME}:storage-v1`;
 const CTOX_HEALTH_POLL_MS = 10000;
 const CTOX_MAINTENANCE_POLL_MS = 2000;
+// Idle cadence. On ctox.dev the maintenance endpoint is served by an SSH round
+// trip into the tenant VM, so a 2 s idle poll is 30 remote logins per minute per
+// open tab. Nothing is happening in that state — 60 s is soon enough to notice a
+// maintenance window starting, and any upgrade started from this shell switches
+// back to the fast cadence immediately.
+const CTOX_MAINTENANCE_IDLE_POLL_MS = 60000;
+
+// modules/registry.json was fetched with `cache: 'no-store'` from several call
+// sites during a single boot — measured five times, ~900 ms each on a managed
+// instance. The file is immutable for a given APP_BUILD, so one request per page
+// is enough. Single-flight: concurrent callers share the in-flight promise, and
+// each caller still gets its own Response via clone().
+let packagedModuleRegistryRequest = null;
+function fetchPackagedModuleRegistry() {
+  packagedModuleRegistryRequest ??= fetch(`modules/registry.json?v=${APP_BUILD}`, { cache: 'no-store' })
+    .catch((error) => {
+      packagedModuleRegistryRequest = null;
+      throw error;
+    });
+  return packagedModuleRegistryRequest.then((response) => response.clone());
+}
 const CTOX_MAINTENANCE_LEASE_KEY = 'ctox.businessOs.maintenanceLease';
 const CTOX_MAINTENANCE_CLIENT_KEY = 'ctox.businessOs.maintenanceClient';
 const CTOX_UPDATE_CHECK_POLL_MS = 30 * 60 * 1000;
@@ -8552,13 +8573,40 @@ function rememberMaintenanceLease(leaseId) {
   } catch {}
 }
 
+// The 2 s tick is only correct WHILE an upgrade runs. Idle, it cost a request
+// every two seconds forever — and on a managed instance every one of those is a
+// fresh SSH session into the customer VM (measured 122–1734 ms each, 16 calls in
+// the first 34 s of a page load). Poll fast only when there is something to
+// watch, back off when idle, and stop entirely while the tab is hidden.
+function maintenancePollDelay() {
+  if (document.visibilityState === 'hidden') return 0;
+  if (state.maintenance?.active || rememberedMaintenanceLease()) return CTOX_MAINTENANCE_POLL_MS;
+  return CTOX_MAINTENANCE_IDLE_POLL_MS;
+}
+
+function scheduleMaintenancePoll() {
+  if (state.maintenanceTimer) window.clearTimeout(state.maintenanceTimer);
+  const delay = maintenancePollDelay();
+  if (!delay) return;
+  state.maintenanceTimer = window.setTimeout(async () => {
+    await refreshMaintenanceStatus();
+    scheduleMaintenancePoll();
+  }, delay);
+}
+
 function startMaintenanceMonitor() {
-  if (state.maintenanceTimer) window.clearInterval(state.maintenanceTimer);
+  if (state.maintenanceTimer) window.clearTimeout(state.maintenanceTimer);
   els.maintenanceBanner?.querySelector('[data-maintenance-retry]')?.addEventListener('click', () => {
-    refreshMaintenanceStatus({ retry: true });
+    refreshMaintenanceStatus({ retry: true }).then(scheduleMaintenancePoll);
   });
-  refreshMaintenanceStatus();
-  state.maintenanceTimer = window.setInterval(refreshMaintenanceStatus, CTOX_MAINTENANCE_POLL_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      refreshMaintenanceStatus().then(scheduleMaintenancePoll);
+    } else {
+      scheduleMaintenancePoll();
+    }
+  });
+  refreshMaintenanceStatus().then(scheduleMaintenancePoll);
 }
 
 async function refreshMaintenanceStatus(options = {}) {
@@ -10312,7 +10360,7 @@ async function loadPackagedModuleCatalog() {
     return canonicalSystemIds.has(id) || explicitlyAllowedIds.has(id);
   };
   try {
-    const response = await fetch(`modules/registry.json?v=${APP_BUILD}`, { cache: 'no-store' });
+    const response = await fetchPackagedModuleRegistry();
     if (response.ok) {
       const catalog = await response.json();
       if (Array.isArray(catalog?.modules) && catalog.modules.length) {

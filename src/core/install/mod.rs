@@ -38,7 +38,12 @@ const LAUNCHD_SIGNALING_LABEL: &str = "com.metric-space.ctox.signaling";
 const DEFAULT_GITHUB_API_BASE: &str = "https://api.github.com";
 const DEFAULT_GITHUB_TOKEN_ENV: &str = "CTOX_UPDATE_GITHUB_TOKEN";
 const DEFAULT_RELEASE_REPO: &str = "metric-space-ai/ctox";
-const UPDATE_BACKUP_RETENTION_COUNT: usize = 3;
+/// Exactly one: the backup taken by the current upgrade, which is the only one
+/// a rollback ever reads. Three retained copies of a multi-gigabyte state root
+/// bought nothing and cost tenants their disks — a full disk stops the SQLite
+/// store, which stops `business-os peer status`, which the ctox.dev proxy parses
+/// as JSON, which ends as "Pairing-Konfiguration ungueltig" for the customer.
+const UPDATE_BACKUP_RETENTION_COUNT: usize = 1;
 const CHATGPT_AUTH_SECRET_SCOPE: &str = "ctox-auth";
 const CHATGPT_AUTH_SECRET_NAME: &str = "chatgpt_subscription_auth_json";
 const UPGRADE_RUNTIME_ENV_INVARIANT_KEYS: &[&str] = &[
@@ -1870,6 +1875,14 @@ fn apply_update(
         });
     let backup_path = backup_state_root(&layout.state_root)?;
     progress_step(format!("state backup created: {}", backup_path.display()));
+    // Direkt nach dem Anlegen aufraeumen, nicht erst am Ende des Erfolgspfads.
+    // Vorher hing die Aufraeumung allein am Abschluss: jeder Lauf, der dazwischen
+    // abbrach (fehlgeschlagener Bau, SIGTERM, Notbremse), liess seine Sicherung
+    // liegen und raeumte nie auf. Gemessen am 07.08.2026 auf einer verwalteten
+    // Instanz: 298 Sicherungen, 21 GB, Platte zu 100 % voll. Das riss sshd mit
+    // und damit den gesamten Mandanten-Proxy, der seine Pairing-Konfiguration
+    // ueber SSH holt. Hier greift die Grenze unabhaengig vom weiteren Ausgang.
+    prune_old_update_backups(&layout.state_root, UPDATE_BACKUP_RETENTION_COUNT);
     let runtime_invariants = RuntimeCredentialSnapshot::capture(&layout.state_root)?;
     persist_update_state(
         &layout.update_state_path(),
@@ -2049,7 +2062,6 @@ fn apply_update(
         last_error: None,
     };
     persist_update_state(&layout.update_state_path(), &completed)?;
-    prune_old_update_backups(&layout.state_root, UPDATE_BACKUP_RETENTION_COUNT);
     progress_done(format!("applied release {release}"), update_started);
     Ok(ApplyResult {
         updated: true,
@@ -5295,6 +5307,46 @@ mod tests {
         assert!(backup_root.join("update-04").exists());
         assert!(backup_root.join("update-05").exists());
         assert!(backup_root.join("manual-pre-upgrade").exists());
+    }
+
+    /// Abgebrochene Upgrades duerfen die Platte nicht fuellen.
+    ///
+    /// Frueher raeumte `apply_update` erst ganz am Ende auf. Ein Lauf, der
+    /// zwischen Sicherung und Abschluss starb, hinterliess seine Sicherung fuer
+    /// immer. Am 07.08.2026 hatte eine verwaltete Instanz so 298 Sicherungen mit
+    /// 21 GB angesammelt und lief auf 100 % voll — sshd fiel aus und riss den
+    /// Mandanten-Proxy mit. Dieser Test bildet zwanzig abgebrochene Laeufe nach:
+    /// Sicherung anlegen, danach aufraeumen, dann abbrechen. Die Zahl der
+    /// Sicherungen muss beschraenkt bleiben.
+    #[test]
+    fn aborted_updates_never_accumulate_backups() {
+        let temp = tempdir().unwrap();
+        let state_root = temp.path().join("state");
+        ensure_dir(&state_root).unwrap();
+
+        for round in 0..20 {
+            // Genau die Reihenfolge aus `apply_update`: erst anlegen, dann
+            // begrenzen — und danach passiert in diesem Test nichts mehr,
+            // der Lauf gilt als abgebrochen.
+            let backup = state_root.join("backups").join(format!("update-{round:04}"));
+            ensure_dir(&backup).unwrap();
+            prune_old_update_backups(&state_root, UPDATE_BACKUP_RETENTION_COUNT);
+
+            let count = fs::read_dir(state_root.join("backups"))
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("update-"))
+                })
+                .count();
+            assert!(
+                count <= UPDATE_BACKUP_RETENTION_COUNT,
+                "nach Runde {round} lagen {count} Sicherungen vor, erlaubt sind {UPDATE_BACKUP_RETENTION_COUNT}"
+            );
+        }
     }
 
     #[test]
