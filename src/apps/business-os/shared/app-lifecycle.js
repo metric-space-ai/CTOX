@@ -2,7 +2,7 @@ import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260714-chat-queue-v56';
+} from './permissions.js?v=20260807-einheitliche-ladepfade-v97';
 
 export function parseBusinessAppSemver(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(String(version || '').trim());

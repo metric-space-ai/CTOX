@@ -1,4 +1,4 @@
-import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260708-canonical-rechunk1';
+import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260807-einheitliche-ladepfade-v97';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';
 

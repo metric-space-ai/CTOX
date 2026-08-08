@@ -1,4 +1,4 @@
-import { collections as ctoxCoreCollections } from '../ctox/schema.js';
+import { collections as ctoxCoreCollections } from '../ctox/schema.js?v=20260807-einheitliche-ladepfade-v97';
 
 const jsonObject = { type: 'object', additionalProperties: true };
 const stringArray = { type: 'array', items: { type: 'string' } };

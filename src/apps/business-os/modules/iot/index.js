@@ -11,7 +11,7 @@
 // human writes prompts (Wenn/Dann + signal); CTOX programs the watcher. All
 // command flows and collection schemas are unchanged from the previous IA.
 import { createContextMenu } from '../../shared/context-menu.js';
-import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js';
+import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js?v=20260807-einheitliche-ladepfade-v97';
 
 const BUILD = '20260727-canonical-readiness';
 const COLLECTIONS = [

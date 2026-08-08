@@ -1,5 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260807-einheitliche-ladepfade-v97';
 
 const REFRESH_DEBOUNCE_MS = 80;
 const TICKET_PRIMARY_COLLECTION = 'ctox_ticket_items';

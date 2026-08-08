@@ -1,33 +1,33 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260723-resizer-pointer-capture-v1';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260717-knowledge-sync-v130';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260721-pane-grammar-v2';
-import { createAppActions } from './shared/app-actions.js?v=20260715-runtime-v2';
+import { CtoxResizer } from './shared/resizer.js?v=20260807-einheitliche-ladepfade-v97';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260807-einheitliche-ladepfade-v97';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260807-einheitliche-ladepfade-v97';
+import { createAppActions } from './shared/app-actions.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260727-local-module-visibility-v1';
+} from './shared/app-lifecycle.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260714-chat-queue-v56';
+} from './shared/permissions.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260714-chat-queue-v56';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260714-chat-queue-v56';
+} from './shared/branding.js?v=20260807-einheitliche-ladepfade-v97';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   launchesInWindow,
   resolvePresentation,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260714-chat-queue-v56';
+} from './shared/presentation.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -38,9 +38,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260714-chat-queue-v56';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260717-chat-overlay-v126';
-import { createDocumentsFacade } from './shared/documents.js?v=20260726-documents-facade-v19';
+} from './shared/shell-permissions-ui.js?v=20260807-einheitliche-ladepfade-v97';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260807-einheitliche-ladepfade-v97';
+import { createDocumentsFacade } from './shared/documents.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -48,16 +48,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260716-maintenance-v1';
+} from './shared/maintenance-state.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260716-workspace-session-v1';
+} from './shared/workspace-session.js?v=20260807-einheitliche-ladepfade-v97';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260717-taskbar-pins-v2';
+} from './shared/taskbar-pins.js?v=20260807-einheitliche-ladepfade-v97';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260807-icon-singleflight-v96';
+const APP_BUILD = '20260807-einheitliche-ladepfade-v97';
 
 ensureShellStylesheets();
 

@@ -1,5 +1,5 @@
-import { collections as ctoxCollections } from '../ctox/schema.js';
-import { collections as desktopCollections } from '../desktop/schema.js';
+import { collections as ctoxCollections } from '../ctox/schema.js?v=20260807-einheitliche-ladepfade-v97';
+import { collections as desktopCollections } from '../desktop/schema.js?v=20260807-einheitliche-ladepfade-v97';
 import { collections as documentCollections } from '../documents/schema.js';
 
 export const collections = {

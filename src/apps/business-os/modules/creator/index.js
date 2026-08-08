@@ -1,4 +1,4 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260807-einheitliche-ladepfade-v97';
 
 const state = {
   ctx: null,

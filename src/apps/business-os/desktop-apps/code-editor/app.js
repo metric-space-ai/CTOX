@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260623-role-session';
+} from '../../shared/permissions.js?v=20260807-einheitliche-ladepfade-v97';
 
 export const manifest = {
   id: 'code-editor',

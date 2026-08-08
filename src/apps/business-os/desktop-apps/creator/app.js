@@ -12,7 +12,7 @@ export async function mount(container, ctx) {
   let teardown = null;
   let disposed = false;
   Promise.resolve().then(async () => {
-    const mod = await import('../../modules/creator/index.js');
+    const mod = await import('../../modules/creator/index.js?v=20260807-einheitliche-ladepfade-v97');
     if (disposed) return;
     container.innerHTML = '';
     const moduleCtx = {

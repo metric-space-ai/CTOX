@@ -3,7 +3,7 @@ import {
   transcodeApp,
   suggestedModuleId,
   scaffoldModule,
-} from '../../shared/app-transcode.mjs?v=20260720-importer-v6';
+} from '../../shared/app-transcode.mjs?v=20260807-einheitliche-ladepfade-v97';
 
 // The App Importer is the hand-over moment of the product story: a coding
 // agent conceived the app, the importer raises it. Source (folder or public
