@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260807-poll-registry-singleflight-v95';
+const APP_BUILD = '20260807-icon-singleflight-v96';
 
 ensureShellStylesheets();
 
@@ -8348,6 +8348,10 @@ async function resolveModuleIconSvg(mod) {
   if (!mod?.id) return '';
   const inlineSvg = inlineModuleIconSvg(mod);
   if (inlineSvg) return inlineSvg;
+  // The cache entry is written only after the fetch resolves, so two overlapping
+  // registerCustomModuleIcons() passes both got a cache miss and both started the
+  // same request — measured as ~20 icon.svg pairs issued in the SAME millisecond.
+  // Storing the in-flight promise makes the second pass wait instead of refetch.
   if (state.moduleIconSvgCache.has(mod.id)) return state.moduleIconSvgCache.get(mod.id);
   const assetPath = moduleIconAssetPath(mod);
   if (!assetPath) return '';
@@ -8355,23 +8359,25 @@ async function resolveModuleIconSvg(mod) {
   // the daemon/network is down or before the WebRTC peer has been stable long
   // enough; inline manifest icons remain available immediately.
   if (!hasStableLiveModulePreloadDataPlane()) return '';
-  try {
-    const response = await fetch(`./${assetPath}?v=${APP_BUILD}${moduleRevisionQuery(mod)}`, { cache: 'force-cache' });
-    if (!response.ok) {
-      state.moduleIconSvgCache.set(mod.id, '');
+  // Claim the slot with the pending promise BEFORE awaiting, so an overlapping
+  // pass hits the cache and waits on this request instead of issuing its own.
+  const pending = (async () => {
+    try {
+      const response = await fetch(`./${assetPath}?v=${APP_BUILD}${moduleRevisionQuery(mod)}`, { cache: 'force-cache' });
+      if (!response.ok) return '';
+      const svg = (await response.text()).trim();
+      return svg.includes('<svg') ? svg : '';
+    } catch (error) {
       return '';
     }
-    const svg = (await response.text()).trim();
-    if (!svg.includes('<svg')) {
-      state.moduleIconSvgCache.set(mod.id, '');
-      return '';
-    }
+  })().then((svg) => {
+    // Replace the promise with the plain value: later callers get it without a
+    // microtask hop, and a failed attempt stays cached as '' exactly as before.
     state.moduleIconSvgCache.set(mod.id, svg);
     return svg;
-  } catch (error) {
-    state.moduleIconSvgCache.set(mod.id, '');
-    return '';
-  }
+  });
+  state.moduleIconSvgCache.set(mod.id, pending);
+  return pending;
 }
 
 function inlineModuleIconSvg(mod) {
