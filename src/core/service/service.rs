@@ -1660,8 +1660,12 @@ fn attempt_state_invariant_repair(
         let mission_status = normalize_state_token(&record.mission_status);
         if matches!(
             mission_status.as_str(),
-            "done" | "closed" | "complete" | "completed"
+            "done" | "closed" | "complete" | "completed" | "dormant"
         ) {
+            // "dormant" ist seit I-070 der ehrliche Leerzustand des
+            // Erstimports; erzwingt der Repair is_open=true wegen offener
+            // Arbeit, muss der Status mitziehen, sonst widersprechen sich
+            // Record und mission_is_open beim naechsten Diff-Apply.
             record.mission_status = "active".to_string();
         }
         let continuation_mode = normalize_state_token(&record.continuation_mode);
@@ -29972,6 +29976,60 @@ Business OS command:
                 && event.reason == "boot_state_invariants_repaired"
                 && event.action_taken == "canonicalized_focus_and_reopened_mission_state"
         }));
+    }
+
+    #[test]
+    fn boot_state_invariant_repair_lifts_dormant_status_with_open_runtime_work() {
+        // I-070 fuehrt "dormant" als ehrlichen Leerzustand des Erstimports
+        // ein. Erzwingt der Repair wegen offener Arbeit is_open=true, muss
+        // der Status auf "active" mitziehen — sonst rechnet der naechste
+        // Diff-Apply is_open aus dem Dormant-Status wieder auf false.
+        let root = temp_root("boot-state-dormant-open");
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        let db_path = crate::paths::core_db(&root);
+        let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
+        let _ = engine
+            .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
+            .unwrap();
+        plan::handle_plan_command(
+            &root,
+            &[
+                "ingest".to_string(),
+                "--title".to_string(),
+                "dormant repair lift verification".to_string(),
+                "--prompt".to_string(),
+                "Open plan work must reopen a dormant-imported mission.".to_string(),
+            ],
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE mission_states
+             SET mission_status = 'dormant', continuation_mode = 'dormant',
+                 is_open = 0, allow_idle = 1
+             WHERE conversation_id = ?1",
+            rusqlite::params![turn_loop::CHAT_CONVERSATION_ID],
+        )
+        .unwrap();
+        drop(conn);
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        run_boot_state_invariant_check(&root, &state);
+
+        let report = state_invariants::evaluate_runtime_state_invariants(
+            &root,
+            turn_loop::CHAT_CONVERSATION_ID,
+        )
+        .expect("failed to evaluate invariants after dormant repair");
+        assert!(
+            report.is_clean(),
+            "unexpected violations: {:?}",
+            report.violations
+        );
+        assert_eq!(report.mission_state.mission_status, "active");
+        assert_eq!(report.mission_state.continuation_mode, "continuous");
+        assert!(report.mission_state.is_open);
+        assert!(!report.mission_state.allow_idle);
     }
 
     #[test]
