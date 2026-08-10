@@ -122,4 +122,53 @@ mod tests {
                 .join("\n  ")
         );
     }
+
+    /// Every `*_tests.rs` beside `main.rs` must be declared there.
+    ///
+    /// On 2026-08-06 a commit dropped a single line — `mod module_size_tests;` —
+    /// and the size ratchet stopped running. Nothing failed, because an unlisted
+    /// module is not compiled: `cargo test module_size_tests` reported "0 tests"
+    /// and read as success. The guard stayed dark for days and hid a budget
+    /// violation that was already committed.
+    ///
+    /// A guard cannot detect its own absence — if this file were dropped from
+    /// `main.rs`, this test would not run either. That case is not solvable from
+    /// the inside; what is solvable is the one that actually happened, where one
+    /// guard is removed while the others still run. Every remaining guard then
+    /// reports the loss.
+    #[test]
+    fn every_guard_module_stays_registered() {
+        let core_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
+        let main_rs = std::fs::read_to_string(core_dir.join("main.rs"))
+            .expect("src/core/main.rs must be readable");
+
+        let mut unregistered = Vec::new();
+        for entry in std::fs::read_dir(&core_dir).expect("src/core must be readable") {
+            let path = entry.expect("directory entry must be readable").path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            if !stem.ends_with("_tests") {
+                continue;
+            }
+            if !main_rs
+                .lines()
+                .any(|line| line.trim() == format!("mod {stem};"))
+            {
+                unregistered.push(stem.to_owned());
+            }
+        }
+        unregistered.sort();
+
+        assert!(
+            unregistered.is_empty(),
+            "these guard modules exist but are not declared in src/core/main.rs, so they \
+             never run and their failures are invisible. Add `mod <name>;` — do not delete \
+             the file to make this pass:\n  {}",
+            unregistered.join("\n  ")
+        );
+    }
 }
