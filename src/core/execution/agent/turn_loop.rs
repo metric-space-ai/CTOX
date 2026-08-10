@@ -33,6 +33,13 @@ fn turn_counters() -> &'static Mutex<HashMap<i64, RefreshTelemetry>> {
     COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerAttemptContext {
+    pub(crate) attempt_id: String,
+    pub(crate) work_key: String,
+    pub(crate) source_label: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChatTurnSessionOptions {
     pub(crate) disable_mcp_servers: bool,
@@ -43,6 +50,9 @@ pub(crate) struct ChatTurnSessionOptions {
     pub(crate) plain_prompt: bool,
     pub(crate) turn_timeout_secs_override: Option<u64>,
     pub(crate) required_initial_tool: Option<String>,
+    /// Service-owned durable completion marker. When present, the successful
+    /// reply is bound to this attempt before any assistant-message effect.
+    pub(crate) worker_attempt: Option<WorkerAttemptContext>,
 }
 
 struct ToolFreeSemanticSummarizer {
@@ -867,7 +877,13 @@ where
                 )?,
         };
         emit("persist-assistant-turn");
-        persist_lcm_message_with_retry(db_path, conversation_id, "assistant", &reply, &mut emit)?;
+        persist_successful_assistant_with_retry(
+            db_path,
+            conversation_id,
+            &reply,
+            options.worker_attempt.as_ref(),
+            &mut emit,
+        )?;
         emit("continuity-refresh-skipped");
         emit(&format!(
             "turn-outcome stage=complete health=plain score=100 reply_chars={} continuity_updates=0 continuity_skips=1 omitted=0",
@@ -1145,7 +1161,13 @@ where
             )?,
     };
     emit("persist-assistant-turn");
-    persist_lcm_message_with_retry(db_path, conversation_id, "assistant", &reply, &mut emit)?;
+    persist_successful_assistant_with_retry(
+        db_path,
+        conversation_id,
+        &reply,
+        options.worker_attempt.as_ref(),
+        &mut emit,
+    )?;
     // Detect durable state transitions since the last refresh (internal work
     // closed — including service-side closures between turns — knowledge
     // entry added, focus document replaced this turn). These count as task
@@ -1294,6 +1316,68 @@ fn persist_lcm_message_with_retry(
     }
     Err(last_error
         .unwrap_or_else(|| anyhow::anyhow!("LCM message persistence failed without error")))
+}
+
+fn persist_successful_assistant_with_retry(
+    db_path: &Path,
+    conversation_id: i64,
+    reply: &str,
+    worker_attempt: Option<&WorkerAttemptContext>,
+    emit: &mut dyn FnMut(&str),
+) -> Result<lcm::MessageRecord> {
+    let mut last_error = None;
+    for attempt in 1..=4 {
+        let result = (|| {
+            if let Some(worker_attempt) = worker_attempt {
+                let durable = lcm::run_begin_worker_attempt_finalization(
+                    db_path,
+                    lcm::WorkerAttemptFinalizationInput {
+                        attempt_id: &worker_attempt.attempt_id,
+                        work_key: &worker_attempt.work_key,
+                        conversation_id,
+                        source_label: &worker_attempt.source_label,
+                        agent_outcome: lcm::AgentOutcome::Success,
+                        reply_text: reply,
+                        error_text: None,
+                    },
+                )?;
+                anyhow::ensure!(
+                    durable.attempt_id == worker_attempt.attempt_id,
+                    "another recoverable worker attempt already owns work key {}",
+                    worker_attempt.work_key
+                );
+                lcm::run_ensure_worker_attempt_assistant_message(
+                    db_path,
+                    &worker_attempt.attempt_id,
+                )
+            } else {
+                // Non-service callers still get the typed Success guarantee.
+                lcm::run_add_assistant_turn(
+                    db_path,
+                    conversation_id,
+                    reply,
+                    lcm::AgentOutcome::Success,
+                )
+            }
+        })();
+        match result {
+            Ok(record) => return Ok(record),
+            Err(err) => {
+                let summary = err.to_string();
+                last_error = Some(err);
+                if attempt == 4 {
+                    break;
+                }
+                emit(&format!(
+                    "persist-assistant-turn-retry attempt={attempt} error={}",
+                    clip_for_log(&summary, 160)
+                ));
+                std::thread::sleep(Duration::from_millis(250 * attempt as u64));
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("typed assistant persistence failed without error")))
 }
 
 fn clip_for_log(value: &str, max_chars: usize) -> String {
@@ -2071,6 +2155,49 @@ fn continuity_refresh_timeout_secs(settings: &BTreeMap<String, String>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_turn_persists_one_attempt_and_typed_success_reply() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("ctox.sqlite3");
+        let context = WorkerAttemptContext {
+            attempt_id: "turn-success-attempt".to_string(),
+            work_key: "queue:turn-success".to_string(),
+            source_label: "turn-loop-test".to_string(),
+        };
+        let mut events = Vec::new();
+        let first = persist_successful_assistant_with_retry(
+            &db_path,
+            7101,
+            "successful reply",
+            Some(&context),
+            &mut |event| events.push(event.to_string()),
+        )?;
+        let second = persist_successful_assistant_with_retry(
+            &db_path,
+            7101,
+            "successful reply",
+            Some(&context),
+            &mut |event| events.push(event.to_string()),
+        )?;
+        assert_eq!(first.message_id, second.message_id);
+        assert_eq!(first.agent_outcome.as_deref(), Some("Success"));
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let attempts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM worker_attempt_finalizations WHERE work_key = ?1",
+            [context.work_key.as_str()],
+            |row| row.get(0),
+        )?;
+        let replies: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = 7101 AND agent_outcome = 'Success'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(attempts, 1);
+        assert_eq!(replies, 1);
+        assert!(events.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn api_provider_overrides_define_core_provider_without_env_key() {

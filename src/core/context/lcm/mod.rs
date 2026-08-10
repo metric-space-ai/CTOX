@@ -154,6 +154,95 @@ impl AgentOutcome {
     }
 }
 
+/// Durable state of one worker-attempt finalization. The row is the recovery
+/// marker across process crashes; `finalizing` and terminal rows with
+/// `effects_completed = false` are resumed instead of invoking the model again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerAttemptRecord {
+    pub attempt_id: String,
+    pub work_key: String,
+    pub conversation_id: i64,
+    pub source_label: String,
+    pub status: String,
+    pub agent_outcome: AgentOutcome,
+    pub reply_text: String,
+    pub error_text: Option<String>,
+    pub reply_message_id: Option<i64>,
+    pub artifact_checked_at: Option<String>,
+    pub artifact_check_accepted: Option<bool>,
+    pub artifact_check_details: Option<String>,
+    pub resumable: bool,
+    pub effects_completed: bool,
+    pub finalization_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub terminal_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerAttemptFinalizationInput<'a> {
+    pub attempt_id: &'a str,
+    pub work_key: &'a str,
+    pub conversation_id: i64,
+    pub source_label: &'a str,
+    pub agent_outcome: AgentOutcome,
+    pub reply_text: &'a str,
+    pub error_text: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerAttemptTerminalStatus {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+impl WorkerAttemptTerminalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+fn map_worker_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerAttemptRecord> {
+    let outcome_token: String = row.get(5)?;
+    let agent_outcome = AgentOutcome::from_token(&outcome_token).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid worker attempt outcome {outcome_token}"),
+            )),
+        )
+    })?;
+    Ok(WorkerAttemptRecord {
+        attempt_id: row.get(0)?,
+        work_key: row.get(1)?,
+        conversation_id: row.get(2)?,
+        source_label: row.get(3)?,
+        status: row.get(4)?,
+        agent_outcome,
+        reply_text: row.get(6)?,
+        error_text: row.get(7)?,
+        reply_message_id: row.get(8)?,
+        artifact_checked_at: row.get(9)?,
+        artifact_check_accepted: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+        artifact_check_details: row.get(11)?,
+        resumable: row.get::<_, i64>(12)? != 0,
+        effects_completed: row.get::<_, i64>(13)? != 0,
+        finalization_error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+        terminal_at: row.get(17)?,
+    })
+}
+
+const WORKER_ATTEMPT_SELECT: &str = "SELECT attempt_id, work_key, conversation_id, source_label, status, agent_outcome, reply_text, error_text, reply_message_id, artifact_checked_at, artifact_check_accepted, artifact_check_details, resumable, effects_completed, finalization_error, created_at, updated_at, terminal_at FROM worker_attempt_finalizations";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryRecord {
     pub summary_id: String,
@@ -1029,6 +1118,7 @@ impl LcmEngine {
             journal_mode.as_sql()
         ))?;
         self.ensure_schema_upgrades()?;
+        self.ensure_worker_attempt_finalization_schema()?;
         migrate_empty_mission_split_brain_with(&self.conn)?;
         Ok(())
     }
@@ -1100,6 +1190,68 @@ impl LcmEngine {
             "structured_state_version",
             "INTEGER NOT NULL DEFAULT 1",
         )?;
+        Ok(())
+    }
+
+    /// I-071: install the worker-attempt marker once per database. The
+    /// `lcm_data_migrations` row is the durable migration marker; the partial
+    /// unique index permits only one recoverable finalization per logical work
+    /// key while retaining terminal attempt history.
+    fn ensure_worker_attempt_finalization_schema(&self) -> Result<()> {
+        const MIGRATION_ID: &str = "i-071-worker-attempt-finalization-v1";
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin worker-attempt schema migration")?;
+        let already_applied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lcm_data_migrations WHERE migration_id = ?1)",
+            [MIGRATION_ID],
+            |row| row.get(0),
+        )?;
+        if !already_applied {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS worker_attempt_finalizations (
+                    attempt_id TEXT PRIMARY KEY,
+                    work_key TEXT NOT NULL,
+                    conversation_id INTEGER NOT NULL,
+                    source_label TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('finalizing', 'succeeded', 'failed', 'timed_out')),
+                    agent_outcome TEXT NOT NULL,
+                    reply_text TEXT NOT NULL,
+                    error_text TEXT,
+                    reply_message_id INTEGER UNIQUE,
+                    artifact_checked_at TEXT,
+                    artifact_check_accepted INTEGER,
+                    artifact_check_details TEXT,
+                    resumable INTEGER NOT NULL DEFAULT 0,
+                    effects_completed INTEGER NOT NULL DEFAULT 0,
+                    queue_effects_applied_at TEXT,
+                    finalization_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    terminal_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_worker_attempt_work_history
+                    ON worker_attempt_finalizations(work_key, created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_attempt_one_recoverable
+                    ON worker_attempt_finalizations(work_key)
+                    WHERE effects_completed = 0;
+                "#,
+            )?;
+            tx.execute(
+                "INSERT INTO lcm_data_migrations (migration_id, applied_at, details_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    MIGRATION_ID,
+                    iso_now(),
+                    r#"{"surface":"worker_attempt_finalizations","version":1}"#
+                ],
+            )?;
+        }
+        tx.commit()
+            .context("failed to commit worker-attempt schema migration")?;
         Ok(())
     }
 
@@ -1219,6 +1371,286 @@ impl LcmEngine {
             created_at: now,
             agent_outcome: stored_outcome,
         })
+    }
+
+    /// Persist the durable `finalizing` marker before any completion effect.
+    /// Repeating the same input is idempotent; a different attempt racing for
+    /// the same recoverable work key receives the already-authoritative row.
+    pub fn begin_worker_attempt_finalization(
+        &self,
+        input: WorkerAttemptFinalizationInput<'_>,
+    ) -> Result<WorkerAttemptRecord> {
+        // Serialize the two identity probes and insert. The partial unique index
+        // remains the database invariant, while the immediate transaction makes
+        // a cross-process race return the authoritative row instead of leaking a
+        // uniqueness error to the worker.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin worker-attempt finalization transaction")?;
+        if let Some(existing) = tx
+            .query_row(
+                &format!("{WORKER_ATTEMPT_SELECT} WHERE attempt_id = ?1"),
+                [input.attempt_id],
+                map_worker_attempt_row,
+            )
+            .optional()?
+        {
+            anyhow::ensure!(
+                existing.work_key == input.work_key
+                    && existing.conversation_id == input.conversation_id
+                    && existing.source_label == input.source_label
+                    && existing.agent_outcome == input.agent_outcome
+                    && existing.reply_text == input.reply_text
+                    && existing.error_text.as_deref() == input.error_text,
+                "worker attempt {} was reused with different immutable finalization data",
+                input.attempt_id
+            );
+            tx.commit()?;
+            return Ok(existing);
+        }
+        if let Some(existing) = tx
+            .query_row(
+                &format!(
+                    "{WORKER_ATTEMPT_SELECT} WHERE work_key = ?1 AND effects_completed = 0 ORDER BY created_at DESC LIMIT 1"
+                ),
+                [input.work_key],
+                map_worker_attempt_row,
+            )
+            .optional()?
+        {
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let now = iso_now();
+        tx.execute(
+            "INSERT INTO worker_attempt_finalizations (
+                attempt_id, work_key, conversation_id, source_label, status,
+                agent_outcome, reply_text, error_text, resumable,
+                effects_completed, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'finalizing', ?5, ?6, ?7, 0, 0, ?8, ?8)",
+            params![
+                input.attempt_id,
+                input.work_key,
+                input.conversation_id,
+                input.source_label,
+                input.agent_outcome.as_str(),
+                input.reply_text,
+                input.error_text,
+                now,
+            ],
+        )?;
+        let record = tx.query_row(
+            &format!("{WORKER_ATTEMPT_SELECT} WHERE attempt_id = ?1"),
+            [input.attempt_id],
+            map_worker_attempt_row,
+        )?;
+        tx.commit()
+            .context("failed to commit worker-attempt finalization marker")?;
+        Ok(record)
+    }
+
+    pub fn worker_attempt(&self, attempt_id: &str) -> Result<Option<WorkerAttemptRecord>> {
+        self.conn
+            .query_row(
+                &format!("{WORKER_ATTEMPT_SELECT} WHERE attempt_id = ?1"),
+                [attempt_id],
+                map_worker_attempt_row,
+            )
+            .optional()
+            .context("failed to load worker attempt")
+    }
+
+    pub fn recoverable_worker_attempt(
+        &self,
+        work_key: &str,
+    ) -> Result<Option<WorkerAttemptRecord>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "{WORKER_ATTEMPT_SELECT} WHERE work_key = ?1 AND effects_completed = 0 ORDER BY created_at DESC LIMIT 1"
+                ),
+                [work_key],
+                map_worker_attempt_row,
+            )
+            .optional()
+            .context("failed to load recoverable worker attempt")
+    }
+
+    /// Insert the attempt's assistant row once and bind its id to the marker in
+    /// the same SQLite transaction. A crash after `finalizing` but before this
+    /// method is recovered by calling it again; a crash after commit returns the
+    /// original row without allocating another sequence number.
+    pub fn ensure_worker_attempt_assistant_message(
+        &self,
+        attempt_id: &str,
+    ) -> Result<MessageRecord> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin worker-attempt reply transaction")?;
+        let attempt = tx
+            .query_row(
+                &format!("{WORKER_ATTEMPT_SELECT} WHERE attempt_id = ?1"),
+                [attempt_id],
+                map_worker_attempt_row,
+            )
+            .optional()?
+            .with_context(|| format!("worker attempt {attempt_id} does not exist"))?;
+        if let Some(message_id) = attempt.reply_message_id {
+            let record = tx.query_row(
+                "SELECT message_id, conversation_id, seq, role, content, token_count, created_at, agent_outcome FROM messages WHERE message_id = ?1",
+                [message_id],
+                |row| {
+                    Ok(MessageRecord {
+                        message_id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        seq: row.get(2)?,
+                        role: row.get(3)?,
+                        content: row.get(4)?,
+                        token_count: row.get(5)?,
+                        created_at: row.get(6)?,
+                        agent_outcome: row.get(7)?,
+                    })
+                },
+            )?;
+            tx.commit()?;
+            return Ok(record);
+        }
+
+        let now = iso_now();
+        let token_count = estimate_tokens(&attempt.reply_text) as i64;
+        let seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE conversation_id = ?1",
+            [attempt.conversation_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        tx.execute(
+            "INSERT INTO messages (conversation_id, seq, role, content, token_count, created_at, agent_outcome)
+             VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6)",
+            params![
+                attempt.conversation_id,
+                seq,
+                attempt.reply_text,
+                token_count,
+                now,
+                attempt.agent_outcome.as_str(),
+            ],
+        )?;
+        let message_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO messages_fts (rowid, content) VALUES (?1, ?2)",
+            params![message_id, normalize_for_fts(&attempt.reply_text)],
+        )?;
+        let ordinal = tx.query_row(
+            "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM context_items WHERE conversation_id = ?1",
+            [attempt.conversation_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        tx.execute(
+            "INSERT INTO context_items (conversation_id, ordinal, item_type, message_id, summary_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            params![
+                attempt.conversation_id,
+                ordinal,
+                ContextItemType::Message.as_str(),
+                message_id,
+                iso_now(),
+            ],
+        )?;
+        tx.execute(
+            "UPDATE worker_attempt_finalizations
+             SET reply_message_id = ?2, updated_at = ?3
+             WHERE attempt_id = ?1 AND reply_message_id IS NULL",
+            params![attempt_id, message_id, iso_now()],
+        )?;
+        tx.commit()
+            .context("failed to commit worker-attempt reply transaction")?;
+        Ok(MessageRecord {
+            message_id,
+            conversation_id: attempt.conversation_id,
+            seq,
+            role: "assistant".to_string(),
+            content: attempt.reply_text,
+            token_count,
+            created_at: now,
+            agent_outcome: Some(attempt.agent_outcome.as_str().to_string()),
+        })
+    }
+
+    pub fn record_worker_attempt_artifact_check(
+        &self,
+        attempt_id: &str,
+        accepted: bool,
+        details: &str,
+    ) -> Result<WorkerAttemptRecord> {
+        self.conn.execute(
+            "UPDATE worker_attempt_finalizations
+             SET artifact_checked_at = ?2, artifact_check_accepted = ?3,
+                 artifact_check_details = ?4, updated_at = ?2
+             WHERE attempt_id = ?1",
+            params![attempt_id, iso_now(), accepted as i64, details],
+        )?;
+        self.worker_attempt(attempt_id)?
+            .with_context(|| format!("worker attempt {attempt_id} does not exist"))
+    }
+
+    pub fn terminalize_worker_attempt(
+        &self,
+        attempt_id: &str,
+        status: WorkerAttemptTerminalStatus,
+        resumable: bool,
+        effects_completed: bool,
+        finalization_error: Option<&str>,
+    ) -> Result<WorkerAttemptRecord> {
+        let current = self
+            .worker_attempt(attempt_id)?
+            .with_context(|| format!("worker attempt {attempt_id} does not exist"))?;
+        anyhow::ensure!(
+            current.artifact_checked_at.is_some(),
+            "worker attempt {attempt_id} cannot become terminal before artifact recheck"
+        );
+        if current.status != "finalizing" {
+            anyhow::ensure!(
+                current.status == status.as_str(),
+                "worker attempt {attempt_id} is already terminal as {}",
+                current.status
+            );
+        }
+        let now = iso_now();
+        self.conn.execute(
+            "UPDATE worker_attempt_finalizations
+             SET status = ?2, resumable = ?3, effects_completed = ?4,
+                 finalization_error = ?5, terminal_at = COALESCE(terminal_at, ?6),
+                 updated_at = ?6
+             WHERE attempt_id = ?1",
+            params![
+                attempt_id,
+                status.as_str(),
+                resumable as i64,
+                effects_completed as i64,
+                finalization_error,
+                now,
+            ],
+        )?;
+        self.worker_attempt(attempt_id)?
+            .context("worker attempt disappeared after terminal transition")
+    }
+
+    pub fn mark_worker_attempt_effects_completed(
+        &self,
+        attempt_id: &str,
+    ) -> Result<WorkerAttemptRecord> {
+        self.conn.execute(
+            "UPDATE worker_attempt_finalizations
+             SET effects_completed = 1, updated_at = ?2
+             WHERE attempt_id = ?1 AND status != 'finalizing'",
+            params![attempt_id, iso_now()],
+        )?;
+        self.worker_attempt(attempt_id)?
+            .with_context(|| format!("worker attempt {attempt_id} does not exist"))
     }
 
     /// F3: read the most recent assistant `agent_outcome` for a conversation.
@@ -2110,7 +2542,14 @@ impl LcmEngine {
             });
         }
         record.agent_failure_count = 0;
-        // A successful turn implicitly clears any prior deferral reason.
+        // Defer/recover is one symmetric state transition. The threshold writer
+        // stores deferred/closed/idle; recovery restores the full active/open/
+        // non-idle combination instead of clearing only two fields of the state.
+        if previous_deferred_reason.as_deref() == Some("agent_failure_threshold") {
+            record.mission_status = "active".to_string();
+            record.is_open = true;
+            record.allow_idle = false;
+        }
         record.deferred_reason = None;
         self.persist_mission_state(&record)?;
         Ok(MissionFailureReset {
@@ -4234,6 +4673,71 @@ pub fn run_add_assistant_turn(
 ) -> Result<MessageRecord> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
     engine.add_message_with_outcome(conversation_id, "assistant", content, Some(outcome))
+}
+
+pub fn run_begin_worker_attempt_finalization(
+    db_path: &Path,
+    input: WorkerAttemptFinalizationInput<'_>,
+) -> Result<WorkerAttemptRecord> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.begin_worker_attempt_finalization(input)
+}
+
+pub fn run_worker_attempt(db_path: &Path, attempt_id: &str) -> Result<Option<WorkerAttemptRecord>> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.worker_attempt(attempt_id)
+}
+
+pub fn run_recoverable_worker_attempt(
+    db_path: &Path,
+    work_key: &str,
+) -> Result<Option<WorkerAttemptRecord>> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.recoverable_worker_attempt(work_key)
+}
+
+pub fn run_ensure_worker_attempt_assistant_message(
+    db_path: &Path,
+    attempt_id: &str,
+) -> Result<MessageRecord> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.ensure_worker_attempt_assistant_message(attempt_id)
+}
+
+pub fn run_record_worker_attempt_artifact_check(
+    db_path: &Path,
+    attempt_id: &str,
+    accepted: bool,
+    details: &str,
+) -> Result<WorkerAttemptRecord> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.record_worker_attempt_artifact_check(attempt_id, accepted, details)
+}
+
+pub fn run_terminalize_worker_attempt(
+    db_path: &Path,
+    attempt_id: &str,
+    status: WorkerAttemptTerminalStatus,
+    resumable: bool,
+    effects_completed: bool,
+    finalization_error: Option<&str>,
+) -> Result<WorkerAttemptRecord> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.terminalize_worker_attempt(
+        attempt_id,
+        status,
+        resumable,
+        effects_completed,
+        finalization_error,
+    )
+}
+
+pub fn run_mark_worker_attempt_effects_completed(
+    db_path: &Path,
+    attempt_id: &str,
+) -> Result<WorkerAttemptRecord> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.mark_worker_attempt_effects_completed(attempt_id)
 }
 
 pub fn run_compact(

@@ -1012,6 +1012,48 @@ struct QueuedPrompt {
     outbound_anchor: Option<String>,
 }
 
+fn worker_attempt_work_key(job: &QueuedPrompt) -> String {
+    let mut leased_messages = job.leased_message_keys.clone();
+    leased_messages.sort();
+    let mut leased_ticket_events = job.leased_ticket_event_keys.clone();
+    leased_ticket_events.sort();
+    let identity = if !leased_messages.is_empty() {
+        serde_json::json!({ "kind": "queue", "keys": leased_messages })
+    } else if !leased_ticket_events.is_empty() {
+        serde_json::json!({ "kind": "ticket-events", "keys": leased_ticket_events })
+    } else if let Some(work_id) = job.ticket_self_work_id.as_deref() {
+        serde_json::json!({ "kind": "internal-work", "id": work_id })
+    } else if let Some(anchor) = job.outbound_anchor.as_deref() {
+        serde_json::json!({ "kind": "outbound", "anchor": anchor })
+    } else {
+        serde_json::json!({
+            "kind": "ephemeral",
+            "thread": job.thread_key,
+            "source": job.source_label,
+            "goal": job.goal,
+            "prompt": job.prompt,
+        })
+    };
+    format!(
+        "worker-attempt:{}",
+        channels::stable_digest(&identity.to_string())
+    )
+}
+
+fn result_from_worker_attempt(attempt: &lcm::WorkerAttemptRecord) -> Result<String> {
+    if attempt.agent_outcome == lcm::AgentOutcome::Success {
+        Ok(attempt.reply_text.clone())
+    } else {
+        Err(anyhow::anyhow!(
+            "{}",
+            attempt
+                .error_text
+                .as_deref()
+                .unwrap_or("worker attempt failed without a stored error")
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DurableSelfWorkQueueRequest {
     kind: String,
@@ -6095,7 +6137,16 @@ fn start_prompt_worker(
             let conversation_thread_key = conversation_thread_key_for_queue_job(&root, &job);
             let conversation_id =
                 turn_loop::conversation_id_for_thread_key(conversation_thread_key.as_deref());
-            let command_turn_id = format!("business-command-turn:{}", uuid::Uuid::new_v4());
+            let attempt_work_key = worker_attempt_work_key(&job);
+            let recoverable_attempt =
+                lcm::run_recoverable_worker_attempt(&db_path, &attempt_work_key)?;
+            let attempt_id = recoverable_attempt
+                .as_ref()
+                .map(|attempt| attempt.attempt_id.clone())
+                .unwrap_or_else(|| format!("worker-attempt:{}", uuid::Uuid::new_v4()));
+            // The Business OS command/evidence run and the worker finalization
+            // share one durable attempt identity.
+            let command_turn_id = attempt_id.clone();
             let research_attempt_started_at = current_epoch_secs();
             // Plan-step messages force a continuity refresh directly.
             // Internal-work closures (which the service performs after the
@@ -6245,77 +6296,169 @@ fn start_prompt_worker(
                     })
                 },
             );
-            let session_options = chat_turn_session_options_for_queue_job(&job);
-            let result = execution_prompt.and_then(|execution_prompt| {
-                if queue_job_reuses_persistent_session(&session_options) {
-                    let session_slot = {
-                        let shared = lock_shared_state(&state);
-                        Arc::clone(&shared.worker_session)
-                    };
-                    let mut session = session_slot
-                        .session
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("persistent worker session lock poisoned"))?;
-                    let settings =
-                        runtime_env::effective_operator_env_map(&root).unwrap_or_default();
-                    if session
-                        .as_ref()
-                        .map(|session| session.matches_current_worker_contract(&root, &settings))
-                        .transpose()?
-                        == Some(false)
-                    {
-                        *session = None;
+            let mut session_options = chat_turn_session_options_for_queue_job(&job);
+            session_options.worker_attempt = Some(turn_loop::WorkerAttemptContext {
+                attempt_id: attempt_id.clone(),
+                work_key: attempt_work_key.clone(),
+                source_label: job.source_label.clone(),
+            });
+            let invoked_result = if let Some(attempt) = recoverable_attempt.as_ref() {
+                push_event(
+                    &event_state,
+                    format!(
+                        "Resuming durable worker attempt {} for {} without invoking the model again",
+                        attempt.attempt_id, job.source_label
+                    ),
+                );
+                result_from_worker_attempt(attempt)
+            } else {
+                execution_prompt.and_then(|execution_prompt| {
+                    if queue_job_reuses_persistent_session(&session_options) {
+                        let session_slot = {
+                            let shared = lock_shared_state(&state);
+                            Arc::clone(&shared.worker_session)
+                        };
+                        let mut session = session_slot.session.lock().map_err(|_| {
+                            anyhow::anyhow!("persistent worker session lock poisoned")
+                        })?;
+                        let settings =
+                            runtime_env::effective_operator_env_map(&root).unwrap_or_default();
+                        if session
+                            .as_ref()
+                            .map(|session| {
+                                session.matches_current_worker_contract(&root, &settings)
+                            })
+                            .transpose()?
+                            == Some(false)
+                        {
+                            *session = None;
+                        }
+                        if session.is_none() {
+                            *session = Some(turn_loop::PersistentSession::start(&root, &settings)?);
+                        }
+                        let result =
+                            turn_loop::run_chat_turn_with_events_extended_guarded_with_options(
+                                &root,
+                                &db_path,
+                                &execution_prompt,
+                                workspace_root,
+                                conversation_id,
+                                job.suggested_skill.as_deref(),
+                                force_continuity_refresh,
+                                session.as_mut(),
+                                session_options,
+                                |event| {
+                                    push_event(
+                                        &event_state,
+                                        format!("phase {} {}", event_source, event),
+                                    );
+                                    record_prompt_worker_progress(&root, &job, event);
+                                },
+                            );
+                        if result.is_err() {
+                            // Recreate the in-process client after any failed
+                            // slice. The next job resumes the same durable rollout
+                            // instead of trusting possibly broken process-local
+                            // transport state.
+                            *session = None;
+                        }
+                        result
+                    } else {
+                        turn_loop::run_chat_turn_with_events_extended_guarded_with_options(
+                            &root,
+                            &db_path,
+                            &execution_prompt,
+                            workspace_root,
+                            conversation_id,
+                            job.suggested_skill.as_deref(),
+                            force_continuity_refresh,
+                            None,
+                            session_options,
+                            |event| {
+                                push_event(
+                                    &event_state,
+                                    format!("phase {} {}", event_source, event),
+                                );
+                                record_prompt_worker_progress(&root, &job, event);
+                            },
+                        )
                     }
-                    if session.is_none() {
-                        *session = Some(turn_loop::PersistentSession::start(&root, &settings)?);
-                    }
-                    let result = turn_loop::run_chat_turn_with_events_extended_guarded_with_options(
-                        &root,
-                        &db_path,
-                        &execution_prompt,
-                        workspace_root,
-                        conversation_id,
-                        job.suggested_skill.as_deref(),
-                        force_continuity_refresh,
-                        session.as_mut(),
-                        session_options,
-                        |event| {
-                            push_event(&event_state, format!("phase {} {}", event_source, event));
-                            record_prompt_worker_progress(&root, &job, event);
-                        },
-                    );
-                    if result.is_err() {
-                        // Recreate the in-process client after any failed
-                        // slice. The next job resumes the same durable rollout
-                        // instead of trusting possibly broken process-local
-                        // transport state.
-                        *session = None;
-                    }
-                    result
+                })
+            };
+            // If the turn loop persisted `finalizing` and then failed in a later
+            // local step (for example continuity refresh), the durable attempt
+            // payload is authoritative. Likewise a process restart resumes that
+            // payload instead of invoking a second model turn.
+            let result = match lcm::run_worker_attempt(&db_path, &attempt_id)? {
+                Some(attempt) => result_from_worker_attempt(&attempt),
+                None => invoked_result,
+            };
+            let agent_outcome = match &result {
+                Ok(_) => lcm::AgentOutcome::Success,
+                Err(err) => classify_agent_failure(&err.to_string()),
+            };
+            let failure_reply = result.as_ref().err().map(|_| {
+                if agent_outcome == lcm::AgentOutcome::TurnTimeout {
+                    "(agent turn timed out; the original attempt is resumable)".to_string()
                 } else {
-                    turn_loop::run_chat_turn_with_events_extended_guarded_with_options(
-                        &root,
-                        &db_path,
-                        &execution_prompt,
-                        workspace_root,
-                        conversation_id,
-                        job.suggested_skill.as_deref(),
-                        force_continuity_refresh,
-                        None,
-                        session_options,
-                        |event| {
-                            push_event(&event_state, format!("phase {} {}", event_source, event));
-                            record_prompt_worker_progress(&root, &job, event);
-                        },
-                    )
+                    "(agent turn did not complete)".to_string()
                 }
             });
-            let timeout_follow_up_outcome = match &result {
-                Err(err) => maybe_enqueue_timeout_continuation(&root, &job, &err.to_string())
-                    .ok()
-                    .flatten(),
-                _ => None,
+            let attempt_reply = result
+                .as_ref()
+                .map(String::as_str)
+                .unwrap_or_else(|_| failure_reply.as_deref().unwrap_or("(agent turn failed)"));
+            let attempt_error = result.as_ref().err().map(|err| err.to_string());
+            let durable_attempt = lcm::run_begin_worker_attempt_finalization(
+                &db_path,
+                lcm::WorkerAttemptFinalizationInput {
+                    attempt_id: &attempt_id,
+                    work_key: &attempt_work_key,
+                    conversation_id,
+                    source_label: &job.source_label,
+                    agent_outcome,
+                    reply_text: attempt_reply,
+                    error_text: attempt_error.as_deref(),
+                },
+            )?;
+            anyhow::ensure!(
+                durable_attempt.attempt_id == attempt_id,
+                "recoverable attempt {} unexpectedly owns work key {}",
+                durable_attempt.attempt_id,
+                attempt_work_key
+            );
+            lcm::run_ensure_worker_attempt_assistant_message(&db_path, &attempt_id)?;
+
+            // Timeout continuation is deliberately post-finalization: first the
+            // original attempt has a typed reply, a fresh artifact observation,
+            // and terminal `timed_out + resumable`; only then may the existing
+            // child-task safety net run.
+            let timeout_follow_up_outcome = if agent_outcome == lcm::AgentOutcome::TurnTimeout {
+                attempt_error
+                    .as_deref()
+                    .map(|error| {
+                        finalize_timeout_attempt_then_enqueue(
+                            &root,
+                            &db_path,
+                            &attempt_id,
+                            &job,
+                            error,
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
             };
+            if agent_outcome.is_agent_failure() && agent_outcome != lcm::AgentOutcome::TurnTimeout {
+                let artifact_details = worker_attempt_artifact_recheck_details(&root, &job);
+                lcm::run_record_worker_attempt_artifact_check(
+                    &db_path,
+                    &attempt_id,
+                    false,
+                    &artifact_details,
+                )?;
+            }
             let runtime_retry_outcome = match &result {
                 Err(err) if timeout_follow_up_outcome.is_none() => {
                     maybe_enqueue_runtime_retry_continuation(&root, &job, &err.to_string())
@@ -6324,48 +6467,14 @@ fn start_prompt_worker(
                 }
                 _ => None,
             };
-            // F3: classify the turn outcome explicitly. The structured value
-            // is persisted on the assistant row in `messages.agent_outcome`
-            // so downstream consumers (founder-send pipeline, status
-            // snapshots) can branch on a typed enum instead of scraping
-            // reply text.
-            let agent_outcome = match &result {
-                Ok(_) => lcm::AgentOutcome::Success,
-                Err(err) => classify_agent_failure(&err.to_string()),
-            };
-            // skills-5: durably JOIN the executor's bound skill to this task's
-            // pass/fail outcome. Skill invocations are otherwise only Codex OTEL
-            // counters and the flow ledger has no per-task outcome event, so a
-            // skill (or skill-bound task family) failing systematically across
-            // many inputs is invisible. Emit a `work.outcome` flow event stamped
-            // with the skill + structured outcome so process-mining can later
-            // aggregate a per-skill failure rate.
+            // `work.outcome` remains a lossy projection. The attempt row and
+            // typed assistant message above are the authoritative durable data.
             record_work_outcome_flow_event(&root, &job, agent_outcome);
             let retryable_runtime_failure = result
                 .as_ref()
                 .err()
-                .map(|err| {
-                    let err_text = err.to_string();
-                    runtime_error_is_transient_api_failure(&err_text)
-                })
+                .map(|err| runtime_error_is_transient_api_failure(&err.to_string()))
                 .unwrap_or(false);
-            // F3: when the turn failed, persist a structured outcome with a
-            // neutral, non-leaking body. The legacy "Status: `blocked`" /
-            // "Status: `deferred`" prose is no longer how downstream
-            // consumers determine the outcome — they read
-            // `messages.agent_outcome`. We still record a short neutral
-            // body so the conversation transcript stays readable.
-            let failure_reply = result.as_ref().err().map(|_err| {
-                if timeout_follow_up_outcome.is_some() {
-                    "(agent turn deferred to a continuation slice)".to_string()
-                } else {
-                    "(agent turn did not complete)".to_string()
-                }
-            });
-            if let Some(reply) = &failure_reply {
-                let _ =
-                    lcm::run_add_assistant_turn(&db_path, conversation_id, reply, agent_outcome);
-            }
             // F2: feed the structured outcome into the per-mission
             // agent-failure counter. Successful turns reset the counter;
             // non-success outcomes increment it for status and explicit
@@ -6416,25 +6525,12 @@ fn start_prompt_worker(
                             ),
                         ),
                     }
-                } else {
-                    match engine.reset_mission_agent_failure_count(conversation_id) {
-                        Ok(reset) => record_agent_failure_recovery(
-                            &root,
-                            conversation_id,
-                            &reset,
-                            agent_outcome,
-                            job.thread_key.as_deref(),
-                            &job.source_label,
-                        ),
-                        Err(err) => push_event(
-                            &state,
-                            format!(
-                                "agent_failure_count reset failed for conversation {}: {}",
-                                conversation_id, err
-                            ),
-                        ),
-                    }
                 }
+                // Success recovery is intentionally not performed here. It is
+                // applied only after completion review and the outcome witness
+                // have accepted the attempt (see the success finalization arm).
+                // Transient ExecutionError therefore never falls through into a
+                // reset merely because it was excluded from the failure bump.
             }
             let latest_runtime_error = result.as_ref().err().map(|err| err.to_string());
             let founder_visible_mail_turn =
@@ -6746,6 +6842,16 @@ fn start_prompt_worker(
             let mut app_validation_rework = false;
             let mut app_validation_terminal_failure = false;
             let mut app_validation_terminal_success = app_validation_precompleted;
+            let mut worker_attempt_terminal_status =
+                if agent_outcome == lcm::AgentOutcome::TurnTimeout {
+                    lcm::WorkerAttemptTerminalStatus::TimedOut
+                } else if agent_outcome == lcm::AgentOutcome::Success {
+                    lcm::WorkerAttemptTerminalStatus::Succeeded
+                } else {
+                    lcm::WorkerAttemptTerminalStatus::Failed
+                };
+            let mut worker_attempt_finalization_error = attempt_error.clone();
+            let mut worker_attempt_effects_ok = true;
             let next_prompt;
             worker_activity.set_phase(&job.source_label, "finalizing");
             {
@@ -7227,6 +7333,62 @@ fn start_prompt_worker(
                                 }
                             }
                         }
+                        let completion_review_accepted = matches!(
+                            &review_disposition,
+                            CompletionReviewDisposition::Approved { .. }
+                                | CompletionReviewDisposition::None
+                                | CompletionReviewDisposition::NoSend { .. }
+                        );
+                        let accepted_success = completion_review_accepted
+                            && outcome_witness_error.is_none()
+                            && founder_send_error.is_none()
+                            && !app_validation_rework
+                            && !app_validation_terminal_failure;
+                        lcm::run_record_worker_attempt_artifact_check(
+                            &db_path,
+                            &attempt_id,
+                            outcome_witness_error.is_none(),
+                            outcome_witness_error.as_deref().unwrap_or(
+                                "completion artifact witness accepted or no artifact was required",
+                            ),
+                        )?;
+                        match recover_mission_after_accepted_attempt(
+                            &db_path,
+                            conversation_id,
+                            accepted_success,
+                        ) {
+                            Ok(Some(reset)) => record_agent_failure_recovery(
+                                &root,
+                                conversation_id,
+                                &reset,
+                                agent_outcome,
+                                job.thread_key.as_deref(),
+                                &job.source_label,
+                            ),
+                            Ok(None) => {}
+                            Err(err) => push_event_locked(
+                                &mut shared,
+                                format!(
+                                    "agent_failure_count reset failed after accepted finalization for conversation {}: {}",
+                                    conversation_id, err
+                                ),
+                            ),
+                        }
+                        if !accepted_success {
+                            worker_attempt_terminal_status =
+                                lcm::WorkerAttemptTerminalStatus::Failed;
+                            worker_attempt_finalization_error = Some(
+                                outcome_witness_error
+                                    .clone()
+                                    .or_else(|| founder_send_error.clone())
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "completion review did not accept terminal success ({})",
+                                            completion_review_disposition_label(&review_disposition)
+                                        )
+                                    }),
+                            );
+                        }
                         if founder_send_error.is_none() && !terminal_no_send {
                             if let Some(message_key) = founder_reply_key.as_deref() {
                                 let _ = close_open_founder_communication_self_work_for_inbound(
@@ -7280,17 +7442,19 @@ fn start_prompt_worker(
                                 ),
                             );
                         } else if !job.leased_message_keys.is_empty() && should_handle_messages {
-                            record_queue_ack_and_refresh_business_os_projections_locked(
-                                &root,
-                                &mut shared,
-                                terminalize_reviewed_queue_messages(
+                            worker_attempt_effects_ok &=
+                                record_queue_ack_and_refresh_business_os_projections_locked(
                                     &root,
+                                    &mut shared,
+                                    terminalize_reviewed_queue_messages(
+                                        &root,
+                                        &attempt_id,
+                                        &job.leased_message_keys,
+                                        &reply,
+                                    ),
+                                    "handled queue lease(s)",
                                     &job.leased_message_keys,
-                                    &reply,
-                                ),
-                                "handled queue lease(s)",
-                                &job.leased_message_keys,
-                            );
+                                );
                             // Auto-complete plan steps whose emit message was
                             // just handled by this turn so the plan advances
                             // without the model needing to call complete-step.
@@ -7300,17 +7464,20 @@ fn start_prompt_worker(
                                 }
                             }
                         } else if !job.leased_message_keys.is_empty() && terminal_no_send {
-                            record_queue_ack_and_refresh_business_os_projections_locked(
-                                &root,
-                                &mut shared,
-                                channels::ack_leased_messages(
+                            worker_attempt_effects_ok &=
+                                record_queue_ack_and_refresh_business_os_projections_locked(
                                     &root,
+                                    &mut shared,
+                                    channels::ack_leased_messages_for_attempt(
+                                        &root,
+                                        &attempt_id,
+                                        &job.leased_message_keys,
+                                        "cancelled",
+                                        None,
+                                    ),
+                                    "cancelled queue lease(s)",
                                     &job.leased_message_keys,
-                                    "cancelled",
-                                ),
-                                "cancelled queue lease(s)",
-                                &job.leased_message_keys,
-                            );
+                                );
                         } else if !job.leased_message_keys.is_empty() {
                             let approved_completion_hold = matches!(
                                 &review_disposition,
@@ -7413,38 +7580,14 @@ fn start_prompt_worker(
                                     format!("queue lease(s) ({retry_status})"),
                                 )
                             };
-                            record_queue_ack_and_refresh_business_os_projections_locked(
-                                &root,
-                                &mut shared,
-                                ack_result,
-                                &ack_label,
-                                &job.leased_message_keys,
-                            );
-                            // Third terminal path of the same defect class: an
-                            // exhausted validation budget acked the queue item
-                            // as failed but only refreshed the projection - the
-                            // Business OS command stayed `accepted` forever and
-                            // no continuation decision (not even the refusal)
-                            // was recorded. Drive the command failure path,
-                            // which owns both.
-                            if let Some(reason) = terminal_review_failure_reason.as_deref() {
-                                for message_key in &job.leased_message_keys {
-                                    if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
-                                        &root,
-                                        message_key,
-                                        reason,
-                                    ) {
-                                        push_event_locked(
-                                            &mut shared,
-                                            format!(
-                                                "Failed to project terminal review failure for {}: {}",
-                                                message_key,
-                                                clip_text(&err.to_string(), 180)
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
+                            worker_attempt_effects_ok &=
+                                record_queue_ack_and_refresh_business_os_projections_locked(
+                                    &root,
+                                    &mut shared,
+                                    ack_result,
+                                    &ack_label,
+                                    &job.leased_message_keys,
+                                );
                         }
                         if !job.leased_ticket_event_keys.is_empty() && should_handle_messages {
                             record_ack_failure_locked(
@@ -7823,11 +7966,12 @@ fn start_prompt_worker(
                                 "retryable runtime/API failure"
                             };
                             let ack_result = if route_status == "failed" {
-                                channels::ack_leased_messages_with_failure_reason(
+                                channels::ack_leased_messages_for_attempt(
                                     &root,
+                                    &attempt_id,
                                     &job.leased_message_keys,
                                     route_status,
-                                    &compact_error,
+                                    Some(&compact_error),
                                 )
                             } else if route_status == "pending" {
                                 release_retryable_worker_messages(
@@ -7837,10 +7981,12 @@ fn start_prompt_worker(
                                     &compact_error,
                                 )
                             } else {
-                                channels::ack_leased_messages(
+                                channels::ack_leased_messages_for_attempt(
                                     &root,
+                                    &attempt_id,
                                     &job.leased_message_keys,
                                     route_status,
+                                    None,
                                 )
                             };
                             match ack_result {
@@ -7873,6 +8019,11 @@ fn start_prompt_worker(
                                     }
                                 }
                                 Err(ack_err) => {
+                                    // The attempt must remain recoverable when its
+                                    // queue transition did not commit. Otherwise a
+                                    // transient queue failure would be followed by
+                                    // `effects_completed = 1` and strand the lease.
+                                    worker_attempt_effects_ok = false;
                                     push_event_locked(
                                         &mut shared,
                                         format!(
@@ -7886,17 +8037,18 @@ fn start_prompt_worker(
                         if cv_print_parser_recovered_after_worker_error
                             && !job.leased_message_keys.is_empty()
                         {
-                            record_queue_ack_and_refresh_business_os_projections_locked(
-                                &root,
-                                &mut shared,
-                                channels::ack_leased_messages(
+                            worker_attempt_effects_ok &=
+                                record_queue_ack_and_refresh_business_os_projections_locked(
                                     &root,
+                                    &mut shared,
+                                    channels::ack_leased_messages(
+                                        &root,
+                                        &job.leased_message_keys,
+                                        "handled",
+                                    ),
+                                    "handled recovered CV print parser queue lease(s)",
                                     &job.leased_message_keys,
-                                    "handled",
-                                ),
-                                "handled recovered CV print parser queue lease(s)",
-                                &job.leased_message_keys,
-                            );
+                                );
                         }
                         if app_validation_verified_after_worker_error
                             && !job.leased_message_keys.is_empty()
@@ -8394,6 +8546,35 @@ fn start_prompt_worker(
                     ),
                 }
             }
+            let durable_attempt =
+                lcm::run_worker_attempt(&db_path, &attempt_id)?.with_context(|| {
+                    format!("worker attempt {attempt_id} disappeared during finalization")
+                })?;
+            if worker_attempt_effects_ok {
+                if durable_attempt.status == "finalizing" {
+                    lcm::run_terminalize_worker_attempt(
+                        &db_path,
+                        &attempt_id,
+                        worker_attempt_terminal_status,
+                        worker_attempt_terminal_status
+                            == lcm::WorkerAttemptTerminalStatus::TimedOut,
+                        true,
+                        worker_attempt_finalization_error.as_deref(),
+                    )?;
+                } else {
+                    // Timed-out attempts become terminal before child-task creation;
+                    // this marks the remaining idempotent lease/recovery effects done.
+                    lcm::run_mark_worker_attempt_effects_completed(&db_path, &attempt_id)?;
+                }
+            } else {
+                push_event(
+                    &state,
+                    format!(
+                        "Worker attempt {} remains recoverable because a queue effect failed",
+                        attempt_id
+                    ),
+                );
+            }
             if !queued_outcome_recovery {
                 if let Some(queued) = next_prompt {
                     worker_activity.set_phase(&job.source_label, "dispatching-next");
@@ -8427,7 +8608,40 @@ fn start_prompt_worker(
                 ),
                 None => eprintln!("ctox prompt worker end source={} ok", job.source_label),
             }
+            Ok::<(), anyhow::Error>(())
         }));
+        if let Ok(Err(finalization_err)) = &panic_outcome {
+            // A durable-finalization error is not a worker panic. In particular,
+            // do not invent a terminal failed queue transition here: the attempt
+            // marker (when already written) must stay recoverable and own the
+            // replay. Stale-lease recovery can hand the same logical work back to
+            // this attempt without a second model invocation.
+            let mut shared = lock_shared_state(&state);
+            shared.busy = false;
+            shared.current_goal_preview = None;
+            shared.active_source_label = None;
+            shared.last_completed_at = Some(now_iso_string());
+            shared.last_progress_epoch_secs = current_epoch_secs();
+            shared.last_reply_chars = None;
+            shared.last_error = Some(format!(
+                "Worker finalization remains recoverable: {}",
+                clip_text(&finalization_err.to_string(), 300)
+            ));
+            worker_activity.release_leased_keys_locked(&mut shared);
+            push_event_locked(
+                &mut shared,
+                format!(
+                    "{} durable worker finalization failed and remains recoverable: {}",
+                    job.source_label,
+                    clip_text(&finalization_err.to_string(), 220)
+                ),
+            );
+            eprintln!(
+                "ctox prompt worker end source={} finalization-error={}",
+                job.source_label,
+                turn_loop::summarize_runtime_error(&finalization_err.to_string())
+            );
+        }
         if panic_outcome.is_err() {
             let mut next_prompt = None;
             {
@@ -9496,6 +9710,7 @@ fn persist_typed_business_command_result(
 
 fn terminalize_reviewed_queue_messages(
     root: &Path,
+    attempt_id: &str,
     message_keys: &[String],
     user_reply: &str,
 ) -> Result<usize> {
@@ -9542,8 +9757,9 @@ fn terminalize_reviewed_queue_messages(
         }
     }
     if !ordinary.is_empty() {
-        updated =
-            updated.saturating_add(channels::ack_leased_messages(root, &ordinary, "handled")?);
+        updated = updated.saturating_add(channels::ack_leased_messages_for_attempt(
+            root, attempt_id, &ordinary, "handled", None,
+        )?);
     }
     Ok(updated)
 }
@@ -10618,9 +10834,10 @@ fn chat_turn_session_options_for_queue_job(
             // still names the exact typed reads to perform, and completion
             // validation of typed receipts remains fail-closed.
             required_initial_tool: None,
+            worker_attempt: None,
         };
     }
-    if business_os_app_module_target_from_prompt(&job.prompt).is_some() {
+    if business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some() {
         return turn_loop::ChatTurnSessionOptions {
             disable_mcp_servers: true,
             enable_business_os_mcp: false,
@@ -10630,6 +10847,7 @@ fn chat_turn_session_options_for_queue_job(
             plain_prompt: true,
             turn_timeout_secs_override: Some(BUSINESS_OS_APP_AUTHORING_TURN_TIMEOUT_SECS),
             required_initial_tool: None,
+            worker_attempt: None,
         };
     }
     turn_loop::ChatTurnSessionOptions {
@@ -14465,6 +14683,26 @@ fn delivered_outcome_artifacts_for_job(
         }
     }
     Ok(delivered)
+}
+
+fn worker_attempt_artifact_recheck_details(root: &Path, job: &QueuedPrompt) -> String {
+    let expected = expected_outcome_artifacts_for_job(job);
+    match delivered_outcome_artifacts_for_job(root, job, &expected) {
+        Ok(delivered) => serde_json::json!({
+            "expected_count": expected.len(),
+            "delivered_count": delivered.len(),
+            "expected": expected,
+            "delivered": delivered,
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "expected_count": expected.len(),
+            "delivered_count": 0,
+            "expected": expected,
+            "read_error": error.to_string(),
+        })
+        .to_string(),
+    }
 }
 
 fn sync_delivered_workspace_files_to_business_os(
@@ -24856,6 +25094,26 @@ fn ensure_queue_guard_locked(root: &Path, shared: &mut SharedState) {
     );
 }
 
+fn finalize_timeout_attempt_then_enqueue(
+    root: &Path,
+    db_path: &Path,
+    attempt_id: &str,
+    job: &QueuedPrompt,
+    error_text: &str,
+) -> Result<Option<String>> {
+    let artifact_details = worker_attempt_artifact_recheck_details(root, job);
+    lcm::run_record_worker_attempt_artifact_check(db_path, attempt_id, false, &artifact_details)?;
+    lcm::run_terminalize_worker_attempt(
+        db_path,
+        attempt_id,
+        lcm::WorkerAttemptTerminalStatus::TimedOut,
+        true,
+        false,
+        Some(error_text),
+    )?;
+    maybe_enqueue_timeout_continuation(root, job, error_text)
+}
+
 fn maybe_enqueue_timeout_continuation(
     root: &Path,
     job: &QueuedPrompt,
@@ -25379,6 +25637,20 @@ fn record_agent_failure_threshold_outcome(
             idempotence_key: Some(&format!("{key_prefix}:{conversation_id}:{failure_count}")),
         },
     );
+}
+
+fn recover_mission_after_accepted_attempt(
+    db_path: &Path,
+    conversation_id: i64,
+    accepted: bool,
+) -> Result<Option<lcm::MissionFailureReset>> {
+    if !accepted {
+        return Ok(None);
+    }
+    let engine = lcm::LcmEngine::open(db_path, lcm::LcmConfig::default())?;
+    engine
+        .reset_mission_agent_failure_count(conversation_id)
+        .map(Some)
 }
 
 /// govrec-5: emit the recovery half of the defer/recover governance pair when a
@@ -32886,9 +33158,44 @@ Business OS command:
             outbound_anchor: None,
         };
 
-        let created =
-            maybe_enqueue_timeout_continuation(&root, &job, "direct session timeout after 900s")
-                .expect("timeout recovery should succeed");
+        let db_path = crate::paths::core_db(&root);
+        std::fs::create_dir_all(db_path.parent().expect("core db parent"))
+            .expect("runtime directory");
+        let engine =
+            LcmEngine::open(&db_path, LcmConfig::default()).expect("attempt database should open");
+        let attempt_id = "attempt-timeout-before-child";
+        engine
+            .begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+                attempt_id,
+                work_key: "queue:timeout-before-child",
+                conversation_id: 73,
+                source_label: "queue",
+                agent_outcome: lcm::AgentOutcome::TurnTimeout,
+                reply_text: "(agent turn timed out; the original attempt is resumable)",
+                error_text: Some("direct session timeout after 900s"),
+            })
+            .expect("timeout attempt should enter finalizing");
+        engine
+            .ensure_worker_attempt_assistant_message(attempt_id)
+            .expect("typed timeout reply should persist");
+        let created = finalize_timeout_attempt_then_enqueue(
+            &root,
+            &db_path,
+            attempt_id,
+            &job,
+            "direct session timeout after 900s",
+        )
+        .expect("timeout recovery should succeed");
+
+        let terminal = engine
+            .worker_attempt(attempt_id)
+            .expect("attempt query")
+            .expect("attempt row");
+        assert_eq!(terminal.status, "timed_out");
+        assert!(terminal.resumable);
+        assert!(!terminal.effects_completed);
+        assert_eq!(terminal.agent_outcome, lcm::AgentOutcome::TurnTimeout);
+        assert!(terminal.reply_message_id.is_some());
 
         assert!(created
             .as_deref()
@@ -32897,6 +33204,18 @@ Business OS command:
         let pending = channels::list_queue_tasks(&root, &["pending".to_string()], 10)
             .expect("failed to list pending queue tasks");
         assert_eq!(pending.len(), 1);
+        let conn = channels::open_channel_db(&db_path).expect("channel db");
+        let child_created_at: String = conn
+            .query_row(
+                "SELECT observed_at FROM communication_messages WHERE message_key = ?1",
+                [pending[0].message_key.as_str()],
+                |row| row.get(0),
+            )
+            .expect("child creation time");
+        assert!(
+            terminal.terminal_at.as_deref().expect("terminal time") <= child_created_at.as_str(),
+            "original timeout attempt must terminalize before the child task exists"
+        );
         assert_eq!(pending[0].thread_key, "tb2-controller");
         assert_eq!(
             pending[0].workspace_root.as_deref(),
@@ -36333,15 +36652,69 @@ Business OS command:
         )?
         .expect("expected business command writeback");
 
+        let db_path = crate::paths::core_db(&root);
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        engine.begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+            attempt_id: "attempt-queue-ack-once",
+            work_key: "queue:ack-once",
+            conversation_id: 7401,
+            source_label: "queue-test",
+            agent_outcome: lcm::AgentOutcome::Success,
+            reply_text: "OK",
+            error_text: None,
+        })?;
+        let first_reply =
+            engine.ensure_worker_attempt_assistant_message("attempt-queue-ack-once")?;
+
         let mut shared = SharedState::default();
         let message_keys = vec![task_id.clone()];
-        record_queue_ack_and_refresh_business_os_projections_locked(
+        assert!(record_queue_ack_and_refresh_business_os_projections_locked(
             &root,
             &mut shared,
-            channels::ack_leased_messages(&root, &message_keys, "handled"),
+            channels::ack_leased_messages_for_attempt(
+                &root,
+                "attempt-queue-ack-once",
+                &message_keys,
+                "handled",
+                None,
+            ),
             "handled queue lease(s)",
             &message_keys,
-        );
+        ));
+        let acked_at_once: Option<String> = channels::open_channel_db(&db_path)?.query_row(
+            "SELECT acked_at FROM communication_routing_state WHERE message_key = ?1",
+            [task_id.as_str()],
+            |row| row.get(0),
+        )?;
+        // Simulate a process crash while the attempt is still `finalizing`,
+        // after both reply and queue acknowledgement committed. Recovery must
+        // bind to the same reply and the ack marker must make replay a no-op.
+        drop(engine);
+        let resumed_engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let resumed_attempt = resumed_engine
+            .recoverable_worker_attempt("queue:ack-once")?
+            .expect("finalizing attempt should resume after reopen");
+        assert_eq!(resumed_attempt.attempt_id, "attempt-queue-ack-once");
+        let resumed_reply =
+            resumed_engine.ensure_worker_attempt_assistant_message("attempt-queue-ack-once")?;
+        assert_eq!(resumed_reply.message_id, first_reply.message_id);
+
+        std::thread::sleep(Duration::from_millis(2));
+        let replayed = channels::ack_leased_messages_for_attempt(
+            &root,
+            "attempt-queue-ack-once",
+            &message_keys,
+            "handled",
+            None,
+        )?;
+        let acked_at_after_replay: Option<String> = channels::open_channel_db(&db_path)?
+            .query_row(
+                "SELECT acked_at FROM communication_routing_state WHERE message_key = ?1",
+                [task_id.as_str()],
+                |row| row.get(0),
+            )?;
+        assert_eq!(replayed, 0);
+        assert_eq!(acked_at_after_replay, acked_at_once);
 
         assert!(
             shared.recent_events.is_empty(),
@@ -45118,10 +45491,38 @@ Those are not durable artifact requirements."
         );
         assert!(recovery.record.deferred_reason.is_none());
         assert_eq!(recovery.record.agent_failure_count, 0);
+        assert_eq!(recovery.record.mission_status, "active");
+        assert!(recovery.record.is_open);
+        assert!(!recovery.record.allow_idle);
         // A second reset on the now-healthy mission surfaces no prior reason, so a
         // long healthy run never re-emits a recovery event.
         let no_recovery = engine.reset_mission_agent_failure_count(101).unwrap();
         assert!(no_recovery.previous_deferred_reason.is_none());
+    }
+
+    #[test]
+    fn rejected_outcome_witness_does_not_reset_failure_counter() {
+        let root = temp_root("attempt-witness-reject-counter");
+        let db_path = root.join("ctox.sqlite3");
+        let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
+        let _ = engine.continuity_init_documents(171).unwrap();
+        let _ = engine.increment_mission_agent_failure_count(171).unwrap();
+        let deferred = engine
+            .defer_mission_for_reason(171, "agent_failure_threshold")
+            .unwrap();
+        assert_eq!(deferred.agent_failure_count, 1);
+
+        let rejected = recover_mission_after_accepted_attempt(&db_path, 171, false).unwrap();
+        assert!(rejected.is_none());
+        let unchanged = engine.mission_state(171).unwrap();
+        assert_eq!(unchanged.agent_failure_count, 1);
+        assert_eq!(unchanged.mission_status, "deferred");
+        assert!(!unchanged.is_open);
+        assert!(unchanged.allow_idle);
+        assert_eq!(
+            unchanged.deferred_reason.as_deref(),
+            Some("agent_failure_threshold")
+        );
     }
 
     #[test]

@@ -2400,6 +2400,64 @@ pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -
 
 /// Ack with an explicit routing reason. The reason is audit data only and does
 /// not authorize a terminal-success transition.
+/// I-071: apply a queue acknowledgement at most once for a durable worker
+/// attempt. The queue transition and the attempt effect marker share one SQLite
+/// transaction, so a crash cannot leave an unmarked acknowledgement that is
+/// replayed with a second `acked_at` timestamp.
+pub fn ack_leased_messages_for_attempt(
+    root: &Path,
+    attempt_id: &str,
+    message_keys: &[String],
+    status: &str,
+    failure_reason: Option<&str>,
+) -> Result<usize> {
+    let status = canonical_queue_route_status(status)?;
+    if status == QueueRouteStatus::Failed {
+        anyhow::ensure!(
+            failure_reason
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
+            "failed queue acknowledgement requires a failure reason"
+        );
+    }
+    let db_path = resolve_db_path(root, None);
+    let mut conn = open_channel_db(&db_path)?;
+    guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
+    attach_queue_projection_store(root, &conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let already_applied: Option<Option<String>> = tx
+        .query_row(
+            "SELECT queue_effects_applied_at FROM worker_attempt_finalizations WHERE attempt_id = ?1",
+            [attempt_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let already_applied = already_applied
+        .with_context(|| format!("worker attempt {attempt_id} does not exist for queue ack"))?;
+    if already_applied.is_some() {
+        tx.commit()?;
+        return Ok(0);
+    }
+    let updated = ack_messages_in_transaction(
+        &tx,
+        message_keys,
+        status.as_str(),
+        failure_reason,
+        None,
+        None,
+    )?;
+    tx.execute(
+        "UPDATE worker_attempt_finalizations
+         SET queue_effects_applied_at = ?2, updated_at = ?2
+         WHERE attempt_id = ?1 AND queue_effects_applied_at IS NULL",
+        params![attempt_id, now_iso_string()],
+    )?;
+    let tasks = load_queue_projection_tasks(&tx, message_keys)?;
+    refresh_queue_projection_tasks(root, &tx, &tasks)?;
+    tx.commit()?;
+    Ok(updated)
+}
+
 pub fn ack_leased_messages_with_reason(
     root: &Path,
     message_keys: &[String],

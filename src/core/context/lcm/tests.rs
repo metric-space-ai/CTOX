@@ -1533,6 +1533,90 @@ fn add_message_with_outcome_rolls_back_on_partial_failure() -> Result<()> {
 }
 
 #[test]
+fn worker_attempt_success_persists_one_marker_and_typed_reply() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let _ = engine.continuity_init_documents(71)?;
+    let input = WorkerAttemptFinalizationInput {
+        attempt_id: "attempt-success-71",
+        work_key: "queue:success-71",
+        conversation_id: 71,
+        source_label: "test-queue",
+        agent_outcome: AgentOutcome::Success,
+        reply_text: "done once",
+        error_text: None,
+    };
+    engine.begin_worker_attempt_finalization(input.clone())?;
+    let first = engine.ensure_worker_attempt_assistant_message(input.attempt_id)?;
+    let second = engine.ensure_worker_attempt_assistant_message(input.attempt_id)?;
+    assert_eq!(first.message_id, second.message_id);
+    assert_eq!(first.agent_outcome.as_deref(), Some("Success"));
+
+    let attempts: i64 = engine.conn.query_row(
+        "SELECT COUNT(*) FROM worker_attempt_finalizations WHERE work_key = ?1",
+        [input.work_key],
+        |row| row.get(0),
+    )?;
+    let replies: i64 = engine.conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = 71 AND role = 'assistant' AND agent_outcome = 'Success'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(attempts, 1);
+    assert_eq!(replies, 1);
+    Ok(())
+}
+
+#[test]
+fn worker_attempt_finalizing_crash_resumes_without_duplicate_reply() -> Result<()> {
+    let db_path = temp_db();
+    {
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let _ = engine.continuity_init_documents(72)?;
+        engine.begin_worker_attempt_finalization(WorkerAttemptFinalizationInput {
+            attempt_id: "attempt-crash-72",
+            work_key: "queue:crash-72",
+            conversation_id: 72,
+            source_label: "test-queue",
+            agent_outcome: AgentOutcome::Success,
+            reply_text: "recover me",
+            error_text: None,
+        })?;
+        engine.ensure_worker_attempt_assistant_message("attempt-crash-72")?;
+        // Simulated process loss: no artifact check and no terminal transition.
+    }
+    let resumed = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let attempt = resumed
+        .recoverable_worker_attempt("queue:crash-72")?
+        .expect("finalizing attempt must be resumable");
+    assert_eq!(attempt.attempt_id, "attempt-crash-72");
+    let original_message_id = attempt.reply_message_id.expect("durable reply id");
+    let replay = resumed.ensure_worker_attempt_assistant_message(&attempt.attempt_id)?;
+    assert_eq!(replay.message_id, original_message_id);
+    let replies: i64 = resumed.conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = 72 AND role = 'assistant'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(replies, 1);
+    resumed.record_worker_attempt_artifact_check(
+        &attempt.attempt_id,
+        true,
+        "no external artifacts required",
+    )?;
+    let terminal = resumed.terminalize_worker_attempt(
+        &attempt.attempt_id,
+        WorkerAttemptTerminalStatus::Succeeded,
+        false,
+        true,
+        None,
+    )?;
+    assert_eq!(terminal.status, "succeeded");
+    assert!(terminal.effects_completed);
+    Ok(())
+}
+
+#[test]
 fn context_token_count_propagates_db_errors() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
