@@ -7302,6 +7302,7 @@ fn start_prompt_worker(
                                 } else {
                                     "pending"
                                 };
+                            let mut terminal_review_failure_reason: Option<String> = None;
                             let (ack_result, ack_label) = if let Some((reason, summary)) =
                                 &approved_completion_hold
                             {
@@ -7341,6 +7342,7 @@ fn start_prompt_worker(
                                         _ => "terminal queue failure",
                                     }
                                 };
+                                terminal_review_failure_reason = Some(failure_reason.to_string());
                                 (
                                     channels::ack_leased_messages_with_failure_reason(
                                         &root,
@@ -7367,6 +7369,31 @@ fn start_prompt_worker(
                                 &ack_label,
                                 &job.leased_message_keys,
                             );
+                            // Third terminal path of the same defect class: an
+                            // exhausted validation budget acked the queue item
+                            // as failed but only refreshed the projection - the
+                            // Business OS command stayed `accepted` forever and
+                            // no continuation decision (not even the refusal)
+                            // was recorded. Drive the command failure path,
+                            // which owns both.
+                            if let Some(reason) = terminal_review_failure_reason.as_deref() {
+                                for message_key in &job.leased_message_keys {
+                                    if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
+                                        &root,
+                                        message_key,
+                                        reason,
+                                    ) {
+                                        push_event_locked(
+                                            &mut shared,
+                                            format!(
+                                                "Failed to project terminal review failure for {}: {}",
+                                                message_key,
+                                                clip_text(&err.to_string(), 180)
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         if !job.leased_ticket_event_keys.is_empty() && should_handle_messages {
                             record_ack_failure_locked(
