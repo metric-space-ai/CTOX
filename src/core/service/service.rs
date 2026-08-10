@@ -10072,13 +10072,12 @@ fn business_os_cv_print_execution_prompt(job: &QueuedPrompt) -> String {
 }
 
 fn cv_print_parser_error_allows_compact_recovery(error: &anyhow::Error) -> bool {
+    // The protocol boundary intentionally collapses stream and incomplete
+    // responses into one recovery class. Their structured origin remains in
+    // the harness, where the incomplete reason is still represented.
     matches!(
         turn_loop::turn_runtime_error_class(error),
-        Some(
-            turn_loop::TurnRuntimeErrorClass::OutputTokenLimit
-                | turn_loop::TurnRuntimeErrorClass::IncompleteResponse
-                | turn_loop::TurnRuntimeErrorClass::StreamDisconnected
-        )
+        Some(turn_loop::TurnRuntimeErrorClass::StreamDisconnected)
     )
 }
 
@@ -10206,16 +10205,9 @@ fn cv_print_is_sqlite_locked_error(error: &anyhow::Error) -> bool {
         || lower.contains("sqlite_busy")
 }
 
-fn cv_print_filename_from_prompt(prompt: &str) -> Option<String> {
-    prompt.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("- filename:")?.trim();
-        (!value.is_empty()).then(|| value.to_string())
-    })
-}
-
 fn cv_print_compact_recovery_reply(prompt: &str, error_text: &str) -> String {
     let extracted = cv_print_extracted_text_from_prompt(prompt);
-    let filename = cv_print_filename_from_prompt(prompt).unwrap_or_default();
+    let filename = prompt_line_value(prompt, "- filename:").unwrap_or_default();
     let email = cv_print_first_email(&extracted);
     let phone = cv_print_first_phone(&extracted);
     let name = cv_print_candidate_name(&extracted, &filename);
@@ -11123,29 +11115,32 @@ struct BusinessOsAppModuleTarget {
     artifact_directory: String,
 }
 
-fn business_os_app_module_target_from_prompt(prompt: &str) -> Option<BusinessOsAppModuleTarget> {
-    if !prompt.contains("Business OS app task metadata:")
-        && !prompt.contains("Business OS app resource context:")
-        && !prompt.contains("ctox.business_os.app.modify")
-        && !prompt.contains("ctox.business_os.app.create")
-    {
+fn business_os_app_module_target_from_metadata(
+    metadata: &Value,
+) -> Option<BusinessOsAppModuleTarget> {
+    let command_type = metadata_string(metadata, "business_os_command_type")?;
+    if !matches!(
+        command_type.as_str(),
+        "ctox.business_os.app.create" | "ctox.business_os.app.modify"
+    ) {
         return None;
     }
-    let module_id = prompt_line_value(prompt, "- module_id:")?;
-    let install_target = prompt_line_value(prompt, "- install_target:")
+    let module_id = metadata_string(metadata, "business_os_record_id")?;
+    let install_target = metadata_string(metadata, "business_os_install_target")
         .unwrap_or_else(|| "runtime-installed-module".to_string());
     let mode_flag = if install_target == "runtime-installed-module" {
         "--installed"
     } else {
         "--source"
     };
-    let artifact_directory = prompt_line_value(prompt, "- app_directory:").unwrap_or_else(|| {
-        if mode_flag == "--installed" {
-            format!("runtime/business-os/installed-modules/{module_id}")
-        } else {
-            format!("src/apps/business-os/modules/{module_id}")
-        }
-    });
+    let artifact_directory =
+        metadata_string(metadata, "business_os_app_directory").unwrap_or_else(|| {
+            if mode_flag == "--installed" {
+                format!("runtime/business-os/installed-modules/{module_id}")
+            } else {
+                format!("src/apps/business-os/modules/{module_id}")
+            }
+        });
     Some(BusinessOsAppModuleTarget {
         module_id,
         install_target,
@@ -30036,26 +30031,6 @@ mod tests {
             !prompt.contains("Do NOT include internal reasoning, chain-of-thought, planning notes, tool transcripts, command output, file paths, diffs, stack traces, raw JSON"),
             "cv parser prompt must not inherit generic chat rules that forbid raw JSON"
         );
-    }
-
-    #[test]
-    fn cv_print_typed_output_token_limit_allows_compact_recovery() {
-        let error = anyhow::Error::new(turn_loop::TurnRuntimeError::new(
-            turn_loop::TurnRuntimeErrorClass::OutputTokenLimit,
-            "direct session error: output token limit",
-        ));
-
-        assert!(cv_print_parser_error_allows_compact_recovery(&error));
-    }
-
-    #[test]
-    fn cv_print_typed_incomplete_response_allows_compact_recovery() {
-        let error = anyhow::Error::new(turn_loop::TurnRuntimeError::new(
-            turn_loop::TurnRuntimeErrorClass::IncompleteResponse,
-            "direct session error: incomplete response",
-        ));
-
-        assert!(cv_print_parser_error_allows_compact_recovery(&error));
     }
 
     #[test]

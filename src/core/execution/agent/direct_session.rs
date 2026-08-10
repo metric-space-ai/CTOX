@@ -545,8 +545,6 @@ impl std::error::Error for SessionPoisoned {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnRuntimeErrorClass {
-    OutputTokenLimit,
-    IncompleteResponse,
     StreamDisconnected,
 }
 
