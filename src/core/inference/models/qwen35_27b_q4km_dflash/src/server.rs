@@ -73,6 +73,7 @@ pub struct Engine {
     pub cache: TargetCache,
     pub backend: crate::ffi::ggml_backend_t,
     pub tokenizer: Tokenizer,
+    pub cached_tokens: Vec<i32>,
     pub model_id: String,
     pub gen_config: GenConfig,
 }
@@ -286,6 +287,7 @@ fn run_responses_turn_sync(
         // pinned under the same mutex guard; borrow checker can't see
         // that we hold `&mut` to disjoint fields via raw ptr here.
         tokenizer: unsafe { &*tokenizer },
+        cached_tokens: &mut engine_ref.cached_tokens,
         model_id: &model_id,
         gen_config: engine_ref.gen_config,
         sink: &mut sink,

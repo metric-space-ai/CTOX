@@ -103,10 +103,7 @@ fn main() -> Result<()> {
     let mut w = TargetWeights::default();
     if !load_target_gguf(&args.target_gguf, backend, &mut w) {
         unsafe { sys::ggml_backend_free(backend) };
-        return Err(anyhow!(
-            "load_target_gguf failed: {}",
-            dflash::last_error()
-        ));
+        return Err(anyhow!("load_target_gguf failed: {}", dflash::last_error()));
     }
     eprintln!("[target] {}", dflash::last_error());
 
@@ -152,6 +149,7 @@ fn main() -> Result<()> {
         ddtree_budget: args.ddtree_budget,
         ddtree_temp: args.ddtree_temp,
         ddtree_chain_seed: !args.ddtree_no_chain_seed,
+        stop_token_id: None,
     };
     let stats: RunStats = match run_dflash_gen_loop(
         &w,
@@ -162,6 +160,7 @@ fn main() -> Result<()> {
         args.n_gen,
         &mut out_all,
         cfg,
+        0,
     ) {
         Ok(s) => s,
         Err(e) => {
