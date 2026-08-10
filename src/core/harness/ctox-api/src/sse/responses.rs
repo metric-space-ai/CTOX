@@ -1,6 +1,7 @@
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::error::ApiError;
+use crate::error::ResponseIncompleteReason;
 use crate::rate_limits::parse_all_rate_limits;
 use crate::telemetry::SseTelemetry;
 use ctox_client::ByteStream;
@@ -343,7 +344,15 @@ pub fn process_responses_event(
             });
             let reason = reason.unwrap_or("unknown");
             let message = format!("Incomplete response returned, reason: {reason}");
-            return Err(ResponsesEventError::Api(ApiError::Stream(message)));
+            let reason = if reason == "max_output_tokens" {
+                ResponseIncompleteReason::MaxOutputTokens
+            } else {
+                ResponseIncompleteReason::Other(reason.to_string())
+            };
+            return Err(ResponsesEventError::Api(ApiError::ResponseIncomplete {
+                message,
+                reason,
+            }));
         }
         "response.completed" => {
             if let Some(resp_val) = event.response {
@@ -675,6 +684,61 @@ mod tests {
             }
             other => panic!("unexpected second event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn incomplete_max_output_tokens_preserves_typed_reason_and_display() {
+        let incomplete = json!({
+            "type": "response.incomplete",
+            "response": {
+                "incomplete_details": { "reason": "max_output_tokens" }
+            }
+        })
+        .to_string();
+        let sse = format!("event: response.incomplete\ndata: {incomplete}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        let error = events.last().expect("incomplete response error");
+        assert_matches!(
+            error,
+            Err(ApiError::ResponseIncomplete {
+                message,
+                reason: ResponseIncompleteReason::MaxOutputTokens,
+            }) if message == "Incomplete response returned, reason: max_output_tokens"
+        );
+        assert_eq!(
+            error.as_ref().unwrap_err().to_string(),
+            "stream error: Incomplete response returned, reason: max_output_tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_other_reason_preserves_typed_reason_and_display() {
+        let incomplete = json!({
+            "type": "response.incomplete",
+            "response": {
+                "incomplete_details": { "reason": "content_filter" }
+            }
+        })
+        .to_string();
+        let sse = format!("event: response.incomplete\ndata: {incomplete}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        let error = events.last().expect("incomplete response error");
+        assert_matches!(
+            error,
+            Err(ApiError::ResponseIncomplete {
+                message,
+                reason: ResponseIncompleteReason::Other(reason),
+            }) if message == "Incomplete response returned, reason: content_filter"
+                && reason == "content_filter"
+        );
+        assert_eq!(
+            error.as_ref().unwrap_err().to_string(),
+            "stream error: Incomplete response returned, reason: content_filter"
+        );
     }
 
     #[tokio::test]

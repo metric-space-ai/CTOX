@@ -8,6 +8,7 @@ use chrono::DateTime;
 use chrono::Datelike;
 use chrono::Local;
 use chrono::Utc;
+use ctox_api::error::ResponseIncompleteReason;
 use ctox_async_utils::CancelErr;
 use ctox_protocol::ThreadId;
 use ctox_protocol::protocol::CodexErrorInfo;
@@ -73,6 +74,12 @@ pub enum CodexErr {
     /// Optionally includes the requested delay before retrying the turn.
     #[error("stream disconnected before completion: {0}")]
     Stream(String, Option<Duration>),
+
+    #[error("stream disconnected before completion: {message}")]
+    ResponseIncomplete {
+        message: String,
+        reason: ResponseIncompleteReason,
+    },
 
     #[error(
         "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
@@ -215,6 +222,7 @@ impl CodexErr {
             | CodexErr::UsageLimitReached(_)
             | CodexErr::ServerOverloaded => false,
             CodexErr::Stream(..)
+            | CodexErr::ResponseIncomplete { .. }
             | CodexErr::Timeout
             | CodexErr::UnexpectedStatus(_)
             | CodexErr::ResponseStreamFailed(_)
@@ -596,6 +604,11 @@ impl CodexErr {
             CodexErr::ResponseStreamFailed(_) => CodexErrorInfo::ResponseStreamConnectionFailed {
                 http_status_code: self.http_status_code_value(),
             },
+            CodexErr::Stream(..) | CodexErr::ResponseIncomplete { .. } => {
+                CodexErrorInfo::ResponseStreamDisconnected {
+                    http_status_code: self.http_status_code_value(),
+                }
+            }
             CodexErr::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
             CodexErr::SessionConfiguredNotFirstEvent
             | CodexErr::InternalServerError

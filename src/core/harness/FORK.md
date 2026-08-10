@@ -85,3 +85,27 @@ cargo test --manifest-path src/core/harness/Cargo.toml -p ctox-core harness_suba
 cargo fmt --manifest-path src/core/harness/Cargo.toml --all --check
 git diff --check
 ```
+
+## 2026-08-10 I-074 Typed CV Recovery Error Flow
+
+Minimal fork deltas preserve the three CV compact-recovery runtime classes
+without changing existing error Display strings or unrelated retry behavior:
+
+- `ctox-api/src/sse/responses.rs`: preserve `incomplete_details.reason` as a
+  typed response-incomplete reason before constructing the API error; includes
+  origin tests for token-limit and other incomplete reasons.
+- `ctox-api/src/error.rs`: add `ResponseIncompleteReason` and the
+  class-preserving `ApiError::ResponseIncomplete` variant.
+- `core/src/api_bridge.rs`: project the typed API incomplete response into the
+  matching core error variant.
+- `core/src/error.rs`: add the matching `CodexErr::ResponseIncomplete` variant
+  and project both stream classes to the existing
+  `CodexErrorInfo::ResponseStreamDisconnected` code.
+- `core/src/response_debug_context.rs`: add the compiler-required telemetry
+  projection for `ApiError::ResponseIncomplete`, preserving the prior message.
+- `core/src/api_bridge_tests.rs`: verify reason and Display preservation across
+  the API bridge.
+- `core/src/error_tests.rs`: verify stream and incomplete errors retain their
+  Display text while using the typed protocol projection.
+
+Ticket: I-074.

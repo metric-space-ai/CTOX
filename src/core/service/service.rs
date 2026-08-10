@@ -7959,7 +7959,7 @@ fn start_prompt_worker(
                         let mut cv_print_parser_recovered_after_worker_error = false;
                         if !job.leased_message_keys.is_empty()
                             && is_cv_print_parser_queue_job(&job)
-                            && cv_print_parser_error_allows_compact_recovery(&err_text)
+                            && cv_print_parser_error_allows_compact_recovery(&err)
                         {
                             match complete_cv_print_parser_recovery_to_leased_queue(
                                 &root, &job, &err_text,
@@ -10071,11 +10071,15 @@ fn business_os_cv_print_execution_prompt(job: &QueuedPrompt) -> String {
     )
 }
 
-fn cv_print_parser_error_allows_compact_recovery(error_text: &str) -> bool {
-    let lower = error_text.to_ascii_lowercase();
-    lower.contains("max_output_tokens")
-        || lower.contains("incomplete response")
-        || lower.contains("stream disconnected before completion")
+fn cv_print_parser_error_allows_compact_recovery(error: &anyhow::Error) -> bool {
+    matches!(
+        turn_loop::turn_runtime_error_class(error),
+        Some(
+            turn_loop::TurnRuntimeErrorClass::OutputTokenLimit
+                | turn_loop::TurnRuntimeErrorClass::IncompleteResponse
+                | turn_loop::TurnRuntimeErrorClass::StreamDisconnected
+        )
+    )
 }
 
 fn record_cv_print_parser_repair_telemetry(
@@ -10202,9 +10206,16 @@ fn cv_print_is_sqlite_locked_error(error: &anyhow::Error) -> bool {
         || lower.contains("sqlite_busy")
 }
 
+fn cv_print_filename_from_prompt(prompt: &str) -> Option<String> {
+    prompt.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("- filename:")?.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
 fn cv_print_compact_recovery_reply(prompt: &str, error_text: &str) -> String {
     let extracted = cv_print_extracted_text_from_prompt(prompt);
-    let filename = prompt_line_value(prompt, "- filename:").unwrap_or_default();
+    let filename = cv_print_filename_from_prompt(prompt).unwrap_or_default();
     let email = cv_print_first_email(&extracted);
     let phone = cv_print_first_phone(&extracted);
     let name = cv_print_candidate_name(&extracted, &filename);
@@ -30023,6 +30034,45 @@ mod tests {
             !prompt.contains("Do NOT include internal reasoning, chain-of-thought, planning notes, tool transcripts, command output, file paths, diffs, stack traces, raw JSON"),
             "cv parser prompt must not inherit generic chat rules that forbid raw JSON"
         );
+    }
+
+    #[test]
+    fn cv_print_typed_output_token_limit_allows_compact_recovery() {
+        let error = anyhow::Error::new(turn_loop::TurnRuntimeError::new(
+            turn_loop::TurnRuntimeErrorClass::OutputTokenLimit,
+            "direct session error: output token limit",
+        ));
+
+        assert!(cv_print_parser_error_allows_compact_recovery(&error));
+    }
+
+    #[test]
+    fn cv_print_typed_incomplete_response_allows_compact_recovery() {
+        let error = anyhow::Error::new(turn_loop::TurnRuntimeError::new(
+            turn_loop::TurnRuntimeErrorClass::IncompleteResponse,
+            "direct session error: incomplete response",
+        ));
+
+        assert!(cv_print_parser_error_allows_compact_recovery(&error));
+    }
+
+    #[test]
+    fn cv_print_typed_stream_disconnect_allows_compact_recovery() {
+        let error = anyhow::Error::new(turn_loop::TurnRuntimeError::new(
+            turn_loop::TurnRuntimeErrorClass::StreamDisconnected,
+            "direct session error: stream disconnected before completion",
+        ));
+
+        assert!(cv_print_parser_error_allows_compact_recovery(&error));
+    }
+
+    #[test]
+    fn cv_print_user_content_substring_does_not_allow_compact_recovery() {
+        let error = anyhow::anyhow!(
+            "direct session error: der Nutzer schrieb 'max_output_tokens' in den CV"
+        );
+
+        assert!(!cv_print_parser_error_allows_compact_recovery(&error));
     }
 
     #[test]

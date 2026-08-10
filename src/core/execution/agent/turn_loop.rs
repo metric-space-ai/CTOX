@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 // Re-export PersistentSession so callers (main.rs, service.rs) can hold one.
-pub(crate) use super::direct_session::PersistentSession;
+pub(crate) use super::direct_session::{
+    turn_runtime_error_class, PersistentSession, TurnRuntimeError, TurnRuntimeErrorClass,
+};
 use std::sync::OnceLock;
 use std::time::Duration;
 use toml::Value as TomlValue;

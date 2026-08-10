@@ -25,6 +25,9 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
         ApiError::Retryable { message, delay } => CodexErr::Stream(message, delay),
         ApiError::Stream(msg) => CodexErr::Stream(msg, None),
+        ApiError::ResponseIncomplete { message, reason } => {
+            CodexErr::ResponseIncomplete { message, reason }
+        }
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => CodexErr::UnexpectedStatus(UnexpectedResponseError {
             status,

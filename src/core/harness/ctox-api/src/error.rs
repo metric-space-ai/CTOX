@@ -4,6 +4,12 @@ use http::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseIncompleteReason {
+    MaxOutputTokens,
+    Other(String),
+}
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     #[error(transparent)]
@@ -12,6 +18,11 @@ pub enum ApiError {
     Api { status: StatusCode, message: String },
     #[error("stream error: {0}")]
     Stream(String),
+    #[error("stream error: {message}")]
+    ResponseIncomplete {
+        message: String,
+        reason: ResponseIncompleteReason,
+    },
     #[error("context window exceeded")]
     ContextWindowExceeded,
     #[error("quota exceeded")]

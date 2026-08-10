@@ -9,6 +9,30 @@ fn map_api_error_maps_server_overloaded() {
 }
 
 #[test]
+fn map_api_error_preserves_incomplete_response_reason_and_display() {
+    let err = map_api_error(ApiError::ResponseIncomplete {
+        message: "Incomplete response returned, reason: max_output_tokens".to_string(),
+        reason: ctox_api::error::ResponseIncompleteReason::MaxOutputTokens,
+    });
+
+    let CodexErr::ResponseIncomplete { message, reason } = &err else {
+        panic!("expected CodexErr::ResponseIncomplete, got {err:?}");
+    };
+    assert_eq!(
+        message,
+        "Incomplete response returned, reason: max_output_tokens"
+    );
+    assert_eq!(
+        reason,
+        &ctox_api::error::ResponseIncompleteReason::MaxOutputTokens
+    );
+    assert_eq!(
+        err.to_string(),
+        "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+    );
+}
+
+#[test]
 fn map_api_error_maps_server_overloaded_from_503_body() {
     let body = serde_json::json!({
         "error": {

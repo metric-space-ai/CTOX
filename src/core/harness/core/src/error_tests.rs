@@ -71,6 +71,41 @@ fn server_overloaded_maps_to_protocol() {
 }
 
 #[test]
+fn stream_disconnect_maps_to_typed_protocol_error_without_changing_display() {
+    let err = CodexErr::Stream("connection reset".to_string(), None);
+
+    assert_eq!(
+        err.to_ctox_protocol_error(),
+        CodexErrorInfo::ResponseStreamDisconnected {
+            http_status_code: None,
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "stream disconnected before completion: connection reset"
+    );
+}
+
+#[test]
+fn incomplete_response_maps_to_typed_protocol_error_without_changing_display() {
+    let err = CodexErr::ResponseIncomplete {
+        message: "Incomplete response returned, reason: max_output_tokens".to_string(),
+        reason: ResponseIncompleteReason::MaxOutputTokens,
+    };
+
+    assert_eq!(
+        err.to_ctox_protocol_error(),
+        CodexErrorInfo::ResponseStreamDisconnected {
+            http_status_code: None,
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+    );
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,

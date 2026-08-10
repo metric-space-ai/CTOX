@@ -38,7 +38,9 @@ use ctox_core::ThreadManager;
 use ctox_feedback::CodexFeedback;
 use ctox_protocol::config_types::SandboxMode;
 use ctox_protocol::openai_models::ReasoningEffort;
-use ctox_protocol::protocol::{AskForApproval, EventMsg, SandboxPolicy, SessionSource};
+use ctox_protocol::protocol::{
+    AskForApproval, CodexErrorInfo, EventMsg, SandboxPolicy, SessionSource,
+};
 use ctox_protocol::user_input::UserInput;
 use ctox_utils_absolute_path::AbsolutePathBuf;
 
@@ -540,6 +542,56 @@ impl std::fmt::Display for SessionPoisoned {
 }
 
 impl std::error::Error for SessionPoisoned {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnRuntimeErrorClass {
+    OutputTokenLimit,
+    IncompleteResponse,
+    StreamDisconnected,
+}
+
+impl TurnRuntimeErrorClass {
+    fn from_codex_error_info(error_info: &CodexErrorInfo) -> Option<Self> {
+        matches!(
+            error_info,
+            CodexErrorInfo::ResponseStreamDisconnected { .. }
+        )
+        .then_some(Self::StreamDisconnected)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TurnRuntimeError {
+    class: TurnRuntimeErrorClass,
+    message: String,
+}
+
+impl TurnRuntimeError {
+    pub(crate) fn new(class: TurnRuntimeErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn class(&self) -> TurnRuntimeErrorClass {
+        self.class
+    }
+}
+
+impl std::fmt::Display for TurnRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TurnRuntimeError {}
+
+pub(crate) fn turn_runtime_error_class(error: &anyhow::Error) -> Option<TurnRuntimeErrorClass> {
+    error
+        .downcast_ref::<TurnRuntimeError>()
+        .map(TurnRuntimeError::class)
+}
 
 /// Holds a running InProcessAppServerClient + thread. Normal service work keeps
 /// one instance across slices and resumes its rollout after restart. Isolated
@@ -1982,6 +2034,16 @@ impl PersistentSession {
                                         ),
                                     );
                                 } else {
+                                    if let Some(class) = err
+                                        .codex_error_info
+                                        .as_ref()
+                                        .and_then(TurnRuntimeErrorClass::from_codex_error_info)
+                                    {
+                                        return Err(anyhow::Error::new(TurnRuntimeError::new(
+                                            class,
+                                            format!("direct session error: {msg_str}"),
+                                        )));
+                                    }
                                     anyhow::bail!("direct session error: {}", msg_str);
                                 }
                             }
