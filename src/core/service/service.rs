@@ -26775,6 +26775,8 @@ mod tests {
 
     static CHANNEL_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static TICKET_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static TICKET_RECONCILE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ORPHANED_QUEUE_LEASE_SWEEP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     /// The channel-router preflight gate is process-global, so two tests that
     /// drive it clobber each other's state when they run in parallel — each
     /// passes alone and they fail together. Same treatment as the sync gates
