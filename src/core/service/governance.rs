@@ -276,12 +276,20 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         description: "Records adapter sync failures as durable governance and ticket sync state instead of hiding them in service logs.",
     },
     DefaultMechanism {
+        mechanism_id: "orphaned_queue_lease_sweep",
+        mechanism_class: "recovery",
+        autonomy: "autonomous_queue_lease_recovery",
+        prompt_visibility: "inventory_only",
+        module_hint: "src/service.rs",
+        description: "Records each non-empty periodic release of expired or incomplete queue-task leases after worker heartbeat loss; zero-release sweeps stay silent. This periodic sweep is the sole runtime owner of stale queue-task lease release outside boot recovery.",
+    },
+    DefaultMechanism {
         mechanism_id: "ticket_reconciliation",
         mechanism_class: "recovery",
         autonomy: "autonomous_ticket_reconciliation",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description: "Reconciles stale ticket leases and previously blocked ticket events before new external routing.",
+        description: "Releases stale ticket-event leases and previously blocked ticket events before new external routing; stale queue-task lease release belongs to the periodic orphaned_queue_lease_sweep.",
     },
     DefaultMechanism {
         mechanism_id: "stuck_lease_escalation",
@@ -1227,6 +1235,7 @@ mod tests {
             "channel_router_loop_active",
             "routing_ack_failed",
             "boot_lease_reclaim",
+            "orphaned_queue_lease_sweep",
         ] {
             assert!(
                 inventory.iter().any(|entry| entry.mechanism_id == id),

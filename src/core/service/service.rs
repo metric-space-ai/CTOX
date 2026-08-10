@@ -19577,59 +19577,13 @@ fn reconcile_ticket_runtime_state(root: &Path, state: &Arc<Mutex<SharedState>>) 
             ),
         ),
     }
-    let queue_lease_sweep =
-        channels::release_stale_queue_task_leases(root, CHANNEL_ROUTER_LEASE_OWNER, &active_keys)?;
-    let released_queue_leases = queue_lease_sweep.released;
-    if !queue_lease_sweep.failures.is_empty() {
-        push_event(
-            state,
-            format!(
-                "Router queue lease recovery left {} candidate(s) for retry: {}",
-                queue_lease_sweep.failures.len(),
-                clip_text(&queue_lease_sweep.failures.join("; "), 240)
-            ),
-        );
-    }
-    if !released_queue_leases.is_empty() {
-        // Status coherence: swept leases must stop rendering as healthy
-        // progress in the native Business OS projections immediately.
-        for message_key in &released_queue_leases {
-            let _ = crate::business_os::store::refresh_business_command_queue_task_projection(
-                root,
-                message_key,
-            );
-        }
-        let released_count = released_queue_leases.len();
-        let idempotence_key = format!(
-            "ticket-reconcile:released-queue:{}",
-            normalize_token(&released_queue_leases.join(","))
-        );
-        governance::record_event_or_count(
-            root,
-            governance::GovernanceEventRequest {
-                mechanism_id: "ticket_reconciliation",
-                conversation_id: None,
-                severity: "info",
-                reason: "leased ticket-backed queue tasks had no active in-process worker or queued prompt",
-                action_taken: "released stale queue task leases back to pending",
-                details: serde_json::json!({
-                    "released_message_keys": released_queue_leases.clone(),
-                }),
-                idempotence_key: Some(&idempotence_key),
-            },
-        );
-        push_event(
-            state,
-            format!("Released {released_count} stale queue task lease(s)"),
-        );
-    }
     // router-3: a stuck queue-task lease whose key is STILL in active_keys (a
     // worker wedged mid-slice, or a key held in pending_prompts) is intentionally
-    // protected from auto-release above — but process-mining flags it CRITICAL
-    // after the stale-lease window with no durable governance evidence. Escalate-
-    // as-evidence: emit one idempotent governance event per stuck protected key so
-    // the deadlock-recovery audit trail exists. We do NOT release it (its worker
-    // may be genuinely mid-slice).
+    // protected from auto-release by the canonical orphaned-lease sweep — but
+    // process-mining flags it CRITICAL after the stale-lease window with no
+    // durable governance evidence. Escalate-as-evidence: emit one idempotent
+    // governance event per stuck protected key so the deadlock-recovery audit
+    // trail exists. We do NOT release it (its worker may be genuinely mid-slice).
     match channels::list_stale_queue_task_leases(root, CHANNEL_ROUTER_LEASE_OWNER) {
         Ok(stale_leases) => {
             let mut stuck_protected: Vec<String> = stale_leases
@@ -26949,6 +26903,25 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn ticket_reconcile_gate_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TICKET_RECONCILE_GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn orphaned_queue_lease_sweep_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        ORPHANED_QUEUE_LEASE_SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn clear_orphaned_queue_lease_sweep_gate_for_tests() {
+        if let Some(gate) = ORPHANED_QUEUE_LEASE_SWEEP_GATE.get() {
+            let mut guard = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = None;
+        }
+    }
+
     fn durable_status_snapshot_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
         DURABLE_STATUS_SNAPSHOT_CACHE_TEST_LOCK
             .lock()
@@ -28698,7 +28671,8 @@ mod tests {
     }
 
     #[test]
-    fn ticket_reconcile_gate_skips_unchanged_idle_state_until_core_db_changes() {
+    fn ticket_reconcile_gate_skips_idle_state_and_reopens_for_remaining_recovery_work() {
+        let _serial = ticket_reconcile_gate_test_lock();
         clear_ticket_reconcile_gate_for_tests();
         let root = temp_root("ticket-reconcile-gate");
         let active_keys = HashSet::new();
@@ -28716,8 +28690,9 @@ mod tests {
         channels::create_queue_task(
             &root,
             channels::QueueTaskCreateRequest {
-                title: "Gate invalidation".to_string(),
-                prompt: "Verify the reconcile gate sees DB changes.".to_string(),
+                title: "Remaining reconcile gate invalidation".to_string(),
+                prompt: "Verify app-task recovery and stuck-lease evidence still see DB changes."
+                    .to_string(),
                 thread_key: "ticket-reconcile-gate".to_string(),
                 workspace_root: None,
                 priority: "normal".to_string(),
@@ -28729,9 +28704,138 @@ mod tests {
         .expect("failed to create queue task");
         assert!(
             !should_skip_idle_ticket_reconcile(&root, &active_keys),
-            "core DB changes must reopen the reconcile gate"
+            "core DB changes must reopen the gate for abandoned app-task recovery, stuck-lease evidence, and ticket-event repair; stale queue-lease release is owned by the orphan sweep"
         );
         clear_ticket_reconcile_gate_for_tests();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orphaned_queue_lease_sweep_audits_one_real_release_and_noop_stays_silent() {
+        let _serial = orphaned_queue_lease_sweep_test_lock();
+        clear_orphaned_queue_lease_sweep_gate_for_tests();
+        let root = temp_root("orphaned-queue-lease-sweep-audit");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Orphaned queue lease".to_string(),
+                prompt: "Prove the periodic owner releases and audits this stale lease."
+                    .to_string(),
+                thread_key: "orphaned-queue-lease-sweep-audit".to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("seed orphaned queue task");
+        channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
+            .expect("lease orphaned queue task");
+        expire_queue_task_lease(&root, &task.message_key);
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        run_orphaned_queue_lease_sweep(&root, &state);
+
+        assert_eq!(queue_task_route_status(&root, &task.message_key), "pending");
+        let events = governance::list_recent_events(&root, 1, 100)
+            .expect("list orphaned sweep governance events");
+        let sweep_events = events
+            .iter()
+            .filter(|event| event.mechanism_id == "orphaned_queue_lease_sweep")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sweep_events.len(),
+            1,
+            "one real release must create exactly one durable sweep audit event"
+        );
+        assert_eq!(
+            sweep_events[0].details["released_message_keys"],
+            json!([task.message_key.clone()]),
+            "the audit detail must identify every released message key"
+        );
+
+        clear_orphaned_queue_lease_sweep_gate_for_tests();
+        run_orphaned_queue_lease_sweep(&root, &state);
+
+        let events = governance::list_recent_events(&root, 1, 100)
+            .expect("list orphaned sweep governance events after no-op");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.mechanism_id == "orphaned_queue_lease_sweep")
+                .count(),
+            1,
+            "a second sweep with no candidates must not create audit spam"
+        );
+        clear_orphaned_queue_lease_sweep_gate_for_tests();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ticket_reconcile_leaves_stale_queue_lease_for_orphaned_sweep_owner() {
+        let _reconcile_serial = ticket_reconcile_gate_test_lock();
+        let _sweep_serial = orphaned_queue_lease_sweep_test_lock();
+        clear_ticket_reconcile_gate_for_tests();
+        clear_orphaned_queue_lease_sweep_gate_for_tests();
+        let root = temp_root("ticket-reconcile-queue-lease-dedupe");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Canonical sweep ownership".to_string(),
+                prompt: "Reconcile must leave this stale queue lease for the periodic sweep."
+                    .to_string(),
+                thread_key: "ticket-reconcile-queue-lease-dedupe".to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("seed stale queue task");
+        channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
+            .expect("lease stale queue task");
+        expire_queue_task_lease(&root, &task.message_key);
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        reconcile_ticket_runtime_state(&root, &state).expect("ticket reconcile succeeds");
+
+        assert_eq!(
+            queue_task_route_status(&root, &task.message_key),
+            "leased",
+            "ticket reconcile must not release queue-task leases after ownership dedupe"
+        );
+        let events = governance::list_recent_events(&root, 1, 100)
+            .expect("list governance events after ticket reconcile");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.mechanism_id == "ticket_reconciliation")
+                .count(),
+            0,
+            "ticket reconcile must not misattribute a queue-lease release"
+        );
+
+        run_orphaned_queue_lease_sweep(&root, &state);
+
+        assert_eq!(
+            queue_task_route_status(&root, &task.message_key),
+            "pending",
+            "the periodic orphaned sweep must release the stale queue lease"
+        );
+        let events = governance::list_recent_events(&root, 1, 100)
+            .expect("list governance events after orphaned sweep");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.mechanism_id == "orphaned_queue_lease_sweep")
+                .count(),
+            1,
+            "the canonical sweep owner must persist exactly one audit event"
+        );
+        clear_ticket_reconcile_gate_for_tests();
+        clear_orphaned_queue_lease_sweep_gate_for_tests();
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -29353,6 +29457,29 @@ mod tests {
             params![message_key, leased_at],
         )
         .expect("age queue task lease");
+    }
+
+    fn expire_queue_task_lease(root: &Path, message_key: &str) {
+        let conn = channels::open_channel_db(&crate::paths::core_db(root))
+            .expect("open channel db to expire queue lease");
+        conn.execute(
+            "UPDATE communication_routing_state \
+             SET lease_expires_at = '2020-01-01T00:00:00.000Z' \
+             WHERE message_key = ?1",
+            params![message_key],
+        )
+        .expect("expire queue task lease");
+    }
+
+    fn queue_task_route_status(root: &Path, message_key: &str) -> String {
+        let conn = channels::open_channel_db(&crate::paths::core_db(root))
+            .expect("open channel db to read queue route status");
+        conn.query_row(
+            "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+            params![message_key],
+            |row| row.get(0),
+        )
+        .expect("read queue task route status")
     }
 
     fn seed_business_os_app_artifacts(root: &Path, module_id: &str) {
@@ -41625,6 +41752,7 @@ Use shell tools to create or update these files."
     /// (today it is only an advisory process-mining finding).
     #[test]
     fn stuck_protected_queue_lease_is_escalated_not_released() {
+        let _serial = ticket_reconcile_gate_test_lock();
         let root = temp_root("router3-stuck-lease");
         let task = channels::create_queue_task(
             &root,
