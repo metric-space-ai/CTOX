@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">11 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">12 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S1-Tor</span>
+    <h3>R-01 komplett: die 59 Roten sind klassifiziert</h3>
+    <p><b>58/59 fallen weiterhin, 1 besteht. Klassen: 23 echte Regressionen · 29 veraltete Tests · 7 Umgebung · 0 unklar.</b> Vertreter je Gruppe mit Verursacher-Commit (u. a. <code>7f10199e7</code> Lifecycle-Autorität vs. MCP-Fixtures, <code>8b7bf4009</code> lean-Session vs. gegensinnige Assertion, Terminologie-Leak aus uncommitteter plan.rs). Messbasis: Arbeitsbaum-Snapshot, weil HEAD unbaubar. Beweise: <code>docs/dev/beweise/r-01-klassifikation-2026-08-10.md</code> (<code>e2a8b71b4</code>) + <code>r-01-headexakt-2026-08-10.md</code> (<code>2b230a3f3</code>).</p>
+    <span class="ev"><b>Orchestrator-Stichprobe</b> lean-mcp-free-Assertion am Code bestätigt<br><b>Lauf-Lektion</b> workjet stop tötet den Worker NICHT (Zombie schrieb 30 min weiter) — Prozess-PID prüfen, Ergebnisdateien je Lauf eindeutig benennen</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan-v2 · S0</span>
@@ -328,10 +335,10 @@ footer{
   <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">3 Karten</span></div>
 
   <article class="karte s-work">
-    <span class="chip c-work">Plan-v2 · S1</span>
-    <h3>R-01 läuft auf Sol — Run <code>…25de283a</code></h3>
-    <p>Klassifikation der 59 roten Tests aus <code>docs/dev/beweise/rot-basis.txt</code>: status_head, Klasse (Regression/veraltet/Umgebung/unklar), seit-Commit für die 5 größten Gruppen. Baut im Scratch auf <code>/Volumes/tmp/ctox-pipeline/r01-scratch</code> (dirty-Baum-Leck umgangen), Zwischenstand laufend nach <code>r01-ergebnis.md</code>.</p>
-    <span class="ev"><b>Fertig heißt</b> alle 59 klassifiziert in <code>/Volumes/tmp/ctox-pipeline/r01-ergebnis.md</code><br><b>Sol-Belegung</b> 1/3 — I-070-Brief liegt bereit, startet NACH R-01 (ein schwerer Job zugleich)</span>
+    <span class="chip c-work">Plan-v2 · S2a</span>
+    <h3>I-070 läuft auf Sol — Run <code>…72d47eed</code></h3>
+    <p>Mission-Seed-Root-Fix aus der I-064-Beweislage: Erstimport darf den Split-Brain „active/continuous + is_open=false + leer" nicht mehr persistieren; Queue-Create sät den Mission-State in derselben Transaktion; die ~662 Alt-Zeilen werden einmal pro DB migriert. Repair-Zweig bleibt bestehen (Netz fällt erst nach Null-Messung). Akzeptanz auf Arbeitsbaum-Basis (HEAD unbaubar, s. Owner-Karte).</p>
+    <span class="ev"><b>Fertig heißt</b> Turn-Ende-Invariante findet nach Queue-Create nichts; Migrationstest; keine neuen Roten gegen eigene Baseline<br><b>Danach seriell</b> I-071 atomarer Attempt-Abschluss</span>
   </article>
 
   <article class="karte s-work">
