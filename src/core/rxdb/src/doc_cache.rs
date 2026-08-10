@@ -32,7 +32,15 @@ use crate::types::{RxDocumentData, RxStorageChangeEvent};
 struct CacheItem<T> {
     by_rev: HashMap<String, Weak<T>>,
     latest: RxDocumentData,
+    insertion_order: u64,
 }
+
+/// Maximum number of document-id entries retained when enough entries have no
+/// live document handles. Ten thousand keeps normal working sets resident while
+/// putting a finite ceiling on churn-only ids and their cloned payloads. The
+/// limit is soft when more than this many ids have live handles: live handles
+/// are never evicted.
+const DOC_CACHE_MAX_ENTRIES: usize = 10_000;
 
 /// After this many `get_cached_rx_documents` calls the cache opportunistically
 /// sweeps the whole map for entries whose document handles have all been
@@ -43,8 +51,9 @@ struct CacheItem<T> {
 /// the outer map entry, so the map grew one dead entry per distinct doc-id ever
 /// touched (churny ids: commands, queue tasks, rotating chunk generations),
 /// pinning historical payloads in RAM. The on-access prune only reaches the
-/// ids being accessed, so a periodic global sweep is what actually bounds
-/// growth. Gating keeps the O(n) sweep amortized O(1) on the hot cache path.
+/// ids being accessed, so the periodic global sweep still reclaims dead entries
+/// below the size ceiling. Gating keeps the O(n) sweep amortized O(1) on the hot
+/// cache path.
 const DOC_CACHE_SWEEP_INTERVAL: u64 = 256;
 
 // ref: rxdb/src/doc-cache.ts:61-178
@@ -55,6 +64,7 @@ pub struct DocumentCache<T> {
     cache_item_by_doc_id: Mutex<HashMap<String, CacheItem<T>>>,
     subscription: Mutex<Option<JoinHandle<()>>>,
     sweep_counter: AtomicU64,
+    insertion_counter: AtomicU64,
 }
 
 /// Remove cache entries whose document handles have all been dropped, mirroring
@@ -70,6 +80,47 @@ fn sweep_dead_cache_items<T>(items: &mut HashMap<String, CacheItem<T>>) {
         item.by_rev.retain(|_, weak| weak.strong_count() > 0);
         !item.by_rev.is_empty()
     });
+}
+
+/// Evict the oldest inserted entries until the configured limit is met or only
+/// entries with live document handles remain. The document id is a deterministic
+/// tie-breaker for the practically unreachable insertion-counter wraparound.
+fn evict_dead_cache_items_to_limit<T>(
+    items: &mut HashMap<String, CacheItem<T>>,
+    max_entries: usize,
+) {
+    let remove_count = items.len().saturating_sub(max_entries);
+    if remove_count == 0 {
+        return;
+    }
+
+    if remove_count == 1 {
+        let eviction_candidate = items
+            .iter()
+            .filter(|(_, item)| item.by_rev.values().all(|weak| weak.strong_count() == 0))
+            .min_by(|(id_a, item_a), (id_b, item_b)| {
+                item_a
+                    .insertion_order
+                    .cmp(&item_b.insertion_order)
+                    .then_with(|| id_a.cmp(id_b))
+            })
+            .map(|(id, _)| id.clone());
+        if let Some(doc_id) = eviction_candidate {
+            items.remove(&doc_id);
+        }
+        return;
+    }
+
+    let mut eviction_candidates = items
+        .iter()
+        .filter(|(_, item)| item.by_rev.values().all(|weak| weak.strong_count() == 0))
+        .map(|(id, item)| (item.insertion_order, id.clone()))
+        .collect::<Vec<_>>();
+    eviction_candidates.sort_unstable();
+
+    for (_, doc_id) in eviction_candidates.into_iter().take(remove_count) {
+        items.remove(&doc_id);
+    }
 }
 
 impl<T> DocumentCache<T>
@@ -88,6 +139,7 @@ where
             cache_item_by_doc_id: Mutex::new(HashMap::new()),
             subscription: Mutex::new(None),
             sweep_counter: AtomicU64::new(0),
+            insertion_counter: AtomicU64::new(0),
         });
 
         let cache_for_task = Arc::clone(&cache);
@@ -114,6 +166,7 @@ where
             cache_item_by_doc_id: Mutex::new(HashMap::new()),
             subscription: Mutex::new(None),
             sweep_counter: AtomicU64::new(0),
+            insertion_counter: AtomicU64::new(0),
         })
     }
 
@@ -141,35 +194,57 @@ where
     /// Return cached document handles for the given document data, creating
     /// missing handles and deduplicating equal revision/lwt states.
     pub fn get_cached_rx_documents(&self, docs_data: &[RxDocumentData]) -> RxResult<Vec<Arc<T>>> {
+        self.get_cached_rx_documents_with_limit(docs_data, DOC_CACHE_MAX_ENTRIES)
+    }
+
+    fn get_cached_rx_documents_with_limit(
+        &self,
+        docs_data: &[RxDocumentData],
+        max_entries: usize,
+    ) -> RxResult<Vec<Arc<T>>> {
         let mut ret = Vec::with_capacity(docs_data.len());
         let mut items = self.cache_item_by_doc_id.lock();
 
         for doc_data in docs_data {
             let doc_id = document_id_from_primary(doc_data, &self.primary_path)?;
             let rev_key = revision_cache_key(doc_data)?;
+            let inserted = !items.contains_key(&doc_id);
+            let insertion_order = if inserted {
+                self.insertion_counter.fetch_add(1, Ordering::Relaxed)
+            } else {
+                0
+            };
 
-            let item = items.entry(doc_id).or_insert_with(|| CacheItem {
-                by_rev: HashMap::new(),
-                latest: doc_data.clone(),
-            });
-            item.latest = doc_data.clone();
+            {
+                let item = items.entry(doc_id).or_insert_with(|| CacheItem {
+                    by_rev: HashMap::new(),
+                    latest: doc_data.clone(),
+                    insertion_order,
+                });
+                item.latest = doc_data.clone();
 
-            if let Some(cached) = item.by_rev.get(&rev_key).and_then(Weak::upgrade) {
-                ret.push(cached);
-                continue;
+                if let Some(cached) = item.by_rev.get(&rev_key).and_then(Weak::upgrade) {
+                    ret.push(cached);
+                } else {
+                    item.by_rev.retain(|_, weak| weak.strong_count() > 0);
+                    let frozen = (OVERWRITABLE.load().deep_freeze_when_dev_mode)(doc_data.clone());
+                    let created = (self.document_creator)(frozen);
+                    item.by_rev.insert(rev_key, Arc::downgrade(&created));
+                    ret.push(created);
+                }
             }
 
-            item.by_rev.retain(|_, weak| weak.strong_count() > 0);
-            let frozen = (OVERWRITABLE.load().deep_freeze_when_dev_mode)(doc_data.clone());
-            let created = (self.document_creator)(frozen);
-            item.by_rev.insert(rev_key, Arc::downgrade(&created));
-            ret.push(created);
+            // Enforce the size ceiling on every new document-id insertion. The
+            // newly returned handle (and all other live handles) is protected;
+            // only dead entries can be selected by the deterministic eviction.
+            if inserted {
+                evict_dead_cache_items_to_limit(&mut items, max_entries);
+            }
         }
 
-        // Opportunistic, counter-gated global GC. `ret` still holds a strong
-        // handle to every doc-id touched by this call, so their entries have a
-        // live handle and are never swept here; only entries for ids whose
-        // handles have all been dropped elsewhere are removed.
+        // Keep the existing opportunistic, counter-gated global GC. `ret` still
+        // holds a strong handle to every doc-id touched by this call, so their
+        // entries have a live handle and are never swept here.
         if self.sweep_counter.fetch_add(1, Ordering::Relaxed) + 1 >= DOC_CACHE_SWEEP_INTERVAL {
             self.sweep_counter.store(0, Ordering::Relaxed);
             sweep_dead_cache_items(&mut items);
@@ -346,6 +421,54 @@ mod tests {
         // A forced sweep with no live handles reclaims everything.
         cache.force_sweep();
         assert_eq!(cache.cached_document_count(), 0);
+    }
+
+    #[test]
+    fn size_limit_evicts_dead_ids_and_preserves_live_handle() {
+        const TEST_MAX_ENTRIES: usize = 8;
+        const DEAD_ID_COUNT: usize = 64;
+
+        let cache =
+            DocumentCache::new_without_stream("id", Arc::new(|data| Arc::new(TestDoc { data })));
+        let live_data = doc("keep", "1-token", 1.0, 42);
+        let live = cache
+            .get_cached_rx_documents_with_limit(std::slice::from_ref(&live_data), TEST_MAX_ENTRIES)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Stay below the 256-call sweep interval so this assertion specifically
+        // proves insertion-time limiting rather than the existing periodic GC.
+        for i in 0..DEAD_ID_COUNT {
+            let dead_data = doc(&format!("dead-{i}"), "1-token", i as f64 + 2.0, i as i64);
+            let handle = cache
+                .get_cached_rx_documents_with_limit(
+                    std::slice::from_ref(&dead_data),
+                    TEST_MAX_ENTRIES,
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            drop(handle);
+        }
+
+        assert!(
+            cache.cached_document_count() <= TEST_MAX_ENTRIES,
+            "dead-id churn exceeded the cache limit: {} > {TEST_MAX_ENTRIES}",
+            cache.cached_document_count()
+        );
+
+        let again = cache
+            .get_cached_rx_documents_with_limit(std::slice::from_ref(&live_data), TEST_MAX_ENTRIES)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(Arc::ptr_eq(&live, &again));
+        assert_eq!(again.data, live.data);
+        assert_eq!(cache.get_latest_document_data("keep").unwrap(), live_data);
     }
 
     #[test]
