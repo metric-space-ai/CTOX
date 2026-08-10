@@ -156,6 +156,20 @@ pub enum ResponsesStreamEvent {
         text: String,
         sequence_number: u64,
     },
+    #[serde(rename = "response.function_call_arguments.delta")]
+    FunctionCallArgumentsDelta {
+        item_id: String,
+        output_index: u32,
+        delta: String,
+        sequence_number: u64,
+    },
+    #[serde(rename = "response.function_call_arguments.done")]
+    FunctionCallArgumentsDone {
+        item_id: String,
+        output_index: u32,
+        arguments: String,
+        sequence_number: u64,
+    },
     #[serde(rename = "response.content_part.done")]
     ContentPartDone {
         item_id: String,
@@ -217,6 +231,15 @@ pub enum ResponseOutputItem {
         status: ResponseStatus,
         role: &'static str, // always "assistant"
         content: Vec<ResponseContentPart>,
+    },
+    FunctionCall {
+        id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        _ctox_raw_tool_call: Option<String>,
+        status: ResponseStatus,
     },
 }
 

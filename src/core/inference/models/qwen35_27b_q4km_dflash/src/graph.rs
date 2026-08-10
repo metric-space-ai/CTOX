@@ -21,20 +21,19 @@ use std::os::raw::c_int;
 
 use crate::ffi as sys;
 use sys::{
-    ggml_backend_t, ggml_cgraph, ggml_context, ggml_tensor, ggml_type,
-    GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NEOX, GGML_TRI_TYPE_LOWER,
-    GGML_TRI_TYPE_LOWER_DIAG,
+    ggml_backend_t, ggml_cgraph, ggml_context, ggml_tensor, ggml_type, GGML_ROPE_TYPE_MROPE,
+    GGML_ROPE_TYPE_NEOX, GGML_TRI_TYPE_LOWER, GGML_TRI_TYPE_LOWER_DIAG,
 };
 
+use crate::model::{
+    DeltaNetCapture, DraftWeights, QwenGraphInputs, QwenGraphOutputs, TargetCache, TargetLayer,
+    TargetWeights,
+};
 use crate::{
     set_last_error, DFLASH27B_DRAFT_BLOCK_SIZE, DFLASH27B_DRAFT_LAYERS,
     DFLASH27B_DRAFT_N_TARGET_LAYERS, DFLASH27B_RMS_EPS, DFLASH27B_ROPE_THETA,
     DFLASH27B_TARGET_HEAD_DIM, DFLASH27B_TARGET_HIDDEN, DFLASH27B_TARGET_N_HEADS,
     DFLASH27B_TARGET_N_KV_HEADS,
-};
-use crate::model::{
-    DeltaNetCapture, DraftWeights, QwenGraphInputs, QwenGraphOutputs, TargetCache,
-    TargetLayer, TargetWeights,
 };
 
 // ════════════════════════════════════════════════════════════════
@@ -338,12 +337,7 @@ pub fn create_target_cache(
         while off < nb {
             let chunk = std::cmp::min(nb - off, zeros.len() as libc::size_t);
             unsafe {
-                sys::ggml_backend_tensor_set(
-                    t,
-                    zeros.as_ptr() as *const libc::c_void,
-                    off,
-                    chunk,
-                );
+                sys::ggml_backend_tensor_set(t, zeros.as_ptr() as *const libc::c_void, off, chunk);
             }
             off += chunk;
         }
@@ -412,6 +406,33 @@ pub fn restore_ssm_state(c: &mut TargetCache) {
     }
 }
 
+/// Reset the recurrent state before prefilling an unrelated prompt.
+///
+/// Attention KV slots are addressed by absolute position and are overwritten
+/// during a fresh prefill. GatedDeltaNet and convolution state is recurrent,
+/// however, so leaving it resident would leak the previous conversation into
+/// a request that cannot reuse the exact token prefix.
+pub fn reset_recurrent_state(c: &mut TargetCache) {
+    let zeros = vec![0u8; 1024 * 1024];
+    for tensor in c.ssm_state.iter().chain(c.conv_state.iter()) {
+        let bytes = unsafe { sys::ggml_nbytes(*tensor) };
+        let mut offset: libc::size_t = 0;
+        while offset < bytes {
+            let chunk = std::cmp::min(bytes - offset, zeros.len() as libc::size_t);
+            unsafe {
+                sys::ggml_backend_tensor_set(
+                    *tensor,
+                    zeros.as_ptr() as *const libc::c_void,
+                    offset,
+                    chunk,
+                );
+            }
+            offset += chunk;
+        }
+    }
+    c.cur_pos = 0;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────
 //
 // ref: `qwen35_target_graph.cpp:258-273`
@@ -465,12 +486,12 @@ fn build_full_attn_block(
     ctx: *mut ggml_context,
     gf: *mut ggml_cgraph,
     l: &TargetLayer,
-    cur: *mut ggml_tensor,           // [hidden, n_tokens]
-    positions: *mut ggml_tensor,     // [n_tokens] i32
+    cur: *mut ggml_tensor,       // [hidden, n_tokens]
+    positions: *mut ggml_tensor, // [n_tokens] i32
     rope_sections: &[c_int; 4],
-    cache_k: *mut ggml_tensor,       // [head_dim, max_ctx, n_head_kv]
-    cache_v: *mut ggml_tensor,       // [head_dim, max_ctx, n_head_kv]
-    attn_mask: *mut ggml_tensor,     // [kv_len, n_tokens] f32 or null
+    cache_k: *mut ggml_tensor,   // [head_dim, max_ctx, n_head_kv]
+    cache_v: *mut ggml_tensor,   // [head_dim, max_ctx, n_head_kv]
+    attn_mask: *mut ggml_tensor, // [kv_len, n_tokens] f32 or null
     kv_start: c_int,
     n_tokens: c_int,
 ) -> *mut ggml_tensor {
@@ -674,8 +695,7 @@ fn build_full_attn_block(
         // [kv_len, n_tokens] with 0 for attendable positions and -inf
         // for positions beyond the causal boundary.
         let kq_scale = 1.0_f32 / (q35::HEAD_DIM as f32).sqrt();
-        let attn0 =
-            sys::ggml_flash_attn_ext(ctx, qfa, kfa, vfa, attn_mask, kq_scale, 0.0, 0.0);
+        let attn0 = sys::ggml_flash_attn_ext(ctx, qfa, kfa, vfa, attn_mask, kq_scale, 0.0, 0.0);
         // attn: [head_dim, n_head, n_tokens] (permuted)
         let attn1 = sys::ggml_reshape_2d(ctx, attn0, q35::Q_DIM as i64, n_tokens as i64);
 
@@ -710,12 +730,12 @@ fn build_delta_net_block(
     ctx: *mut ggml_context,
     gf: *mut ggml_cgraph,
     l: &TargetLayer,
-    cur: *mut ggml_tensor,           // [hidden, n_tokens]
-    conv_state: *mut ggml_tensor,    // [kernel-1, conv_channels] persistent
-    ssm_state: *mut ggml_tensor,     // [head_v_dim, head_v_dim, num_v_heads] persistent
+    cur: *mut ggml_tensor,        // [hidden, n_tokens]
+    conv_state: *mut ggml_tensor, // [kernel-1, conv_channels] persistent
+    ssm_state: *mut ggml_tensor,  // [head_v_dim, head_v_dim, num_v_heads] persistent
     n_tokens: c_int,
     cap: Option<&mut DeltaNetCapture>,
-    parent_ids: *mut ggml_tensor,    // optional [n_tokens] i32; tree mode when non-null
+    parent_ids: *mut ggml_tensor, // optional [n_tokens] i32; tree mode when non-null
 ) -> *mut ggml_tensor {
     // Constants (mirrors lines 429-435).
     let head_k_dim = q35::HEAD_K_DIM; // 128
@@ -755,8 +775,7 @@ fn build_delta_net_block(
         let alpha2 = sys::ggml_add(ctx, alpha1, l.ssm_dt_bias);
         let alpha3 = sys::ggml_softplus(ctx, alpha2);
         let g0 = sys::ggml_mul(ctx, alpha3, l.ssm_a);
-        let g_tensor =
-            sys::ggml_reshape_4d(ctx, g0, 1, num_v_heads as i64, n_seq_tokens, n_seqs);
+        let g_tensor = sys::ggml_reshape_4d(ctx, g0, 1, num_v_heads as i64, n_seq_tokens, n_seqs);
 
         // ── Fetch conv state [kernel-1, conv_channels] and prepend to
         //    qkv_mixed along the token axis to form the convolution
@@ -995,9 +1014,7 @@ fn build_delta_net_block(
                 persist_inter,
             )
         } else if !parent_ids.is_null() {
-            sys::ggml_gated_delta_net_tree(
-                ctx, q_c, k_c, v_c, g_tensor, beta, s, parent_ids,
-            )
+            sys::ggml_gated_delta_net_tree(ctx, q_c, k_c, v_c, g_tensor, beta, s, parent_ids)
         } else {
             sys::ggml_gated_delta_net(ctx, q_c, k_c, v_c, g_tensor, beta, s)
         };
@@ -1160,8 +1177,7 @@ pub fn build_qwen35_graph(
     // DFlash target layer IDs for feature capture: {1, 16, 31, 46, 61}
     // HF hidden_states[lid+1] convention — capture AFTER layer 'lid'
     // runs. ref: lines 692-695
-    const CAPTURE_LAYERS: [c_int; DFLASH27B_DRAFT_N_TARGET_LAYERS as usize] =
-        [1, 16, 31, 46, 61];
+    const CAPTURE_LAYERS: [c_int; DFLASH27B_DRAFT_N_TARGET_LAYERS as usize] = [1, 16, 31, 46, 61];
 
     let hidden = w.n_embd;
     let eps = q35::EPS;
@@ -1278,9 +1294,7 @@ pub fn build_qwen35_graph(
                     // First slice: [slot_start..slot_start+pre_n) in ring.
                     {
                         let offset = (slot_start as libc::size_t) * col_stride
-                            + (capture_idx as libc::size_t)
-                                * (hidden as libc::size_t)
-                                * elt;
+                            + (capture_idx as libc::size_t) * (hidden as libc::size_t) * elt;
                         let slot = sys::ggml_view_2d(
                             ctx,
                             cache.target_feat,
@@ -1302,9 +1316,7 @@ pub fn build_qwen35_graph(
 
                     // Second slice: wrap-around at [0..post_n) if needed.
                     if post_n > 0 {
-                        let offset = (capture_idx as libc::size_t)
-                            * (hidden as libc::size_t)
-                            * elt;
+                        let offset = (capture_idx as libc::size_t) * (hidden as libc::size_t) * elt;
                         let slot = sys::ggml_view_2d(
                             ctx,
                             cache.target_feat,
@@ -1343,7 +1355,6 @@ pub fn build_qwen35_graph(
         og
     }
 }
-
 
 // ════════════════════════════════════════════════════════════════
 //  DRAFT GRAPH (qwen3_dflash_graph.cpp)
@@ -1532,16 +1543,8 @@ pub fn build_draft_graph(
             // ── 2f. Non-causal flash attention; GQA broadcast handled
             //     internally. ref: lines 120-127
             let scale = 1.0_f32 / (head_dim as f32).sqrt();
-            let mut attn = sys::ggml_flash_attn_ext(
-                ctx,
-                q,
-                k,
-                v,
-                std::ptr::null_mut(),
-                scale,
-                0.0,
-                0.0,
-            );
+            let mut attn =
+                sys::ggml_flash_attn_ext(ctx, q, k, v, std::ptr::null_mut(), scale, 0.0, 0.0);
             // attn result: [n_embd_v=head_dim, n_head, n_batch=q_len, 1]
             attn = sys::ggml_reshape_2d(ctx, attn, (head_dim * n_head) as i64, q_len as i64);
             // attn: [q_dim, q_len]
@@ -1591,7 +1594,6 @@ pub fn build_draft_graph(
         og
     }
 }
-
 
 // ════════════════════════════════════════════════════════════════
 //  DELTA-NET CHUNKED (delta_net_chunked.cpp)
@@ -1698,23 +1700,9 @@ pub fn build_delta_net_chunked(
         // ref: lines 85-92
         let q = sys::ggml_reshape_4d(ctx0, q, s_k, cs as i64, n_chunks as i64, h_k * n_seqs);
         let k = sys::ggml_reshape_4d(ctx0, k, s_k, cs as i64, n_chunks as i64, h_k * n_seqs);
-        let k_b = sys::ggml_reshape_4d(
-            ctx0,
-            k_b,
-            s_k,
-            cs as i64,
-            n_chunks as i64,
-            h_v * n_seqs,
-        );
+        let k_b = sys::ggml_reshape_4d(ctx0, k_b, s_k, cs as i64, n_chunks as i64, h_v * n_seqs);
         let _v = sys::ggml_reshape_4d(ctx0, v, s_v, cs as i64, n_chunks as i64, h_v * n_seqs);
-        let v_b = sys::ggml_reshape_4d(
-            ctx0,
-            v_b,
-            s_v,
-            cs as i64,
-            n_chunks as i64,
-            h_v * n_seqs,
-        );
+        let v_b = sys::ggml_reshape_4d(ctx0, v_b, s_v, cs as i64, n_chunks as i64, h_v * n_seqs);
 
         let g_ne0 = (*g).ne[0];
         let g = sys::ggml_reshape_4d(ctx0, g, g_ne0, cs as i64, n_chunks as i64, h_v * n_seqs);
@@ -1741,8 +1729,7 @@ pub fn build_delta_net_chunked(
             let decay_tri = sys::ggml_tri(ctx0, decay_sub, GGML_TRI_TYPE_LOWER_DIAG);
             let decay_exp = sys::ggml_exp(ctx0, decay_tri);
             let decay_perm = sys::ggml_permute(ctx0, decay_exp, 2, 1, 0, 3);
-            let decay_mask =
-                sys::ggml_cont_4d(ctx0, decay_perm, s_k, cs as i64, cs as i64, chb);
+            let decay_mask = sys::ggml_cont_4d(ctx0, decay_perm, s_k, cs as i64, cs as i64, chb);
 
             let k_b_i = sys::ggml_reshape_4d(ctx0, k_b, s_k, cs as i64, 1, chb);
             let k_j = sys::ggml_reshape_4d(ctx0, k, s_k, 1, cs as i64, chb);
@@ -1754,10 +1741,22 @@ pub fn build_delta_net_chunked(
             let kb_m = sys::ggml_mul_mat(ctx0, decay_k_b_i, k_j);
             let kq_m = sys::ggml_mul_mat(ctx0, decay_q_i, k_j);
 
-            let kb_r =
-                sys::ggml_reshape_4d(ctx0, kb_m, cs as i64, cs as i64, n_chunks as i64, h_v * n_seqs);
-            let kq_r =
-                sys::ggml_reshape_4d(ctx0, kq_m, cs as i64, cs as i64, n_chunks as i64, h_v * n_seqs);
+            let kb_r = sys::ggml_reshape_4d(
+                ctx0,
+                kb_m,
+                cs as i64,
+                cs as i64,
+                n_chunks as i64,
+                h_v * n_seqs,
+            );
+            let kq_r = sys::ggml_reshape_4d(
+                ctx0,
+                kq_m,
+                cs as i64,
+                cs as i64,
+                n_chunks as i64,
+                h_v * n_seqs,
+            );
             let kb_t = sys::ggml_transpose(ctx0, kb_r);
             let kq_t = sys::ggml_transpose(ctx0, kq_r);
             kb = sys::ggml_cont(ctx0, kb_t);
@@ -1767,8 +1766,14 @@ pub fn build_delta_net_chunked(
             let mut g_cs_j =
                 sys::ggml_reshape_4d(ctx0, g_cs, 1, cs as i64, n_chunks as i64, h_v * n_seqs);
 
-            g_cs_j =
-                sys::ggml_repeat_4d(ctx0, g_cs_j, cs as i64, cs as i64, n_chunks as i64, h_v * n_seqs);
+            g_cs_j = sys::ggml_repeat_4d(
+                ctx0,
+                g_cs_j,
+                cs as i64,
+                cs as i64,
+                n_chunks as i64,
+                h_v * n_seqs,
+            );
 
             let decay_sub = sys::ggml_sub(ctx0, g_cs_j, g_cs_i);
             let decay_tri = sys::ggml_tri(ctx0, decay_sub, GGML_TRI_TYPE_LOWER_DIAG);
