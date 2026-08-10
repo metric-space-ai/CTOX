@@ -198,7 +198,7 @@ Stamp-Disziplin — Fundament-Plan S3) ist Sol-Tier und läuft VOR P6-Tuning.
 | P1/P2 | Sol (klein, testbar) | P1: pinnenden Test :4149 begründet anpassen |
 | P3–P6 | erst Messung (direkt/Grok), dann Sol-Welle | keine Semantik in Mess-Briefs |
 | Erreichbarkeits-Wächter | Sol | Inhalt-Prüfung, je Mandant |
-| Review | **Kimi — AUSSTEHEND (Quota)** | bis dahin Selbst-Abnahme als vorläufig markiert |
+| Review | **Grok 4.5** (Owner-Freigabe 10.08.: Kimi-Quota bis 18.08. erschöpft, Grok als Vertretung autorisiert) | Kimi-Re-Review der Gesamtkampagne nach dem 18.08. bleibt S4-Tor |
 
 Bekannte Panel-Schwäche dieser Runde: beide Erst-Läufe von Grok und Luna
 starben nach ~7 min mit Gateway-Transportfehlern; Reruns liefen durch.
