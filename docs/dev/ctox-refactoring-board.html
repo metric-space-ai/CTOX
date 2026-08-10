@@ -151,264 +151,280 @@ footer{
   .wrap{padding:0 16px 64px}
 }
 </style>
+<style>
+.plan{margin-top:56px}
+.plan h2{font-size:12px;letter-spacing:.13em;text-transform:uppercase;font-weight:700;margin:0 0 4px;padding-bottom:8px;border-bottom:2px solid var(--ink)}
+.stufe{border:1px solid var(--rule);background:var(--card);padding:18px 18px 16px;margin-top:18px;position:relative}
+.stufe::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--owner)}
+.stufe.s0::before{background:var(--alert)}
+.stufe.s1::before{background:var(--pending)}
+.stufe.s2::before{background:var(--verified)}
+.stufe.s3::before{background:var(--owner)}
+.stufe-kopf{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;margin-bottom:6px}
+.stufe-nr{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:var(--muted)}
+.stufe h3{margin:0;font-size:19px;letter-spacing:-.015em;font-weight:700}
+.stufe .warum{font-size:13.5px;color:var(--muted);margin:0 0 12px;max-width:82ch}
+.tor{border-left:2px solid var(--verified);padding:8px 0 8px 12px;margin:12px 0 0;font-size:13px}
+.tor b{display:block;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--verified);margin-bottom:3px}
+.arbeit{list-style:none;padding:0;margin:10px 0 0}
+.arbeit li{font-size:13.5px;line-height:1.5;padding:7px 0 7px 20px;border-bottom:1px solid var(--hair);position:relative}
+.arbeit li:last-child{border-bottom:none}
+.arbeit li::before{content:"▸";position:absolute;left:2px;color:var(--muted)}
+.arbeit li b{font-weight:650}
+.wer{display:inline-block;font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;padding:1px 5px;border:1px solid currentColor;margin-left:6px;vertical-align:1px}
+.w-ich{color:var(--owner)} .w-worker{color:var(--pending)} .w-fremd{color:var(--muted)} .w-owner{color:var(--alert)}
+</style>
 
 <div class="wrap">
 <header>
   <div class="eyebrow">
-    <span>CTOX Sync-Engine</span><span>Missionstafel</span>
-    <span>Stand 06.08.2026, 20:05</span><span>Wiederaufnahmedokument</span>
+    <span>CTOX Sync-Engine</span><span>Missionstafel &amp; Sanierungsplan</span>
+    <span>Stand 09.08.2026</span><span>Wiederaufnahmedokument</span>
   </div>
-  <h1>Die Instanz zeigt noch nichts von dem, was repariert ist.</h1>
-  <p class="pfad"><b>Kritischer Pfad:</b> Commit <code>27ca6b205</code> liegt auf <code>main</code>, aber der Daemon läuft das Release vom 24.07. Bis <code>ctox update apply --source</code> und <em>ein</em> Neustart durch sind, ändert sich am laufenden System nichts — und erst die Nachher-Messung gegen <code>messung-vorher.txt</code> entscheidet, ob die Note steigt.</p>
+  <h1>Der Kern ist nicht instabil, weil Code fehlt. Er ist instabil, weil nichts ihn festhält.</h1>
+  <p class="pfad"><b>Befund nach drei Tagen:</b> Jeder Ausfall dieser Woche — die zwölf Tage Schreibschutz, der Launch-Kontext-Ausfall, die volle Platte, die still zurückgenommenen Zeilen — hatte dieselbe Wurzel: <b>137 geänderte und 34 unversionierte Dateien</b> im gemeinsamen Arbeitsbaum, ein deaktivierter Größen-Wächter, und 59 rote Tests, die nie klassifiziert wurden. Solange das so bleibt, erzeugt jede Reparatur die nächste. Der Plan unten dreht die Reihenfolge um: <b>erst das Netz, dann der Umbau.</b></p>
   <div class="notenband">
     <span class="note">Note F</span>
-    <span class="warum">Die Note steigt nicht durch Commits. Sie steigt, wenn der Eigentümer am laufenden System merkt, dass es besser ist.</span>
+    <span class="warum">Sie steigt nicht durch Commits, sondern wenn eine Änderung nicht mehr stillschweigend verschwinden kann.</span>
   </div>
 </header>
 
+<section class="plan">
+  <h2>Sanierungsplan — vier Stufen, jede mit einem messbaren Tor</h2>
+  <p class="lead" style="font-size:13px;color:var(--muted);margin:10px 0 4px;max-width:82ch">Keine Stufe beginnt, bevor das Tor der vorherigen belegt ist. Das ist der Unterschied zu dieser Woche: bisher lief alles gleichzeitig, und jeder Fix schnitt in Arbeit, die noch nicht festgehalten war.</p>
+
+  <article class="stufe s0">
+    <div class="stufe-kopf"><span class="stufe-nr">Stufe 0 · Blockiert alles</span><h3>Den Arbeitsbaum leeren</h3></div>
+    <p class="warum">137 geänderte plus 34 unversionierte Dateien sind kein Zustand, sondern die Ursache. Sie haben diese Woche dreimal dazu geführt, dass ein Commit fremde Zeilen still zurücknahm — <code>flate2</code>, <code>mod hashing;</code>, <code>mod module_size_tests;</code>. Jede weitere Naht schneidet in dieselbe Falle.</p>
+    <ul class="arbeit">
+      <li><b>Verwaiste Worker-Arbeit entscheiden.</b> Die Auth-Assist-Browserarbeit (<code>browserCandidateFieldsInFrame</code>) stammt aus Lauf <code>20260805T104652</code>, war nie auf <code>main</code>, ist aber in den <code>preserve</code>-Refs gesichert. Übernehmen oder verwerfen — beides ist in Ordnung, nur Liegenlassen nicht.<span class="wer w-owner">Owner</span></li>
+      <li><b>Die vier Budget-Verletzer committen oder verwerfen.</b> <code>office_engine.rs</code>, <code>store.rs</code>, <code>store_outbound_commands.rs</code>, <code>channels/mod.rs</code> sind in HEAD alle unter Budget — erst die unversionierte Arbeit sprengt sie.<span class="wer w-fremd">Plattform-Strang</span></li>
+      <li><b>Die fehlende <code>secrets.rs</code>-API einchecken.</b> Ohne sie baut <code>main</code> nicht aus sauberem Checkout: <code>SecretRecordWrite</code>, <code>write_secret_records</code>, <code>read_secret_values</code>, <code>delete_secret_records</code>, <code>credential_lifecycle_guard</code>, <code>execution::cliproxyapi_integration</code>, <code>MainResponsesGatewayPhase</code>.<span class="wer w-fremd">Port-Strang</span></li>
+    </ul>
+    <div class="tor"><b>Tor</b><code>git status --porcelain | wc -l</code> = 0 und <code>cargo check</code> grün aus einem frischen <code>git clone</code>. Erst dann beginnt Stufe 1.</div>
+  </article>
+
+  <article class="stufe s1">
+    <div class="stufe-kopf"><span class="stufe-nr">Stufe 1 · Das Netz</span><h3>Wächter, die eine Rücknahme unmöglich machen</h3></div>
+    <p class="warum">Diese Woche verschwand der Größen-Wächter durch <b>eine gelöschte Zeile</b> und blieb monatelang unbemerkt — mit ihm ein bereits committeter Budget-Verstoß. Ein Wächter, der sich still abschalten lässt, ist kein Wächter.</p>
+    <ul class="arbeit">
+      <li><b><code>mod module_size_tests;</code> committet zurück</b> — plus ein Meta-Test, der fehlschlägt, wenn die <code>mod</code>-Zeile fehlt. Ein Wächter muss seine eigene Anmeldung bewachen.<span class="wer w-ich">Ich</span></li>
+      <li><b>R-01: die 59 roten Tests klassifizieren.</b> Seit welchem Commit, echte Regression / veralteter Test / Umgebung. Solange „grün" unerreichbar ist, kann kein Tor je grün sein.<span class="wer w-worker">Worker</span></li>
+      <li><b>Erreichbarkeits-Wächter je Mandant.</b> leadyoda war zehn Tage tot, ohne dass es jemand merkte — die Fehlertafel liefert HTTP 200. Ein Wächter, der Inhalt statt Statuscode prüft.<span class="wer w-worker">Worker</span></li>
+      <li><b>Plattenwarnung in die Instanz-Gesundheit.</b> Der Produktionsausfall war eine volle Platte. Zwei Zeilen Schwellwert hätten ihn verhindert.<span class="wer w-ich">Ich</span></li>
+    </ul>
+    <div class="tor"><b>Tor</b>Alle vier Wächter laufen auf <code>main</code>, die Anzahl roter Tests ist eine bekannte, dokumentierte Zahl statt einer Unbekannten, und jede Instanz meldet ihren Zustand selbst.</div>
+  </article>
+
+  <article class="stufe s2">
+    <div class="stufe-kopf"><span class="stufe-nr">Stufe 2 · Der Umbau</span><h3>Die Engine zerlegen — jetzt gefahrlos</h3></div>
+    <p class="warum">Erst jetzt ist ein Schnitt billig: ein leerer Baum heißt keine Kollision, ein aktiver Wächter heißt sofortige Rückmeldung. <code>S-02c</code> hat bewiesen, dass die Mechanik trägt — 25.292 auf 22.658 Zeilen, reiner Umzug, zeilenweise verifiziert.</p>
+    <ul class="arbeit">
+      <li><b><code>store.rs</code> — 28.413 Zeilen, das größte Ziel.</b> Nähte: Revisionen (F-01b liegt fertig), Projektionen, Outbound. Blockiert bis Stufe 0.<span class="wer w-worker">Worker</span></li>
+      <li><b><code>service.rs</code> — 26.224 Zeilen.</b> Nie angefasst, zweitgrößte Datei der Codebasis.<span class="wer w-worker">Worker</span></li>
+      <li><b><code>office_engine.rs</code> — 14.598 Zeilen</b>, aktuell über Budget.<span class="wer w-worker">Worker</span></li>
+      <li><b>Restliche Peer-Nähte:</b> desktop_file (54 Funktionen), Projektion (69), Command (31), Demand (8). <code>rxdb_peer.rs</code> ist nach S-02c kollisionsfrei.<span class="wer w-worker">Worker</span></li>
+      <li><b>Vor jeder Naht:</b> <code>grep -rho 'business_os::[A-Za-z_]*' src</code> — externe Verweise sieht man nicht in der Datei selbst. Und Attribute vor der Startzeile prüfen, sonst bleibt ein <code>#[derive(...)]</code> verwaist zurück.<span class="wer w-ich">Ich</span></li>
+    </ul>
+    <div class="tor"><b>Tor</b>Keine Datei über 10.000 Produktionszeilen, jede Naht ein reiner Umzug (Vereinigung nach Normalisierung = Original), Wächter grün.</div>
+  </article>
+
+  <article class="stufe s3">
+    <div class="stufe-kopf"><span class="stufe-nr">Stufe 3 · Die Leistung</span><h3>Was nach den Sofortmaßnahmen bleibt</h3></div>
+    <p class="warum">Die Ladezeit-Gewinne dieser Woche sind belegt (208 → 129 Anfragen, Poll ~30 → 1,6/min). Was übrig ist, sind keine Hotfixes mehr, sondern Struktur.</p>
+    <ul class="arbeit">
+      <li><b>Wartungsabfrage im Proxy zwischenspeichern.</b> Sie wird per SSH in die Kunden-VM beantwortet — bis 1,7 s pro Aufruf. Der Prozessspeicher (4 s TTL) ist fertig, aber nicht ausgeliefert.<span class="wer w-fremd">Plattform-Strang</span></li>
+      <li><b>Peer-Status-Rückfall.</b> Fällt SSH aus, läuft die App auf dem letzten guten Stand weiter statt auszufallen. Fertig, wartet auf Freigabe.<span class="wer w-owner">Owner</span></li>
+      <li><b>Fehlertafel mit 503 statt 200.</b> Ändert das Verhalten jeder Überwachung — gehört als eigener, angekündigter Schritt ausgeliefert.<span class="wer w-owner">Owner</span></li>
+      <li><b>Flotte vereinheitlichen.</b> Vier Mandanten, Binäre vom 16.06. bis 07.08. Release-Upgrade für brand-demo und leadyoda.<span class="wer w-owner">Owner</span></li>
+      <li><b>Keep-alive und Worker-Pool.</b> <code>Connection: close</code> erzwingt je Anfrage einen neuen Verbindungsaufbau; ab der fünften parallelen Anfrage serialisiert der Pool sichtbar.<span class="wer w-ich">Ich</span></li>
+    </ul>
+    <div class="tor"><b>Tor</b>Eine Nachher-Messung bei gleichem Daemon-Alter wie <code>messung-vorher.txt</code>, im Browser verifiziert — nicht per Statuscode.</div>
+  </article>
+</section>
+
 <div class="kanban">
-
-<!-- ============ ERLEDIGT ============ -->
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt</h2><span class="zaehler">12 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">9 Karten</span></div>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Committet</span>
-    <h3>Fünf Live-Fixes plus Größen-Ratsche</h3>
-    <p>Bundle-Vertrag mit Mindestboden, Wartungs-Endzustand, HTTP-Warm-up im Hintergrund, gzip mit <code>Vary</code>, Diagnose-TTL-Cache — dazu 17 Module im Größenbudget mit beidseitigem Wächter.</p>
-    <span class="ev"><b>Commit</b> 27ca6b205 auf 1a0e4b62a · 9 Dateien, +446/−14<br>
-    <b>Tor</b> keine neuen Fehlschläge, seriell verglichen: Basis <span class="num">59</span> rot, meine <span class="num">60</span>, davon einer nachgewiesen flatternd<br>
-    <b>Grün</b> install::tests 36/36 · module_size_tests<br>
-    <b>Log</b> /Volumes/tmp/ctox-pipeline/build-verify.log</span>
+    <span class="chip c-ok">Plan v2</span>
+    <h3>Konsolidierter Plan: Optimierung + Refactoring vereint</h3>
+    <p><code>docs/ctox-sync-plan-2026-08-10.md</code> — aus Workjet-Dreier-Panel (Grok/Luna/GLM, identischer Brief) synthetisiert; jede tragende Behauptung am HEAD nachgemessen. Kernkorrekturen: Wächter+Meta-Test SIND auf HEAD (<code>d328d3a1d</code>+<code>6a917e13b</code>); HEAD hat 0 Budget-Verstöße — die 4 „OVER" liegen im dirty Baum (store.rs +1.097); 178 Collections, nicht ~195. 6 belegte Perf-Hebel (Keep-Alive, doc_cache-Deckel, Idle-Backoff, Initial-Sync-Priorisierung, Batch-Matrix, Projektions-Scan).</p>
+    <span class="ev"><b>Panel-Receipts</b> 3× completed (2 Gateway-Reruns nötig)<br><b>Kimi-Review AUSSTEHEND</b> — 403-Quota bis nächster Zyklus<br><b>Owner-Fragen</b> 5, im Plan §6</span>
   </article>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Ursache belegt</span>
-    <h3>Der Upgrade-Pfad war durch Konstruktion kaputt</h3>
-    <p><code>v0.3.27</code> getaggt am 10.06., der Bundle-Vertrag entstand am 29.07. Der Installer prüfte das heruntergeladene Bundle gegen seine <em>eigene</em>, später geschriebene Kopie — 30 „fehlende" Pfade, die es nie versprechen konnte, terminal gescheitert.</p>
-    <span class="ev"><b>Folge</b> 12 Tage Schreibschutz, jedes Upgrade auf ältere Tags unmöglich<br>
-    <b>Fix</b> Prüfung gegen das mitgelieferte Manifest; ohne Manifest gilt ein Mindestboden aus 4 Dateien, damit „kein Manifest“ nicht „alles installiert“ wird</span>
+    <span class="chip c-ok">Kernzerlegung</span>
+    <h3>Erster Commit an der Engine: <code>afa5b21c0</code></h3>
+    <p><code>rxdb_peer.rs</code> von 25.292 auf 22.658 Zeilen, Browser-Control in ein eigenes Modul (2.681 Zeilen). Reiner Umzug: Vereinigung beider Dateien nach Normalisierung = Original.</p>
+    <span class="ev"><b>Selbst gebaut</b> cargo check grün · rustfmt sauber<br><b>Ratsche</b> 14.744 → 12.718<br><b>Invarianten</b> nicht berührt</span>
   </article>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Live entsperrt</span>
-    <h3>Zwölf Tage Schreibschutz aufgehoben</h3>
-    <p>Ein terminal gescheitertes Upgrade galt dem Status-Endpunkt weiter als aktiv. Live-Zeile <code>business-os-upgrade</code> von <code>failed</code> auf <code>rolled_back</code> gesetzt, Sicherung vorher.</p>
-    <span class="ev"><b>Wirkung</b> Browser fehlerfrei, Desktop mountet, Threads gefüllt (9 Handeln / 10 Wartet)<br>
-    <b>Zusätzlich</b> Daemon-Neustart hat die eingefrorene DNS-Auflösung behoben — jede Upgrade-Wiederholung war zuvor an <code>resolve 'api.github.com'</code> gescheitert, während die Maschine GitHub in 0,3 s erreichte</span>
+    <span class="chip c-alert">Produktionsausfall</span>
+    <h3>thesen.ctox.dev war tot — volle Platte</h3>
+    <p><code>peer status</code> lieferte <code>disk I/O error</code> statt JSON, der Proxy parste <code>null</code> → <code>missing_config</code>. Kette: <code>business-os-pairing.ts:28</code> → <code>business-os-launch.ts:174-191</code> → SSH.</p>
+    <span class="ev"><b>Geräumt</b> 12 GB Bauabfall → 31 GB frei<br><b>Verifiziert</b> im Browser, nicht per curl</span>
   </article>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Ursache belegt</span>
-    <h3>Sellify: 238.913 Zeilen liegen unerreichbar</h3>
-    <p>Die Daten stehen in <code>__v1</code>, die Manifeste deklarieren <code>version 0</code>, die Registrierung bindet die leeren v0-Tabellen an. Der Beweis steht in der Datei selbst: dieselben vier Collections tragen die Identitäts-Migrationsstrategie <b>nach Version 1</b>.</p>
-    <span class="ev"><b>Gemessen</b> people 60.639 · companies 17.516 · campaigns 86.549 · activities 74.209, alle v0 = 0<br>
-    <b>F-05</b> 363 Collections geprüft, nur diese vier betroffen, außerhalb Sellify null<br>
-    <b>Reparatur</b> gebaut und gesichert, für die Kundenvorführung zurückgenommen — greift erst mit dem Neustart</span>
+    <span class="chip c-alert">Eigenes Verschulden</span>
+    <h3>Mein Auftrag P-01 machte alle Instanzen startunfähig</h3>
+    <p>Der Launch-Kontext sollte in einen HTTP-Endpunkt — verwaltete Instanzen erreichen <code>/api/business-os/*</code> aber per Konstruktion nicht (410). Und der Abruf war Pflicht statt Rückfall.</p>
+    <span class="ev"><b>Behoben</b> 54570c8ea — Injektion wieder Primärquelle<br><b>Zahlt sich aus</b> skf und brand-demo starten trotz 410</span>
   </article>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Grundlinie</span>
-    <h3>Vorher-Messung als reproduzierbare Datei</h3>
-    <p>Dieselben Befehle laufen nachher wieder. Shell <span class="num">651.692</span> Byte, unkomprimiert, <code>no-store</code>, <code>Connection: close</code>. TTFB 4,18 s kalt / 0,39–0,73 s warm. Sechs gleichzeitige Anfragen zeigen den Vier-Worker-Pool: 4× ~2,85 s, dann 2× ~4,0 s.</p>
-    <span class="ev"><b>Skript</b> /Volumes/tmp/ctox-pipeline/messung.sh<br>
-    <b>Ergebnis</b> /Volumes/tmp/ctox-pipeline/messung-vorher.txt</span>
+    <span class="chip c-ok">Gemessen</span>
+    <h3>208 → 129 Anfragen je Seitenaufruf</h3>
+    <p>Wartungs-Poll lief dauerhaft alle 2 s (auf verwalteten Instanzen ein SSH-Aufbau je Abfrage), Icons doppelt geholt, 26 verschiedene Cache-Buster.</p>
+    <span class="ev"><b>Commits</b> b64f0e06b · 3f46fb06e · 3ac1075d5<br><b>Poll</b> ~30/min → 1,6/min · <b>Dubletten</b> 51 → 13</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Am System belegt</span>
+    <h3>Sellify: 238.913 Zeilen wieder gebunden</h3>
+    <p>Die leeren <code>__v0</code>-Tabellen existieren nicht mehr; nur noch <code>__v1</code> mit Indizes und Triggern.</p>
+    <span class="ev">people 60.639 · companies 17.516 · campaigns 86.549 · activities 74.209</span>
   </article>
 
   <article class="karte s-done">
     <span class="chip c-alert">Befund</span>
-    <h3>origin/main ist rot — ohne mein Zutun</h3>
-    <p>Auf der unveränderten Basis fallen seriell <span class="num">59</span> Tests reproduzierbar durch. Bei voller Parallelität kommen ~50 weitere dazu, die allein grün sind.</p>
-    <span class="ev"><b>Gruppen</b> mcp_channel 13 · store 9 · service_loop 6 · tickets 5 · runtime_control 5<br>
-    <b>Namen</b> /Volumes/tmp/ctox-pipeline/rot-basis.txt<br>
-    <b>Folge</b> „grün" ist als Tor unerreichbar; das Tor heißt jetzt „keine neuen Fehlschläge"</span>
+    <h3>Der Größen-Wächter war still abgeschaltet</h3>
+    <p><code>94251e6be</code> entfernte <b>eine Zeile</b> — <code>mod module_size_tests;</code> — aus <code>main.rs</code>. Seither lief er nicht und verdeckte einen bereits committeten Budget-Verstoß in <code>service/business_os.rs</code> (7187 &gt; 7106).</p>
+    <span class="ev"><b>Entdeckt</b> beim Testen von S-02c: „0 Tests gefunden"<br><b>Folge</b> Stufe 1 des Plans</span>
   </article>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Bereinigt</span>
-    <h3>Platte von 11 GB auf 63 GB befreit</h3>
-    <p>69 GB lagen in Arbeitsbäumen meiner delegierten Läufe. Gelöscht wurden nur Bäume, die gegen den Hauptbaum <b>null eigene Dateien</b> hatten — der 18-GB-Baum meldete 106 „Änderungen", davon 0 eigene.</p>
-    <span class="ev"><b>Warum</b> ENOSPC ist die belegte Ursache hinter Heartbeat-Ausfall und Peer-Respawns (S-01)<br>
-    <b>Warum nicht automatisch</b> der eingebaute Aufräumer verlangt eine Markierung, die ich als Orchestrator nie gesetzt habe</span>
+    <span class="chip c-neg">Korrektur</span>
+    <h3>Drei eigene Fehlbefunde zurückgenommen</h3>
+    <p>Das gemeldete Verbindungsleck (205 stabile Verbindungen, kein Wachstum), der „defekte" Log (launchd schreibt nur bei Fehlern), die 69 Minuten als feste Zahl (Extremwert bei Last 158). Dazu: <b>der Installer räumt Sicherungen sehr wohl auf</b> — meine gegenteilige Behauptung war falsch.</p>
   </article>
 
   <article class="karte s-done">
-    <span class="chip c-ok">Entstört</span>
-    <h3>Verwaiste Git-Sperre seit 10:52 entfernt</h3>
-    <p><code>.git/index.lock</code>, 0 Bytes, kein laufender Git-Prozess. Sie blockierte über vier Stunden jedes <code>git add</code>, <code>commit</code> und <code>checkout</code> im Hauptcheckout — auch für den parallelen Strang.</p>
-    <span class="ev"><b>Kopie</b> /Volumes/tmp/ctox-pipeline/index.lock.entfernt-20260806</span>
-  </article>
-
-  <article class="karte s-done">
-    <span class="chip c-neg">Negativergebnis</span>
-    <h3><span class="korr">KORREKTUR:</span> das Verbindungsleck gibt es nicht</h3>
-    <p>Gemeldet waren 2.926 Deskriptoren als Leck. Nachgemessen: <span class="num">205</span> Verbindungen auf <code>business-os-rxdb.sqlite3</code>, über 90 s unverändert, RSS 0,2 GB — eine Verbindung je registrierter Collection, beschränkt, kein Wachstum. Befund zurückgezogen.</p>
-  </article>
-
-  <article class="karte s-done">
-    <span class="chip c-neg">Negativergebnis</span>
-    <h3><span class="korr">KORREKTUR:</span> zwei weitere eigene Fehlbefunde</h3>
-    <p><b>Das Log ist nicht defekt.</b> launchd leitet stdout dorthin; der Daemon schreibt nur bei Fehlern. Stille heißt: keine Fehler.</p>
-    <p><b>Der 69-Minuten-Ausfall ist kein Normalfall.</b> Nach dem Neustart um 12:55 antwortete dieselbe Shell nach 4,18 s. Die 4.121 Sekunden waren ein Extremwert bei Last 158 und voller Platte. Der Warm-up-Fix bleibt richtig, die Zahl war keine Konstante.</p>
-  </article>
-
-  <article class="karte s-done">
-    <span class="chip c-neg">Negativergebnis</span>
-    <h3>S-02 Runde 1 verloren</h3>
-    <p>Beim Notstopp vor der Kundenvorführung abgebrochen. Der Schnitt an <code>rxdb_peer.rs</code> ging verloren, nur die ausgelagerte Datei blieb.</p>
-    <span class="ev"><b>Rest</b> /Volumes/tmp/ctox-s02/src/core/business_os/rxdb_peer_browser.rs (2.678 Zeilen) — dient S-02b als Vorlage</span>
-  </article>
-
-  <article class="karte s-done">
-    <span class="chip c-ok">Messungen</span>
-    <h3>Vier Messaufträge geliefert</h3>
-    <p><b>F-02</b> Registrierungsausfälle je Modul: 860× <code>user_thread_messages</code> nicht registriert, 22 Modulschemata als <code>unsupported</code> verworfen.<br>
-    <b>S-01</b> Peer-Respawn: volle Platte → Heartbeat unschreibbar → Watchdog hält gesunden Peer für tot; Backoff resettet nicht nach Bring-up.<br>
-    <b>F-04/F-05</b> Sellify-Schreibpfad und Schadensgrenze.</p>
-    <span class="ev"><b>Berichte</b> /Volumes/tmp/ctox-pipeline/reports/{f-02,s-01,f-04,f-05}-frisch.md</span>
+    <span class="chip c-ok">Flotte</span>
+    <h3>leadyoda antwortet wieder</h3>
+    <p>Von <code>:8765=000</code> auf 200, Replikation 90 → 178. Die Instanz war seit Juni unerreichbar. Der Blocker war ein Migrationsguard, kein Binärfehler.</p>
+    <span class="ev"><b>Gelöst vom</b> Plattform-Strang mit dem ts-gpu3-Bau</span>
   </article>
 </section>
 
-<!-- ============ IN ARBEIT ============ -->
 <section class="spalte">
-  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">0 laufend · 3 gestoppt</span></div>
+  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">2 Karten</span></div>
 
   <article class="karte s-work">
-    <span class="chip c-alert">Gestoppt · ENOSPC</span>
-    <h3>Alle drei Aufträge durch Plattennot abgebrochen</h3>
-    <p>Drei parallele Sol-Läufe bauten je einen vollständigen Rust-Zielbaum <em>im Arbeitsbaum</em>. 63 GB waren in unter einer Stunde aufgebraucht; bei 0 Bytes konnte nicht einmal mehr ein Befehlsergebnis geschrieben werden.</p>
-    <span class="ev"><b>Betroffen</b> F-01b (Revisionsformat) · S-02b (Browser-Control-Schnitt) · R-01 (die 59 roten Tests)<br>
-    <b>Läufe</b> 20260806T194506-1403 · 194514-1572 · 194619-3738<br>
-    <b>Quellstände</b> in den Arbeitsbäumen erhalten, nur <code>runtime/build</code> geleert</span>
-    <span class="ausloeser">Neustart erst nach <span>der Bauplatz-Entscheidung im Rückstau — sonst wiederholt sich ENOSPC beim nächsten Anlauf.</span></span>
+    <span class="chip c-work">Fertig, blockiert am Commit</span>
+    <h3><code>service/business_os.rs</code> geschnitten — Plattform-Strang</h3>
+    <p>7187 → 6060 Produktionszeilen, neues Modul <code>business_os_app_testing.rs</code> (1232 Zeilen). Meine Grenzberatung übernommen: ganzer App-Testing-Block statt seines ursprünglichen Schnitts, der vorne den Bench-Cluster angeschnitten und hinten fremde Auth-Handler mitgenommen hätte.</p>
+    <span class="ev"><b>Verifiziert</b> null Abweichungen über 1190 Zeilen · cargo check rc=0<br>
+    <b>Grenzfall geklärt</b> alle 7 Aufrufer von <code>print_process_output</code> liegen außerhalb → bleibt in der Hauptdatei<br>
+    <b>Blockiert</b> weil die Datei verwaiste Auth-Assist-Arbeit trägt, die ein <code>git commit &lt;pfad&gt;</code> mitnähme</span>
+    <span class="ausloeser">Entblockt durch <span>Stufe 0 — das Patch-Verfahren liegt vor: Fremdarbeit herausheben, sauber committen, mit <code>--3way</code> zurücklegen.</span></span>
   </article>
 
   <article class="karte s-work">
-    <span class="chip c-alert">Fremdschaden</span>
-    <h3>Ich habe den Lauf des anderen Strangs mitgetötet</h3>
-    <p>Unter ENOSPC-Druck habe ich pauschal alle <code>claude --bare</code>-Prozesse abgeschossen — darunter den Browser-Anmeldungs-Lauf, der seit 10:31 lief. Das war kein Zielfehler, sondern ein zu grober Schnitt.</p>
-    <span class="ev"><b>Lauf</b> 20260806T103149-35252-implementation-hard<br>
-    <b>Verloren</b> der laufende Prozess und die Build-Artefakte<br>
-    <b>Erhalten</b> 102 geänderte + 19 neue Quelldateien im Arbeitsbaum, geprüft</span>
-  </article>
-
-  <article class="karte s-work">
-    <span class="chip c-alert">Anbieter aus</span>
-    <h3>Kimi bis zum nächsten Abrechnungszyklus nicht erreichbar</h3>
-    <p><code>403 You've reached your usage limit for this billing cycle</code>, direkt bestätigt. Der Dispatcher hat R-01 als <code>research</code> korrekt <em>abgelehnt</em> statt still zu degradieren.</p>
-    <span class="ev"><b>Folge</b> unabhängige Review hat keinen Ersatz — sie ist <b>aufgeschoben</b>, nicht erledigt<br>
-    <b>Umplanung</b> R-01 läuft als <code>implementation-hard</code> auf Sol; die Aufgabe ist detailreiche Messarbeit, das Änderungsverbot steht im Auftrag</span>
+    <span class="chip c-ok">Beweislage</span>
+    <h3>Verwaiste Worker-Arbeit forensisch geklärt</h3>
+    <p><code>browserCandidateFieldsInFrame</code>: 12 Treffer in der Historie, <b>alle</b> maschinell (<code>preserve run</code> / <code>wip:</code>), <b>0 auf main</b>. Frühester Träger: Lauf <code>20260805T104652</code>. Kein menschlicher Autoren-Commit.</p>
+    <span class="ev"><b>Entscheidend</b> in den preserve-Refs gesichert → kein Zeitdruck<br>
+    <b>Verbreitung</b> liegt via <code>--include-dirty</code> in allen sieben Worktrees</span>
+    <span class="ausloeser">Wartet auf <span>Owner-Entscheidung: übernehmen oder verwerfen.</span></span>
   </article>
 </section>
 
-<!-- ============ ALS NÄCHSTES ============ -->
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">8 Karten</span></div>
+  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">7 Karten</span></div>
 
   <article class="karte s-todo">
-    <h3>Bauplatz der Worker aus dem Arbeitsbaum holen</h3>
-    <p>Jeder Lauf kostet 10–18 GB, workjet räumt unmarkierte Läufe nie auf, und drei parallele Läufe sind eine garantierte Plattennot. Solange das steht, ist jede Delegation ein Risiko für den Daemon.</p>
-    <span class="ausloeser">Auslöser <span>sofort — blockiert alle drei gestoppten Aufträge.</span></span>
+    <h3>Meta-Test: der Wächter bewacht seine eigene Anmeldung</h3>
+    <p>Ein Test, der fehlschlägt, wenn <code>mod module_size_tests;</code> aus <code>main.rs</code> fehlt. Diese Woche hat gezeigt, dass eine gelöschte Zeile reicht.</p>
+    <span class="ausloeser">Auslöser <span>sobald der Wächter committet zurück ist.</span></span>
   </article>
 
   <article class="karte s-todo">
-    <h3>Installieren, <em>einmal</em> neu starten, nachmessen</h3>
-    <p><code>ctox update apply --source</code> nimmt einen lokalen Quellbaum — kein Remote, kein Push. Im selben Fenster wird Sellify wieder scharf geschaltet, damit ein Neustart beides trägt.</p>
-    <span class="ev"><b>Danach</b> messung.sh nachher · Vergleich gegen messung-vorher.txt<br>
-    <b>Erwartet</b> Bytes über die Leitung fallen um ~90 %, TTFB sinkt, Sellify zeigt 238.913 Zeilen</span>
-    <span class="ausloeser">Auslöser <span>wenn F-01b und S-02b integriert sind — oder früher, wenn der Eigentümer das Ergebnis eher sehen will.</span></span>
+    <h3>R-01: die 59 roten Tests klassifizieren</h3>
+    <p>Seit welchem Commit, warum je Gruppe, Einordnung in echte Regression / veralteter Test / Umgebung. Dazu die ~50 nur-parallel-roten.</p>
+    <span class="ev"><b>Namen liegen</b> docs/dev/beweise/rot-basis.txt<br><b>Blockiert bisher</b> Kimi-Quote, dann Plattennot — nie gelaufen</span>
+    <span class="ausloeser">Auslöser <span>Worker-Platz frei — kollidiert mit niemandem, reine Diagnose.</span></span>
   </article>
 
   <article class="karte s-todo">
-    <h3>Die 59 roten Tests klassifizieren</h3>
-    <p>Seit welchem Commit, warum je Gruppe, und alle 59 in echte Regression / veralteter Test / Umgebung einsortiert. Dazu die gemeinsame Ursache der ~50 nur-parallel-roten.</p>
-    <span class="ausloeser">Auslöser <span>R-01 neu gestartet, sobald der Bauplatz steht.</span></span>
+    <h3>F-01b: Revisionsformat aus <code>store.rs</code></h3>
+    <p><code>store_revision.rs</code> liegt fertig gerettet vor, <code>store.rs</code> hat weiterhin 14 <code>rev_</code>-Stellen.</p>
+    <span class="ausloeser">Auslöser <span><code>store.rs</code> committet — trägt derzeit +1.649 fremde Zeilen.</span></span>
   </article>
 
   <article class="karte s-todo">
-    <h3>F-01b: Revisionsformat, ohne store.rs zu mästen</h3>
-    <p>39.478 verworfene <code>rev_&lt;uuid&gt;</code>-Revisionen. Der kanonische Helfer kommt in ein eigenes Modul, die Ratschenzahl für <code>store.rs</code> muss <b>fallen</b>. Am ersten Anlauf gescheitert, weil er die Datei um 132 Zeilen wachsen ließ.</p>
-    <span class="ausloeser">Auslöser <span>Bauplatz steht · Sol-Platz frei.</span></span>
+    <h3>Restliche Peer-Nähte</h3>
+    <p>desktop_file (54 Funktionen), Projektion (69), Command (31), Demand (8). <code>rxdb_peer.rs</code> ist nach S-02c kollisionsfrei.</p>
+    <span class="ev"><b>Vor jeder Naht</b> <code>grep -rho 'business_os::[A-Za-z_]*' src</code> für externe Verweise, und Attribute vor der Startzeile prüfen</span>
+    <span class="ausloeser">Auslöser <span>Klärung, ob der Plattform-Strang selbst an <code>rxdb_peer.rs</code> will.</span></span>
   </article>
 
   <article class="karte s-todo">
-    <h3>S-02b: Browser-Control aus dem Peer schneiden</h3>
-    <p>Reiner Umzug, 28 <code>browser_*</code>-Funktionen aus <code>rxdb_peer.rs</code> (14.744 Produktionszeilen). Kein Umbenennen, keine Signaturänderung — sonst lässt sich der Baum nicht gegen fremde offene Arbeit mischen.</p>
-    <span class="ausloeser">Auslöser <span>Bauplatz steht · Sol-Platz frei.</span></span>
+    <h3><code>service.rs</code> — 26.224 Zeilen, nie angefasst</h3>
+    <p>Die zweitgrößte Datei der Codebasis. Bisher in keinem Auftrag.</p>
+    <span class="ausloeser">Auslöser <span>Stufe 2.</span></span>
   </article>
 
   <article class="karte s-todo">
-    <h3>Den Peer weiter zerlegen</h3>
-    <p>Verbleibende Nähte nach S-02b: desktop_file 54 Funktionen, Projektion 69, Command 31, Demand 8.</p>
-    <span class="ausloeser">Auslöser <span>S-02b gelandet und die Ratsche gesenkt.</span></span>
+    <h3>Erreichbarkeits-Wächter je Mandant</h3>
+    <p>leadyoda war zehn Tage tot, ohne Alarm. Die Fehlertafel liefert HTTP 200 — jede Statuscode-Prüfung meldet „gesund". Der Wächter muss Inhalt prüfen.</p>
+    <span class="ausloeser">Auslöser <span>Stufe 1.</span></span>
   </article>
 
   <article class="karte s-todo">
-    <h3>Die Shell client-first machen</h3>
-    <p>gzip nimmt die Bytes, nicht die Ursache: 650 KB personalisiertes Dokument, deshalb <code>no-store</code>. Der eigentliche Schnitt ist eine kleine cachebare Shell plus winziger Launch-Kontext als JSON, Keep-alive zurück statt <code>Connection: close</code>, Worker-Pool über 4.</p>
-    <span class="ausloeser">Auslöser <span>Nachher-Messung liegt vor — die Reihenfolge muss belegt bleiben.</span></span>
-  </article>
-
-  <article class="karte s-todo">
-    <h3>Thread-Nachrichten und REM-Schemata</h3>
-    <p>860× <code>user_thread_messages collection is not registered</code> — Browser-Sync und Offline für Nachrichten defekt. 22 Modulschemata als <code>unsupported schema_format</code> still übersprungen; die Prüfung gehört an die Installation, nicht in jeden Start.</p>
-    <span class="ausloeser">Auslöser <span>nach der Nachher-Messung, gemeinsam mit dem Peer-Respawn-Fix aus S-01.</span></span>
+    <h3>Keep-alive und Vier-Worker-Pool</h3>
+    <p><code>Connection: close</code> erzwingt je Anfrage einen neuen Verbindungsaufbau; ab der fünften parallelen Anfrage serialisiert der Pool sichtbar in Wellen.</p>
+    <span class="ausloeser">Auslöser <span>nach der fairen Nachmessung — erst zeigt sich, wie viel davon noch zählt.</span></span>
   </article>
 </section>
 
-<!-- ============ RÜCKSTAU + EIGENTÜMER ============ -->
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">7 Karten</span></div>
+  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">6 Karten</span></div>
 
   <article class="karte s-back">
-    <span class="chip c-owner">Owner</span>
-    <h3>Wohin bauen die Worker?</h3>
-    <p>Drei Möglichkeiten: Zielbaum auf das separate Volume <code>/Volumes/tmp</code> legen (495 GB, aber flüchtig), höchstens ein Worker gleichzeitig, oder nach jedem Lauf <code>runtime/build</code> automatisch leeren. Ich empfehle das separate Volume plus automatisches Leeren — beides zusammen.</p>
-    <span class="ausloeser">Blockiert <span>alle drei gestoppten Aufträge.</span></span>
+    <span class="chip c-owner">Owner · blockiert Stufe 0</span>
+    <h3>Verwaiste Auth-Assist-Arbeit: übernehmen oder verwerfen?</h3>
+    <p>Aus Lauf <code>20260805T104652</code>, nie auf <code>main</code>, in preserve-Refs gesichert. Inhalt: frame-rekursive Feldsuche im eingebetteten Browser, ein „relaxed pass" für momentan unbemalbare Felder, Erweiterungen an <code>fillField</code>/<code>clickSubmit</code>.</p>
+    <span class="ev"><b>Kein Zeitdruck</b> — verloren gehen kann sie nicht<br><b>Aber</b> sie blockiert den Commit des Größen-Wächters</span>
   </article>
 
   <article class="karte s-back">
     <span class="chip c-owner">Owner</span>
-    <h3>Soll <code>main</code> nach origin geschoben werden?</h3>
-    <p>Commit <code>27ca6b205</code> liegt nur lokal. Der parallele Strang schiebt aktiv nach <code>origin/main</code> (zuletzt <code>1a0e4b62a</code>). Ohne Push sehen die anderen meine Fixes nicht; mit Push landen sie in einem gemeinsamen Zweig, dessen Testtor rot ist.</p>
+    <h3>Release-Upgrade für brand-demo und leadyoda</h3>
+    <p>Vier Mandanten, Binäre vom 16.06. bis 07.08. Neue Shell auf altem Binär ist die Konstellation, die thesen umgeworfen hat.</p>
+    <span class="ev"><b>Gemessen entwarnt</b> skf voll kompatibel · brand-demo startet (Poll 410, still abgefangen)<br><b>Bereit</b> ts-gpu3-Bau erprobt, glibc-Richtung stimmt</span>
   </article>
 
   <article class="karte s-back">
     <span class="chip c-owner">Owner</span>
-    <h3>Postgres als externe SQL-Quelle: tragen oder abschalten?</h3>
-    <p><code>unsupported external SQL source kind 'postgres'</code> — 683 Fehler in 6 Stunden, alle 30 Sekunden. Aus dem Übergabedokument des Plattform-Strangs.</p>
+    <h3>Drei fertige ctox-dev-Änderungen ausliefern</h3>
+    <p>Prozessspeicher (4 s TTL) gegen den SSH-Weg, Peer-Status-Rückfall bei SSH-Ausfall, <code>errorPageStatus</code> 503 statt 200. Fertig, nicht ausgeliefert.</p>
+    <span class="ev"><b>Reihenfolge</b> Speicher + Rückfall zuerst, 503 getrennt danach — es ändert jede Überwachung, die auf 200 eingestellt ist</span>
   </article>
 
   <article class="karte s-back">
-    <span class="chip c-owner">Owner</span>
-    <h3>I-053 App-Recovery bleibt bewusst blockiert</h3>
-    <p>Fällt erst, wenn <code>queue.ack_failed</code> über Zeit null zeigt oder die Pro-Key-Reihenfolge gebaut ist. Der einzige nicht abgearbeitete Auftrag aus SYNC-A..E (23 von 24, 28 Commits).</p>
+    <span class="chip c-alert">Blockiert Stufe 0</span>
+    <h3>Port-Strang: <code>main</code> baut nicht aus sauberem Checkout</h3>
+    <p><code>cliproxyapi_host.rs</code> zeigt auf eine API, die nur unversioniert im Arbeitsbaum existiert.</p>
+    <span class="ev"><b>Fehlt</b> secrets.rs-API (5 Symbole) · <code>execution::cliproxyapi_integration</code> · <code>MainResponsesGatewayPhase</code> · zwei Transport-Features</span>
   </article>
 
   <article class="karte s-back">
     <span class="chip c-alert">Querbezug</span>
     <h3>„Grün über Nichts" ist derselbe Defekt wie I-066</h3>
-    <p>Der Plattform-Strang misst <code>auth_assist</code>, das <code>completion_claim = false</code> berichtet und als <code>completed</code> erscheint — 48 solcher Erfolge gegen null Anmeldungen. Ich messe in <code>service.rs</code>: 895 Assistant-Zeilen, <b>null</b> mit typisiertem <code>Success</code>. Eine Ursache, zwei Seiten: der Abschluss ist keine atomare Transition.</p>
-    <span class="ev"><b>Auftrag</b> I-071 — dauerhafter Finalisierungsdatensatz, typisiertes Outcome, Zeuge vor Zähler-Reset</span>
+    <p>Der Plattform-Strang misst <code>auth_assist</code>, das <code>completion_claim = false</code> berichtet und als <code>completed</code> erscheint. Ich messe in <code>service.rs</code>: 895 Assistant-Zeilen, <b>null</b> mit typisiertem <code>Success</code>. Eine Ursache, zwei Seiten.</p>
   </article>
 
   <article class="karte s-back">
     <span class="chip c-work">Aufgeschoben</span>
-    <h3>Unabhängige Review von 27ca6b205</h3>
-    <p>Kimi ist der Pflichtprüfer und hat keinen Ersatz. Ich habe selbst und gegnerisch geprüft — das zählt, ersetzt die zweite Meinung aber nicht.</p>
-    <span class="ausloeser">Auslöser <span>Kimi wieder erreichbar (nächster Abrechnungszyklus).</span></span>
-  </article>
-
-  <article class="karte s-back">
-    <span class="chip c-alert">Risiko</span>
-    <h3>Die Beweise liegen auf flüchtigem Speicher</h3>
-    <p>Messungen, Testnamenlisten, Worker-Berichte und Build-Logs liegen unter <code>/Volumes/tmp</code>. Dieses Volume wird geleert. Die Tafel verweist darauf und würde beim nächsten Neustart auf Leerstellen zeigen.</p>
-    <span class="ausloeser">Auslöser <span>sofort — die Beweisstücke gehören ins versionierte Repository.</span></span>
+    <h3>Unabhängige Review der Commits dieser Woche</h3>
+    <p>Kimi ist der Pflichtprüfer und stand auf Quote. Ich habe selbst und gegnerisch geprüft — das zählt, ersetzt die zweite Meinung aber nicht.</p>
   </article>
 </section>
 </div>
-
-<!-- ============ DAUERABSCHNITT 1 ============ -->
 <section class="dauer">
   <h2>Umgebungsfallen</h2>
   <p class="lead">Jede hat mindestens einmal Arbeit gekostet. Vor dem Schreiben eines Auftrags zu lesen.</p>
@@ -423,6 +439,20 @@ footer{
     <div class="eintrag"><b>ENOSPC bricht mehr als den Build</b><span>Bei 0 Bytes kann nicht einmal mehr ein Befehlsergebnis geschrieben werden, der Peer-Heartbeat wird unschreibbar, und der Watchdog hält den gesunden Peer für tot (S-01).</span></div>
     <div class="eintrag"><b>Der Server liefert Module aus dem Zustand, Paketdateien aus dem Release</b><span><code>installed-modules/…</code> kommt aus <code>~/.local/state/ctox/business-os/</code>, die gepackten Assets aus <code>~/.local/lib/ctox/current/</code>. Wer die falsche Kopie ändert, arbeitet an einer Datei, die niemand ausführt. Prüfen, indem man die Datei über HTTP abruft.</span></div>
     <div class="eintrag"><b>Zwei Installationswege</b><span><code>ctox upgrade --dev</code> holt <em>remote</em> von Branch main. <code>ctox update apply --source &lt;pfad&gt;</code> nimmt einen lokalen Baum — das ist der Weg, um eigene Fixes ohne Push auf die laufende Instanz zu bringen.</span></div>
+    <div class="eintrag"><b>Zeilenbasierte Schnitte lassen Attribute verwaist zurück</b><span>Ein Schnitt ab Zeile N lässt ein <code>#[derive(Clone, Copy)]</code> auf N−1 in der alten Datei stehen. Immer beim Attribut beginnen, nicht bei der <code>struct</code>/<code>fn</code>-Zeile.</span></div>
+    <div class="eintrag"><b>Externe Verweise sieht man nicht in der Datei</b><span>Vor jeder Naht <code>grep -rho 'business_os::[A-Za-z_][A-Za-z0-9_]*' src</code>. Eine verschobene Funktion, die von <code>mcp_channel.rs</code> oder <code>store.rs</code> über den Modulpfad angesprochen wird, braucht <code>pub(crate)</code> UND einen Re-Export.</span></div>
+    <div class="eintrag"><b><code>cp</code> über ein laufendes Binär gibt „Text file busy"</b><span>Nach <code>.neu</code> kopieren und mit <code>mv -f</code> darüber. Auf leadyoda hält der jami-daemon dieselbe Datei seit 53 Tagen.</span></div>
+    <div class="eintrag"><b><code>pgrep -fc</code> gibt bei null Treffern „0" UND einen Fehlercode</b><span>Ein angehängtes <code>|| echo 0</code> erzeugt eine zweite Null, jeder Vergleich kippt.</span></div>
+    <div class="eintrag"><b>Verwaiste Worker-Arbeit wandert per <code>--include-dirty</code> weiter</b><span>Unversionierte Arbeit im Hauptcheckout wird in JEDEN neuen Arbeitsbaum mitkopiert und sieht dort wie eigene Arbeit aus. Herkunft immer mit <code>git log --all -S</code> prüfen: nur <code>preserve run</code>/<code>wip:</code>-Treffer und 0 auf <code>main</code> heißt verwaist.</span></div>
+    <div class="eintrag"><b>Die ctox.dev-Fehlertafel kommt mit HTTP 200</b><span>Eine tote Instanz liefert 200 in 0,19 s. Jede <code>curl</code>-Prüfung auf Statuscode meldet „gesund". Nur der Seiteninhalt zeigt den Ausfall — im Browser nachsehen, nicht messen.</span></div>
+    <div class="eintrag"><b>Verwaltete Instanzen erreichen neue API-Pfade nicht</b><span><code>app/instance/[tenant]/[[...path]]/route.ts</code> hat eine harte Positivliste (maintenance, runtime-settings, auth/capability, subscription-auth) und beantwortet jeden anderen Business-OS-Pfad mit <b>410</b>. Ein neuer Endpunkt ist dort unerreichbar, egal was <code>is_business_os_control_plane_path</code> lokal erlaubt. Bootstrap muss über das Dokument gehen, nicht über einen zweiten Abruf.</span></div>
+    <div class="eintrag"><b>Mandanten-VMs: Zugang und Werkzeuge</b><span>Nicht über <code>ssh_credentials</code>, sondern über <code>fleet_instances.vm_encrypted_private_key</code> (AES-256-GCM, <code>iv.tag.ciphertext</code> base64url, Schlüssel aus <code>CTOX_ENCRYPTION_KEY</code>/<code>CTOX_COOKIE_SECRET</code>, siehe <code>lib/crypto.ts</code>). Direkt: <code>ssh -p 2201x ctox@217.182.134.181</code>. Werkzeuge in <code>ctox-dev/output/</code>: fleet-run, fleet-push, fleet-disk-audit, tenant-vm-map. <b>Entschlüsselte Schlüssel danach löschen</b> — ich habe sechs davon auf dem Flottenwirt liegen lassen.</span></div>
+    <div class="eintrag"><b>Worker-Arbeitsbäume haben kein <code>node_modules</code></b><span>Browser-Smokes sterben dort an fehlendem playwright und sehen aus wie neue Fehlschläge. Vor jedem Vergleich <code>node_modules</code> hineinverlinken — sonst vergleicht man wieder zwei Läufe unter verschiedenen Bedingungen.</span></div>
+    <div class="eintrag"><b>Es laufen zwei <code>ctox-real</code></b><span>Der launchd-verwaltete Dienst und ein zweiter, kleiner Prozess. <code>pgrep -x ctox-real | head -1</code> trifft den falschen und liefert dann „0 Verbindungen, 28 Deskriptoren". Immer die PID aus <code>launchctl print gui/$(id -u)/com.metric-space.ctox.service</code> nehmen.</span></div>
+    <div class="eintrag"><b><code>claude-agent --brief &lt;datei&gt;</code> übergibt nichts</b><span><code>brief.txt</code> bleibt 0 Bytes, der Sondierungslauf ist trotzdem grün, und der Lauf stirbt erst an der Buchführung. Immer <code>-p "$(cat …)"</code>.</span></div>
+    <div class="eintrag"><b>Der Standard-Zeitdeckel tötet echte Arbeit</b><span>Zwei Läufe starben mit <code>rc=124</code> und null Bytes Ausgabe — im Arbeitsbaum lag das fertige Ergebnis. Für schwere Aufträge <code>AGENT_TIMEOUT=5400</code> setzen und nach <code>rc=124</code> IMMER erst den Arbeitsbaum durchsehen, bevor irgendetwas gelöscht wird.</span></div>
+    <div class="eintrag"><b>Die Installation braucht zweistellig GB frei</b><span>Vor dem Tausch wird der komplette Zustand gesichert (<code>hr-enrich</code> allein 5,2 GB). Bei zu wenig Platz bricht sie mitten in der Sicherung ab — und hinterlässt eine 18-GB-Teilsicherung, die selbst wieder weg muss.</span></div>
+    <div class="eintrag"><b>Ein gescheitertes Upgrade sperrt die laufende Instanz</b><span>Bis die neue Binary aktiv ist, bleibt <code>active: true</code> trotz terminalem <code>status: failed</code>. Sofort abräumen: Wartungsdatenbank sichern, <code>status</code> auf <code>rolled_back</code> setzen, Endpunkt nachprüfen.</span></div>
     <div class="eintrag"><b>Kimi hat keinen Ersatz</b><span>Rolle <code>review</code> fällt nie automatisch weiter. Bei 403 wird die Review <em>aufgeschoben</em> und ausdrücklich als solche gekennzeichnet — niemals als erledigt ausgegeben. Sol maximal 3 parallel.</span></div>
     <div class="eintrag"><b>Sol-Auth ist Nutzersache</b><span>Läuft die ChatGPT-OAuth ab, hilft nur <code>cliproxyapi -codex-login</code> im Browser. Nicht darum herumrouten, sondern den Befehl nennen.</span></div>
   </div>
@@ -444,6 +474,13 @@ footer{
     <tr><td class="num">7</td><td>Die eigene Maschine ausgehungert</td><td>Zwei Tage Builds bei Last 158, während über Performance geschrieben wurde. Danach drei parallele Läufe bis ENOSPC.</td><td class="zahl num">2</td></tr>
     <tr><td class="num">8</td><td>Die Tafel vernachlässigt</td><td>Als Statusseite geführt statt als Kanban mit Auslösern und Dauerabschnitten — also ohne den Teil, der eine Kompaktierung überlebt.</td><td class="zahl num">1</td></tr>
     <tr><td class="num">9</td><td>Unerreichbares Tor gesetzt</td><td>„Commit erst, wenn alles grün ist" — auf einer Basis mit 59 roten Tests nie erfüllbar. Ein Tor muss messbar erreichbar sein: keine <em>neuen</em> Fehlschläge.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">10</td><td>Commit-Titel behauptet mehr als der Commit tut</td><td>„main lässt sich wieder bauen" — es blieben 42 Fehler. Als <code>1a0fd9fc3</code> wahrheitsgemäß neu abgelegt, inklusive Liste dessen, was weiter fehlt. Ein Titel ist eine Behauptung und braucht denselben Beweis wie ein Befund.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">11</td><td>Messwerkzeug nicht selbst geprüft</td><td><code>pgrep -x ctox-real | head -1</code> traf den falschen von zwei Prozessen; daraus wurde „Daemon neu gestartet, 0 Verbindungen" — frei erfunden. Das Messgerät gehört genauso verifiziert wie das Gemessene.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">13</td><td>Erreichbarkeit mit Statuscodes verwechselt</td><td>Eine ganze Nacht mit <code>curl</code> gemessen und die Instanz für gesund erklärt, während Kunden vor einer Fehlerseite standen — die mit HTTP 200 ausgeliefert wird. Die Anwendung erst geöffnet, als der Eigentümer darauf hinwies. Abnahme heißt hinsehen, nicht messen.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">14</td><td>Neuen Pfad angeordnet, ohne seine Erreichbarkeit zu prüfen</td><td>P-01 verlegte den Shell-Start auf einen Endpunkt, den verwaltete Instanzen nicht erreichen können — und machte ihn zur Pflicht statt zum Rückfall. Ergebnis: alle Kundeninstanzen startunfähig.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">15</td><td>Zulieferer beschuldigt statt eigene Messung geprüft</td><td>Dem Worker fünf neue Testfehlschläge angelastet und es aufgeschrieben. Tatsächlich fehlte meinem Vergleichslauf <code>node_modules</code>. Der Worker hatte recht — dritter Vergleich unter ungleichen Bedingungen an einem Tag.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">16</td><td>Geheimnisse liegen gelassen</td><td>Sechs entschlüsselte VM-Schlüssel blieben stundenlang in <code>/tmp</code> auf dem Flottenwirt. Selbst bemerkt und mit <code>shred</code> beseitigt — aber erst Stunden später.</td><td class="zahl num">1</td></tr>
+    <tr><td class="num">12</td><td>Umstellung ohne Gegenprobe übernommen</td><td>Von <code>-p</code> auf <code>--brief &lt;datei&gt;</code> gewechselt, ohne zu prüfen, ob der Auftrag ankommt. Er kam nicht an (0 Bytes), zwei Läufe verloren.</td><td class="zahl num">1</td></tr>
   </table>
   </div>
 </section>
@@ -458,7 +495,11 @@ footer{
     <tr><td>Diese Tafel</td><td><code>docs/dev/ctox-refactoring-board.html</code></td><td>versioniert</td></tr>
     <tr><td>Commit der fünf Fixes</td><td><code>27ca6b205</code> auf lokalem <code>main</code></td><td>versioniert</td></tr>
     <tr><td>Größen-Ratsche</td><td><code>contracts/module_size_budget.txt</code> · <code>src/core/module_size_tests.rs</code></td><td>versioniert</td></tr>
-    <tr><td>Vorher-Messung und Skript</td><td><code>/Volumes/tmp/ctox-pipeline/messung-vorher.txt</code> · <code>messung.sh</code></td><td>flüchtig</td></tr>
+    <tr><td>Messungen vorher / nachher / eingeschwungen / fair</td><td><code>docs/dev/beweise/messung-vorher.txt</code> · <code>/Volumes/tmp/ctox-pipeline/messung-{nachher,eingeschwungen,fair}.txt</code></td><td>vorher versioniert</td></tr>
+    <tr><td>Gerettete Worker-Ergebnisse S-02b und F-01b</td><td><code>/Volumes/tmp/ctox-pipeline/gerettet/{S-02b,F-01b}/</code></td><td>flüchtig — gehört in git</td></tr>
+    <tr><td>Gesicherte Fremdarbeit aus Juli-Läufen (218 Dateien)</td><td><code>/Volumes/tmp/ctox-pipeline/gerettet/fremd-juli/</code></td><td>flüchtig</td></tr>
+    <tr><td>Sicherungen der Wartungsdatenbank</td><td><code>/Volumes/tmp/ctox-pipeline/ctox-maintenance.sicherung-*.sqlite3</code></td><td>flüchtig</td></tr>
+    <tr><td>Installations- und Build-Protokolle</td><td><code>/Volumes/tmp/ctox-pipeline/{install,release-build,verify-release,P-01}.log</code></td><td>flüchtig</td></tr>
     <tr><td>Rote Tests der Basis (59) und meine (60)</td><td><code>/Volumes/tmp/ctox-pipeline/rot-basis.txt</code> · <code>rot-final.txt</code></td><td>flüchtig</td></tr>
     <tr><td>Build- und Vergleichsläufe</td><td><code>build-verify.log</code> · <code>grundlinie.log</code> · <code>meine-seite.log</code> · <code>final.log</code></td><td>flüchtig</td></tr>
     <tr><td>Worker-Berichte F-02 / S-01 / F-04 / F-05</td><td><code>/Volumes/tmp/ctox-pipeline/reports/*-frisch.md</code></td><td>flüchtig</td></tr>
