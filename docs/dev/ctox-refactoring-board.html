@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">14 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">15 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S2a</span>
+    <h3>I-072 gelandet: <code>4b5aca6ee</code> — Repair-Telemetrie dauerhaft, Attempt-Bindung komplett</h3>
+    <p>CV-/Preserve-Lease-/Founder-Repairs schreiben dauerhafte <code>governance_events</code> (Idempotenzschlüssel <code>repair:&lt;kind&gt;:&lt;digest&gt;</code>) statt Ringpuffer. Alle Hold-/pending-/failed-Acks laufen attempt-gebunden in einer Transaktion; Business-Writeback und Witness-Enqueue sind bei Resume gededupt — die vertagten I-071-Review-Funde sind damit zu. Sieben Beweistests grün; service_loop 379/5 = bekannte Rote, queue 15/15.</p>
+    <span class="ev"><b>Montage</b> 23+3 Hunks, Parse- und Symbol-Audit VOR Commit ohne Befund<br><b>Grok-Review läuft</b> Run <code>…82aa73e2</code> — danach I-073 Sweep-Audit</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan-v2 · S2a</span>
