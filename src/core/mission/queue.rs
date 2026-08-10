@@ -456,6 +456,18 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
+            // The channels write alone leaves the Business OS projection stale:
+            // the browser kept showing a cancelled run as `running` and blocked
+            // its resume button. Refresh the projection the same way the queue
+            // worker does after an ack.
+            if let Err(err) =
+                crate::business_os::store::refresh_business_command_queue_task_projection(
+                    root,
+                    message_key,
+                )
+            {
+                eprintln!("[ctox] queue projection refresh for {message_key} failed: {err}");
+            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "complete" => {
@@ -471,6 +483,18 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
+            // The channels write alone leaves the Business OS projection stale:
+            // the browser kept showing a cancelled run as `running` and blocked
+            // its resume button. Refresh the projection the same way the queue
+            // worker does after an ack.
+            if let Err(err) =
+                crate::business_os::store::refresh_business_command_queue_task_projection(
+                    root,
+                    message_key,
+                )
+            {
+                eprintln!("[ctox] queue projection refresh for {message_key} failed: {err}");
+            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "fail" => {
@@ -487,6 +511,15 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
+            // Terminal failure must reach the Business OS command: it owns the
+            // durable failure record and the research continuation decision.
+            if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
+                root,
+                message_key,
+                reason,
+            ) {
+                eprintln!("[ctox] queue fail projection for {message_key} failed: {err}");
+            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "cancel" => {
@@ -502,6 +535,18 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
+            // The channels write alone leaves the Business OS projection stale:
+            // the browser kept showing a cancelled run as `running` and blocked
+            // its resume button. Refresh the projection the same way the queue
+            // worker does after an ack.
+            if let Err(err) =
+                crate::business_os::store::refresh_business_command_queue_task_projection(
+                    root,
+                    message_key,
+                )
+            {
+                eprintln!("[ctox] queue projection refresh for {message_key} failed: {err}");
+            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "spill" => {

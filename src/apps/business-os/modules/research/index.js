@@ -4446,7 +4446,15 @@ function effectiveTargetVerifiedSources(
     && configured === rawVerifiedCount;
   const duplicatedAliasTarget = verifiedCount > 0
     && configured === verifiedCount * 2;
-  return Math.max(100, duplicatedProjectionTarget || duplicatedAliasTarget ? 0 : configured);
+  // A target that merely mirrors the current verified count is gaming, not
+  // configuration - it falls back to the strict default. An explicitly
+  // configured target is honored down to a floor of 20: the old hard
+  // Math.max(100, ...) made every target below 100 silently impossible, and
+  // with open-access discovery plateauing near 40-65 admitted sources no run
+  // on this instance ever satisfied its own gate.
+  if (duplicatedProjectionTarget || duplicatedAliasTarget) return 100;
+  if (configured > 0) return Math.max(20, configured);
+  return 100;
 }
 
 function researchScoringContract(scoringDimensions) {
