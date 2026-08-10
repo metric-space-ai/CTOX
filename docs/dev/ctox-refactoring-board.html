@@ -335,10 +335,10 @@ footer{
   <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">3 Karten</span></div>
 
   <article class="karte s-work">
-    <span class="chip c-work">Plan-v2 · S2a</span>
-    <h3>I-070 läuft auf Sol — Run <code>…72d47eed</code></h3>
-    <p>Mission-Seed-Root-Fix aus der I-064-Beweislage: Erstimport darf den Split-Brain „active/continuous + is_open=false + leer" nicht mehr persistieren; Queue-Create sät den Mission-State in derselben Transaktion; die ~662 Alt-Zeilen werden einmal pro DB migriert. Repair-Zweig bleibt bestehen (Netz fällt erst nach Null-Messung). Akzeptanz auf Arbeitsbaum-Basis (HEAD unbaubar, s. Owner-Karte).</p>
-    <span class="ev"><b>Fertig heißt</b> Turn-Ende-Invariante findet nach Queue-Create nichts; Migrationstest; keine neuen Roten gegen eigene Baseline<br><b>Danach seriell</b> I-071 atomarer Attempt-Abschluss</span>
+    <span class="chip c-work">Plan-v2 · S3</span>
+    <h3>P2 läuft auf Sol — DocumentCache-Deckel (Run <code>…8db9df9e</code>)</h3>
+    <p>RAM-Leck <code>doc_cache.rs:150-160</code>: <code>latest</code> wird für tote IDs weiter geklont, Sweep greift nur bei leerem <code>by_rev</code>. Deckel mit Verdrängung NUR toter Einträge, Leck-Beweistest 3× grün. Danach seriell P1 Keep-Alive (Brief liegt), dann I-071.</p>
+    <span class="ev"><b>I-070 GELANDET</b> <code>1cbefb0bc</code> — Erstimport ehrlich (Dormant statt Split-Brain), Queue-Seed transaktional, 662er-Migration mit DB-Marker; context:: 79/2 = Baseline, invariants 5/0, queue 15/0<br><b>Lauf-Detail</b> Worker stoppte korrekt am eigenen Platten-Gate (4,2 GiB — greppy-Release-Build der Parallelsession); Orchestrator fuhr die Abschlussläufe und schnitt service.rs hunk-genau</span>
   </article>
 
   <article class="karte s-work">
