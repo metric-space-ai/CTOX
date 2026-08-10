@@ -390,7 +390,14 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">6 Karten</span></div>
+  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">7 Karten</span></div>
+
+  <article class="karte s-owner">
+    <span class="chip c-alert">OWNER: HEAD nicht baubar</span>
+    <h3>main kompiliert seit Tagen nicht aus der Historie</h3>
+    <p>Bewiesen per <code>git archive HEAD</code> + Scratch-Build (R-01, 10.08.): 52 Fehler. <code>1a0fd9fc3</code> („…kommt in die Versionsverwaltung", 06.08.) committete <code>cliproxyapi_host.rs</code>, aber die Cargo.toml-Features (<code>anthropic-fingerprint-transport</code>, <code>antigravity-http-transport</code>) und das ganze Modul <code>cliproxyapi_integration/</code> liegen NUR uncommittet im Baum; weitere fehlende Symbole in secrets/store_outbound_commands ebenso. Davor fehlte die komplette cliproxyapi-Crate. Alle „grünen" Checks seither liefen im dirty Baum.</p>
+    <span class="ev"><b>Entscheidung</b> fehlende Companion-Dateien der Fremd-Welle committen (wessen Baustelle?) oder 1a0fd9fc3-Anteile zurücknehmen<br><b>Bis dahin</b> misst R-01 auf eingefrorenem Arbeitsbaum-Snapshot (/Volumes/tmp/ctox-pipeline/r01-scratch); JEDER Kampagnen-Commit braucht die archive-Bauprobe erst wieder, wenn HEAD heil ist</span>
+  </article>
 
   <article class="karte s-back">
     <span class="chip c-owner">Owner · blockiert Stufe 0</span>
