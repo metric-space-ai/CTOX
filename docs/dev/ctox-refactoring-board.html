@@ -182,7 +182,7 @@ footer{
     <span>Stand 09.08.2026</span><span>Wiederaufnahmedokument</span>
   </div>
   <h1>Der Kern ist nicht instabil, weil Code fehlt. Er ist instabil, weil nichts ihn festhält.</h1>
-  <p class="pfad"><b>Befund nach drei Tagen:</b> Jeder Ausfall dieser Woche — die zwölf Tage Schreibschutz, der Launch-Kontext-Ausfall, die volle Platte, die still zurückgenommenen Zeilen — hatte dieselbe Wurzel: <b>137 geänderte und 34 unversionierte Dateien</b> im gemeinsamen Arbeitsbaum, ein deaktivierter Größen-Wächter, und 59 rote Tests, die nie klassifiziert wurden. Solange das so bleibt, erzeugt jede Reparatur die nächste. Der Plan unten dreht die Reihenfolge um: <b>erst das Netz, dann der Umbau.</b></p>
+  <p class="pfad"><b>Kritischer Pfad (10.08., Plan-v2 aktiv):</b> Das Netz steht zur Hälfte — Wächter + Meta-Test auf HEAD, S0 durch (Platte geräumt, Index geheilt, origin gemergt, Baseline committet). <b>R-01 läuft auf Sol.</b> Danach seriell I-070 (Mission-Seed), dann P1/P2 (Keep-Alive, doc_cache-Deckel; Briefs liegen). Kanonischer Plan: <code>docs/ctox-sync-plan-2026-08-10.md</code>. Bei dir liegen §6: Dirty-Baum-Triage, Wire-Freeze, Release-Upgrade brand-demo/leadyoda, Zielmetrik, Auth-Assist. Kimi-Review wartet auf Quota. <span style="opacity:.65">(Vorheriger Befund vom 09.08. bleibt unten als Historie der Stufen-Begründung.)</span></p>
   <div class="notenband">
     <span class="note">Note F</span>
     <span class="warum">Sie steigt nicht durch Commits, sondern wenn eine Änderung nicht mehr stillschweigend verschwinden kann.</span>
@@ -245,7 +245,21 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">9 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">11 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S0</span>
+    <h3>S0 durch: Platte, Index, origin-Merge, Baseline</h3>
+    <p>Platte war WIEDER 100 % voll (8,5 GiB frei) → nach Räumung (incremental 8,3 G + ctox-Testbinaries) ~16 GiB. Index-Kontamination geheilt (<code>restore --staged</code>, 0 gestagte Löschungen). origin/main eingeholt: Merge <code>abb0c3aea</code>, ein CSS-Konflikt zugunsten der lokalen Umstrukturierung (<code>.research-run-note</code> existiert nicht mehr). Baseline committet: <code>docs/dev/beweise/plan-v2-baseline.md</code> (<code>63700d7d6</code>).</p>
+    <span class="ev"><b>Offen aus S0</b> Dirty-Baum-Triage = Owner-Frage §6.1<br><b>Platten-Check</b> bleibt Pflicht vor jedem Worker-Testlauf</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Wächter</span>
+    <h3>Meta-Test gelandet: Wächter-Anmeldung wird bewacht</h3>
+    <p><code>6a917e13b</code> (Parallelsession): Test in <code>module_boundary_tests.rs</code> verlangt, dass jede <code>*_tests.rs</code> in <code>main.rs</code> als <code>mod</code> deklariert ist — nachgestellt mit entfernter Zeile, Fehlermeldung nennt das Modul. Grenze dokumentiert: seine eigene Abwesenheit kann er nicht erkennen. Zusammen mit <code>d328d3a1d</code> (Wächter zurück) ist die Stufe-1-Wächterbasis auf HEAD.</p>
+    <span class="ev"><b>Verifiziert</b> Commit gelesen, Registrierung main.rs:107 geprüft<br><b>HEAD-Budget</b> 0 Verstöße (alle 6 Ratschen eingehalten)</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan v2</span>
@@ -311,7 +325,14 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">2 Karten</span></div>
+  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">3 Karten</span></div>
+
+  <article class="karte s-work">
+    <span class="chip c-work">Plan-v2 · S1</span>
+    <h3>R-01 läuft auf Sol — Run <code>…25de283a</code></h3>
+    <p>Klassifikation der 59 roten Tests aus <code>docs/dev/beweise/rot-basis.txt</code>: status_head, Klasse (Regression/veraltet/Umgebung/unklar), seit-Commit für die 5 größten Gruppen. Baut im Scratch auf <code>/Volumes/tmp/ctox-pipeline/r01-scratch</code> (dirty-Baum-Leck umgangen), Zwischenstand laufend nach <code>r01-ergebnis.md</code>.</p>
+    <span class="ev"><b>Fertig heißt</b> alle 59 klassifiziert in <code>/Volumes/tmp/ctox-pipeline/r01-ergebnis.md</code><br><b>Sol-Belegung</b> 1/3 — I-070-Brief liegt bereit, startet NACH R-01 (ein schwerer Job zugleich)</span>
+  </article>
 
   <article class="karte s-work">
     <span class="chip c-work">Fertig, blockiert am Commit</span>
@@ -334,20 +355,7 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">7 Karten</span></div>
-
-  <article class="karte s-todo">
-    <h3>Meta-Test: der Wächter bewacht seine eigene Anmeldung</h3>
-    <p>Ein Test, der fehlschlägt, wenn <code>mod module_size_tests;</code> aus <code>main.rs</code> fehlt. Diese Woche hat gezeigt, dass eine gelöschte Zeile reicht.</p>
-    <span class="ausloeser">Auslöser <span>sobald der Wächter committet zurück ist.</span></span>
-  </article>
-
-  <article class="karte s-todo">
-    <h3>R-01: die 59 roten Tests klassifizieren</h3>
-    <p>Seit welchem Commit, warum je Gruppe, Einordnung in echte Regression / veralteter Test / Umgebung. Dazu die ~50 nur-parallel-roten.</p>
-    <span class="ev"><b>Namen liegen</b> docs/dev/beweise/rot-basis.txt<br><b>Blockiert bisher</b> Kimi-Quote, dann Plattennot — nie gelaufen</span>
-    <span class="ausloeser">Auslöser <span>Worker-Platz frei — kollidiert mit niemandem, reine Diagnose.</span></span>
-  </article>
+  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">5 Karten</span></div>
 
   <article class="karte s-todo">
     <h3>F-01b: Revisionsformat aus <code>store.rs</code></h3>
