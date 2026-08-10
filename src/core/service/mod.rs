@@ -2,6 +2,7 @@
 // License: AGPL-3.0-only
 
 pub mod business_os;
+pub mod business_os_app_testing;
 pub mod business_os_harness_bench;
 pub mod db_migration;
 pub mod governance;
