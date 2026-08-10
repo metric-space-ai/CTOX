@@ -906,10 +906,89 @@ fn legacy_mission_state_import_ignores_empty_focus_template_placeholders() -> Re
     assert_eq!(mission.blocker, "");
     assert_eq!(mission.next_slice, "");
     assert_eq!(mission.done_gate, "");
+    // An untouched template is not an active-but-closed mission. Queue-backed
+    // creation promotes this honest empty state atomically when work exists.
+    assert_eq!(mission.mission_status, "dormant");
+    assert_eq!(mission.continuation_mode, "dormant");
+    assert_eq!(mission.trigger_intensity, "archive");
     assert!(!mission.is_open);
+    assert!(mission.allow_idle);
     assert_eq!(mission.watcher_trigger_count, 0);
     assert!(mission.watcher_last_triggered_at.is_none());
 
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
+fn empty_active_continuous_rows_migrate_once_per_database() -> Result<()> {
+    let db_path = temp_db();
+    let conn = Connection::open(&db_path)?;
+    ensure_mission_state_storage_with(&conn)?;
+    conn.execute(
+        "INSERT INTO mission_states (
+            conversation_id, mission, mission_status, continuation_mode,
+            trigger_intensity, blocker, next_slice, done_gate,
+            closure_confidence, is_open, allow_idle, focus_head_commit_id,
+            last_synced_at, watcher_last_triggered_at, watcher_trigger_count,
+            agent_failure_count, deferred_reason, rewrite_failure_count,
+            structured_state_version
+         ) VALUES (?1, '', 'active', 'continuous', 'hot', '', '', '', 'low',
+                   0, 0, '', ?2, NULL, 0, 0, NULL, 0, 1)",
+        params![71_i64, iso_now()],
+    )?;
+
+    migrate_empty_mission_split_brain_with(&conn)?;
+    let migrated = conn.query_row(
+        "SELECT mission_status, continuation_mode, trigger_intensity, is_open, allow_idle
+         FROM mission_states WHERE conversation_id = ?1",
+        params![71_i64],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        },
+    )?;
+    assert_eq!(
+        migrated,
+        (
+            "dormant".to_string(),
+            "dormant".to_string(),
+            "archive".to_string(),
+            false,
+            true,
+        )
+    );
+    let marker_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM lcm_data_migrations WHERE migration_id = ?1",
+        params![EMPTY_MISSION_SPLIT_BRAIN_MIGRATION],
+        |row| row.get(0),
+    )?;
+    assert_eq!(marker_count, 1);
+
+    // Prove the durable marker, rather than a process-local path cache, owns
+    // once-per-database behavior: recreating the legacy values stays untouched
+    // on a second explicit migration pass.
+    conn.execute(
+        "UPDATE mission_states
+         SET mission_status = 'active', continuation_mode = 'continuous',
+             trigger_intensity = 'hot', is_open = 0, allow_idle = 0
+         WHERE conversation_id = ?1",
+        params![71_i64],
+    )?;
+    migrate_empty_mission_split_brain_with(&conn)?;
+    let status: String = conn.query_row(
+        "SELECT mission_status FROM mission_states WHERE conversation_id = ?1",
+        params![71_i64],
+        |row| row.get(0),
+    )?;
+    assert_eq!(status, "active");
+
+    drop(conn);
     let _ = std::fs::remove_file(db_path);
     Ok(())
 }

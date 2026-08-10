@@ -2695,11 +2695,50 @@ fn create_queue_task_is_idempotent_under_same_idempotency_key() {
         "an idempotent retry must spend the spawn budget only once"
     );
 
+    let conversation_id =
+        crate::execution::agent::turn_loop::conversation_id_for_thread_key(Some(thread_key));
+    let seeded = conn
+        .query_row(
+            "SELECT mission, next_slice, is_open FROM mission_states WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .expect("failed to load queue mission seed");
+    assert_eq!(seeded.0, "Structure the latest export");
+    assert_eq!(seeded.1, "Structure the latest export");
+    assert!(seeded.2);
+    conn.execute(
+        "UPDATE mission_states SET mission = ?2, next_slice = ?3 WHERE conversation_id = ?1",
+        rusqlite::params![
+            conversation_id,
+            "Model-authored mission",
+            "Model-authored next slice"
+        ],
+    )
+    .expect("failed to install model-authored mission fixture");
+    drop(conn);
+
     let third = create_queue_task(&root, make(None)).expect("third create without key");
     assert_ne!(
         third.message_key, first.message_key,
         "a keyless create must still get a distinct now-salted message_key"
     );
+    let conn = open_channel_db(&crate::paths::core_db(&root)).expect("failed to reopen db");
+    let preserved = conn
+        .query_row(
+            "SELECT mission, next_slice FROM mission_states WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("failed to load preserved model mission");
+    assert_eq!(preserved.0, "Model-authored mission");
+    assert_eq!(preserved.1, "Model-authored next slice");
 
     let _ = fs::remove_dir_all(&root);
 }

@@ -29975,6 +29975,59 @@ Business OS command:
     }
 
     #[test]
+    fn queue_create_seeds_mission_before_turn_end_invariant_check() {
+        let root = temp_root("turn-state-queue-mission-seed");
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        let thread_key = "queue:i070::first-contact";
+        let title = "Verify the first queue-backed mission slice";
+        channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: title.to_string(),
+                prompt: "Run the queue-backed turn without requiring invariant repair.".to_string(),
+                thread_key: thread_key.to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create queue-backed mission seed");
+        let conversation_id = turn_loop::conversation_id_for_thread_key(Some(thread_key));
+        let db_path = crate::paths::core_db(&root);
+        let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
+        engine
+            .continuity_init_documents(conversation_id)
+            .expect("failed to render seeded mission focus");
+
+        let before = state_invariants::evaluate_runtime_state_invariants(&root, conversation_id)
+            .expect("failed to evaluate queue-seeded invariants");
+        assert!(
+            before.is_clean(),
+            "queue creation must not leave turn-end repair work: {:?}",
+            before.violations
+        );
+        assert_eq!(before.open_queue_count, 1);
+        assert_eq!(before.mission_state.mission, title);
+        assert_eq!(before.mission_state.next_slice, title);
+        assert!(before.mission_state.is_open);
+        assert!(!before.mission_state.allow_idle);
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let after = run_turn_end_state_invariant_check(&root, &state, conversation_id)
+            .expect("clean turn-end check should return mission state");
+        assert_eq!(after.mission, title);
+        assert!(after.is_open);
+        let events = governance::list_recent_events(&root, conversation_id, 8)
+            .expect("failed to list governance events");
+        assert!(!events.iter().any(|event| {
+            event.mechanism_id == "state_invariant_guard"
+                && event.reason == "turn_state_invariants_repaired"
+        }));
+    }
+
+    #[test]
     fn turn_end_state_invariant_check_reopens_mission_when_runtime_work_is_still_open() {
         let root = temp_root("turn-state-runtime-open");
         std::fs::create_dir_all(root.join("runtime")).unwrap();

@@ -3,10 +3,10 @@ pub(crate) use mission_state::drain_pending_mission_state_clobbers;
 #[cfg(test)]
 pub(crate) use mission_state::drain_pending_mission_state_clobbers_for_test;
 use mission_state::{
-    apply_canonical_focus_diff_to_mission_state, import_legacy_mission_state,
-    load_mission_state_with, load_mission_states_with, map_mission_claim_row,
-    map_strategic_directive_row, map_verification_run_row, persist_mission_state_with,
-    render_focus_continuity_from_record, OwnerIntentClearGuard,
+    apply_canonical_focus_diff_to_mission_state, apply_imported_focus_diff_controls,
+    import_legacy_mission_state, load_mission_state_with, load_mission_states_with,
+    map_mission_claim_row, map_strategic_directive_row, map_verification_run_row,
+    persist_mission_state_with, render_focus_continuity_from_record, OwnerIntentClearGuard,
 };
 pub use mission_state::{
     count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
@@ -25,7 +25,7 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -46,6 +46,7 @@ const DEFAULT_LEAF_MIN_FANOUT: usize = 4;
 const DEFAULT_CONDENSED_MIN_FANOUT: usize = 3;
 const DEFAULT_MAX_ROUNDS: usize = 6;
 const FALLBACK_MAX_CHARS: usize = 512 * 4;
+const EMPTY_MISSION_SPLIT_BRAIN_MIGRATION: &str = "i070_empty_active_continuous_mission_state_v1";
 const CONDENSED_MIN_INPUT_RATIO: f64 = 0.1;
 const MAX_SUMMARY_RATIO: f64 = 0.8;
 #[cfg(test)]
@@ -941,6 +942,12 @@ impl LcmEngine {
                 structured_state_version INTEGER NOT NULL DEFAULT 1
             );
 
+            CREATE TABLE IF NOT EXISTS lcm_data_migrations (
+                migration_id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{{}}'
+            );
+
             CREATE TABLE IF NOT EXISTS verification_runs (
                 run_id TEXT PRIMARY KEY,
                 conversation_id INTEGER NOT NULL,
@@ -1022,6 +1029,7 @@ impl LcmEngine {
             journal_mode.as_sql()
         ))?;
         self.ensure_schema_upgrades()?;
+        migrate_empty_mission_split_brain_with(&self.conn)?;
         Ok(())
     }
 
@@ -1715,19 +1723,28 @@ impl LcmEngine {
         let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
         if kind == ContinuityKind::Focus {
             let (record, imported) = load_or_import_mission_state_with(&tx, &continuity)?;
-            let record = if imported {
-                record
-            } else {
-                let updated = apply_canonical_focus_diff_to_mission_state(
+            // The just-applied model diff remains the last writer even when this
+            // transaction also performed the one-time legacy import. Imported
+            // free-form text keeps legacy parsing semantics; only stale control
+            // defaults from the old focus body are reconciled here (e10735662).
+            let updated = if imported {
+                apply_imported_focus_diff_controls(
                     &record,
                     &continuity.focus.content,
                     &normalized_diff,
                     &continuity.focus.head_commit_id,
-                )?;
-                persist_mission_state_with(&tx, &updated)?;
-                load_mission_state_with(&tx, conversation_id)?
-                    .context("mission state missing after applying canonical focus fields")?
+                )?
+            } else {
+                apply_canonical_focus_diff_to_mission_state(
+                    &record,
+                    &continuity.focus.content,
+                    &normalized_diff,
+                    &continuity.focus.head_commit_id,
+                )?
             };
+            persist_mission_state_with(&tx, &updated)?;
+            let record = load_mission_state_with(&tx, conversation_id)?
+                .context("mission state missing after applying canonical focus fields")?;
             let reason = if imported {
                 "Imported the legacy focus document once and rendered typed mission state."
             } else {
@@ -4562,6 +4579,210 @@ fn merge_fixture_config(config: Option<LcmFixtureConfig>) -> LcmConfig {
         }
     }
     merged
+}
+
+fn ensure_mission_state_storage_with(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mission_states (
+            conversation_id INTEGER PRIMARY KEY,
+            mission TEXT NOT NULL,
+            mission_status TEXT NOT NULL,
+            continuation_mode TEXT NOT NULL,
+            trigger_intensity TEXT NOT NULL,
+            blocker TEXT NOT NULL,
+            next_slice TEXT NOT NULL,
+            done_gate TEXT NOT NULL,
+            closure_confidence TEXT NOT NULL,
+            is_open INTEGER NOT NULL,
+            allow_idle INTEGER NOT NULL,
+            focus_head_commit_id TEXT NOT NULL,
+            last_synced_at TEXT NOT NULL,
+            watcher_last_triggered_at TEXT,
+            watcher_trigger_count INTEGER NOT NULL DEFAULT 0,
+            agent_failure_count INTEGER NOT NULL DEFAULT 0,
+            deferred_reason TEXT,
+            rewrite_failure_count INTEGER NOT NULL DEFAULT 0,
+            structured_state_version INTEGER NOT NULL DEFAULT 1
+        );",
+    )?;
+    Ok(())
+}
+
+/// Seed durable queue work without replacing model-authored mission text. The
+/// caller owns the transaction; queue creation uses this on the same SQLite
+/// transaction as the communication message and routing rows.
+pub(crate) fn seed_mission_state_for_queue_with(
+    conn: &Connection,
+    conversation_id: i64,
+    title: &str,
+) -> Result<bool> {
+    let title = title.trim();
+    if title.is_empty() {
+        anyhow::bail!("queue mission seed title must not be empty");
+    }
+    ensure_mission_state_storage_with(conn)?;
+    let focus_head_commit_id = if table_exists_with(conn, "continuity_documents")? {
+        conn.query_row(
+            "SELECT head_commit_id FROM continuity_documents
+             WHERE conversation_id = ?1 AND kind = 'focus'",
+            params![conversation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let now = iso_now();
+    let changed = conn.execute(
+        "INSERT INTO mission_states (
+            conversation_id, mission, mission_status, continuation_mode,
+            trigger_intensity, blocker, next_slice, done_gate,
+            closure_confidence, is_open, allow_idle, focus_head_commit_id,
+            last_synced_at, watcher_last_triggered_at, watcher_trigger_count,
+            agent_failure_count, deferred_reason, rewrite_failure_count,
+            structured_state_version
+         ) VALUES (
+            ?1, ?2, 'active', 'continuous', 'hot', '', ?2, '', 'low', 1, 0,
+            ?3, ?4, NULL, 0, 0, NULL, 0, 1
+         )
+         ON CONFLICT(conversation_id) DO UPDATE SET
+            mission = excluded.mission,
+            mission_status = 'active',
+            continuation_mode = 'continuous',
+            trigger_intensity = 'hot',
+            next_slice = excluded.next_slice,
+            closure_confidence = 'low',
+            is_open = 1,
+            allow_idle = 0,
+            last_synced_at = excluded.last_synced_at,
+            deferred_reason = NULL
+         WHERE trim(mission_states.mission) = ''
+           AND trim(mission_states.next_slice) = ''
+           AND trim(mission_states.done_gate) = ''",
+        params![conversation_id, title, focus_head_commit_id, now],
+    )?;
+    Ok(changed > 0)
+}
+
+fn table_exists_with(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(Into::into)
+}
+
+fn migrate_empty_mission_split_brain_with(conn: &Connection) -> Result<()> {
+    ensure_mission_state_storage_with(conn)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS lcm_data_migrations (
+            migration_id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}'
+        );",
+    )?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .context("failed to begin empty mission-state migration")?;
+    let already_applied = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM lcm_data_migrations WHERE migration_id = ?1
+         )",
+        params![EMPTY_MISSION_SPLIT_BRAIN_MIGRATION],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if already_applied {
+        tx.commit()?;
+        return Ok(());
+    }
+
+    let candidate_ids = {
+        let mut statement = tx.prepare(
+            "SELECT conversation_id
+             FROM mission_states
+             WHERE trim(mission) = ''
+               AND trim(next_slice) = ''
+               AND trim(done_gate) = ''
+               AND is_open = 0
+               AND lower(trim(mission_status)) = 'active'
+               AND lower(trim(continuation_mode)) = 'continuous'",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>()?
+    };
+
+    let mut queue_titles = HashMap::new();
+    if !candidate_ids.is_empty()
+        && table_exists_with(&tx, "communication_messages")?
+        && table_exists_with(&tx, "communication_routing_state")?
+    {
+        let mut statement = tx.prepare(
+            "SELECT message.thread_key, message.subject
+             FROM communication_messages message
+             LEFT JOIN communication_routing_state route
+               ON route.message_key = message.message_key
+             WHERE message.channel = 'queue'
+               AND message.direction = 'inbound'
+               AND lower(COALESCE(route.route_status, 'pending'))
+                   IN ('pending', 'leased', 'blocked')
+             ORDER BY message.external_created_at ASC, message.observed_at ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (thread_key, title) = row?;
+            let conversation_id =
+                crate::execution::agent::turn_loop::conversation_id_for_thread_key(Some(
+                    thread_key.as_str(),
+                ));
+            if candidate_ids.contains(&conversation_id) && !title.trim().is_empty() {
+                queue_titles.entry(conversation_id).or_insert(title);
+            }
+        }
+    }
+
+    let now = iso_now();
+    let migrated_to_empty = tx.execute(
+        "UPDATE mission_states
+         SET mission_status = 'dormant',
+             continuation_mode = 'dormant',
+             trigger_intensity = 'archive',
+             closure_confidence = 'low',
+             is_open = 0,
+             allow_idle = 1,
+             last_synced_at = ?1
+         WHERE trim(mission) = ''
+           AND trim(next_slice) = ''
+           AND trim(done_gate) = ''
+           AND is_open = 0
+           AND lower(trim(mission_status)) = 'active'
+           AND lower(trim(continuation_mode)) = 'continuous'",
+        params![now],
+    )?;
+    let mut queue_seeded = 0usize;
+    for (conversation_id, title) in queue_titles {
+        if seed_mission_state_for_queue_with(&tx, conversation_id, &title)? {
+            queue_seeded = queue_seeded.saturating_add(1);
+        }
+    }
+    tx.execute(
+        "INSERT INTO lcm_data_migrations (migration_id, applied_at, details_json)
+         VALUES (?1, ?2, ?3)",
+        params![
+            EMPTY_MISSION_SPLIT_BRAIN_MIGRATION,
+            iso_now(),
+            serde_json::to_string(&serde_json::json!({
+                "candidate_count": candidate_ids.len(),
+                "queue_seeded_count": queue_seeded,
+                "empty_state_count": migrated_to_empty.saturating_sub(queue_seeded),
+            }))?,
+        ],
+    )?;
+    tx.commit()
+        .context("failed to commit empty mission-state migration")?;
+    Ok(())
 }
 
 impl LcmEngine {

@@ -283,6 +283,7 @@ pub struct QueueTaskView {
     pub priority: String,
     pub suggested_skill: Option<String>,
     pub parent_message_key: Option<String>,
+    pub metadata: Value,
     pub route_status: String,
     pub status_note: Option<String>,
     pub lease_owner: Option<String>,
@@ -2801,6 +2802,10 @@ fn create_queue_task_with_metadata_tx(
     )?;
     refresh_thread_tx(tx, request.thread_key.trim())?;
     ensure_routing_rows_for_inbound(tx)?;
+    let conversation_id = crate::execution::agent::turn_loop::conversation_id_for_thread_key(Some(
+        request.thread_key.trim(),
+    ));
+    crate::lcm::seed_mission_state_for_queue_with(tx, conversation_id, title)?;
     load_queue_task_from_conn(tx, &message_key)?.context("failed to load created queue task")
 }
 
@@ -6278,6 +6283,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
             .get("parent_message_key")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        metadata: message.metadata,
         route_status: route_status.as_str().to_string(),
         status_note,
         lease_owner: message.routing.lease_owner,
@@ -7170,6 +7176,56 @@ fn positional_after_flags(args: &[String]) -> Vec<String> {
 fn print_json(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod queue_task_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn queue_task_metadata_round_trips_typed_business_os_identity() {
+        let root = tempfile::tempdir().expect("temp root");
+        let created = create_queue_task(
+            root.path(),
+            QueueTaskCreateRequest {
+                title: "Create contracts app".to_string(),
+                prompt: "Build the requested app without relying on prompt metadata markers."
+                    .to_string(),
+                thread_key: "business-os/app-creator/contracts".to_string(),
+                workspace_root: Some(root.path().display().to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("business-os-app-module-development".to_string()),
+                parent_message_key: None,
+                extra_metadata: Some(serde_json::json!({
+                    "source": "business-os",
+                    "business_os_command_id": "cmd-contracts",
+                    "business_os_module": "creator",
+                    "business_os_command_type": "ctox.business_os.app.create",
+                    "business_os_record_id": "contracts"
+                })),
+            },
+        )
+        .expect("create queue task");
+
+        let loaded = load_queue_task(root.path(), &created.message_key)
+            .expect("load queue task")
+            .expect("queue task exists");
+
+        assert_eq!(
+            loaded
+                .metadata
+                .get("business_os_command_type")
+                .and_then(Value::as_str),
+            Some("ctox.business_os.app.create")
+        );
+        assert_eq!(
+            loaded
+                .metadata
+                .get("business_os_record_id")
+                .and_then(Value::as_str),
+            Some("contracts")
+        );
+    }
 }
 
 #[cfg(test)]

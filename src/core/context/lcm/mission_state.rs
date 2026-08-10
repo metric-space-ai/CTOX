@@ -523,19 +523,19 @@ pub(super) fn import_legacy_mission_state(continuity: &ContinuityShowAll) -> Mis
         .or_else(|| first_non_meta_line(&legacy_status_lines))
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_default();
-    let mission_status = canonicalize_mission_status(
+    let mut mission_status = canonicalize_mission_status(
         last_named_value(&contract_lines, &["mission_state", "mission state"])
             .or_else(|| last_named_value(&legacy_status_lines, &["Mission state", "Status"]))
             .as_deref(),
     )
     .unwrap_or(MissionStatus::Active);
-    let continuation_mode = canonicalize_continuation_mode(
+    let mut continuation_mode = canonicalize_continuation_mode(
         last_named_value(&contract_lines, &["continuation_mode", "continuation mode"])
             .or_else(|| last_named_value(&legacy_status_lines, &["Continuation mode"]))
             .as_deref(),
     )
     .unwrap_or(ContinuationMode::Continuous);
-    let trigger_intensity = canonicalize_trigger_intensity(
+    let mut trigger_intensity = canonicalize_trigger_intensity(
         last_named_value(&contract_lines, &["trigger_intensity", "trigger intensity"])
             .or_else(|| last_named_value(&legacy_status_lines, &["Trigger intensity"]))
             .as_deref(),
@@ -556,6 +556,15 @@ pub(super) fn import_legacy_mission_state(continuity: &ContinuityShowAll) -> Mis
         .or_else(|| first_non_meta_line(&state_lines))
         .or_else(|| first_non_meta_line(&legacy_gate_lines))
         .unwrap_or_default();
+    // An untouched focus template carries active/continuous defaults but no
+    // mission-bearing text. Persist it as an honest "no mission yet" state;
+    // queue creation separately promotes this state with its durable title in
+    // the same transaction as the queue row.
+    if mission.trim().is_empty() && next_slice.trim().is_empty() && done_gate.trim().is_empty() {
+        mission_status = MissionStatus::Dormant;
+        continuation_mode = ContinuationMode::Dormant;
+        trigger_intensity = TriggerIntensity::Archive;
+    }
     let closure_confidence = canonicalize_closure_confidence(
         last_named_value(&state_lines, &["closure_confidence", "closure confidence"])
             .or_else(|| last_named_value(&legacy_gate_lines, &["Closure confidence"]))
@@ -659,6 +668,110 @@ pub(super) fn apply_canonical_focus_diff_to_mission_state(
                     .as_str()
                     .to_string();
             }
+        }
+    }
+
+    let mission_status = MissionStatus::from_stored(&updated.mission_status)?;
+    let continuation_mode = ContinuationMode::from_stored(&updated.continuation_mode)?;
+    let trigger_intensity = TriggerIntensity::from_stored(&updated.trigger_intensity)?;
+    updated.is_open = mission_is_open(
+        &updated.mission,
+        mission_status,
+        continuation_mode,
+        &updated.next_slice,
+        &updated.done_gate,
+    );
+    updated.allow_idle = mission_allows_idle(mission_status, continuation_mode, trigger_intensity);
+    updated.focus_head_commit_id = applied_focus_head_commit_id.to_string();
+    updated.last_synced_at = iso_now();
+    Ok(updated)
+}
+
+/// Preserve legacy text extraction on the transaction that first imports a
+/// focus document, while ensuring explicit model-written control fields beat
+/// stale defaults rendered by an earlier empty template.
+pub(super) fn apply_imported_focus_diff_controls(
+    imported: &MissionStateRecord,
+    applied_focus: &str,
+    normalized_diff: &str,
+    applied_focus_head_commit_id: &str,
+) -> Result<MissionStateRecord> {
+    let mut updated = imported.clone();
+    let mut mission_text_touched = false;
+    let mut status_touched = false;
+    let mut continuation_touched = false;
+    let mut trigger_touched = false;
+
+    for spec in canonical_focus_assignments(normalized_diff) {
+        match spec.field {
+            CanonicalFocusField::Mission
+            | CanonicalFocusField::NextSlice
+            | CanonicalFocusField::DoneGate => mission_text_touched = true,
+            CanonicalFocusField::MissionStatus => {
+                let value = exact_focus_field_value(applied_focus, spec).with_context(|| {
+                    format!(
+                        "imported focus control {} / {} is missing from the applied document",
+                        spec.section, spec.name
+                    )
+                })?;
+                updated.mission_status = canonicalize_mission_status(Some(&value))
+                    .unwrap_or(MissionStatus::Active)
+                    .as_str()
+                    .to_string();
+                status_touched = true;
+            }
+            CanonicalFocusField::ContinuationMode => {
+                let value = exact_focus_field_value(applied_focus, spec).with_context(|| {
+                    format!(
+                        "imported focus control {} / {} is missing from the applied document",
+                        spec.section, spec.name
+                    )
+                })?;
+                updated.continuation_mode = canonicalize_continuation_mode(Some(&value))
+                    .unwrap_or(ContinuationMode::Continuous)
+                    .as_str()
+                    .to_string();
+                continuation_touched = true;
+            }
+            CanonicalFocusField::TriggerIntensity => {
+                let value = exact_focus_field_value(applied_focus, spec).with_context(|| {
+                    format!(
+                        "imported focus control {} / {} is missing from the applied document",
+                        spec.section, spec.name
+                    )
+                })?;
+                updated.trigger_intensity = canonicalize_trigger_intensity(Some(&value))
+                    .unwrap_or(TriggerIntensity::Hot)
+                    .as_str()
+                    .to_string();
+                trigger_touched = true;
+            }
+            CanonicalFocusField::ClosureConfidence => {
+                let value = exact_focus_field_value(applied_focus, spec).with_context(|| {
+                    format!(
+                        "imported focus control {} / {} is missing from the applied document",
+                        spec.section, spec.name
+                    )
+                })?;
+                updated.closure_confidence = canonicalize_closure_confidence(Some(&value))
+                    .unwrap_or(ClosureConfidence::Low)
+                    .as_str()
+                    .to_string();
+            }
+            CanonicalFocusField::Blocker => {}
+        }
+    }
+
+    if mission_text_touched {
+        if !status_touched && updated.mission_status == MissionStatus::Dormant.as_str() {
+            updated.mission_status = MissionStatus::Active.as_str().to_string();
+        }
+        if !continuation_touched && updated.continuation_mode == ContinuationMode::Dormant.as_str()
+        {
+            updated.continuation_mode = ContinuationMode::Continuous.as_str().to_string();
+        }
+        if !trigger_touched && updated.trigger_intensity == TriggerIntensity::Archive.as_str() {
+            updated.trigger_intensity = TriggerIntensity::Hot.as_str().to_string();
         }
     }
 
