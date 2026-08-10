@@ -245,7 +245,21 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">12 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">14 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S2a</span>
+    <h3>I-071 gelandet + Review-Nacharbeit: <code>5a1dc3d35</code> · <code>c8314b308</code></h3>
+    <p>Der Worker-Abschluss ist eine atomare, wiederaufnehmbare Transition: <code>worker_attempt_finalizations</code> (finalizing → terminal nach frischem Artefakt-Check), Erfolgs-Reply trägt typisiertes <code>Success</code> (vorher 0/895), Zähler-Reset erst nach Review+Zeuge, Timeout terminalisiert vor Kindtask, Defer→Recover ein Übergang, attempt-gebundene Acks. Fünf Beweistests grün; Suiten exakt die bekannten Roten. <b>Grok-Review fand die I-070-Fehlerklassen ERNEUT</b> (halber metadata-Drive-by als dirty-Symbol-Call, geopferte fail_business_command-Repair-Naht) — beide in <code>c8314b308</code> behoben; Attempt-Bindung für Hold/failed/CV-Acks + Resume-Gates bewusst in die I-072-Spur vertagt.</p>
+    <span class="ev"><b>Beweise</b> plan-v2-i071-report.md · plan-v2-review-i071.md<br><b>Montage-Lehre (2×)</b> Keyword-Hunk-Extraktion aus dem dirty Baum braucht das Review als Netz — es hat beide Male getragen</span>
+  </article>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Negatives Ergebnis</span>
+    <h3>P1 Keep-Alive: Escape-Hatch — <code>Connection: close</code> ist Absicht</h3>
+    <p>Sols Historienprüfung fand <code>a429b596d</code> (22.06.): die raw-Writer wurden eingeführt, weil Chromiums ES-Modul-Graph auf Keep-Alive-Loopback-Verbindungen hängen blieb. P1 hätte eine bekannte Produktions-Regression wiedereröffnet. Blockiert bis: Chromium-Regression reproduziert + Browser-Beweis des Modul-Graphen über persistente Verbindung. Nebenfund: bestehender roter Server-Test (Cache-Control no-store vs. no-cache) — vorbestehend.</p>
+    <span class="ev"><b>Genau dafür</b> stehen die Mess-Tore im Plan — ein Hebel weniger, eine Regression verhindert</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan-v2 · S1-Tor</span>
@@ -332,14 +346,9 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">3 Karten</span></div>
+  <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">2 Karten</span></div>
 
-  <article class="karte s-work">
-    <span class="chip c-work">Plan-v2 · Review</span>
-    <h3>Grok-Review von I-071 läuft (Run <code>…78b97d16</code>)</h3>
-    <p><b>I-071 IST GELANDET: <code>5a1dc3d35</code></b> — der Worker-Abschluss ist eine atomare, wiederaufnehmbare Transition. <code>worker_attempt_finalizations</code> (finalizing → terminal nach frischem Artefakt-Check, ein offener Attempt je work_key), Erfolgs-Reply trägt typisiertes <code>Success</code> (vorher 0/895), Zähler-Reset erst nach Review+Zeuge, Timeout terminalisiert vor Kindtask, Defer→Recover als ein Übergang, attempt-gebundene idempotente Queue-Acks. Fünf Beweistests grün; Suiten: 376/5·5/0·15/0·81/2 = exakt die bekannten Roten.</p>
-    <span class="ev"><b>Montage</b> service.rs hunk-genau 27+1 Hunks, 245 fremde blieben draußen; Syntax-Parse + Symbol-Schluss geprüft<br><b>Review prüft</b> dieselben Fehlerklassen, die bei I-070 trafen (Drive-by, dirty-Symbol-Montage)<br><b>Danach</b> P1 Keep-Alive · I-072…074</span>
-  </article>
+
 
   <article class="karte s-work">
     <span class="chip c-work">Fertig, blockiert am Commit</span>

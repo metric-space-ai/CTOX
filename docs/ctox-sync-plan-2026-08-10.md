@@ -116,7 +116,7 @@ Orchestrator am Code verifiziert:
 
 | # | Hebel | Evidenz | Messung (vorher/nachher) | Aufwand |
 |---|---|---|---|---|
-| P1 | **HTTP Keep-Alive statt `Connection: close`** — jeder Response trennt; 129 Boot-Requests = 129 TCP-Handshakes, ab der 5. parallelen Anfrage serialisiert der Pool | `server.rs:3821,3845` (+ Test :4149 pinnt close!) | Shell-Boot-Zeit, Requests bis dataPlaneReady | S |
+| P1 | **BLOCKIERT (negatives Ergebnis 10.08.):** `Connection: close` ist ABSICHT — `a429b596d` (22.06.) führte die raw-Writer ein, weil Chromiums ES-Modul-Graph auf Keep-Alive-Loopback hängen blieb. Wiedereröffnung nur mit reproduzierter Chromium-Regression + Browser-Beweis über persistente Verbindung | `server.rs:3821,3845`; Historie `a429b596d` | erst Repro, dann Browser-Proof des Modul-Graphen | — |
 | P2 | **DocumentCache-Deckel (LRU/Size-Cap)** — `latest` wird bei jedem Aufruf für tote IDs weiter geklont; Sweep greift nur bei leerem `by_rev`, alle 256 Aufrufe | `doc_cache.rs:150-160,68-73` | `cached_document_count()` + RSS nach 1 h Command-Churn (Kriterium: ≤ Ausgang +10 %) | S–M |
 | P3 | **Idle-Backoff härten + Wake statt Poll** — 12+ Loops à 3 s; ein einziger aktiver Tick resettet den Idle-Zähler; Standby 30 min wird selten erreicht | `rxdb_peer.rs:722-761,3781-3901,4395-4432` | effektive Poll-Rate aller Loops über 10 min Null-Last | S–M |
 | P4 | **Initial-Sync-Priorisierung** — 178 Collections, serieller Start mit 500 ms Gap (Worst Case ~89 s nur Startabstände); Critical-first existiert shell-seitig, Peer registriert alle | `sync.js:56,940`; `rxdb_peer.rs:2518-2612`; `app.js:129-133` | Zeit bis CRITICAL live, Zeit bis letzte Collection, Frames/Collection | M |
