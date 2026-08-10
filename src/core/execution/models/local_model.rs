@@ -176,6 +176,8 @@ fn qwen36_27b_q4km_dflash_backend(
     }
     args.push("--socket".into());
     args.push(socket.into());
+    args.push("--max-ctx".into());
+    args.push("262144".into());
     args.push("--model-id".into());
     args.push("qwen36-27b-q4km-dflash".into());
     args.push("--fast-rollback".into());
@@ -207,8 +209,10 @@ fn qwen36_27b_q4km_dflash_backend(
         ggml_lib_dir.display(),
         ggml_lib_dir.join("ggml-cuda").display()
     );
-    let env: Vec<(&'static str, OsString)> =
-        vec![("LD_LIBRARY_PATH", OsString::from(ld_library_path))];
+    let env: Vec<(&'static str, OsString)> = vec![
+        ("LD_LIBRARY_PATH", OsString::from(ld_library_path)),
+        ("DFLASH27B_KV_Q4", OsString::from("1")),
+    ];
 
     LocalModelBackend {
         binary,

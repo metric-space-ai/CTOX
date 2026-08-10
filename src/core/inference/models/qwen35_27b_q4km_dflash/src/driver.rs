@@ -33,19 +33,16 @@ use std::os::raw::{c_char, c_int};
 
 use crate::ffi as sys;
 use sys::{
-    ggml_backend_t, ggml_cgraph, ggml_context, ggml_gallocr, ggml_status, ggml_tensor,
-    ggml_type,
+    ggml_backend_t, ggml_cgraph, ggml_context, ggml_gallocr, ggml_status, ggml_tensor, ggml_type,
 };
 
+use crate::graph::{
+    build_qwen35_graph, reset_recurrent_state, restore_ssm_state, snapshot_ssm_state,
+};
+use crate::model::{DeltaNetCapture, QwenGraphInputs, TargetCache, TargetWeights};
 use crate::{
     set_last_error, DFLASH27B_DRAFT_BLOCK_SIZE, DFLASH27B_DRAFT_MASK_TOKEN_ID,
     DFLASH27B_TARGET_HIDDEN, DFLASH27B_TARGET_VOCAB,
-};
-use crate::model::{
-    DeltaNetCapture, QwenGraphInputs, TargetCache, TargetWeights,
-};
-use crate::graph::{
-    build_qwen35_graph, restore_ssm_state, snapshot_ssm_state,
 };
 
 /// Draft-side `ctx_len` cap — matches the reference.
@@ -66,7 +63,7 @@ pub struct StepGraph {
     pub positions: *mut ggml_tensor,
     pub positions_k: *mut ggml_tensor, // draft only
     pub attn_mask: *mut ggml_tensor,
-    pub parent_ids: *mut ggml_tensor,  // DDTree only (unused in this subset)
+    pub parent_ids: *mut ggml_tensor, // DDTree only (unused in this subset)
     pub target_hidden_cat: *mut ggml_tensor, // draft only
 
     // Graph-resident outputs pointing into the compute buffer after
@@ -204,11 +201,8 @@ pub fn build_target_step(
         sys::ggml_set_name(sg.inp_embed, NAME_INP_EMBED.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.inp_embed);
 
-        sg.positions = sys::ggml_new_tensor_1d(
-            sg.ctx,
-            ggml_type::GGML_TYPE_I32,
-            (4 * n_tokens) as i64,
-        );
+        sg.positions =
+            sys::ggml_new_tensor_1d(sg.ctx, ggml_type::GGML_TYPE_I32, (4 * n_tokens) as i64);
         sys::ggml_set_name(sg.positions, NAME_POSITIONS.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.positions);
 
@@ -250,8 +244,7 @@ pub fn build_target_step(
         sys::ggml_build_forward_expand(sg.gf, sg.logits);
 
         if sg.alloc.is_null() {
-            sg.alloc =
-                sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend));
+            sg.alloc = sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend));
             if sg.alloc.is_null() {
                 set_last_error("build_target_step: ggml_gallocr_new failed");
                 return false;
@@ -310,11 +303,8 @@ pub fn build_target_step_tree(
         sys::ggml_set_name(sg.inp_embed, NAME_INP_EMBED.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.inp_embed);
 
-        sg.positions = sys::ggml_new_tensor_1d(
-            sg.ctx,
-            ggml_type::GGML_TYPE_I32,
-            (4 * n_tokens) as i64,
-        );
+        sg.positions =
+            sys::ggml_new_tensor_1d(sg.ctx, ggml_type::GGML_TYPE_I32, (4 * n_tokens) as i64);
         sys::ggml_set_name(sg.positions, NAME_POSITIONS.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.positions);
 
@@ -334,11 +324,7 @@ pub fn build_target_step_tree(
         //   -1    : reload from pre-block state (root, t==0)
         //    k    : reload from intermediate[k]   (tree siblings)
         //    t-1  : sequential                    (hot path)
-        sg.parent_ids = sys::ggml_new_tensor_1d(
-            sg.ctx,
-            ggml_type::GGML_TYPE_I32,
-            n_tokens as i64,
-        );
+        sg.parent_ids = sys::ggml_new_tensor_1d(sg.ctx, ggml_type::GGML_TYPE_I32, n_tokens as i64);
         sys::ggml_set_name(sg.parent_ids, NAME_PARENT_IDS.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.parent_ids);
 
@@ -366,8 +352,7 @@ pub fn build_target_step_tree(
         sys::ggml_build_forward_expand(sg.gf, sg.logits);
 
         if sg.alloc.is_null() {
-            sg.alloc =
-                sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend));
+            sg.alloc = sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend));
             if sg.alloc.is_null() {
                 set_last_error("build_target_step_tree: gallocr_new failed");
                 return false;
@@ -439,19 +424,11 @@ pub fn build_draft_step(
         );
         sys::ggml_set_input(sg.target_hidden_cat);
 
-        sg.positions = sys::ggml_new_tensor_1d(
-            sg.ctx,
-            ggml_type::GGML_TYPE_I32,
-            q_len as i64,
-        );
+        sg.positions = sys::ggml_new_tensor_1d(sg.ctx, ggml_type::GGML_TYPE_I32, q_len as i64);
         sys::ggml_set_name(sg.positions, NAME_POSITIONS_Q.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.positions);
 
-        sg.positions_k = sys::ggml_new_tensor_1d(
-            sg.ctx,
-            ggml_type::GGML_TYPE_I32,
-            total_k as i64,
-        );
+        sg.positions_k = sys::ggml_new_tensor_1d(sg.ctx, ggml_type::GGML_TYPE_I32, total_k as i64);
         sys::ggml_set_name(sg.positions_k, NAME_POSITIONS_K.as_ptr() as *const c_char);
         sys::ggml_set_input(sg.positions_k);
 
@@ -476,8 +453,7 @@ pub fn build_draft_step(
         sys::ggml_build_forward_expand(sg.gf, sg.logits);
 
         if sg.alloc.is_null() {
-            sg.alloc =
-                sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend));
+            sg.alloc = sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend));
             if sg.alloc.is_null() {
                 set_last_error("build_draft_step: ggml_gallocr_new failed");
                 return false;
@@ -515,12 +491,7 @@ fn argmax_f32(row: &[f32]) -> i32 {
 /// (column-major — positions `[q, k]` at index `q*kv_pad + k`).
 ///
 /// ref: `test_dflash.cpp::build_causal_mask` (top of file)
-fn build_causal_mask(
-    buf: &mut Vec<u16>,
-    kv_len: c_int,
-    n_tokens: c_int,
-    kv_start: c_int,
-) {
+fn build_causal_mask(buf: &mut Vec<u16>, kv_len: c_int, n_tokens: c_int, kv_start: c_int) {
     let kv_pad = align_up(kv_len, G_KQ_STRIDE_PAD);
     let q_pad = align_up(n_tokens, KQ_MASK_PAD);
     buf.clear();
@@ -575,6 +546,9 @@ pub struct GenConfig {
     /// top-1 chain into the tree builder (defensive default, matches
     /// reference).
     pub ddtree_chain_seed: bool,
+    /// Stop immediately after this token is committed. The server sets this
+    /// to Qwen's `<|im_end|>` id; benchmarks may leave it unset.
+    pub stop_token_id: Option<i32>,
 }
 
 impl Default for GenConfig {
@@ -585,6 +559,7 @@ impl Default for GenConfig {
             ddtree_budget: 64,
             ddtree_temp: 1.0,
             ddtree_chain_seed: true,
+            stop_token_id: None,
         }
     }
 }
@@ -616,6 +591,7 @@ pub fn run_dflash_gen_loop(
     n_gen: c_int,
     out_all: &mut Vec<i32>,
     cfg: GenConfig,
+    prefilled_prefix_len: usize,
 ) -> Result<RunStats, String> {
     let _ = DFLASH27B_DRAFT_MASK_TOKEN_ID; // used below via `mask_tok`
     let _ = DFLASH27B_TARGET_VOCAB;
@@ -630,6 +606,12 @@ pub fn run_dflash_gen_loop(
     if prompt_len == 0 {
         return fail("empty prompt");
     }
+    if prefilled_prefix_len > prompt_ids.len() {
+        return fail("prefilled prefix exceeds prompt length");
+    }
+    if prefilled_prefix_len == prompt_ids.len() {
+        return fail("prefilled prefix leaves no suffix for next-token logits");
+    }
     // ref: test_dflash.cpp:881-884
     if prompt_len + n_gen + q_len > cache.max_ctx {
         return fail(&format!(
@@ -641,8 +623,12 @@ pub fn run_dflash_gen_loop(
     // DDTree implicitly turns on fast-rollback (ref: test_dflash.cpp:740).
     let fast_rollback = cfg.fast_rollback || cfg.ddtree;
 
+    if prefilled_prefix_len == 0 {
+        reset_recurrent_state(cache);
+    }
+
     *out_all = prompt_ids.to_vec();
-    let mut committed: c_int = 0;
+    let mut committed: c_int = prefilled_prefix_len as c_int;
     let mut last_tok: i32 = -1;
 
     let mut sg = StepGraph::default();
@@ -664,7 +650,7 @@ pub fn run_dflash_gen_loop(
     let mut pf_logits_buf: Vec<f32> = vec![0.0_f32; vocab as usize];
 
     // ─── Prefill loop. ref: test_dflash.cpp:919-971 ─────────────
-    let mut start: c_int = 0;
+    let mut start: c_int = prefilled_prefix_len as c_int;
     while start < prompt_len {
         let n_tokens = std::cmp::min(prefill_ubatch, prompt_len - start);
         let kv_len = start + n_tokens;
@@ -682,10 +668,7 @@ pub fn run_dflash_gen_loop(
             /*capture=*/ true,
             /*capture_delta_intermediate=*/ false,
         ) {
-            return fail(&format!(
-                "prefill build @{start}: {}",
-                crate::last_error()
-            ));
+            return fail(&format!("prefill build @{start}: {}", crate::last_error()));
         }
 
         // CPU-side token embedding dequant (bf16 → f32 for the graph).
@@ -743,10 +726,7 @@ pub fn run_dflash_gen_loop(
         // ref: lines 961-962
         let st = unsafe { sys::ggml_backend_graph_compute(backend, sg.gf) };
         if st != ggml_status::GGML_STATUS_SUCCESS {
-            return fail(&format!(
-                "prefill compute @{start}: status {:?}",
-                st
-            ));
+            return fail(&format!("prefill compute @{start}: status {:?}", st));
         }
 
         // ref: lines 964-969
@@ -801,8 +781,7 @@ pub fn run_dflash_gen_loop(
     } else {
         q_len
     };
-    let mut draft_logits_buf: Vec<f32> =
-        vec![0.0_f32; (vocab as usize) * (q_len as usize)];
+    let mut draft_logits_buf: Vec<f32> = vec![0.0_f32; (vocab as usize) * (q_len as usize)];
     let mut verify_logits_buf: Vec<f32> =
         vec![0.0_f32; (vocab as usize) * (verify_max_tokens as usize)];
     // verify_embed is reused for chain-verify AND replay AND DDTree
@@ -827,7 +806,7 @@ pub fn run_dflash_gen_loop(
 
     let t_gen0 = std::time::Instant::now();
 
-    while n_generated < n_gen {
+    'decode: while n_generated < n_gen {
         let need_commit_budget = n_gen - n_generated;
 
         // 1) Noise block [last_tok, MASK*15]. ref: lines 1011-1014
@@ -845,10 +824,7 @@ pub fn run_dflash_gen_loop(
 
         // 2) Build + run the draft forward. ref: lines 1026-1073
         if !build_draft_step(&mut sg, dw, w, backend, draft_ctx) {
-            return fail(&format!(
-                "draft build failed: {}",
-                crate::last_error()
-            ));
+            return fail(&format!("draft build failed: {}", crate::last_error()));
         }
 
         unsafe {
@@ -876,8 +852,7 @@ pub fn run_dflash_gen_loop(
                 let thc_data = (*sg.target_hidden_cat).data as *mut u8;
                 // Pre-slice.
                 sys::dflash27b_launch_bf16_to_f32(
-                    tf_data.add((slot0 as libc::size_t) * elt_feat * fc_in)
-                        as *const libc::c_void,
+                    tf_data.add((slot0 as libc::size_t) * elt_feat * fc_in) as *const libc::c_void,
                     thc_data as *mut libc::c_void,
                     (pre_n as libc::size_t) * fc_in,
                     std::ptr::null_mut(),
@@ -885,9 +860,8 @@ pub fn run_dflash_gen_loop(
                 if post_n > 0 {
                     sys::dflash27b_launch_bf16_to_f32(
                         tf_data as *const libc::c_void,
-                        thc_data.add(
-                            (pre_n as libc::size_t) * fc_in * std::mem::size_of::<f32>(),
-                        ) as *mut libc::c_void,
+                        thc_data.add((pre_n as libc::size_t) * fc_in * std::mem::size_of::<f32>())
+                            as *mut libc::c_void,
                         (post_n as libc::size_t) * fc_in,
                         std::ptr::null_mut(),
                     );
@@ -988,10 +962,7 @@ pub fn run_dflash_gen_loop(
             let n_flat: c_int = 1 + n_nodes; // slot 0 = root
 
             if !build_target_step_tree(&mut sg, w, cache, backend, committed, n_flat) {
-                return fail(&format!(
-                    "ddtree verify build: {}",
-                    crate::last_error()
-                ));
+                return fail(&format!("ddtree verify build: {}", crate::last_error()));
             }
 
             // Flat embed sequence: [last_tok, tree.token_ids...].
@@ -1024,12 +995,7 @@ pub fn run_dflash_gen_loop(
             let pos_elems = 4 * n_us;
             let tp = &mut tree_pos4[..pos_elems];
             for i in 0..n_us {
-                let p = committed
-                    + if i == 0 {
-                        0
-                    } else {
-                        tree.depths[i - 1]
-                    };
+                let p = committed + if i == 0 { 0 } else { tree.depths[i - 1] };
                 tp[0 * n_us + i] = p;
                 tp[1 * n_us + i] = p;
                 tp[2 * n_us + i] = p;
@@ -1118,6 +1084,15 @@ pub fn run_dflash_gen_loop(
                 };
                 out_all.push(tok);
             }
+            let mut stop_hit = false;
+            if let Some(stop_n) = stop_prefix_len(
+                &out_all[out_all.len() - commit_n as usize..],
+                cfg.stop_token_id,
+            ) {
+                out_all.truncate(out_all.len() - commit_n as usize + stop_n as usize);
+                commit_n = stop_n;
+                stop_hit = true;
+            }
             last_tok = next_token;
 
             // Rollback: SSM + conv + target_feat + KV compaction.
@@ -1141,9 +1116,7 @@ pub fn run_dflash_gen_loop(
             for il in 0..n_delta {
                 let cap = sg.delta_captures[il];
                 if cap.ssm_intermediate_states.is_null() || cap.conv_input.is_null() {
-                    return fail(&format!(
-                        "ddtree rollback: missing capture layer {il}"
-                    ));
+                    return fail(&format!("ddtree rollback: missing capture layer {il}"));
                 }
 
                 unsafe {
@@ -1154,10 +1127,10 @@ pub fn run_dflash_gen_loop(
                     let ssm_elems = (ssm_dst_ne[0] as libc::size_t)
                         * (ssm_dst_ne[1] as libc::size_t)
                         * (ssm_dst_ne[2] as libc::size_t);
-                    let ssm_src_offset = (rollback_dfs as libc::size_t)
-                        * (*cap.ssm_intermediate_states).nb[3];
-                    let ssm_src = ((*cap.ssm_intermediate_states).data as *const u8)
-                        .add(ssm_src_offset);
+                    let ssm_src_offset =
+                        (rollback_dfs as libc::size_t) * (*cap.ssm_intermediate_states).nb[3];
+                    let ssm_src =
+                        ((*cap.ssm_intermediate_states).data as *const u8).add(ssm_src_offset);
                     sys::dflash27b_launch_f16_to_f32(
                         ssm_src as *const libc::c_void,
                         (*ssm_dst).data,
@@ -1179,8 +1152,7 @@ pub fn run_dflash_gen_loop(
                         // rows prepended, so slot `rollback_dfs + 1`
                         // is where the source window starts.
                         let conv_off = (rollback_dfs as libc::size_t) + 1;
-                        let conv_src = ((*cap.conv_input).data as *const u8)
-                            .add(conv_off * elt);
+                        let conv_src = ((*cap.conv_input).data as *const u8).add(conv_off * elt);
                         let ce = sys::cudaMemcpy2DAsync(
                             (*conv_state_dst).data,
                             dpitch,
@@ -1192,9 +1164,7 @@ pub fn run_dflash_gen_loop(
                             std::ptr::null_mut(),
                         );
                         if ce != 0 {
-                            return fail(&format!(
-                                "ddtree conv fast il={il} ce={ce}"
-                            ));
+                            return fail(&format!("ddtree conv fast il={il} ce={ce}"));
                         }
                     } else {
                         // Sibling path: K-1 separate column copies
@@ -1214,8 +1184,8 @@ pub fn run_dflash_gen_loop(
                             let sx_slot = (K_CONV - 1) as i64 + virt[k as usize] as i64;
                             let src_col = ((*cap.conv_input).data as *const u8)
                                 .add((sx_slot as libc::size_t) * elt);
-                            let dst_col = ((*conv_state_dst).data as *mut u8)
-                                .add((k as libc::size_t) * elt);
+                            let dst_col =
+                                ((*conv_state_dst).data as *mut u8).add((k as libc::size_t) * elt);
                             let ce = sys::cudaMemcpy2DAsync(
                                 dst_col as *mut libc::c_void,
                                 dpitch,
@@ -1227,9 +1197,7 @@ pub fn run_dflash_gen_loop(
                                 std::ptr::null_mut(),
                             );
                             if ce != 0 {
-                                return fail(&format!(
-                                    "ddtree conv col il={il} k={k} ce={ce}"
-                                ));
+                                return fail(&format!("ddtree conv col il={il} k={k} ce={ce}"));
                             }
                         }
                     }
@@ -1262,9 +1230,7 @@ pub fn run_dflash_gen_loop(
                             std::ptr::null_mut(),
                         );
                         if ce != 0 {
-                            return fail(&format!(
-                                "ddtree target_feat compact d={d} ce={ce}"
-                            ));
+                            return fail(&format!("ddtree target_feat compact d={d} ce={ce}"));
                         }
                     }
                 }
@@ -1291,16 +1257,14 @@ pub fn run_dflash_gen_loop(
                             let head_dst = dst_off + (h as libc::size_t) * (*ck).nb[2];
                             let ce_k = sys::cudaMemcpyAsync(
                                 ((*ck).data as *mut u8).add(head_dst) as *mut libc::c_void,
-                                ((*ck).data as *const u8).add(head_src)
-                                    as *const libc::c_void,
+                                ((*ck).data as *const u8).add(head_src) as *const libc::c_void,
                                 slot_bytes,
                                 sys::CUDA_MEMCPY_DEVICE_TO_DEVICE,
                                 std::ptr::null_mut(),
                             );
                             let ce_v = sys::cudaMemcpyAsync(
                                 ((*cv).data as *mut u8).add(head_dst) as *mut libc::c_void,
-                                ((*cv).data as *const u8).add(head_src)
-                                    as *const libc::c_void,
+                                ((*cv).data as *const u8).add(head_src) as *const libc::c_void,
                                 slot_bytes,
                                 sys::CUDA_MEMCPY_DEVICE_TO_DEVICE,
                                 std::ptr::null_mut(),
@@ -1321,6 +1285,9 @@ pub fn run_dflash_gen_loop(
             n_generated += commit_n;
             n_accept_sum += commit_n;
             n_draft_steps += 1;
+            if stop_hit {
+                break 'decode;
+            }
             continue;
         }
 
@@ -1341,10 +1308,7 @@ pub fn run_dflash_gen_loop(
             /*capture=*/ true,
             /*capture_delta_intermediate=*/ fast_rollback,
         ) {
-            return fail(&format!(
-                "verify build: {}",
-                crate::last_error()
-            ));
+            return fail(&format!("verify build: {}", crate::last_error()));
         }
 
         // Embedding for verify tokens (reuse pre-allocated buffer).
@@ -1408,8 +1372,7 @@ pub fn run_dflash_gen_loop(
             );
         }
         for i in 0..q_len as usize {
-            let slice =
-                &verify_logits_buf[i * (vocab as usize)..(i + 1) * (vocab as usize)];
+            let slice = &verify_logits_buf[i * (vocab as usize)..(i + 1) * (vocab as usize)];
             target_tok[i] = argmax_f32(slice);
         }
 
@@ -1445,6 +1408,16 @@ pub fn run_dflash_gen_loop(
                 bonus_tok = -1;
             }
         }
+        let mut stop_hit = false;
+        if fast_rollback {
+            if let Some(stop_n) =
+                stop_prefix_len(&draft_tok[..commit_n as usize], cfg.stop_token_id)
+            {
+                commit_n = stop_n;
+                bonus_tok = -1;
+                stop_hit = true;
+            }
+        }
 
         // (per-step tracing disabled in hot path — args would
         // materialize even when the filter rejects the event)
@@ -1464,9 +1437,7 @@ pub fn run_dflash_gen_loop(
                 for il in 0..n_delta {
                     let cap = sg.delta_captures[il];
                     if cap.ssm_intermediate_states.is_null() || cap.conv_input.is_null() {
-                        return fail(&format!(
-                            "rollback: missing capture at layer {il}"
-                        ));
+                        return fail(&format!("rollback: missing capture at layer {il}"));
                     }
 
                     unsafe {
@@ -1480,11 +1451,10 @@ pub fn run_dflash_gen_loop(
                         let ssm_elems = (ssm_dst_ne[0] as libc::size_t)
                             * (ssm_dst_ne[1] as libc::size_t)
                             * (ssm_dst_ne[2] as libc::size_t);
-                        let ssm_src_offset = (rollback_idx as libc::size_t)
-                            * (*cap.ssm_intermediate_states).nb[3];
+                        let ssm_src_offset =
+                            (rollback_idx as libc::size_t) * (*cap.ssm_intermediate_states).nb[3];
                         let ssm_src =
-                            ((*cap.ssm_intermediate_states).data as *const u8)
-                                .add(ssm_src_offset);
+                            ((*cap.ssm_intermediate_states).data as *const u8).add(ssm_src_offset);
                         sys::dflash27b_launch_f16_to_f32(
                             ssm_src as *const libc::c_void,
                             (*ssm_dst).data,
@@ -1560,6 +1530,11 @@ pub fn run_dflash_gen_loop(
                     replay_tok.push(bonus_tok);
                 }
             }
+            if let Some(stop_n) = stop_prefix_len(&replay_tok, cfg.stop_token_id) {
+                replay_tok.truncate(stop_n as usize);
+                commit_n = stop_n;
+                stop_hit = true;
+            }
 
             let replay_with_mask = commit_n > 1;
             if !build_target_step(
@@ -1573,10 +1548,7 @@ pub fn run_dflash_gen_loop(
                 /*capture=*/ true,
                 /*capture_delta_intermediate=*/ false,
             ) {
-                return fail(&format!(
-                    "replay build: {}",
-                    crate::last_error()
-                ));
+                return fail(&format!("replay build: {}", crate::last_error()));
             }
 
             // Reuse `verify_embed` scratch for the replay embed.
@@ -1615,12 +1587,7 @@ pub fn run_dflash_gen_loop(
             }
 
             if replay_with_mask {
-                build_causal_mask(
-                    &mut mask_buf,
-                    committed + commit_n,
-                    commit_n,
-                    committed,
-                );
+                build_causal_mask(&mut mask_buf, committed + commit_n, commit_n, committed);
                 unsafe {
                     sys::ggml_backend_tensor_set(
                         sg.attn_mask,
@@ -1656,8 +1623,11 @@ pub fn run_dflash_gen_loop(
 
         committed += commit_n;
         n_generated += commit_n;
-        n_accept_sum += accept_n;
+        n_accept_sum += std::cmp::min(accept_n, commit_n);
         n_draft_steps += 1;
+        if stop_hit {
+            break 'decode;
+        }
     }
 
     let t_gen1 = std::time::Instant::now();
@@ -1679,8 +1649,31 @@ pub fn run_dflash_gen_loop(
     })
 }
 
+fn stop_prefix_len(tokens: &[i32], stop_token_id: Option<i32>) -> Option<c_int> {
+    let stop_token_id = stop_token_id?;
+    let stop_index = tokens.iter().position(|token| *token == stop_token_id)?;
+    Some((stop_index + 1) as c_int)
+}
+
 #[inline]
 fn fail<T>(msg: &str) -> Result<T, String> {
     set_last_error(msg);
     Err(msg.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_prefix_len;
+
+    #[test]
+    fn stop_token_returns_committable_prefix() {
+        let tokens = vec![20, 21, 99, 22, 23];
+        assert_eq!(stop_prefix_len(&tokens, Some(99)), Some(3));
+    }
+
+    #[test]
+    fn absent_stop_token_returns_none() {
+        let tokens = vec![20, 21];
+        assert_eq!(stop_prefix_len(&tokens, Some(99)), None);
+    }
 }

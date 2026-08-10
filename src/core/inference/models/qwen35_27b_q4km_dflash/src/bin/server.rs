@@ -133,12 +133,13 @@ fn main() -> Result<()> {
     }
     tracing::info!("draft loaded");
 
-    let gen_config = GenConfig {
+    let mut gen_config = GenConfig {
         fast_rollback: args.fast_rollback || args.ddtree,
         ddtree: args.ddtree,
         ddtree_budget: args.ddtree_budget,
         ddtree_temp: args.ddtree_temp,
         ddtree_chain_seed: !args.ddtree_no_chain_seed,
+        stop_token_id: None,
     };
 
     // 4. Build target cache. DDTree needs room for the flat tree:
@@ -177,6 +178,7 @@ fn main() -> Result<()> {
             .context("no --tokenizer given and no HF-cache tokenizer.json found")?,
     };
     let tokenizer = Tokenizer::from_file(&tok_path)?;
+    gen_config.stop_token_id = tokenizer.eos_id();
     tracing::info!(tokenizer = ?tok_path, "tokenizer ready");
 
     // 6. Engine handle + async runtime.
@@ -186,6 +188,7 @@ fn main() -> Result<()> {
         cache,
         backend,
         tokenizer,
+        cached_tokens: Vec::new(),
         model_id: args.model_id,
         gen_config,
     };
