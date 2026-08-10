@@ -11441,8 +11441,8 @@ fn complete_business_os_app_validation_success_to_leased_queue(
             return Ok(job.leased_message_keys.len());
         }
     }
-    let expected_module_id = business_os_app_module_target_from_metadata(&job.queue_task_metadata)
-        .map(|target| target.module_id);
+    let expected_module_id =
+        business_os_app_module_target_from_prompt(&job.prompt).map(|target| target.module_id);
     let mut fallback_message_keys = Vec::new();
     let mut updated = 0usize;
     for message_key in &job.leased_message_keys {
