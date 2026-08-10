@@ -33,7 +33,7 @@
 
 src/core/business_os/mcp_channel.rs = 6783
 src/core/business_os/office_engine.rs = 13953
-src/core/business_os/rxdb_peer.rs = 14744
+src/core/business_os/rxdb_peer.rs = 12718
 src/core/business_os/store.rs = 27516
 src/core/business_os/store_outbound_commands.rs = 5270
 src/core/communication/meeting_native.rs = 5018
