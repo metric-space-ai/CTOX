@@ -173,6 +173,8 @@ pub struct WorkerAttemptRecord {
     pub artifact_check_details: Option<String>,
     pub resumable: bool,
     pub effects_completed: bool,
+    pub queue_effects_applied_at: Option<String>,
+    pub recovery_effects_applied_at: Option<String>,
     pub finalization_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -234,14 +236,16 @@ fn map_worker_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerAtt
         artifact_check_details: row.get(11)?,
         resumable: row.get::<_, i64>(12)? != 0,
         effects_completed: row.get::<_, i64>(13)? != 0,
-        finalization_error: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
-        terminal_at: row.get(17)?,
+        queue_effects_applied_at: row.get(14)?,
+        recovery_effects_applied_at: row.get(15)?,
+        finalization_error: row.get(16)?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
+        terminal_at: row.get(19)?,
     })
 }
 
-const WORKER_ATTEMPT_SELECT: &str = "SELECT attempt_id, work_key, conversation_id, source_label, status, agent_outcome, reply_text, error_text, reply_message_id, artifact_checked_at, artifact_check_accepted, artifact_check_details, resumable, effects_completed, finalization_error, created_at, updated_at, terminal_at FROM worker_attempt_finalizations";
+const WORKER_ATTEMPT_SELECT: &str = "SELECT attempt_id, work_key, conversation_id, source_label, status, agent_outcome, reply_text, error_text, reply_message_id, artifact_checked_at, artifact_check_accepted, artifact_check_details, resumable, effects_completed, queue_effects_applied_at, recovery_effects_applied_at, finalization_error, created_at, updated_at, terminal_at FROM worker_attempt_finalizations";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryRecord {
@@ -1228,6 +1232,7 @@ impl LcmEngine {
                     resumable INTEGER NOT NULL DEFAULT 0,
                     effects_completed INTEGER NOT NULL DEFAULT 0,
                     queue_effects_applied_at TEXT,
+                    recovery_effects_applied_at TEXT,
                     finalization_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -1252,6 +1257,14 @@ impl LcmEngine {
         }
         tx.commit()
             .context("failed to commit worker-attempt schema migration")?;
+        // I-072 extends the existing attempt surface without replacing the
+        // once-per-database I-071 migration marker. Existing databases already
+        // carrying that marker still receive the new idempotence column.
+        self.ensure_column(
+            "worker_attempt_finalizations",
+            "recovery_effects_applied_at",
+            "TEXT",
+        )?;
         Ok(())
     }
 
@@ -1651,6 +1664,25 @@ impl LcmEngine {
         )?;
         self.worker_attempt(attempt_id)?
             .with_context(|| format!("worker attempt {attempt_id} does not exist"))
+    }
+
+    /// Mark the process-local recovery enqueue as applied for this attempt.
+    /// The enqueue is performed before this marker is written; after a real
+    /// process crash the old in-memory queue is gone, while a committed marker
+    /// suppresses replay after any later finalization step fails in-process.
+    pub fn mark_worker_attempt_recovery_effects_applied(&self, attempt_id: &str) -> Result<bool> {
+        let now = iso_now();
+        let updated = self.conn.execute(
+            "UPDATE worker_attempt_finalizations
+             SET recovery_effects_applied_at = ?2, updated_at = ?2
+             WHERE attempt_id = ?1 AND recovery_effects_applied_at IS NULL",
+            params![attempt_id, now],
+        )?;
+        anyhow::ensure!(
+            updated != 0 || self.worker_attempt(attempt_id)?.is_some(),
+            "worker attempt {attempt_id} does not exist"
+        );
+        Ok(updated != 0)
     }
 
     /// F3: read the most recent assistant `agent_outcome` for a conversation.
@@ -4738,6 +4770,14 @@ pub fn run_mark_worker_attempt_effects_completed(
 ) -> Result<WorkerAttemptRecord> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
     engine.mark_worker_attempt_effects_completed(attempt_id)
+}
+
+pub fn run_mark_worker_attempt_recovery_effects_applied(
+    db_path: &Path,
+    attempt_id: &str,
+) -> Result<bool> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.mark_worker_attempt_recovery_effects_applied(attempt_id)
 }
 
 pub fn run_compact(

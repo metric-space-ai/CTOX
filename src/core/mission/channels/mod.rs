@@ -2458,6 +2458,59 @@ pub fn ack_leased_messages_for_attempt(
     Ok(updated)
 }
 
+/// Bind an already-durable queue outcome to its worker attempt without
+/// rewriting the queue row. This closes the recovery window for effects (such
+/// as Business OS command writeback) that terminalize the queue in their own
+/// transaction before the service can persist `effects_completed`.
+pub fn mark_worker_attempt_queue_effects_applied_if_status(
+    root: &Path,
+    attempt_id: &str,
+    message_keys: &[String],
+    expected_status: &str,
+) -> Result<bool> {
+    if message_keys.is_empty() {
+        return Ok(false);
+    }
+    let expected_status = canonical_queue_route_status(expected_status)?;
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    let already_applied: Option<Option<String>> = tx
+        .query_row(
+            "SELECT queue_effects_applied_at FROM worker_attempt_finalizations WHERE attempt_id = ?1",
+            [attempt_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let already_applied = already_applied.with_context(|| {
+        format!("worker attempt {attempt_id} does not exist for queue effect adoption")
+    })?;
+    if already_applied.is_some() {
+        tx.commit()?;
+        return Ok(true);
+    }
+    for message_key in message_keys {
+        let route_status = current_queue_route_status(&tx, message_key)?;
+        if route_status != expected_status.as_str() {
+            tx.commit()?;
+            return Ok(false);
+        }
+    }
+    let now = now_iso_string();
+    let updated = tx.execute(
+        "UPDATE worker_attempt_finalizations
+         SET queue_effects_applied_at = ?2, updated_at = ?2
+         WHERE attempt_id = ?1 AND queue_effects_applied_at IS NULL",
+        params![attempt_id, now],
+    )?;
+    anyhow::ensure!(
+        updated == 1,
+        "worker attempt {attempt_id} queue effect adoption was not persisted"
+    );
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn ack_leased_messages_with_reason(
     root: &Path,
     message_keys: &[String],
@@ -2536,11 +2589,50 @@ pub fn hold_leased_messages(
     reason: &HoldReason,
     summary: &str,
 ) -> Result<usize> {
+    hold_leased_messages_impl(root, None, message_keys, reason, summary)
+}
+
+/// I-072: apply a typed hold at most once for a durable worker attempt. The
+/// hold transition, retry-budget timestamp, projection refresh, and attempt
+/// marker commit in the same SQLite transaction.
+pub fn hold_leased_messages_for_attempt(
+    root: &Path,
+    attempt_id: &str,
+    message_keys: &[String],
+    reason: &HoldReason,
+    summary: &str,
+) -> Result<usize> {
+    hold_leased_messages_impl(root, Some(attempt_id), message_keys, reason, summary)
+}
+
+fn hold_leased_messages_impl(
+    root: &Path,
+    attempt_id: Option<&str>,
+    message_keys: &[String],
+    reason: &HoldReason,
+    summary: &str,
+) -> Result<usize> {
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
     attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
+    if let Some(attempt_id) = attempt_id {
+        let already_applied: Option<Option<String>> = tx
+            .query_row(
+                "SELECT queue_effects_applied_at FROM worker_attempt_finalizations WHERE attempt_id = ?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let already_applied = already_applied.with_context(|| {
+            format!("worker attempt {attempt_id} does not exist for queue hold")
+        })?;
+        if already_applied.is_some() {
+            tx.commit()?;
+            return Ok(0);
+        }
+    }
     let now = now_iso_string();
     let mut updated = 0usize;
     for message_key in message_keys {
@@ -2674,6 +2766,14 @@ pub fn hold_leased_messages(
                 )?;
             }
         }
+    }
+    if let Some(attempt_id) = attempt_id {
+        tx.execute(
+            "UPDATE worker_attempt_finalizations
+             SET queue_effects_applied_at = ?2, updated_at = ?2
+             WHERE attempt_id = ?1 AND queue_effects_applied_at IS NULL",
+            params![attempt_id, now],
+        )?;
     }
     let tasks = load_queue_projection_tasks(&tx, message_keys)?;
     refresh_queue_projection_tasks(root, &tx, &tasks)?;

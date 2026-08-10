@@ -1054,6 +1054,101 @@ fn result_from_worker_attempt(attempt: &lcm::WorkerAttemptRecord) -> Result<Stri
     }
 }
 
+fn apply_business_command_writebacks_for_attempt<F>(
+    root: &Path,
+    db_path: &Path,
+    attempt_id: &str,
+    message_keys: &[String],
+    apply: F,
+) -> Result<usize>
+where
+    F: FnOnce() -> Result<usize>,
+{
+    let attempt = lcm::run_worker_attempt(db_path, attempt_id)?
+        .with_context(|| format!("worker attempt {attempt_id} does not exist for writeback"))?;
+    if attempt.queue_effects_applied_at.is_some()
+        || channels::mark_worker_attempt_queue_effects_applied_if_status(
+            root,
+            attempt_id,
+            message_keys,
+            "handled",
+        )?
+    {
+        return Ok(0);
+    }
+    apply()
+}
+
+fn apply_recovery_enqueue_for_attempt<F>(db_path: &Path, attempt_id: &str, apply: F) -> Result<bool>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let attempt = lcm::run_worker_attempt(db_path, attempt_id)?.with_context(|| {
+        format!("worker attempt {attempt_id} does not exist for recovery enqueue")
+    })?;
+    if attempt.recovery_effects_applied_at.is_some() {
+        return Ok(false);
+    }
+    apply()?;
+    anyhow::ensure!(
+        lcm::run_mark_worker_attempt_recovery_effects_applied(db_path, attempt_id)?,
+        "worker attempt {attempt_id} recovery enqueue raced with another finalizer"
+    );
+    Ok(true)
+}
+
+/// Durable, deduplicated telemetry for the three retained repair nets. The
+/// existing state-integrity governance surface is reused because all three
+/// actions reconcile a durable state after an interrupted normal writer; the
+/// repair kind and concrete context remain explicit in structured details.
+fn record_repair_telemetry(
+    root: &Path,
+    repair_kind: &str,
+    cause: &str,
+    action_taken: &str,
+    context_key: &str,
+    message_key: Option<&str>,
+    mut details: Value,
+) -> Result<bool> {
+    if !details.is_object() {
+        details = serde_json::json!({ "details": details });
+    }
+    let detail_map = details
+        .as_object_mut()
+        .context("repair telemetry details must be a JSON object")?;
+    detail_map.insert(
+        "repair_kind".to_string(),
+        Value::String(repair_kind.to_string()),
+    );
+    detail_map.insert(
+        "context_key".to_string(),
+        Value::String(context_key.to_string()),
+    );
+    if let Some(message_key) = message_key {
+        detail_map.insert(
+            "message_key".to_string(),
+            Value::String(message_key.to_string()),
+        );
+    }
+    let idempotence_key = format!(
+        "repair:{}:{}",
+        repair_kind,
+        channels::stable_digest(context_key)
+    );
+    governance::record_event_if_new(
+        root,
+        governance::GovernanceEventRequest {
+            mechanism_id: "state_invariant_guard",
+            conversation_id: None,
+            severity: "info",
+            reason: cause,
+            action_taken,
+            details,
+            idempotence_key: Some(&idempotence_key),
+        },
+    )
+}
+
 #[derive(Debug, Clone)]
 struct DurableSelfWorkQueueRequest {
     kind: String,
@@ -2024,6 +2119,23 @@ fn release_stale_service_communication_leases(root: &Path) -> Result<usize> {
     let mut releasable_message_keys = Vec::new();
     for message_key in &message_keys {
         if preserve_stale_service_communication_lease_for_specialized_recovery(root, message_key)? {
+            if let Err(err) = record_repair_telemetry(
+                root,
+                "preserve_stale_service_communication_lease_for_specialized_recovery",
+                "service restart found a stale application queue lease owned by the generic communication worker",
+                "preserved the lease for the specialized Business OS application recovery path",
+                message_key,
+                Some(message_key),
+                serde_json::json!({
+                    "lease_owner": CHANNEL_ROUTER_LEASE_OWNER,
+                    "route_status": "leased",
+                    "acked_at": Value::Null,
+                }),
+            ) {
+                eprintln!(
+                    "failed to persist preserve-lease repair telemetry for {message_key}: {err:#}"
+                );
+            }
             continue;
         }
         releasable_message_keys.push(message_key.clone());
@@ -7402,35 +7514,51 @@ fn start_prompt_worker(
                             && !app_validation_terminal_success
                             && !job.leased_message_keys.is_empty()
                         {
-                            for message_key in &job.leased_message_keys {
-                                match crate::business_os::store::complete_business_command_from_queue_reply(
-                                    &root,
-                                    message_key,
-                                    &reply,
-                                ) {
-                                    Ok(Some(result)) => {
-                                        push_event_locked(
-                                            &mut shared,
-                                            format!(
-                                                "Business OS command writeback completed for {}: {}",
-                                                message_key,
-                                                clip_text(&result.to_string(), 180)
-                                            ),
-                                        );
-                                    }
-                                    Ok(None) => {}
-                                    Err(err) => {
-                                        let summary = format!(
-                                            "Business OS command writeback failed for {}: {}",
+                            let writeback_result = apply_business_command_writebacks_for_attempt(
+                                &root,
+                                &db_path,
+                                &attempt_id,
+                                &job.leased_message_keys,
+                                || {
+                                    let mut completed = 0usize;
+                                    for message_key in &job.leased_message_keys {
+                                        match crate::business_os::store::complete_business_command_from_queue_reply(
+                                            &root,
                                             message_key,
-                                            clip_text(&err.to_string(), 180)
-                                        );
-                                        push_event_locked(&mut shared, summary.clone());
-                                        founder_send_error = Some(summary);
-                                        should_handle_messages = false;
-                                        break;
+                                            &reply,
+                                        ) {
+                                            Ok(Some(result)) => {
+                                                completed += 1;
+                                                push_event_locked(
+                                                    &mut shared,
+                                                    format!(
+                                                        "Business OS command writeback completed for {}: {}",
+                                                        message_key,
+                                                        clip_text(&result.to_string(), 180)
+                                                    ),
+                                                );
+                                            }
+                                            Ok(None) => {}
+                                            Err(err) => {
+                                                return Err(err).with_context(|| {
+                                                    format!(
+                                                        "Business OS command writeback failed for {message_key}"
+                                                    )
+                                                });
+                                            }
+                                        }
                                     }
-                                }
+                                    Ok(completed)
+                                },
+                            );
+                            if let Err(err) = writeback_result {
+                                let summary = format!(
+                                    "Business OS command writeback failed: {}",
+                                    clip_text(&err.to_string(), 180)
+                                );
+                                push_event_locked(&mut shared, summary.clone());
+                                founder_send_error = Some(summary);
+                                should_handle_messages = false;
                             }
                         }
                         if !job.leased_message_keys.is_empty() && app_validation_terminal_success {
@@ -7520,13 +7648,13 @@ fn start_prompt_worker(
                                 } else {
                                     "pending"
                                 };
-                            let mut terminal_review_failure_reason: Option<String> = None;
                             let (ack_result, ack_label) = if let Some((reason, summary)) =
                                 &approved_completion_hold
                             {
                                 (
-                                        channels::hold_leased_messages(
+                                        channels::hold_leased_messages_for_attempt(
                                             &root,
+                                            &attempt_id,
                                             &job.leased_message_keys,
                                             reason,
                                             summary,
@@ -7539,8 +7667,9 @@ fn start_prompt_worker(
                                 &review_disposition
                             {
                                 (
-                                    channels::hold_leased_messages(
+                                    channels::hold_leased_messages_for_attempt(
                                         &root,
+                                        &attempt_id,
                                         &job.leased_message_keys,
                                         reason,
                                         summary,
@@ -7560,22 +7689,24 @@ fn start_prompt_worker(
                                         _ => "terminal queue failure",
                                     }
                                 };
-                                terminal_review_failure_reason = Some(failure_reason.to_string());
                                 (
-                                    channels::ack_leased_messages_with_failure_reason(
+                                    channels::ack_leased_messages_for_attempt(
                                         &root,
+                                        &attempt_id,
                                         &job.leased_message_keys,
                                         retry_status,
-                                        failure_reason,
+                                        Some(failure_reason),
                                     ),
                                     format!("queue lease(s) ({retry_status})"),
                                 )
                             } else {
                                 (
-                                    channels::ack_leased_messages(
+                                    channels::ack_leased_messages_for_attempt(
                                         &root,
+                                        &attempt_id,
                                         &job.leased_message_keys,
                                         retry_status,
+                                        None,
                                     ),
                                     format!("queue lease(s) ({retry_status})"),
                                 )
@@ -7829,6 +7960,17 @@ fn start_prompt_worker(
                             ) {
                                 Ok(updated) if updated > 0 => {
                                     cv_print_parser_recovered_after_worker_error = true;
+                                    if let Err(telemetry_err) = record_cv_print_parser_repair_telemetry(
+                                        &root,
+                                        &attempt_id,
+                                        &job,
+                                        &compact_error,
+                                        updated,
+                                    ) {
+                                        eprintln!(
+                                            "failed to persist CV parser repair telemetry for {attempt_id}: {telemetry_err:#}"
+                                        );
+                                    }
                                     push_event_locked(
                                         &mut shared,
                                         format!(
@@ -8001,6 +8143,7 @@ fn start_prompt_worker(
                             } else if route_status == "pending" {
                                 release_retryable_worker_messages(
                                     &root,
+                                    &attempt_id,
                                     &job.leased_message_keys,
                                     retry_reason,
                                     &compact_error,
@@ -8066,10 +8209,12 @@ fn start_prompt_worker(
                                 record_queue_ack_and_refresh_business_os_projections_locked(
                                     &root,
                                     &mut shared,
-                                    channels::ack_leased_messages(
+                                    channels::ack_leased_messages_for_attempt(
                                         &root,
+                                        &attempt_id,
                                         &job.leased_message_keys,
                                         "handled",
+                                        None,
                                     ),
                                     "handled recovered CV print parser queue lease(s)",
                                     &job.leased_message_keys,
@@ -8108,11 +8253,12 @@ fn start_prompt_worker(
                                 .unwrap_or(
                                     "Business OS app validation repair attempts exhausted after worker error",
                                 );
-                            if let Err(ack_err) = channels::ack_leased_messages_with_failure_reason(
+                            if let Err(ack_err) = channels::ack_leased_messages_for_attempt(
                                 &root,
+                                &attempt_id,
                                 &job.leased_message_keys,
                                 "failed",
-                                failure_reason,
+                                Some(failure_reason),
                             ) {
                                 push_event_locked(
                                     &mut shared,
@@ -8551,26 +8697,34 @@ fn start_prompt_worker(
                     ),
                 }
             }
-            let queued_outcome_recovery = outcome_recovery_prompt.is_some();
-            if let Some(mut queued) = outcome_recovery_prompt {
+            let queued_outcome_recovery = if let Some(mut queued) = outcome_recovery_prompt {
                 worker_activity.set_phase(&job.source_label, "queueing-recovery");
-                match preserve_systematic_research_binding(&job, &mut queued) {
-                    Ok(()) => enqueue_prompt(
+                match apply_recovery_enqueue_for_attempt(&db_path, &attempt_id, || {
+                    preserve_systematic_research_binding(&job, &mut queued)?;
+                    enqueue_prompt(
                         &root,
                         &state,
                         queued,
                         "Queued outcome-witness recovery for reviewed send".to_string(),
-                    ),
-                    Err(err) => push_event(
-                        &state,
-                        format!(
-                            "Refused malformed systematic-research recovery for {}: {}",
-                            job.source_label,
-                            clip_text(&err.to_string(), 180)
-                        ),
-                    ),
+                    );
+                    Ok(())
+                }) {
+                    Ok(applied) => applied,
+                    Err(err) => {
+                        push_event(
+                            &state,
+                            format!(
+                                "Refused or failed outcome recovery enqueue for {}: {}",
+                                job.source_label,
+                                clip_text(&err.to_string(), 180)
+                            ),
+                        );
+                        false
+                    }
                 }
-            }
+            } else {
+                false
+            };
             let durable_attempt =
                 lcm::run_worker_attempt(&db_path, &attempt_id)?.with_context(|| {
                     format!("worker attempt {attempt_id} disappeared during finalization")
@@ -9785,6 +9939,16 @@ fn terminalize_reviewed_queue_messages(
         updated = updated.saturating_add(channels::ack_leased_messages_for_attempt(
             root, attempt_id, &ordinary, "handled", None,
         )?);
+    } else {
+        anyhow::ensure!(
+            channels::mark_worker_attempt_queue_effects_applied_if_status(
+                root,
+                attempt_id,
+                message_keys,
+                "handled",
+            )?,
+            "reviewed Business OS queue terminalization did not bind to attempt {attempt_id}"
+        );
     }
     Ok(updated)
 }
@@ -9906,13 +10070,36 @@ fn cv_print_parser_error_allows_compact_recovery(error_text: &str) -> bool {
         || lower.contains("stream disconnected before completion")
 }
 
+fn record_cv_print_parser_repair_telemetry(
+    root: &Path,
+    attempt_id: &str,
+    job: &QueuedPrompt,
+    error_text: &str,
+    updated: usize,
+) -> Result<bool> {
+    record_repair_telemetry(
+        root,
+        "complete_cv_print_parser_recovery_to_leased_queue",
+        error_text,
+        "completed compact CV parser writeback after the worker runtime failed",
+        attempt_id,
+        job.leased_message_keys.first().map(String::as_str),
+        serde_json::json!({
+            "attempt_id": attempt_id,
+            "source_label": job.source_label.clone(),
+            "message_keys": job.leased_message_keys.clone(),
+            "updated_count": updated,
+        }),
+    )
+}
+
 fn complete_cv_print_parser_recovery_to_leased_queue(
     root: &Path,
     job: &QueuedPrompt,
     error_text: &str,
 ) -> Result<usize> {
     let reply = cv_print_compact_recovery_reply(&job.prompt, error_text);
-    let command_id = prompt_line_value(&job.prompt, "- command_id:");
+    let command_id = metadata_string(&job.queue_task_metadata, "business_os_command_id");
     let mut last_lock_error: Option<anyhow::Error> = None;
     for attempt in 0..6 {
         match complete_cv_print_parser_recovery_once(root, job, command_id.as_deref(), &reply) {
@@ -20556,6 +20743,25 @@ fn repair_stalled_founder_communications(
             "pending",
         );
         if rework_changed {
+            if let Err(err) = record_repair_telemetry(
+                root,
+                "repair_stalled_founder_communications",
+                "a founder communication was marked handled without a reviewed sent reply",
+                "restored the inbound and its durable founder rework into the routing loop",
+                &message.message_key,
+                Some(&message.message_key),
+                serde_json::json!({
+                    "thread_key": message.thread_key.clone(),
+                    "channel": message.channel.clone(),
+                    "previous_route_status": "handled",
+                    "repair_outcome": "restored_unreviewed_handled",
+                }),
+            ) {
+                eprintln!(
+                    "failed to persist founder repair telemetry for {}: {err:#}",
+                    message.message_key
+                );
+            }
             push_event(
                 state,
                 format!(
@@ -20639,6 +20845,25 @@ fn repair_stalled_founder_communications(
                 &message.message_key,
                 "Superseded by later reviewed founder reply in the same thread.",
             )?;
+            if let Err(err) = record_repair_telemetry(
+                root,
+                "repair_stalled_founder_communications",
+                "a founder communication remained stalled after a later reviewed reply was sent in the same thread",
+                "cancelled the superseded inbound and closed its stale founder rework state",
+                &message.message_key,
+                Some(&message.message_key),
+                serde_json::json!({
+                    "thread_key": message.thread_key.clone(),
+                    "channel": message.channel.clone(),
+                    "previous_route_status": previous_route_status,
+                    "repair_outcome": "superseded_by_later_reviewed_thread_send",
+                }),
+            ) {
+                eprintln!(
+                    "failed to persist founder repair telemetry for {}: {err:#}",
+                    message.message_key
+                );
+            }
             continue;
         }
         if founder_subject_has_later_reviewed_send_to_sender(root, &message)? {
@@ -20695,6 +20920,25 @@ fn repair_stalled_founder_communications(
                 std::slice::from_ref(&message.message_key),
                 "pending",
             );
+            if let Err(err) = record_repair_telemetry(
+                root,
+                "repair_stalled_founder_communications",
+                "a founder communication remained failed or in review rework without a reviewed sent reply",
+                "restored the inbound and its durable founder rework into the routing loop",
+                &message.message_key,
+                Some(&message.message_key),
+                serde_json::json!({
+                    "thread_key": message.thread_key.clone(),
+                    "channel": message.channel.clone(),
+                    "previous_route_status": previous_route_status,
+                    "repair_outcome": "restored_stalled_founder_communication",
+                }),
+            ) {
+                eprintln!(
+                    "failed to persist founder repair telemetry for {}: {err:#}",
+                    message.message_key
+                );
+            }
             push_event(
                 state,
                 format!(
@@ -25538,6 +25782,7 @@ fn runtime_retry_not_before_iso(error_text: &str) -> String {
 
 fn release_retryable_worker_messages(
     root: &Path,
+    attempt_id: &str,
     message_keys: &[String],
     reason: &str,
     summary: &str,
@@ -25547,8 +25792,9 @@ fn release_retryable_worker_messages(
     } else {
         "worker-runtime-api-failure"
     };
-    channels::hold_leased_messages(
+    channels::hold_leased_messages_for_attempt(
         root,
+        attempt_id,
         message_keys,
         &review::HoldReason::Technical {
             policy_id: policy_id.to_string(),
@@ -29655,6 +29901,75 @@ Business OS command:
             .iter()
             .any(|entry| entry["key"] == "cv.skills"
                 && entry["value"].get("Weitere Fähigkeiten").is_some()));
+    }
+
+    #[test]
+    fn cv_print_repair_telemetry_is_durable_contextual_and_deduplicated() {
+        let root = temp_root("cv-print-repair-telemetry");
+        let attempt_id = "attempt-cv-repair-telemetry";
+        let message_key = "queue:system::cv-repair-telemetry";
+        let error_text =
+            "direct session error: stream disconnected before completion: max_output_tokens";
+        let job = QueuedPrompt {
+            queue_task_metadata: Value::Null,
+            prompt: "CV PDF extracted text:\nJulia Schikore".to_string(),
+            goal: "parse cv".to_string(),
+            preview: "cv".to_string(),
+            source_label: "business-os:cv-print".to_string(),
+            suggested_skill: Some("ctox-cv-print-parser".to_string()),
+            leased_message_keys: vec![message_key.to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("business-os/cv-print-builder".to_string()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+
+        assert!(
+            record_cv_print_parser_repair_telemetry(&root, attempt_id, &job, error_text, 1,)
+                .expect("persist first CV repair telemetry")
+        );
+        assert!(
+            !record_cv_print_parser_repair_telemetry(&root, attempt_id, &job, error_text, 1,)
+                .expect("dedupe repeated CV repair telemetry")
+        );
+
+        let conn = channels::open_channel_db(&crate::paths::core_db(&root))
+            .expect("open CV repair telemetry db");
+        let (reason, action, details_json, idempotence_key): (String, String, String, String) =
+            conn.query_row(
+                "SELECT reason, action_taken, details_json, idempotence_key
+                 FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'complete_cv_print_parser_recovery_to_leased_queue'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load CV repair telemetry");
+        assert_eq!(reason, error_text);
+        assert!(action.contains("compact CV parser writeback"));
+        let details: Value =
+            serde_json::from_str(&details_json).expect("parse CV telemetry details");
+        assert_eq!(details["attempt_id"], attempt_id);
+        assert_eq!(details["context_key"], attempt_id);
+        assert_eq!(details["message_key"], message_key);
+        assert_eq!(details["updated_count"], 1);
+        assert!(idempotence_key.starts_with("repair:complete_cv_print_parser_recovery"));
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'complete_cv_print_parser_recovery_to_leased_queue'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count CV repair telemetry");
+        assert_eq!(count, 1, "identical CV repair context must dedupe");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -36623,6 +36938,216 @@ Business OS command:
     }
 
     #[test]
+    fn resumed_attempt_does_not_repeat_business_command_writeback_after_ack() -> anyhow::Result<()>
+    {
+        let root = temp_root("business-os-writeback-resume-after-ack");
+        let accepted = crate::business_os::store::record_command(
+            &root,
+            crate::business_os::store::BusinessCommand {
+                origin: crate::business_os::store::CommandOrigin::TrustedLocal,
+                id: Some("cmd_writeback_resume_after_ack".to_string()),
+                module: "ctox".to_string(),
+                command_type: "business_os.chat.task".to_string(),
+                record_id: Some("ctox".to_string()),
+                payload: serde_json::json!({
+                    "title": "Resume-safe writeback",
+                    "instruction": "Answer OK",
+                    "prompt": "Answer OK"
+                }),
+                client_context: serde_json::json!({"source":"test"}),
+            },
+        )?;
+        let task_id = accepted.task_id.expect("queue task id");
+        channels::lease_queue_task(&root, &task_id, CHANNEL_ROUTER_LEASE_OWNER)?;
+        channels::transition_business_command_for_task(
+            &root,
+            &task_id,
+            "leased",
+            None,
+            None,
+            None,
+            "test worker leased",
+        )?;
+        channels::transition_business_command_for_task(
+            &root,
+            &task_id,
+            "running",
+            None,
+            None,
+            None,
+            "test worker started",
+        )?;
+        channels::persist_business_command_worker_result(&root, &task_id, "OK")?;
+        channels::record_business_command_review(
+            &root,
+            &task_id,
+            "passed",
+            "passed",
+            &serde_json::json!({"test": true}),
+        )?;
+
+        let db_path = crate::paths::core_db(&root);
+        let attempt_id = "attempt-writeback-resume-after-ack";
+        let work_key = "queue:writeback-resume-after-ack";
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        engine.begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+            attempt_id,
+            work_key,
+            conversation_id: 7402,
+            source_label: "queue-test",
+            agent_outcome: lcm::AgentOutcome::Success,
+            reply_text: "OK",
+            error_text: None,
+        })?;
+
+        let writeback_calls = std::cell::Cell::new(0usize);
+        let first = apply_business_command_writebacks_for_attempt(
+            &root,
+            &db_path,
+            attempt_id,
+            std::slice::from_ref(&task_id),
+            || {
+                writeback_calls.set(writeback_calls.get() + 1);
+                Ok(
+                    crate::business_os::store::complete_business_command_from_queue_reply(
+                        &root, &task_id, "OK",
+                    )?
+                    .is_some() as usize,
+                )
+            },
+        )?;
+        assert_eq!(first, 1);
+        assert_eq!(writeback_calls.get(), 1);
+        assert_eq!(route_status_for(&root, &task_id), "handled");
+        let queue_timestamps_before_resume: (String, Option<String>) = channels::open_channel_db(
+            &db_path,
+        )?
+        .query_row(
+            "SELECT updated_at, acked_at FROM communication_routing_state WHERE message_key = ?1",
+            [task_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert!(
+            engine
+                .worker_attempt(attempt_id)?
+                .expect("attempt exists after writeback")
+                .queue_effects_applied_at
+                .is_none(),
+            "simulate the crash window after writeback acknowledged the queue but before the attempt marker"
+        );
+
+        drop(engine);
+        let resumed_engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let resumed = resumed_engine
+            .recoverable_worker_attempt(work_key)?
+            .expect("attempt remains recoverable before effects_completed");
+        assert_eq!(resumed.attempt_id, attempt_id);
+        assert!(resumed.queue_effects_applied_at.is_none());
+
+        let replayed = apply_business_command_writebacks_for_attempt(
+            &root,
+            &db_path,
+            attempt_id,
+            std::slice::from_ref(&task_id),
+            || {
+                writeback_calls.set(writeback_calls.get() + 1);
+                Ok(
+                    crate::business_os::store::complete_business_command_from_queue_reply(
+                        &root, &task_id, "OK",
+                    )?
+                    .is_some() as usize,
+                )
+            },
+        )?;
+        assert_eq!(replayed, 0);
+        assert_eq!(
+            writeback_calls.get(),
+            1,
+            "resume after acknowledgement must not call the writeback a second time"
+        );
+        assert!(
+            resumed_engine
+                .worker_attempt(attempt_id)?
+                .expect("resumed attempt exists")
+                .queue_effects_applied_at
+                .is_some(),
+            "resume must adopt the already-terminal queue effect into the attempt marker"
+        );
+        let queue_timestamps_after_resume: (String, Option<String>) = channels::open_channel_db(
+            &db_path,
+        )?
+        .query_row(
+            "SELECT updated_at, acked_at FROM communication_routing_state WHERE message_key = ?1",
+            [task_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            queue_timestamps_after_resume, queue_timestamps_before_resume,
+            "adopting an already-terminal writeback must not rewrite queue timestamps"
+        );
+        let transition_count: i64 = channels::open_channel_db(&db_path)?.query_row(
+            "SELECT COUNT(*) FROM business_command_transitions
+             WHERE command_id = ?1
+               AND reason = 'command-specific writeback completed after review and validation'",
+            [accepted.command_id.as_str()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(transition_count, 1, "writeback effect must remain singular");
+        Ok(())
+    }
+
+    #[test]
+    fn resumed_attempt_does_not_repeat_outcome_recovery_enqueue() -> anyhow::Result<()> {
+        let root = temp_root("outcome-recovery-enqueue-resume");
+        std::fs::create_dir_all(root.join("runtime"))?;
+        let db_path = crate::paths::core_db(&root);
+        let attempt_id = "attempt-outcome-recovery-resume";
+        let work_key = "queue:outcome-recovery-resume";
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        engine.begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+            attempt_id,
+            work_key,
+            conversation_id: 7403,
+            source_label: "queue-test",
+            agent_outcome: lcm::AgentOutcome::Success,
+            reply_text: "reviewed reply",
+            error_text: None,
+        })?;
+
+        let enqueue_calls = std::cell::Cell::new(0usize);
+        assert!(apply_recovery_enqueue_for_attempt(
+            &db_path,
+            attempt_id,
+            || {
+                enqueue_calls.set(enqueue_calls.get() + 1);
+                Ok(())
+            }
+        )?);
+        assert_eq!(enqueue_calls.get(), 1);
+
+        drop(engine);
+        let resumed_engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let resumed = resumed_engine
+            .recoverable_worker_attempt(work_key)?
+            .expect("attempt remains recoverable before effects_completed");
+        assert!(resumed.recovery_effects_applied_at.is_some());
+        assert!(!apply_recovery_enqueue_for_attempt(
+            &db_path,
+            attempt_id,
+            || {
+                enqueue_calls.set(enqueue_calls.get() + 1);
+                Ok(())
+            },
+        )?);
+        assert_eq!(
+            enqueue_calls.get(),
+            1,
+            "resume must not enqueue a second outcome-witness recovery"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn queue_ack_refreshes_business_os_command_projection() -> anyhow::Result<()> {
         let root = temp_root("business-os-queue-ack-projection");
         let accepted = crate::business_os::store::record_command(
@@ -39905,9 +40430,23 @@ Use shell tools to create or update these files."
             Some(CHANNEL_ROUTER_LEASE_OWNER)
         );
         assert!(first_lease.leased_at.is_some());
+        let db_path = crate::paths::core_db(&root);
+        let engine = LcmEngine::open(&db_path, LcmConfig::default()).expect("open attempt db");
+        engine
+            .begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+                attempt_id: "attempt-runtime-retry-wait",
+                work_key: "queue:runtime-retry-wait",
+                conversation_id: 7404,
+                source_label: "queue-test",
+                agent_outcome: lcm::AgentOutcome::ExecutionError,
+                reply_text: "",
+                error_text: Some("provider stream disconnected before completion"),
+            })
+            .expect("begin runtime retry attempt");
 
         release_retryable_worker_messages(
             &root,
+            "attempt-runtime-retry-wait",
             std::slice::from_ref(&task_id),
             "retryable runtime/API failure",
             "provider stream disconnected before completion",
@@ -40351,6 +40890,40 @@ Use shell tools to create or update these files."
             reloaded.lease_owner.as_deref(),
             Some(CHANNEL_ROUTER_LEASE_OWNER)
         );
+        let conn = channels::open_channel_db(&crate::paths::core_db(&root))
+            .expect("open repair telemetry db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT reason, action_taken, details_json, idempotence_key
+                 FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'preserve_stale_service_communication_lease_for_specialized_recovery'",
+            )
+            .expect("prepare preserve telemetry query");
+        let events = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .expect("query preserve telemetry")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect preserve telemetry");
+        assert_eq!(events.len(), 1, "identical preserve hits must dedupe");
+        assert!(events[0].0.contains("stale application queue lease"));
+        assert!(events[0]
+            .1
+            .contains("specialized Business OS application recovery"));
+        let details: Value = serde_json::from_str(&events[0].2).expect("parse telemetry details");
+        assert_eq!(details["message_key"], task.message_key);
+        assert_eq!(details["context_key"], task.message_key);
+        assert!(events[0]
+            .3
+            .starts_with("repair:preserve_stale_service_communication_lease"));
     }
 
     #[test]
@@ -42256,6 +42829,53 @@ Use shell tools to create or update these files."
             channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
                 .expect("failed to list queue tasks");
         assert!(tasks.is_empty());
+
+        assert!(!record_repair_telemetry(
+            &root,
+            "repair_stalled_founder_communications",
+            "a founder communication remained stalled after a later reviewed reply was sent in the same thread",
+            "cancelled the superseded inbound and closed its stale founder rework state",
+            inbound_key,
+            Some(inbound_key),
+            serde_json::json!({
+                "thread_key": thread_key,
+                "channel": "email",
+                "previous_route_status": "failed",
+                "repair_outcome": "superseded_by_later_reviewed_thread_send",
+            }),
+        )
+        .expect("dedupe repeated founder repair telemetry"));
+        let (reason, action, details_json): (String, String, String) = conn
+            .query_row(
+                "SELECT reason, action_taken, details_json
+                 FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'repair_stalled_founder_communications'
+                   AND json_extract(details_json, '$.message_key') = ?1",
+                [inbound_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load founder repair telemetry");
+        assert!(reason.contains("later reviewed reply"));
+        assert!(action.contains("cancelled the superseded inbound"));
+        let details: Value =
+            serde_json::from_str(&details_json).expect("parse founder telemetry details");
+        assert_eq!(details["context_key"], inbound_key);
+        assert_eq!(details["thread_key"], thread_key);
+        assert_eq!(details["previous_route_status"], "failed");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'repair_stalled_founder_communications'
+                   AND json_extract(details_json, '$.message_key') = ?1",
+                [inbound_key],
+                |row| row.get(0),
+            )
+            .expect("count founder repair telemetry");
+        assert_eq!(count, 1, "identical founder repair context must dedupe");
         let _ = std::fs::remove_dir_all(root);
     }
 

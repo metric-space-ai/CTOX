@@ -1687,6 +1687,137 @@ fn typed_holds_block_on_wait_ref_and_budget_technical_retries() {
 }
 
 #[test]
+fn attempt_bound_hold_and_failed_ack_do_not_rewrite_on_resume() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::create_dir_all(root.path().join("runtime"))?;
+    let db_path = resolve_db_path(root.path(), None);
+    let engine =
+        crate::context::lcm::LcmEngine::open(&db_path, crate::context::lcm::LcmConfig::default())?;
+
+    let held = create_queue_task(
+        root.path(),
+        QueueTaskCreateRequest {
+            title: "attempt-bound hold".to_string(),
+            prompt: "Hold once across finalization resume.".to_string(),
+            thread_key: "queue/attempt-hold".to_string(),
+            workspace_root: None,
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+            extra_metadata: None,
+        },
+    )?;
+    lease_queue_task(root.path(), &held.message_key, "ctox-test")?;
+    engine.begin_worker_attempt_finalization(
+        crate::context::lcm::WorkerAttemptFinalizationInput {
+            attempt_id: "attempt-hold-once",
+            work_key: "queue:attempt-hold-once",
+            conversation_id: 7201,
+            source_label: "queue-test",
+            agent_outcome: crate::context::lcm::AgentOutcome::Success,
+            reply_text: "held",
+            error_text: None,
+        },
+    )?;
+    assert_eq!(
+        hold_leased_messages_for_attempt(
+            root.path(),
+            "attempt-hold-once",
+            std::slice::from_ref(&held.message_key),
+            &HoldReason::MissingArtifact,
+            "artifact is still missing",
+        )?,
+        1
+    );
+    let held_once: (i64, String, Option<String>) = open_channel_db(&db_path)?.query_row(
+        "SELECT failure_attempt_count, updated_at, retry_not_before
+         FROM communication_routing_state WHERE message_key = ?1",
+        [held.message_key.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        hold_leased_messages_for_attempt(
+            root.path(),
+            "attempt-hold-once",
+            std::slice::from_ref(&held.message_key),
+            &HoldReason::MissingArtifact,
+            "artifact is still missing",
+        )?,
+        0
+    );
+    let held_after_resume: (i64, String, Option<String>) = open_channel_db(&db_path)?.query_row(
+        "SELECT failure_attempt_count, updated_at, retry_not_before
+         FROM communication_routing_state WHERE message_key = ?1",
+        [held.message_key.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(held_after_resume, held_once);
+
+    let failed = create_queue_task(
+        root.path(),
+        QueueTaskCreateRequest {
+            title: "attempt-bound failed ack".to_string(),
+            prompt: "Fail once across finalization resume.".to_string(),
+            thread_key: "queue/attempt-failed".to_string(),
+            workspace_root: None,
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+            extra_metadata: None,
+        },
+    )?;
+    lease_queue_task(root.path(), &failed.message_key, "ctox-test")?;
+    engine.begin_worker_attempt_finalization(
+        crate::context::lcm::WorkerAttemptFinalizationInput {
+            attempt_id: "attempt-failed-once",
+            work_key: "queue:attempt-failed-once",
+            conversation_id: 7202,
+            source_label: "queue-test",
+            agent_outcome: crate::context::lcm::AgentOutcome::ExecutionError,
+            reply_text: "failed",
+            error_text: Some("terminal worker failure"),
+        },
+    )?;
+    assert_eq!(
+        ack_leased_messages_for_attempt(
+            root.path(),
+            "attempt-failed-once",
+            std::slice::from_ref(&failed.message_key),
+            "failed",
+            Some("terminal worker failure"),
+        )?,
+        1
+    );
+    let failed_once: (String, Option<String>, String) = open_channel_db(&db_path)?.query_row(
+        "SELECT updated_at, acked_at, last_error
+         FROM communication_routing_state WHERE message_key = ?1",
+        [failed.message_key.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        ack_leased_messages_for_attempt(
+            root.path(),
+            "attempt-failed-once",
+            std::slice::from_ref(&failed.message_key),
+            "failed",
+            Some("terminal worker failure"),
+        )?,
+        0
+    );
+    let failed_after_resume: (String, Option<String>, String) = open_channel_db(&db_path)?
+        .query_row(
+            "SELECT updated_at, acked_at, last_error
+             FROM communication_routing_state WHERE message_key = ?1",
+            [failed.message_key.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    assert_eq!(failed_after_resume, failed_once);
+    Ok(())
+}
+
+#[test]
 fn tui_ingest_sanitizes_minimax_secret_before_persisting_message() -> Result<()> {
     let root = std::env::temp_dir().join(format!(
         "ctox-tui-secret-test-{}",
