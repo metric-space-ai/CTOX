@@ -80,6 +80,7 @@ tmp_intersolar_*.js
 !/docs/business-adoption-readiness-plan.md
 !/docs/business-os.md
 !/docs/ctox-rxdb.md
+!/docs/ctox-sync-feldbefunde-skf-2026-08-10.md
 !/docs/ctox-sync-production-readiness-95.md
 !/docs/ctox-sync-production-readiness-runbooks.md
 !/docs/core_runtime_state_machine.md
