@@ -1130,10 +1130,15 @@ fn record_repair_telemetry(
             Value::String(message_key.to_string()),
         );
     }
+    let idempotence_context_key = detail_map
+        .get("repair_outcome")
+        .and_then(Value::as_str)
+        .map(|repair_outcome| serde_json::json!([context_key, repair_outcome]).to_string())
+        .unwrap_or_else(|| context_key.to_string());
     let idempotence_key = format!(
         "repair:{}:{}",
         repair_kind,
-        channels::stable_digest(context_key)
+        channels::stable_digest(&idempotence_context_key)
     );
     governance::record_event_if_new(
         root,
@@ -7161,6 +7166,7 @@ fn start_prompt_worker(
                                             &root,
                                             &job,
                                             "Business OS app artifacts validated before queue completion",
+                                            Some(&attempt_id),
                                         ) {
                                             Ok(updated) => push_event_locked(
                                                 &mut shared,
@@ -8015,6 +8021,7 @@ fn start_prompt_worker(
                                         &feedback,
                                         &summary,
                                         repair_attempts.saturating_add(1),
+                                        Some(&attempt_id),
                                     ) {
                                         Ok(updated) => {
                                             app_validation_rework = true;
@@ -8231,6 +8238,7 @@ fn start_prompt_worker(
                                 &root,
                                 &job,
                                 completion_reason,
+                                Some(&attempt_id),
                             ) {
                                 Ok(updated) => push_event_locked(
                                     &mut shared,
@@ -11370,7 +11378,18 @@ fn apply_business_os_app_validation_rework_to_leased_queue(
     feedback: &str,
     summary: &str,
     attempt: usize,
+    attempt_id: Option<&str>,
 ) -> Result<usize> {
+    if let Some(attempt_id) = attempt_id {
+        if channels::mark_worker_attempt_queue_effects_applied_if_status(
+            root,
+            attempt_id,
+            &job.leased_message_keys,
+            "review_rework",
+        )? {
+            return Ok(0);
+        }
+    }
     let updated = apply_review_feedback_to_leased_queue(root, job, feedback, summary)?;
     anyhow::ensure!(
         updated > 0,
@@ -11388,8 +11407,17 @@ fn apply_business_os_app_validation_rework_to_leased_queue(
             format!("failed to record Business OS app validation rework proof for {message_key}")
         })?;
     }
-    channels::ack_leased_messages(root, &job.leased_message_keys, "review_rework")
-        .context("failed to mark Business OS app validation rework queue task(s)")?;
+    match attempt_id {
+        Some(attempt_id) => channels::ack_leased_messages_for_attempt(
+            root,
+            attempt_id,
+            &job.leased_message_keys,
+            "review_rework",
+            None,
+        ),
+        None => channels::ack_leased_messages(root, &job.leased_message_keys, "review_rework"),
+    }
+    .context("failed to mark Business OS app validation rework queue task(s)")?;
     Ok(updated)
 }
 
@@ -11397,13 +11425,24 @@ fn complete_business_os_app_validation_success_to_leased_queue(
     root: &Path,
     job: &QueuedPrompt,
     reason: &str,
+    attempt_id: Option<&str>,
 ) -> Result<usize> {
     anyhow::ensure!(
         !job.leased_message_keys.is_empty(),
         "Business OS app validation success had no leased queue task to update"
     );
-    let expected_module_id =
-        business_os_app_module_target_from_prompt(&job.prompt).map(|target| target.module_id);
+    if let Some(attempt_id) = attempt_id {
+        if channels::mark_worker_attempt_queue_effects_applied_if_status(
+            root,
+            attempt_id,
+            &job.leased_message_keys,
+            "handled",
+        )? {
+            return Ok(job.leased_message_keys.len());
+        }
+    }
+    let expected_module_id = business_os_app_module_target_from_metadata(&job.queue_task_metadata)
+        .map(|target| target.module_id);
     let mut fallback_message_keys = Vec::new();
     let mut updated = 0usize;
     for message_key in &job.leased_message_keys {
@@ -11496,6 +11535,17 @@ fn complete_business_os_app_validation_success_to_leased_queue(
                 )
             })?;
         }
+    }
+    if let Some(attempt_id) = attempt_id {
+        anyhow::ensure!(
+            channels::mark_worker_attempt_queue_effects_applied_if_status(
+                root,
+                attempt_id,
+                &job.leased_message_keys,
+                "handled",
+            )?,
+            "Business OS app validation success did not bind handled queue effects to attempt {attempt_id}"
+        );
     }
     Ok(updated)
 }
@@ -34261,7 +34311,7 @@ Business OS command:
     }
 
     #[test]
-    fn business_os_app_validation_worker_error_keeps_same_task_reworkable() {
+    fn resumed_attempt_does_not_repeat_business_os_app_validation_rework_after_ack() {
         let root = temp_root("business-os-app-validation-worker-error-rework");
         let script_dir = root.join("src/apps/business-os/scripts");
         std::fs::create_dir_all(&script_dir).expect("create validator script dir");
@@ -34301,6 +34351,22 @@ Business OS command:
             outbound_email: None,
             outbound_anchor: None,
         };
+        let db_path = crate::paths::core_db(&root);
+        let attempt_id = "attempt-app-validation-rework-resume";
+        let work_key = "queue:app-validation-rework-resume";
+        let engine =
+            LcmEngine::open(&db_path, LcmConfig::default()).expect("open worker attempt engine");
+        engine
+            .begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+                attempt_id,
+                work_key,
+                conversation_id: 7404,
+                source_label: "business-os:app-create",
+                agent_outcome: lcm::AgentOutcome::ExecutionError,
+                reply_text: "",
+                error_text: Some("worker error after invalid app artifacts"),
+            })
+            .expect("begin app validation worker attempt finalization");
 
         let feedback = business_os_app_module_validation_feedback(&root, &job)
             .expect("validator hook failed")
@@ -34311,6 +34377,7 @@ Business OS command:
             &feedback,
             "Business OS app artifact validation failed after worker error for business-os:app-create",
             1,
+            Some(attempt_id),
         )
         .expect("failed to convert worker error into app validation rework");
         assert_eq!(updated, 1);
@@ -34343,6 +34410,78 @@ Business OS command:
             )
             .expect("count validator rework proofs");
         assert_eq!(proof_count, 1);
+        let prompt_once = reloaded.prompt.clone();
+        let routing_once: (String, Option<String>) = conn
+            .query_row(
+                "SELECT updated_at, acked_at
+                 FROM communication_routing_state WHERE message_key = ?1",
+                [task.message_key.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load app validation rework timestamps");
+        assert!(
+            engine
+                .worker_attempt(attempt_id)
+                .expect("load app validation worker attempt")
+                .expect("app validation worker attempt exists")
+                .queue_effects_applied_at
+                .is_some(),
+            "attempt-bound rework acknowledgement must persist the queue marker"
+        );
+
+        drop(conn);
+        drop(engine);
+        let resumed_engine =
+            LcmEngine::open(&db_path, LcmConfig::default()).expect("reopen worker attempt engine");
+        let resumed = resumed_engine
+            .recoverable_worker_attempt(work_key)
+            .expect("load recoverable app validation attempt")
+            .expect("app validation attempt remains recoverable before effects completion");
+        assert_eq!(resumed.attempt_id, attempt_id);
+        std::thread::sleep(Duration::from_millis(2));
+        let replayed = apply_business_os_app_validation_rework_to_leased_queue(
+            &root,
+            &job,
+            &feedback,
+            "Business OS app artifact validation failed after worker error for business-os:app-create",
+            1,
+            Some(attempt_id),
+        )
+        .expect("resume app validation rework finalization");
+        assert_eq!(replayed, 0);
+
+        let replayed_task = channels::load_queue_task(&root, &task.message_key)
+            .expect("reload app validation rework task")
+            .expect("app validation rework task still exists");
+        assert_eq!(replayed_task.prompt, prompt_once);
+        let replayed_conn =
+            channels::open_channel_db(&db_path).expect("reopen channel db after resume");
+        let routing_after_resume: (String, Option<String>) = replayed_conn
+            .query_row(
+                "SELECT updated_at, acked_at
+                 FROM communication_routing_state WHERE message_key = ?1",
+                [task.message_key.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("reload app validation rework timestamps");
+        assert_eq!(routing_after_resume, routing_once);
+        let proof_count_after_resume: i64 = replayed_conn
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM ctox_core_transition_proofs
+                WHERE entity_type = 'QueueItem'
+                  AND entity_id = ?1
+                  AND to_state = 'ReworkRequired'
+                  AND accepted = 1
+                  AND request_json LIKE '%"validator_rework":"true"%'
+                  AND request_json LIKE '%"module_id":"projects"%'
+                "#,
+                params![task.message_key],
+                |row| row.get(0),
+            )
+            .expect("count validator rework proofs after resume");
+        assert_eq!(proof_count_after_resume, proof_count);
     }
 
     #[test]
@@ -34379,15 +34518,40 @@ Business OS command:
             outbound_email: None,
             outbound_anchor: None,
         };
+        let db_path = crate::paths::core_db(&root);
+        let attempt_id = "attempt-app-validation-green-after-worker-error";
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())
+            .expect("open app validation success attempt engine");
+        engine
+            .begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+                attempt_id,
+                work_key: "queue:app-validation-green-after-worker-error",
+                conversation_id: 7405,
+                source_label: "business-os:app-create",
+                agent_outcome: lcm::AgentOutcome::ExecutionError,
+                reply_text: "",
+                error_text: Some("worker error after green app artifacts"),
+            })
+            .expect("begin app validation success attempt finalization");
 
         let updated = complete_business_os_app_validation_success_to_leased_queue(
             &root,
             &job,
             "Business OS app artifacts validated after worker error",
+            Some(attempt_id),
         )
         .expect("failed to mark green app validation worker error handled");
         assert_eq!(updated, 1);
         assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        assert!(
+            engine
+                .worker_attempt(attempt_id)
+                .expect("load app validation success attempt")
+                .expect("app validation success attempt exists")
+                .queue_effects_applied_at
+                .is_some(),
+            "app validation success must bind handled queue effects to its attempt"
+        );
     }
 
     #[test]
@@ -42485,6 +42649,70 @@ Use shell tools to create or update these files."
             channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
                 .expect("failed to list queue tasks");
         assert!(tasks.is_empty());
+
+        let restored_details = serde_json::json!({
+            "thread_key": thread_key,
+            "channel": "email",
+            "previous_route_status": "failed",
+            "repair_outcome": "restored_stalled_founder_communication",
+        });
+        assert!(record_repair_telemetry(
+            &root,
+            "repair_stalled_founder_communications",
+            "a founder communication remained failed without a reviewed sent reply",
+            "restored the inbound and its durable founder rework into the routing loop",
+            inbound_key,
+            Some(inbound_key),
+            restored_details.clone(),
+        )
+        .expect("persist second founder repair outcome"));
+        assert!(!record_repair_telemetry(
+            &root,
+            "repair_stalled_founder_communications",
+            "a founder communication remained failed without a reviewed sent reply",
+            "restored the inbound and its durable founder rework into the routing loop",
+            inbound_key,
+            Some(inbound_key),
+            restored_details,
+        )
+        .expect("dedupe identical second founder repair outcome"));
+        let (reason, action, details_json): (String, String, String) = conn
+            .query_row(
+                "SELECT reason, action_taken, details_json
+                 FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'repair_stalled_founder_communications'
+                   AND json_extract(details_json, '$.message_key') = ?1
+                   AND json_extract(details_json, '$.repair_outcome') =
+                       'superseded_by_later_reviewed_thread_send'",
+                [inbound_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load superseded founder repair telemetry");
+        assert!(reason.contains("later reviewed reply"));
+        assert!(action.contains("cancelled the superseded inbound"));
+        let details: Value =
+            serde_json::from_str(&details_json).expect("parse founder telemetry details");
+        assert_eq!(details["context_key"], inbound_key);
+        assert_eq!(details["thread_key"], thread_key);
+        assert_eq!(details["previous_route_status"], "failed");
+        let (count, distinct_outcomes): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COUNT(DISTINCT json_extract(details_json, '$.repair_outcome'))
+                 FROM governance_events
+                 WHERE mechanism_id = 'state_invariant_guard'
+                   AND json_extract(details_json, '$.repair_kind') =
+                       'repair_stalled_founder_communications'
+                   AND json_extract(details_json, '$.message_key') = ?1",
+                [inbound_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("count founder repair telemetry outcomes");
+        assert_eq!(count, 2, "different founder repair outcomes must persist");
+        assert_eq!(distinct_outcomes, 2);
+
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -42829,53 +43057,6 @@ Use shell tools to create or update these files."
             channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
                 .expect("failed to list queue tasks");
         assert!(tasks.is_empty());
-
-        assert!(!record_repair_telemetry(
-            &root,
-            "repair_stalled_founder_communications",
-            "a founder communication remained stalled after a later reviewed reply was sent in the same thread",
-            "cancelled the superseded inbound and closed its stale founder rework state",
-            inbound_key,
-            Some(inbound_key),
-            serde_json::json!({
-                "thread_key": thread_key,
-                "channel": "email",
-                "previous_route_status": "failed",
-                "repair_outcome": "superseded_by_later_reviewed_thread_send",
-            }),
-        )
-        .expect("dedupe repeated founder repair telemetry"));
-        let (reason, action, details_json): (String, String, String) = conn
-            .query_row(
-                "SELECT reason, action_taken, details_json
-                 FROM governance_events
-                 WHERE mechanism_id = 'state_invariant_guard'
-                   AND json_extract(details_json, '$.repair_kind') =
-                       'repair_stalled_founder_communications'
-                   AND json_extract(details_json, '$.message_key') = ?1",
-                [inbound_key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("load founder repair telemetry");
-        assert!(reason.contains("later reviewed reply"));
-        assert!(action.contains("cancelled the superseded inbound"));
-        let details: Value =
-            serde_json::from_str(&details_json).expect("parse founder telemetry details");
-        assert_eq!(details["context_key"], inbound_key);
-        assert_eq!(details["thread_key"], thread_key);
-        assert_eq!(details["previous_route_status"], "failed");
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM governance_events
-                 WHERE mechanism_id = 'state_invariant_guard'
-                   AND json_extract(details_json, '$.repair_kind') =
-                       'repair_stalled_founder_communications'
-                   AND json_extract(details_json, '$.message_key') = ?1",
-                [inbound_key],
-                |row| row.get(0),
-            )
-            .expect("count founder repair telemetry");
-        assert_eq!(count, 1, "identical founder repair context must dedupe");
         let _ = std::fs::remove_dir_all(root);
     }
 
