@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">16 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">17 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S2a</span>
+    <h3>I-073 gelandet: <code>0d05240c3</code> — Sweep auditiert, Reconcile-Duplikat weg</h3>
+    <p>Der 60-s-Queue-Lease-Sweep ist als Governance-Mechanismus <code>orphaned_queue_lease_sweep</code> registriert und schreibt bei realen Releases dauerhafte Ereignisse (Noop still); die Queue-Hälfte fiel aus dem Ticket-Reconcile — der Sweep ist alleiniger Owner. Abnahme: 381/5 — Orchestrator hat die 5 einzeln gegen die R-01-Klassifikation bewiesen (stop_guard = vorbestehende echte_regression, rot-basis Zeile 57). Der getrennte Symbol-Audit fing einen fehlenden Testhelfer-Hunk VOR dem Commit.</p>
+    <span class="ev"><b>SYNC-F Runde 2</b> I-070✓ I-071✓ I-072✓ I-073✓ — <b>I-074 läuft</b> (Run <code>…86255b3e</code>, CV-Gate typisiert; danach ist Runde 2 KOMPLETT)</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan-v2 · S2a</span>
