@@ -335,10 +335,10 @@ footer{
   <div class="spalte-kopf"><h2>In Arbeit</h2><span class="zaehler">3 Karten</span></div>
 
   <article class="karte s-work">
-    <span class="chip c-work">Plan-v2 · S2a</span>
-    <h3>I-071 läuft auf Sol — der atomare Attempt-Abschluss (Run <code>…88ac012e</code>)</h3>
-    <p>Das große Los aus I-066: dauerhafter Attempt-Datensatz (finalizing → terminal nach Artefakt-Check), typisiertes <code>Success</code> in <code>messages.agent_outcome</code> (heute: 0 von 895!), Zähler-Reset erst NACH Review+Zeuge, Timeout finalisiert vor Kind-Aufgabe, Defer/Recover symmetrisch. Die drei Netze bleiben bis zur Null-Messung. Läuft auf dem warmen i070-Target.</p>
-    <span class="ev"><b>Heute gelandet</b> I-070 <code>1cbefb0bc</code> + Review-Nacharbeit I-070b <code>5f49d7f76</code> (Drive-by raus, dormant→active im Repair) + P2 doc_cache-Deckel <code>fa1a18ab6</code><br><b>Grok-Review</b> (Owner-autorisierte Kimi-Vertretung) fand beide I-070b-Befunde — Beweis <code>docs/dev/beweise/plan-v2-review-i070.md</code><br><b>Danach</b> P1 Keep-Alive (Brief liegt) · I-072…074 · Erreichbarkeits-Wächter wartet auf ctox-dev-Triage</span>
+    <span class="chip c-work">Plan-v2 · Review</span>
+    <h3>Grok-Review von I-071 läuft (Run <code>…78b97d16</code>)</h3>
+    <p><b>I-071 IST GELANDET: <code>5a1dc3d35</code></b> — der Worker-Abschluss ist eine atomare, wiederaufnehmbare Transition. <code>worker_attempt_finalizations</code> (finalizing → terminal nach frischem Artefakt-Check, ein offener Attempt je work_key), Erfolgs-Reply trägt typisiertes <code>Success</code> (vorher 0/895), Zähler-Reset erst nach Review+Zeuge, Timeout terminalisiert vor Kindtask, Defer→Recover als ein Übergang, attempt-gebundene idempotente Queue-Acks. Fünf Beweistests grün; Suiten: 376/5·5/0·15/0·81/2 = exakt die bekannten Roten.</p>
+    <span class="ev"><b>Montage</b> service.rs hunk-genau 27+1 Hunks, 245 fremde blieben draußen; Syntax-Parse + Symbol-Schluss geprüft<br><b>Review prüft</b> dieselben Fehlerklassen, die bei I-070 trafen (Drive-by, dirty-Symbol-Montage)<br><b>Danach</b> P1 Keep-Alive · I-072…074</span>
   </article>
 
   <article class="karte s-work">
