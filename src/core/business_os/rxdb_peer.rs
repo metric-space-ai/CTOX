@@ -29,6 +29,10 @@ pub(super) use super::rxdb_peer_browser::{
     browser_frame_hash, find_browser_document, upsert_browser_frame, upsert_browser_session,
     upsert_browser_tab, BrowserSessionAccess,
 };
+pub(super) use super::rxdb_peer_demand_files::{
+    demand_file_source_configs, register_demand_file_sources, stream_demand_file_chunks,
+    DEMAND_FILE_CHUNK_COLLECTIONS,
+};
 pub(super) use super::rxdb_peer_desktop_files::{
     active_desktop_file_chunk_rows_from_sqlite, collect_desktop_file_index_scan,
     compact_desktop_file_index_store, compact_desktop_file_index_store_sync,
@@ -530,7 +534,7 @@ static BUSINESS_RECORDS_LOOP_METRICS: NativePeerLoopMetrics =
     NativePeerLoopMetrics::new("business_records");
 static BUSINESS_COMMANDS_LOOP_METRICS: NativePeerLoopMetrics =
     NativePeerLoopMetrics::new("business_commands");
-static DEMAND_FILE_FETCH_METRICS: DemandFileFetchMetrics = DemandFileFetchMetrics::new();
+pub(super) static DEMAND_FILE_FETCH_METRICS: DemandFileFetchMetrics = DemandFileFetchMetrics::new();
 static COMMAND_PLANE_METRICS: CommandPlaneMetrics = CommandPlaneMetrics::new();
 
 /// Supervision backoff bounds for respawning the native peer after a
@@ -854,7 +858,7 @@ fn native_peer_worker_threads() -> usize {
         .max(NATIVE_PEER_MIN_WORKER_THREADS)
 }
 
-type WebRtcPool = Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>;
+pub(super) type WebRtcPool = Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>;
 
 pub(super) struct NativePeerLoopMetrics {
     name: &'static str,
@@ -1012,7 +1016,7 @@ pub(super) struct DemandFileFetchRequestStats {
 }
 
 impl DemandFileFetchRequestStats {
-    fn new(range: Option<&FileRange>) -> Self {
+    pub(super) fn new(range: Option<&FileRange>) -> Self {
         Self {
             ranged: range.is_some(),
             bytes_requested: range.map(|range| range.length).unwrap_or_default(),
@@ -1020,14 +1024,14 @@ impl DemandFileFetchRequestStats {
         }
     }
 
-    fn finish(&mut self) {
+    pub(super) fn finish(&mut self) {
         if !self.ranged {
             self.bytes_requested = self.bytes_emitted;
         }
     }
 }
 
-struct DemandFileFetchMetrics {
+pub(super) struct DemandFileFetchMetrics {
     requests: std::sync::atomic::AtomicU64,
     ranged_requests: std::sync::atomic::AtomicU64,
     error_requests: std::sync::atomic::AtomicU64,
@@ -1056,7 +1060,7 @@ impl DemandFileFetchMetrics {
         }
     }
 
-    fn record(&self, stats: &DemandFileFetchRequestStats, success: bool) {
+    pub(super) fn record(&self, stats: &DemandFileFetchRequestStats, success: bool) {
         self.requests.fetch_add(1, Ordering::Relaxed);
         if stats.ranged {
             self.ranged_requests.fetch_add(1, Ordering::Relaxed);
@@ -8471,224 +8475,6 @@ fn spreadsheet_column_label(mut index: usize) -> String {
     }
 }
 
-/// Phase 4: file-demand sources exposed to the browser. The request collection
-/// can be metadata (`desktop_files`) while the bytes still live in a separate
-/// chunk collection (`desktop_file_chunks`); this keeps large payloads off the
-/// normal background replication path.
-struct DemandFileChunkCollection {
-    request_collection: &'static str,
-    storage_collection: &'static str,
-    key_field: &'static str,
-}
-
-const DEMAND_FILE_CHUNK_COLLECTIONS: &[DemandFileChunkCollection] = &[
-    DemandFileChunkCollection {
-        request_collection: "desktop_files",
-        storage_collection: "desktop_file_chunks",
-        key_field: "file_id",
-    },
-    DemandFileChunkCollection {
-        request_collection: "desktop_file_chunks",
-        storage_collection: "desktop_file_chunks",
-        key_field: "file_id",
-    },
-    DemandFileChunkCollection {
-        request_collection: "document_blob_chunks",
-        storage_collection: "document_blob_chunks",
-        key_field: "blob_id",
-    },
-    DemandFileChunkCollection {
-        request_collection: "spreadsheet_blob_chunks",
-        storage_collection: "spreadsheet_blob_chunks",
-        key_field: "blob_id",
-    },
-    DemandFileChunkCollection {
-        request_collection: "business_module_source_blob_chunks",
-        storage_collection: "business_module_source_blob_chunks",
-        key_field: "blob_id",
-    },
-];
-
-/// SYNC-32: one resolved demand-file source — either a built-in entry from
-/// `DEMAND_FILE_CHUNK_COLLECTIONS` or a runtime-module collection declared
-/// with `"syncProfile": "demand-chunks"`.
-struct DemandFileSourceConfig {
-    request_collection: String,
-    storage_collection: String,
-    key_field: String,
-}
-
-/// SYNC-32: built-in demand-file sources plus the sources runtime-installed
-/// modules declare. Built-ins come first and are unchanged; declared sources
-/// are appended, serve their own collection (request == storage), and are
-/// deduped on the request collection so a declaration can never shadow a
-/// built-in source.
-fn demand_file_source_configs(root: &Path) -> Vec<DemandFileSourceConfig> {
-    let mut configs: Vec<DemandFileSourceConfig> = DEMAND_FILE_CHUNK_COLLECTIONS
-        .iter()
-        .map(|source| DemandFileSourceConfig {
-            request_collection: source.request_collection.to_owned(),
-            storage_collection: source.storage_collection.to_owned(),
-            key_field: source.key_field.to_owned(),
-        })
-        .collect();
-    let mut seen: HashSet<String> = configs
-        .iter()
-        .map(|config| config.request_collection.clone())
-        .collect();
-    for (collection, key_field) in runtime_module_demand_chunk_sources(root) {
-        if !seen.insert(collection.clone()) {
-            continue;
-        }
-        configs.push(DemandFileSourceConfig {
-            request_collection: collection.clone(),
-            storage_collection: collection,
-            key_field,
-        });
-    }
-    configs
-}
-
-/// Phase 4: register a bounded-memory file stream source on the pool's file
-/// fetch registry for each file-bearing chunk collection that is actually
-/// registered on this database. Without this, `rxdb.file.fetch` always returns
-/// FILE_NOT_FOUND (no source). The source closure is sync and reads the local
-/// RxDB SQLite store through read-only queries; the file-fetch dispatcher runs
-/// it on a blocking worker and applies async transport backpressure.
-/// SYNC-32: the source list is the built-in set plus runtime-module
-/// `demand-chunks` declarations (`demand_file_source_configs`).
-fn register_demand_file_sources(pool: &WebRtcPool, database: &Arc<RxDatabase>, root: &Path) {
-    for source_config in demand_file_source_configs(root) {
-        // Only register sources whose backing storage collection exists (the
-        // catalog is fault-tolerant; optional chunk collections may be absent).
-        if database
-            .collection(&source_config.storage_collection)
-            .is_none()
-        {
-            continue;
-        }
-        let root = root.to_path_buf();
-        let request_collection = source_config.request_collection;
-        let storage_collection = source_config.storage_collection;
-        let key_field = source_config.key_field;
-        let closure_storage_collection = storage_collection.clone();
-        let closure_key_field = key_field.clone();
-        let source: Arc<rxdb::plugins::replication_webrtc::file_fetch_handler::FileChunkStreamFn> =
-            Arc::new(move |_collection, file_id, range, emit| {
-                stream_demand_file_chunks(
-                    &root,
-                    &closure_storage_collection,
-                    &closure_key_field,
-                    file_id,
-                    range,
-                    emit,
-                )
-            });
-        pool.file_fetch_registry
-            .register_stream_source(&request_collection, source);
-        eprintln!(
-            "[business-os] demand-fetch file source registered for `{request_collection}` \
-             via `{storage_collection}` (key `{key_field}`)"
-        );
-    }
-}
-
-/// Phase 4: stream the bytes of `file_id` from `collection`'s chunk documents.
-/// Reads the chunk docs by the collection's key field, orders by `idx`,
-/// base64-decodes each `data`, and emits one chunk of raw bytes at a time
-/// (honoring an optional byte range). Returns `Err` when the collection is
-/// missing or the query fails; emits nothing (→ FILE_NOT_FOUND upstream) when
-/// the file has no chunks.
-fn stream_demand_file_chunks(
-    root: &Path,
-    collection: &str,
-    key_field: &str,
-    file_id: &str,
-    range: Option<&FileRange>,
-    emit: &mut dyn FnMut(&[u8]) -> rxdb::rx_error::RxResult<bool>,
-) -> rxdb::rx_error::RxResult<()> {
-    let mut stats = DemandFileFetchRequestStats::new(range);
-    let result = stream_demand_file_chunks_inner(
-        root, collection, key_field, file_id, range, emit, &mut stats,
-    );
-    stats.finish();
-    DEMAND_FILE_FETCH_METRICS.record(&stats, result.is_ok());
-    result
-}
-
-fn stream_demand_file_chunks_inner(
-    root: &Path,
-    collection: &str,
-    key_field: &str,
-    file_id: &str,
-    range: Option<&FileRange>,
-    emit: &mut dyn FnMut(&[u8]) -> rxdb::rx_error::RxResult<bool>,
-    stats: &mut DemandFileFetchRequestStats,
-) -> rxdb::rx_error::RxResult<()> {
-    let (mut chunk_rows, loaded_base_offset) = if collection == "desktop_file_chunks" {
-        active_desktop_file_chunk_rows_from_sqlite(root, file_id, range, stats)?
-    } else {
-        (
-            demand_file_chunk_rows_for_key_from_sqlite(
-                root, collection, key_field, file_id, None, None, stats,
-            )?,
-            0,
-        )
-    };
-    // Order by `idx` so the reassembled byte stream is correct.
-    chunk_rows.sort_by_key(|chunk: &Value| chunk.get("idx").and_then(Value::as_u64).unwrap_or(0));
-
-    // Range support: skip/take a byte window across the decoded chunk stream.
-    let (range_start, range_end) = match range {
-        Some(r) => (r.offset, r.offset.saturating_add(r.length)),
-        None => (0u64, u64::MAX),
-    };
-    let mut emitted_offset: u64 = loaded_base_offset;
-    for chunk in chunk_rows {
-        // Skip redacted/pruned chunks (empty data) so they do not corrupt the
-        // stream; the browser tracks presence separately.
-        let data = chunk.get("data").and_then(Value::as_str).unwrap_or("");
-        if data.is_empty() {
-            continue;
-        }
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(data.as_bytes())
-            .map_err(|err| {
-                rxdb::rx_error::new_rx_error(
-                    "RC_WEBRTC_PEER",
-                    Some(json!({
-                        "message": format!("decode {collection} chunk for {file_id}: {err}"),
-                    })),
-                )
-            })?;
-        stats.chunks_decoded = stats.chunks_decoded.saturating_add(1);
-        stats.bytes_decoded = stats
-            .bytes_decoded
-            .saturating_add(u64::try_from(decoded.len()).unwrap_or(u64::MAX));
-        let chunk_start = emitted_offset;
-        let chunk_end = emitted_offset.saturating_add(decoded.len() as u64);
-        emitted_offset = chunk_end;
-        // Clip this chunk to the requested byte window.
-        if chunk_end <= range_start || chunk_start >= range_end {
-            continue;
-        }
-        let slice_start = range_start.saturating_sub(chunk_start) as usize;
-        let slice_end = (range_end.min(chunk_end) - chunk_start) as usize;
-        let slice = &decoded[slice_start.min(decoded.len())..slice_end.min(decoded.len())];
-        if slice.is_empty() {
-            continue;
-        }
-        // `emit` returns Ok(false) to stop early (cancel / known-sequence skip).
-        if !emit(slice)? {
-            break;
-        }
-        stats.bytes_emitted = stats
-            .bytes_emitted
-            .saturating_add(u64::try_from(slice.len()).unwrap_or(u64::MAX));
-    }
-    Ok(())
-}
-
 pub(super) struct DesktopFileDemandMetadata {
     pub(super) generation_id: String,
     pub(super) size_bytes: u64,
@@ -9493,7 +9279,7 @@ fn runtime_installed_module_collection_creators(
 /// `(collection, key_field)` pairs. Only collections that passed the
 /// fail-closed chunk-schema validation in `module_dir_collection_entries`
 /// appear here.
-fn runtime_module_demand_chunk_sources(root: &Path) -> Vec<(String, String)> {
+pub(super) fn runtime_module_demand_chunk_sources(root: &Path) -> Vec<(String, String)> {
     runtime_module_collection_entries_for_root(root)
         .into_iter()
         .filter_map(|entry| match entry.sync_profile {
