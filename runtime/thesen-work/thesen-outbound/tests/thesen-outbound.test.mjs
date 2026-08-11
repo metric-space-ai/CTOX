@@ -1398,3 +1398,27 @@ test('bei zwei CRM-Datensaetzen zum selben Namen gewinnt der vollstaendigere', a
   await hooks.uebernehmeCrmKontaktdaten(lead2, { contextAvailable: true, people: [...context.people].reverse() });
   assert.equal(lead2.contacts[0].email, 'roger.wintzen@chemofast.com');
 });
+
+test('die Sperrpruefung laeuft nur, wo Empfaenger ausgewaehlt sind', () => {
+  // Die Schleife lief ueber JEDEN Lead, sequenziell. Bei 21 Leads und gemessenen
+  // 5-23 s je Pruefung waren das bis zu 480 Sekunden am Stueck; jeder Aufruf hat
+  // 40 s Frist, die spaeteren rissen sie und erzeugten "Sperrvermerk nicht
+  // pruefbar". Damit war JEDER Kontakt gesperrt — an einer Warteschlange, nicht
+  // an einem Sperrvermerk.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const block = quelle.slice(
+    quelle.indexOf('async function refreshAllRecipientEligibility'),
+    quelle.indexOf('async function enforceRecipientEligibility'),
+  );
+  // Es wird gefiltert, und zwar auf ausgewaehlte Empfaenger.
+  assert.match(block, /selected_contact_ids[\s\S]{0,60}length > 0/,
+    'nur Leads mit ausgewaehlten Empfaengern werden geprueft');
+  assert.doesNotMatch(block, /for \(const lead of state\.leads\)/,
+    'der ungefilterte Reihenlauf ueber den ganzen Bestand darf nicht zurueckkehren');
+
+  // Der Schutzzweck bleibt: wo ausgewaehlt wurde, wird geprueft.
+  const filter = (lead) => Array.isArray(lead?.selected_contact_ids) && lead.selected_contact_ids.length > 0;
+  assert.equal(filter({ selected_contact_ids: ['c1'] }), true);
+  assert.equal(filter({ selected_contact_ids: [] }), false);
+  assert.equal(filter({}), false);
+});

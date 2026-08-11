@@ -1865,8 +1865,26 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
   return decisions;
 }
 
+// Geprueft wird, wo es RECHTLICH zaehlt — nicht der ganze Bestand.
+//
+// Diese Schleife lief ueber JEDEN Lead, sequenziell. Bei 21 Leads und gemessenen
+// 5 bis 23 Sekunden je Pruefung sind das 100 bis 480 Sekunden am Stueck. Jeder
+// Einzelaufruf hat 40 Sekunden Frist; die spaeteren rissen sie zwangslaeufig,
+// fielen auf contextAvailable=false und erzeugten "Sellify-Sperrvermerk nicht
+// pruefbar". Damit war jeder Kontakt gesperrt und die Kette endete vor der
+// Uebergabe — an einer Warteschlange, nicht an einem Sperrvermerk.
+//
+// Der Schutzzweck bleibt vollstaendig erhalten: geprueft wird jeder Lead, bei
+// dem jemand Empfaenger AUSGEWAEHLT hat, denn nur dort kann eine Sperre verletzt
+// werden. Ein Lead ohne Auswahl kann niemanden anschreiben; seine Pruefung
+// passiert spaeter beim Oeffnen oder beim Auswaehlen, wo sie allein laeuft und
+// die Frist muehelos haelt.
 async function refreshAllRecipientEligibility() {
-  for (const lead of state.leads) await refreshLeadRecipientEligibility(lead);
+  const relevant = state.leads.filter((lead) => (
+    Array.isArray(lead?.selected_contact_ids) && lead.selected_contact_ids.length > 0
+  ));
+  for (const lead of relevant) await refreshLeadRecipientEligibility(lead);
+  return relevant.length;
 }
 
 async function enforceRecipientEligibility() {
@@ -4337,6 +4355,7 @@ export const __thesenOutboundTestHooks = {
   uebernehmeCrmKontaktdaten,
   firmenSchluessel,
   firmenNamensvarianten,
+  refreshAllRecipientEligibility,
   researchFieldValue,
   validationBlockers,
   RESEARCH_FIELD_GROUPS,
