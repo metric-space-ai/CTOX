@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">24 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">25 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">MEILENSTEIN · F-Wurzel</span>
+    <h3>main baut wieder aus der Historie — <code>03b250f38</code></h3>
+    <p>Die 1a0fd9fc3-Companions sind gelandet: 15 Dateien als von Sol zweifach im frischen Archiv-Replay bewiesene Minimalmenge (Hunks statt dirty-ganz; Master-Key-Migration und rustls-Umbau bewusst NICHT adoptiert; Delta-Risiken inkl. Mail-Tracking-Produktsemantik ehrlich dokumentiert). Finale Orchestrator-Bauprobe: <code>git archive HEAD</code> → <code>cargo check --locked --tests --bin ctox</code> <b>Exit 0</b>. Fünf Tage „grün nur im Schmutz" sind beendet — die archive-Bauprobe gilt wieder für jeden Commit.</p>
+    <span class="ev"><b>Beweise</b> plan-v2-heal-report.md · plan-v2-heal2-report.md · Patch-SHA c3a46704…<br><b>Dirty-Baum</b> schrumpft entsprechend: die 15 Flächen sind jetzt Historie statt Schmutz</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">MEILENSTEIN · S2b-Tor</span>
@@ -476,7 +483,14 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">8 Karten</span></div>
+  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">9 Karten</span></div>
+
+  <article class="karte s-back">
+    <span class="chip c-owner">OWNER: Ein Klick bis zum Push</span>
+    <h3>GitHub Push Protection blockiert am vendierten OAuth-Client-Wert</h3>
+    <p>Der Kampagnen-Push (65 Commits inkl. HEAD-Heilung, Merge mit origin konfliktfrei, Bauprobe grün) scheitert an GH013: Google-OAuth-Client-ID in <code>1a0fd9fc3</code> (<code>cliproxyapi/internal/auth/antigravity/constants.rs:21</code>) — vendierte Upstream-Konstante, laut Code-Kommentar und Google-Doku ein öffentlicher Installed-App-Wert. History-Rewrite verboten; Freischalten geht nur über dein GitHub-Konto: <code>github.com/metric-space-ai/ctox/security/secret-scanning/unblock-secret/3HltKTMxW6dnJmGx7NgxWZa1q9Y</code> — danach <code>git push origin main</code>.</p>
+    <span class="ev"><b>Bewertung</b> CLIENT_ID+Installed-App-SECRET sind per Design öffentlich (stecken in jedem Client); wenn du sie dennoch nicht publizieren willst, braucht der Port eine Laufzeit-Bezugsquelle — eigenes Ticket</span>
+  </article>
 
   <article class="karte s-back">
     <span class="chip c-alert">OWNER: Workjet-Update blockiert alle lokalen Worker</span>
