@@ -152,6 +152,11 @@ const RESEARCH_POLICY_ID = 'thesen_research_policy_v1';
 // A research run reports progress continuously. Silence past this window means
 // the task is gone even though the durable status still reads `running`.
 const RESEARCH_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
+// Obergrenze fuer einen Lead im Zustand "laeuft", wenn zu ihm ueberhaupt kein
+// Vorgang mehr auffindbar ist. Ein einzelner Lauf dauert gemessen rund 90
+// Sekunden; 30 Minuten lassen Warteschlange und Wiederholung reichlich Luft und
+// beenden trotzdem den Zustand, in dem ANGUS Chemie ueber fuenf Stunden hing.
+const RESEARCH_RUNNING_MAX_MS = 30 * 60 * 1000;
 const LEGACY_RESEARCH_POLICY_IMPORT_ID = 'settings_research_policy';
 const REPLICATED_COLLECTIONS = Object.freeze([
   'thesen_outbound_sources',
@@ -2431,6 +2436,28 @@ async function researchLead(id, options = {}) {
     return { status: 'queued', commandId: result.command_id, taskId: result.task_id || '' };
   } catch (error) {
     const message = String(error?.message || error);
+    // Ein abgelaufener Wartender ist KEIN gescheiterter Auftrag. Der Command-Bus
+    // meldet den Zeitablauf ausdruecklich als transient/projection_delayed: der
+    // Vorgang laeuft weiter, nur die Projektion kam nicht rechtzeitig hinterher.
+    // Vorher setzte jeder Fehler den Lead auf failed — am 11.08.2026 lagen
+    // dadurch bei vier Firmen (ANGUS, Berg, Dr. Kurt Richter, Aeroxon) je 21
+    // eingebettete Felder samt Quellen fertig im Ergebnis, waehrend der Lead
+    // "fehlgeschlagen, 0 belegt" zeigte. Der Lead bleibt jetzt verfolgbar; der
+    // Abgleich in reconcileResearchCommands wendet das Ergebnis an, sobald die
+    // Projektion es sichtbar macht.
+    if (isTransientResearchWaitError(error)) {
+      await patchLead(id, {
+        research_status: 'running',
+        command_id: commandId,
+        payload: {
+          ...lead.payload,
+          campaign_run_id: options.campaignRunId || '',
+          research_wait_note: message,
+          research_wait_since_ms: Number(lead.payload?.research_wait_since_ms || Date.now()),
+        },
+      });
+      return { status: 'running', commandId, note: message };
+    }
     await patchLead(id, {
       research_status: 'failed',
       command_id: commandId,
@@ -2478,7 +2505,30 @@ async function reconcileResearchCommands({ authoritative = false } = {}) {
     ]);
     for (const lead of pendingLeads) {
       const command = researchCommandForLead(lead, commands);
-      if (!command) continue;
+      // Ein Lead ohne auffindbaren Vorgang darf nicht ewig "laeuft" anzeigen.
+      // ANGUS Chemie stand am 11.08.2026 ueber fuenf Stunden auf running,
+      // obwohl sein Vorgang um 12:04 fertig war — fuer den Nutzer nicht von
+      // einem haengenden System zu unterscheiden. Nach der Obergrenze sagt der
+      // Lead ehrlich, dass die Rueckmeldung ausblieb; ein spaeter doch noch
+      // gefundener Vorgang wird oben trotzdem weiter angewendet, weil failed
+      // Teil der abgeglichenen Menge bleibt.
+      if (!command) {
+        if (lead.research_status !== 'running' && lead.research_status !== 'queued') continue;
+        const startedAt = Number(
+          lead.payload?.research_wait_since_ms || lead.payload?.research_started_at_ms || 0,
+        );
+        if (!startedAt || Date.now() - startedAt < RESEARCH_RUNNING_MAX_MS) continue;
+        await patchLead(lead.id, {
+          research_status: 'failed',
+          payload: {
+            ...lead.payload,
+            research_finished_at_ms: Date.now(),
+            research_error: 'Der Vorgang hat sich nicht zurueckgemeldet. Recherche bitte erneut starten.',
+          },
+        });
+        changed = true;
+        continue;
+      }
       const observedCommandId = String(command.command_id || command.id || '').trim();
       const observationKey = researchCommandObservationKey(command);
       if (lead.payload?.observed_research_command_key === observationKey) continue;
@@ -2533,6 +2583,20 @@ function uniqueCommands(commands = []) {
     if (id) byId.set(id, command);
   }
   return [...byId.values()];
+}
+
+// Der Command-Bus kennzeichnet einen Zeitablauf beim Warten selbst als transient
+// und wiederholbar (shared/command-bus.js, code 'projection_delayed'). Wir lesen
+// diese Kennzeichnung, statt den Text zu vergleichen; der Text bleibt nur als
+// letzter Rueckfall, falls ein aelterer Bus die Felder noch nicht mitschickt.
+function isTransientResearchWaitError(error) {
+  if (!error) return false;
+  const code = String(error.code || error.details?.code || '').trim();
+  if (code === 'projection_delayed' || code === 'projection_pending') return true;
+  const status = String(error.status || error.details?.status || '').trim();
+  if (status === 'projection_pending') return true;
+  if (error.transient === true || error.details?.transient === true) return true;
+  return /wartet noch auf die R/i.test(String(error.message || ''));
 }
 
 function researchCommandObservationKey(command) {

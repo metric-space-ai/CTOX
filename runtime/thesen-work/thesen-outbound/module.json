@@ -1,0 +1,81 @@
+{
+  "id": "thesen-outbound",
+  "title": "THESEN Outbound",
+  "description": "Private Lead-Recherche und kontrollierte Übergabe an Sellify.",
+  "entry": "local-modules/thesen-outbound/index.html",
+  "icon": "icon.svg",
+  "collections": [
+    "thesen_outbound_sources",
+    "thesen_outbound_adapters",
+    "thesen_outbound_imports",
+    "thesen_outbound_research_policies",
+    "thesen_outbound_leads",
+    "business_commands",
+    "sellify_companies",
+    "sellify_people"
+  ],
+  "record_fields": {
+    "thesen_outbound_leads": {
+      "contacts": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "selected_contact_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "evidence": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "source": "local",
+  "core": false,
+  "editable": true,
+  "deletable": false,
+  "layout": {
+    "shell": "windowed",
+    "left": "Kampagnen",
+    "center": "Importierte und recherchierte Leads",
+    "right": "Prüfung und Sellify-Übergabe",
+    "third_pane_justification": "Die Detailansicht hält Quellenbelege und Freigabe während der Lead-Auswahl sichtbar."
+  },
+  "category": "Sales",
+  "version": "0.5.4",
+  "developer": "THESEN",
+  "license": "Proprietary",
+  "tags": [
+    "outbound",
+    "research",
+    "sellify",
+    "thesen"
+  ],
+  "install_scope": "local",
+  "default_installed": false,
+  "launch_kind": "desktop-app",
+  "presentation": {
+    "default_mode": "window",
+    "supported_modes": [
+      "window",
+      "maximized",
+      "focus"
+    ],
+    "initial_size": {
+      "width": 1240,
+      "height": 780
+    },
+    "minimum_size": {
+      "width": 680,
+      "height": 520
+    },
+    "multi_instance": false,
+    "auto_restore": false
+  }
+}
