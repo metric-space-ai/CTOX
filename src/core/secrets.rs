@@ -33,6 +33,18 @@ const SECRET_INTAKE_USAGE: &str = "usage: ctox secret intake --scope <scope> --n
 
 type SecretMaterial = Zeroizing<Vec<u8>>;
 
+/// Serializes compound account topology/credential mutations inside the CTOX
+/// daemon. Individual SQLite tuple writes remain transactional; this guard
+/// prevents an old disconnect from deleting a same-process reinstall that
+/// reused the stable account secret handles between the two database commits.
+pub(crate) fn credential_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretRecordView {
     pub secret_id: String,
@@ -169,6 +181,114 @@ pub fn list_secret_records(root: &Path, scope: Option<&str>) -> Result<Vec<Secre
 
 pub fn read_secret_value(root: &Path, scope: &str, name: &str) -> Result<String> {
     get_secret_value(root, scope, name)
+}
+
+/// One encrypted secret mutation used by callers that must rotate a credential
+/// tuple atomically (for example access/refresh/ID tokens).
+#[derive(Debug, Clone)]
+pub struct SecretRecordWrite<'a> {
+    pub scope: &'a str,
+    pub name: &'a str,
+    pub value: &'a str,
+    pub description: Option<&'a str>,
+    pub metadata: Value,
+}
+
+/// Reads a credential tuple from one SQLite snapshot. No partially rotated
+/// combination can be observed between the individual values.
+pub fn read_secret_values(root: &Path, keys: &[(&str, &str)]) -> Result<Vec<String>> {
+    let (key_bytes, _) = ensure_secret_master_key(root)?;
+    let mut conn = open_secret_db(root)?;
+    let tx = conn.transaction()?;
+    let mut values = Vec::with_capacity(keys.len());
+    for (scope, name) in keys {
+        let (nonce_b64, ciphertext_b64): (String, String) = tx
+            .query_row(
+                "SELECT nonce_b64, ciphertext_b64 FROM ctox_secret_records WHERE scope = ?1 AND secret_name = ?2 LIMIT 1",
+                params![scope, name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .context("secret not found")?;
+        let value = decrypt_secret_value(&key_bytes, &nonce_b64, &ciphertext_b64)?;
+        values.push(
+            std::str::from_utf8(&value)
+                .context("secret value is not valid UTF-8")?
+                .to_owned(),
+        );
+    }
+    tx.commit()?;
+    Ok(values)
+}
+
+/// Encrypts a credential tuple first and commits every record in one SQLite
+/// transaction. Encryption or SQL failure leaves the previous tuple intact.
+pub fn write_secret_records(root: &Path, records: &[SecretRecordWrite<'_>]) -> Result<()> {
+    let (key_bytes, _) = ensure_secret_master_key(root)?;
+    let encrypted = records
+        .iter()
+        .map(|record| {
+            Ok((
+                record,
+                encrypt_secret_value(&key_bytes, record.value.as_bytes())?,
+                serde_json::to_string(&record.metadata)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut conn = open_secret_db(root)?;
+    let tx = conn.transaction()?;
+    let now = now_iso_string();
+    for (record, encrypted, metadata_json) in encrypted {
+        let secret_id = format!("secret:{}:{}", record.scope, stable_digest(record.name));
+        tx.execute(
+            r#"
+            INSERT INTO ctox_secret_records (
+                secret_id, scope, secret_name, description, metadata_json,
+                nonce_b64, ciphertext_b64, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            ON CONFLICT(scope, secret_name) DO UPDATE SET
+                description=excluded.description,
+                metadata_json=excluded.metadata_json,
+                nonce_b64=excluded.nonce_b64,
+                ciphertext_b64=excluded.ciphertext_b64,
+                updated_at=excluded.updated_at
+            "#,
+            params![
+                secret_id,
+                record.scope,
+                record.name,
+                record.description,
+                metadata_json,
+                encrypted.nonce_b64,
+                encrypted.ciphertext_b64,
+                now,
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Deletes a credential tuple in one SQLite transaction. This is used after
+/// an account has been removed from its server-owned topology so a concurrent
+/// reader can observe either the old complete tuple or no tuple, never a
+/// partially deleted access/refresh/state combination.
+pub fn delete_secret_records(root: &Path, keys: &[(&str, &str)]) -> Result<usize> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let mut conn = open_secret_db(root)?;
+    ensure_secret_schema(&conn)?;
+    let tx = conn.transaction()?;
+    let mut deleted = 0usize;
+    for (scope, name) in keys {
+        deleted = deleted.saturating_add(tx.execute(
+            "DELETE FROM ctox_secret_records WHERE scope = ?1 AND secret_name = ?2",
+            params![scope, name],
+        )?);
+    }
+    tx.commit()?;
+    Ok(deleted)
 }
 
 pub fn secret_store_path(root: &Path) -> PathBuf {

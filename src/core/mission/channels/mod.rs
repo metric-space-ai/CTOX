@@ -283,6 +283,7 @@ pub struct QueueTaskView {
     pub priority: String,
     pub suggested_skill: Option<String>,
     pub parent_message_key: Option<String>,
+    pub metadata: Value,
     pub route_status: String,
     pub status_note: Option<String>,
     pub lease_owner: Option<String>,
@@ -6440,6 +6441,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
             .get("parent_message_key")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        metadata: message.metadata,
         route_status: route_status.as_str().to_string(),
         status_note,
         lease_owner: message.routing.lease_owner,

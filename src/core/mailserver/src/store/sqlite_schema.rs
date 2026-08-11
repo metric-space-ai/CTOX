@@ -35,6 +35,36 @@ CREATE TABLE IF NOT EXISTS stalwart_smtp_delivery_log (
 CREATE INDEX IF NOT EXISTS stalwart_smtp_delivery_log_id_idx
     ON stalwart_smtp_delivery_log (id);
 
+CREATE TABLE IF NOT EXISTS stalwart_runtime_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL,
+    config_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stalwart_mail_tracking_tokens (
+    token TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    campaign_id TEXT,
+    event_type TEXT NOT NULL,
+    target_url TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS stalwart_mail_tracking_message_idx
+    ON stalwart_mail_tracking_tokens (message_id);
+
+CREATE TABLE IF NOT EXISTS stalwart_mail_tracking_events (
+    id TEXT PRIMARY KEY,
+    token TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    user_agent TEXT,
+    FOREIGN KEY(token) REFERENCES stalwart_mail_tracking_tokens(token) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS stalwart_mail_tracking_events_message_idx
+    ON stalwart_mail_tracking_events (message_id, occurred_at);
+
 CREATE TABLE IF NOT EXISTS stalwart_caldav_calendars (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,

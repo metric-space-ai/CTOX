@@ -754,7 +754,7 @@ pub(super) fn handle_outbound_active_command(
                 outbound_record_send_failure(&conn, &message_id, &mut message, &reason, now)?;
                 return Err(err);
             }
-            let provider_queue_id = match outbound_queue_email_delivery(root, &message)
+            let provider_queue_id = match outbound_queue_email_delivery(root, &mut message)
                 .context("failed to queue approved outbound email")
             {
                 Ok(id) => id,
@@ -4151,17 +4151,26 @@ fn outbound_sync_email_message_to_communication(
     Ok(())
 }
 
-fn outbound_queue_email_delivery(root: &Path, message: &Value) -> anyhow::Result<String> {
+fn outbound_queue_email_delivery(root: &Path, message: &mut Value) -> anyhow::Result<String> {
     let sender_account_id = outbound_required_string(message, &["sender_account_id"])?;
     let from = outbound_email_address_from_account_key(&sender_account_id);
     let to = outbound_required_string(message, &["recipient_email"])?;
     let subject = outbound_string(message, &["subject"]).unwrap_or_default();
     let body_text = outbound_string(message, &["body_text"]).unwrap_or_default();
-    let body_html = outbound_string(message, &["body_html"]).unwrap_or_default();
+    let mut body_html = outbound_string(message, &["body_html"]).unwrap_or_default();
     anyhow::ensure!(
         !body_text.trim().is_empty() || !body_html.trim().is_empty(),
         "outbound email body is empty (body_text and body_html both blank)"
     );
+    let db_path = root
+        .join("runtime/ctox.sqlite3")
+        .to_string_lossy()
+        .into_owned();
+    let store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
+    store.init()?;
+    if !body_html.trim().is_empty() {
+        body_html = outbound_prepare_tracked_html(&store, message, &body_html)?;
+    }
     let sender_domain = from.split('@').nth(1).unwrap_or("ctox.local");
     let msg_id = format!("<{}@{}>", Uuid::new_v4(), sender_domain);
     let date = chrono::Utc::now().to_rfc2822();
@@ -4226,15 +4235,160 @@ fn outbound_queue_email_delivery(root: &Path, message: &Value) -> anyhow::Result
         )
     };
 
-    let db_path = root
-        .join("runtime/ctox.sqlite3")
-        .to_string_lossy()
-        .into_owned();
-    let store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
-    store.init()?;
     store
         .queue_email(&from, &to, &rfc822_body)
         .map_err(Into::into)
+}
+
+fn outbound_prepare_tracked_html(
+    store: &ctox_mailserver::store::sqlite::SqliteStore,
+    message: &mut Value,
+    html: &str,
+) -> anyhow::Result<String> {
+    let settings = store.load_runtime_settings()?;
+    let explicitly_disabled = message
+        .pointer("/payload/tracking_enabled")
+        .and_then(Value::as_bool)
+        == Some(false);
+    if settings.tracking_base_url.is_empty() || explicitly_disabled {
+        outbound_payload_insert(message, "tracking_enabled", Value::Bool(false));
+        return Ok(html.to_string());
+    }
+
+    let message_id = outbound_required_string(message, &["id"])?;
+    let campaign_id = outbound_string(message, &["campaign_id"]);
+    let base = settings.tracking_base_url.trim_end_matches('/');
+    let link_pattern = regex::Regex::new(r#"(?i)href\s*=\s*[\"'](https?://[^\"']+)[\"']"#)
+        .context("compile outbound link tracking pattern")?;
+    let mut tracked = String::with_capacity(html.len() + 256);
+    let mut cursor = 0;
+    let mut click_links = 0_i64;
+    for captures in link_pattern.captures_iter(html) {
+        let Some(whole) = captures.get(0) else {
+            continue;
+        };
+        let Some(target) = captures.get(1) else {
+            continue;
+        };
+        tracked.push_str(&html[cursor..whole.start()]);
+        let token = Uuid::new_v4().simple().to_string();
+        store.save_tracking_token(
+            &token,
+            &message_id,
+            campaign_id.as_deref(),
+            "clicked",
+            Some(target.as_str()),
+        )?;
+        tracked.push_str(&format!("href=\"{base}/mail/track/c/{token}\""));
+        cursor = whole.end();
+        click_links += 1;
+    }
+    tracked.push_str(&html[cursor..]);
+
+    let open_token = Uuid::new_v4().simple().to_string();
+    store.save_tracking_token(
+        &open_token,
+        &message_id,
+        campaign_id.as_deref(),
+        "opened",
+        None,
+    )?;
+    let pixel = format!(
+        r#"<img src="{base}/mail/track/o/{open_token}.gif" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0" />"#
+    );
+    let lower = tracked.to_ascii_lowercase();
+    if let Some(index) = lower.rfind("</body>") {
+        tracked.insert_str(index, &pixel);
+    } else {
+        tracked.push_str(&pixel);
+    }
+    outbound_payload_insert(message, "tracking_enabled", Value::Bool(true));
+    outbound_payload_insert(
+        message,
+        "tracking_status",
+        Value::String("armed".to_string()),
+    );
+    outbound_payload_insert(message, "tracking_open_token", Value::String(open_token));
+    outbound_payload_insert(
+        message,
+        "tracking_click_links",
+        Value::Number(click_links.into()),
+    );
+    Ok(tracked)
+}
+
+pub(super) fn record_mail_tracking_event(
+    root: &Path,
+    token: &str,
+    expected_event_type: &str,
+    user_agent: Option<&str>,
+) -> anyhow::Result<Option<Value>> {
+    let db_path = crate::paths::core_db(root).to_string_lossy().into_owned();
+    let mail_store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
+    mail_store.init()?;
+    let Some(tracking) = mail_store.tracking_token(token)? else {
+        return Ok(None);
+    };
+    if tracking.event_type != expected_event_type {
+        return Ok(None);
+    }
+    let now = now_ms() as i64;
+    mail_store.record_tracking_event(
+        token,
+        &tracking.message_id,
+        &tracking.event_type,
+        now,
+        user_agent,
+    )?;
+
+    let conn = open_store(root)?;
+    if let Ok(mut message) = outbound_load_required(
+        &conn,
+        "outbound_messages",
+        &tracking.message_id,
+        "outbound message not found",
+    ) {
+        let (count_key, first_key, last_key) = if tracking.event_type == "clicked" {
+            ("click_count", "first_clicked_at_ms", "last_clicked_at_ms")
+        } else {
+            ("open_count", "first_opened_at_ms", "last_opened_at_ms")
+        };
+        let count = message
+            .pointer(&format!("/payload/{count_key}"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            + 1;
+        outbound_payload_insert(&mut message, count_key, Value::Number(count.into()));
+        if message
+            .pointer(&format!("/payload/{first_key}"))
+            .and_then(Value::as_i64)
+            .is_none()
+        {
+            outbound_payload_insert(&mut message, first_key, Value::Number(now.into()));
+        }
+        outbound_payload_insert(&mut message, last_key, Value::Number(now.into()));
+        outbound_payload_insert(
+            &mut message,
+            "tracking_status",
+            Value::String(tracking.event_type.clone()),
+        );
+        outbound_put_i64(&mut message, "updated_at_ms", now);
+        upsert_business_record(
+            &conn,
+            "outbound_messages",
+            &tracking.message_id,
+            now,
+            message,
+        )?;
+    }
+
+    Ok(Some(serde_json::json!({
+        "message_id": tracking.message_id,
+        "campaign_id": tracking.campaign_id,
+        "event_type": tracking.event_type,
+        "target_url": tracking.target_url,
+        "occurred_at_ms": now,
+    })))
 }
 
 /// Minimal HTML → plain-text fallback for outbound mails that only carry body_html.

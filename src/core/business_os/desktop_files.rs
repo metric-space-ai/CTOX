@@ -28,6 +28,16 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 pub(super) static DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+pub(super) fn reset_desktop_file_chunk_completeness_checks(_root: &Path) {
+    DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn desktop_file_chunk_completeness_check_count(_root: &Path) -> usize {
+    DESKTOP_FILE_CHUNK_COMPLETENESS_CHECKS.load(Ordering::Relaxed)
+}
+
 pub(super) const DESKTOP_FILE_CHUNK_SIZE: usize = 16 * 1024;
 pub(super) const SPREADSHEET_BLOB_CHUNK_SIZE: usize = 256_000;
 pub(super) const SPREADSHEET_CSV_IMPORT_LIMIT_BYTES: u64 = 10 * 1024 * 1024;

@@ -2119,6 +2119,7 @@ dependencies = [
  "ctox-voxtral-4b-tts-2603",
  "ctox-voxtral-mini-4b-realtime-2602",
  "ctox-web-stack",
+ "flate2",
  "futures-util",
  "git2",
  "image",
@@ -2383,20 +2384,42 @@ name = "ctox-cliproxyapi"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "brotli",
+ "chrono",
+ "chrono-tz",
+ "flate2",
  "futures-util",
  "getrandom 0.3.4",
+ "git2",
+ "gjson",
  "httpdate",
+ "libc",
+ "mime",
+ "percent-encoding",
+ "png",
+ "rand 0.8.5",
+ "rcgen",
+ "rsa",
+ "rustls 0.23.37",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "subtle",
+ "tempfile",
  "tiktoken-rs",
  "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-tungstenite 0.28.0",
  "url",
  "uuid",
+ "webpki-roots 1.0.6",
+ "weezl",
+ "windows-sys 0.59.0",
  "wreq",
  "wreq-util",
  "zeroize",
+ "zip 0.6.6",
  "zstd",
 ]
 
@@ -4549,6 +4572,12 @@ dependencies = [
  "openssl-sys",
  "url",
 ]
+
+[[package]]
+name = "gjson"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43503cc176394dd30a6525f5f36e838339b8b5619be33ed9a7783841580a97b6"
 
 [[package]]
 name = "glob"

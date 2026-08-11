@@ -22,6 +22,66 @@ use crate::inference::runtime_state;
 
 const DEFAULT_BOOST_MINUTES: u64 = 20;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainResponsesGatewayPhase {
+    Stopped,
+    Starting,
+    Ready,
+    Faulted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainResponsesGatewayStatus {
+    pub phase: MainResponsesGatewayPhase,
+    pub listen_addr: String,
+    pub last_error: Option<String>,
+}
+
+impl Default for MainResponsesGatewayStatus {
+    fn default() -> Self {
+        Self {
+            phase: MainResponsesGatewayPhase::Stopped,
+            listen_addr: "127.0.0.1:12434".to_owned(),
+            last_error: None,
+        }
+    }
+}
+
+fn main_responses_gateway_status_cell(
+) -> &'static Mutex<Option<(PathBuf, MainResponsesGatewayStatus)>> {
+    static STATUS: OnceLock<Mutex<Option<(PathBuf, MainResponsesGatewayStatus)>>> = OnceLock::new();
+    STATUS.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_main_responses_gateway_status(
+    root: &Path,
+    phase: MainResponsesGatewayPhase,
+    listen_addr: impl Into<String>,
+    last_error: Option<String>,
+) {
+    let mut status = main_responses_gateway_status_cell()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *status = Some((
+        root.to_path_buf(),
+        MainResponsesGatewayStatus {
+            phase,
+            listen_addr: listen_addr.into(),
+            last_error,
+        },
+    ));
+}
+
+pub fn main_responses_gateway_status(root: &Path) -> MainResponsesGatewayStatus {
+    main_responses_gateway_status_cell()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|(status_root, _)| status_root == root)
+        .map(|(_, status)| status.clone())
+        .unwrap_or_default()
+}
+
 /// Window during which a previously computed `RuntimeTelemetry` snapshot is
 /// reused. The compute path includes `InferenceRuntimeKernel::resolve` plus
 /// `merge_credentials_into_env_map` per auxiliary role — and SQLite re-parses

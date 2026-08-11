@@ -1,6 +1,7 @@
 // ref: stalwart/src/store/sqlite/mod.rs:1-120
 // ref: ctox-mailserver new code for campaign & collaboration SQLite store
 
+use crate::config::MailserverRuntimeSettings;
 use crate::store::sqlite_schema::SQLITE_SCHEMA;
 use crate::util::errors::StalwartResult;
 use ring::hmac;
@@ -57,6 +58,14 @@ pub struct MessageContent {
     pub headers: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailTrackingToken {
+    pub message_id: String,
+    pub campaign_id: Option<String>,
+    pub event_type: String,
+    pub target_url: Option<String>,
+}
+
 impl SqliteStore {
     pub fn new(db_path: &str) -> Self {
         Self {
@@ -103,6 +112,118 @@ impl SqliteStore {
         conn.execute_batch(SQLITE_SCHEMA)?;
         migrate_message_uids(&conn)?;
         Ok(())
+    }
+
+    pub fn load_runtime_settings(&self) -> StalwartResult<MailserverRuntimeSettings> {
+        self.with_connection(|conn| {
+            let raw = conn.query_row(
+                "SELECT config_json FROM stalwart_runtime_config WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            );
+            match raw {
+                Ok(raw) => serde_json::from_str(&raw)
+                    .map_err(|err| crate::util::errors::StalwartError::General(err.to_string())),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    Ok(MailserverRuntimeSettings::default())
+                }
+                Err(err) => Err(err.into()),
+            }
+        })
+    }
+
+    pub fn save_runtime_settings(
+        &self,
+        settings: &MailserverRuntimeSettings,
+    ) -> StalwartResult<()> {
+        let raw = serde_json::to_string(settings)
+            .map_err(|err| crate::util::errors::StalwartError::General(err.to_string()))?;
+        self.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO stalwart_runtime_config (id, enabled, config_json, updated_at)
+                 VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled,
+                     config_json = excluded.config_json, updated_at = excluded.updated_at",
+                params![
+                    settings.enabled as i64,
+                    raw,
+                    crate::util::now_utc_secs() as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn save_tracking_token(
+        &self,
+        token: &str,
+        message_id: &str,
+        campaign_id: Option<&str>,
+        event_type: &str,
+        target_url: Option<&str>,
+    ) -> StalwartResult<()> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO stalwart_mail_tracking_tokens
+                    (token, message_id, campaign_id, event_type, target_url, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    token,
+                    message_id,
+                    campaign_id,
+                    event_type,
+                    target_url,
+                    crate::util::now_utc_secs() as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn tracking_token(&self, token: &str) -> StalwartResult<Option<MailTrackingToken>> {
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT message_id, campaign_id, event_type, target_url
+                 FROM stalwart_mail_tracking_tokens WHERE token = ?1",
+            )?;
+            let mut rows = stmt.query(params![token])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(MailTrackingToken {
+                    message_id: row.get(0)?,
+                    campaign_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    target_url: row.get(3)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    pub fn record_tracking_event(
+        &self,
+        token: &str,
+        message_id: &str,
+        event_type: &str,
+        occurred_at: i64,
+        user_agent: Option<&str>,
+    ) -> StalwartResult<()> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO stalwart_mail_tracking_events
+                    (id, token, message_id, event_type, occurred_at, user_agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    crate::util::generate_unique_id(),
+                    token,
+                    message_id,
+                    event_type,
+                    occurred_at,
+                    user_agent
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     // --- Domain and DKIM Management ---

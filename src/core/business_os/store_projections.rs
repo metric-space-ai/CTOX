@@ -1317,6 +1317,7 @@ pub(crate) mod tests {
             priority: "normal".to_string(),
             suggested_skill: None,
             parent_message_key: None,
+            metadata: Value::Null,
             route_status: "leased".to_string(),
             status_note: Some(
                 "Business-OS documents bug report completed. Changed editor rendering. Verified in browser."
