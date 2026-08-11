@@ -1694,13 +1694,7 @@ async function loadSellifyRecipientContext(lead) {
       // Ohne exakten Treffer normalisiert nachschlagen — sonst bleibt der
       // Sperrvermerk fuer jede Firma ungeprueft, deren Name im CRM ein
       // Registerzeichen traegt.
-      if (!exakt.length) {
-        const gesucht = firmenSchluessel(lead.name);
-        if (gesucht) {
-          const alle = await findSellifyRecords(state.sellifyCompanies, {});
-          companies.push(...alle.filter((entry) => firmenSchluessel(entry.name) === gesucht));
-        }
-      }
+      // Auch hier kein Volltabellenscan — siehe findSellifyCompanyDuplicate.
     }
     const activeCompanies = uniqueSellifyRecords(companies);
     const people = [];
@@ -3025,13 +3019,12 @@ async function findSellifyCompanyDuplicate(lead) {
   // Kein exakter Treffer? Dann normalisiert vergleichen. "CHEMOFAST Anchoring
   // GmbH" und "CHEMOFAST® Anchoring GmbH" sind dieselbe Firma; ein
   // Registerzeichen darf den ganzen CRM-Pfad nicht abschneiden.
-  if (!active.length) {
-    const gesucht = firmenSchluessel(lead.name);
-    if (gesucht) {
-      const alle = await collection.find().exec();
-      active = alle.filter((entry) => !entry.is_deleted && firmenSchluessel(entry.name) === gesucht);
-    }
-  }
+  // KEIN Volltabellenscan hier. Der normalisierte Namensvergleich braucht alle
+  // 17.520 Organisationen; ueber die Bedarfsabfrage in einem Rutsch geladen friert
+  // das die Seite ein (am 12.08.2026 gemessen: CDP-Timeout nach 45 s, Renderer
+  // unresponsive). Der Abgleich "CHEMOFAST Anchoring GmbH" gegen
+  // "CHEMOFAST® Anchoring GmbH" bleibt damit offen und gehoert serverseitig
+  // geloest — dort liegen die Daten ohnehin und ein Index kostet nichts.
   if (active.length <= 1) return active[0] || null;
   const domain = normalizedDomain(lead.website || lead.domain);
   const postalCode = String(lead.data?.postal_code || lead.data?.plz || '').trim();
