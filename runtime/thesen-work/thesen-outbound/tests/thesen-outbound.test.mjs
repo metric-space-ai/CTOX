@@ -1346,3 +1346,20 @@ test('gepflegte CRM-Kontaktdaten werden uebernommen, nicht neu erraten', async (
   assert.equal(await hooks.uebernehmeCrmKontaktdaten(unberuehrt, { contextAvailable: false, people: [] }), false);
   assert.equal(unberuehrt.contacts[0].email, '');
 });
+
+test('ein Registerzeichen darf den CRM-Abgleich nicht abschneiden', () => {
+  // Der Lead hiess "CHEMOFAST Anchoring GmbH", die CRM-Organisation
+  // "CHEMOFAST® Anchoring GmbH". Der exakte Vergleich fand das nicht — und damit
+  // blieb am 11.08.2026 der GESAMTE CRM-Pfad wirkungslos: keine Dublette, kein
+  // Vorwissen im Auftrag, keine uebernommenen Kontaktdaten, keine Serien-E-Mail.
+  // Wegen eines Registerzeichens.
+  const k = hooks.firmenSchluessel;
+  assert.equal(k('CHEMOFAST® Anchoring GmbH'), k('CHEMOFAST Anchoring GmbH'));
+  assert.equal(k('Destilla GmbH & Co. KG'), k('Destilla GmbH & Co KG'));
+  assert.equal(k('  Mueller-Meier  GmbH '), k('Mueller Meier GmbH'));
+
+  // Die Rechtsform bleibt unterscheidend: das sind verschiedene Firmen.
+  assert.notEqual(k('Muster GmbH'), k('Muster AG'));
+  assert.notEqual(k('Muster Chemie GmbH'), k('Muster Technik GmbH'));
+  assert.equal(k(''), '');
+});

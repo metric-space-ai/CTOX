@@ -1687,9 +1687,20 @@ async function loadSellifyRecipientContext(lead) {
       if (linked) companies.push(docJson(linked));
     }
     if (String(lead?.name || '').trim()) {
-      companies.push(...await findSellifyRecords(state.sellifyCompanies, {
+      const exakt = await findSellifyRecords(state.sellifyCompanies, {
         name: { $eq: String(lead.name).trim() },
-      }));
+      });
+      companies.push(...exakt);
+      // Ohne exakten Treffer normalisiert nachschlagen — sonst bleibt der
+      // Sperrvermerk fuer jede Firma ungeprueft, deren Name im CRM ein
+      // Registerzeichen traegt.
+      if (!exakt.length) {
+        const gesucht = firmenSchluessel(lead.name);
+        if (gesucht) {
+          const alle = await findSellifyRecords(state.sellifyCompanies, {});
+          companies.push(...alle.filter((entry) => firmenSchluessel(entry.name) === gesucht));
+        }
+      }
     }
     const activeCompanies = uniqueSellifyRecords(companies);
     const people = [];
@@ -3010,7 +3021,17 @@ async function findSellifyCompanyDuplicate(lead) {
   const matches = await collection.find({
     selector: { name: { $eq: String(lead.name || '').trim() } },
   }).exec();
-  const active = matches.filter((entry) => !entry.is_deleted);
+  let active = matches.filter((entry) => !entry.is_deleted);
+  // Kein exakter Treffer? Dann normalisiert vergleichen. "CHEMOFAST Anchoring
+  // GmbH" und "CHEMOFAST® Anchoring GmbH" sind dieselbe Firma; ein
+  // Registerzeichen darf den ganzen CRM-Pfad nicht abschneiden.
+  if (!active.length) {
+    const gesucht = firmenSchluessel(lead.name);
+    if (gesucht) {
+      const alle = await collection.find().exec();
+      active = alle.filter((entry) => !entry.is_deleted && firmenSchluessel(entry.name) === gesucht);
+    }
+  }
   if (active.length <= 1) return active[0] || null;
   const domain = normalizedDomain(lead.website || lead.domain);
   const postalCode = String(lead.data?.postal_code || lead.data?.plz || '').trim();
@@ -3518,6 +3539,28 @@ function firstValue(record, keys) {
 function finiteNumber(value) {
   const number = Number(String(value ?? '').replace(',', '.'));
   return Number.isFinite(number) ? number : 0;
+}
+
+// Firmennamen vergleichen, wie ein Mensch sie vergleicht.
+//
+// Der Lead heisst "CHEMOFAST Anchoring GmbH", die CRM-Organisation
+// "CHEMOFAST® Anchoring GmbH". Ein exakter Vergleich findet das nicht, und damit
+// blieb am 11.08.2026 der gesamte CRM-Pfad wirkungslos: keine Dublette, kein
+// Vorwissen im Auftrag, keine uebernommenen Kontaktdaten, keine Serien-E-Mail —
+// wegen eines Registerzeichens. Der Import konnte es laengst besser; der
+// Firmenabgleich vor der Recherche nicht.
+//
+// Entfernt werden nur Zeichen ohne Unterscheidungskraft: Schutzzeichen,
+// Satzzeichen, Mehrfach-Leerraum. Die Rechtsform bleibt drin — "Muster GmbH" und
+// "Muster AG" sind verschiedene Firmen und muessen es bleiben.
+function firmenSchluessel(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[®™©]/g, ' ')
+    .replace(/[.,;:!?"'`´\/\\()\[\]{}]/g, ' ')
+    .replace(/[-–—_+]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function normalizedDomain(value) {
@@ -4219,6 +4262,7 @@ export const __thesenOutboundTestHooks = {
   renderResearchReview,
   researchFieldReview,
   uebernehmeCrmKontaktdaten,
+  firmenSchluessel,
   researchFieldValue,
   validationBlockers,
   RESEARCH_FIELD_GROUPS,
