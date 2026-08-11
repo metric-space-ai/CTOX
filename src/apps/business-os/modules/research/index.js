@@ -2146,8 +2146,8 @@ function renderCenter() {
       <section class="research-workbench">
         <div class="research-tabs-container">
           <div class="ctox-pane-tabs" role="tablist" aria-label="Research views">
-            ${countedTabButton('sources', state.t('sources', 'Sources'), evidenceRankedSources().length)}
-            ${countedTabButton('candidates', state.t('candidates', 'Candidates'), state.candidateModels.length)}
+            ${countedTabButton('sources', state.t('sourcesTab', 'Verifizierte Quellen'), evidenceRankedSources().length)}
+            ${countedTabButton('candidates', state.t('candidatesTab', 'Gefundene Kandidaten'), state.candidateModels.length)}
             ${countedTabButton('measurements', state.t('measurements', 'Measurements'), filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length)}
             ${countedTabButton('knowledge', state.t('knowledge', 'Knowledge'), state.curatedRows.length)}
             ${countedTabButton('reports', state.t('reports', 'Fachberichte'), researchReportsForTask(task).length)}
@@ -3621,12 +3621,24 @@ function renderDirectMeasurements(rows) {
             <td class="is-num">${formatMeasurementNumber(row.rpm, 0)}</td>
             <td class="is-num">${formatMeasurementNumber(row.thrust_coefficient_CT)}</td>
             <td class="is-num">${formatMeasurementNumber(row.power_coefficient_CP)}</td>
-            <td>${escapeHtml(firstString(row, ['confidence', 'derivation_method']).slice(0, 90))}</td>
+            <td title="${escapeHtml(firstString(row, ['confidence', 'derivation_method']))}">${escapeHtml(humanizeMethodToken(firstString(row, ['confidence', 'derivation_method'])))}</td>
           </tr>
         `).join('') || `<tr><td colspan="8">${escapeHtml(state.t('noMeasurements', 'Keine verifizierten Messpunkte vorhanden.'))}</td></tr>`}
       </tbody>
     </table>
   `;
+}
+
+// Writeback method/confidence values arrive as machine tokens
+// ("high_for_reported_coefficients_medium_for_filename_decimal_size_guess").
+// Rendered raw they read as garbage; a schema token is not a label. Show the
+// token as words, keep the exact raw value in the cell tooltip.
+function humanizeMethodToken(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!/^[a-z0-9]+(_[a-z0-9]+)+$/i.test(raw)) return raw.slice(0, 90);
+  const words = raw.replace(/_/g, ' ');
+  return words.length > 60 ? `${words.slice(0, 60)}…` : words;
 }
 
 function renderDerivedMeasurements(rows) {
@@ -3752,9 +3764,9 @@ function renderRight() {
         </div>` : ''}
       </section>
       <section class="research-metric-grid">
-        <div><strong>${state.candidateModels.length}</strong><span>${escapeHtml(state.t('candidates', 'Candidates'))}</span></div>
-        <div><strong>${evidenceRankedSources().length}</strong><span>${escapeHtml(state.t('sources', 'Sources'))}</span></div>
-        <div><strong>${filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length}</strong><span>${escapeHtml(state.t('measurements', 'Measurements'))}</span></div>
+        <div title="${escapeHtml(state.t('candidatesHint', 'Bei der Recherche gefundene Fundstellen, die noch nicht verifiziert sind. Erst nach Original-Abruf, Snapshot und Beleg-Prüfung wird daraus eine Quelle.'))}"><strong>${state.candidateModels.length}</strong><span>${escapeHtml(state.t('candidates', 'Gefunden'))}</span></div>
+        <div title="${escapeHtml(state.t('sourcesHint', 'Verifizierte Quellen: Original gelesen, Snapshot mit Prüfsumme abgelegt, vom Beleg-Gate zugelassen.'))}"><strong>${evidenceRankedSources().length}</strong><span>${escapeHtml(state.t('sources', 'Verifiziert'))}</span></div>
+        <div title="${escapeHtml(state.t('measurementsHint', 'Aus verifizierten Quellen extrahierte Messwerte.'))}"><strong>${filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length}</strong><span>${escapeHtml(state.t('measurements', 'Messwerte'))}</span></div>
         <div><strong>${researchReportsForTask(task).length}</strong><span>${escapeHtml(state.t('reports', 'Fachberichte'))}</span></div>
       </section>
       ${renderRunPanel(runInfo)}
