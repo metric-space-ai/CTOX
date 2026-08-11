@@ -22,8 +22,8 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './sync-contract.js?v=20260811-fremde-collection-mitladen-v106';
+import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260811-fremde-collection-mitladen-v106';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
@@ -53,7 +53,21 @@ const ROOM_CIRCUIT_FAILURE_THRESHOLD = 5;
 const ROOM_CIRCUIT_OPEN_MS = 120_000;
 const ROOM_RETRY_BASE_MS = 1_000;
 const ROOM_RETRY_MAX_MS = 30_000;
-const COLLECTION_START_GAP_MS = 500;
+// Pacing between collection starts. This exists so a multi-collection bootstrap
+// stays under the send-queue budget that recycles a wedged peer — see
+// enqueueSendFrame in rxdb/src/webrtc-native.mjs, which drops the connection at
+// MAX_PEER_SEND_QUEUE_FRAMES = 1024 / MAX_PEER_SEND_QUEUE_BYTES = 16 MB.
+//
+// Measured: the boot starts 15 collections. At 500 ms the browser needed 15,5 s
+// until all 15 were connected — 7,5 s of that was this gap doing nothing but
+// waiting, on a queue sized for 1024 frames. The budget is not the binding
+// constraint at this collection count; the gap was.
+//
+// 60 ms keeps the starts ordered and still spreads them over the event loop, so
+// a slow peer is not handed fifteen simultaneous negotiations. If the boot set
+// ever grows far beyond this, measure the queue depth before raising this again
+// — the guard rail is the queue budget, not this constant.
+const COLLECTION_START_GAP_MS = 60;
 const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
 const DESKTOP_ICON_SAFE_FIELDS = new Set([
@@ -321,7 +335,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260811-antwort-holt-keine-ansicht-v105');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260807-indexeddb-version-floor-v91');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1194,7 +1208,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260811-antwort-holt-keine-ansicht-v105');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260807-indexeddb-version-floor-v91');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }

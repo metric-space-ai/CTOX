@@ -1,0 +1,39 @@
+M2 BROWSER-BOOT — die Start-Pause war ein Teil, nicht die Ursache
+Lokale Instanz, gleicher Browser, Zeit bis alle 15 Boot-Collections verbunden.
+
+VORHER (COLLECTION_START_GAP_MS = 500)
+  Lauf 1   15.504 ms
+  (deckt sich mit der unabhängigen Messung der Parallelsitzung: 15,1 s)
+
+NACHHER (COLLECTION_START_GAP_MS = 60)
+  Lauf 1   13.168 ms
+  Lauf 2   10.538 ms   (alle 15 registriert nach 2.539 ms)
+
+GEWINN: rund 2 bis 5 Sekunden. REAL, aber NICHT der Durchbruch.
+Erwartet hatte ich ~7,5 s Ersparnis (15 x 500 ms). Eingetreten ist weniger,
+also ist die Pause nicht der dominierende Anteil.
+
+WAS DIE MESSUNG STATTDESSEN ZEIGT (Verlauf Lauf 1 nachher):
+  ms     1   10 registriert,  8 verbunden
+  ms  1171   13 registriert, 10 verbunden
+  ms  3172   14 registriert, 12 verbunden
+  ms  5172   15 registriert, 13 verbunden
+  ms  8173   15 registriert, 12 verbunden   <-- RÜCKSCHRITT
+  ms 11169   15 registriert, 15 verbunden
+
+Zwei offene Anteile, beide größer als die Pause:
+1. Die REGISTRIERUNG der 15 Collections dauert 2,5 bis 5 s, bevor überhaupt
+   alle bekannt sind.
+2. Zwischen Sekunde 5 und 11 VERLIERT mindestens eine Collection ihre
+   Verbindung wieder (13 -> 12 -> 15). Das ist kein Anlauf, das ist ein
+   Abbruch mit Wiederholung — vermutlich dieselbe Wurzel wie der
+   masterChangesSince-Zeitablauf und die Schreibschleife.
+
+BEGRÜNDUNG DER ÄNDERUNG: Die Pause schützt vor dem Send-Queue-Budget, das bei
+Überlauf die Verbindung kappt (webrtc-native.mjs, enqueueSendFrame:
+MAX_PEER_SEND_QUEUE_FRAMES = 1024, MAX_PEER_SEND_QUEUE_BYTES = 16 MB). Bei 15
+Collections ist dieses Budget nicht die bindende Schranke. 60 ms hält die
+Starts geordnet und über den Event-Loop verteilt.
+
+NÄCHSTER SCHRITT: nicht weiter an der Pause drehen, sondern den
+Verbindungsabbruch zwischen Sekunde 5 und 11 messen.
