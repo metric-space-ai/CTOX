@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">20 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">21 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Negatives Ergebnis</span>
+    <h3>P3 gemessen und widerlegt: der Idle-Backoff arbeitet ehrlich — <code>72d85019a</code></h3>
+    <p>10-Minuten-Differenzmessung am lebenden Daemon (Peer-Status performance.loops): <b>7 von 12 Loops schlafen im Idle vollständig</b> (0,0 Ticks/min), der Command-Consumer hält sein 30-s-Intervall (2,1/min), kein 3-s-Polling in Ruhe. Die Discovery-Hypothese H-4 gilt nicht — zweites Mess-Tor, das eine unnötige Welle verhindert (nach P1). Nebenbefund: die P6-Fläche (Business-Record-Projektion) ist im Idle still — lohnt nur unter Änderungslast.</p>
+    <span class="ev"><b>Beweis</b> docs/dev/beweise/plan-v2-p3-messung.md + Rohdaten p3-messung-{1,2}.json<br><b>Rest-Ticket</b> Reset-Empfindlichkeit unter Last (klein)</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan-v2 · S2b</span>
