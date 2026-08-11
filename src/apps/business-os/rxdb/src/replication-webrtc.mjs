@@ -1166,7 +1166,12 @@ class CtoxWebRtcReplicationState {
         const peerIds = this.openPeerIds();
         const results = await Promise.allSettled(peerIds.map((peerId) => this.pullFromPeer(peerId)));
         this.reportPeerResults(results, peerIds);
-        if (results.some((result) => result.status === 'rejected')) {
+        // No open peer is not "nothing to do" — it is a pull that never ran.
+        // `results` is empty in that case, so `some(rejected)` is false and the
+        // old code scheduled no retry: the pull was silently lost until the next
+        // master-change event or a page reload. Same shape as the bug the retry
+        // timer below was added for, one level up.
+        if (!peerIds.length || results.some((result) => result.status === 'rejected')) {
           this.schedulePullRetry();
         }
       } while (this.pullAgainAfterCurrent && !this.cancelled);
@@ -1302,7 +1307,13 @@ class CtoxWebRtcReplicationState {
           const peerIds = this.openPeerIds();
           const results = await Promise.allSettled(peerIds.map((peerId) => this.pushToPeer(peerId)));
           this.reportPeerResults(results, peerIds);
-          if (results.some((result) => result.status === 'rejected')) {
+          // See pullFromRemotePeers: an empty peer list produces an empty
+          // `results`, so `some(rejected)` is false and no retry was scheduled.
+          // Local writes made while the peer is momentarily gone then sat
+          // unsent until the user reloaded — measured on a customer instance as
+          // an import that stayed browser-only for 40 minutes and appeared 60 s
+          // after a reload.
+          if (!peerIds.length || results.some((result) => result.status === 'rejected')) {
             this.schedulePushRetry();
           }
         } while (this.pushAgainAfterCurrent && !this.cancelled);
@@ -1327,6 +1338,9 @@ class CtoxWebRtcReplicationState {
       this.schedulePushRetry();
       throw rejected.reason;
     }
+    // Documents handed in with no open peer were dropped without a trace: the
+    // caller saw a resolved promise and assumed they were sent.
+    if (!peerIds.length) this.schedulePushRetry();
   }
 
   async pushDocumentsToPeer(peerId, documents) {

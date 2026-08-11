@@ -9409,7 +9409,7 @@ var CtoxWebRtcReplicationState = class {
         const peerIds = this.openPeerIds();
         const results = await Promise.allSettled(peerIds.map((peerId) => this.pullFromPeer(peerId)));
         this.reportPeerResults(results, peerIds);
-        if (results.some((result) => result.status === "rejected")) {
+        if (!peerIds.length || results.some((result) => result.status === "rejected")) {
           this.schedulePullRetry();
         }
       } while (this.pullAgainAfterCurrent && !this.cancelled);
@@ -9522,7 +9522,7 @@ var CtoxWebRtcReplicationState = class {
           const peerIds = this.openPeerIds();
           const results = await Promise.allSettled(peerIds.map((peerId) => this.pushToPeer(peerId)));
           this.reportPeerResults(results, peerIds);
-          if (results.some((result) => result.status === "rejected")) {
+          if (!peerIds.length || results.some((result) => result.status === "rejected")) {
             this.schedulePushRetry();
           }
         } while (this.pushAgainAfterCurrent && !this.cancelled);
@@ -9546,6 +9546,7 @@ var CtoxWebRtcReplicationState = class {
       this.schedulePushRetry();
       throw rejected.reason;
     }
+    if (!peerIds.length) this.schedulePushRetry();
   }
   async pushDocumentsToPeer(peerId, documents) {
     const unique = /* @__PURE__ */ new Map();
