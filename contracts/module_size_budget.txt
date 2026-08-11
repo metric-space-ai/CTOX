@@ -32,23 +32,29 @@
 # sind kein Produktionsmodul und deshalb nicht Teil dieses Inventars.
 
 src/core/business_os/mcp_channel.rs = 6783
-src/core/business_os/office_engine.rs = 13953
+src/core/business_os/office_engine.rs = 13561
+src/core/business_os/office_engine_spreadsheet_layout.rs = 1045
 src/core/business_os/rxdb_peer.rs = 9941
 src/core/business_os/rxdb_peer_commands.rs = 251
 src/core/business_os/rxdb_peer_demand_files.rs = 237
 src/core/business_os/rxdb_peer_projections.rs = 551
 src/core/business_os/rxdb_peer_desktop_files.rs = 1908
-src/core/business_os/store.rs = 27516
-src/core/business_os/store_outbound_commands.rs = 5270
+src/core/business_os/store.rs = 27356
+src/core/business_os/store_security_projections.rs = 1073
+src/core/business_os/store_outbound_commands.rs = 5108
+src/core/business_os/store_outbound_delivery_policy.rs = 257
 src/core/communication/meeting_native.rs = 5018
-src/core/context/lcm/mod.rs = 5627
+src/core/context/lcm/mod.rs = 5310
+src/core/context/lcm/runtime_support.rs = 1074
 src/core/execution/models/runtime_plan.rs = 6517
 src/core/harness/app-server/src/codex_message_processor.rs = 7715
 src/core/harness/app-server-protocol/src/protocol/v2.rs = 5796
 src/core/harness/core/src/codex.rs = 7372
-src/core/mission/channels/mod.rs = 7221
+src/core/mission/channels/mod.rs = 7035
+src/core/mission/channels/account_helpers.rs = 363
 src/core/mission/tickets/mod.rs = 6011
-src/core/service/business_os.rs = 7106
+src/core/service/business_os.rs = 6060
 src/core/service/process_mining.rs = 6064
-src/core/service/service.rs = 26237
+src/core/service/service.rs = 26225
+src/core/service/service_runtime_support.rs = 572
 src/core/ui/tui/mod.rs = 6141
