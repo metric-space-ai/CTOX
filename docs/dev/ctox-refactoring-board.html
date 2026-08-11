@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">19 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">20 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S2b</span>
+    <h3>S2b-2: Demand-Chunks aus dem Peer — <code>0d82cbd18</code></h3>
+    <p><code>rxdb_peer.rs</code> 10.875 → <b>10.661</b>; Streaming/Registry als reiner Umzug (+11/−225) nach <code>rxdb_peer_demand_files.rs</code> (237). Der „geteilter Belang"-Vorbehalt trat nicht ein — pub(super)-Grenzen genügten, Replikationskern unberührt. Damit hat der Peer in der Kampagne <b>25.292 → 10.661</b> Produktionszeilen verloren; das 10.000er-Plan-Tor ist in Reichweite (Rest: Projektions-Gerüst, Command-Anteile).</p>
+    <span class="ev"><b>Verifiziert</b> Schnittmenge 0 · SHA-identisch · keine dirty-only-Symbole · Gate nur Fremd-OVERs · fmt/diff-check grün</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">Plan-v2 · S2b</span>
