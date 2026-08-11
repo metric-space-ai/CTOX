@@ -1827,6 +1827,20 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
   ]);
   if (context.timedOut) {
     console.warn('[thesen-outbound] Sperrvermerkspruefung hat die Frist ueberschritten', lead.id);
+    // Ein BEREITS geprueftes Ergebnis darf durch einen Fristablauf nicht
+    // verfallen. Der Serienbrief und die Sellify-Uebergabe rufen mit force auf;
+    // laeuft diese zweite Pruefung in die Frist, fiel der eben noch freigegebene
+    // Kontakt zurueck auf "gesperrt oder zu pruefen" — am 12.08.2026 endete die
+    // Kette genau dort, obwohl der Sperrvermerk Sekunden zuvor sauber geprueft
+    // worden war. Wir behalten dann das alte Urteil: ein freier Kontakt bleibt
+    // frei, ein gesperrter bleibt gesperrt. Neu bewertet wird erst, wenn die
+    // Pruefung wieder durchlaeuft.
+    if (state.recipientEligibilityReady.has(lead.id)) {
+      return new Map((lead.contacts || []).map((contact) => [
+        contact.id,
+        currentContactEligibility(lead, contact),
+      ]));
+    }
   }
   await uebernehmeCrmKontaktdaten(lead, context);
   const decisions = deriveLeadRecipientEligibility(lead, context);
