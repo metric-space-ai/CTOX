@@ -1,4 +1,4 @@
-import { collections as ctoxCoreCollections } from '../ctox/schema.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { collections as ctoxCoreCollections } from '../ctox/schema.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const jsonObject = { type: 'object', additionalProperties: true };
 const stringArray = { type: 'array', items: { type: 'string' } };

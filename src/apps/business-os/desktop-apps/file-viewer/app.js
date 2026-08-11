@@ -1,7 +1,7 @@
 import {
   FILE_CHUNK_ERROR_CODES,
   readStoredFileFromDemandChunks,
-} from '../../shared/file-integrity.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from '../../shared/file-integrity.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const TEXT_PREVIEW_RANGE_BYTES = 256 * 1024;
 

@@ -1,33 +1,33 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { createAppActions } from './shared/app-actions.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { CtoxResizer } from './shared/resizer.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { createAppActions } from './shared/app-actions.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/app-lifecycle.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/permissions.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/branding.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   launchesInWindow,
   resolvePresentation,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/presentation.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -38,9 +38,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { createDocumentsFacade } from './shared/documents.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/shell-permissions-ui.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { createDocumentsFacade } from './shared/documents.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -48,16 +48,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/maintenance-state.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/workspace-session.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './shared/taskbar-pins.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260811-tag-wechselt-nur-der-nutzer-v103';
+const APP_BUILD = '20260811-antwort-holt-keine-ansicht-v105';
 
 ensureShellStylesheets();
 

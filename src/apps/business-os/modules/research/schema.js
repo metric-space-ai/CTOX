@@ -1,6 +1,6 @@
 import { collections as knowledgeCollections } from '../../modules/knowledge/schema.js';
 import { collections as documentCollections } from '../../modules/documents/schema.js';
-import { collections as ctoxCollections } from '../../modules/ctox/schema.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { collections as ctoxCollections } from '../../modules/ctox/schema.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const commandSchema = {
   version: 1,

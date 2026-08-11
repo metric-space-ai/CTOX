@@ -12,7 +12,7 @@ export async function mount(container, ctx) {
   let teardown = null;
   let disposed = false;
   Promise.resolve().then(async () => {
-    const mod = await import('../../modules/creator/index.js?v=20260811-tag-wechselt-nur-der-nutzer-v103');
+    const mod = await import('../../modules/creator/index.js?v=20260811-antwort-holt-keine-ansicht-v105');
     if (disposed) return;
     container.innerHTML = '';
     const moduleCtx = {

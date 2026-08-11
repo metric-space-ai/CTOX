@@ -2329,3 +2329,24 @@ test('focusChatForUser zieht die Leiste nicht ungefragt in die Vergangenheit', (
   focusChatForUser(nutzer, alt, { allowDateChange: true });
   assert.equal(nutzer.selectedDate, '2026-07-26', 'ausdrueckliche Navigation muss den Tag wechseln');
 });
+
+test('eine Antwort auf einen alten Chat holt sich die Ansicht nicht', () => {
+  // remoteReplyChatToFocus meldet jeden Chat mit neuer Serverantwort. Der
+  // Abgleich schreibt laufend in alte Vorgaenge nach — am 11.08.2026 riss
+  // deshalb jede Nachmeldung die Leiste auf den 26. Juli. Nachgewiesen mit
+  // einer Aufrufspur aus der laufenden Seite:
+  //   set selectedDate 2026-08-11 -> 2026-07-26
+  //     at focusChatForUser (business-chat.js:1644)
+  //     at hydrateChatsFromRxDb (business-chat.js:3673)
+  const { focusChatForUser, getLocalDateString } = __businessChatTestInternals;
+  const heute = getLocalDateString(Date.now());
+  const alterChat = { id: 'chat-juli', createdAt: Date.parse('2026-07-26T09:00:00Z') };
+
+  // So ruft der Antwort-Pfad jetzt: erst pruefen, dann fokussieren.
+  const state = { selectedDate: heute, chats: [alterChat] };
+  if (getLocalDateString(alterChat.createdAt) === heute) {
+    focusChatForUser(state, alterChat, { allowDateChange: true });
+  }
+  assert.equal(state.selectedDate, heute);
+  assert.notEqual(state.selectedDate, '2026-07-26');
+});

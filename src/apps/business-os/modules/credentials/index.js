@@ -1,5 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 // Write-only credentials manager. The browser never receives a secret value:
 // it dispatches ctox.secret.{list,put,delete} control commands over the

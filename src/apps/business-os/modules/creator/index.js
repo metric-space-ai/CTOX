@@ -1,4 +1,4 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const state = {
   ctx: null,

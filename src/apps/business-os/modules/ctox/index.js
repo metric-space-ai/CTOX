@@ -1,4 +1,4 @@
-import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
 

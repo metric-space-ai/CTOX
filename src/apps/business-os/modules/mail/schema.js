@@ -5,7 +5,7 @@ import {
   collections as conversationCollections,
   migrationStrategies as conversationMigrationStrategies,
 } from '../conversations/schema.js';
-import { collections as ctoxCollections } from '../ctox/schema.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { collections as ctoxCollections } from '../ctox/schema.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import { collections as appStoreCollections } from '../app-store/schema.js';
 import { collections as documentCollections } from '../documents/schema.js';
 

@@ -6,7 +6,7 @@ import {
   openUniversalImporter,
   parseDelimitedText,
 } from '../../shared/universal-importer.js';
-import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import {
   configureActiveOutreach,
@@ -14,7 +14,7 @@ import {
   renderActiveOutreachShell,
   handleActiveOutreachAction,
   handleActiveOutreachInput,
-} from './active-outreach.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './active-outreach.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const BUILD = '20260721-outbound-ia-karte';
 let loadedOutboundLang = '';

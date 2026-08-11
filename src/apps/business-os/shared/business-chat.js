@@ -1,11 +1,11 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from './file-integrity.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -3620,7 +3620,16 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
   }
   if (focusChatId) {
     const focusChat = state.chats.find((chat) => chat.id === focusChatId);
-    if (focusChat) focusChatForUser(state, focusChat, { allowDateChange: true });
+    // Nur ein Chat von heute wird durch eine eintreffende Antwort nach vorn
+    // geholt. remoteReplyChatToFocus meldet jeden Chat, der serverseitig eine
+    // neue Antwort bekam — und der Abgleich schreibt laufend in ALTE Vorgaenge
+    // nach. Am 11.08.2026 riss deshalb jede dieser Nachmeldungen die Leiste auf
+    // den 26. Juli. Der Chip des alten Chats aktualisiert sich weiterhin; er
+    // bleibt ueber die Datumsauswahl erreichbar, holt sich die Ansicht aber
+    // nicht mehr selbst.
+    if (focusChat && getLocalDateString(focusChat.createdAt) === getLocalDateString(Date.now())) {
+      focusChatForUser(state, focusChat, { allowDateChange: true });
+    }
   }
   writeChatState(state);
   return changed || Boolean(focusChatId);

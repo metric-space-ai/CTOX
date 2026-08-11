@@ -1,6 +1,6 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { importTemplateToDb } from './templates/skr.js';
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 
 // --- Native ES Module Imports for Fibu Core Engines ---

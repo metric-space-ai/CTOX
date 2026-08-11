@@ -1,6 +1,6 @@
 import {
   readStoredFileFromDemandChunks,
-} from '../../shared/file-integrity.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+} from '../../shared/file-integrity.js?v=20260811-antwort-holt-keine-ansicht-v105';
 
 const BUILD = '20260721-ia-grammar-v30';
 const MODULE_ID = 'cv-print-builder';
