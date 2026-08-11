@@ -1288,3 +1288,28 @@ test('die Recherche bekommt die vorhandenen CRM-Kontakte als Vorwissen mit', () 
   const ohne = hooks.sellifyVorwissenAlsText({ contact_id: 1, name: 'Leer GmbH', personen: [] });
   assert.match(ohne, /noch keine Ansprechpartner gefuehrt/);
 });
+
+test('ein unvollstaendig geladener Lead meldet nicht "0 Quellen"', () => {
+  // Am 11.08.2026 hing der Dienst 33 Stunden mit 4,2 GB fest, die Replikation
+  // lieferte nichts mehr, und die Feldkarten meldeten fuer ANGUS Chemie
+  // durchgaengig "0 Quellen" — waehrend serverseitig ZWOELF Belege lagen. Der
+  // Nutzer haette die Firma auf dieser Anzeige als unbelegt verworfen. Eine
+  // Aussage ueber die Welt darf nur fallen, wenn wir sie treffen koennen.
+  const lead = {
+    name: 'ANGUS Chemie GmbH',
+    data: { firma_name: 'Angus Chemie GmbH', firma_plz: '49479', firma_ort: 'Ibbenbueren' },
+    contacts: [],
+    evidence: [{ field_key: 'firma_name', source_id: 'northdata.de', source_url: 'https://northdata.de/x' }],
+  };
+  // Belege da, aber die Auswertung findet keine Quelle -> unvollstaendig geladen.
+  const kaputt = hooks.researchFieldReview({ ...lead, evidence: [{ nutzlos: true }] });
+  assert.equal(kaputt.evidenceUnloaded, true);
+
+  // Mit auswertbaren Belegen ist es eine echte Messung.
+  const echt = hooks.researchFieldReview(lead);
+  assert.equal(echt.evidenceUnloaded, false);
+
+  // Ein Lead ganz ohne Belege ist ebenfalls eine echte Aussage: nichts gefunden.
+  const leer = hooks.researchFieldReview({ ...lead, evidence: [] });
+  assert.equal(leer.evidenceUnloaded, false);
+});

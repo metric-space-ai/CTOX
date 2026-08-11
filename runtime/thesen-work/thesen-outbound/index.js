@@ -3765,6 +3765,13 @@ function researchFieldReview(lead) {
     sufficientCount: fields.filter((field) => field.filled && field.sufficient).length,
     missingValueKeys: fields.filter((field) => !field.filled).map((field) => field.key),
     missingEvidenceKeys: fields.filter((field) => field.filled && !field.sufficient).map((field) => field.key),
+    // Traegt der Lead Belege, findet die Feldauswertung aber KEINE einzige Quelle,
+    // ist der Datenstand unvollstaendig geladen — dann ist auch die Zusammenfassung
+    // keine Messung. Siehe renderReviewFieldRow: am 11.08.2026 meldete die
+    // Oberflaeche "0 mit mindestens zwei unabhaengigen Quellen belegt", waehrend
+    // zwoelf Belege auf dem Server lagen.
+    evidenceUnloaded: (Array.isArray(lead?.evidence) ? lead.evidence.length : 0) > 0
+      && fields.every((field) => !field.sources.length),
   };
 }
 function validationBlockers(lead) {
@@ -3793,7 +3800,7 @@ function leadIsUnresearched(lead) {
   if (['queued', 'running', 'completed', 'needs_review', 'failed'].includes(lead.research_status)) return false;
   return !(lead.evidence || []).length;
 }
-function renderReviewFieldRow(field, untouched = false) {
+function renderReviewFieldRow(field, untouched = false, lead = null) {
   const stateClass = untouched
     ? 'is-untouched'
     : !field.filled ? 'is-missing' : field.sufficient ? 'is-sufficient' : 'is-insufficient';
@@ -3802,11 +3809,26 @@ function renderReviewFieldRow(field, untouched = false) {
   // Nutzerfreigabe erscheint als Haekchen-Chip, nicht als Pseudo-Quelle.
   const realSources = field.sources.filter((source) => source.key !== 'operator');
   const approved = field.sources.some((source) => source.key === 'operator');
-  const badge = untouched && !field.filled
-    ? tr('notResearchedYet', 'noch nicht recherchiert')
-    : !field.filled
-      ? tr('missing', 'fehlt')
-      : `${field.independentCount} ${field.independentCount === 1 ? tr('source', 'Quelle') : tr('sources', 'Quellen')}`;
+  // "0 Quellen" ist eine AUSSAGE UEBER DIE WELT und darf nur fallen, wenn wir sie
+  // treffen koennen. Am 11.08.2026 hing der Dienst 33 Stunden mit 4,2 GB fest,
+  // die Replikation lieferte nichts mehr, und die Feldkarten meldeten fuer ANGUS
+  // Chemie durchgaengig "0 Quellen" — waehrend serverseitig zwoelf Belege lagen.
+  // Der Nutzer trifft auf solchen Zahlen Entscheidungen: er haette die Firma als
+  // unbelegt verworfen. Ein stiller Anzeigefehler dieser Art ist schaedlicher als
+  // ein sichtbarer Absturz.
+  //
+  // Solange der Lead nachweislich Belege traegt, die Feldauswertung aber keine
+  // einzige Quelle findet, ist das ein unvollstaendiger Ladezustand und kein
+  // Messergebnis. Dann sagt die Karte das auch.
+  const belegeAmLead = Array.isArray(lead?.evidence) ? lead.evidence.length : 0;
+  const auswertungLeer = belegeAmLead > 0 && !field.sources.length;
+  const badge = auswertungLeer
+    ? tr('sourcesNotLoaded', 'Quellen nicht geladen')
+    : untouched && !field.filled
+      ? tr('notResearchedYet', 'noch nicht recherchiert')
+      : !field.filled
+        ? tr('missing', 'fehlt')
+        : `${field.independentCount} ${field.independentCount === 1 ? tr('source', 'Quelle') : tr('sources', 'Quellen')}`;
   const sourceLinks = realSources.map((source) => source.url
     ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.label)}</a>`
     : escapeHtml(source.label));
@@ -3836,7 +3858,9 @@ function renderResearchReviewSummary(review, lead) {
     // noch nichts zu beanstanden, weil noch nichts gesucht wurde.
     return `<section class="thesen-detail-section thesen-review-summary">
       <h3>${tr('reviewTitle', 'Rechercheprüfung')}</h3>
-      <p><strong>${review.filledCount} ${tr('ofFields', 'von')} ${review.total} ${tr('fieldsFilled', 'Feldern ermittelt')}</strong> · ${review.sufficientCount} ${tr('fieldsSufficient', 'mit mindestens zwei unabhängigen Quellen belegt')}</p>
+      <p>${review.evidenceUnloaded
+      ? `<strong>${tr('evidenceUnloadedTitle', 'Belege noch nicht geladen')}</strong> · ${tr('evidenceUnloadedHint', 'Der Lead traegt Belege, die Datenverbindung liefert sie gerade nicht. Bitte neu laden, bevor du entscheidest.')}`
+      : `<strong>${review.filledCount} ${tr('ofFields', 'von')} ${review.total} ${tr('fieldsFilled', 'Feldern ermittelt')}</strong> · ${review.sufficientCount} ${tr('fieldsSufficient', 'mit mindestens zwei unabhängigen Quellen belegt')}`}</p>
       <p class="thesen-muted">${tr('researchNotStarted', 'Die Recherche wurde für diesen Lead noch nicht gestartet.')}</p>
       <p class="thesen-muted">${tr('status', 'Status')}: ${escapeHtml(researchLabel(lead))} · ${tr('campaign', 'Kampagne')}: ${escapeHtml(lead?.campaign || tr('annualResearch', 'Jahresrecherche'))}</p>
     </section>`;
@@ -3852,7 +3876,9 @@ function renderResearchReviewSummary(review, lead) {
   }
   return `<section class="thesen-detail-section thesen-review-summary">
     <h3>${tr('reviewTitle', 'Rechercheprüfung')}</h3>
-    <p><strong>${review.filledCount} ${tr('ofFields', 'von')} ${review.total} ${tr('fieldsFilled', 'Feldern ermittelt')}</strong> · ${review.sufficientCount} ${tr('fieldsSufficient', 'mit mindestens zwei unabhängigen Quellen belegt')}</p>
+    <p>${review.evidenceUnloaded
+      ? `<strong>${tr('evidenceUnloadedTitle', 'Belege noch nicht geladen')}</strong> · ${tr('evidenceUnloadedHint', 'Der Lead traegt Belege, die Datenverbindung liefert sie gerade nicht. Bitte neu laden, bevor du entscheidest.')}`
+      : `<strong>${review.filledCount} ${tr('ofFields', 'von')} ${review.total} ${tr('fieldsFilled', 'Feldern ermittelt')}</strong> · ${review.sufficientCount} ${tr('fieldsSufficient', 'mit mindestens zwei unabhängigen Quellen belegt')}`}</p>
     <p class="${missingParts.length ? 'thesen-review-open' : 'thesen-muted'}">${missingParts.length
       ? `${tr('stillOpen', 'Noch offen')}: ${escapeHtml(missingParts.join(' · '))}`
       : escapeHtml(tr('allFieldsProven', 'Alle Pflichtfelder sind ermittelt und mit zwei unabhängigen Quellen belegt.'))}</p>
@@ -3906,7 +3932,7 @@ function renderResearchReviewGroups(review, lead) {
     const recipientSelection = group.id === 'contact' ? renderContactRecipientSelection(lead) : '';
     return `<section class="thesen-detail-section thesen-review-group" data-review-group="${escapeHtml(group.id)}">
       <h3>${escapeHtml(group.label)}</h3>
-      <ul class="thesen-review-fields">${group.fields.map((field) => renderReviewFieldRow(field, untouched)).join('')}</ul>
+      <ul class="thesen-review-fields">${group.fields.map((field) => renderReviewFieldRow(field, untouched, lead)).join('')}</ul>
       ${recipientSelection}
     </section>`;
   }).join('');
@@ -4108,6 +4134,7 @@ export const __thesenOutboundTestHooks = {
   researchCommandForLead,
   researchCommandObservationKey,
   sellifyVorwissenAlsText,
+  researchFieldReview,
   normalizedResearchCommandStatus,
   uniqueCommands,
   resetLeadForImport,
