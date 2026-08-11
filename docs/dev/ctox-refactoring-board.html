@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">18 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">19 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S2b</span>
+    <h3>S2b-1: Desktop-Datei-Index aus dem Peer — <code>8e7b6413e</code></h3>
+    <p><code>rxdb_peer.rs</code> 12.718 → <b>10.875</b> Produktionszeilen; 54 Funktionen als reiner Umzug nach <code>rxdb_peer_desktop_files.rs</code> (1.908). Diff-Signatur −1.931/+88, Schnittmenge 0, SHA-identisch, Ratsche im selben Commit. Stamp/Scheduling und Demand-Streaming blieben bewusst im Peer. Zwei Anläufe wegen Nacht-Fremdlast (Load-Spikes bis 98) — das Warte-Gate hat getragen.</p>
+    <span class="ev"><b>Verifiziert</b> cargo check · desktop_file 36/36 · Symbol-Schluss 25/25 · Guard nur bekannte Fremd-OVERs<br><b>Offen</b> Peer-Vollsuite-Nachlauf bei ruhiger Maschine · nächste Naht: Demand-Chunks (~8 fns) oder Projektions-Gerüst</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">MEILENSTEIN</span>
