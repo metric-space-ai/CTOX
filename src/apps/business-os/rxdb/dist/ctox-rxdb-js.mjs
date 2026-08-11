@@ -8540,6 +8540,9 @@ function getConnectionHandlerSimplePeer({ signalingServerUrl, config } = {}) {
 }
 var SHARED_ROOM_PEERS = /* @__PURE__ */ new Map();
 var SHARED_HANDSHAKE_TIMEOUT_MS = 6e4;
+var SHARED_PEER_NEGOTIATION_RETRY_ATTEMPTS = 10;
+var SHARED_PEER_NEGOTIATION_RETRY_BASE_MS = 500;
+var SHARED_PEER_NEGOTIATION_RETRY_MAX_MS = 1e4;
 var SHARED_PEER_OPEN_WAIT_MS = 6e4;
 var SHARED_COLLECTION_CATCH_UP_QUEUE_SLICE_MS = 250;
 var SHARED_PROTOCOL_COLLECTION_CONCURRENCY = 8;
@@ -8646,9 +8649,56 @@ var SharedRoomPeer = class {
     this.scheduleCollectionCatchUp(collection, registration);
   }
   scheduleAllCollectionCatchUps() {
+    this.clearSharedPeerNegotiationRetry();
     for (const [collection, registration] of this.collections.entries()) {
       this.scheduleCollectionCatchUp(collection, registration);
     }
+  }
+  clearSharedPeerNegotiationRetry() {
+    if (!this.sharedPeerNegotiationRetryTimer) return;
+    clearTimeout(this.sharedPeerNegotiationRetryTimer);
+    this.sharedPeerNegotiationRetryTimer = null;
+    this.sharedPeerNegotiationRetryAttempt = 0;
+  }
+  // Re-arm a negotiation that produced no peer. Bounded and self-cancelling: it
+  // stops as soon as a negotiation succeeds (scheduleAllCollectionCatchUps
+  // clears it), when the peer is gone, or after the attempt budget — an
+  // unbounded retry would just be a second kind of loop.
+  scheduleSharedPeerNegotiationRetry(peerId, reason = "") {
+    if (!this.peer || this.sharedPeerNegotiationRetryTimer) return;
+    const attempt = Number(this.sharedPeerNegotiationRetryAttempt || 0) + 1;
+    if (attempt > SHARED_PEER_NEGOTIATION_RETRY_ATTEMPTS) return;
+    this.sharedPeerNegotiationRetryAttempt = attempt;
+    const delayMs = Math.min(
+      SHARED_PEER_NEGOTIATION_RETRY_MAX_MS,
+      SHARED_PEER_NEGOTIATION_RETRY_BASE_MS * 2 ** (attempt - 1)
+    );
+    this.sharedPeerNegotiationRetryTimer = setTimeout(() => {
+      this.sharedPeerNegotiationRetryTimer = null;
+      if (!this.peer) return;
+      const targetPeerId = this.isPeerOpen(peerId) ? peerId : this.openSharedPeerIds()[0] || "";
+      if (!targetPeerId) {
+        this.sharedPeerNegotiationRetryAttempt = 0;
+        return;
+      }
+      this.peerOpenQueue = this.peerOpenQueue.then(async () => {
+        try {
+          const negotiated = await this.ensureNegotiatedPeer(targetPeerId);
+          if (!negotiated) {
+            this.scheduleSharedPeerNegotiationRetry(targetPeerId, reason);
+            return;
+          }
+          this.scheduleAllCollectionCatchUps();
+        } catch (error) {
+          if (isTransientSharedPeerError(error)) {
+            this.scheduleSharedPeerNegotiationRetry(targetPeerId, reason);
+            return;
+          }
+          this.fanout("handshake-error", error);
+        }
+      });
+    }, delayMs);
+    this.sharedPeerNegotiationRetryTimer.unref?.();
   }
   scheduleCollectionCatchUp(collection, registration) {
     if (!collection || this.collectionCatchUps.has(collection)) return;
@@ -8808,10 +8858,16 @@ var SharedRoomPeer = class {
       this.peerOpenQueue = this.peerOpenQueue.then(async () => {
         try {
           const negotiated = await this.ensureNegotiatedPeer(peerId);
-          if (!negotiated) return;
+          if (!negotiated) {
+            this.scheduleSharedPeerNegotiationRetry(peerId, "negotiation-empty");
+            return;
+          }
           this.scheduleAllCollectionCatchUps();
         } catch (error) {
-          if (isTransientSharedPeerError(error)) return;
+          if (isTransientSharedPeerError(error)) {
+            this.scheduleSharedPeerNegotiationRetry(peerId, "negotiation-transient");
+            return;
+          }
           this.fanout("handshake-error", error);
         }
       });
