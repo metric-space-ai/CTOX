@@ -1,4 +1,4 @@
-import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-verlauf-startet-heute-v98';
+import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';
 

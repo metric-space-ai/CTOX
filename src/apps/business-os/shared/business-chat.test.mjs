@@ -2276,3 +2276,56 @@ test('ein gespeichertes Verlaufsdatum ueberdauert das Oeffnen nicht', () => {
     else globalThis.localStorage = vorherigerSpeicher;
   }
 });
+
+test('die Leiste springt beim Oeffnen nicht auf einen alten Tag', () => {
+  // Am 11.08.2026 sprang die Leiste beim Oeffnen von Outbound auf den 28. Juli
+  // und zeigte 26 alte Fehlversuche. Ursache war der Rueckfall auf den neuesten
+  // Chat aus IRGENDEINEM Tag, sobald heute nichts Offenes vorlag.
+  const { preferredChatForDockOpen, getLocalDateString } = __businessChatTestInternals;
+  const heute = getLocalDateString(Date.now());
+  const alt = {
+    id: 'chat-alt', createdAt: Date.parse('2026-07-28T10:00:00Z'), open: true,
+    messages: [{ role: 'user', text: 'alter Fehlversuch' }],
+  };
+  assert.equal(preferredChatForDockOpen({ chats: [alt] }), null);
+
+  const neu = {
+    id: 'chat-heute', createdAt: Date.now(), open: true,
+    messages: [{ role: 'user', text: 'heutiger Lauf' }],
+  };
+  const gewaehlt = preferredChatForDockOpen({ chats: [alt, neu] });
+  assert.equal(gewaehlt?.id, 'chat-heute');
+  assert.equal(getLocalDateString(gewaehlt.createdAt), heute);
+});
+
+test('ein Lead-Chat von gestern wird nicht als heutiger wiederverwendet', () => {
+  // Ein Lead behaelt seinen Kennschluessel ueber Wochen. Am 11.08.2026 lieferte
+  // resolveChatForOpenDetail deshalb beim Wechsel in eine Kampagne den Chat des
+  // Juli-Laufs zurueck; focusChatForUser zog die Leiste auf den 26. Juli.
+  const { resolveChatForOpenDetail, getLocalDateString } = __businessChatTestInternals;
+  const heute = getLocalDateString(Date.now());
+  const detail = { chat_id: 'chat-juli' };
+  const alt = { id: 'chat-juli', createdAt: Date.parse('2026-07-26T09:00:00Z'), open: true, messages: [] };
+  const state = { ownerUserId: 'nutzer-1', selectedDate: heute, chats: [alt] };
+
+  const gewaehlt = resolveChatForOpenDetail(state, { user: { id: 'nutzer-1' } }, detail);
+  assert.notEqual(gewaehlt.id, 'chat-juli');
+  assert.equal(getLocalDateString(gewaehlt.createdAt), heute);
+});
+
+test('focusChatForUser zieht die Leiste nicht ungefragt in die Vergangenheit', () => {
+  // Die Wurzel aller fuenf Spruenge: focusChatForUser setzte selectedDate
+  // bedingungslos auf das Datum des Chats und wird aus sechs Richtungen
+  // gerufen, meist aus dem Hintergrund.
+  const { focusChatForUser, getLocalDateString } = __businessChatTestInternals;
+  const heute = getLocalDateString(Date.now());
+  const alt = { id: 'chat-juli', createdAt: Date.parse('2026-07-26T09:00:00Z') };
+
+  const hintergrund = { selectedDate: heute, chats: [alt] };
+  focusChatForUser(hintergrund, alt);
+  assert.equal(hintergrund.selectedDate, heute, 'Hintergrundvorgang darf den Tag nicht wechseln');
+
+  const nutzer = { selectedDate: heute, chats: [alt] };
+  focusChatForUser(nutzer, alt, { allowDateChange: true });
+  assert.equal(nutzer.selectedDate, '2026-07-26', 'ausdrueckliche Navigation muss den Tag wechseln');
+});

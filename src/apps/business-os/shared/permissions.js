@@ -1,4 +1,4 @@
-import { normalizeRole, roleCanManage } from './roles.js?v=20260811-verlauf-startet-heute-v98';
+import { normalizeRole, roleCanManage } from './roles.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 export const BusinessOsPermissions = Object.freeze({
   WorkspaceManage: 'workspace.manage',

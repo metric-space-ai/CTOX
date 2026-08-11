@@ -1,8 +1,8 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import { createCtoxLauncher } from './ctoxLauncher.js';
-import { makeIconDraggable } from './iconDrag.js?v=20260811-verlauf-startet-heute-v98';
-import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260811-verlauf-startet-heute-v98';
+import { makeIconDraggable } from './iconDrag.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   buildQuickAppCreateCommand,
   isRuntimeInstalledApp,

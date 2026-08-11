@@ -1,4 +1,4 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const state = {
   ctx: null,

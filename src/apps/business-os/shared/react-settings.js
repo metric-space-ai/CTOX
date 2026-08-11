@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-verlauf-startet-heute-v98';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260811-verlauf-startet-heute-v98';
+} from './permissions.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260811-verlauf-startet-heute-v98';
+} from './branding.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260811-verlauf-startet-heute-v98';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-verlauf-startet-heute-v98';
+} from './roles.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
   codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),

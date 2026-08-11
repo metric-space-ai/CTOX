@@ -1,5 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const REFRESH_DEBOUNCE_MS = 80;
 const TICKET_PRIMARY_COLLECTION = 'ctox_ticket_items';

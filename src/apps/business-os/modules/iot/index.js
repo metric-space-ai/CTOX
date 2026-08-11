@@ -11,7 +11,7 @@
 // human writes prompts (Wenn/Dann + signal); CTOX programs the watcher. All
 // command flows and collection schemas are unchanged from the previous IA.
 import { createContextMenu } from '../../shared/context-menu.js';
-import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const BUILD = '20260727-canonical-readiness';
 const COLLECTIONS = [

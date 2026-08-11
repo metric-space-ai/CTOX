@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260811-verlauf-startet-heute-v98';
+} from '../../shared/permissions.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 export const manifest = {
   id: 'code-editor',

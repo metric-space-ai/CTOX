@@ -1,5 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { CtoxResizer } from '../../shared/resizer.js?v=20260811-verlauf-startet-heute-v98';
+import { CtoxResizer } from '../../shared/resizer.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 // This module reads the canonical CTOX channel projection (mirror of the
 // communication_* tables in runtime/ctox.sqlite3). Per-channel threads are the

@@ -4,24 +4,24 @@ import {
   appReleaseProjection,
   businessDataAreaLabel,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
-} from '../../shared/app-lifecycle.js?v=20260811-verlauf-startet-heute-v98';
+} from '../../shared/app-lifecycle.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   BusinessOsPermissions,
   canInstallBusinessApps,
   canModifyBusinessModule,
   canUninstallBusinessApp,
   canUseBusinessPermission,
-} from '../../shared/permissions.js?v=20260811-verlauf-startet-heute-v98';
+} from '../../shared/permissions.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   buildGlobalCtoxAgentScopeView,
   renderGlobalCtoxAgentScopeHtml,
-} from '../../shared/shell-permissions-ui.js?v=20260811-verlauf-startet-heute-v98';
+} from '../../shared/shell-permissions-ui.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   base64ToBytes,
   sha256Hex,
   FILE_CONTENT_HASH_SCHEME,
   FILE_CHUNK_HASH_SCHEME,
-} from '../../shared/file-integrity.js?v=20260811-verlauf-startet-heute-v98';
+} from '../../shared/file-integrity.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const CTOX_REPO = 'metric-space-ai/ctox';
 const CTOX_BRANCH = 'main';

@@ -3,7 +3,7 @@ import {
   transcodeApp,
   suggestedModuleId,
   scaffoldModule,
-} from '../../shared/app-transcode.mjs?v=20260811-verlauf-startet-heute-v98';
+} from '../../shared/app-transcode.mjs?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 // The App Importer is the hand-over moment of the product story: a coding
 // agent conceived the app, the importer raises it. Source (folder or public

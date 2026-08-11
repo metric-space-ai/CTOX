@@ -1,7 +1,7 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { preserveScrollDuring } from '../../shared/stable-dom.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-verlauf-startet-heute-v98';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const MARKDOWN_MIME = 'text/markdown';
@@ -288,7 +288,7 @@ function documentBySourceSha(records = [], sourceSha = '') {
 }
 
 async function loadDocumentFormatModule() {
-  return import('../../vendor/document-format.mjs?v=20260811-verlauf-startet-heute-v98');
+  return import('../../vendor/document-format.mjs?v=20260811-tag-wechselt-nur-der-nutzer-v103');
 }
 
 async function ensureDocumentFormatModule(state) {
@@ -311,7 +311,7 @@ async function loadSuperDocModule(state) {
 
 async function loadCtoxDocumentsModule(state) {
   if (!state.ctoxDocumentsModule) {
-    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260811-verlauf-startet-heute-v98');
+    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260811-tag-wechselt-nur-der-nutzer-v103');
   }
   return state.ctoxDocumentsModule;
 }

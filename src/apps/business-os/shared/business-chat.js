@@ -1,11 +1,11 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260811-verlauf-startet-heute-v98';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-verlauf-startet-heute-v98';
+} from './file-integrity.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-tag-wechselt-nur-der-nutzer-v103';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -1378,7 +1378,7 @@ async function submitChatForm({ root, state, chat, node, commandBus, db, sync, g
   if (!text) return;
   const attachments = Array.isArray(chat.attachments) ? chat.attachments.slice() : [];
   moveEmptyHistoricalChatToToday(state, chat);
-  focusChatForUser(state, chat);
+  focusChatForUser(state, chat, { allowDateChange: true });
 
   const isFuture = chat.createdAt > Date.now();
   if (isFuture) {
@@ -1612,9 +1612,15 @@ function expandChatOnly(state, activeChat) {
   activeChat.minimized = false;
 }
 
-function focusChatForUser(state, chat, { openDock = true } = {}) {
+// Den angezeigten Tag wechselt nur, wer ausdruecklich dorthin navigiert. Diese
+// Funktion wird aus sechs Richtungen gerufen, die meisten davon Hintergrund-
+// vorgaenge; jede davon zog die Leiste sonst in die Vergangenheit.
+function focusChatForUser(state, chat, { openDock = true, allowDateChange = false } = {}) {
   if (!state || !chat) return null;
-  state.selectedDate = getLocalDateString(chat.createdAt || Date.now());
+  const chatDate = getLocalDateString(chat.createdAt || Date.now());
+  if (allowDateChange || chatDate === getLocalDateString(Date.now())) {
+    state.selectedDate = chatDate;
+  }
   if (chat.userMinimized) {
     // Der Nutzer hat dieses Fenster zugeklappt. Es wird aktiv gefuehrt und der
     // Chip markiert den neuen Zustand — aufgerissen wird es nicht.
@@ -1645,7 +1651,11 @@ function findChatForOpenDetail(state, detail = {}) {
 
 function resolveChatForOpenDetail(state, session, detail = {}) {
   const trackedChat = findChatForOpenDetail(state, detail);
-  if (trackedChat) return trackedChat;
+  // Nur ein Chat von HEUTE wird wiederverwendet. Ein Lead behaelt seinen
+  // Kennschluessel ueber Wochen; sonst kehrt der Chat des letzten Laufs zurueck.
+  if (trackedChat && getLocalDateString(trackedChat.createdAt) === getLocalDateString(Date.now())) {
+    return trackedChat;
+  }
   if (detail.reuseActive === true) return ensureChat(state, session);
   const chat = createChat(state.ownerUserId, state.selectedDate);
   state.chats.push(chat);
@@ -1683,7 +1693,9 @@ function preferredChatForDockOpen(state) {
     .sort((a, b) => chatActivityMs(b) - chatActivityMs(a));
   if (!chats.length) return null;
   const today = getLocalDateString(Date.now());
-  return chats.find((chat) => getLocalDateString(chat.createdAt) === today) || chats[0];
+  // NUR heute. Der Rueckfall auf chats[0] holte den neuesten Chat aus IRGENDEINEM
+  // Tag und zog die Leiste auf dessen Datum.
+  return chats.find((chat) => getLocalDateString(chat.createdAt) === today) || null;
 }
 
 function moveEmptyHistoricalChatToToday(state, chat) {
@@ -3608,7 +3620,7 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
   }
   if (focusChatId) {
     const focusChat = state.chats.find((chat) => chat.id === focusChatId);
-    if (focusChat) focusChatForUser(state, focusChat);
+    if (focusChat) focusChatForUser(state, focusChat, { allowDateChange: true });
   }
   writeChatState(state);
   return changed || Boolean(focusChatId);
@@ -6538,6 +6550,7 @@ export const __businessChatTestInternals = Object.freeze({
   initSchedulerLoop,
   isChatEmptyForDeletion,
   isScrolledToBottom,
+  focusChatForUser,
   preferredChatForDockOpen,
   readChatState,
   renderChatRoot,
