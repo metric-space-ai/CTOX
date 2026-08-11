@@ -98,8 +98,27 @@ function hasBlockedDetection(page) {
 }
 
 function isBlockedPage(page) {
-  const corpus = normalized([page?.title, page?.evidence].filter(Boolean).join(" "));
+  // Only the page body/title can prove a real access challenge here.
+  // `evidence` is the provider verdict row ("… | Gültig") and must not
+  // participate in block classification.
+  const corpus = normalized([page?.title, page?.body, page?.body_head].filter(Boolean).join(" "));
   return /captcha|cloudflare|verify you are human|access denied|zugriff verweigert|sicherheitsuberprufung/.test(corpus);
+}
+
+// CTOX browser-automation attaches ambient `detection.markers` (often just
+// "captcha") even when the checker page is fully interactive — the marketing
+// copy on experte.de mentions CAPTCHA-adjacent wording and the detector is
+// coarse. Prefer conclusive provider verdicts over marker-only false positives.
+// A run is blocked only when:
+//   (a) the browser source itself returned status "blocked", or
+//   (b) the visible page body/title looks challenged, or
+//   (c) ambient markers fire AND we have no conclusive status to accept.
+function isEffectivelyBlocked(validation) {
+  if (!validation) return false;
+  if (validation.status === "blocked") return true;
+  if (isBlockedPage(validation)) return true;
+  const conclusive = CONCLUSIVE_STATUSES.has(validation.status);
+  return !conclusive && hasBlockedDetection(validation);
 }
 
 // Browser-automation source: replay of the solo probe inside the CTOX
@@ -227,10 +246,7 @@ function main() {
   }
 
   const validation = validateEmail(email);
-  const blocked = hasBlockedDetection(validation)
-    || isBlockedPage(validation)
-    || validation?.status === "blocked";
-  if (blocked) {
+  if (isEffectivelyBlocked(validation)) {
     recordUnlockSignal(
       isAllowedUrl(validation?.url) ? validation.url : START_URL,
       validation?.detection?.markers || ["access_challenge"],
@@ -286,5 +302,6 @@ module.exports = {
   hasBlockedDetection,
   isAllowedUrl,
   isBlockedPage,
+  isEffectivelyBlocked,
   isPortalOrLoginTitle,
 };

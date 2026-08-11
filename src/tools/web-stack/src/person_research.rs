@@ -2552,7 +2552,10 @@ mod tests {
 
     #[test]
     fn slugify_handles_typical_company_names() {
-        assert_eq!(slugify("Example Industrial GmbH"), "example-industrial-gmbh");
+        assert_eq!(
+            slugify("Example Industrial GmbH"),
+            "example-industrial-gmbh"
+        );
         assert_eq!(slugify("DO & Co. AG"), "do-co-ag");
         assert_eq!(slugify("  Foo   Bar  "), "foo-bar");
     }

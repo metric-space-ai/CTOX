@@ -47,6 +47,10 @@ pub use egress::allow_hosts_from_config as browser_egress_allow_hosts_from_confi
 #[cfg(feature = "full")]
 pub use egress::assert_browser_egress_url;
 #[cfg(feature = "full")]
+pub use person_research::merge_person_research_source_records;
+#[cfg(feature = "full")]
+pub use person_research::persist_person_research_workspace;
+#[cfg(feature = "full")]
 pub use person_research::run_ctox_person_research_tool;
 #[cfg(feature = "full")]
 pub use person_research::PersonResearchRequest;
@@ -74,10 +78,6 @@ pub use scholarly_search::UNPAYWALL_DEFAULT_BASE_URL;
 pub use surface::handle_web_command;
 #[cfg(feature = "full")]
 pub use surface::WebScrapeRequest;
-#[cfg(feature = "full")]
-pub use person_research::merge_person_research_source_records;
-#[cfg(feature = "full")]
-pub use person_research::persist_person_research_workspace;
 #[cfg(feature = "full")]
 pub use unlock::handle_unlock_command;
 #[cfg(feature = "full")]

@@ -680,23 +680,45 @@ function parseAddressLine(line) {
 }
 
 function parseBizqPersons(html) {
-  // <figure class="bizq" data-data='[{...}]'> with persons.
-  const figures = [
-    ...html.matchAll(/<figure[^>]*class=\"[^\"]*bizq[^\"]*\"[^>]*data-data=\"([^\"]+)\"/gi),
-  ];
+  // Northdata embeds person history as
+  //   <figure class="bizq" data-data="{ &quot;event&quot;: [ ... ] }">
+  // Live and fixture pages both use the object form with an `event` array
+  // (not a bare array / `items`). Prefer active person events (`type == "p"`,
+  // `old` not true) and fall back to the free-text label on `text`/`desc`.
+  const payloads = [];
+  for (const match of html.matchAll(/<figure\b([^>]*)>/gi)) {
+    const attrs = match[1] || "";
+    const classMatch = attrs.match(/\bclass\s*=\s*(["'])([\s\S]*?)\1/i);
+    const classValue = classMatch?.[2] || "";
+    if (!classValue.split(/\s+/).some((token) => token.toLowerCase() === "bizq")) continue;
+    // data-data may contain escaped quotes and span newlines inside the attribute.
+    const fullTag = html.slice(match.index, match.index + 400000);
+    const openEnd = fullTag.indexOf(">");
+    const openTag = openEnd >= 0 ? fullTag.slice(0, openEnd + 1) : match[0];
+    const dataMatch = openTag.match(/\bdata-data\s*=\s*(["'])([\s\S]*?)\1/i);
+    if (dataMatch?.[2]) payloads.push(dataMatch[2]);
+  }
   const out = [];
-  for (const fig of figures) {
-    let dataStr = fig[1]
+  for (const raw of payloads) {
+    let dataStr = raw
       .replace(/&quot;/g, '"')
+      .replace(/&#34;/g, '"')
       .replace(/&amp;/g, "&")
-      .replace(/&#39;/g, "'");
+      .replace(/&#39;/g, "'")
+      .replace(/&apos;/g, "'");
     try {
       const data = JSON.parse(dataStr);
-      const items = Array.isArray(data) ? data : data.items || [];
+      const items = Array.isArray(data)
+        ? data
+        : (Array.isArray(data?.event) ? data.event
+          : (Array.isArray(data?.items) ? data.items : []));
       for (const item of items) {
-        if (item && !item.old && typeof item.text === "string") {
-          out.push(item.text);
-        }
+        if (!item || item.old === true) continue;
+        if (item.type && item.type !== "p") continue;
+        const text = typeof item.text === "string" && item.text.trim()
+          ? item.text
+          : (typeof item.desc === "string" ? item.desc : "");
+        if (text.trim()) out.push(text.trim());
       }
     } catch (err) {
       // Selector drifted; let the empty-records path trigger portal_drift.
@@ -705,12 +727,93 @@ function parseBizqPersons(html) {
   return out;
 }
 
+// Position tokens are matched after `normalized()` (umlauts stripped:
+// ä/ö/ü → a/o/u, ß → ss). Keep both the short Northdata abbreviations and
+// the full DACH role words here.
+const POSITION_TOKENS = new Set([
+  "vorstand",
+  "vorstandsvorsitzender",
+  "vorstandsvorsitzende",
+  "geschaftsfuhrer",
+  "geschaftsfuhrerin",
+  "geschaftsfuhrung",
+  "prokurist",
+  "prokuristin",
+  "prokura",
+  "aufsichtsrat",
+  "aufsichtsratsvorsitzender",
+  "inhaber",
+  "inhaberin",
+  "vv",
+  "vst",
+  "gf",
+  "verwaltungsrat",
+  "verwaltungsratsprasident",
+  "verwaltungsratsprasidentin",
+  "prasident",
+  "prasidentin",
+]);
+
+function expandPosition(raw) {
+  switch (String(raw || "").trim()) {
+    case "VV":
+      return "Vorstandsvorsitzender";
+    case "Vst.":
+    case "Vst":
+      return "Vorstand";
+    case "GF":
+    case "GF.":
+      return "Geschäftsführer";
+    default:
+      return String(raw || "").trim();
+  }
+}
+
+function isPositionToken(token) {
+  const compact = normalized(token).replace(/\./g, "");
+  if (!compact) return false;
+  if (POSITION_TOKENS.has(compact)) return true;
+  // Full role words contain lowercase letters; initials like "K." do not count.
+  return /[a-zäöü]/i.test(token)
+    && !/^[A-ZÄÖÜ]\.$/.test(token)
+    && /^(vorstand|geschafts|prokur|aufsicht|inhaber|verwaltungs|prasident)/.test(compact);
+}
+
 function splitPersonClause(text) {
-  // "Vorstand Anna Müller" → {position: "Vorstand", first: "Anna", last: "Müller"}
-  const trimmed = text.trim();
-  const m = trimmed.match(/^([A-Za-zÄÖÜäöü\-\s\.]+?)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]+)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]+)*)$/);
-  if (!m) return null;
-  return { position: m[1].trim(), first: m[2].trim(), last: m[3].trim() };
+  // Mirrors src/sources/northdata.rs::parse_person_label for labels such as:
+  //   "Vorstand Veronika Bienert"
+  //   "GF Robert Süße"
+  //   "VV Roland Busch"
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return null;
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+
+  let splitIdx = 0;
+  while (splitIdx < tokens.length && isPositionToken(tokens[splitIdx])) {
+    splitIdx += 1;
+  }
+  if (splitIdx === tokens.length && tokens.length >= 2) {
+    splitIdx = tokens.length - 2;
+  }
+  if (splitIdx === 0) {
+    // No explicit role token — require the legacy "Role First Last" shape.
+    const m = trimmed.match(/^([A-Za-zÄÖÜäöü\-\s.]+?)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]+)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]+)*)$/);
+    if (!m) return null;
+    return { position: expandPosition(m[1]), first: m[2].trim(), last: m[3].trim() };
+  }
+
+  const position = expandPosition(tokens.slice(0, splitIdx).join(" "));
+  const nameTokens = tokens.slice(splitIdx);
+  if (nameTokens.length === 0) return null;
+  if (nameTokens.length === 1) {
+    return { position, first: null, last: nameTokens[0] };
+  }
+  return {
+    position,
+    first: nameTokens.slice(0, -1).join(" "),
+    last: nameTokens[nameTokens.length - 1],
+  };
 }
 
 function extractRecords(url, html) {
@@ -752,10 +855,10 @@ function extractRecords(url, html) {
   for (const clause of parseBizqPersons(html)) {
     const parsed = splitPersonClause(clause);
     if (!parsed) continue;
-    push("person_position", parsed.position, "medium", "bizq figure: position");
-    push("person_vorname", parsed.first, "medium", "bizq figure: first name");
-    push("person_nachname", parsed.last, "medium", "bizq figure: last name");
-    // First clause is enough for an aggregated record set.
+    if (parsed.position) push("person_position", parsed.position, "medium", "bizq figure: position");
+    if (parsed.first) push("person_vorname", parsed.first, "medium", "bizq figure: first name");
+    if (parsed.last) push("person_nachname", parsed.last, "medium", "bizq figure: last name");
+    // First active clause is enough for an aggregated record set.
     break;
   }
 
@@ -838,14 +941,17 @@ module.exports = {
   browserCapturePage,
   browserSessionId,
   candidateUrls,
+  expandPosition,
   extractRecords,
   hasBlockedDetection,
   htmlToText,
   northdataBrowserSource,
   pageMatchesCompany,
+  parseBizqPersons,
   publishedIdentityName,
   recordsFromProviderFields,
   recordsForPage,
   requestedPathMatches,
+  splitPersonClause,
   verifiedProfileUrl,
 };

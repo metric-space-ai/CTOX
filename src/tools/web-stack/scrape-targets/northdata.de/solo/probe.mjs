@@ -193,24 +193,78 @@ try {
         ort = last;
       }
     }
-    // Management persons rendered as <figure class="bizq" data-data='[...]'>.
+    // Management persons: Northdata embeds history as
+    // <figure class="bizq" data-data='{"event":[...]}'>. Prefer active
+    // person events (`type == "p"`, not `old`) and expand role abbreviations
+    // the same way as scripts/v1.js / the Rust adapter.
+    const positionTokens = new Set([
+      'vorstand', 'vorstandsvorsitzender', 'vorstandsvorsitzende',
+      'geschaftsfuhrer', 'geschaftsfuhrerin', 'geschaftsfuhrung',
+      'prokurist', 'prokuristin', 'prokura', 'aufsichtsrat',
+      'aufsichtsratsvorsitzender', 'inhaber', 'inhaberin', 'vv', 'vst', 'gf',
+      'verwaltungsrat', 'verwaltungsratsprasident', 'verwaltungsratsprasidentin',
+      'prasident', 'prasidentin',
+    ]);
+    const normalize = (value) => String(value || '').normalize('NFKD')
+      .replace(/[̀-ͯ]/g, '').toLowerCase().replace(/ß/g, 'ss')
+      .replace(/[^a-z0-9.]+/g, ' ').trim();
+    const expandPosition = (raw) => {
+      switch (String(raw || '').trim()) {
+        case 'VV': return 'Vorstandsvorsitzender';
+        case 'Vst.':
+        case 'Vst': return 'Vorstand';
+        case 'GF':
+        case 'GF.': return 'Geschäftsführer';
+        default: return String(raw || '').trim();
+      }
+    };
+    const isPositionToken = (token) => {
+      const compact = normalize(token).replace(/\./g, '');
+      if (!compact) return false;
+      if (positionTokens.has(compact)) return true;
+      return /[a-zäöü]/i.test(token)
+        && !/^[A-ZÄÖÜ]\.$/.test(token)
+        && /^(vorstand|geschafts|prokur|aufsicht|inhaber|verwaltungs|prasident)/.test(compact);
+    };
+    const splitPerson = (text) => {
+      const tokens = String(text || '').trim().split(/\s+/).filter(Boolean);
+      if (tokens.length < 2) return null;
+      let splitIdx = 0;
+      while (splitIdx < tokens.length && isPositionToken(tokens[splitIdx])) splitIdx += 1;
+      if (splitIdx === tokens.length && tokens.length >= 2) splitIdx = tokens.length - 2;
+      if (splitIdx === 0) return null;
+      const position = expandPosition(tokens.slice(0, splitIdx).join(' '));
+      const nameTokens = tokens.slice(splitIdx);
+      if (nameTokens.length === 0) return null;
+      if (nameTokens.length === 1) return { position, first: null, last: nameTokens[0] };
+      return {
+        position,
+        first: nameTokens.slice(0, -1).join(' '),
+        last: nameTokens[nameTokens.length - 1],
+      };
+    };
     const persons = [];
     for (const figure of document.querySelectorAll('figure.bizq[data-data]')) {
       try {
         const data = JSON.parse(figure.getAttribute('data-data'));
-        const items = Array.isArray(data) ? data : (data.items || []);
+        const items = Array.isArray(data)
+          ? data
+          : (Array.isArray(data?.event) ? data.event
+            : (Array.isArray(data?.items) ? data.items : []));
         for (const item of items) {
-          if (item && !item.old && typeof item.text === 'string') persons.push(item.text);
+          if (!item || item.old === true) continue;
+          if (item.type && item.type !== 'p') continue;
+          const text = (typeof item.text === 'string' && item.text.trim())
+            ? item.text
+            : (typeof item.desc === 'string' ? item.desc : '');
+          if (text.trim()) persons.push(text.trim());
         }
       } catch (err) { /* selector drift tolerated */ }
     }
     let person = null;
     for (const text of persons) {
-      const match = text.trim().match(/^([A-Za-zÄÖÜäöü\-\s.]+?)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöü-]+)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöü-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöü-]+)*)$/);
-      if (match) {
-        person = { position: match[1].trim(), first: match[2].trim(), last: match[3].trim() };
-        break;
-      }
+      const parsed = splitPerson(text);
+      if (parsed) { person = parsed; break; }
     }
     return { url: location.href, title: document.title, name, street, plz, ort, heading, person };
   });

@@ -995,7 +995,9 @@ mod tests {
             country: Some(Country::De),
             mode: ResearchMode::NewRecord,
         };
-        assert!(module().fetch_direct(&ctx, "Example Industrial GmbH").is_none());
+        assert!(module()
+            .fetch_direct(&ctx, "Example Industrial GmbH")
+            .is_none());
     }
 
     #[test]
@@ -1022,7 +1024,9 @@ mod tests {
                 country: Some(country),
                 mode: ResearchMode::NewRecord,
             };
-            assert!(module().fetch_direct(&ctx, "Example Industrial GmbH").is_none());
+            assert!(module()
+                .fetch_direct(&ctx, "Example Industrial GmbH")
+                .is_none());
         }
     }
 
@@ -1033,7 +1037,9 @@ mod tests {
             country: None,
             mode: ResearchMode::NewRecord,
         };
-        assert!(module().fetch_direct(&ctx, "Example Industrial GmbH").is_none());
+        assert!(module()
+            .fetch_direct(&ctx, "Example Industrial GmbH")
+            .is_none());
     }
 
     #[test]
