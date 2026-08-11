@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// Project the outcome of a `ctox.iot.*` business command into the
+/// RxDB-visible `business_records` store. The engine state lives in
+/// `runtime/ctox.sqlite3` (written by the shared `iot::commands` op via
+/// `crate::paths::core_db`); `iot::projector` reads it back and builds the
+/// canonical `iot_*` envelopes, and this integrator writes those rows into the
+/// business-os store (the read source for `pull_collection_records` and the
+/// RxDB peer). No HTTP bridge: every row flows engine -> projector ->
+/// business_records -> RxDB/WebRTC.
+///
+/// Returns the `(collection, record_id)` pairs for the rxdb_peer to stream into
+/// the live RxDB collections. Idempotent: a replayed outcome rewrites identical
+/// envelopes (only `_rev`/`updated_at_ms` advance) and tombstones stay
+/// tombstoned.
 pub(in crate::business_os) fn project_iot_business_command_outcome(
     root: &Path,
     result: &Value,
