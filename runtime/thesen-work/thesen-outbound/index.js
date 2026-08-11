@@ -3072,8 +3072,14 @@ async function openSeriesEmailFromLead(id) {
       : 'Bitte mindestens eine Person mit gültiger E-Mail-Adresse auswählen.');
     return;
   }
-  location.hash = handoff.hash;
+  // Reihenfolge ist entscheidend: openApp setzt den Hash auf die geoeffnete App
+  // (#desktop) und ueberschreibt damit die Empfaengerliste, wenn sie vorher
+  // gesetzt wurde. Am 12.08.2026 gemessen: die Mail-App ging auf, aber mit
+  // hash=#desktop und ohne einen einzigen Empfaenger — Kampagnen 0,
+  // Massen-Ausgang 0. Der Serienbrief uebergab ins Leere.
+  // Erst oeffnen, dann die Empfaenger anhaengen.
   await state.ctx?.openApp?.('mail');
+  location.hash = handoff.hash;
 }
 
 // Namensvarianten, die ein CRM ueblicherweise fuehrt — als GEZIELTE Abfragen.
