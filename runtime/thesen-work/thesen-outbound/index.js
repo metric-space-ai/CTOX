@@ -1818,8 +1818,13 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
   // Nach der Frist gilt der Kontext als NICHT verfuegbar. Das ist die sichere
   // Richtung: nicht pruefbar heisst gesperrt, niemand wird versehentlich
   // angeschrieben — aber der Aufrufer bekommt eine Antwort und kann es sagen.
+  const t0 = Date.now();
   const context = await Promise.race([
-    loadSellifyRecipientContext(lead),
+    loadSellifyRecipientContext(lead).then((wert) => {
+      console.info(`[thesen-outbound] Sperrvermerkspruefung ${lead.id}: ${Date.now() - t0} ms, `
+        + `${(wert?.companies || []).length} Firmen, ${(wert?.people || []).length} Personen`);
+      return wert;
+    }),
     new Promise((resolve) => setTimeout(
       () => resolve({ people: [], companies: [], contextAvailable: false, timedOut: true }),
       RECIPIENT_ELIGIBILITY_TIMEOUT_MS,
