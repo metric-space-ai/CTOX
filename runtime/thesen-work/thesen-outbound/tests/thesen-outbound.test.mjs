@@ -1259,3 +1259,32 @@ test('die Beobachtungskennung ignoriert reines Neuschreiben ohne Inhaltsaenderun
     hooks.researchCommandObservationKey(vorgang),
   );
 });
+
+test('die Recherche bekommt die vorhandenen CRM-Kontakte als Vorwissen mit', () => {
+  // Bis zum 11.08.2026 fragte der Auftrag Sellify nur, OB die Firma existiert.
+  // Die dort gefuehrten Ansprechpartner — in diesem Mandanten 60.639 Personen zu
+  // 17.516 Firmen — blieben unbeachtet, und die Recherche suchte dieselben Namen
+  // im offenen Netz neu zusammen.
+  const text = hooks.sellifyVorwissenAlsText({
+    contact_id: 4711,
+    name: 'Destilla GmbH',
+    anschrift: 'Industriestr. 1', plz: '88326', ort: 'Aulendorf',
+    domain: 'destilla.de', telefon: '+4975251234',
+    personen: [
+      { vorname: 'Anna', nachname: 'Berg', funktion: 'Einkauf', email: 'a.berg@destilla.de', telefon: '' },
+      { vorname: 'Jo', nachname: 'Klein', funktion: '', email: '', telefon: '+49752512399' },
+    ],
+  });
+  assert.match(text, /Destilla GmbH/);
+  assert.match(text, /contact_id 4711/);
+  assert.match(text, /Anna Berg \| Einkauf \| a\.berg@destilla\.de/);
+  assert.match(text, /Jo Klein/);
+  assert.match(text, /NICHT erneut erraten/);
+
+  // Ohne CRM-Treffer darf kein leerer Block in den Auftrag geraten.
+  assert.equal(hooks.sellifyVorwissenAlsText(null), '');
+
+  // Eine bekannte Firma ohne Kontakte ist trotzdem Vorwissen.
+  const ohne = hooks.sellifyVorwissenAlsText({ contact_id: 1, name: 'Leer GmbH', personen: [] });
+  assert.match(ohne, /noch keine Ansprechpartner gefuehrt/);
+});

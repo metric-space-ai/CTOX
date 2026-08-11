@@ -2356,12 +2356,20 @@ async function researchLead(id, options = {}) {
   // Die Dublettenpruefung entscheidet ueber Neu- oder Nachrecherche. Faellt sie
   // aus (Projektion noch nicht da), bleibt es bei der bisherigen Herleitung.
   let bekannteFirma = null;
-  try { bekannteFirma = await findSellifyCompanyDuplicate(lead); } catch (error) {
+  let vorwissen = null;
+  try {
+    vorwissen = await sellifyVorwissen(lead);
+    bekannteFirma = vorwissen;
+  } catch (error) {
     console.warn('[thesen-outbound] Sellify-Dublettenpruefung vor der Recherche fehlgeschlagen', error);
   }
   const researchMode = leadResearchMode(lead, bekannteFirma);
+  const crmWissen = sellifyVorwissenAlsText(vorwissen);
   const prompt = [
     `Recherchiere den Lead ${lead.name} [${lead.id}] nach dem THESEN-Quellenstandard.`,
+    // Das CRM steht bewusst GANZ OBEN im Auftrag: was das Haus schon weiss, soll
+    // die Recherche leiten, nicht am Ende mit ihr abgeglichen werden.
+    ...(crmWissen ? [crmWissen] : []),
     'Nutze die konfigurierten Quellen und Playwright-Adapter; bei Zugriffshürden den Web-Stack-Unlocking- und Browser-Anmeldeprozess.',
     'Sichere jedes übernommene Feld mit mindestens zwei unabhängigen Quellen ab.',
     'Erfasse ALLE auffindbaren Ansprechpartner des Unternehmens, nicht nur einen: '
@@ -2917,6 +2925,78 @@ async function findSellifyCompanyDuplicate(lead) {
   });
   if (strong.length === 1) return strong[0];
   throw new Error('Die Sellify-Dublettenprüfung ist nicht eindeutig. Bitte den Lead und die vorhandenen Organisationen prüfen.');
+}
+
+// Das CRM ist die erste Quelle, nicht die letzte Ablage.
+//
+// Bis zum 11.08.2026 wurde Sellify vor einer Recherche nur gefragt, OB die Firma
+// existiert — die dort gefuehrten Ansprechpartner (im Schnitt 3,5 je Firma, in
+// diesem Mandanten 60.639 Personen zu 17.516 Firmen) blieben unbeachtet. Der
+// Auftrag ging dann los und liess dieselben Namen, Anschriften und Telefonnummern
+// im offenen Netz neu zusammensuchen, die zwei Handgriffe entfernt schon
+// vorlagen. Das ist nicht nur Verschwendung: extern Erratenes ist schlechter
+// belegt als ein gepflegter CRM-Eintrag.
+//
+// Was hier eingesammelt wird, geht als Vorwissen in den Auftrag. Es ersetzt die
+// externe Pruefung nicht — der Zwei-Quellen-Nachweis bleibt unangetastet —, aber
+// die Recherche weiss ab jetzt, was das Haus bereits kennt.
+async function sellifyVorwissen(lead) {
+  const firma = await findSellifyCompanyDuplicate(lead);
+  if (!firma) return null;
+  let personen = [];
+  try {
+    const gefunden = await sellifyReadCollection('sellify_people')
+      .find({ selector: { contact_id: { $eq: firma.contact_id } } })
+      .exec();
+    personen = gefunden
+      .filter((entry) => !entry.is_deleted)
+      .map((entry) => ({
+        vorname: String(entry.first_name || '').trim(),
+        nachname: String(entry.last_name || '').trim(),
+        funktion: String(entry.position || entry.function || '').trim(),
+        email: String(entry.email || '').trim(),
+        telefon: String(entry.phone || entry.telephone || '').trim(),
+      }))
+      .filter((p) => p.vorname || p.nachname);
+  } catch (error) {
+    // Eine Firma ohne lesbare Kontakte ist immer noch Vorwissen.
+    console.warn('[thesen-outbound] Sellify-Kontakte nicht lesbar', error);
+  }
+  return {
+    contact_id: firma.contact_id,
+    name: String(firma.name || '').trim(),
+    anschrift: String(firma.street || firma.address || '').trim(),
+    plz: String(firma.postal_code || '').trim(),
+    ort: String(firma.city || '').trim(),
+    domain: String(firma.website_url || '').trim(),
+    telefon: String(firma.phone || '').trim(),
+    personen,
+  };
+}
+
+function sellifyVorwissenAlsText(vorwissen) {
+  if (!vorwissen) return '';
+  const zeilen = [
+    'BEKANNT AUS DEM EIGENEN CRM (Sellify) — diese Angaben sind gepflegt und haben Vorrang',
+    'vor extern Gefundenem. Pruefe sie, widerlege sie wenn noetig, aber erfinde sie nicht neu:',
+    `- Organisation: ${vorwissen.name}${vorwissen.contact_id ? ` [contact_id ${vorwissen.contact_id}]` : ''}`,
+  ];
+  if (vorwissen.anschrift || vorwissen.plz || vorwissen.ort) {
+    zeilen.push(`- Anschrift: ${[vorwissen.anschrift, [vorwissen.plz, vorwissen.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ')}`);
+  }
+  if (vorwissen.domain) zeilen.push(`- Domain: ${vorwissen.domain}`);
+  if (vorwissen.telefon) zeilen.push(`- Telefon: ${vorwissen.telefon}`);
+  if (vorwissen.personen.length) {
+    zeilen.push(`- Bereits gefuehrte Ansprechpartner (${vorwissen.personen.length}):`);
+    for (const p of vorwissen.personen.slice(0, 25)) {
+      const teile = [[p.vorname, p.nachname].filter(Boolean).join(' '), p.funktion, p.email, p.telefon].filter(Boolean);
+      zeilen.push(`  · ${teile.join(' | ')}`);
+    }
+    zeilen.push('  Diese Personen NICHT erneut erraten. Ergaenze fehlende Angaben und suche zusaetzliche Ansprechpartner.');
+  } else {
+    zeilen.push('- Im CRM sind zu dieser Organisation noch keine Ansprechpartner gefuehrt.');
+  }
+  return zeilen.join('\n');
 }
 
 async function createSellifyCompany(lead, workflowId, prompt) {
@@ -4027,6 +4107,7 @@ export const __thesenOutboundTestHooks = {
   researchCommandLeadPatch,
   researchCommandForLead,
   researchCommandObservationKey,
+  sellifyVorwissenAlsText,
   normalizedResearchCommandStatus,
   uniqueCommands,
   resetLeadForImport,
