@@ -37,3 +37,29 @@ Starts geordnet und über den Event-Loop verteilt.
 
 NÄCHSTER SCHRITT: nicht weiter an der Pause drehen, sondern den
 Verbindungsabbruch zwischen Sekunde 5 und 11 messen.
+
+TEIL 2 — PARALLELSTART MIT VIER SPUREN (12.08.)
+Gemessen über die Diagnostik-Zeitstempel je Collection (connectedAt und
+initialReplicationStartedAt, relativ zu performance.timeOrigin) statt über ein
+Messfenster — die früheren Messungen waren wertlos, weil mein Aufruf erst
+Sekunden nach der Navigation ankam und ich dann schon verbundene Collections
+zählte.
+
+  seriell (1 Kette)     erster Start 4.063 ms, letzter 12.040 ms
+                        Startspanne 7.977 ms, zuletzt verbunden 15.073 ms
+  4 Spuren              erster Start 2.424 ms, letzter 11.112 ms
+                        Startspanne 8.688 ms, zuletzt verbunden 12.123 ms
+
+GEWINN: rund 3 Sekunden (15,1 -> 12,1 s). REAL, aber KEIN Durchbruch.
+
+WARUM NICHT MEHR: Die Startspanne ist praktisch gleich geblieben. Vorher
+brauchte eine Bridge ~530 ms und sie liefen nacheinander; jetzt laufen vier
+gleichzeitig, aber jede braucht ~2.300 ms. Die Bridges bremsen sich gegenseitig
+aus — sie teilen sich Peer und Signalisierung. Vierfache Parallelität bringt
+damit nur etwa den Faktor 1,25, nicht 4.
+
+DER NÄCHSTE ENGPASS IST DAMIT BENANNT und liegt nicht mehr in der Reihenfolge:
+eine einzelne Bridge braucht 0,5 bis 2,3 Sekunden. Das ist der Multi-RTT-
+Handshake, den die Sync-Engine-Sitzung mit 600-1000 ms je Collection gemessen
+hat. Wer den Boot wirklich schnell machen will, muss die Anzahl der
+Rundreisen pro Bridge senken, nicht ihre Reihenfolge ändern.

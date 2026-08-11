@@ -22,8 +22,8 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260811-fremde-collection-mitladen-v106';
-import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260811-fremde-collection-mitladen-v106';
+} from './sync-contract.js?v=20260812-start-lanes-v98';
+import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260812-start-lanes-v98';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
@@ -68,6 +68,10 @@ const ROOM_RETRY_MAX_MS = 30_000;
 // ever grows far beyond this, measure the queue depth before raising this again
 // — the guard rail is the queue budget, not this constant.
 const COLLECTION_START_GAP_MS = 60;
+// How many collection bridges may be built at the same time. One meant the boot
+// was as slow as the sum of all bridges; unbounded would hand a slow peer
+// fifteen simultaneous negotiations and push the send queue toward its budget.
+const COLLECTION_START_LANES = 4;
 const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
 const DESKTOP_ICON_SAFE_FIELDS = new Set([
@@ -109,7 +113,19 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   const suspendedCollections = new Set();
   let globalRestartTimer = null;
   let repairCycleInProgress = false;
-  let collectionStartQueue = Promise.resolve();
+  // Collection starts used to hang off ONE promise chain: every collection
+  // waited for the previous one to finish its bridge before it even began. At a
+  // measured 600–1000 ms per bridge that put the whole boot on a serial track —
+  // 15 collections, ~15 s until all were connected.
+  //
+  // Now COLLECTION_START_LANES chains run side by side and each collection takes
+  // the next lane round-robin. Start ORDER is preserved (lane n gets the n-th
+  // collection), so priority collections still go first; only the waiting is
+  // parallel. The guard rail stays the send-queue budget in
+  // rxdb/src/webrtc-native.mjs (1024 frames / 16 MB) — four concurrent bridges
+  // are nowhere near it.
+  let collectionStartLanes = createCollectionStartLanes();
+  let collectionStartLaneCursor = 0;
   let multiTabCoordinator = null;
   const multiTabUnsubscribers = [];
   let suspensionReason = '';
@@ -604,7 +620,9 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         }
       }
       recordCollection(collection, { status: 'starting' });
-      const bridgePromise = collectionStartQueue.then(() => {
+      const startLane = collectionStartLaneCursor % collectionStartLanes.length;
+      collectionStartLaneCursor += 1;
+      const bridgePromise = collectionStartLanes[startLane].then(() => {
         if (stopped) throw new Error('Business OS sync runtime has been stopped');
         return startWebRtcReplication({
           db,
@@ -623,7 +641,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       // Every collection shares one bounded room send queue. Pacing initial
       // catch-up keeps a legitimate multi-collection bootstrap below the
       // wedged-peer recycle threshold while preserving deterministic order.
-      collectionStartQueue = boundedCollectionStartQueueStep(bridgePromise);
+      collectionStartLanes[startLane] = boundedCollectionStartQueueStep(bridgePromise);
       bridges.set(collection, bridgePromise);
       publishResourceBudget();
       try {
@@ -734,7 +752,8 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         preservePin: true,
       })));
       const startBatch = async (batchCollections) => {
-        collectionStartQueue = Promise.resolve();
+        collectionStartLanes = createCollectionStartLanes();
+        collectionStartLaneCursor = 0;
         const starts = [];
         for (const collection of batchCollections) {
           starts.push(this.startCollection(collection, {
@@ -955,6 +974,10 @@ function boundedCollectionStartQueueStep(
 ) {
   return withTimeout(Promise.resolve(bridgePromise).catch(() => undefined), timeoutMs)
     .then(() => delay(gapMs));
+}
+
+function createCollectionStartLanes(lanes = COLLECTION_START_LANES) {
+  return Array.from({ length: Math.max(1, lanes) }, () => Promise.resolve());
 }
 
 async function settleRestartEntries(entries, waitForStable) {
