@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">21 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">22 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Negatives Ergebnis</span>
+    <h3>P4 gemessen und widerlegt: der Boot synct 15, nicht 178 — <code>65f0e0aec</code></h3>
+    <p>Frisches Browser-Profil gegen die lokale Instanz: 125 Boot-Requests (Baseline 129 ✓), eager nur <b>15 Prioritäts-Collections</b>, alle nach ~1 Minute <code>complete</code>, 19 MB Heap, kein Fehler. Das Demand-Loading leistet die geplante Priorisierung bereits — P4 als Bauauftrag entfällt. <b>Mess-Bilanz der 6 Discovery-Hebel: 3 widerlegt (P1/P3/P4) · 1 gelandet (P2) · 2 verbleiben (P5-Matrix messen, P6 nur unter Änderungslast).</b> Die Mess-Tore des Plans haben damit drei unnötige Wellen verhindert.</p>
+    <span class="ev"><b>Beweis</b> docs/dev/beweise/plan-v2-p4-messung.md<br><b>Folgefrage (klein)</b> Demand-Collection-Latenz beim ersten Modul-Öffnen</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-neg">Negatives Ergebnis</span>
