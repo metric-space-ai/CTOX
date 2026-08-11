@@ -25,6 +25,7 @@ mod rxdb_peer;
 mod rxdb_peer_browser;
 mod rxdb_peer_demand_files;
 mod rxdb_peer_desktop_files;
+mod rxdb_peer_projections;
 pub mod server;
 mod session;
 pub mod store;
