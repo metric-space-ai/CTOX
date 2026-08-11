@@ -1,4 +1,4 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260807-einheitliche-ladepfade-v97';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
 
 const state = {
   ctx: null,

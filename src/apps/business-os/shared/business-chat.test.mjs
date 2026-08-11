@@ -1731,3 +1731,28 @@ function makeTimerWindow(timers) {
     assert.equal(getTaskState(chatWith('completed')), 'success');
   });
 }
+
+test('ein gespeichertes Verlaufsdatum ueberdauert das Oeffnen nicht', () => {
+  // Am 11.08.2026 stand die Chat-Leiste eines Nutzers beim Oeffnen noch auf dem
+  // 6. August und zeigte die 24 Chats jenes Tages — darunter Fehlversuche aus
+  // einer Fassung, die es nicht mehr gibt. Die vier erfolgreichen Laeufe des
+  // laufenden Tages waren dahinter unsichtbar. Die Leiste startet ab jetzt
+  // immer heute; vergangene Tage bleiben ueber die Datumsauswahl erreichbar.
+  const { readChatState, getLocalDateString } = __businessChatTestInternals;
+  const heute = getLocalDateString(Date.now());
+  const gespeichert = { selectedDate: '2026-08-06', chats: [], activeChatId: '' };
+
+  const vorherigerSpeicher = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: (key) => (key === 'ctox.businessOs.chat.v1' ? JSON.stringify(gespeichert) : null),
+    setItem() {},
+  };
+  try {
+    const state = readChatState({ user: { id: 'nutzer-1' } });
+    assert.equal(state.selectedDate, heute);
+    assert.notEqual(state.selectedDate, '2026-08-06');
+  } finally {
+    if (vorherigerSpeicher === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = vorherigerSpeicher;
+  }
+});

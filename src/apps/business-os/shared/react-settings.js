@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260714-chat-queue-v56';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260714-chat-queue-v56';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-verlauf-startet-heute-v98';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260811-verlauf-startet-heute-v98';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260714-chat-queue-v56';
+} from './permissions.js?v=20260811-verlauf-startet-heute-v98';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260714-chat-queue-v56';
+} from './branding.js?v=20260811-verlauf-startet-heute-v98';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260714-chat-queue-v56';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260714-chat-queue-v56';
+} from './roles.js?v=20260811-verlauf-startet-heute-v98';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-verlauf-startet-heute-v98';
 
 export async function openReactSettings({
   mount,

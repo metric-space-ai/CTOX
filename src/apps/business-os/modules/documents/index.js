@@ -1,7 +1,7 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260807-einheitliche-ladepfade-v97';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { preserveScrollDuring } from '../../shared/stable-dom.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260807-einheitliche-ladepfade-v97';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-verlauf-startet-heute-v98';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const MARKDOWN_MIME = 'text/markdown';
@@ -288,7 +288,7 @@ function documentBySourceSha(records = [], sourceSha = '') {
 }
 
 async function loadDocumentFormatModule() {
-  return import('../../vendor/document-format.mjs?v=20260807-einheitliche-ladepfade-v97');
+  return import('../../vendor/document-format.mjs?v=20260811-verlauf-startet-heute-v98');
 }
 
 async function ensureDocumentFormatModule(state) {
@@ -311,7 +311,7 @@ async function loadSuperDocModule(state) {
 
 async function loadCtoxDocumentsModule(state) {
   if (!state.ctoxDocumentsModule) {
-    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260807-einheitliche-ladepfade-v97');
+    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260811-verlauf-startet-heute-v98');
   }
   return state.ctoxDocumentsModule;
 }

@@ -1,11 +1,11 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260714-chat-queue-v56';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-verlauf-startet-heute-v98';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260714-chat-queue-v56';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260714-chat-queue-v56';
+} from './file-integrity.js?v=20260811-verlauf-startet-heute-v98';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-verlauf-startet-heute-v98';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -3175,7 +3175,7 @@ function readChatState(session) {
     const chats = Array.isArray(parsed.chats) ? parsed.chats : [];
     const state = {
       ownerUserId: owner,
-      selectedDate: parsed.selectedDate || getLocalDateString(Date.now()),
+      selectedDate: getLocalDateString(Date.now()),
       activeChatId: parsed.activeChatId || '',
       dockCollapsed: 'dockCollapsed' in parsed ? Boolean(parsed.dockCollapsed) : true,
       preCollapseExpandedChatIds: Array.isArray(parsed.preCollapseExpandedChatIds)
@@ -6377,6 +6377,7 @@ export const __businessChatTestInternals = Object.freeze({
   initSchedulerLoop,
   isChatEmptyForDeletion,
   preferredChatForDockOpen,
+  readChatState,
   resolveChatForOpenDetail,
   persistChatDocsRemote,
   persistChatState,

@@ -1,6 +1,6 @@
 import { collections as knowledgeCollections } from '../../modules/knowledge/schema.js';
 import { collections as documentCollections } from '../../modules/documents/schema.js';
-import { collections as ctoxCollections } from '../../modules/ctox/schema.js?v=20260807-einheitliche-ladepfade-v97';
+import { collections as ctoxCollections } from '../../modules/ctox/schema.js?v=20260811-verlauf-startet-heute-v98';
 
 const commandSchema = {
   version: 1,

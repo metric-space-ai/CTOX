@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260807-einheitliche-ladepfade-v97';
+} from '../../shared/permissions.js?v=20260811-verlauf-startet-heute-v98';
 
 export const manifest = {
   id: 'code-editor',

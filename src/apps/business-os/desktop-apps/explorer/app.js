@@ -3,7 +3,7 @@ import {
   FILE_CONTENT_HASH_SCHEME,
   readStoredFileFromDemandChunks,
   sha256Hex,
-} from '../../shared/file-integrity.js?v=20260807-einheitliche-ladepfade-v97';
+} from '../../shared/file-integrity.js?v=20260811-verlauf-startet-heute-v98';
 
 export const manifest = {
   id: 'explorer',

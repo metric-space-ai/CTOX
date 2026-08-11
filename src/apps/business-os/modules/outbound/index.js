@@ -14,7 +14,7 @@ import {
   renderActiveOutreachShell,
   handleActiveOutreachAction,
   handleActiveOutreachInput,
-} from './active-outreach.js?v=20260721-outbound-ia-karte';
+} from './active-outreach.js?v=20260811-verlauf-startet-heute-v98';
 
 const BUILD = '20260721-outbound-ia-karte';
 let loadedOutboundLang = '';

@@ -1,4 +1,4 @@
-import { normalizeRole, roleCanManage } from './roles.js?v=20260807-einheitliche-ladepfade-v97';
+import { normalizeRole, roleCanManage } from './roles.js?v=20260811-verlauf-startet-heute-v98';
 
 export const BusinessOsPermissions = Object.freeze({
   WorkspaceManage: 'workspace.manage',

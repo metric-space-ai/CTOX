@@ -1,6 +1,6 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { importTemplateToDb } from './templates/skr.js';
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260807-einheitliche-ladepfade-v97';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
 
 
 // --- Native ES Module Imports for Fibu Core Engines ---
