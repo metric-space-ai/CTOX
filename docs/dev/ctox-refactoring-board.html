@@ -182,10 +182,10 @@ footer{
     <span>Stand 09.08.2026</span><span>Wiederaufnahmedokument</span>
   </div>
   <h1>Der Kern ist nicht instabil, weil Code fehlt. Er ist instabil, weil nichts ihn festhält.</h1>
-  <p class="pfad"><b>Kritischer Pfad (10.08., Plan-v2 aktiv):</b> Das Netz steht zur Hälfte — Wächter + Meta-Test auf HEAD, S0 durch (Platte geräumt, Index geheilt, origin gemergt, Baseline committet). <b>R-01 läuft auf Sol.</b> Danach seriell I-070 (Mission-Seed), dann P1/P2 (Keep-Alive, doc_cache-Deckel; Briefs liegen). Kanonischer Plan: <code>docs/ctox-sync-plan-2026-08-10.md</code>. Bei dir liegen §6: Dirty-Baum-Triage, Wire-Freeze, Release-Upgrade brand-demo/leadyoda, Zielmetrik, Auth-Assist. Kimi-Review wartet auf Quota. <span style="opacity:.65">(Vorheriger Befund vom 09.08. bleibt unten als Historie der Stufen-Begründung.)</span></p>
+  <p class="pfad"><b>Kritischer Pfad (11.08.):</b> HEAD ist geheilt und baut wieder aus der Historie; der volle service_loop-Lauf zeigt exakt die klassifizierte Baseline (383 grün, 5 bekannte Rote, Commit <code>0e1f895e0</code>, gepusht). Die Triage-Inventur der ~135 ungespeicherten Dateien liegt vor (<code>/Volumes/tmp/ctox-pipeline/triage-inventur.md</code>): acht kohärente Arbeitsstränge, ~105 Dateien committwürdig, ~25 zu archivieren (Track-B-Infra, SKF-Berichte, hr-enrich). <b>Jetzt läuft:</b> blockweises Committen nach Abhängigkeitsgruppen, jede Gruppe mit eigenem Bauprüfstand und Push. Kanonischer Plan: <code>docs/ctox-sync-plan-2026-08-10.md</code>. Bei dir liegen: Release-Upgrade brand-demo/leadyoda, Auth-Assist-Entscheid. Kimi-Gesamtreview ab 18.08. <span style="opacity:.65">(Vorheriger Befund vom 09.08. bleibt unten als Historie der Stufen-Begründung.)</span></p>
   <div class="notenband">
-    <span class="note">Note F</span>
-    <span class="warum">Sie steigt nicht durch Commits, sondern wenn eine Änderung nicht mehr stillschweigend verschwinden kann.</span>
+    <span class="note">Note C−</span>
+    <span class="warum">Hochgestuft von F am 11.08.: main baut wieder aus sauberem Checkout (Beweis: <code>cargo check --locked --tests</code> Exit 0 aus <code>git archive</code>), alle ~70 Kampagnen-Commits sind gepusht, die Testbaseline ist klassifiziert und reproduziert. Noch kein B, weil der Arbeitsbaum ~135 ungespeicherte Dateien trägt — bis sie gelandet oder archiviert sind, kann Arbeit weiterhin still verschwinden.</span>
   </div>
 </header>
 
