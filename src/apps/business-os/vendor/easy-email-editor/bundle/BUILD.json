@@ -1,0 +1,10 @@
+{
+  "upstream_repository": "https://github.com/zalify/easy-email-editor.git",
+  "upstream_commit": "16bb02926a20af20dc6dc473c72619f4a0b4f64b",
+  "upstream_version": "4.17.1",
+  "built_at": "2026-08-07T10:30:57.195Z",
+  "entry": "frame.html",
+  "files": [
+    "frame.html"
+  ]
+}

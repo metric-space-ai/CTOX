@@ -1,0 +1,44 @@
+{
+  "subject": "Upstream Easy Email fixture",
+  "subTitle": "Selection paths come from useFocusIdx()",
+  "content": {
+    "type": "page",
+    "data": {
+      "value": {
+        "responsive": true,
+        "font-size": "14px",
+        "line-height": "1.7"
+      }
+    },
+    "attributes": {
+      "background-color": "#efeeea",
+      "width": "600px"
+    },
+    "children": [
+      {
+        "type": "section",
+        "data": { "value": {} },
+        "attributes": { "padding": "20px 0" },
+        "children": [
+          {
+            "type": "column",
+            "data": { "value": {} },
+            "attributes": { "width": "100%" },
+            "children": [
+              {
+                "type": "text",
+                "data": {
+                  "value": {
+                    "content": "<p>Hallo {{contact.name}}</p>"
+                  }
+                },
+                "attributes": { "padding": "10px 25px" },
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

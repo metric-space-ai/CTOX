@@ -408,14 +408,23 @@ pub fn module_catalog_for_rxdb(root: &Path) -> anyhow::Result<Value> {
 
 pub fn write_module_catalog_projection_to_rxdb(root: &Path) -> anyhow::Result<()> {
     let mut document = module_catalog_for_rxdb(root)?;
+    let now = now_ms();
+    let revision = format!("{now}-ctox-module-catalog");
     if let Some(object) = document.as_object_mut() {
-        object.remove("_rev");
-        object.remove("_meta");
+        // This writer intentionally bypasses RxCollection because it is also
+        // used during Business OS bring-up, before the native peer is ready.
+        // Keep the serialized data envelope in lockstep with the SQLite
+        // revision/lwt columns: RxCollection's document cache reads these
+        // fields from `data` and rejects legacy bare rows with DOC_CACHE_REV.
+        object.insert("_rev".to_string(), Value::String(revision.clone()));
+        object.insert(
+            "_meta".to_string(),
+            serde_json::json!({ "lwt": now as f64 }),
+        );
+        object.insert("_attachments".to_string(), serde_json::json!({}));
         object.insert("_deleted".to_string(), Value::Bool(false));
         object.insert("is_deleted".to_string(), Value::Bool(false));
     }
-    let now = now_ms();
-    let revision = format!("{now}-ctox-module-catalog");
     let path = rxdb_store_path(root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -540,12 +549,26 @@ mod tests {
         write_module_catalog_projection_to_rxdb(root)?;
 
         let conn = Connection::open(rxdb_store_path(root))?;
-        let catalog_json: String = conn.query_row(
-            "SELECT data FROM ctox_business_os__business_module_catalog__v0 WHERE id = 'module-catalog'",
+        let (stored_revision, stored_lwt, catalog_json): (String, f64, String) = conn.query_row(
+            "SELECT revision, lastWriteTime, data FROM ctox_business_os__business_module_catalog__v0 WHERE id = 'module-catalog'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         let catalog: Value = serde_json::from_str(&catalog_json)?;
+        assert_eq!(
+            catalog.get("_rev").and_then(Value::as_str),
+            Some(stored_revision.as_str()),
+            "direct SQL writer must keep the RxDB revision envelope in data"
+        );
+        assert_eq!(
+            catalog.pointer("/_meta/lwt").and_then(Value::as_f64),
+            Some(stored_lwt),
+            "direct SQL writer must keep the RxDB lwt envelope in data"
+        );
+        assert!(
+            catalog.get("_attachments").is_some_and(Value::is_object),
+            "direct SQL writer must materialize the RxDB attachments envelope"
+        );
         let ids = catalog
             .get("modules")
             .and_then(Value::as_array)

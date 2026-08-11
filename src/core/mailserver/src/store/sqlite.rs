@@ -1398,4 +1398,59 @@ mod tests {
         assert!(store.authenticate_user("legacy@example.test", "oldplain")?);
         Ok(())
     }
+
+    #[test]
+    fn runtime_settings_roundtrip_without_environment_state() -> StalwartResult<()> {
+        let (_temp, store, _inbox) = test_store()?;
+        let settings = MailserverRuntimeSettings {
+            enabled: false,
+            hostname: "mail.example.test".to_string(),
+            bind_host: "127.0.0.2".to_string(),
+            smtp_port: 2626,
+            imap_port: 1243,
+            outbound_throttle_per_min: 42,
+            max_connections: 7,
+            tracking_base_url: "https://mail.example.test".to_string(),
+        };
+        store.save_runtime_settings(&settings)?;
+        assert_eq!(store.load_runtime_settings()?, settings);
+        Ok(())
+    }
+
+    #[test]
+    fn tracking_tokens_resolve_to_append_only_events() -> StalwartResult<()> {
+        let (_temp, store, _inbox) = test_store()?;
+        store.save_tracking_token(
+            "click-token",
+            "message-1",
+            Some("campaign-1"),
+            "clicked",
+            Some("https://example.test/offer"),
+        )?;
+        let token = store
+            .tracking_token("click-token")?
+            .expect("tracking token");
+        assert_eq!(token.message_id, "message-1");
+        assert_eq!(token.event_type, "clicked");
+        assert_eq!(
+            token.target_url.as_deref(),
+            Some("https://example.test/offer")
+        );
+        store.record_tracking_event(
+            "click-token",
+            "message-1",
+            "clicked",
+            1234,
+            Some("test-agent"),
+        )?;
+        let count: i64 = store.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM stalwart_mail_tracking_events WHERE message_id = 'message-1'",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
 }

@@ -1,0 +1,313 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text, CanvasText);
+  background: var(--bg, Canvas);
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.ctox-frame-shell {
+  container: ctox-email-editor / inline-size;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg, Canvas);
+}
+
+.ctox-frame-canvas {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#easy-email-editor {
+  min-width: 0 !important;
+}
+
+#easy-email-editor > div > .easy-email-editor-tabWrapper {
+  display: none !important;
+}
+
+#easy-email-editor > div > .easy-email-editor-tabWrapper ~ div {
+  height: 100% !important;
+}
+
+.ctox-frame-drawer {
+  position: absolute;
+  z-index: 21;
+  inset: 0 0 0 auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(390px, 92%);
+  color: var(--text, CanvasText);
+  background: var(--surface, Canvas);
+  border-left: 1px solid var(--line, ButtonBorder);
+  box-shadow: -10px 0 28px color-mix(in srgb, var(--text, CanvasText) 12%, transparent);
+  transform: translateX(0);
+  transition: transform 180ms cubic-bezier(.22, 1, .36, 1), visibility 180ms;
+}
+
+.ctox-frame-drawer.is-closed {
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(100%);
+}
+
+.ctox-frame-drawer > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--line, ButtonBorder);
+}
+
+.ctox-frame-drawer > header button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line, ButtonBorder);
+  border-radius: 3px;
+  color: var(--muted, CanvasText);
+  background: var(--surface, Canvas);
+  cursor: pointer;
+}
+
+.ctox-frame-drawer > header button:hover {
+  color: var(--text, CanvasText);
+  background: var(--surface-2, Canvas);
+}
+
+.ctox-frame-drawer > header button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring, 0 0 0 2px var(--accent, Highlight));
+}
+
+.ctox-frame-drawer-body {
+  min-height: 0;
+  padding: 8px;
+  overflow: auto;
+}
+
+.ctox-frame-drawer-body > section {
+  min-height: 100%;
+}
+
+.ctox-frame-block-library {
+  display: grid;
+  gap: 8px;
+}
+
+.ctox-frame-block-library > p {
+  margin: 0;
+  color: var(--muted, CanvasText);
+  font-size: 12px;
+}
+
+.ctox-frame-block-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ctox-frame-block-item {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 5px 7px;
+  border: 1px solid var(--line, ButtonBorder);
+  border-radius: 3px;
+  background: var(--surface, Canvas);
+  cursor: grab;
+}
+
+.ctox-frame-block-item:hover {
+  border-color: color-mix(in srgb, var(--accent, Highlight) 52%, var(--line, ButtonBorder));
+  background: var(--surface-2, Canvas);
+}
+
+.ctox-frame-block-item:active { cursor: grabbing; }
+
+.ctox-frame-block-item > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ctox-frame-block-item strong {
+  color: var(--text-strong, CanvasText);
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.ctox-frame-block-item small {
+  overflow: hidden;
+  color: var(--muted, CanvasText);
+  font-size: 10px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-frame-design-panel {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 8px;
+  min-height: 100%;
+}
+
+.ctox-frame-history {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.ctox-frame-history button {
+  min-height: 28px;
+  border: 1px solid var(--line, ButtonBorder);
+  border-radius: 3px;
+  color: var(--text, CanvasText);
+  background: var(--surface, Canvas);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ctox-frame-history button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.ctox-frame-view-select {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--muted, CanvasText);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ctox-frame-view-select select {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line, ButtonBorder);
+  border-radius: 3px;
+  color: var(--text, CanvasText);
+  background: var(--surface-2, Canvas);
+}
+
+.ctox-frame-design-panel > section {
+  min-height: 0;
+}
+
+.ctox-frame-segmented {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line, ButtonBorder);
+  border-radius: 3px;
+  background: var(--surface-2, Canvas);
+}
+
+.ctox-frame-segmented button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 2px;
+  color: var(--muted, CanvasText);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ctox-frame-segmented button[aria-selected='true'] {
+  color: var(--text-strong, CanvasText);
+  background: var(--surface, Canvas);
+}
+
+.ctox-logic-preview {
+  position: absolute;
+  z-index: 12;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: calc(100% - 92px);
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--success, Highlight) 52%, var(--line, ButtonBorder));
+  border-radius: 999px;
+  color: var(--success, CanvasText);
+  background: color-mix(in srgb, var(--success, Highlight) 10%, var(--surface, Canvas));
+  font-size: 12px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.ctox-logic-preview.is-excluded {
+  border-color: color-mix(in srgb, var(--warning, Highlight) 52%, var(--line, ButtonBorder));
+  color: var(--warning, CanvasText);
+  background: color-mix(in srgb, var(--warning, Highlight) 10%, var(--surface, Canvas));
+}
+
+/* The upstream widgets inherit Business OS semantics instead of publishing a
+   second palette inside the iframe. */
+#easy-email-editor,
+.arco-layout,
+.arco-layout-content,
+.easy-email-editor-tabWrapper {
+  color: var(--text, CanvasText) !important;
+  background: var(--surface, Canvas) !important;
+}
+
+.arco-input,
+.arco-select-view,
+.arco-textarea,
+.easy-email-editor-button {
+  color: var(--text, CanvasText) !important;
+  border-color: var(--line, ButtonBorder) !important;
+  border-radius: 3px !important;
+  background: var(--surface-2, Canvas) !important;
+  box-shadow: none !important;
+}
+
+.arco-input:focus,
+.arco-select-view:focus-within,
+.arco-textarea:focus {
+  border-color: var(--accent, Highlight) !important;
+  box-shadow: var(--focus-ring, 0 0 0 2px var(--accent, Highlight)) !important;
+}
+
+@container ctox-email-editor (max-width: 700px) {
+  .ctox-frame-drawer {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ctox-frame-drawer { transition: none; }
+}

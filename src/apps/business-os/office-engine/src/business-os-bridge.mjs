@@ -92,6 +92,43 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
       });
     },
 
+    async freezeEmailContent({ recordId, versionId } = {}) {
+      if (kind !== 'document') throw new TypeError('Only CTOX documents can be compiled into email content');
+      if (!canWrite()) throw permissionError('CTOX document write permission is required');
+      return withChunkLease(ctx, config, `${config.module}-freeze-email-content`, async (lease) => {
+        const result = await dispatch(ctx, config, 'freeze_email_content', recordId, {
+          document_id: recordId,
+          version_id: versionId,
+        });
+        const artifact = result?.artifact;
+        if (!artifact?.html_blob_id || !artifact?.text_blob_id) {
+          throw integrityError('Frozen email content is missing its transport blobs', 'email_artifact_invalid');
+        }
+        const fileLoader = lazyDemandFileLoader(ctx, lease, config.chunks);
+        const [htmlBytes, textBytes] = await Promise.all([
+          loadBlob(collection(config.chunks), artifact.html_blob_id, artifact.html_sha256, fileLoader),
+          loadBlob(collection(config.chunks), artifact.text_blob_id, artifact.text_sha256, fileLoader),
+        ]);
+        const assets = await Promise.all((Array.isArray(artifact.assets) ? artifact.assets : []).map(async (asset) => {
+          if (!asset?.content_id || !asset?.blob_id || !asset?.sha256 || !asset?.mime_type) {
+            throw integrityError('Frozen email content contains an invalid CID asset', 'email_asset_invalid');
+          }
+          return {
+            ...asset,
+            bytes: await loadBlob(collection(config.chunks), asset.blob_id, asset.sha256, fileLoader),
+          };
+        }));
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        return {
+          ...result,
+          artifact,
+          html: decoder.decode(htmlBytes),
+          text: decoder.decode(textBytes),
+          assets,
+        };
+      });
+    },
+
     async export({ recordId, versionId, format } = {}) {
       return withChunkLease(ctx, config, `${config.module}-export`, async (lease) => {
         const result = await dispatch(ctx, config, 'export', recordId, {

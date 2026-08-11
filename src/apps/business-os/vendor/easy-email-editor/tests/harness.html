@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Easy Email Bridge Harness</title>
+    <style>
+      :root{--bg:#eef0f4;--surface:#fff;--surface-2:#f7f8fa;--text:#172033;--line:#d8dce4;--accent:#2563eb}
+      html,body{height:100%;margin:0;font-family:system-ui;background:var(--bg)}
+      body{display:grid;grid-template-rows:auto minmax(0,1fr)}
+      header{display:flex;gap:8px;padding:8px;background:var(--surface);border-bottom:1px solid var(--line)}
+      button{padding:6px 10px}
+      #editor{position:relative;min-height:0}
+      output{margin-left:auto}
+    </style>
+  </head>
+  <body>
+    <header>
+      <button data-panel="layout">Layout</button>
+      <button data-panel="properties">Eigenschaften</button>
+      <button data-panel="source">HTML &amp; MJML</button>
+      <button data-export>HTML erzeugen</button>
+      <button data-document>Dokument prüfen</button>
+      <button data-logic>Logik-Vorschau</button>
+      <output data-status>Lädt …</output>
+    </header>
+    <div id="editor"></div>
+    <script type="module">
+      import { createEasyEmailEditor, createEmailDocument } from '../index.mjs';
+      const status = document.querySelector('[data-status]');
+      const initialDocument = new URLSearchParams(location.search).has('empty')
+        ? {}
+        : createEmailDocument({ subject: 'CTOX Browser Smoke', content: '<p>Hallo {{contact.name}}</p>' });
+      const editor = await createEasyEmailEditor({
+        host: document.querySelector('#editor'),
+        document: initialDocument,
+        mergeTags: { contact: { name: 'Ada' } },
+        onChange({ document }) { status.textContent = `Änderung: ${document.content.type}`; },
+      });
+      window.editor = editor;
+      status.textContent = `Bereit: ${editor.getSelectedBlockId()}`;
+      document.addEventListener('click', async (event) => {
+        const panel = event.target.closest('[data-panel]');
+        if (panel) await editor.setActivePanel(panel.dataset.panel);
+        if (event.target.closest('[data-export]')) {
+          const html = await editor.getHtml();
+          status.textContent = `HTML: ${html.length} Zeichen`;
+        }
+        if (event.target.closest('[data-document]')) {
+          const document = await editor.getDocument();
+          const findText = (block) => block?.type === 'text'
+            ? block.data?.value?.content
+            : block?.children?.map(findText).find(Boolean);
+          status.textContent = `Dokument: ${findText(document.content) || 'kein Text'}`;
+        }
+        if (event.target.closest('[data-logic]')) {
+          await editor.setLogicPreview({
+            blockId: editor.getSelectedBlockId(),
+            matched: false,
+            testData: { contact: { segment: 'test' } },
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

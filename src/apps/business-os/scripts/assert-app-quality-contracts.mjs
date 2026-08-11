@@ -15,8 +15,8 @@ const allowedArchetypes = new Set([
 ]);
 
 assert.equal(contract.schema, 'ctox.business_os.app_quality_contracts.v1');
-assert.deepEqual(actual, expected, 'per-app quality contracts must cover exactly the 34 source apps');
-assert.equal(new Set(actual).size, 34, 'per-app quality contract ids must be unique');
+assert.deepEqual(actual, expected, `per-app quality contracts must cover exactly the ${expected.length} source apps`);
+assert.equal(new Set(actual).size, expected.length, 'per-app quality contract ids must be unique');
 assert.ok(Array.isArray(contract.common_required_evidence) && contract.common_required_evidence.length >= 9);
 
 for (const app of contract.apps) {
@@ -32,4 +32,4 @@ for (const app of contract.apps) {
   assert.ok(existsSync(join(moduleDir, 'index.css')), `${app.id}: index.css is missing`);
 }
 
-console.log(`Business OS per-app quality contracts OK: ${contract.apps.length}/34 apps with named archetype, variant, story and actions`);
+console.log(`Business OS per-app quality contracts OK: ${contract.apps.length}/${expected.length} apps with named archetype, variant, story and actions`);

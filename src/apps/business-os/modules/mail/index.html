@@ -1,0 +1,253 @@
+<main class="ctox-workspace mail-module is-inspector-hidden" data-mail-root data-resize-frame>
+  <!-- Canonical Business OS column grammar: the shell owns search, view,
+       tray, reset and counted-band wiring through data-pg-* attributes. -->
+  <aside class="ctox-pane mail-sidebar" data-mail-left-pane aria-label="Mail-Bereiche">
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker">Mail</span>
+          <h2 class="ctox-pane-title" data-mail-navigation-title>E-Mail-Queues</h2>
+        </div>
+        <div class="ctox-pane-actions">
+          <button type="button" class="ctox-pane-icon" data-mail-compose aria-label="Neue Mail" title="Neue Mail"></button>
+          <button type="button" class="ctox-pane-icon" data-mail-new-group hidden aria-label="Neue E-Mail-Gruppe" title="Neue E-Mail-Gruppe"></button>
+          <button type="button" class="ctox-pane-icon" data-mail-settings aria-label="Einstellungen" title="Einstellungen"></button>
+          <button type="button" class="ctox-pane-icon mail-mobile-only" data-mail-close-nav aria-label="Navigation schließen" title="Navigation schließen"></button>
+        </div>
+      </div>
+      <div class="ctox-filterbar">
+        <input class="ctox-pane-search" type="search" data-pg-search placeholder="Bereiche suchen…" aria-label="Bereiche suchen" />
+        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
+          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"></button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"></button>
+        </div>
+        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"></button>
+      </div>
+      <div class="ctox-filter-tray" data-pg-tray hidden>
+        <div class="ctox-filter-row">
+          <select class="ctox-select" data-mail-account data-pg-filter data-pg-name="account" data-pg-default="all" aria-label="Postfach">
+            <option value="all">Alle sichtbaren Postfächer</option>
+          </select>
+          <select class="ctox-select" data-pg-filter data-pg-name="sort" data-pg-default="recent" aria-label="Sortieren">
+            <option value="recent">Zuletzt aktiv</option>
+            <option value="name">Name</option>
+            <option value="count">Anzahl</option>
+          </select>
+          <button type="button" class="ctox-pane-icon" data-mail-import aria-label="Importieren" title="Importieren"></button>
+          <button type="button" class="ctox-pane-icon" data-mail-export aria-label="Exportieren" title="Exportieren"></button>
+          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"></button>
+        </div>
+      </div>
+    </header>
+    <nav class="ctox-view-switch" aria-label="Mail-Queues">
+      <div class="ctox-pane-tabs">
+        <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="queues" aria-selected="true">Queues<span class="view-count" data-pg-count="queues"></span></button>
+        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="campaigns" aria-selected="false">E-Mail-Gruppen<span class="view-count" data-pg-count="campaigns"></span></button>
+      </div>
+    </nav>
+      <div class="ctox-pane-body ctox-well mail-nav-body">
+        <div class="mail-scope-list" data-mail-scope-list></div>
+        <div data-mail-group-list hidden></div>
+      </div>
+    <footer class="ctox-pane-footer"><span data-pg-footer data-mail-sidebar-footer></span></footer>
+  </aside>
+
+  <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--mail-left-width" data-resizer-min="250" data-resizer-max="460" aria-label="Navigationsbreite anpassen"></button>
+
+  <section class="ctox-pane mail-list-pane" data-mail-list-pane aria-label="Mail-Hauptansicht">
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <button type="button" class="ctox-pane-icon mail-mobile-only" data-mail-open-nav aria-label="Mail-Navigation öffnen" title="Mail-Navigation öffnen"></button>
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-mail-list-kicker>Postfach</span>
+          <h2 class="ctox-pane-title" data-mail-list-title>Posteingang</h2>
+        </div>
+        <div class="ctox-pane-actions">
+          <button type="button" class="ctox-pane-icon" data-mail-list-import aria-label="Mails importieren" title="Mails importieren"></button>
+          <button type="button" class="ctox-pane-icon" data-mail-list-export aria-label="Mails exportieren" title="Mails exportieren"></button>
+        </div>
+      </div>
+      <div class="ctox-filterbar">
+        <input class="ctox-pane-search" type="search" data-pg-search data-mail-search placeholder="Mails durchsuchen…" aria-label="Mails durchsuchen" />
+        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
+          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"></button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"></button>
+        </div>
+        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"></button>
+      </div>
+      <div class="ctox-filter-tray" data-pg-tray hidden>
+        <div class="ctox-filter-row">
+          <select class="ctox-select" data-pg-filter data-pg-name="status" data-pg-default="all" aria-label="Status">
+            <option value="all">Alle Status</option>
+            <option value="unread">Ungelesen</option>
+            <option value="awaiting">Freigabe</option>
+            <option value="routed">Geroutet</option>
+            <option value="failed">Fehler</option>
+          </select>
+          <select class="ctox-select" data-pg-filter data-pg-name="sort" data-pg-default="recent" aria-label="Sortieren">
+            <option value="recent">Neueste zuerst</option>
+            <option value="oldest">Älteste zuerst</option>
+            <option value="subject">Betreff</option>
+          </select>
+          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"></button>
+        </div>
+      </div>
+    </header>
+    <nav class="ctox-view-switch" aria-label="Mail-Verkehr">
+      <div class="ctox-pane-tabs">
+        <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true">Alle<span class="view-count" data-pg-count="all"></span></button>
+        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="inbound" aria-selected="false">Eingang<span class="view-count" data-pg-count="inbound"></span></button>
+        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="outbound" aria-selected="false">Ausgang<span class="view-count" data-pg-count="outbound"></span></button>
+        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="attention" aria-selected="false">Aktion nötig<span class="view-count" data-pg-count="attention"></span></button>
+      </div>
+    </nav>
+    <div class="mail-bulkbar" data-mail-bulkbar hidden>
+      <div class="mail-bulk-selection"><strong data-mail-selected-count>0 ausgewählt</strong><button type="button" class="mail-select-filtered" data-mail-select-filtered>Alle gefilterten auswählen</button></div>
+      <div class="mail-bulk-actions">
+        <button type="button" class="ctox-button ctox-button--sm is-primary" data-mail-bulk-route>An App routen</button>
+        <button type="button" class="ctox-button ctox-button--sm" data-mail-bulk-approval>Zur Freigabe</button>
+        <button type="button" class="ctox-button ctox-button--sm" data-mail-bulk-send>Freigegebene senden</button>
+        <button type="button" class="ctox-button ctox-button--sm" data-mail-bulk-export>Auswahl exportieren</button>
+        <button type="button" class="ctox-pane-icon" data-mail-clear-selection aria-label="Auswahl aufheben" title="Auswahl aufheben"></button>
+      </div>
+    </div>
+    <div class="ctox-pane-body ctox-well mail-list-body">
+      <div class="mail-table-head" role="row">
+        <label class="mail-table-check"><input type="checkbox" data-mail-select-page aria-label="Sichtbare Seite auswählen" /></label>
+        <span>Absender</span><span>Betreff und Fortschritt</span><span>Zeit</span>
+      </div>
+      <div class="mail-record-list" data-mail-record-list role="listbox" aria-label="E-Mails"></div>
+      <div class="ctox-empty mail-list-empty" data-mail-list-empty>
+        <strong data-mail-empty-title>Keine E-Mails</strong>
+        <span data-mail-empty-body>Nachrichten erscheinen nach der ersten Synchronisierung.</span>
+      </div>
+    </div>
+    <footer class="ctox-pane-footer mail-list-footer"><span data-pg-footer data-mail-list-footer></span><div class="mail-pager" aria-label="Seitennavigation"><button type="button" class="ctox-pane-icon" data-mail-prev-page aria-label="Vorherige Seite" title="Vorherige Seite"></button><button type="button" class="ctox-pane-icon" data-mail-next-page aria-label="Nächste Seite" title="Nächste Seite"></button></div></footer>
+  </section>
+
+  <button class="ctox-column-resizer" type="button" data-resizer="right" data-resizer-var="--mail-right-width" data-resizer-min="320" data-resizer-max="680" aria-label="Detailbreite anpassen"></button>
+
+  <section class="ctox-pane mail-detail-pane" data-mail-detail-pane aria-label="Mail-Detail">
+    <header class="ctox-pane-header ctox-pane-band mail-detail-chrome">
+      <div class="ctox-pane-title-row">
+        <button type="button" class="ctox-pane-icon mail-detail-back" data-mail-close-detail aria-label="Zurück zur Liste" title="Zurück zur Liste"></button>
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker">Details</span>
+          <h2 class="ctox-pane-title" data-mail-detail-title>Nachricht</h2>
+        </div>
+      </div>
+    </header>
+    <div class="ctox-pane-body mail-detail-body" data-mail-detail>
+      <div class="ctox-empty mail-detail-empty" data-mail-detail-empty>
+        <strong data-mail-detail-empty-title>Keine Mail ausgewählt</strong>
+        <span data-mail-detail-empty-body>Wähle eine Nachricht oder Kampagne aus.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="ctox-pane mail-content-surface" data-mail-content-surface hidden aria-label="Gruppeninhalt bearbeiten">
+    <header class="mail-content-surface-header ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <button type="button" class="ctox-pane-icon" data-mail-close-content-editor aria-label="Zurück zur E-Mail-Gruppe" title="Zurück zur E-Mail-Gruppe"></button>
+        <div class="ctox-pane-titles"><span class="ctox-pane-kicker">Gruppeninhalt</span><h2 class="ctox-pane-title" data-mail-content-title>E-Mail-Inhalt</h2></div>
+        <div class="mail-content-surface-controls" data-mail-content-controls></div>
+        <div class="ctox-pane-actions"><button type="button" class="ctox-pane-icon" data-mail-save-content aria-label="Gruppeninhalt speichern" title="Gruppeninhalt speichern"></button></div>
+      </div>
+    </header>
+    <div class="mail-content-surface-host" data-mail-content-host></div>
+  </section>
+
+  <section class="mail-composer" data-mail-composer hidden aria-label="Neue E-Mail">
+    <header class="mail-composer-header">
+      <div><span class="ctox-pane-kicker" data-mail-composer-kicker>Entwurf</span><h3 data-mail-composer-title>Neue E-Mail</h3></div>
+      <button type="button" class="ctox-pane-icon" data-mail-close-composer aria-label="Schließen" title="Schließen"></button>
+    </header>
+    <div class="mail-composer-fields">
+      <label><span data-mail-from-label>Von</span><select class="ctox-select" data-mail-compose-from></select></label>
+      <label><span data-mail-to-label>An</span><textarea class="ctox-textarea mail-recipient-input" rows="3" data-mail-compose-to placeholder="eine oder mehrere Adressen, getrennt durch Komma oder Zeilenumbruch"></textarea></label>
+      <label><span data-mail-group-label>Gruppe / Kampagne</span><select class="ctox-select" data-mail-compose-campaign></select></label>
+      <label><span data-mail-subject-label>Betreff</span><input class="ctox-input" type="text" data-mail-compose-subject /></label>
+      <label class="mail-body-field"><span data-mail-message-label>Nachricht</span><textarea class="ctox-textarea" rows="12" data-mail-compose-body></textarea></label>
+    </div>
+    <div class="mail-composer-status" data-mail-composer-status role="status" aria-live="polite"></div>
+    <footer class="mail-composer-footer">
+      <button type="button" class="ctox-button" data-mail-save-draft>Als Entwurf speichern</button>
+      <button type="button" class="ctox-button" data-mail-request-approval>Zur Freigabe</button>
+      <button type="button" class="ctox-button is-primary mail-send-now" data-mail-send-now>Freigeben &amp; senden</button>
+    </footer>
+  </section>
+
+  <section class="mail-group-editor" data-mail-group-editor hidden aria-label="Neue E-Mail-Gruppe">
+    <header><div><span class="ctox-pane-kicker">Arbeitsauftrag</span><h3>Neue E-Mail-Gruppe</h3></div><button type="button" class="ctox-pane-icon" data-mail-close-group aria-label="Schließen"></button></header>
+    <label><span>Vorlage</span><select class="ctox-select" data-mail-group-template><option value="outbound-sales">Outbound Sales</option><option value="newsletter">Newsletter</option><option value="support">Support-Topf</option><option value="routing">Routing-Topf</option><option value="free">Freie Gruppe</option></select></label>
+    <label><span>Name</span><input class="ctox-input" data-mail-group-name placeholder="z. B. Messekontakte August" /></label>
+    <label><span>Auftrag</span><textarea class="ctox-textarea" rows="4" data-mail-group-description></textarea></label>
+    <footer><button type="button" class="ctox-button is-primary" data-mail-create-group>Gruppe erstellen</button></footer>
+  </section>
+
+  <section class="mail-mailbox-admin" data-mail-mailbox-admin hidden aria-label="Mail-Einstellungen">
+    <header class="mail-mailbox-admin-header">
+      <div><span class="ctox-pane-kicker" data-mail-mailbox-admin-kicker>Einstellungen</span><h3 data-mail-mailbox-admin-title>Mail-Einstellungen</h3></div>
+      <button type="button" class="ctox-pane-icon" data-mail-close-mailbox-admin aria-label="Schließen" title="Schließen"></button>
+    </header>
+    <div class="mail-mailbox-admin-body">
+      <section class="mail-server-overview">
+        <div class="mail-server-state-line"><span class="mail-server-dot" data-mail-server-dot></span><div><strong data-mail-server-state>Serverstatus wird geladen</strong><span data-mail-server-endpoints></span></div><button type="button" class="ctox-button ctox-button--sm" data-mail-toggle-server>Stoppen</button></div>
+        <div class="mail-server-counters"><span><strong data-mail-queue-count>0</strong> in Queue</span><span><strong data-mail-delivered-count>0</strong> zugestellt</span><span><strong data-mail-failed-count>0</strong> fehlgeschlagen</span></div>
+      </section>
+
+      <form class="mail-server-form" data-mail-server-form>
+        <div class="mail-section-heading"><span>Server &amp; Tracking</span><span class="mail-section-hint">Änderungen werden sofort angewendet</span></div>
+        <div class="mail-settings-grid">
+          <label class="mail-field-wide"><span>Servername</span><input class="ctox-input" data-mail-server-hostname placeholder="mail.example.com" required /></label>
+          <label><span>Bind-Adresse</span><input class="ctox-input" data-mail-server-bind-host placeholder="127.0.0.1" required /></label>
+          <label><span>SMTP-Port</span><input class="ctox-input" type="number" min="1" max="65535" data-mail-server-smtp-port required /></label>
+          <label><span>IMAP-Port</span><input class="ctox-input" type="number" min="1" max="65535" data-mail-server-imap-port required /></label>
+          <label><span>Versand / Minute</span><input class="ctox-input" type="number" min="1" data-mail-server-throttle required /></label>
+          <label><span>Max. Verbindungen</span><input class="ctox-input" type="number" min="1" data-mail-server-connections required /></label>
+          <label class="mail-field-wide"><span>Öffentlich erreichbare Tracking-URL</span><input class="ctox-input" type="url" data-mail-server-tracking-url placeholder="https://mail.example.com" /><small>Aktiviert Öffnungs- und Link-Ereignisse für HTML-Mails.</small></label>
+        </div>
+        <button type="submit" class="ctox-button is-primary" data-mail-save-server>Serverkonfiguration speichern</button>
+      </form>
+
+      <form class="mail-domain-form" data-mail-domain-form>
+        <div class="mail-section-heading"><span data-mail-domains-label>Versanddomain &amp; DNS</span><span class="mail-section-hint">DKIM-Schlüssel wird bei Bedarf erzeugt</span></div>
+        <div class="mail-settings-grid">
+          <label><span>Domain</span><input class="ctox-input" data-mail-domain-name placeholder="example.com" required /></label>
+          <label><span>DKIM-Selector</span><input class="ctox-input" data-mail-dkim-selector value="default" required /></label>
+          <label class="mail-field-wide"><span>SPF-Eintrag</span><input class="ctox-input" data-mail-spf-record value="v=spf1 mx a ~all" required /></label>
+          <label class="mail-field-wide"><span>DMARC-Eintrag</span><input class="ctox-input" data-mail-dmarc-record placeholder="v=DMARC1; p=none; rua=mailto:dmarc@example.com" /></label>
+        </div>
+        <button type="submit" class="ctox-button" data-mail-save-domain>Domain hinzufügen</button>
+      </form>
+      <section class="mail-mailbox-server-state"><div class="mail-domain-list" data-mail-domain-list></div></section>
+
+      <form class="mail-mailbox-form" data-mail-mailbox-form>
+        <div class="mail-section-heading"><span data-mail-new-mailbox-label>Postfach anlegen</span></div>
+        <label><span data-mail-address-label>E-Mail-Adresse</span><input class="ctox-input" type="email" data-mail-mailbox-username autocomplete="off" required /></label>
+        <label><span data-mail-owner-label>Nutzer</span><select class="ctox-select" data-mail-mailbox-owner required><option value="">— Person wählen —</option></select></label>
+        <label><span data-mail-password-label>Initialpasswort</span><input class="ctox-input" type="password" data-mail-mailbox-password autocomplete="new-password" required /></label>
+        <button type="submit" class="ctox-button is-primary" data-mail-create-mailbox>Postfach anlegen</button>
+      </form>
+      <div class="mail-mailbox-status" data-mail-mailbox-status role="status" aria-live="polite"></div>
+      <section class="mail-mailbox-users"><div class="mail-section-heading"><span data-mail-existing-mailboxes-label>Vorhandene Postfächer</span><span data-mail-mailbox-count>0</span></div><div class="mail-mailbox-list" data-mail-mailbox-list></div></section>
+    </div>
+    <footer class="mail-mailbox-admin-footer"><span data-mail-mailbox-security>Das Passwort wird nach der Einrichtung aus dem Command entfernt.</span><button type="button" class="ctox-button" data-mail-reload-mailboxes>Neu laden</button></footer>
+  </section>
+
+  <section class="mail-route-drawer" data-mail-route-drawer hidden aria-label="E-Mails an App routen">
+    <header class="mail-route-header">
+      <div><span class="ctox-pane-kicker">Routing</span><h3>E-Mails an App übergeben</h3></div>
+      <button type="button" class="ctox-pane-icon" data-mail-close-route aria-label="Schließen" title="Schließen"></button>
+    </header>
+    <div class="mail-route-body">
+      <div class="mail-route-selection" data-mail-route-selection></div>
+      <label><span>Ziel-App</span><select class="ctox-select" data-mail-route-destination required></select></label>
+      <label><span>Übergabe</span><select class="ctox-select" data-mail-route-mode><option value="handoff">Arbeitsverantwortung übergeben</option><option value="reference">Als Referenz verknüpfen</option></select></label>
+      <label><span>Arbeitsauftrag</span><textarea class="ctox-textarea" rows="5" data-mail-route-note placeholder="Was soll die Ziel-App mit diesen E-Mails tun?"></textarea></label>
+      <p class="mail-route-note">Original bleibt unverändert; Batch, Ziel und Quelldatensätze werden protokolliert.</p>
+      <div class="mail-route-status" data-mail-route-status role="status" aria-live="polite"></div>
+    </div>
+    <footer class="mail-route-footer"><button type="button" class="ctox-button" data-mail-cancel-route>Abbrechen</button><button type="button" class="ctox-button is-primary" data-mail-confirm-route>Routing starten</button></footer>
+  </section>
+</main>

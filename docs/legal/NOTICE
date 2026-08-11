@@ -61,6 +61,16 @@ been retired.
   `office-engine/upstream/euro-office-v9.3.1.json`. The pinned DocumentServer
   image is a development oracle only and is not part of the CTOX runtime.
 
+- src/apps/business-os/assets/provider-logos/
+  Provider artwork copied from the local Workjet project
+  (https://github.com/metric-space-ai/claude-workjet), whose source code and
+  artwork are distributed under the MIT license, Copyright (c) 2026 metric
+  space AI. Exact source paths and SHA-256 hashes are recorded in
+  `provider-logos.provenance.json`; the transferred MIT license is retained
+  beside the assets. Provider names and logos remain trademarks of their
+  respective owners. Their display identifies a configured interoperability
+  target and does not imply endorsement by or affiliation with that provider.
+
 The root AGPLv3 LICENSE applies to first-party CTOX repository code unless
 an integrated source subtree or file states otherwise.
 

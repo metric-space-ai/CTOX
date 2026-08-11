@@ -3659,6 +3659,11 @@ fn outbound_handle_provider_reconcile(
         }
         if new_status == "sent" {
             outbound_put_i64(&mut message, "sent_at_ms", completed_at);
+            outbound_payload_insert(
+                &mut message,
+                "delivered_at_ms",
+                Value::Number(serde_json::Number::from(completed_at)),
+            );
         }
         outbound_put_i64(&mut message, "updated_at_ms", now);
         upsert_business_record(conn, "outbound_messages", &message_id, now, message.clone())?;

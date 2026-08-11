@@ -9,154 +9,219 @@ pub mod imap;
 pub mod smtp;
 pub mod store;
 
-pub use config::StalwartConfig;
+pub use config::{MailserverRuntimeSettings, StalwartConfig};
 pub use imap::ImapServer;
 pub use util::errors::{StalwartError, StalwartResult};
 
-use std::sync::Arc;
+use serde::Serialize;
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::mpsc;
+
+enum RuntimeCommand {
+    Apply(MailserverRuntimeSettings),
+    Stop,
+}
+
+static RUNTIME_CONTROL: OnceLock<mpsc::UnboundedSender<RuntimeCommand>> = OnceLock::new();
+static RUNTIME_STATUS: OnceLock<Mutex<MailserverRuntimeStatus>> = OnceLock::new();
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MailserverRuntimeStatus {
+    pub state: String,
+    pub enabled: bool,
+    pub generation: u64,
+    pub started_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+impl Default for MailserverRuntimeStatus {
+    fn default() -> Self {
+        Self {
+            state: "not_started".to_string(),
+            enabled: false,
+            generation: 0,
+            started_at: None,
+            last_error: None,
+        }
+    }
+}
+
+fn status_store() -> &'static Mutex<MailserverRuntimeStatus> {
+    RUNTIME_STATUS.get_or_init(|| Mutex::new(MailserverRuntimeStatus::default()))
+}
+
+pub fn runtime_status() -> MailserverRuntimeStatus {
+    status_store()
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default()
+}
+
+pub fn apply_runtime_settings(settings: MailserverRuntimeSettings) -> StalwartResult<()> {
+    let sender = RUNTIME_CONTROL.get().ok_or_else(|| {
+        StalwartError::General("mailserver runtime supervisor is not initialized".to_string())
+    })?;
+    sender
+        .send(RuntimeCommand::Apply(settings))
+        .map_err(|_| StalwartError::General("mailserver runtime supervisor stopped".to_string()))
+}
+
+pub fn stop_runtime() -> StalwartResult<()> {
+    let sender = RUNTIME_CONTROL.get().ok_or_else(|| {
+        StalwartError::General("mailserver runtime supervisor is not initialized".to_string())
+    })?;
+    sender
+        .send(RuntimeCommand::Stop)
+        .map_err(|_| StalwartError::General("mailserver runtime supervisor stopped".to_string()))
+}
 
 pub fn start_services_thread(db_path: String) {
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    if RUNTIME_CONTROL.set(command_tx).is_err() {
+        tracing::warn!("[ctox-mailserver] runtime supervisor already started");
+        return;
+    }
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("Failed to build tokio runtime for mailserver");
-
-        rt.block_on(async {
-            tracing::info!("[ctox-mailserver] Starting mailserver thread with DB: {}", db_path);
-            println!("[ctox-mailserver] Starting mailserver thread with DB: {}", db_path);
-            let store = store::SqliteStore::new(&db_path);
-            if let Err(e) = store.init() {
-                tracing::error!("[ctox-mailserver] ERROR: Failed to initialize mailserver SQLite store: {:?}", e);
-                eprintln!("[ctox-mailserver] ERROR: Failed to initialize mailserver SQLite store: {:?}", e);
-                return;
-            }
-            tracing::info!("[ctox-mailserver] SQLite store initialized successfully");
-            println!("[ctox-mailserver] SQLite store initialized successfully");
-
-            let mut config = StalwartConfig::default();
-            config.server.db_path = db_path;
-
-            // Optional port configurations from env variables
-            if let Ok(smtp_port) = std::env::var("CTOX_SMTP_PORT") {
-                if let Ok(port) = smtp_port.parse::<u16>() {
-                    config.smtp.bind_address = std::net::SocketAddr::new(
-                        "127.0.0.1".parse().unwrap(),
-                        port
-                    );
-                }
-            } else {
-                config.smtp.bind_address = "127.0.0.1:2525".parse().unwrap();
-            }
-
-            if let Ok(imap_port) = std::env::var("CTOX_IMAP_PORT") {
-                if let Ok(port) = imap_port.parse::<u16>() {
-                    config.imap.bind_address = std::net::SocketAddr::new(
-                        "127.0.0.1".parse().unwrap(),
-                        port
-                    );
-                }
-            } else {
-                config.imap.bind_address = "127.0.0.1:1143".parse().unwrap();
-            }
-
-            if let Ok(caldav_port) = std::env::var("CTOX_CALDAV_PORT") {
-                if let Ok(port) = caldav_port.parse::<u16>() {
-                    config.caldav.bind_address = std::net::SocketAddr::new(
-                        "127.0.0.1".parse().unwrap(),
-                        port
-                    );
-                }
-            } else {
-                config.caldav.bind_address = "127.0.0.1:8080".parse().unwrap();
-            }
-
-            if let Ok(carddav_port) = std::env::var("CTOX_CARDDAV_PORT") {
-                if let Ok(port) = carddav_port.parse::<u16>() {
-                    config.carddav.bind_address = std::net::SocketAddr::new(
-                        "127.0.0.1".parse().unwrap(),
-                        port
-                    );
-                }
-            } else {
-                config.carddav.bind_address = "127.0.0.1:8081".parse().unwrap();
-            }
-
-            tracing::info!(
-                "[ctox-mailserver] Starting services: SMTP on {}, IMAP on {}, CalDAV on {}, CardDAV on {}",
-                config.smtp.bind_address, config.imap.bind_address, config.caldav.bind_address, config.carddav.bind_address
-            );
-            println!(
-                "[ctox-mailserver] Starting services: SMTP on {}, IMAP on {}, CalDAV on {}, CardDAV on {}",
-                config.smtp.bind_address, config.imap.bind_address, config.caldav.bind_address, config.carddav.bind_address
-            );
-
-            // Start Inbound SMTP Server
-            let smtp_server = Arc::new(smtp::server::SmtpInboundServer::new(
-                store.clone(),
-                config.smtp.clone(),
-            ));
-            tokio::spawn(async move {
-                tracing::info!("[ctox-mailserver] SMTP Inbound Server thread running");
-                if let Err(e) = smtp_server.start().await {
-                    tracing::error!("[ctox-mailserver] SMTP Inbound Server failed to start: {:?}", e);
-                    eprintln!("SMTP Inbound Server failed to start: {:?}", e);
-                }
-            });
-
-            // Start IMAP Server
-            let imap_server = Arc::new(imap::ImapServer::new(
-                store.clone(),
-                config.imap.clone(),
-            ));
-            tokio::spawn(async move {
-                tracing::info!("[ctox-mailserver] IMAP Server thread running");
-                if let Err(e) = imap_server.start().await {
-                    tracing::error!("[ctox-mailserver] IMAP Server failed to start: {:?}", e);
-                    eprintln!("IMAP Server failed to start: {:?}", e);
-                }
-            });
-
-            // Start CalDAV Server
-            let caldav_server = Arc::new(caldav::CalDavServer::new(
-                store.clone(),
-                config.caldav.clone(),
-            ));
-            tokio::spawn(async move {
-                tracing::info!("[ctox-mailserver] CalDAV Server thread running");
-                if let Err(e) = caldav_server.start().await {
-                    tracing::error!("[ctox-mailserver] CalDAV Server failed to start: {:?}", e);
-                    eprintln!("CalDAV Server failed to start: {:?}", e);
-                }
-            });
-
-            // Start CardDAV Server
-            let carddav_server = Arc::new(carddav::CardDavServer::new(
-                store.clone(),
-                config.carddav.clone(),
-            ));
-            tokio::spawn(async move {
-                tracing::info!("[ctox-mailserver] CardDAV Server thread running");
-                if let Err(e) = carddav_server.start().await {
-                    tracing::error!("[ctox-mailserver] CardDAV Server failed to start: {:?}", e);
-                    eprintln!("CardDAV Server failed to start: {:?}", e);
-                }
-            });
-
-            // Start SMTP Outbound Queue Runner
-            let queue_runner = Arc::new(smtp::client_queue::SmtpOutboundQueue::new(
-                store.clone(),
-                config.smtp.clone(),
-            ));
-            tokio::spawn(async move {
-                tracing::info!("[ctox-mailserver] SMTP Outbound Queue Runner thread running");
-                queue_runner.start().await;
-            });
-
-            // Keep the tokio runtime alive
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-            }
-        });
+        rt.block_on(run_runtime_supervisor(db_path, command_rx));
     });
+}
+
+async fn run_runtime_supervisor(
+    db_path: String,
+    mut command_rx: mpsc::UnboundedReceiver<RuntimeCommand>,
+) {
+    let store = store::SqliteStore::new(&db_path);
+    if let Err(error) = store.init() {
+        set_runtime_error(format!("failed to initialize mailserver store: {error}"));
+        return;
+    }
+
+    let initial_settings = match store.load_runtime_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            set_runtime_error(format!("failed to load mailserver configuration: {error}"));
+            MailserverRuntimeSettings::default()
+        }
+    };
+
+    // Calendar/address-book services remain collaboration services with their
+    // own lifecycle. The runtime controls below deliberately govern only SMTP,
+    // IMAP and the outbound queue shown in the Mail app.
+    start_collaboration_services(store.clone(), &db_path).await;
+
+    let mut email_tasks = Vec::new();
+    apply_email_runtime(&store, &db_path, &initial_settings, &mut email_tasks).await;
+
+    while let Some(command) = command_rx.recv().await {
+        match command {
+            RuntimeCommand::Apply(settings) => {
+                apply_email_runtime(&store, &db_path, &settings, &mut email_tasks).await;
+            }
+            RuntimeCommand::Stop => {
+                stop_email_tasks(&mut email_tasks);
+                let mut status = status_store().lock().unwrap_or_else(|err| err.into_inner());
+                status.state = "stopped".to_string();
+                status.enabled = false;
+                status.generation += 1;
+                status.started_at = None;
+                status.last_error = None;
+            }
+        }
+    }
+}
+
+async fn start_collaboration_services(store: store::SqliteStore, db_path: &str) {
+    let mut config = StalwartConfig::default();
+    config.server.db_path = db_path.to_string();
+    let caldav = Arc::new(caldav::CalDavServer::new(store.clone(), config.caldav));
+    tokio::spawn(async move {
+        if let Err(error) = caldav.start().await {
+            tracing::error!("[ctox-mailserver] CalDAV failed: {error}");
+        }
+    });
+    let carddav = Arc::new(carddav::CardDavServer::new(store, config.carddav));
+    tokio::spawn(async move {
+        if let Err(error) = carddav.start().await {
+            tracing::error!("[ctox-mailserver] CardDAV failed: {error}");
+        }
+    });
+}
+
+async fn apply_email_runtime(
+    store: &store::SqliteStore,
+    db_path: &str,
+    settings: &MailserverRuntimeSettings,
+    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    stop_email_tasks(tasks);
+    if !settings.enabled {
+        let mut status = status_store().lock().unwrap_or_else(|err| err.into_inner());
+        status.state = "stopped".to_string();
+        status.enabled = false;
+        status.generation += 1;
+        status.started_at = None;
+        status.last_error = None;
+        return;
+    }
+
+    let config = match settings.stalwart_config(db_path.to_string()) {
+        Ok(config) => config,
+        Err(error) => {
+            set_runtime_error(error);
+            return;
+        }
+    };
+    tracing::info!(
+        "[ctox-mailserver] applying SMTP {} and IMAP {}",
+        config.smtp.bind_address,
+        config.imap.bind_address
+    );
+
+    let smtp = Arc::new(smtp::server::SmtpInboundServer::new(
+        store.clone(),
+        config.smtp.clone(),
+    ));
+    tasks.push(tokio::spawn(async move {
+        if let Err(error) = smtp.start().await {
+            set_runtime_error(format!("SMTP listener failed: {error}"));
+        }
+    }));
+
+    let imap = Arc::new(imap::ImapServer::new(store.clone(), config.imap));
+    tasks.push(tokio::spawn(async move {
+        if let Err(error) = imap.start().await {
+            set_runtime_error(format!("IMAP listener failed: {error}"));
+        }
+    }));
+
+    let queue = Arc::new(smtp::client_queue::SmtpOutboundQueue::new(
+        store.clone(),
+        config.smtp,
+    ));
+    tasks.push(tokio::spawn(async move { queue.start().await }));
+
+    let mut status = status_store().lock().unwrap_or_else(|err| err.into_inner());
+    status.state = "running".to_string();
+    status.enabled = true;
+    status.generation += 1;
+    status.started_at = Some(chrono::Utc::now().timestamp_millis());
+    status.last_error = None;
+}
+
+fn stop_email_tasks(tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+    for task in tasks.drain(..) {
+        task.abort();
+    }
+}
+
+fn set_runtime_error(error: String) {
+    tracing::error!("[ctox-mailserver] {error}");
+    let mut status = status_store().lock().unwrap_or_else(|err| err.into_inner());
+    status.state = "degraded".to_string();
+    status.last_error = Some(error);
 }

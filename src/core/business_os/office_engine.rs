@@ -18,6 +18,7 @@ pub const DOCUMENT_EDITOR_PROTOCOL: &str = "euro-office-word-binary-v10";
 pub const DOCUMENT_EDITOR_PROTOCOL_VERSION: u32 = 10;
 pub const SPREADSHEET_EDITOR_PROTOCOL: &str = "euro-office-cell-binary-v10";
 pub const SPREADSHEET_EDITOR_PROTOCOL_VERSION: u32 = 10;
+pub const DOCUMENT_EMAIL_COMPILER_ID: &str = "ctox-documents-email-html-v1";
 
 static DELIMITED_NUMERIC_CELL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
@@ -116,6 +117,28 @@ pub struct OfficeDiagnostic {
     pub level: String,
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrozenDocumentEmailContent {
+    pub schema_version: String,
+    pub compiler_id: String,
+    pub source_sha256: String,
+    pub html_sha256: String,
+    pub text_sha256: String,
+    pub html: String,
+    pub text: String,
+    pub assets: Vec<FrozenDocumentEmailAsset>,
+    pub diagnostics: Vec<OfficeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrozenDocumentEmailAsset {
+    pub content_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2259,6 +2282,628 @@ pub fn transcode_document_to_editor_payload(source_bytes: &[u8]) -> anyhow::Resu
     }
     inspect_editor_payload(OfficeKind::Document, &payload)?;
     Ok(payload)
+}
+
+/// Compile the canonical DOCX source into the immutable transport payload used
+/// by Mail. The compiler deliberately renders from the OOXML model instead of
+/// accepting browser HTML: every emitted element, attribute and style value is
+/// constructed from an allowlist, so the returned fragment is safe to persist
+/// and hand to an SMTP provider after normal address/policy checks.
+pub fn compile_document_to_email(
+    source_bytes: &[u8],
+) -> anyhow::Result<FrozenDocumentEmailContent> {
+    inspect(OfficeKind::Document, source_bytes)?;
+    let source_sha256 = sha256_hex(source_bytes);
+    let mut archive = ZipArchive::new(Cursor::new(source_bytes)).context("open document OOXML")?;
+    let xml = read_zip_part(&mut archive, "word/document.xml")?;
+    let relationships = read_optional_zip_part(&mut archive, "word/_rels/document.xml.rels")?
+        .as_deref()
+        .map(parse_document_relationships)
+        .transpose()?
+        .unwrap_or_default();
+    let styles = read_optional_zip_part(&mut archive, "word/styles.xml")?;
+    let numbering = read_optional_zip_part(&mut archive, "word/numbering.xml")?;
+    let theme_fonts = read_optional_zip_part(&mut archive, "word/theme/theme1.xml")?
+        .as_deref()
+        .map(parse_document_theme_fonts)
+        .transpose()?
+        .unwrap_or_default();
+    let style_context = styles
+        .as_deref()
+        .map(|styles| parse_document_style_context(styles, theme_fonts.clone()))
+        .transpose()?
+        .unwrap_or_else(|| DocumentStyleContext {
+            theme_fonts,
+            ..DocumentStyleContext::default()
+        });
+    let header_footers =
+        parse_document_header_footer_parts(&mut archive, &style_context, &relationships)?;
+    let source = parse_document_source(&xml, &style_context, &relationships, &header_footers)?;
+    let numbering = numbering
+        .as_deref()
+        .map(parse_document_numbering)
+        .transpose()?
+        .unwrap_or_default();
+
+    let mut diagnostics = Vec::new();
+    let (assets, image_content_ids) =
+        build_document_email_assets(&mut archive, &source.blocks, &mut diagnostics)?;
+    if !source.header_footers.headers.is_empty() || !source.header_footers.footers.is_empty() {
+        diagnostics.push(OfficeDiagnostic {
+            level: "info".to_string(),
+            code: "document.email.header_footer_omitted".to_string(),
+            message: "Word headers and footers are not part of the email body.".to_string(),
+        });
+    }
+    let mut html = String::from(
+        "<div style=\"margin:0;padding:0;color:#111827;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5\">",
+    );
+    render_document_email_blocks(
+        &source.blocks,
+        &numbering,
+        &image_content_ids,
+        &mut html,
+        &mut diagnostics,
+    );
+    html.push_str("</div>");
+    let mut text = String::new();
+    render_document_email_text_blocks(&source.blocks, &numbering, &mut text, 0);
+    let text = text.trim_end().to_string();
+    let html_sha256 = sha256_hex(html.as_bytes());
+    let text_sha256 = sha256_hex(text.as_bytes());
+    Ok(FrozenDocumentEmailContent {
+        schema_version: "ctox.mail.frozen-content.v1".to_string(),
+        compiler_id: DOCUMENT_EMAIL_COMPILER_ID.to_string(),
+        source_sha256,
+        html_sha256,
+        text_sha256,
+        html,
+        text,
+        assets,
+        diagnostics,
+    })
+}
+
+fn build_document_email_assets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    blocks: &[DocumentBlock],
+    diagnostics: &mut Vec<OfficeDiagnostic>,
+) -> anyhow::Result<(Vec<FrozenDocumentEmailAsset>, BTreeMap<String, String>)> {
+    let mut raster_ids = BTreeSet::new();
+    collect_document_email_raster_ids(blocks, &mut raster_ids);
+    let mut assets_by_hash = BTreeMap::<String, FrozenDocumentEmailAsset>::new();
+    let mut content_ids = BTreeMap::new();
+    for raster_id in raster_ids {
+        let safe_relative = raster_id.strip_prefix("media/").filter(|value| {
+            !value.is_empty()
+                && !value.contains('/')
+                && !value.contains('\\')
+                && !value.contains("..")
+        });
+        let Some(relative) = safe_relative else {
+            diagnostics.push(OfficeDiagnostic {
+                level: "warning".to_string(),
+                code: "document.email.image_target_rejected".to_string(),
+                message: "An embedded image used an invalid package target and was omitted."
+                    .to_string(),
+            });
+            continue;
+        };
+        let path = format!("word/media/{relative}");
+        let Some(bytes) = read_optional_zip_part(archive, &path)? else {
+            diagnostics.push(OfficeDiagnostic {
+                level: "warning".to_string(),
+                code: "document.email.image_missing".to_string(),
+                message: format!("The embedded Word image {relative} is missing."),
+            });
+            continue;
+        };
+        let Some((mime_type, extension)) = document_email_image_type(&bytes) else {
+            diagnostics.push(OfficeDiagnostic {
+                level: "warning".to_string(),
+                code: "document.email.image_type_unsupported".to_string(),
+                message: format!(
+                    "The embedded Word image {relative} is not PNG, JPEG, GIF, or WebP and was omitted."
+                ),
+            });
+            continue;
+        };
+        let sha256 = sha256_hex(&bytes);
+        let content_id = format!("ctox-{}@business-os", &sha256[..24]);
+        content_ids.insert(raster_id, content_id.clone());
+        assets_by_hash
+            .entry(sha256.clone())
+            .or_insert_with(|| FrozenDocumentEmailAsset {
+                content_id,
+                filename: format!("image-{}.{}", &sha256[..12], extension),
+                mime_type: mime_type.to_string(),
+                sha256,
+                bytes,
+            });
+    }
+    Ok((assets_by_hash.into_values().collect(), content_ids))
+}
+
+fn collect_document_email_raster_ids(blocks: &[DocumentBlock], ids: &mut BTreeSet<String>) {
+    for block in blocks {
+        match block {
+            DocumentBlock::Paragraph(paragraph) => {
+                collect_document_email_raster_ids_from_runs(&paragraph.runs, ids)
+            }
+            DocumentBlock::Table(table) => {
+                for cell in table.rows.iter().flatten() {
+                    collect_document_email_raster_ids(&cell.blocks, ids);
+                }
+            }
+        }
+    }
+}
+
+fn collect_document_email_raster_ids_from_runs(runs: &[DocumentRun], ids: &mut BTreeSet<String>) {
+    for run in runs {
+        match run {
+            DocumentRun::Drawing(drawing) => {
+                if let Some(image) = &drawing.image {
+                    ids.insert(image.raster_id.clone());
+                }
+            }
+            DocumentRun::Hyperlink { runs, .. } | DocumentRun::Revision { runs, .. } => {
+                collect_document_email_raster_ids_from_runs(runs, ids)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn document_email_image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", "png"))
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(("image/jpeg", "jpg"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("image/gif", "gif"))
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some(("image/webp", "webp"))
+    } else {
+        None
+    }
+}
+
+fn render_document_email_blocks(
+    blocks: &[DocumentBlock],
+    numbering: &DocumentNumbering,
+    image_content_ids: &BTreeMap<String, String>,
+    html: &mut String,
+    diagnostics: &mut Vec<OfficeDiagnostic>,
+) {
+    let mut list_tag: Option<&'static str> = None;
+    for block in blocks {
+        match block {
+            DocumentBlock::Paragraph(paragraph) => {
+                let next_list_tag = document_email_list_tag(paragraph, numbering);
+                if list_tag != next_list_tag {
+                    if let Some(tag) = list_tag.take() {
+                        html.push_str("</");
+                        html.push_str(tag);
+                        html.push('>');
+                    }
+                    if let Some(tag) = next_list_tag {
+                        html.push('<');
+                        html.push_str(tag);
+                        html.push_str(" style=\"margin:0 0 12px;padding-left:24px\">");
+                    }
+                    list_tag = next_list_tag;
+                }
+                if list_tag.is_some() {
+                    html.push_str("<li>");
+                    render_document_email_runs(
+                        &paragraph.runs,
+                        image_content_ids,
+                        html,
+                        diagnostics,
+                    );
+                    html.push_str("</li>");
+                    continue;
+                }
+                let heading = document_email_heading_level(paragraph.style_id.as_deref());
+                let tag = heading.map(|level| match level {
+                    1 => "h1",
+                    2 => "h2",
+                    3 => "h3",
+                    4 => "h4",
+                    5 => "h5",
+                    _ => "h6",
+                });
+                let tag = tag.unwrap_or("p");
+                html.push('<');
+                html.push_str(tag);
+                html.push_str(" style=\"");
+                if heading.is_some() {
+                    html.push_str("margin:0 0 12px;font-weight:700;line-height:1.25;");
+                    let size = match heading.unwrap_or(6) {
+                        1 => 28,
+                        2 => 24,
+                        3 => 21,
+                        4 => 19,
+                        5 => 17,
+                        _ => 16,
+                    };
+                    html.push_str(&format!("font-size:{size}px;"));
+                } else {
+                    html.push_str("margin:0 0 12px;");
+                }
+                if let Some(alignment) = document_email_alignment(paragraph.alignment) {
+                    html.push_str("text-align:");
+                    html.push_str(alignment);
+                    html.push(';');
+                }
+                html.push_str("\">");
+                render_document_email_runs(&paragraph.runs, image_content_ids, html, diagnostics);
+                html.push_str("</");
+                html.push_str(tag);
+                html.push('>');
+            }
+            DocumentBlock::Table(table) => {
+                if let Some(tag) = list_tag.take() {
+                    html.push_str("</");
+                    html.push_str(tag);
+                    html.push('>');
+                }
+                html.push_str("<table role=\"presentation\" style=\"width:100%;border-collapse:collapse;margin:0 0 12px\"><tbody>");
+                for row in &table.rows {
+                    html.push_str("<tr>");
+                    for cell in row {
+                        html.push_str(
+                            "<td style=\"vertical-align:top;border:1px solid #d1d5db;padding:8px;",
+                        );
+                        if let Some([red, green, blue]) = cell.fill {
+                            html.push_str(&format!(
+                                "background-color:#{red:02x}{green:02x}{blue:02x};"
+                            ));
+                        }
+                        html.push_str("\">");
+                        render_document_email_blocks(
+                            &cell.blocks,
+                            numbering,
+                            image_content_ids,
+                            html,
+                            diagnostics,
+                        );
+                        html.push_str("</td>");
+                    }
+                    html.push_str("</tr>");
+                }
+                html.push_str("</tbody></table>");
+            }
+        }
+    }
+    if let Some(tag) = list_tag {
+        html.push_str("</");
+        html.push_str(tag);
+        html.push('>');
+    }
+}
+
+fn render_document_email_runs(
+    runs: &[DocumentRun],
+    image_content_ids: &BTreeMap<String, String>,
+    html: &mut String,
+    diagnostics: &mut Vec<OfficeDiagnostic>,
+) {
+    for run in runs {
+        match run {
+            DocumentRun::Text { value, properties } => {
+                let mut style = String::new();
+                if let Some(size) = properties.font_size_half_points {
+                    let points = (size as f64 / 2.0).clamp(8.0, 72.0);
+                    style.push_str(&format!("font-size:{points:.1}pt;"));
+                }
+                if let Some([red, green, blue]) = properties.color {
+                    style.push_str(&format!("color:#{red:02x}{green:02x}{blue:02x};"));
+                }
+                if properties.bold {
+                    html.push_str("<strong>");
+                }
+                if properties.italic {
+                    html.push_str("<em>");
+                }
+                if !style.is_empty() {
+                    html.push_str("<span style=\"");
+                    html.push_str(&style);
+                    html.push_str("\">");
+                }
+                html.push_str(&escape_email_html(value));
+                if !style.is_empty() {
+                    html.push_str("</span>");
+                }
+                if properties.italic {
+                    html.push_str("</em>");
+                }
+                if properties.bold {
+                    html.push_str("</strong>");
+                }
+            }
+            DocumentRun::Hyperlink {
+                value,
+                anchor,
+                tooltip,
+                runs,
+            } => {
+                let candidate = if value.is_empty() {
+                    anchor.as_ref().map(|value| format!("#{value}"))
+                } else if let Some(anchor) = anchor {
+                    Some(format!("{value}#{anchor}"))
+                } else {
+                    Some(value.clone())
+                };
+                if let Some(url) = candidate.as_deref().filter(|url| safe_email_href(url)) {
+                    html.push_str("<a href=\"");
+                    html.push_str(&escape_email_html_attribute(url));
+                    html.push_str("\" style=\"color:#2563eb;text-decoration:underline\"");
+                    if let Some(tooltip) = tooltip {
+                        html.push_str(" title=\"");
+                        html.push_str(&escape_email_html_attribute(tooltip));
+                        html.push('"');
+                    }
+                    html.push('>');
+                    render_document_email_runs(runs, image_content_ids, html, diagnostics);
+                    html.push_str("</a>");
+                } else {
+                    diagnostics.push(OfficeDiagnostic {
+                        level: "warning".to_string(),
+                        code: "document.email.unsafe_link_removed".to_string(),
+                        message: "A hyperlink with an unsupported URL scheme was rendered without its target.".to_string(),
+                    });
+                    render_document_email_runs(runs, image_content_ids, html, diagnostics);
+                }
+            }
+            DocumentRun::Drawing(drawing) => {
+                let label = drawing
+                    .shape
+                    .as_ref()
+                    .map(|shape| shape.text.as_str())
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        drawing
+                            .doc_pr
+                            .as_ref()
+                            .and_then(|value| value.descr.as_deref())
+                    })
+                    .or_else(|| {
+                        drawing
+                            .doc_pr
+                            .as_ref()
+                            .and_then(|value| value.name.as_deref())
+                    })
+                    .or_else(|| {
+                        drawing
+                            .image
+                            .as_ref()
+                            .and_then(|value| value.name.as_deref())
+                    })
+                    .or_else(|| drawing.chart.as_ref().map(|value| value.title.as_str()))
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Bild");
+                if let Some((image, content_id)) = drawing.image.as_ref().and_then(|image| {
+                    image_content_ids
+                        .get(&image.raster_id)
+                        .map(|content_id| (image, content_id))
+                }) {
+                    let alt = drawing
+                        .doc_pr
+                        .as_ref()
+                        .and_then(|value| value.descr.as_deref())
+                        .or(image.name.as_deref())
+                        .unwrap_or(label);
+                    html.push_str("<img src=\"cid:");
+                    html.push_str(&escape_email_html_attribute(content_id));
+                    html.push_str("\" alt=\"");
+                    html.push_str(&escape_email_html_attribute(alt));
+                    html.push_str("\"");
+                    if let Some((width, height)) = drawing.extent_emu {
+                        html.push_str(&format!(
+                            " width=\"{}\" height=\"{}\"",
+                            (width / 9_525).max(1),
+                            (height / 9_525).max(1)
+                        ));
+                    }
+                    html.push_str(" style=\"max-width:100%;height:auto;display:block;border:0\">");
+                } else {
+                    html.push_str("<span style=\"color:#6b7280\">[");
+                    html.push_str(&escape_email_html(label));
+                    html.push_str("]</span>");
+                    if drawing.image.is_none() {
+                        diagnostics.push(OfficeDiagnostic {
+                            level: "warning".to_string(),
+                            code: "document.email.drawing_replaced".to_string(),
+                            message:
+                                "A Word shape or chart was replaced with accessible fallback text."
+                                    .to_string(),
+                        });
+                    }
+                }
+            }
+            DocumentRun::LineBreak => html.push_str("<br>"),
+            DocumentRun::PageBreak => {
+                html.push_str("<hr style=\"border:0;border-top:1px solid #d1d5db;margin:16px 0\">")
+            }
+            DocumentRun::Tab => html.push_str("&emsp;"),
+            DocumentRun::Revision { kind, runs, .. } if *kind != 12 => {
+                render_document_email_runs(runs, image_content_ids, html, diagnostics)
+            }
+            DocumentRun::InstructionText { .. }
+            | DocumentRun::FieldChar(_)
+            | DocumentRun::Bookmark { .. }
+            | DocumentRun::CommentStart(_)
+            | DocumentRun::CommentEnd(_)
+            | DocumentRun::CommentReference(_)
+            | DocumentRun::Revision { .. } => {}
+        }
+    }
+}
+
+fn render_document_email_text_blocks(
+    blocks: &[DocumentBlock],
+    numbering: &DocumentNumbering,
+    text: &mut String,
+    depth: usize,
+) {
+    let mut ordered_index = 0usize;
+    for block in blocks {
+        match block {
+            DocumentBlock::Paragraph(paragraph) => {
+                match document_email_list_tag(paragraph, numbering) {
+                    Some("ol") => {
+                        ordered_index += 1;
+                        text.push_str(&"  ".repeat(depth));
+                        text.push_str(&format!("{ordered_index}. "));
+                    }
+                    Some(_) => {
+                        ordered_index = 0;
+                        text.push_str(&"  ".repeat(depth));
+                        text.push_str("- ");
+                    }
+                    None => ordered_index = 0,
+                }
+                render_document_email_text_runs(&paragraph.runs, text);
+                text.push('\n');
+            }
+            DocumentBlock::Table(table) => {
+                ordered_index = 0;
+                for row in &table.rows {
+                    for (index, cell) in row.iter().enumerate() {
+                        if index > 0 {
+                            text.push_str(" | ");
+                        }
+                        let before = text.len();
+                        render_document_email_text_blocks(&cell.blocks, numbering, text, depth + 1);
+                        while text.len() > before && text.ends_with('\n') {
+                            text.pop();
+                        }
+                    }
+                    text.push('\n');
+                }
+            }
+        }
+    }
+}
+
+fn render_document_email_text_runs(runs: &[DocumentRun], text: &mut String) {
+    for run in runs {
+        match run {
+            DocumentRun::Text { value, .. } => text.push_str(value),
+            DocumentRun::Drawing(drawing) => {
+                let label = drawing
+                    .shape
+                    .as_ref()
+                    .map(|shape| shape.text.as_str())
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        drawing
+                            .doc_pr
+                            .as_ref()
+                            .and_then(|value| value.descr.as_deref())
+                    })
+                    .or_else(|| {
+                        drawing
+                            .doc_pr
+                            .as_ref()
+                            .and_then(|value| value.name.as_deref())
+                    })
+                    .unwrap_or("Bild");
+                text.push('[');
+                text.push_str(label);
+                text.push(']');
+            }
+            DocumentRun::LineBreak => text.push('\n'),
+            DocumentRun::PageBreak => text.push_str("\n---\n"),
+            DocumentRun::Tab => text.push('\t'),
+            DocumentRun::Hyperlink { runs, .. } | DocumentRun::Revision { kind: 13, runs, .. } => {
+                render_document_email_text_runs(runs, text)
+            }
+            DocumentRun::InstructionText { .. }
+            | DocumentRun::FieldChar(_)
+            | DocumentRun::Bookmark { .. }
+            | DocumentRun::CommentStart(_)
+            | DocumentRun::CommentEnd(_)
+            | DocumentRun::CommentReference(_)
+            | DocumentRun::Revision { .. } => {}
+        }
+    }
+}
+
+fn document_email_list_tag(
+    paragraph: &DocumentParagraph,
+    numbering: &DocumentNumbering,
+) -> Option<&'static str> {
+    let number_id = paragraph.num_id?;
+    let abstract_id = numbering
+        .nums
+        .iter()
+        .find(|number| number.id == number_id)?
+        .abstract_id;
+    let level = paragraph.num_level.unwrap_or(0);
+    let format = numbering
+        .abstracts
+        .iter()
+        .find(|number| number.id == abstract_id)?
+        .levels
+        .iter()
+        .find(|candidate| candidate.level == level)
+        .map(|candidate| candidate.format)
+        .unwrap_or(13);
+    Some(if format == 5 { "ul" } else { "ol" })
+}
+
+fn document_email_heading_level(style_id: Option<&str>) -> Option<u8> {
+    let normalized = style_id?
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let level = normalized.strip_prefix("heading")?.parse::<u8>().ok()?;
+    Some(level.clamp(1, 6))
+}
+
+fn document_email_alignment(alignment: Option<u8>) -> Option<&'static str> {
+    match alignment {
+        Some(1) => Some("center"),
+        Some(2) => Some("right"),
+        Some(3) => Some("justify"),
+        _ => None,
+    }
+}
+
+fn safe_email_href(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return false;
+    }
+    if value.starts_with('#') {
+        return value[1..].chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        });
+    }
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "mailto" | "tel"
+    )
+}
+
+fn escape_email_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_email_html_attribute(value: &str) -> String {
+    escape_email_html(value)
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[derive(Debug)]
@@ -14071,6 +14716,90 @@ mod tests {
             writer.write_all(bytes).unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn document_email_compiler_emits_stable_sanitized_html_and_text() {
+        let source = docx_with_document_xml(
+            r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/><w:i/><w:color w:val="2563EB"/></w:rPr><w:t>Hallo &amp; &lt;script&gt;CTOX&lt;/script&gt;</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Angebot A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>42 EUR</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+            None,
+        );
+
+        let first = compile_document_to_email(&source).unwrap();
+        let second = compile_document_to_email(&source).unwrap();
+
+        assert_eq!(first.schema_version, "ctox.mail.frozen-content.v1");
+        assert_eq!(first.compiler_id, DOCUMENT_EMAIL_COMPILER_ID);
+        assert_eq!(first.source_sha256, sha256_hex(&source));
+        assert_eq!(first.html_sha256, sha256_hex(first.html.as_bytes()));
+        assert_eq!(first.text_sha256, sha256_hex(first.text.as_bytes()));
+        assert_eq!(first.html, second.html);
+        assert_eq!(first.html_sha256, second.html_sha256);
+        assert_eq!(first.text, second.text);
+        assert!(first.html.contains("<h1"));
+        assert!(first.html.contains("<strong><em>"));
+        assert!(first
+            .html
+            .contains("Hallo &amp; &lt;script&gt;CTOX&lt;/script&gt;"));
+        assert!(!first.html.contains("<script>"));
+        assert!(first.html.contains("<table"));
+        assert!(first.text.contains("Hallo & <script>CTOX</script>"));
+        assert!(first.text.contains("Angebot A | 42 EUR"));
+    }
+
+    #[test]
+    fn document_email_compiler_removes_unsafe_hyperlink_targets() {
+        let source = docx_with_document_xml(
+            r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="rIdUnsafe"><w:r><w:t>Kein Skript</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#,
+            Some((
+                "word/_rels/document.xml.rels",
+                br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdUnsafe" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/></Relationships>"#,
+            )),
+        );
+
+        let compiled = compile_document_to_email(&source).unwrap();
+
+        assert!(compiled.html.contains("Kein Skript"));
+        assert!(!compiled.html.contains("javascript:"));
+        assert!(!compiled.html.contains("<a "));
+        assert!(compiled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "document.email.unsafe_link_removed" }));
+    }
+
+    #[test]
+    fn document_email_compiler_freezes_embedded_images_as_cid_assets() {
+        let source = fs::read(office_fixture("document/images-positioning.docx")).unwrap();
+        let compiled = compile_document_to_email(&source).unwrap();
+
+        assert_eq!(compiled.assets.len(), 2);
+        for asset in &compiled.assets {
+            assert_eq!(asset.mime_type, "image/png");
+            assert_eq!(asset.sha256, sha256_hex(&asset.bytes));
+            assert!(asset.content_id.starts_with("ctox-"));
+            assert!(compiled
+                .html
+                .contains(&format!("src=\"cid:{}\"", asset.content_id)));
+        }
+        assert!(!compiled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "document.email.drawing_replaced" }));
+        assert!(compiled.html.contains("<img src=\"cid:"));
+        assert!(!compiled.html.contains("data:"));
+    }
+
+    #[test]
+    fn document_email_compiler_keeps_diagnosed_fallback_for_shapes_and_charts() {
+        let source = fs::read(office_fixture("document/drawings-charts.docx")).unwrap();
+        let compiled = compile_document_to_email(&source).unwrap();
+
+        assert!(compiled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "document.email.drawing_replaced" }));
+        assert!(compiled.html.contains("<span style=\"color:#6b7280\">["));
     }
 
     #[test]

@@ -304,6 +304,105 @@ test('Business OS bridge reads versions and dispatches typed office commands', a
   ]);
 });
 
+test('document bridge freezes and verifies transport-ready email HTML and text over RxDB chunks', async () => {
+  const html = '<div><strong>Hallo CTOX</strong></div>';
+  const text = 'Hallo CTOX';
+  const htmlBytes = new TextEncoder().encode(html);
+  const textBytes = new TextEncoder().encode(text);
+  const htmlSha256 = createHash('sha256').update(htmlBytes).digest('hex');
+  const textSha256 = createHash('sha256').update(textBytes).digest('hex');
+  const imageBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+  const imageSha256 = createHash('sha256').update(imageBytes).digest('hex');
+  const chunkRows = [];
+  const commands = [];
+  const leases = [];
+  const collection = (name) => ({
+    find({ selector }) {
+      return {
+        async exec() {
+          return name === 'document_blob_chunks'
+            ? chunkRows.filter((row) => row.blob_id === selector.blob_id)
+            : [];
+        },
+      };
+    },
+  });
+  const artifact = {
+    schema_version: 'ctox.mail.frozen-content.v1',
+    state: 'frozen',
+    compiler_id: 'ctox-documents-email-html-v1',
+    document_id: 'doc_mail',
+    document_version_id: 'doc_mail_v3',
+    source_blob_id: 'doc_mail_v3_blob',
+    source_sha256: 'a'.repeat(64),
+    html_blob_id: 'doc_mail_v3_email_html',
+    html_sha256: htmlSha256,
+    text_blob_id: 'doc_mail_v3_email_text',
+    text_sha256: textSha256,
+    assets: [{
+      content_id: 'ctox-image@business-os',
+      filename: 'image.png',
+      mime_type: 'image/png',
+      blob_id: 'doc_mail_v3_email_asset',
+      sha256: imageSha256,
+      bytes: imageBytes.length,
+    }],
+    diagnostics: [],
+  };
+  const bridge = createBusinessOsOfficeBridge({
+    db: { collection },
+    permissions: { canWriteCollection: () => true },
+    sync: {
+      async leaseCollection(name, reason) {
+        leases.push(`lease:${name}:${reason}`);
+        return {
+          bridge: { state: { async awaitInSync() {} } },
+          async release() { leases.push(`release:${name}`); },
+        };
+      },
+    },
+    commandBus: {
+      async dispatch(command) {
+        commands.push(command);
+        chunkRows.push(
+          {
+            id: `${artifact.html_blob_id}_0000`, blob_id: artifact.html_blob_id,
+            document_id: 'doc_mail', version_id: 'doc_mail_v3', idx: 0, total: 1,
+            data: Buffer.from(htmlBytes).toString('base64'),
+          },
+          {
+            id: `${artifact.text_blob_id}_0000`, blob_id: artifact.text_blob_id,
+            document_id: 'doc_mail', version_id: 'doc_mail_v3', idx: 0, total: 1,
+            data: Buffer.from(textBytes).toString('base64'),
+          },
+          {
+            id: `${artifact.assets[0].blob_id}_0000`, blob_id: artifact.assets[0].blob_id,
+            document_id: 'doc_mail', version_id: 'doc_mail_v3', idx: 0, total: 1,
+            data: Buffer.from(imageBytes).toString('base64'),
+          },
+        );
+        return { status: 'completed', payload: { outcome: { ok: true, artifact } } };
+      },
+    },
+  }, 'document');
+
+  const result = await bridge.freezeEmailContent({ recordId: 'doc_mail', versionId: 'doc_mail_v3' });
+
+  assert.equal(commands[0].type, 'office.document.freeze_email_content');
+  assert.equal(commands[0].payload.document_id, 'doc_mail');
+  assert.equal(commands[0].payload.version_id, 'doc_mail_v3');
+  assert.equal(commands[0].client_context.transport, 'rxdb-webrtc');
+  assert.equal(result.html, html);
+  assert.equal(result.text, text);
+  assert.equal(result.artifact.compiler_id, 'ctox-documents-email-html-v1');
+  assert.equal(result.assets[0].content_id, 'ctox-image@business-os');
+  assert.deepEqual(result.assets[0].bytes, imageBytes);
+  assert.deepEqual(leases, [
+    'lease:document_blob_chunks:documents-freeze-email-content',
+    'release:document_blob_chunks',
+  ]);
+});
+
 test('prepare result is immediately readable before the native version projection arrives', async () => {
   const canonicalBytes = new TextEncoder().encode('canonical-docx');
   const editorBytes = new TextEncoder().encode('DOCY;v10;0;prepared-editor');

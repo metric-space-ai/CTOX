@@ -17,8 +17,8 @@ pub(super) fn handle_office_control_command(
     command: &BusinessCommand,
 ) -> anyhow::Result<Value> {
     use super::office_engine::{
-        apply_changes, delimited_text_to_xlsx, export, prepare, sha256_hex, ApplyChangesOptions,
-        OfficeKind, PrepareOptions,
+        apply_changes, compile_document_to_email, delimited_text_to_xlsx, export, prepare,
+        sha256_hex, ApplyChangesOptions, OfficeKind, PrepareOptions,
     };
 
     let (kind, module_id, records_collection, versions_collection, chunks_collection) =
@@ -327,6 +327,114 @@ pub(super) fn handle_office_control_command(
                 ),
             }
         }
+        "office.document.freeze_email_content" => {
+            anyhow::ensure!(
+                kind == OfficeKind::Document,
+                "email content can only be compiled from a document"
+            );
+            let source_blob_id = version
+                .get("blob_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("office version has no canonical blob")?;
+            let source = load_rxdb_office_blob(root, chunks_collection, source_blob_id)?;
+            let compiled = compile_document_to_email(&source)?;
+            if let Some(expected) = version
+                .get("source_sha256")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                anyhow::ensure!(
+                    expected == compiled.source_sha256,
+                    "office version source hash mismatch"
+                );
+            }
+            let html_blob_id = persist_document_email_blob(
+                root,
+                &record_id,
+                &version_id,
+                "email_html",
+                "text/html; charset=utf-8",
+                &compiled.html_sha256,
+                compiled.html.as_bytes(),
+            )?;
+            let text_blob_id = persist_document_email_blob(
+                root,
+                &record_id,
+                &version_id,
+                "email_text",
+                "text/plain; charset=utf-8",
+                &compiled.text_sha256,
+                compiled.text.as_bytes(),
+            )?;
+            let mut asset_artifacts = Vec::with_capacity(compiled.assets.len());
+            for asset in &compiled.assets {
+                let blob_id = persist_document_email_blob(
+                    root,
+                    &record_id,
+                    &version_id,
+                    "email_asset",
+                    &asset.mime_type,
+                    &asset.sha256,
+                    &asset.bytes,
+                )?;
+                asset_artifacts.push(serde_json::json!({
+                    "content_id": asset.content_id,
+                    "filename": asset.filename,
+                    "mime_type": asset.mime_type,
+                    "blob_id": blob_id,
+                    "sha256": asset.sha256,
+                    "bytes": asset.bytes.len(),
+                }));
+            }
+            let now = now_ms() as i64;
+            let artifact = serde_json::json!({
+                "schema_version": compiled.schema_version,
+                "state": "frozen",
+                "compiler_id": compiled.compiler_id,
+                "document_id": record_id,
+                "document_version_id": version_id,
+                "source_blob_id": source_blob_id,
+                "source_sha256": compiled.source_sha256,
+                "html_blob_id": html_blob_id,
+                "html_sha256": compiled.html_sha256,
+                "html_bytes": compiled.html.len(),
+                "text_blob_id": text_blob_id,
+                "text_sha256": compiled.text_sha256,
+                "text_bytes": compiled.text.len(),
+                "assets": asset_artifacts,
+                "diagnostics": compiled.diagnostics,
+                "frozen_at_ms": now,
+            });
+            let mut next_version = version.clone();
+            let object = next_version
+                .as_object_mut()
+                .context("office version must be an object")?;
+            object.insert("email_render_artifact".to_string(), artifact.clone());
+            object.insert("updated_at_ms".to_string(), Value::from(now));
+            let conn = open_store(root)?;
+            upsert_business_record(
+                &conn,
+                versions_collection,
+                &version_id,
+                now,
+                next_version.clone(),
+            )?;
+            upsert_rxdb_collection_record(
+                root,
+                versions_collection,
+                &version_id,
+                now,
+                next_version,
+            )?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "operation": "freeze_email_content",
+                "record_id": record_id,
+                "version_id": version_id,
+                "artifact": artifact,
+            }))
+        }
         "office.document.export" | "office.spreadsheet.export" => {
             let blob_id = version
                 .get("blob_id")
@@ -351,6 +459,60 @@ pub(super) fn handle_office_control_command(
         }
         other => anyhow::bail!("unsupported office command type: {other}"),
     }
+}
+
+fn persist_document_email_blob(
+    root: &Path,
+    document_id: &str,
+    version_id: &str,
+    role: &str,
+    mime_type: &str,
+    expected_sha256: &str,
+    bytes: &[u8],
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !document_id.is_empty(),
+        "email artifact document id is empty"
+    );
+    anyhow::ensure!(!version_id.is_empty(), "email artifact version id is empty");
+    anyhow::ensure!(
+        super::office_engine::sha256_hex(bytes) == expected_sha256,
+        "email artifact hash mismatch"
+    );
+    let suffix = expected_sha256.get(..12).unwrap_or(expected_sha256);
+    let blob_id = format!("{version_id}_{role}_{suffix}");
+    let chunks = if bytes.is_empty() {
+        vec![&[][..]]
+    } else {
+        bytes.chunks(DOCUMENT_BLOB_CHUNK_SIZE).collect::<Vec<_>>()
+    };
+    let total = chunks.len();
+    let now = now_ms() as i64;
+    let conn = open_store(root)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut projections = Vec::with_capacity(total);
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let chunk_id = format!("{blob_id}_{index:04}");
+        let payload = serde_json::json!({
+            "id": chunk_id,
+            "blob_id": blob_id,
+            "document_id": document_id,
+            "version_id": version_id,
+            "idx": index,
+            "total": total,
+            "mime_type": mime_type,
+            "encoding": "base64",
+            "data": base64::engine::general_purpose::STANDARD.encode(chunk),
+            "created_at_ms": now,
+        });
+        upsert_business_record(&tx, "document_blob_chunks", &chunk_id, now, payload.clone())?;
+        projections.push((chunk_id, payload));
+    }
+    tx.commit()?;
+    for (chunk_id, payload) in projections {
+        upsert_rxdb_collection_record(root, "document_blob_chunks", &chunk_id, now, payload)?;
+    }
+    Ok(blob_id)
 }
 
 fn persist_office_canonical_spreadsheet_blob(
@@ -1121,6 +1283,74 @@ mod tests {
             .get("data")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn frozen_email_blobs_are_content_addressed_and_reload_from_live_rxdb() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("runtime"))?;
+        let rxdb_path = rxdb_store_path(root.path());
+        let rxdb = Connection::open(&rxdb_path)?;
+        rxdb.execute(
+            "CREATE TABLE ctox_business_os__document_blob_chunks__v0 (
+                id TEXT PRIMARY KEY NOT NULL,
+                revision TEXT,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                lastWriteTime REAL NOT NULL DEFAULT 0,
+                data TEXT NOT NULL
+            )",
+            [],
+        )?;
+        drop(rxdb);
+
+        let html = b"<div><strong>Hallo CTOX</strong></div>";
+        let html_sha = super::super::office_engine::sha256_hex(html);
+        let html_blob_id = persist_document_email_blob(
+            root.path(),
+            "doc_mail",
+            "doc_mail_v1",
+            "email_html",
+            "text/html; charset=utf-8",
+            &html_sha,
+            html,
+        )?;
+        let empty_text_sha = super::super::office_engine::sha256_hex(b"");
+        let text_blob_id = persist_document_email_blob(
+            root.path(),
+            "doc_mail",
+            "doc_mail_v1",
+            "email_text",
+            "text/plain; charset=utf-8",
+            &empty_text_sha,
+            b"",
+        )?;
+
+        assert!(html_blob_id.contains(&html_sha[..12]));
+        assert_eq!(
+            load_rxdb_office_blob(root.path(), "document_blob_chunks", &html_blob_id)?,
+            html
+        );
+        assert_eq!(
+            load_rxdb_office_blob(root.path(), "document_blob_chunks", &text_blob_id)?,
+            Vec::<u8>::new()
+        );
+        let rxdb = Connection::open(&rxdb_path)?;
+        let payload: String = rxdb.query_row(
+            "SELECT data FROM ctox_business_os__document_blob_chunks__v0
+             WHERE json_extract(data, '$.blob_id') = ?1",
+            [&html_blob_id],
+            |row| row.get(0),
+        )?;
+        let payload: Value = serde_json::from_str(&payload)?;
+        assert_eq!(
+            payload.get("mime_type").and_then(Value::as_str),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            payload.get("version_id").and_then(Value::as_str),
+            Some("doc_mail_v1")
+        );
         Ok(())
     }
 

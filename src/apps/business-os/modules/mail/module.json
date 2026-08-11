@@ -1,0 +1,73 @@
+{
+  "id": "mail",
+  "title": "Mail",
+  "description": "Hochvolumen-Mail-Workbench für Massen-Ein- und -Ausgang, Kampagnen, Freigaben und nachverfolgbare App-Übergaben.",
+  "entry": "modules/mail/index.html",
+  "collections": [
+    "business_commands",
+    "business_module_catalog",
+    "business_users",
+    "communication_accounts",
+    "communication_threads",
+    "communication_messages",
+    "documents",
+    "document_versions",
+    "document_blob_chunks",
+    "outbound_campaigns",
+    "outbound_pipeline_items",
+    "outbound_engagements",
+    "outbound_messages",
+    "outbound_approvals"
+  ],
+  "layout": {
+    "shell": "windowed",
+    "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"3\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"1.8\"/><path d=\"m5 8 7 5 7-5\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+    "left": "Operative Eingangs-, Ausgangs-, Freigabe-, Fehler- und Routing-Queues sowie Kampagnen",
+    "center": "Paginierte Massenansicht mit Seitenauswahl, Filtern und Bulk-Aktionen",
+    "right": "Nachrichtenkontext, Routing-Evidenz und Kampagnensteuerung",
+    "third_pane_justification": "Der Nachrichten- oder Kampagnenkontext bleibt beim Scannen der Mail-Liste sichtbar; in schmalen Fenstern stapelt die App die Bereiche."
+  },
+  "category": "Collaboration",
+  "version": "1.0.0",
+  "developer": "CTOX",
+  "license": "AGPL-3.0-only",
+  "tags": [
+    "email",
+    "inbox",
+    "campaigns",
+    "collaboration"
+  ],
+  "store": {
+    "summary": "Operative Mail-Workbench für Kampagnen, Massensendungen, große Eingangsmengen und CTOX-protokollierte Übergaben an andere Business-OS-Apps.",
+    "repository": "metric-space-ai/ctox",
+    "source_path": "modules/mail",
+    "installable": false,
+    "editable_after_install": false,
+    "distribution": "system-module"
+  },
+  "install_scope": "core",
+  "default_installed": true,
+  "launch_kind": "desktop-app",
+  "presentation": {
+    "default_mode": "window",
+    "supported_modes": [
+      "window",
+      "maximized",
+      "focus"
+    ],
+    "initial_size": {
+      "width": 1280,
+      "height": 820
+    },
+    "minimum_size": {
+      "width": 640,
+      "height": 480
+    },
+    "multi_instance": false,
+    "auto_restore": false
+  },
+  "source": "core",
+  "core": true,
+  "editable": true,
+  "deletable": false
+}
