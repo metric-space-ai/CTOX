@@ -29,6 +29,12 @@ pub(super) use super::rxdb_peer_browser::{
     browser_frame_hash, find_browser_document, upsert_browser_frame, upsert_browser_session,
     upsert_browser_tab, BrowserSessionAccess,
 };
+use super::rxdb_peer_commands::{
+    command_id_from_document, deliver_business_command_outbox_background_loop,
+    enqueue_business_command_document_with_database, incremental_upsert_document_with_envelope,
+    project_appsec_command_result, project_support_command_result, project_threads_command_result,
+    typed_app_action_error_code,
+};
 pub(super) use super::rxdb_peer_demand_files::{
     demand_file_source_configs, register_demand_file_sources, stream_demand_file_chunks,
     DEMAND_FILE_CHUNK_COLLECTIONS,
@@ -48,18 +54,17 @@ pub(super) use super::rxdb_peer_desktop_files::{
     unsafe_desktop_file_index_candidates_sql,
 };
 pub(super) use super::rxdb_peer_projections::{
-    appsec_projection_collection, bulk_upsert_business_record_projection_documents,
-    find_projection_documents_by_id, record_desktop_file_index_loop_result,
-    record_native_peer_bool_loop_result, record_native_peer_loop_result,
-    support_projection_collection, sync_business_users_background_loop,
+    bulk_upsert_business_record_projection_documents, find_projection_documents_by_id,
+    record_desktop_file_index_loop_result, record_native_peer_bool_loop_result,
+    record_native_peer_loop_result, sync_business_users_background_loop,
     sync_channel_state_background_loop, sync_knowledge_tables_background_loop,
     sync_module_catalog_background_loop, sync_runtime_settings_background_loop,
     sync_ticket_state_background_loop, sync_workspace_branding_background_loop,
-    threads_projection_collection, upsert_business_record_projection_document,
-    BUSINESS_COMMANDS_LOOP_METRICS, BUSINESS_RECORDS_LOOP_METRICS, BUSINESS_USERS_LOOP_METRICS,
-    CHANNEL_STATE_LOOP_METRICS, DESKTOP_FILE_INDEX_LOOP_METRICS, KNOWLEDGE_TABLES_LOOP_METRICS,
-    MODULE_CATALOG_LOOP_METRICS, NOTES_LOOP_METRICS, RUNTIME_SETTINGS_LOOP_METRICS,
-    TICKET_STATE_LOOP_METRICS, WORKSPACE_BRANDING_LOOP_METRICS,
+    upsert_business_record_projection_document, BUSINESS_COMMANDS_LOOP_METRICS,
+    BUSINESS_RECORDS_LOOP_METRICS, BUSINESS_USERS_LOOP_METRICS, CHANNEL_STATE_LOOP_METRICS,
+    DESKTOP_FILE_INDEX_LOOP_METRICS, KNOWLEDGE_TABLES_LOOP_METRICS, MODULE_CATALOG_LOOP_METRICS,
+    NOTES_LOOP_METRICS, RUNTIME_SETTINGS_LOOP_METRICS, TICKET_STATE_LOOP_METRICS,
+    WORKSPACE_BRANDING_LOOP_METRICS,
 };
 #[cfg(test)]
 use super::rxdb_peer_projections::{
@@ -734,13 +739,13 @@ pub(super) const BUSINESS_RECORD_PROJECTION_WRITE_BATCH_SIZE: usize = 250;
 // envelopes are normalized and derived AppSec evidence fields are refreshed.
 const BUSINESS_RECORD_PROJECTION_CURSOR_VERSION: u32 = 2;
 const QUEUE_CHAT_REPAIR_ORPHAN_EPOCH_MS: i64 = 10 * 60 * 1_000;
-const BUSINESS_COMMAND_ACTIVE_POLL_SECS: u64 = 1;
+pub(super) const BUSINESS_COMMAND_ACTIVE_POLL_SECS: u64 = 1;
 // Browser-originated commands are user-visible control-plane work. Same-process
 // RxDB writes wake this loop through table notifiers. The storage-wide
 // `data_version` watcher covers writes from other SQLite connections, while
 // this slower poll remains as a bounded recovery path for a lost notification.
-const BUSINESS_COMMAND_IDLE_POLL_SECS: u64 = 30;
-const BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS: u32 = 1;
+pub(super) const BUSINESS_COMMAND_IDLE_POLL_SECS: u64 = 30;
+pub(super) const BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS: u32 = 1;
 const SUPPORT_COMMUNICATION_INTAKE_SINCE_KEY: &str = "__support_communication_intake";
 const THREADS_CTOX_RELEVANCE_COMMANDS_SINCE_KEY: &str =
     "__threads_ctox_relevance_business_commands";
@@ -4042,7 +4047,7 @@ fn business_record_projection_loop_sleep_secs(
     }
 }
 
-fn projection_sleep_secs(
+pub(super) fn projection_sleep_secs(
     active_interval_secs: u64,
     idle_interval_secs: u64,
     idle_backoff_after_ticks: u32,
@@ -4097,57 +4102,6 @@ async fn consume_business_commands_loop(root: PathBuf, database: Arc<RxDatabase>
         }
         wait_for_business_command_wake(&root, last_source_stamp.as_ref(), consecutive_idle_rounds)
             .await;
-    }
-}
-
-async fn deliver_business_command_outbox_background_loop(root: PathBuf) {
-    let mut idle_rounds = 0u32;
-    loop {
-        let result: anyhow::Result<usize> = async {
-            if idle_rounds > 0 && idle_rounds % 60 == 0 {
-                let reconcile_root = root.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::mission::channels::audit_and_migrate_business_command_storage(
-                        &reconcile_root,
-                        true,
-                    )
-                })
-                .await
-                .context("join business command invariant reconciliation")??;
-            }
-            let outbox_root = root.clone();
-            let outbox = tokio::task::spawn_blocking(move || {
-                store::deliver_business_command_outbox(&outbox_root, 10)
-            })
-            .await
-            .context("join business command outbox delivery")??;
-            Ok(outbox
-                .get("processed")
-                .and_then(Value::as_u64)
-                .unwrap_or_default() as usize)
-        }
-        .await;
-        match result {
-            Ok(0) => {
-                idle_rounds = idle_rounds.saturating_add(1);
-                tokio::time::sleep(Duration::from_secs(projection_sleep_secs(
-                    BUSINESS_COMMAND_ACTIVE_POLL_SECS,
-                    BUSINESS_COMMAND_IDLE_POLL_SECS,
-                    BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS,
-                    idle_rounds,
-                )))
-                .await;
-            }
-            Ok(_) => {
-                idle_rounds = 0;
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-            Err(err) => {
-                idle_rounds = 0;
-                eprintln!("[business-os] native business command outbox delivery failed: {err:#}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
     }
 }
 
@@ -4215,46 +4169,6 @@ const BUSINESS_COMMAND_RETRY_CANDIDATE_SQL: &str = r#"(
     )
   )
 )"#;
-
-async fn enqueue_business_command_document_with_database(
-    database: &Arc<RxDatabase>,
-    mut document: Value,
-) -> anyhow::Result<Value> {
-    let Some(object) = document.as_object_mut() else {
-        anyhow::bail!("business command document must be an object");
-    };
-    let command_id = object
-        .get("command_id")
-        .or_else(|| object.get("id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("business_command_{}", Uuid::new_v4().simple()));
-    let now = now_ms() as u64;
-    object.insert("id".to_string(), Value::String(command_id.clone()));
-    object.insert("command_id".to_string(), Value::String(command_id.clone()));
-    object
-        .entry("status".to_string())
-        .or_insert_with(|| Value::String("pending_sync".to_string()));
-    object
-        .entry("created_at_ms".to_string())
-        .or_insert_with(|| Value::from(now));
-    object.insert("updated_at_ms".to_string(), Value::from(now));
-
-    let commands = database
-        .collection("business_commands")
-        .context("business_commands collection is not registered")?;
-    let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
-    incremental_upsert_document_with_envelope(
-        &commands,
-        document.clone(),
-        &format!("enqueued business_command {command_id}"),
-    )
-    .await
-    .map_err(|err| anyhow::anyhow!("enqueue business command {command_id}: {err}"))?;
-    Ok(document)
-}
 
 async fn consume_pending_business_commands(
     root: &Path,
@@ -4536,19 +4450,6 @@ fn pending_business_command_documents_sync(
         }
     }
     Ok(documents)
-}
-
-async fn incremental_upsert_document_with_envelope(
-    collection: &Arc<RxCollection>,
-    document: Value,
-    label: &str,
-) -> anyhow::Result<()> {
-    let document = fill_projection_document_envelope(collection, document, label)?;
-    collection
-        .incremental_upsert(document)
-        .await
-        .map(|_| ())
-        .map_err(|err| anyhow::anyhow!("upsert {label}: {err}"))
 }
 
 async fn accept_pending_business_command(
@@ -4970,30 +4871,6 @@ async fn accept_pending_business_command(
     Ok(())
 }
 
-fn command_id_from_document(document: &Value) -> anyhow::Result<String> {
-    document
-        .get("command_id")
-        .or_else(|| document.get("id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .context("business command id is required")
-}
-
-fn typed_app_action_error_code(message: &str) -> Option<&'static str> {
-    [
-        "app_action_not_registered",
-        "app_action_input_invalid",
-        "app_action_permission_denied",
-        "app_action_definition_changed",
-        "app_runtime_reconfiguring",
-        "app_action_compensation_failed",
-    ]
-    .into_iter()
-    .find(|code| message.contains(code))
-}
-
 fn enrich_native_command_lifecycle(document: &mut Value, accepted: &Value) -> anyhow::Result<()> {
     if document.get("contract_version").and_then(Value::as_u64) != Some(2) {
         return Ok(());
@@ -5087,74 +4964,6 @@ fn enrich_native_command_lifecycle(document: &mut Value, accepted: &Value) -> an
     crate::command_lifecycle::validate_document(document).map_err(|error| anyhow::anyhow!(error))
 }
 
-async fn project_support_command_result(
-    root: PathBuf,
-    database: &Arc<RxDatabase>,
-    accepted: &Value,
-) -> anyhow::Result<()> {
-    let projections = accepted
-        .get("result")
-        .and_then(|result| result.get("projections"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for projection in projections {
-        let Some(collection) = projection
-            .get("collection")
-            .and_then(Value::as_str)
-            .and_then(support_projection_collection)
-        else {
-            continue;
-        };
-        let Some(record_id) = projection
-            .get("record_id")
-            .or_else(|| projection.get("id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        upsert_business_record_projection(root.clone(), database, collection, record_id).await?;
-    }
-    Ok(())
-}
-
-async fn project_threads_command_result(
-    root: PathBuf,
-    database: &Arc<RxDatabase>,
-    accepted: &Value,
-) -> anyhow::Result<()> {
-    let projections = accepted
-        .get("result")
-        .and_then(|result| result.get("projections"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for projection in projections {
-        let Some(collection) = projection
-            .get("collection")
-            .and_then(Value::as_str)
-            .and_then(threads_projection_collection)
-        else {
-            continue;
-        };
-        let Some(record_id) = projection
-            .get("record_id")
-            .or_else(|| projection.get("id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        upsert_business_record_projection(root.clone(), database, collection, record_id).await?;
-    }
-    Ok(())
-}
-
 fn is_transient_business_command_store_error(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}").to_ascii_lowercase();
     [
@@ -5200,39 +5009,6 @@ fn transient_business_command_retry_document(
     object.remove("error_code");
     object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
     Some(retry)
-}
-
-async fn project_appsec_command_result(
-    root: PathBuf,
-    database: &Arc<RxDatabase>,
-    accepted: &Value,
-) -> anyhow::Result<()> {
-    let projections = accepted
-        .pointer("/result/ctox_durable_projection/business_os_projection/projected_records")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for projection in projections {
-        let Some(collection) = projection
-            .get("collection")
-            .and_then(Value::as_str)
-            .and_then(appsec_projection_collection)
-        else {
-            continue;
-        };
-        let Some(record_id) = projection
-            .get("record_id")
-            .or_else(|| projection.get("id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        upsert_business_record_projection(root.clone(), database, collection, record_id).await?;
-    }
-    Ok(())
 }
 
 pub(super) async fn sync_business_users_with_database(
@@ -6433,7 +6209,7 @@ fn chat_tracking_message_age_ms(message: &serde_json::Map<String, Value>) -> i64
     (now_ms() as i64).saturating_sub(created_at)
 }
 
-async fn upsert_business_record_projection(
+pub(super) async fn upsert_business_record_projection(
     root: PathBuf,
     database: &Arc<RxDatabase>,
     collection_name: &'static str,
@@ -10399,6 +10175,7 @@ pub(in crate::business_os) mod tests {
     fn background_loops_use_a_sanctioned_idle_strategy() {
         let source = [
             include_str!("rxdb_peer.rs"),
+            include_str!("rxdb_peer_commands.rs"),
             include_str!("rxdb_peer_projections.rs"),
         ]
         .join("\n")

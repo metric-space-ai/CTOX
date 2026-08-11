@@ -33,7 +33,8 @@
 
 src/core/business_os/mcp_channel.rs = 6783
 src/core/business_os/office_engine.rs = 13953
-src/core/business_os/rxdb_peer.rs = 10165
+src/core/business_os/rxdb_peer.rs = 9941
+src/core/business_os/rxdb_peer_commands.rs = 251
 src/core/business_os/rxdb_peer_demand_files.rs = 237
 src/core/business_os/rxdb_peer_projections.rs = 551
 src/core/business_os/rxdb_peer_desktop_files.rs = 1908
