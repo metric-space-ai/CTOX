@@ -1236,3 +1236,26 @@ test('a company-level remark reviews only the named person instead of blocking t
   assert.equal(decisions.get('named').status, 'review');
   assert.equal(decisions.get('other').status, 'free');
 });
+
+test('die Beobachtungskennung ignoriert reines Neuschreiben ohne Inhaltsaenderung', () => {
+  // Auf der Kundeninstanz schreibt eine Schleife im nativen Peer dieselben sechs
+  // Vorgangsdokumente unveraendert neu — am 11.08.2026 gemessen mit zeitweise
+  // ueber 100 Revisionen je Minute, unabhaengig nachgewiesen bei
+  // replicationUp=false, also ganz ohne Browser. Solange updated_at_ms im
+  // Schluessel stand, galt jedes dieser Neuschreiben als neue Beobachtung und der
+  // Browser schrieb den Lead erneut: die Anzeige haette die Schleife angeheizt.
+  const vorgang = { command_id: 'cmd_research_1', terminal_status: 'completed', updated_at_ms: 1_000 };
+  const dasselbeNurNeuGeschrieben = { ...vorgang, updated_at_ms: 9_999_999 };
+  assert.equal(
+    hooks.researchCommandObservationKey(dasselbeNurNeuGeschrieben),
+    hooks.researchCommandObservationKey(vorgang),
+  );
+
+  // Der Statuswechsel muss weiterhin durchkommen — darauf beruht das Nachholen
+  // verspaeteter Ergebnisse, das heute vier Firmen ihre Belege zurueckgab.
+  const vorherGescheitert = { command_id: 'cmd_research_1', terminal_status: 'failed', updated_at_ms: 1_000 };
+  assert.notEqual(
+    hooks.researchCommandObservationKey(vorherGescheitert),
+    hooks.researchCommandObservationKey(vorgang),
+  );
+});

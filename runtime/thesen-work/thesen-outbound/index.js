@@ -2599,11 +2599,25 @@ function isTransientResearchWaitError(error) {
   return /wartet noch auf die R/i.test(String(error.message || ''));
 }
 
+// Kennung, MIT DER SICH INHALTLICH ETWAS GEAENDERT HAT — bewusst ohne Zeitstempel.
+//
+// Vorher stand updated_at_ms mit im Schluessel. Auf der Kundeninstanz laeuft eine
+// Schreibschleife im nativen Peer, die dieselben sechs Vorgangsdokumente
+// unveraendert immer wieder neu schreibt (am 11.08.2026 gemessen: zeitweise ueber
+// 100 Revisionen pro Minute, unabhaengig nachgewiesen bei replicationUp=false,
+// also voellig ohne Browser). Jedes dieser Neuschreiben hob updated_at_ms an, damit
+// aenderte sich der Schluessel, damit galt der Vorgang als neu beobachtet — und der
+// Browser schrieb den Lead erneut. Die Anzeige haette die Schleife also zusaetzlich
+// angeheizt, sobald jemand das Modul offen laesst.
+//
+// Der Status bleibt im Schluessel: der Uebergang failed -> completed muss weiterhin
+// durchkommen, denn genau darauf beruht das Nachholen verspaeteter Ergebnisse.
+// Die Ursache der Schleife selbst liegt im Peer und gehoert nicht hierher; dies ist
+// die Bremse auf unserer Seite, keine Behebung.
 function researchCommandObservationKey(command) {
   return [
     String(command?.command_id || command?.id || '').trim(),
     String(command?.terminal_status || command?.task_status || command?.status || command?.execution_phase || '').trim(),
-    Number(command?.updated_at_ms || command?.created_at_ms || 0),
   ].join(':');
 }
 
