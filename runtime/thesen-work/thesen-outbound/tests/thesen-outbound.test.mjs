@@ -1363,3 +1363,19 @@ test('ein Registerzeichen darf den CRM-Abgleich nicht abschneiden', () => {
   assert.notEqual(k('Muster Chemie GmbH'), k('Muster Technik GmbH'));
   assert.equal(k(''), '');
 });
+
+test('Namensvarianten werden gezielt abgefragt, nicht die ganze Collection geladen', () => {
+  // Der Lead heisst "CHEMOFAST Anchoring GmbH", die CRM-Organisation
+  // "CHEMOFAST® Anchoring GmbH". Ein normalisierter Vergleich braeuchte alle
+  // 17.520 Organisationen — am 12.08.2026 fror genau das die Seite ein
+  // (CDP-Timeout 45 s, renderer unresponsive) und musste zurueckgenommen werden.
+  // Wenige gezielte Punktabfragen kosten dagegen nichts, egal wie gross das CRM ist.
+  const v = hooks.firmenNamensvarianten('CHEMOFAST Anchoring GmbH');
+  assert.ok(v.includes('CHEMOFAST® Anchoring GmbH'), 'die CRM-Schreibweise muss dabei sein');
+  assert.ok(!v.includes('CHEMOFAST Anchoring GmbH'), 'der schon gepruefte Originalname faellt raus');
+  assert.ok(v.length <= 16, `Kandidatenliste bleibt klein, war ${v.length}`);
+
+  // Kein Name, keine Abfragen.
+  assert.deepEqual(hooks.firmenNamensvarianten(''), []);
+  assert.deepEqual(hooks.firmenNamensvarianten(null), []);
+});

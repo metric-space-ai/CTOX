@@ -1694,7 +1694,13 @@ async function loadSellifyRecipientContext(lead) {
       // Ohne exakten Treffer normalisiert nachschlagen — sonst bleibt der
       // Sperrvermerk fuer jede Firma ungeprueft, deren Name im CRM ein
       // Registerzeichen traegt.
-      // Auch hier kein Volltabellenscan — siehe findSellifyCompanyDuplicate.
+      // Auch hier gezielt statt Scan — siehe firmenNamensvarianten.
+      if (!exakt.length) {
+        for (const variante of firmenNamensvarianten(lead?.name)) {
+          const treffer = await findSellifyRecords(state.sellifyCompanies, { name: { $eq: variante } });
+          if (treffer.length) { companies.push(...treffer); break; }
+        }
+      }
     }
     const activeCompanies = uniqueSellifyRecords(companies);
     const people = [];
@@ -3010,6 +3016,36 @@ async function openSeriesEmailFromLead(id) {
   await state.ctx?.openApp?.('mail');
 }
 
+// Namensvarianten, die ein CRM ueblicherweise fuehrt — als GEZIELTE Abfragen.
+//
+// Der Lead heisst "CHEMOFAST Anchoring GmbH", die CRM-Organisation
+// "CHEMOFAST® Anchoring GmbH". Ein normalisierter Vergleich braeuchte alle 17.520
+// Organisationen; ueber die Bedarfsabfrage geladen friert das die Seite ein (am
+// 12.08.2026 gemessen und wieder zurueckgenommen). Statt zu scannen leiten wir
+// aus dem Leadnamen wenige plausible Schreibweisen ab und fragen sie einzeln
+// exakt ab. Das kostet eine Handvoll Punktabfragen, unabhaengig davon, wie gross
+// das CRM ist.
+function firmenNamensvarianten(name) {
+  const roh = String(name || '').trim();
+  if (!roh) return [];
+  const varianten = new Set([roh]);
+  const woerter = roh.split(/\s+/);
+  // Schutzzeichen direkt hinter einem der vorderen Woerter — so fuehren CRMs
+  // Marken ueblicherweise: "CHEMOFAST® Anchoring GmbH".
+  for (const zeichen of ['®', '™']) {
+    for (let i = 0; i < Math.min(woerter.length, 3); i += 1) {
+      const kopie = [...woerter];
+      kopie[i] = `${kopie[i]}${zeichen}`;
+      varianten.add(kopie.join(' '));
+      const mitLeerraum = [...woerter];
+      mitLeerraum.splice(i + 1, 0, zeichen);
+      varianten.add(mitLeerraum.join(' '));
+    }
+  }
+  varianten.delete(roh);
+  return [...varianten];
+}
+
 async function findSellifyCompanyDuplicate(lead) {
   const collection = sellifyReadCollection('sellify_companies');
   const matches = await collection.find({
@@ -3019,12 +3055,14 @@ async function findSellifyCompanyDuplicate(lead) {
   // Kein exakter Treffer? Dann normalisiert vergleichen. "CHEMOFAST Anchoring
   // GmbH" und "CHEMOFAST® Anchoring GmbH" sind dieselbe Firma; ein
   // Registerzeichen darf den ganzen CRM-Pfad nicht abschneiden.
-  // KEIN Volltabellenscan hier. Der normalisierte Namensvergleich braucht alle
-  // 17.520 Organisationen; ueber die Bedarfsabfrage in einem Rutsch geladen friert
-  // das die Seite ein (am 12.08.2026 gemessen: CDP-Timeout nach 45 s, Renderer
-  // unresponsive). Der Abgleich "CHEMOFAST Anchoring GmbH" gegen
-  // "CHEMOFAST® Anchoring GmbH" bleibt damit offen und gehoert serverseitig
-  // geloest — dort liegen die Daten ohnehin und ein Index kostet nichts.
+  // Kein Scan: wenige gezielte Punktabfragen auf plausible Schreibweisen.
+  if (!active.length) {
+    for (const variante of firmenNamensvarianten(lead.name)) {
+      const treffer = await collection.find({ selector: { name: { $eq: variante } } }).exec();
+      const lebend = treffer.filter((entry) => !entry.is_deleted);
+      if (lebend.length) { active = lebend; break; }
+    }
+  }
   if (active.length <= 1) return active[0] || null;
   const domain = normalizedDomain(lead.website || lead.domain);
   const postalCode = String(lead.data?.postal_code || lead.data?.plz || '').trim();
@@ -4256,6 +4294,7 @@ export const __thesenOutboundTestHooks = {
   researchFieldReview,
   uebernehmeCrmKontaktdaten,
   firmenSchluessel,
+  firmenNamensvarianten,
   researchFieldValue,
   validationBlockers,
   RESEARCH_FIELD_GROUPS,
