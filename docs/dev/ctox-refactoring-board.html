@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">25 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">26 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">MEILENSTEIN · gepusht</span>
+    <h3>Die Kampagne ist auf origin/main — <code>56677ca80..37f8353fb</code></h3>
+    <p>65 Commits (gesamte Plan-v2-Arbeit inkl. HEAD-Heilung, SYNC-F Runde 2, Peer-Zerlegung, P-Messungen) sind gepusht. GitHub Push Protection blockierte zweistufig am vendierten Google-OAuth-Wert (Client-ID + Secret) aus dem Fremd-Commit <code>1a0fd9fc3</code> — per Design öffentliche Installed-App-Werte, beide als false_positive via <code>gh api</code>-Bypass freigegeben, kein History-Rewrite. Damit ist das Ein-Platten-Risiko der 65 lokalen Commits beseitigt.</p>
+    <span class="ev"><b>Zweite F-Wurzel zu</b> stilles Verschwinden (unbaubarer HEAD) UND Ein-Platten-Risiko (ungepusht) sind beide behandelt</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-ok">MEILENSTEIN · F-Wurzel</span>
@@ -483,14 +490,8 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">9 Karten</span></div>
+  <div class="spalte-kopf"><h2>Rückstau &amp; Eigentümer</h2><span class="zaehler">8 Karten</span></div>
 
-  <article class="karte s-back">
-    <span class="chip c-owner">OWNER: Ein Klick bis zum Push</span>
-    <h3>GitHub Push Protection blockiert am vendierten OAuth-Client-Wert</h3>
-    <p>Der Kampagnen-Push (65 Commits inkl. HEAD-Heilung, Merge mit origin konfliktfrei, Bauprobe grün) scheitert an GH013: Google-OAuth-Client-ID in <code>1a0fd9fc3</code> (<code>cliproxyapi/internal/auth/antigravity/constants.rs:21</code>) — vendierte Upstream-Konstante, laut Code-Kommentar und Google-Doku ein öffentlicher Installed-App-Wert. History-Rewrite verboten; Freischalten geht nur über dein GitHub-Konto: <code>github.com/metric-space-ai/ctox/security/secret-scanning/unblock-secret/3HltKTMxW6dnJmGx7NgxWZa1q9Y</code> — danach <code>git push origin main</code>.</p>
-    <span class="ev"><b>Bewertung</b> CLIENT_ID+Installed-App-SECRET sind per Design öffentlich (stecken in jedem Client); wenn du sie dennoch nicht publizieren willst, braucht der Port eine Laufzeit-Bezugsquelle — eigenes Ticket</span>
-  </article>
 
   <article class="karte s-back">
     <span class="chip c-alert">OWNER: Workjet-Update blockiert alle lokalen Worker</span>
