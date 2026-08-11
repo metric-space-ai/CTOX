@@ -35,7 +35,18 @@ wird erst mit verbundenem Browser wahr); nicht gewertet.
 Die vom Owner benannten „vielen Sekunden“ sind damit lokalisierbar:
 serielle Collection-Starts plus ein einzelner Ausreißer.
 
-## M3 Command-Bus — DEFEKT, Latenz nicht messbar
+## M3 — Nachtrag (21:30): Verarbeitung funktioniert, Rückmeldung defekt, Latenz in Sekunden
+
+Direktabfrage der `business_commands`-Collection zeigt: **alle 60 abgesetzten
+Commands kamen an und wurden nativ `completed`.** Der Defekt liegt allein im
+Browser-Tracking (`waitForTerminal`), das trotz Erfolg den
+QUERY_STREAM-Fehler wirft — die UI meldet Fehlschlag bei serverseitigem
+Erfolg. Echte Roundtrip-Latenz aus den Dokument-Zeitstempeln
+(created→updated, 60 Commands, trivialer Status-Command):
+**p50 3,56 s · p95 7,47 s · min 0,18 s · max 9,0 s** — Sekunden statt
+Millisekunden.
+
+## M3 Command-Bus — ursprünglicher Befund (Tracking-Pfad)
 
 30 Dispatches `ctox.provider_subscription.status` über den offiziellen
 Modul-Command-Bus (`createModuleContext({id:'ctox',
@@ -63,7 +74,17 @@ Daemon hart getötet, 20 s Ausfall, Neustart (~18 s bis HTTP). Browser:
 Serverrückkehr alle wieder verbunden**. Kein hängender Zustand, Room-Circuit
 blieb geschlossen, `lastError` null. (Vier Collections melden dauerhaft
 Status `reused` — das ist Bridge-Wiederverwendung, kein Fehler.)
-Ausstehend: 9 weitere Zyklen, Schreib-vor-Kill-Datenverlustprüfung.
+Ausstehend nach Zyklus 1: 9 weitere Zyklen, Verlustprüfung.
+
+### Zyklus 2 (mit Verlustprobe) — bestanden
+
+Command 252 ms vor dem Daemon-Kill abgesetzt (Dispatch erfolgreich, lokales
+IndexedDB-Write). Daemon 15 s tot, Neustart, Resynchronisation vollständig
+(0 getrennte Collections ≤105 s nach Kill inkl. Ausfall- und Startzeit).
+Die Verlustprobe: **vorhanden und nativ `completed`** — der ungesyncte Write
+überlebte den Kill und wurde nach Rückkehr verarbeitet. Kein Datenverlust.
+(Anmerkung: `idempotencyKey` aus dem Dispatch-Aufruf wird ignoriert und
+systemseitig vergeben — kleiner API-Vertragsbefund am Rande.)
 
 ## M5 Multi-User — ausstehend
 
