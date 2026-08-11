@@ -1,4 +1,4 @@
-import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';
 

@@ -1,6 +1,6 @@
 import {
   readStoredFileFromDemandChunks,
-} from '../../shared/file-integrity.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from '../../shared/file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
 
 const BUILD = '20260721-ia-grammar-v30';
 const MODULE_ID = 'cv-print-builder';

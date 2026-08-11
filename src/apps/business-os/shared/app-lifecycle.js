@@ -2,7 +2,7 @@ import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './permissions.js?v=20260811-fremde-collection-mitladen-v106';
 
 export function parseBusinessAppSemver(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(String(version || '').trim());

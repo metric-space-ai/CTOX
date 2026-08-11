@@ -3,7 +3,7 @@ import {
   transcodeApp,
   suggestedModuleId,
   scaffoldModule,
-} from '../../shared/app-transcode.mjs?v=20260811-antwort-holt-keine-ansicht-v105';
+} from '../../shared/app-transcode.mjs?v=20260811-fremde-collection-mitladen-v106';
 
 // The App Importer is the hand-over moment of the product story: a coding
 // agent conceived the app, the importer raises it. Source (folder or public

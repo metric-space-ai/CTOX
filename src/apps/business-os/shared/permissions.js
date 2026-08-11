@@ -1,4 +1,4 @@
-import { normalizeRole, roleCanManage } from './roles.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { normalizeRole, roleCanManage } from './roles.js?v=20260811-fremde-collection-mitladen-v106';
 
 export const BusinessOsPermissions = Object.freeze({
   WorkspaceManage: 'workspace.manage',

@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './permissions.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './branding.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './roles.js?v=20260811-fremde-collection-mitladen-v106';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
 
 const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
   codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),

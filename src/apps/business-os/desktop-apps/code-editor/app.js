@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from '../../shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
 
 export const manifest = {
   id: 'code-editor',

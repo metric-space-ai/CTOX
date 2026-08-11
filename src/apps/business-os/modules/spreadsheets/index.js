@@ -1,6 +1,6 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-antwort-holt-keine-ansicht-v105';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-fremde-collection-mitladen-v106';
 
 const CSV_MIME = 'text/csv';
 const TSV_MIME = 'text/tab-separated-values';

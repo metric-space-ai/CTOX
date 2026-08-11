@@ -1,7 +1,7 @@
-import { collections as ctoxCollections } from '../ctox/schema.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { collections as ctoxCollections } from '../ctox/schema.js?v=20260811-fremde-collection-mitladen-v106';
 import { collections as conversationCollections } from '../conversations/schema.js';
 import { collections as customerCollections } from '../customers/schema.js';
-import { collections as desktopCollections } from '../desktop/schema.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { collections as desktopCollections } from '../desktop/schema.js?v=20260811-fremde-collection-mitladen-v106';
 import { collections as ticketCollections } from '../tickets/schema.js';
 
 const textArray = { type: 'array', items: { type: 'string' } };

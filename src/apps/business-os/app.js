@@ -1,33 +1,33 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { createAppActions } from './shared/app-actions.js?v=20260811-antwort-holt-keine-ansicht-v105';
+import { CtoxResizer } from './shared/resizer.js?v=20260811-fremde-collection-mitladen-v106';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260811-fremde-collection-mitladen-v106';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260811-fremde-collection-mitladen-v106';
+import { createAppActions } from './shared/app-actions.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/app-lifecycle.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/branding.js?v=20260811-fremde-collection-mitladen-v106';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   launchesInWindow,
   resolvePresentation,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/presentation.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -38,9 +38,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260811-antwort-holt-keine-ansicht-v105';
-import { createDocumentsFacade } from './shared/documents.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260811-fremde-collection-mitladen-v106';
+import { createDocumentsFacade } from './shared/documents.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -48,16 +48,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/maintenance-state.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/workspace-session.js?v=20260811-fremde-collection-mitladen-v106';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260811-antwort-holt-keine-ansicht-v105';
+} from './shared/taskbar-pins.js?v=20260811-fremde-collection-mitladen-v106';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260811-antwort-holt-keine-ansicht-v105';
+const APP_BUILD = '20260811-fremde-collection-mitladen-v106';
 
 ensureShellStylesheets();
 
@@ -5298,9 +5298,53 @@ function withMigrationStrategies(collections, migrationStrategies = {}) {
 // touches sync at all (apps just read/write). Kept thin (not fully removed)
 // because the sync runtime still owns connection-handler + signaling config,
 // and moving that into RxDB is a larger, separately-shippable refactor.
+// Eine App, die eine fremde Collection deklariert, muss sie auch lesen koennen —
+// ohne dass der Nutzer vorher die besitzende App geoeffnet hat.
+//
+// THESEN Outbound deklariert sellify_companies und sellify_people, um vor jeder
+// Recherche im CRM nachzuschlagen: existiert die Firma schon, ist es eine
+// Nachrecherche, und die dort gefuehrten Ansprechpartner (im Schnitt 3,5 je
+// Firma) sind bereits bekannt. Registriert wurden diese Collections aber nur
+// beim Start der Sellify-App. Wer Outbound oeffnete, ohne vorher Sellify
+// anzufassen, bekam von ctx.db.collection('sellify_companies') null zurueck; der
+// Nachschlag warf, wurde stillschweigend gefangen und JEDE Firma lief als
+// Neuanlage. Am 11.08.2026 gemessen: 17.520 Firmen und 60.640 Personen lagen auf
+// dem Server bereit, im Browser kam davon kein einziger Datensatz an, und die
+// Fehlermeldung sagte woertlich "Bitte Sellify einmal oeffnen" — eine Bedingung,
+// die kein Nutzer kennen kann und keine Recherche haben darf.
+function collectForeignSchemaModules(mod) {
+  const declared = Array.isArray(mod?.collections) ? mod.collections : [];
+  if (!declared.length || !Array.isArray(state.modules)) return [];
+  const eigene = new Set(declared.filter((name) => String(name || '').startsWith(`${mod.id}_`)));
+  const gesucht = declared
+    .map((name) => String(name || '').trim())
+    .filter((name) => name && !eigene.has(name));
+  if (!gesucht.length) return [];
+  const besitzer = new Map();
+  for (const other of state.modules) {
+    if (!other?.id || other.id === mod.id) continue;
+    const fremde = Array.isArray(other.collections) ? other.collections : [];
+    for (const name of gesucht) {
+      if (fremde.includes(name)) besitzer.set(other.id, other);
+    }
+  }
+  return [...besitzer.values()];
+}
+
 function startModuleSync(mod) {
   if (!mod?.id || !state.sync) return Promise.resolve(null);
   return registerModuleSchemas(mod)
+    .then(async () => {
+      // Fehlschlaege hier duerfen den Start der eigentlichen App nicht kippen:
+      // ohne die Fremd-Collection arbeitet sie schlechter, aber sie arbeitet.
+      for (const fremd of collectForeignSchemaModules(mod)) {
+        try {
+          await registerModuleSchemas(fremd);
+        } catch (error) {
+          console.warn(`[business-os] Fremdschema ${fremd.id} fuer ${mod.id} nicht registrierbar`, error);
+        }
+      }
+    })
     .then(() => {
       state.schemaImportRetries.delete(mod.id);
       if (typeof state.sync.leaseModule === 'function') {
