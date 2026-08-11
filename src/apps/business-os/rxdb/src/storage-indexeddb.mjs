@@ -12,8 +12,13 @@ import {
 import { masterAcknowledgesLocal, openRecoveryJournal } from './recovery-journal.mjs';
 import { recoverQueryMetaQuota } from './query-meta-storage.mjs';
 
-const DB_VERSION = 3;
+// IndexedDB versions are a monotonic compatibility contract. Version 4 was
+// already shipped with the collection schema marker store; even when the
+// marker feature is not active, reopening an existing v4 database as v3
+// throws VersionError before Business OS can start.
+const DB_VERSION = 4;
 const DOCUMENT_STORE = 'documents';
+const COLLECTION_SCHEMA_MARKER_STORE = 'collectionSchemaMarkers';
 const SCHEMA_INDEX_ENTRIES = 'schemaIndexEntries';
 const PUSHABLE_LWT_INDEX = 'collectionPushableLwtId';
 const OPEN_DATABASE_TIMEOUT_MS = 4000;
@@ -1181,6 +1186,13 @@ function openDatabase(databaseName) {
       if (store && !store.indexNames.contains(PUSHABLE_LWT_INDEX)) {
         store.createIndex(PUSHABLE_LWT_INDEX, ['collection', 'pushable', 'lwt', 'id'], { unique: false });
         migrateStoredReplicationFlags(store);
+      }
+      // Preserve the schema shape that shipped with DB_VERSION 4. The store is
+      // intentionally retained even while no current code consumes it, so a
+      // new v4 profile and an upgraded v3 profile remain byte-layout compatible
+      // with already existing v4 browser profiles.
+      if (!db.objectStoreNames.contains(COLLECTION_SCHEMA_MARKER_STORE)) {
+        db.createObjectStore(COLLECTION_SCHEMA_MARKER_STORE, { keyPath: 'collection' });
       }
     };
     request.onsuccess = () => {
