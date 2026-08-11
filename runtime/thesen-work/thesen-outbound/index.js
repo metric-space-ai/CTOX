@@ -157,6 +157,10 @@ const RESEARCH_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
 // Sekunden; 30 Minuten lassen Warteschlange und Wiederholung reichlich Luft und
 // beenden trotzdem den Zustand, in dem ANGUS Chemie ueber fuenf Stunden hing.
 const RESEARCH_RUNNING_MAX_MS = 30 * 60 * 1000;
+// Frist fuer die Sperrvermerkspruefung gegen die CRM-Projektion. Grosszuegig
+// genug fuer eine kalte Bedarfsabfrage ueber 60.639 Personen, kurz genug, dass
+// ein Knopfdruck nicht ins Leere laeuft.
+const RECIPIENT_ELIGIBILITY_TIMEOUT_MS = 12_000;
 const LEGACY_RESEARCH_POLICY_IMPORT_ID = 'settings_research_policy';
 const REPLICATED_COLLECTIONS = Object.freeze([
   'thesen_outbound_sources',
@@ -1656,6 +1660,22 @@ async function findSellifyRecords(collection, selector) {
 }
 
 async function loadSellifyRecipientContext(lead) {
+  // Die Sperrvermerkspruefung darf nicht daran scheitern, dass zufaellig noch
+  // niemand sellifyReadCollection() gerufen hat. state.sellifyPeople ist ein
+  // Zwischenspeicher, der erst beim ersten Zugriff gefuellt wird — beim Rendern
+  // der Empfaengerliste passierte das nie. Ergebnis am 11.08.2026: jeder Kontakt
+  // stand auf "Sellify-Sperrvermerk nicht pruefbar", das Haekchen war
+  // deaktiviert, und damit endete die Kette vor der Uebergabe. Das System hat
+  // dabei richtig gehandelt — ohne Pruefung der Kontaktsperre darf niemand
+  // angeschrieben werden; es konnte nur nicht pruefen.
+  if (!state.sellifyPeople?.find || !state.sellifyCompanies?.find) {
+    try {
+      sellifyReadCollection('sellify_companies');
+      sellifyReadCollection('sellify_people');
+    } catch (error) {
+      console.warn('[thesen-outbound] Sellify-Projektion fuer die Sperrvermerkspruefung nicht erreichbar', error);
+    }
+  }
   if (!state.sellifyPeople?.find || !state.sellifyCompanies?.find) {
     return { people: [], companies: [], contextAvailable: false };
   }
@@ -1704,7 +1724,27 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
       currentContactEligibility(lead, contact),
     ]));
   }
-  const context = await loadSellifyRecipientContext(lead);
+  // Die Sperrvermerkspruefung fragt die CRM-Projektion ab — in diesem Mandanten
+  // 17.520 Firmen und 60.639 Personen, die per Bedarfsabfrage erst geladen
+  // werden muessen. Bleibt diese Abfrage haengen, haengt der ganze Aufrufer mit:
+  // am 11.08.2026 fuehrte der Klick "Zu Sellify (nur aktualisieren)" zu gar
+  // nichts. Kein Vorgang, kein Fehler, keine Meldung — sendLeadToSellify stand
+  // in genau diesem await und erreichte die Zeile nie, die sellify_status auf
+  // "queued" setzt. Fuer den Nutzer war der Knopf kaputt.
+  //
+  // Nach der Frist gilt der Kontext als NICHT verfuegbar. Das ist die sichere
+  // Richtung: nicht pruefbar heisst gesperrt, niemand wird versehentlich
+  // angeschrieben — aber der Aufrufer bekommt eine Antwort und kann es sagen.
+  const context = await Promise.race([
+    loadSellifyRecipientContext(lead),
+    new Promise((resolve) => setTimeout(
+      () => resolve({ people: [], companies: [], contextAvailable: false, timedOut: true }),
+      RECIPIENT_ELIGIBILITY_TIMEOUT_MS,
+    )),
+  ]);
+  if (context.timedOut) {
+    console.warn('[thesen-outbound] Sperrvermerkspruefung hat die Frist ueberschritten', lead.id);
+  }
   const decisions = deriveLeadRecipientEligibility(lead, context);
   for (const [contactId, decision] of decisions) {
     state.recipientEligibility.set(recipientEligibilityKey(lead.id, contactId), decision);
