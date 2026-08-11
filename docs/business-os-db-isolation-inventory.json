@@ -1,6 +1,6 @@
 {
   "schema_version": "business-os-db-isolation-inventory-v1",
-  "updated_at": "2026-07-22",
+  "updated_at": "2026-08-06",
   "owner": "business-os-platform",
   "purpose": "Phase 13A inventory plus Phase 13D drift guard for packaged/core module data-isolation migration, unscoped facade exceptions, and tested scoped system/internal module exceptions.",
   "modules": {
@@ -179,6 +179,25 @@
         "uses_cached_db_handle": false
       },
       "notes": "P13C packaged user-module batch: conversations uses the guarded DB facade in Shell context. Browser/Rust dynamic-app smoke requires collection/property/raw/context denial on the manifest-declared business_commands collection before data.read, read success after an exact collection data.read grant and write denial without data.write."
+    },
+    "mail": {
+      "title": "Mail",
+      "manifest_path": "src/apps/business-os/modules/mail/module.json",
+      "source_path": "src/apps/business-os/modules/mail",
+      "install_scope": "core",
+      "distribution": "system-module",
+      "default_installed": true,
+      "classification": "system-collaboration-module",
+      "isolation_status": "guarded-facade-migrated",
+      "owner": "business-os-platform",
+      "review_by": "2026-08-06",
+      "db_access": {
+        "uses_raw_db": false,
+        "uses_collection_property_access": false,
+        "uses_collections_proxy": false,
+        "uses_cached_db_handle": false
+      },
+      "notes": "Mail resolves only its manifest-declared communication and outbound collections through ctx.db.collection(name). The browser app filters assigned/shared mailbox accounts and campaign membership for UX, while write permission checks and every approval/send transition remain server-authoritative through the native Outbound command bus. No HTTP business-data path or raw database access is used."
     },
     "creator": {
       "title": "App Creator",

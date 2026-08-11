@@ -327,7 +327,29 @@ test('detail pane reviews all 21 research fields in three groups and keeps scrol
   // the handover only updates the record or also adds it to the campaign.
   assert.match(source, /data-action="sellify-update-only"/);
   assert.match(source, /data-action="sellify-update-campaign"/);
+  assert.match(source, /data-action="mail-series-email"/);
+  assert.match(source, /openSeriesEmailFromLead/);
   assert.match(source, /data-action="edit-lead"/);
+});
+
+test('Sellify recipient selection hands eligible addresses to Mail series email', () => {
+  const lead = {
+    id: 'lead-mail', campaign: 'August-Welle',
+    contacts: [
+      { id: 'a', email: 'A@Example.test' },
+      { id: 'b', person_email: 'b@example.test' },
+      { id: 'blocked', email: 'blocked@example.test' },
+    ],
+    selected_contact_ids: ['a', 'b', 'blocked'],
+  };
+  const decisions = new Map([
+    ['a', { status: 'free' }], ['b', { status: 'free' }], ['blocked', { status: 'blocked' }],
+  ]);
+  const handoff = hooks.seriesEmailHandoffForLead(lead, decisions);
+  assert.deepEqual(handoff.recipients, ['a@example.test', 'b@example.test']);
+  assert.match(handoff.hash, /^#mail\?action=series-email&source_module=sellify/);
+  assert.match(handoff.hash, /recipients=a%40example\.test%2Cb%40example\.test/);
+  assert.equal(handoff.excluded.length, 1);
 });
 
 test('native person research result writes typed values, contacts, and field evidence', () => {

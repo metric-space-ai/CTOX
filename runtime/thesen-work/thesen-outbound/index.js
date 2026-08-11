@@ -931,6 +931,7 @@ function renderDetail() {
         <button class="ctox-button" data-action="validate-lead" data-id="${escapeHtml(lead.id)}" ${readyForValidation ? '' : 'disabled'} title="${escapeHtml(validateLabel)}">${icon('check')}<span>${escapeHtml(validateLabel)}</span></button>
         <button class="ctox-button" data-action="sellify-update-only" data-id="${escapeHtml(lead.id)}" ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(handoffTitle || tr('sellifyUpdateOnlyTitle', 'Organisation und ausgewählte Personen in Sellify aktualisieren.'))}">${icon('send')}<span>${tr('sellifyUpdateOnly', 'Zu Sellify (nur aktualisieren)')}</span></button>
         <button class="ctox-button" data-action="sellify-update-campaign" data-id="${escapeHtml(lead.id)}" ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(handoffTitle || tr('sellifyUpdateCampaignTitle', 'Organisation und ausgewählte Personen aktualisieren und der Kampagne hinzufügen.'))}">${icon('send')}<span>${tr('sellifyUpdateCampaign', 'Zu Sellify (aktualisieren & Kampagne)')}</span></button>
+        <button class="ctox-button" data-action="mail-series-email" data-id="${escapeHtml(lead.id)}" ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(handoffTitle || tr('mailSeriesEmailTitle', 'Ausgewählte, freigegebene Personen in eine Serien-E-Mail übernehmen.'))}">${icon('send')}<span>${tr('mailSeriesEmail', 'Als Serien-E-Mail')}</span></button>
       </div>
       ${renderResearchReviewGroups(review, lead)}
     </div>`;
@@ -1094,6 +1095,7 @@ async function handleClick(event) {
   }
   if (action === 'sellify-update-only') await sendLeadToSellify(id, { includeCampaign: false });
   if (action === 'sellify-update-campaign') await sendLeadToSellify(id, { includeCampaign: true });
+  if (action === 'mail-series-email') await openSeriesEmailFromLead(id);
   if (action === 'add-source') await addSource();
 }
 
@@ -2786,6 +2788,38 @@ async function sendLeadToSellify(id, { includeCampaign = false } = {}) {
   }
 }
 
+function seriesEmailHandoffForLead(lead, decisions = null) {
+  const plan = buildCampaignRecipientList(lead, decisions);
+  const recipients = [...new Set(plan.recipients
+    .map((contact) => String(contact.email || contact.person_email || '').trim().toLowerCase())
+    .filter((address) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)))];
+  const params = new URLSearchParams({
+    action: 'series-email',
+    source_module: 'sellify',
+    recipients: recipients.join(','),
+    subject: String(lead?.campaign || state.selectedCampaign || '').trim(),
+  });
+  return { recipients, hash: `#mail?${params.toString()}`, excluded: plan.excluded };
+}
+
+async function openSeriesEmailFromLead(id) {
+  const lead = state.leads.find((entry) => entry.id === id);
+  if (!lead || lead.validation_status !== 'validated') {
+    showBusinessAlert('Bitte den Lead vor der Serien-E-Mail validieren.');
+    return;
+  }
+  const decisions = await refreshLeadRecipientEligibility(lead, { force: true });
+  const handoff = seriesEmailHandoffForLead(lead, decisions);
+  if (!handoff.recipients.length) {
+    showBusinessAlert(handoff.excluded.length
+      ? 'Die ausgewählten Personen sind gesperrt oder müssen zuerst geprüft werden.'
+      : 'Bitte mindestens eine Person mit gültiger E-Mail-Adresse auswählen.');
+    return;
+  }
+  location.hash = handoff.hash;
+  await state.ctx?.openApp?.('mail');
+}
+
 async function findSellifyCompanyDuplicate(lead) {
   const collection = sellifyReadCollection('sellify_companies');
   const matches = await collection.find({
@@ -3878,6 +3912,7 @@ export const __thesenOutboundTestHooks = {
   // and no recipient selection could persist.
   sellifyHandoffPrecondition,
   sendLeadToSellify,
+  seriesEmailHandoffForLead,
   setContactRecipientSelection,
   buildCampaignRecipientList,
   classifySellifyPerson,
