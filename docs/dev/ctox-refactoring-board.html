@@ -191,8 +191,8 @@ footer{
     <b style="color:var(--fg,inherit)">Messtore für die Produktnote (je: Messaufbau + Zahl + Wiederholbarkeit):</b>
     <b>M1 Kaltstart: GEMESSEN</b> — Median <b>15,5 s</b> bis HTTP (8–27 s Streuung, leerer Store, Debug-Binary; Erststart 88 s; Release-Nachmessung läuft).
     <b>M2 Browser-Boot: GEMESSEN</b> — Shell interaktiv 1,75 s, aber alle 15 Boot-Collections erst nach <b>15,9 s</b> live: serielle Start-Queue ~1 s/Collection + desktop_icons allein 11,1 s.
-    <b>M3 Command-Bus: DEFEKT</b> — 30/30 Dispatches scheitern an <code>SQLITE_QUERY_STREAM_UNSUPPORTED</code> (query-fetch verweigert nicht-SQL-kompilierbare Mango-Query); Command-Plane-Zähler dieser frischen Instanz: leer. Latenz erst nach Fix messbar.
-    <b>M4 Abbruch-Churn: Zyklus 1/10</b> — Daemon-Kill, 20 s Ausfall: volle Resynchronisation ~30 s nach Serverrückkehr, kein Hängen, Circuit blieb zu. Offen: 9 Zyklen + Datenverlustprüfung.
+    <b>M3 Command-Bus: GEMESSEN + 1 Defekt</b> — Verarbeitung funktioniert (60/60 nativ completed), Roundtrip <b>p50 3,6 s / p95 7,5 s</b> für einen trivialen Status-Command (Sekunden statt Millisekunden). Defekt: <code>waitForTerminal</code> wirft <code>SQLITE_QUERY_STREAM_UNSUPPORTED</code> trotz Erfolg — die UI meldet Fehlschlag bei serverseitigem Erfolg. Rand: <code>idempotencyKey</code> im Dispatch wird ignoriert.
+    <b>M4 Abbruch-Churn: 2/10 Zyklen, beide sauber</b> — volle Resynchronisation ~30 s nach Serverrückkehr, kein Hängen; <b>Verlustprobe bestanden</b>: Write 252 ms vor dem Kill überlebt und wird nach Rückkehr nativ verarbeitet.
     <b>M5 Multi-User: OFFEN</b> — braucht zweite echte Nutzersitzung (Invite-Flow).
     Beweis: <code>docs/dev/beweise/produkt-messung-m1-m5-2026-08-12.md</code> (Commit 0169d1ebb). Nach aktueller Faktenlage wäre die Produktnote schlecht — langsamer Boot, ein Kernpfad defekt; Erholung funktioniert.
   </div>
