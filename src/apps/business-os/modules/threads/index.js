@@ -1,4 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { renderHtmlIfChanged } from '../../shared/stable-dom.js';
 import {
   THREAD_COLLECTIONS,
   buildApprovalRequestPayload,
@@ -814,8 +815,8 @@ function renderList(threads, { resetScroll = false } = {}) {
   if (!els.list) return;
   // Data re-renders never move the operator: preserve the scroll offset across
   // the rebuild (intentional resets — search/view/filter — pass resetScroll
-  // because the content set changed). The shell scroll guard backs this up.
-  const scrollTop = resetScroll ? 0 : els.list.scrollTop;
+  // because the content set changed). Prefer skipping the write entirely when
+  // the data signature is unchanged; selection is an in-place class flip.
   if (!threads.length) {
     // Data-driven empty: only when the UNFILTERED source (user_threads) is
     // empty. While that collection has not finished its initial replication
@@ -823,27 +824,34 @@ function renderList(threads, { resetScroll = false } = {}) {
     // or searched-out list (source non-empty) stays a plain filter empty.
     const readiness = state.threadsReadiness || readThreadsReadiness();
     if (!state.data.threads.length && readiness?.ready === false) {
-      els.list.innerHTML = `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(state.t('syncingThreads', 'Threads werden synchronisiert.'))}</div>`;
+      renderHtmlIfChanged(
+        els.list,
+        `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(state.t('syncingThreads', 'Threads werden synchronisiert.'))}</div>`,
+        { signature: 'state:syncing', preserveScroll: !resetScroll },
+      );
     } else {
-      els.list.innerHTML = `<div class="ctox-empty">${escapeHtml(state.t('noThreads', 'Keine relevanten Threads vorhanden.'))}</div>`;
+      renderHtmlIfChanged(
+        els.list,
+        `<div class="ctox-empty">${escapeHtml(state.t('noThreads', 'Keine relevanten Threads vorhanden.'))}</div>`,
+        { signature: 'state:empty', preserveScroll: !resetScroll },
+      );
     }
-    els.list.scrollTop = scrollTop;
+    if (resetScroll) els.list.scrollTop = 0;
     return;
   }
   const me = currentUserId();
-  els.list.innerHTML = threads.map((thread) => {
+  const html = threads.map((thread) => {
     const pending = approvalsForThread(thread.id).filter((item) => item.status === 'pending').length;
     const unread = unreadNotificationsForThread(thread.id, me).length;
     const why = whyMeLine(thread, pending);
     const preview = foreignPreview(thread);
-    const selected = thread.id === state.selectedId;
     return `
-      <button type="button" class="ctox-list-item threads-list-item ${selected ? 'is-selected' : ''} ${unread ? 'is-unread' : ''}"
+      <button type="button" class="ctox-list-item threads-list-item ${unread ? 'is-unread' : ''}"
         data-thread-id="${escapeAttr(thread.id)}"
         data-context-record-id="${escapeAttr(thread.source_record_id || thread.id)}"
         data-context-record-type="thread"
         data-context-label="${escapeAttr(thread.title || '')}"
-        aria-selected="${selected}">
+        aria-selected="false">
         <span class="threads-item-anchor" aria-hidden="true">
           <span class="threads-item-dot"></span>
           <span class="threads-item-avatar">${escapeHtml(threadSenderInitial(preview))}</span>
@@ -859,7 +867,17 @@ function renderList(threads, { resetScroll = false } = {}) {
       </button>
     `;
   }).join('');
-  els.list.scrollTop = scrollTop;
+  const signature = JSON.stringify(threads.map((thread) => ([
+    thread.id,
+    thread.title || '',
+    thread.last_message_at_ms || thread.updated_at_ms || 0,
+    approvalsForThread(thread.id).filter((item) => item.status === 'pending').length,
+    unreadNotificationsForThread(thread.id, me).length,
+    foreignPreview(thread).text,
+  ])));
+  renderHtmlIfChanged(els.list, html, { signature, preserveScroll: !resetScroll });
+  if (resetScroll) els.list.scrollTop = 0;
+  applyThreadSelection();
 }
 
 // In-place selection: flip is-selected/aria-selected across the existing rows,

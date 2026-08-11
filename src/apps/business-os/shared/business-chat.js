@@ -513,16 +513,20 @@ function alignChatWindows(root) {
   const isNarrow = window.innerWidth <= 780;
 
   if (isNarrow) {
-    stageInner.classList.remove('is-side-by-side');
+    if (stageInner.classList.contains('is-side-by-side')) {
+      stageInner.classList.remove('is-side-by-side');
+    }
     windows.forEach((win) => {
-      win.style.position = '';
-      win.style.left = '';
+      setStyleIfChanged(win, 'position', '');
+      setStyleIfChanged(win, 'left', '');
     });
     return;
   }
 
   const hasMaximized = windows.some((win) => win.classList.contains('is-maximized'));
-  stageInner.classList.toggle('has-maximized', hasMaximized);
+  if (stageInner.classList.contains('has-maximized') !== hasMaximized) {
+    stageInner.classList.toggle('has-maximized', hasMaximized);
+  }
 
   const rootRect = stageInner.getBoundingClientRect();
   const gap = 12;
@@ -557,7 +561,9 @@ function alignChatWindows(root) {
   const totalWidthNeeded = positions.reduce((sum, item) => sum + item.width, 0)
     + Math.max(0, positions.length - 1) * gap;
   const fitsSideBySide = totalWidthNeeded <= layoutFrame.width;
-  stageInner.classList.toggle('is-side-by-side', fitsSideBySide);
+  if (stageInner.classList.contains('is-side-by-side') !== fitsSideBySide) {
+    stageInner.classList.toggle('is-side-by-side', fitsSideBySide);
+  }
 
   if (fitsSideBySide && positions.length > 0) {
     for (let iteration = 0; iteration < 10; iteration += 1) {
@@ -597,18 +603,18 @@ function alignChatWindows(root) {
   }
 
   positions.forEach(({ win, left }) => {
-    win.style.position = 'absolute';
+    setStyleIfChanged(win, 'position', 'absolute');
     const width = win.classList.contains('is-maximized') ? 440 : 320;
     const nextLeft = fitsSideBySide || win.classList.contains('is-active')
       ? clampChatWindowLeft(left, width, layoutFrame)
       : left;
-    win.style.left = `${nextLeft}px`;
+    setStyleIfChanged(win, 'left', `${nextLeft}px`);
   });
 
   const spacer = stageInner.querySelector('.ctox-chat-stage-spacer');
   if (spacer) {
-    spacer.style.position = 'absolute';
-    spacer.style.width = '1px';
+    setStyleIfChanged(spacer, 'position', 'absolute');
+    setStyleIfChanged(spacer, 'width', '1px');
   }
 }
 
@@ -704,15 +710,60 @@ function setWindowInteractiveState(win, isActive) {
         node.removeAttribute('tabindex');
         delete node.dataset.chatInactiveTabManaged;
       }
-      node.removeAttribute('aria-hidden');
+      if (node.hasAttribute('aria-hidden')) node.removeAttribute('aria-hidden');
       return;
     }
     if (!node.hasAttribute('tabindex')) {
       node.dataset.chatInactiveTabManaged = 'true';
+      node.setAttribute('tabindex', '-1');
+    } else if (node.dataset.chatInactiveTabManaged === 'true' && node.getAttribute('tabindex') !== '-1') {
+      node.setAttribute('tabindex', '-1');
     }
-    node.setAttribute('tabindex', '-1');
-    node.setAttribute('aria-hidden', 'true');
+    if (node.getAttribute('aria-hidden') !== 'true') {
+      node.setAttribute('aria-hidden', 'true');
+    }
   });
+}
+
+// Identical textContent / className / attribute writes force a layout pass even
+// when nothing visible moved. Status ticks used to hit these paths every few
+// seconds and the chat bar looked like it was rebuilding itself.
+function setTextIfChanged(element, value) {
+  const next = String(value ?? '');
+  if (!element || element.textContent === next) return false;
+  element.textContent = next;
+  return true;
+}
+
+function setClassNameIfChanged(element, value) {
+  const next = String(value ?? '');
+  if (!element || element.className === next) return false;
+  element.className = next;
+  return true;
+}
+
+function setAttrIfChanged(element, name, value) {
+  if (!element) return false;
+  const next = String(value ?? '');
+  if (element.getAttribute(name) === next) return false;
+  element.setAttribute(name, next);
+  return true;
+}
+
+function setDatasetIfChanged(element, key, value) {
+  if (!element) return false;
+  const next = String(value ?? '');
+  if (element.dataset[key] === next) return false;
+  element.dataset[key] = next;
+  return true;
+}
+
+function setStyleIfChanged(element, prop, value) {
+  if (!element?.style) return false;
+  const next = String(value ?? '');
+  if (element.style[prop] === next) return false;
+  element.style[prop] = next;
+  return true;
 }
 
 function stageWindowChats(activeExpandedChat) {
@@ -783,10 +834,13 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const taskStateUnchanged = windowShapeUnchanged && existingWindows.every((win, idx) => (
     windowTaskStateMatches(win, visibleWindowChats[idx])
   ));
+  // taskStateUnchanged is deliberately NOT required: a status change is exactly
+  // when the bar must update WITHOUT a full rebuild. The in-place path below
+  // refreshes every task-state-dependent part (window class, chip class, status
+  // text, and the chip mark icon), so a rebuild would only cause the jump.
   const canUpdateInPlace = windowShapeUnchanged &&
                            attachmentsUnchanged &&
                            composerShapeUnchanged &&
-                           taskStateUnchanged &&
                            root.querySelector('[data-chat-dock]') &&
                            wasCollapsed === dockCollapsed &&
                            matchesCurrentDate &&
@@ -796,16 +850,18 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
                            !hasDatePanel;
 
   if (canUpdateInPlace) {
+    let inPlaceDomChanged = false;
+
     // 1. Update dock state / collapse class
     const dockEl = root.querySelector('[data-chat-dock]');
     if (dockEl) {
-      dockEl.className = `ctox-chat-dock ${dockStateClass}`;
+      if (setClassNameIfChanged(dockEl, `ctox-chat-dock ${dockStateClass}`)) inPlaceDomChanged = true;
     }
-    
+
     // Update Chat count badge in FAB
     const fabBadge = root.querySelector('.ctox-chat-fab b');
     if (fabBadge) {
-      fabBadge.textContent = openChats.length || '';
+      if (setTextIfChanged(fabBadge, openChats.length || '')) inPlaceDomChanged = true;
     }
 
     // 2. Update active states and details on chips in the dock
@@ -816,42 +872,75 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       if (chat) {
         const taskState = getTaskState(chat);
         const status = chatDockStatusText(chat, taskState);
+        const aria = chatDockAriaLabel(chat, status);
 
-        chip.className = chatDockClassName(chat, activeChat?.id, taskState);
-        chip.setAttribute('aria-label', chatDockAriaLabel(chat, status));
-        chip.setAttribute('title', chatDockAriaLabel(chat, status));
-        
+        if (setClassNameIfChanged(chip, chatDockClassName(chat, activeChat?.id, taskState))) inPlaceDomChanged = true;
+        if (setAttrIfChanged(chip, 'aria-label', aria)) inPlaceDomChanged = true;
+        if (setAttrIfChanged(chip, 'title', aria)) inPlaceDomChanged = true;
+
         const smallEl = chip.querySelector('.ctox-chat-chip-copy small');
-        if (smallEl) smallEl.textContent = status;
-        
+        if (smallEl && setTextIfChanged(smallEl, status)) inPlaceDomChanged = true;
+
         const strongEl = chip.querySelector('.ctox-chat-chip-copy strong');
-        if (strongEl) strongEl.textContent = chat.title || 'CTOX';
+        if (strongEl && setTextIfChanged(strongEl, chat.title || 'CTOX')) inPlaceDomChanged = true;
+
+        // Refresh the status mark icon in place (spinner → check → warning …).
+        // Only replace when the state class actually changed, so a stable chip
+        // does not churn its DOM every tick.
+        const markEl = chip.querySelector('.ctox-chat-chip-mark');
+        if (markEl) {
+          const markStateClass = ['running', 'queued', 'success', 'blocked', 'failed', 'scheduled'].includes(taskState)
+            ? `is-${taskState}`
+            : '';
+          const markHasCorrectState = markStateClass
+            ? markEl.classList.contains(markStateClass)
+            : markEl.className.trim() === 'ctox-chat-chip-mark';
+          if (!markHasCorrectState) {
+            markEl.outerHTML = chatChipMarkHtml(taskState);
+            inPlaceDomChanged = true;
+          }
+        }
       }
     });
 
     // 3. Update active states, 3D relation tags, maximized and minimized classes on windows
     const activeIndex = visibleWindowChats.findIndex((c) => c.id === activeExpandedChat?.id);
+    let messagesDomChanged = false;
     existingWindows.forEach((win, idx) => {
       const chat = visibleWindowChats[idx];
       const relation = idx < activeIndex ? 'left' : idx > activeIndex ? 'right' : 'center';
       const taskState = getTaskState(chat);
 
       const isActiveWindow = chat.id === activeExpandedChat?.id;
-      win.className = `ctox-chat-window ${chat.maximized ? 'is-maximized' : ''} ${isActiveWindow ? 'is-active' : ''} is-task-${taskState}`;
-      win.dataset.chatRel = relation;
-      setWindowInteractiveState(win, isActiveWindow);
+      const wasActiveWindow = win.classList.contains('is-active');
+      const nextWindowClass = [
+        'ctox-chat-window',
+        chat.maximized ? 'is-maximized' : '',
+        isActiveWindow ? 'is-active' : '',
+        `is-task-${taskState}`,
+      ].filter(Boolean).join(' ');
+      if (setClassNameIfChanged(win, nextWindowClass)) inPlaceDomChanged = true;
+      if (setDatasetIfChanged(win, 'chatRel', relation)) inPlaceDomChanged = true;
+      // Interactive tabindex/aria-hidden churn is only needed when the active
+      // window actually changes. Re-applying it every tick was pure DOM noise.
+      if (wasActiveWindow !== isActiveWindow) {
+        setWindowInteractiveState(win, isActiveWindow);
+      }
 
       // Update title text in header
       const titleStrong = win.querySelector('.ctox-chat-title strong');
-      if (titleStrong) titleStrong.textContent = chat.title || 'CTOX';
+      if (titleStrong && setTextIfChanged(titleStrong, chat.title || 'CTOX')) inPlaceDomChanged = true;
 
-      // Update maximize icon in window header
+      // Update maximize icon in window header only when maximized state flipped.
       const maxBtn = win.querySelector('[data-chat-maximize]');
       if (maxBtn) {
-        maxBtn.setAttribute('aria-label', chat.maximized ? 'Chat wiederherstellen' : 'Chat maximieren');
-        maxBtn.innerHTML = chat.maximized 
-          ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="10" y1="14" x2="3" y2="21"></line></svg>` 
-          : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`;
+        const maxLabel = chat.maximized ? 'Chat wiederherstellen' : 'Chat maximieren';
+        if (setAttrIfChanged(maxBtn, 'aria-label', maxLabel)) {
+          maxBtn.innerHTML = chat.maximized
+            ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="10" y1="14" x2="3" y2="21"></line></svg>`
+            : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`;
+          inPlaceDomChanged = true;
+        }
       }
 
       // Update messages container content if it changed
@@ -870,6 +959,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
           messagesContainer.innerHTML = expectedHtml;
           if (wasPinnedToBottom) messagesContainer.scrollTop = messagesContainer.scrollHeight;
           else messagesContainer.scrollTop = previousScrollTop;
+          inPlaceDomChanged = true;
+          messagesDomChanged = true;
         }
       }
 
@@ -877,14 +968,19 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       const textarea = win.querySelector('[name="message"]');
       if (textarea && textarea.value !== (chat.draft || '')) {
         textarea.value = chat.draft || '';
+        inPlaceDomChanged = true;
       }
     });
 
-    // 4. Align position and scroll
-    alignChatWindows(root);
-    scrollActiveChatIntoView(root, state);
-    updateChatStripOverflowState(root);
-    publishChatLayout(root, state);
+    // 4. Align position and scroll — only when something actually moved.
+    // A no-op status tick must not call scrollIntoView or rewrite left styles;
+    // that is the visible "chat bar rebuilds every 2 seconds" twitch.
+    if (inPlaceDomChanged) {
+      alignChatWindows(root);
+      scrollActiveChatIntoView(root, state, { forceMessages: messagesDomChanged });
+      updateChatStripOverflowState(root);
+      publishChatLayout(root, state);
+    }
     return; // Exit early without recreating DOM nodes!
   }
   // --- END OF IN-PLACE DOM UPDATE FAST-PATH ---
@@ -1431,10 +1527,12 @@ async function toggleChatDock({ root, state, commandBus, db, getActiveModule }) 
 function toggleChatFromDock(state, chat) {
   if (chat.id === state.activeChatId && !chat.minimized) {
     chat.minimized = true;
+    chat.userMinimized = true;
     return;
   }
   chat.open = true;
   chat.minimized = false;
+  chat.userMinimized = false;
   state.activeChatId = chat.id;
 }
 
@@ -1444,6 +1542,10 @@ async function collapseChatWindow({ root, state, commandBus, db, getActiveModule
   if (!chat) return;
   captureDrafts(root, state);
   chat.minimized = true;
+  // Merken, dass der NUTZER zugeklappt hat. Ein eintreffendes Ergebnis darf
+  // dieses Fenster dann nicht wieder aufreissen — bei einem Kampagnenlauf mit
+  // vielen Einzelaufgaben sprang es sonst im Sekundentakt auf.
+  chat.userMinimized = true;
   touchChats(state, [chat]);
   renderChatRoot({ root, state, commandBus, db, getActiveModule });
   await persistChatState({ state, db });
@@ -1513,6 +1615,13 @@ function expandChatOnly(state, activeChat) {
 function focusChatForUser(state, chat, { openDock = true } = {}) {
   if (!state || !chat) return null;
   state.selectedDate = getLocalDateString(chat.createdAt || Date.now());
+  if (chat.userMinimized) {
+    // Der Nutzer hat dieses Fenster zugeklappt. Es wird aktiv gefuehrt und der
+    // Chip markiert den neuen Zustand — aufgerissen wird es nicht.
+    state.activeChatId = chat.id;
+    chat.open = true;
+    return chat;
+  }
   expandChatOnly(state, chat);
   if (openDock) state.dockCollapsed = false;
   return chat;
@@ -1599,7 +1708,19 @@ function attachmentSignature(chat) {
 }
 
 function chatComposerSignature(chat) {
-  return `${getTaskState(chat)}:${chat?.showFollowUp ? 'follow-up' : 'default'}`;
+  // Encode the composer SHAPE, not the raw task state. queued/running/blocked
+  // all render the same delegation card; treating each as a new shape forced a
+  // full window rebuild on every status transition (and on every tick that
+  // flipped between queued and running), which is the "chat fenster baut sich
+  // alle 2 sekunden neu auf" failure.
+  const taskState = getTaskState(chat);
+  let shape = 'idle';
+  if (taskState === 'scheduled') shape = 'scheduled';
+  else if (taskState === 'queued' || taskState === 'running' || taskState === 'blocked') shape = 'active';
+  else if (taskState === 'success' || taskState === 'failed') {
+    shape = chat?.showFollowUp ? 'terminal-follow-up' : 'terminal';
+  }
+  return shape;
 }
 
 function windowTaskStateMatches(win, chat) {
@@ -2245,39 +2366,38 @@ function busyChatRow(chat, activeId) {
   `;
 }
 
+// The chip status mark (spinner / check / warning …) as standalone markup, so
+// the in-place fast-path can refresh it on a status change without rebuilding
+// the whole dock. Previously any task-state change forced a full innerHTML
+// rebuild of the chat bar — which is why the strip visibly jumped on every
+// research status refresh.
+function chatChipMarkHtml(taskState) {
+  if (taskState === 'running') {
+    return `<span class="ctox-chat-chip-mark is-running" aria-hidden="true"><span class="ctox-chip-spinner"></span></span>`;
+  }
+  if (taskState === 'queued') {
+    return `<span class="ctox-chat-chip-mark is-queued" aria-hidden="true"></span>`;
+  }
+  if (taskState === 'success') {
+    return `<span class="ctox-chat-chip-mark is-success" aria-hidden="true"><svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`;
+  }
+  if (taskState === 'blocked') {
+    return `<span class="ctox-chat-chip-mark is-blocked" aria-hidden="true"></span>`;
+  }
+  if (taskState === 'failed') {
+    return `<span class="ctox-chat-chip-mark is-failed" aria-hidden="true"><svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></span>`;
+  }
+  if (taskState === 'scheduled') {
+    return `<span class="ctox-chat-chip-mark is-scheduled" aria-hidden="true"><svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"></circle><polyline points="12 7 12 12 15 14"></polyline></svg></span>`;
+  }
+  return `<span class="ctox-chat-chip-mark" aria-hidden="true"></span>`;
+}
+
 function chatDockItem(chat, activeId) {
   const taskState = getTaskState(chat);
   const status = chatDockStatusText(chat, taskState);
   const moduleName = chat.contextMeta?.module || 'ctox';
-  
-  let markHtml = '';
-  if (taskState === 'running') {
-    markHtml = `<span class="ctox-chat-chip-mark is-running" aria-hidden="true"><span class="ctox-chip-spinner"></span></span>`;
-  } else if (taskState === 'queued') {
-    markHtml = `<span class="ctox-chat-chip-mark is-queued" aria-hidden="true"></span>`;
-  } else if (taskState === 'success') {
-    markHtml = `
-      <span class="ctox-chat-chip-mark is-success" aria-hidden="true">
-        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      </span>
-    `;
-  } else if (taskState === 'blocked') {
-    markHtml = `<span class="ctox-chat-chip-mark is-blocked" aria-hidden="true"></span>`;
-  } else if (taskState === 'failed') {
-    markHtml = `
-      <span class="ctox-chat-chip-mark is-failed" aria-hidden="true">
-        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-      </span>
-    `;
-  } else if (taskState === 'scheduled') {
-    markHtml = `
-      <span class="ctox-chat-chip-mark is-scheduled" aria-hidden="true">
-        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"></circle><polyline points="12 7 12 12 15 14"></polyline></svg>
-      </span>
-    `;
-  } else {
-    markHtml = `<span class="ctox-chat-chip-mark" aria-hidden="true"></span>`;
-  }
+  const markHtml = chatChipMarkHtml(taskState);
 
   return `
     <button class="${chatDockClassName(chat, activeId, taskState)}" type="button" data-chat-focus="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" aria-label="${escapeAttr(chatDockAriaLabel(chat, status))}" title="${escapeAttr(chatDockAriaLabel(chat, status))}">
@@ -2380,22 +2500,47 @@ function isScrolledToBottom(container) {
   return distanceFromBottom <= CHAT_BOTTOM_PIN_THRESHOLD_PX;
 }
 
-function scrollActiveChatIntoView(root, state) {
+function scrollActiveChatIntoView(root, state, { forceMessages = true } = {}) {
   const activeChip = Array.from(root.querySelectorAll('[data-chat-focus]'))
     .find((node) => node.dataset.chatFocus === state.activeChatId);
-  activeChip?.scrollIntoView?.({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  // scrollIntoView on every no-op tick re-animates the dock strip and is the
+  // visible "chat bar jumps by itself" symptom. Only call it when the active
+  // chip is actually outside the strip's visible range.
+  if (activeChip && !isChipMostlyVisible(root, activeChip)) {
+    activeChip.scrollIntoView?.({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  }
   updateChatStripOverflowState(root);
 
   // Follow new messages only in windows the reader left at the bottom. This ran
   // unconditionally over EVERY open window before, so scrolling up in one chat
   // was undone on the next render — including renders caused by an unrelated
-  // chat receiving a message.
+  // chat receiving a message. In-place ticks pass forceMessages only when the
+  // message HTML actually changed; a full rebuild keeps the default true so a
+  // freshly created window still lands at the latest message.
+  if (!forceMessages) return;
   root.querySelectorAll('[data-chat-id]:not(.is-minimized)').forEach((node) => {
     const messagesContainer = node.querySelector('.ctox-chat-messages');
-    if (messagesContainer && isScrolledToBottom(messagesContainer)) {
-      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    if (!messagesContainer) return;
+    // Fresh nodes after a full rebuild report distanceFromBottom === 0 even when
+    // empty, so isScrolledToBottom is true and we pin to the end. A reader who
+    // scrolled up has a larger distance and is left alone.
+    if (isScrolledToBottom(messagesContainer)) {
+      const nextTop = messagesContainer.scrollHeight;
+      if (messagesContainer.scrollTop !== nextTop) {
+        messagesContainer.scrollTop = nextTop;
+      }
     }
   });
+}
+
+function isChipMostlyVisible(root, chip) {
+  const strip = root?.querySelector?.('[data-chat-strip]');
+  if (!strip || !chip) return true;
+  const stripRect = strip.getBoundingClientRect?.();
+  const chipRect = chip.getBoundingClientRect?.();
+  if (!stripRect || !chipRect || stripRect.width <= 0) return true;
+  // Fully inside or only slightly clipped still counts as visible — no scroll.
+  return chipRect.left >= stripRect.left - 2 && chipRect.right <= stripRect.right + 2;
 }
 
 function updateChatStripOverflowState(root) {
@@ -2403,9 +2548,17 @@ function updateChatStripOverflowState(root) {
   if (!strip) return;
   const maxScroll = Math.max(0, strip.scrollWidth - strip.clientWidth);
   const scrollable = maxScroll > 1;
-  strip.classList.toggle('is-scrollable', scrollable);
-  strip.classList.toggle('is-at-start', !scrollable || strip.scrollLeft <= 1);
-  strip.classList.toggle('is-at-end', !scrollable || strip.scrollLeft >= maxScroll - 1);
+  const atStart = !scrollable || strip.scrollLeft <= 1;
+  const atEnd = !scrollable || strip.scrollLeft >= maxScroll - 1;
+  if (strip.classList.contains('is-scrollable') !== scrollable) {
+    strip.classList.toggle('is-scrollable', scrollable);
+  }
+  if (strip.classList.contains('is-at-start') !== atStart) {
+    strip.classList.toggle('is-at-start', atStart);
+  }
+  if (strip.classList.contains('is-at-end') !== atEnd) {
+    strip.classList.toggle('is-at-end', atEnd);
+  }
 }
 
 function trackButtonLabel(message) {
@@ -3175,6 +3328,12 @@ function readChatState(session) {
     const chats = Array.isArray(parsed.chats) ? parsed.chats : [];
     const state = {
       ownerUserId: owner,
+      // Ein gespeichertes Datum darf beim Oeffnen nicht ueberdauern. Am 11.08.2026
+      // stand die Leiste bei einem Nutzer noch auf dem 6. August und zeigte die
+      // 24 Chats jenes Tages — darunter Fehlversuche aus einer Fassung, die es
+      // laengst nicht mehr gibt. Wer die App aufmacht, sieht dann ein Truemmerfeld,
+      // waehrend die heutigen Laeufe sauber durchlaufen. Zurueckliegende Tage bleiben
+      // ueber die Datumsauswahl erreichbar; die Voreinstellung ist immer heute.
       selectedDate: getLocalDateString(Date.now()),
       activeChatId: parsed.activeChatId || '',
       dockCollapsed: 'dockCollapsed' in parsed ? Boolean(parsed.dockCollapsed) : true,
@@ -6205,7 +6364,9 @@ async function processScheduledChats({ root, state, commandBus, db, sync, getAct
     const chatId = el.dataset.countdownTimer;
     const chat = state.chats.find(c => c.id === chatId);
     if (chat) {
-      el.textContent = getCountdownText(chat.createdAt);
+      // Countdown text changes every second when a timer is visible; still
+      // guard so identical second values do not force a layout pass.
+      setTextIfChanged(el, getCountdownText(chat.createdAt));
     }
   });
 
@@ -6376,12 +6537,17 @@ export const __businessChatTestInternals = Object.freeze({
   hydrateChatsFromRxDb,
   initSchedulerLoop,
   isChatEmptyForDeletion,
+  isScrolledToBottom,
   preferredChatForDockOpen,
   readChatState,
+  renderChatRoot,
   resolveChatForOpenDetail,
   persistChatDocsRemote,
   persistChatState,
   schedulerDelayMs,
+  setAttrIfChanged,
+  setClassNameIfChanged,
+  setTextIfChanged,
   shouldDeferRemoteChatHydration,
   startChatLiveCollections,
   stageChatAttachments,

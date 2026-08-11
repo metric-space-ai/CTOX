@@ -1,4 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { renderHtmlIfChanged } from '../../shared/stable-dom.js';
 import { SUPPORT_AGENT_SUGGESTION_KINDS, buildSupportAgentTaskCommand, buildSupportCommand } from './support-commands.mjs';
 import { filterSupportConversations, mergeSupportTimeline, supportQueueCounts } from './support-reducers.mjs';
 
@@ -496,29 +497,54 @@ function renderConversationList() {
     readiness: state.conversationReadiness,
   });
   if (listState === 'loading') {
-    container.innerHTML = renderEmptyState(state.t('loadingTitle', 'Support wird synchronisiert'), state.t('loadingBody', ''));
+    renderHtmlIfChanged(
+      container,
+      renderEmptyState(state.t('loadingTitle', 'Support wird synchronisiert'), state.t('loadingBody', '')),
+      { signature: 'state:loading' },
+    );
     return;
   }
   if (listState === 'syncing') {
-    container.innerHTML = renderSyncingState(state.t('loadingTitle', 'Support wird synchronisiert'), state.t('loadingBody', ''));
+    renderHtmlIfChanged(
+      container,
+      renderSyncingState(state.t('loadingTitle', 'Support wird synchronisiert'), state.t('loadingBody', '')),
+      { signature: 'state:syncing' },
+    );
     return;
   }
   const rows = visibleConversations();
   if (!rows.length) {
-    container.innerHTML = renderEmptyState(state.t('emptyListTitle', 'Keine Support-Konversationen'), state.t('emptyListBody', ''));
+    renderHtmlIfChanged(
+      container,
+      renderEmptyState(state.t('emptyListTitle', 'Keine Support-Konversationen'), state.t('emptyListBody', '')),
+      { signature: 'state:empty' },
+    );
     return;
   }
-  container.innerHTML = rows.map(renderConversationRow).join('');
+  // Selection is applied after the write; do not put selectedId into the signature
+  // or every click rebuilds the scrollable well.
+  const signature = JSON.stringify({
+    view: state.viewMode,
+    rows: rows.map((item) => ([
+      item.id,
+      item.updated_at_ms || 0,
+      item.status || '',
+      item.subject || '',
+      item.customer_name || '',
+      item.agent_draft_count || 0,
+      item.sla_due_at_ms || 0,
+    ])),
+  });
+  renderHtmlIfChanged(container, rows.map(renderConversationRow).join(''), { signature });
   applyListSelection();
 }
 
 function renderConversationRow(item) {
-  const selected = item.id === state.selectedId ? 'is-selected' : '';
   const label = conversationLabel(item);
   const risk = isSlaRisk(item) ? `<span class="ctox-badge is-warning">${escapeHtml(state.t('slaRisk', 'SLA'))}</span>` : '';
   const agent = Number(item.agent_draft_count || 0) > 0 ? `<span class="ctox-badge is-info">${escapeHtml(state.t('agentDrafts', 'CTOX'))}</span>` : '';
   return `
-    <button type="button" role="option" aria-selected="${item.id === state.selectedId ? 'true' : 'false'}" class="ctox-list-item support-conversation-row ${selected}" data-support-conversation-id="${escapeAttr(item.id)}" data-context-record-id="${escapeAttr(item.id)}" data-context-record-type="support_conversation" data-context-label="${escapeAttr(label)}">
+    <button type="button" role="option" aria-selected="false" class="ctox-list-item support-conversation-row" data-support-conversation-id="${escapeAttr(item.id)}" data-context-record-id="${escapeAttr(item.id)}" data-context-record-type="support_conversation" data-context-label="${escapeAttr(label)}">
       <span class="support-row-meta">
         <span>${escapeHtml(item.inbox_id || state.t('inbox', 'Inbox'))}</span>
         <span>${escapeHtml(item.priority || 'normal')}</span>

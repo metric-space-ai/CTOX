@@ -1,4 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { renderHtmlIfChanged } from '../../shared/stable-dom.js';
 import { createCalendarView } from './calendar-view-adapter.js';
 
 const RENDER_DEBOUNCE_MS = 50;
@@ -832,7 +833,7 @@ function renderLeftList() {
   els.leftList.classList.toggle('is-list-view', state.listView === 'list');
 
   if (!rows.length) {
-    els.leftList.innerHTML = '';
+    renderHtmlIfChanged(els.leftList, '', { signature: `empty:${state.leftBand}` });
     if (els.leftEmpty) {
       const collectionName = isPages ? 'calendar_booking_pages' : 'calendar_calendars';
       const readiness = state.readiness?.[collectionName]
@@ -854,10 +855,19 @@ function renderLeftList() {
   }
   if (els.leftEmpty) els.leftEmpty.hidden = true;
 
-  els.leftList.innerHTML = isPages
+  const html = isPages
     ? rows.map(bookingPageRowHtml).join('')
     : rows.map(calendarRowHtml).join('');
-
+  // Booking-page selection is flipped in place after the write. Calendar
+  // checkbox state belongs in the signature because it is the list content.
+  const signature = JSON.stringify({
+    band: state.leftBand,
+    view: state.listView,
+    rows: isPages
+      ? rows.map((bp) => ([bp.id, bp.title || '', bp.status || '', bp.duration_minutes || 0, bp.slug || '']))
+      : rows.map((cal) => ([cal.id, cal.title || '', cal.color || '', state.selectedCalendarIds.has(cal.id) ? 1 : 0])),
+  });
+  renderHtmlIfChanged(els.leftList, html, { signature });
   if (isPages) markActiveBookingPage();
 }
 
@@ -882,9 +892,8 @@ function bookingPageRowHtml(bp) {
   const safeSlug = normalizeSlug(bp.slug) || String(bp.slug || '').replace(/[^a-zA-Z0-9-_]/g, '');
   const publicUrl = `${window.location.origin}/book/${encodeURIComponent(safeSlug)}`;
   const isActive = bp.status === 'active';
-  const isSelected = bp.id === state.selectedBookingPageId;
   return `
-    <div class="ctox-list-item booking-page-item ${isSelected ? 'is-selected' : ''}" data-action="select-bp" data-id="${escapeHtml(bp.id)}" data-context-record-id="${escapeHtml(bp.id)}" data-context-record-type="calendar_booking_page" data-context-label="${escapeHtml(bp.title || bp.id)}" role="button" tabindex="0" aria-pressed="${isSelected ? 'true' : 'false'}">
+    <div class="ctox-list-item booking-page-item" data-action="select-bp" data-id="${escapeHtml(bp.id)}" data-context-record-id="${escapeHtml(bp.id)}" data-context-record-type="calendar_booking_page" data-context-label="${escapeHtml(bp.title || bp.id)}" role="button" tabindex="0" aria-pressed="false">
       <div class="booking-page-item-left">
         <div class="booking-page-item-title">
           <span>${escapeHtml(bp.title)}</span>

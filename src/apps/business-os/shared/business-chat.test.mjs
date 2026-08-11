@@ -1732,6 +1732,526 @@ function makeTimerWindow(timers) {
   });
 }
 
+// REGRESSION C1/C2/C4: a status tick with no content change must not rebuild the
+// chat window DOM, rewrite identical text/class attributes, or yank the message
+// list back to the bottom while the user is reading higher up.
+{
+  const {
+    isScrolledToBottom,
+    renderChatRoot,
+    setAttrIfChanged,
+    setClassNameIfChanged,
+    setTextIfChanged,
+  } = __businessChatTestInternals;
+
+  test('setTextIfChanged / setClassNameIfChanged write only on real change', () => {
+    const textEl = { textContent: 'Queue' };
+    assert.equal(setTextIfChanged(textEl, 'Queue'), false);
+    assert.equal(textEl.textContent, 'Queue');
+    assert.equal(setTextIfChanged(textEl, 'Aktiv'), true);
+    assert.equal(textEl.textContent, 'Aktiv');
+
+    const classEl = { className: 'ctox-chat-chip is-task-queued is-active is-expanded' };
+    assert.equal(
+      setClassNameIfChanged(classEl, 'ctox-chat-chip is-task-queued is-active is-expanded'),
+      false,
+    );
+    assert.equal(
+      setClassNameIfChanged(classEl, 'ctox-chat-chip is-task-running is-active is-expanded'),
+      true,
+    );
+    assert.equal(classEl.className, 'ctox-chat-chip is-task-running is-active is-expanded');
+
+    const attrEl = {
+      attrs: { 'aria-label': 'CTOX: Queue, geöffnet' },
+      getAttribute(name) { return this.attrs[name] ?? null; },
+      setAttribute(name, value) { this.attrs[name] = String(value); },
+    };
+    assert.equal(setAttrIfChanged(attrEl, 'aria-label', 'CTOX: Queue, geöffnet'), false);
+    assert.equal(setAttrIfChanged(attrEl, 'aria-label', 'CTOX: Aktiv, geöffnet'), true);
+    assert.equal(attrEl.getAttribute('aria-label'), 'CTOX: Aktiv, geöffnet');
+  });
+
+  test('isScrolledToBottom only counts a view that is already near the end', () => {
+    assert.equal(isScrolledToBottom({
+      scrollHeight: 1000,
+      scrollTop: 980,
+      clientHeight: 200,
+    }), true);
+    assert.equal(isScrolledToBottom({
+      scrollHeight: 1000,
+      scrollTop: 100,
+      clientHeight: 200,
+    }), false);
+  });
+
+  test('status tick without change produces no chat DOM replacement', () => {
+    const previousDocument = globalThis.document;
+    const previousWindow = globalThis.window;
+    const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const previousCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    const previousInnerWidth = globalThis.innerWidth;
+    const mutations = [];
+
+    globalThis.document = {
+      documentElement: { lang: 'de' },
+      getElementById() { return null; },
+      createElement() {
+        return {
+          id: '',
+          textContent: '',
+          setAttribute() {},
+        };
+      },
+      head: { appendChild() {} },
+    };
+    globalThis.requestAnimationFrame = (fn) => {
+      fn();
+      return 1;
+    };
+    globalThis.cancelAnimationFrame = () => {};
+    globalThis.innerWidth = 1200;
+    globalThis.window = {
+      innerWidth: 1200,
+      setTimeout() { return 1; },
+      clearTimeout() {},
+      setInterval() { return 1; },
+      clearInterval() {},
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return true; },
+    };
+
+    try {
+      const chat = {
+        id: 'chat-stable',
+        title: 'Recherche',
+        open: true,
+        minimized: false,
+        maximized: false,
+        createdAt: Date.now(),
+        draft: '',
+        attachments: [],
+        lastTrackingId: 'task-stable',
+        messages: [{
+          id: 'status-stable',
+          role: 'ctox',
+          text: 'Task angelegt und in der CTOX Queue.',
+          commandId: 'cmd-stable',
+          taskId: 'task-stable',
+          status: 'queued',
+          createdAt: Date.now(),
+        }],
+      };
+      const state = {
+        ownerUserId: 'user-1',
+        selectedDate: __businessChatTestInternals.getLocalDateString(chat.createdAt),
+        activeChatId: chat.id,
+        dockCollapsed: false,
+        chatListOpen: false,
+        dateWorkloadOpen: false,
+        chats: [chat],
+      };
+
+      const root = makeChatRootFixture({ chat, mutations });
+      // First pass: shape already matches, so the in-place path runs.
+      renderChatRoot({
+        root,
+        state,
+        commandBus: null,
+        db: null,
+        getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+      });
+      const afterFirst = mutations.length;
+
+      // Second pass: identical status tick. Must not replace DOM or rewrite text.
+      renderChatRoot({
+        root,
+        state,
+        commandBus: null,
+        db: null,
+        getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+      });
+      const secondPassMutations = mutations.slice(afterFirst);
+      assert.deepEqual(
+        secondPassMutations,
+        [],
+        `status tick without change must not touch the chat DOM, got: ${JSON.stringify(secondPassMutations)}`,
+      );
+
+      // Reader scrolled up: a later message rewrite must preserve that position.
+      // Keep the task state queued so the in-place path stays active (a terminal
+      // status would flip the composer signature and force a full rebuild).
+      const messages = root.querySelector('.ctox-chat-messages');
+      messages.scrollTop = 12;
+      messages.clientHeight = 200;
+      messages.scrollHeight = 800;
+      const mutationsBeforeRead = mutations.length;
+      chat.messages.push({
+        id: 'progress-stable',
+        role: 'ctox',
+        text: 'Zwischenschritt sichtbar, ohne den Leser nach unten zu ziehen.',
+        commandId: 'cmd-stable',
+        taskId: 'task-stable',
+        status: 'queued',
+        createdAt: Date.now() + 1,
+      });
+      renderChatRoot({
+        root,
+        state,
+        commandBus: null,
+        db: null,
+        getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+      });
+      const readPassMutations = mutations.slice(mutationsBeforeRead);
+      assert.equal(
+        readPassMutations.some((entry) => entry.type === 'innerHTML' && entry.target === 'messages'),
+        true,
+        'new message content must still update the message list',
+      );
+      const yanked = readPassMutations.some((entry) => (
+        entry.type === 'scrollTop'
+        && entry.target === 'messages'
+        && entry.value >= 800
+      ));
+      assert.equal(yanked, false, 'reader who scrolled up must keep their position');
+      assert.equal(messages.scrollTop, 12, 'scrollTop stays where the reader left it');
+    } finally {
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+      if (previousWindow === undefined) delete globalThis.window;
+      else globalThis.window = previousWindow;
+      if (previousRequestAnimationFrame === undefined) delete globalThis.requestAnimationFrame;
+      else globalThis.requestAnimationFrame = previousRequestAnimationFrame;
+      if (previousCancelAnimationFrame === undefined) delete globalThis.cancelAnimationFrame;
+      else globalThis.cancelAnimationFrame = previousCancelAnimationFrame;
+      if (previousInnerWidth === undefined) delete globalThis.innerWidth;
+      else globalThis.innerWidth = previousInnerWidth;
+    }
+  });
+}
+
+function makeChatRootFixture({ chat, mutations }) {
+  const classListFor = (initial = []) => {
+    const set = new Set(initial);
+    return {
+      contains(name) { return set.has(name); },
+      add(...names) { names.forEach((name) => set.add(name)); },
+      remove(...names) { names.forEach((name) => set.delete(name)); },
+      toggle(name, force) {
+        if (force === true) set.add(name);
+        else if (force === false) set.delete(name);
+        else if (set.has(name)) set.delete(name);
+        else set.add(name);
+        return set.has(name);
+      },
+      toString() { return [...set].join(' '); },
+    };
+  };
+
+  const track = (type, target, value) => {
+    mutations.push({ type, target, value: value === undefined ? true : value });
+  };
+
+  const makeTextNode = (initial, label) => {
+    let text = String(initial ?? '');
+    return {
+      get textContent() { return text; },
+      set textContent(value) {
+        const next = String(value ?? '');
+        if (text === next) return;
+        text = next;
+        track('textContent', label, next);
+      },
+    };
+  };
+
+  const makeAttrNode = (initialAttrs = {}, label = 'node') => {
+    const attrs = { ...initialAttrs };
+    let html = '';
+    return {
+      attrs,
+      getAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
+      setAttribute(name, value) {
+        const next = String(value ?? '');
+        if (attrs[name] === next) return;
+        attrs[name] = next;
+        track('setAttribute', `${label}.${name}`, next);
+      },
+      removeAttribute(name) {
+        if (!Object.prototype.hasOwnProperty.call(attrs, name)) return;
+        delete attrs[name];
+        track('removeAttribute', `${label}.${name}`);
+      },
+      hasAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name); },
+      get innerHTML() { return html; },
+      set innerHTML(value) {
+        const next = String(value ?? '');
+        if (html === next) return;
+        html = next;
+        track('innerHTML', label, next);
+      },
+    };
+  };
+
+  const messagesHtml = `<article class="ctox-chat-message is-ctox"><div class="ctox-chat-body"><span class="ctox-chat-text">Task angelegt und in der CTOX Queue.</span></div><footer><button class="ctox-chat-track" type="button">Fortschritt ansehen</button><span>queued</span></footer></article>`;
+  let messagesInner = messagesHtml;
+  const messages = {
+    className: 'ctox-chat-messages',
+    scrollTop: 0,
+    scrollHeight: 400,
+    clientHeight: 400,
+    get innerHTML() { return messagesInner; },
+    set innerHTML(value) {
+      const next = String(value ?? '');
+      if (messagesInner === next) return;
+      messagesInner = next;
+      track('innerHTML', 'messages', next);
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  // Proxy scrollTop writes for C4 assertions.
+  let scrollTopValue = 0;
+  Object.defineProperty(messages, 'scrollTop', {
+    configurable: true,
+    get() { return scrollTopValue; },
+    set(value) {
+      const next = Number(value) || 0;
+      if (scrollTopValue === next) return;
+      scrollTopValue = next;
+      track('scrollTop', 'messages', next);
+    },
+  });
+
+  const titleStrong = makeTextNode(chat.title || 'CTOX', 'titleStrong');
+  const maxBtn = makeAttrNode({ 'aria-label': 'Chat maximieren' }, 'maxBtn');
+  maxBtn.querySelectorAll = () => [];
+  const markEl = {
+    className: 'ctox-chat-chip-mark is-queued',
+    classList: classListFor(['ctox-chat-chip-mark', 'is-queued']),
+    get outerHTML() { return '<span class="ctox-chat-chip-mark is-queued"></span>'; },
+    set outerHTML(value) { track('outerHTML', 'chipMark', value); },
+  };
+  const chipSmall = makeTextNode('Queue', 'chipSmall');
+  const chipStrong = makeTextNode(chat.title || 'CTOX', 'chipStrong');
+  const chip = {
+    className: 'ctox-chat-chip is-task-queued is-active is-expanded',
+    dataset: { chatFocus: chat.id },
+    classList: classListFor(['ctox-chat-chip', 'is-task-queued', 'is-active', 'is-expanded']),
+    ...makeAttrNode({
+      'aria-label': 'Recherche: Queue, geöffnet',
+      title: 'Recherche: Queue, geöffnet',
+    }, 'chip'),
+    querySelector(selector) {
+      if (selector === '.ctox-chat-chip-copy small') return chipSmall;
+      if (selector === '.ctox-chat-chip-copy strong') return chipStrong;
+      if (selector === '.ctox-chat-chip-mark') return markEl;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 20, right: 140, width: 120, top: 0, bottom: 28, height: 28 };
+    },
+    scrollIntoView() { track('scrollIntoView', 'chip'); },
+  };
+
+  const interactiveNodes = [];
+  const win = {
+    className: 'ctox-chat-window is-active is-task-queued',
+    dataset: {
+      chatId: chat.id,
+      chatRel: 'center',
+      chatAttachmentSignature: '',
+      chatComposerSignature: 'active',
+    },
+    classList: classListFor(['ctox-chat-window', 'is-active', 'is-task-queued']),
+    style: {},
+    querySelector(selector) {
+      if (selector === '.ctox-chat-title strong') return titleStrong;
+      if (selector === '[data-chat-maximize]') return maxBtn;
+      if (selector === '.ctox-chat-messages') return messages;
+      if (selector === '[name="message"]') return null;
+      if (selector === '[data-chat-form]') return null;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'button, input, textarea, select, a') return interactiveNodes;
+      return [];
+    },
+    getBoundingClientRect() {
+      return { left: 40, right: 360, width: 320, top: 100, bottom: 500, height: 400 };
+    },
+    addEventListener() {},
+  };
+  Object.defineProperty(win, 'className', {
+    configurable: true,
+    get() { return win._className || 'ctox-chat-window is-active is-task-queued'; },
+    set(value) {
+      const next = String(value ?? '');
+      if (win._className === next) return;
+      win._className = next;
+      track('className', 'window', next);
+    },
+  });
+  win._className = 'ctox-chat-window is-active is-task-queued';
+  Object.defineProperty(win.dataset, 'chatRel', {
+    configurable: true,
+    get() { return win._chatRel || 'center'; },
+    set(value) {
+      const next = String(value ?? '');
+      if (win._chatRel === next) return;
+      win._chatRel = next;
+      track('dataset', 'window.chatRel', next);
+    },
+  });
+  win._chatRel = 'center';
+  win.style = new Proxy({}, {
+    get(target, prop) { return target[prop] || ''; },
+    set(target, prop, value) {
+      const next = String(value ?? '');
+      if (target[prop] === next) return true;
+      target[prop] = next;
+      track('style', `window.${String(prop)}`, next);
+      return true;
+    },
+  });
+
+  Object.defineProperty(chip, 'className', {
+    configurable: true,
+    get() { return chip._className || 'ctox-chat-chip is-task-queued is-active is-expanded'; },
+    set(value) {
+      const next = String(value ?? '');
+      if (chip._className === next) return;
+      chip._className = next;
+      track('className', 'chip', next);
+    },
+  });
+  chip._className = 'ctox-chat-chip is-task-queued is-active is-expanded';
+
+  const dock = {
+    className: 'ctox-chat-dock has-visible-chats has-one-chat has-no-nav',
+    classList: classListFor(['ctox-chat-dock', 'has-visible-chats', 'has-one-chat', 'has-no-nav']),
+    querySelector(selector) {
+      if (selector === '[data-chat-strip]') return strip;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 20, right: 480, width: 460, top: 640, bottom: 700, height: 60 };
+    },
+  };
+  Object.defineProperty(dock, 'className', {
+    configurable: true,
+    get() { return dock._className || 'ctox-chat-dock has-visible-chats has-one-chat has-no-nav'; },
+    set(value) {
+      const next = String(value ?? '');
+      if (dock._className === next) return;
+      dock._className = next;
+      track('className', 'dock', next);
+    },
+  });
+  dock._className = 'ctox-chat-dock has-visible-chats has-one-chat has-no-nav';
+
+  const fabBadge = makeTextNode('1', 'fabBadge');
+  const datePicker = { value: __businessChatTestInternals.getLocalDateString(chat.createdAt), addEventListener() {} };
+  const strip = {
+    className: 'ctox-chat-strip',
+    classList: classListFor(['ctox-chat-strip']),
+    scrollLeft: 0,
+    scrollWidth: 120,
+    clientWidth: 400,
+    querySelector(selector) {
+      if (selector === `[data-chat-focus="${chat.id}"]`) return chip;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '.ctox-chat-chip' || selector === '[data-chat-focus]') return [chip];
+      return [];
+    },
+    getBoundingClientRect() {
+      return { left: 20, right: 420, width: 400, top: 640, bottom: 680, height: 40 };
+    },
+  };
+  const stageInner = {
+    className: 'ctox-chat-stage-inner',
+    classList: classListFor(['ctox-chat-stage-inner']),
+    querySelector(selector) {
+      if (selector === '.ctox-chat-stage-spacer') return spacer;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '.ctox-chat-window') return [win];
+      return [];
+    },
+    getBoundingClientRect() {
+      return { left: 0, right: 800, width: 800, top: 80, bottom: 600, height: 520 };
+    },
+  };
+  const spacer = { style: new Proxy({}, {
+    get(target, prop) { return target[prop] || ''; },
+    set(target, prop, value) {
+      const next = String(value ?? '');
+      if (target[prop] === next) return true;
+      target[prop] = next;
+      track('style', `spacer.${String(prop)}`, next);
+      return true;
+    },
+  }) };
+  const stage = {
+    querySelector(selector) {
+      if (selector === '.ctox-chat-stage-inner') return stageInner;
+      return null;
+    },
+  };
+
+  const nodesBySelector = new Map([
+    ['[data-chat-date-picker]', datePicker],
+    ['[data-chat-busy-panel]', null],
+    ['[data-chat-date-workload-panel]', null],
+    ['[data-chat-dock]', dock],
+    ['.ctox-chat-fab b', fabBadge],
+    ['[data-chat-strip]', strip],
+    ['[data-chat-stage]', stage],
+    ['.ctox-chat-stage-inner', stageInner],
+    ['.ctox-chat-messages', messages],
+  ]);
+
+  const root = {
+    className: 'ctox-chat-root',
+    classList: classListFor(['ctox-chat-root']),
+    isConnected: true,
+    __ctoxChatSync: null,
+    __ctoxChatOnTrackingStateChanged: null,
+    __ctoxChatLayoutFrame: 0,
+    querySelector(selector) {
+      if (nodesBySelector.has(selector)) return nodesBySelector.get(selector);
+      if (selector === '.ctox-chat-window') return win;
+      if (selector.startsWith('[data-chat-focus=')) return chip;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '.ctox-chat-window') return [win];
+      if (selector === '.ctox-chat-chip') return [chip];
+      if (selector === '[data-chat-focus]') return [chip];
+      if (selector === '[data-chat-id]') return [win];
+      if (selector === '[data-chat-id]:not(.is-minimized)') return [win];
+      if (selector === '[data-countdown-timer]') return [];
+      if (selector === '.ctox-chat-window.no-left-transition') return [];
+      return [];
+    },
+    getBoundingClientRect() {
+      return { left: 0, right: 800, width: 800, top: 80, bottom: 700, height: 620 };
+    },
+    addEventListener() {},
+    set innerHTML(value) {
+      track('innerHTML', 'root', String(value || '').slice(0, 80));
+    },
+  };
+
+  return root;
+}
+
 test('ein gespeichertes Verlaufsdatum ueberdauert das Oeffnen nicht', () => {
   // Am 11.08.2026 stand die Chat-Leiste eines Nutzers beim Oeffnen noch auf dem
   // 6. August und zeigte die 24 Chats jenes Tages — darunter Fehlversuche aus

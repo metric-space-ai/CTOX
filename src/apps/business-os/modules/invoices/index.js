@@ -36,6 +36,7 @@ import {
 } from './commands/builders.js';
 import { validateInvoice } from './core/invoice-validate.js';
 import { renderListOrState } from '../../shared/list-state.js';
+import { renderHtmlIfChanged } from '../../shared/stable-dom.js';
 
 const BUILD = '20260721-invoices-ia-two-pane';
 const MODULE_ID = 'invoices';
@@ -778,13 +779,29 @@ function renderList() {
   const rows = visibleInvoices();
   if (STATE.view === 'list') f.listEl.classList.add('is-list-view');
   else f.listEl.classList.remove('is-list-view');
-  f.listEl.innerHTML = renderInvoiceListMarkup(rows, {
+  // Selection is flipped in place after the write. Keeping selectedId out of
+  // the signature means an unchanged data set never rebuilds the well.
+  const html = renderInvoiceListMarkup(rows, {
     view: STATE.view,
-    selectedId: STATE.selectedInvoiceId,
+    selectedId: null,
     // Gate the syncing shell on the UNFILTERED source: a filter/search empty
     // (rows empty while STATE.invoices has records) must keep the plain hint.
     readiness: STATE.invoices.length === 0 ? STATE.invoiceReadiness : null,
   });
+  const signature = JSON.stringify({
+    view: STATE.view,
+    readiness: STATE.invoices.length === 0 ? STATE.invoiceReadiness : null,
+    rows: rows.map((inv) => ([
+      inv.id,
+      inv.invoice_number || '',
+      inv.state || '',
+      inv.party_id || '',
+      inv.total_cents || 0,
+      inv.updated_at_ms || 0,
+    ])),
+  });
+  renderHtmlIfChanged(f.listEl, html, { signature });
+  applyListSelection();
   writeCounts(countsFor(STATE.invoices));
   writeFooter(`${rows.length} ${t('entries')} · ${bandLabel(STATE.band)}`);
 }

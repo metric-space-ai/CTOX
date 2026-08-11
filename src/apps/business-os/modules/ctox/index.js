@@ -1,4 +1,4 @@
-import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js';
+import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
 
@@ -472,7 +472,14 @@ const ctoxSeed = {
 };
 
 export async function mount(ctx) {
+  if (!ctx?.host) {
+    throw new Error('CTOX mount requires ctx.host');
+  }
   await ensureStyles();
+  // Markup is the durable workspace shell. Everything after this point is
+  // fail-soft: the windowed Business OS shell replaces the whole host with a
+  // recovery dialog on any thrown mount error, so secondary wiring (readiness,
+  // realtime, i18n) must never take the app down once the harness is visible.
   ctx.host.innerHTML = await loadModuleMarkup();
   const launchFocusTask = normalizeFocusTask(ctx.args);
   if (launchFocusTask) persistFocusTask(launchFocusTask);
@@ -531,34 +538,44 @@ export async function mount(ctx) {
 
   const harness = ctx.host.querySelector('[data-ctox-harness]');
   if (harness) harness.__ctoxState = state;
-  const teardownShellMessages = wireShellMessages(state);
-  state.layoutResizeCleanup = wireColumnResize(state);
-  await loadCtoxMessages(state.lang);
-  renderLoading(state);
-  startLiveTicker(state);
-  state.localSubscriptionCleanup = wireLocalRealtime(state);
-  state.readinessCleanup = wireTaskSourceReadiness(state);
-  // A cold RxDB/WebRTC lease must not block the OS window from becoming
-  // operable. Hydrate in the background while the compact loading workspace is
-  // already visible, then let the normal refresh interval take over.
-  state.refreshInFlight = true;
-  void renderFromLocalCache(state)
-    .catch((error) => {
-      if (!state.disposed) console.warn('[ctox] initial local render failed', error);
-    })
-    .finally(() => {
-      state.refreshInFlight = false;
-    });
-  state.refreshTimer = window.setInterval(() => refresh(state), HARNESS_REFRESH_MS);
+  let teardownShellMessages = () => {};
+  try {
+    teardownShellMessages = wireShellMessages(state);
+    state.layoutResizeCleanup = wireColumnResize(state);
+    await loadCtoxMessages(state.lang);
+    renderLoading(state);
+    startLiveTicker(state);
+    state.localSubscriptionCleanup = wireLocalRealtime(state);
+    state.readinessCleanup = wireTaskSourceReadiness(state);
+    // A cold RxDB/WebRTC lease must not block the OS window from becoming
+    // operable. Hydrate in the background while the compact loading workspace is
+    // already visible, then let the normal refresh interval take over.
+    state.refreshInFlight = true;
+    void renderFromLocalCache(state)
+      .catch((error) => {
+        if (!state.disposed) console.warn('[ctox] initial local render failed', error);
+      })
+      .finally(() => {
+        state.refreshInFlight = false;
+      });
+    state.refreshTimer = window.setInterval(() => refresh(state), HARNESS_REFRESH_MS);
+  } catch (error) {
+    // Keep the markup host and a usable teardown. The shell recovery dialog is
+    // worse than a loading/partial harness for transient wiring failures.
+    if (!state.disposed) console.warn('[ctox] mount wiring failed; keeping harness shell', error);
+    try {
+      renderLoading(state);
+    } catch {}
+  }
   return () => {
     state.disposed = true;
     window.clearInterval(state.liveTicker);
     window.clearInterval(state.refreshTimer);
-    state.localSubscriptionCleanup?.();
-    state.readinessCleanup?.();
-    state.layoutResizeCleanup?.();
+    try { state.localSubscriptionCleanup?.(); } catch {}
+    try { state.readinessCleanup?.(); } catch {}
+    try { state.layoutResizeCleanup?.(); } catch {}
     if (harness) delete harness.__ctoxState;
-    teardownShellMessages();
+    try { teardownShellMessages(); } catch {}
   };
 }
 
@@ -1139,15 +1156,33 @@ function taskSourceReadiness(state) {
 // Re-render the list content (never the chrome) when a backing collection
 // flips its readiness state, so the syncing shell resolves to rows or the
 // honest empty state without waiting for the next poll tick.
+//
+// Fail-soft on purpose: the shell's subscribeCollectionReadiness can throw
+// synchronously (e.g. when the module host is no longer connected, or when an
+// immediate listener re-render fails). That used to abort mount() and surface
+// the window recovery dialog ("CTOX konnte nicht geladen werden") even though
+// the harness markup and the replicated collections were already available.
 function wireTaskSourceReadiness(state) {
   const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
   if (typeof subscribe !== 'function') return () => {};
-  const unsubscribes = TASK_SOURCE_COLLECTIONS
-    .map((name) => subscribe.call(state.ctx.sync, name, () => {
-      if (state.disposed) return;
-      renderTaskList(state);
-    }))
-    .filter((unsubscribe) => typeof unsubscribe === 'function');
+  const unsubscribes = [];
+  for (const name of TASK_SOURCE_COLLECTIONS) {
+    try {
+      const unsubscribe = subscribe.call(state.ctx.sync, name, () => {
+        if (state.disposed) return;
+        try {
+          renderTaskList(state);
+        } catch (error) {
+          if (!state.disposed) console.warn('[ctox] readiness re-render failed', error);
+        }
+      });
+      if (typeof unsubscribe === 'function') unsubscribes.push(unsubscribe);
+    } catch (error) {
+      if (!state.disposed) {
+        console.warn(`[ctox] readiness subscription failed for ${name}`, error);
+      }
+    }
+  }
   return () => {
     for (const unsubscribe of unsubscribes) {
       try { unsubscribe(); } catch {}
@@ -3683,7 +3718,12 @@ function emptyHarnessFlow(error = '') {
 
 function canModifyCtoxApp(state) {
   if (typeof state.ctx.canModifyModule === 'function' && state.ctx.canModifyModule()) return true;
-  const user = state.ctx.session?.user || {};
+  // Prefer the shell session, but accept the flattened ctx.user projection used
+  // by some launch paths. local-dev is the offline operator identity and must
+  // keep write affordances even when its role string is only "user".
+  const user = state.ctx.session?.user || state.ctx.user || {};
+  const userId = String(user.id || '').trim().toLowerCase();
+  if (userId === 'local-dev' || user.is_admin === true) return true;
   const role = String(user.role || (user.is_admin ? 'admin' : 'user')).trim().toLowerCase().replace(/^business_os_/, '');
   return ['admin', 'chef'].includes(role);
 }
@@ -4343,7 +4383,11 @@ function moduleAssetUrl(relativePath) {
 }
 
 async function loadModuleMarkup() {
-  return fetch(moduleAssetUrl('./index.html')).then((response) => response.text());
+  const response = await fetch(moduleAssetUrl('./index.html'));
+  if (!response.ok) {
+    throw new Error(`CTOX markup unavailable: HTTP ${response.status}`);
+  }
+  return response.text();
 }
 
 async function ensureStyles() {
@@ -4371,6 +4415,7 @@ function escapeAttr(value) {
 export const __ctoxTestHooks = {
   aggregateFlowMetrics,
   buildHarnessModel,
+  canModifyCtoxApp,
   clampMetric,
   deriveHarnessHealth,
   eventToNodeId,
@@ -4397,4 +4442,5 @@ export const __ctoxTestHooks = {
   applyTaskSelection,
   webStackPanel,
   taskPipelineStage,
+  wireTaskSourceReadiness,
 };

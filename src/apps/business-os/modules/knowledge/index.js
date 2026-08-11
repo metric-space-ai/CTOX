@@ -1,4 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { replaceChildrenIfChanged, renderHtmlIfChanged } from '../../shared/stable-dom.js';
 
 const KNOWLEDGE_RENDER_DEBOUNCE_MS = 80;
 const KNOWLEDGE_SYNC_START_WAIT_MS = 1500;
@@ -1159,16 +1160,42 @@ function renderKnowledgeList({ resetScroll = false } = {}) {
     // branch) is data-driven and gets the readiness gate; search/filter and
     // error empties stay plain .ctox-empty.
     const dataDriven = !state.loadError && !state.missingCollections.length && !term && !state.items.length;
-    els.list.innerHTML = knowledgeListStateHtml({
+    const emptyHtml = knowledgeListStateHtml({
       dataDriven,
       readiness: knowledgeSourceReadiness(),
       message: knowledgeEmptyStateMessage(copy, term),
       syncingText: copy.syncingData,
     });
-    els.list.scrollTop = scrollTop;
+    renderHtmlIfChanged(els.list, emptyHtml, {
+      signature: `empty:${emptyHtml}`,
+      preserveScroll: !resetScroll,
+    });
+    if (resetScroll) els.list.scrollTop = 0;
   } else {
-    els.list.replaceChildren(...visibleGroups.map((group) => renderKnowledgeBundle(group)));
-    els.list.scrollTop = scrollTop;
+    const signature = JSON.stringify({
+      scope: state.sourceScope,
+      term,
+      sortMode: state.sortMode,
+      sortDir: state.sortDir,
+      flags: [...(state.flagFilters || [])].sort(),
+      groups: visibleGroups.map((group) => ([
+        group.id,
+        group.title || '',
+        group.summary || '',
+        group.domain || '',
+        group.entries.map((entry) => entry.id).join(','),
+        group.runbookIds?.join?.(',') || '',
+        group.tableIds?.join?.(',') || '',
+      ])),
+    });
+    replaceChildrenIfChanged(
+      els.list,
+      visibleGroups.map((group) => renderKnowledgeBundle(group)),
+      { signature, preserveScroll: !resetScroll },
+    );
+    if (resetScroll) els.list.scrollTop = 0;
+    else els.list.scrollTop = scrollTop;
+    applyKnowledgeSelection();
   }
   // One-line pane footer via the shell-wired grammar handle (null-guarded: the
   // shell wires the panes debounced ~120ms after mount, so early renders fall
@@ -1241,15 +1268,15 @@ function bundleCountsHtml(skillbooks, runbooks, tables) {
 
 function renderKnowledgeBundle(group) {
   const section = document.createElement('section');
-  const selected = group.id === state.selectedGroupId;
-  section.className = `knowledge-bundle${selected ? ' is-selected' : ''}`;
+  // Selection is applied after the write via applyKnowledgeSelection.
+  section.className = 'knowledge-bundle';
   section.dataset.bundleId = group.id;
   section.dataset.contextModule = 'knowledge';
   section.dataset.contextRecordType = 'knowledge-group';
   section.dataset.contextRecordId = group.id;
   section.dataset.contextLabel = group.title;
   section.dataset.knowledgeColumn = 'sources';
-  section.setAttribute('aria-selected', String(selected));
+  section.setAttribute('aria-selected', 'false');
   const tableCount = group.tableIds.length;
   const runbookCount = group.runbookIds.length;
   const skillbookCount = skillbooksForGroup(group).length;

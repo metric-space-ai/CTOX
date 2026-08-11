@@ -1,6 +1,7 @@
 import * as Lexical from '../../vendor/lexical.mjs';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { sanitizeRichHtml } from '../../shared/sanitize-rich-html.js';
+import { renderHtmlIfChanged } from '../../shared/stable-dom.js';
 
 const ElementNode = Object.getPrototypeOf(Lexical.HeadingNode);
 
@@ -1044,7 +1045,8 @@ function renderNotesList() {
   let html = '';
 
   function renderCard(note) {
-    const active = note.id === state.activeNoteId;
+    // Selection is applied after the write via applyListSelection — never bake
+    // is-selected into the signature, or every click rebuilds the well.
     const dateStr = formatTimestamp(note.updated_at_ms);
     let contentForSnippet = note.content;
     if (note.is_locked) {
@@ -1064,7 +1066,7 @@ function renderNotesList() {
 
     const titleText = note.title || state.t('untitled');
     return `
-      <div class="ctox-list-item notes-card ${active ? 'is-selected' : ''}" role="button" tabindex="0" aria-selected="${active ? 'true' : 'false'}" aria-label="${escapeHtml(titleText)}" data-note-id="${escapeHtml(note.id)}" data-context-record-id="${escapeHtml(note.id)}" data-context-record-type="note" data-context-label="${escapeHtml(titleText)}">
+      <div class="ctox-list-item notes-card" role="button" tabindex="0" aria-selected="false" aria-label="${escapeHtml(titleText)}" data-note-id="${escapeHtml(note.id)}" data-context-record-id="${escapeHtml(note.id)}" data-context-record-type="note" data-context-label="${escapeHtml(titleText)}">
         <div class="nn-card-row">
           <div class="notes-card-title">${escapeHtml(note.title || state.t('untitled'))}</div>
           <div class="nn-card-icons">
@@ -1095,7 +1097,27 @@ function renderNotesList() {
     olderBucket.forEach(n => html += renderCard(n));
   }
 
-  els.notesList.innerHTML = html;
+  const signature = JSON.stringify({
+    view: state.viewMode,
+    category: state.activeCategory,
+    notebook: state.activeNotebook,
+    tag: state.activeTag,
+    sort: state.sortMode,
+    search: state.searchQuery,
+    lang: state.lang,
+    rows: list.map((note) => ([
+      note.id,
+      note.title || '',
+      note.updated_at_ms || 0,
+      note.notebook || '',
+      note.tags || '',
+      note.is_favorite ? 1 : 0,
+      note.is_locked ? 1 : 0,
+      note.is_trashed ? 1 : 0,
+    ])),
+  });
+  renderHtmlIfChanged(els.notesList, html, { signature });
+  applyListSelection();
 }
 
 // Selection is an in-place class flip across the EXISTING rows — never a list

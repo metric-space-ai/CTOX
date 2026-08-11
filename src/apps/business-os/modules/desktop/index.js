@@ -1,8 +1,8 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
 import { createCtoxLauncher } from './ctoxLauncher.js';
 import { makeIconDraggable } from './iconDrag.js?v=20260811-verlauf-startet-heute-v98';
-import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js';
+import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260811-verlauf-startet-heute-v98';
 import {
   buildQuickAppCreateCommand,
   isRuntimeInstalledApp,
@@ -175,14 +175,14 @@ export async function mount(ctx) {
         if (ctx && typeof ctx.locale === 'string') {
           locale = ctx.locale;
         }
-        timeEl.textContent = now.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
-        dateEl.textContent = now.toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        setTextIfChanged(timeEl, now.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }));
+        setTextIfChanged(dateEl, now.toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
       } catch (e) {
         console.error('[desktop] clock update failed with locale:', ctx?.locale, e);
         try {
           const now = new Date();
-          timeEl.textContent = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-          dateEl.textContent = now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+          setTextIfChanged(timeEl, now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }));
+          setTextIfChanged(dateEl, now.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
         } catch (fallbackErr) {
           console.error('[desktop] clock absolute fallback failed:', fallbackErr);
         }
@@ -376,6 +376,16 @@ export async function mount(ctx) {
     return labels[lang]?.[status] || status;
   }
 
+  // Writing textContent replaces the text node even when the string is
+  // identical, which costs a layout pass on every status tick. The desktop
+  // widgets tick about twice a second, so the unchanged writes were the whole
+  // visible twitch. Only write when the value actually moved.
+  function setTextIfChanged(element, value) {
+    const next = String(value ?? '');
+    if (!element || element.textContent === next) return;
+    element.textContent = next;
+  }
+
   function shortSyncDetail(value) {
     const text = String(value || '').replace(/\s+/g, ' ').trim();
     if (text.length <= 72) return text;
@@ -384,12 +394,13 @@ export async function mount(ctx) {
 
   function renderSyncStatus(view) {
     refs.widgetSync.hidden = Boolean(view.hidden);
-    refs.widgetSync.dataset.state = view.state;
-    refs.widgetSyncTitle.textContent = view.title;
-    refs.widgetSyncCount.textContent = `${view.ready}/${view.total}`;
-    refs.widgetSyncDetail.textContent = view.detail;
+    if (refs.widgetSync.dataset.state !== view.state) refs.widgetSync.dataset.state = view.state;
+    setTextIfChanged(refs.widgetSyncTitle, view.title);
+    setTextIfChanged(refs.widgetSyncCount, `${view.ready}/${view.total}`);
+    setTextIfChanged(refs.widgetSyncDetail, view.detail);
     const percent = view.total > 0 ? Math.round((view.ready / view.total) * 100) : 0;
-    refs.widgetSyncFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+    const width = `${Math.min(100, Math.max(0, percent))}%`;
+    if (refs.widgetSyncFill.style.width !== width) refs.widgetSyncFill.style.width = width;
   }
 
   function createLauncher(modules) {
@@ -441,6 +452,22 @@ export async function mount(ctx) {
     if (!usingFallbackDocs) {
       syncIconPositionCacheFromDocs(docs);
     }
+    // Jeder Sync-Tick baute bisher saemtliche Icons neu auf, auch wenn sich
+    // kein einziges geaendert hatte — gemessen 35 DOM-Ersetzungen in 20
+    // Sekunden. Die Icons sind eine reine Funktion der Dokumente, also darf
+    // ein unveraenderter Satz den Neuaufbau ueberspringen.
+    const iconSignature = JSON.stringify([
+      usingFallbackDocs,
+      docs.map((doc) => {
+        const value = typeof doc.toJSON === 'function' ? doc.toJSON() : doc;
+        return [
+          value.id, value.label, value.glyph, value.target_module, value.target_type,
+          value.x, value.y, value.pinned, value.hidden, value.sort_index,
+        ];
+      }),
+    ]);
+    if (iconSignature === renderIcons.lastSignature && refs.icons.childElementCount) return;
+    renderIcons.lastSignature = iconSignature;
     refs.icons.innerHTML = '';
     if (!docs.length) {
       if (!usingFallbackDocs && iconsReadiness?.ready === false) {

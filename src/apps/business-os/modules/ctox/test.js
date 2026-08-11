@@ -24,6 +24,7 @@ const {
   aggregateFlowMetrics,
   applyTaskSelection,
   buildHarnessModel,
+  canModifyCtoxApp,
   clampMetric,
   compactTaskFlowRow,
   deriveHarnessHealth,
@@ -48,6 +49,7 @@ const {
   webStackPanel,
   webStackStateFromRefreshResult,
   webStackProjectionMissing,
+  wireTaskSourceReadiness,
 } = hooks;
 
 // --- Minimal fake DOM ---------------------------------------------------------
@@ -281,6 +283,89 @@ test('Task list empty-state follows collection readiness of the backing sources'
   const filteredHtml = taskListInner([hidden], { ...unready, taskSearch: 'no-such-match' });
   assert.match(filteredHtml, /class="ctox-empty"/);
   assert.doesNotMatch(filteredHtml, /ctox-syncing/);
+});
+
+test('Readiness wiring stays fail-soft when subscribeCollectionReadiness throws', () => {
+  // Reproduces the shell recovery path: openWindowedModule treats any thrown
+  // mount error as "CTOX konnte nicht geladen werden". A throwing readiness
+  // subscription used to abort mount after the harness markup was already set.
+  const throwsClosed = new Error('Business OS module sync context is no longer active.');
+  throwsClosed.code = 'CTOX_BUSINESS_OS_MODULE_CONTEXT_CLOSED';
+  const state = {
+    disposed: false,
+    ctx: {
+      sync: {
+        subscribeCollectionReadiness() {
+          throw throwsClosed;
+        },
+      },
+    },
+  };
+
+  assert.doesNotThrow(() => {
+    const cleanup = wireTaskSourceReadiness(state);
+    assert.equal(typeof cleanup, 'function');
+    cleanup();
+  });
+});
+
+test('Readiness wiring ignores a listener re-render throw and still unsubscribes', () => {
+  let listener = null;
+  let unsubscribed = 0;
+  const state = {
+    disposed: false,
+    model: { tasks: [] },
+    lang: 'en',
+    taskSearch: '',
+    taskViewMode: 'cards',
+    taskPrimaryView: 'all',
+    taskSourceFilter: 'all',
+    taskPinFilter: 'all',
+    taskSort: 'updated',
+    taskSortDirection: 'desc',
+    pinnedTaskIds: new Set(),
+    ctx: {
+      host: {
+        // renderTaskList looks for [data-ctox-left] and rebuilds when missing;
+        // force the list path to throw by returning a host without queryable panes.
+        querySelector() {
+          throw new Error('host disconnected during readiness render');
+        },
+      },
+      sync: {
+        subscribeCollectionReadiness(_name, next) {
+          listener = next;
+          // Immediate emit mirrors the live shell facade.
+          next({ collection: _name, state: 'live', ready: true, syncing: false });
+          return () => { unsubscribed += 1; };
+        },
+      },
+    },
+  };
+
+  const cleanup = wireTaskSourceReadiness(state);
+  assert.equal(typeof listener, 'function');
+  assert.doesNotThrow(() => listener({ collection: 'ctox_queue_tasks', state: 'live', ready: true }));
+  cleanup();
+  assert.ok(unsubscribed >= 1);
+});
+
+test('local-dev keeps modify affordances even when role is only user', () => {
+  assert.equal(canModifyCtoxApp({
+    ctx: { session: { user: { id: 'local-dev', role: 'user', is_admin: false } } },
+  }), true);
+  assert.equal(canModifyCtoxApp({
+    ctx: { user: { id: 'local-dev', role: 'user' } },
+  }), true);
+  assert.equal(canModifyCtoxApp({
+    ctx: { session: { user: { id: 'viewer-1', role: 'user', is_admin: false } } },
+  }), false);
+  assert.equal(canModifyCtoxApp({
+    ctx: {
+      canModifyModule: () => true,
+      session: { user: { id: 'viewer-1', role: 'user' } },
+    },
+  }), true);
 });
 
 test('Selecting a task is an in-place class flip across the existing rows', () => {
