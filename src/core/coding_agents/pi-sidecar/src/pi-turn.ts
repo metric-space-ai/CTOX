@@ -48,6 +48,25 @@ export const vercelPiCodingToolNames = [
 
 export type VercelPiCodingToolName = typeof vercelPiCodingToolNames[number];
 
+/**
+ * Allows Pi's public API-key-shaped sentinel only for daemon-owned loopback
+ * gateways. Provider, scheme, credentials, and hostname are all checked so an
+ * arbitrary model override cannot forward the sentinel to a remote service.
+ */
+export function isCtoxLoopbackGatewayModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
+  if (!["ctox-gateway", "ctox-minimax-coding", "ctox-kimi-coding"].includes(model.provider)
+      || typeof model.baseUrl !== "string") return false;
+  try {
+    const url = new URL(model.baseUrl);
+    return url.protocol === "http:"
+      && url.username === ""
+      && url.password === ""
+      && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]");
+  } catch {
+    return false;
+  }
+}
+
 export type VercelPiCodingToolsMode = "coding" | "readOnly" | "all";
 
 export type CreateVercelPiCodingToolsOptions = {
@@ -248,12 +267,18 @@ export async function runVercelPiCodingAgentTurn(
   };
   let assistantTurns = 0;
   const maxAssistantTurns = input.maxAssistantTurns ?? 12;
+  const model = input.model ?? PI_CODING_AGENT_VERCEL_MODEL;
 
   const messages = await runAgentLoop(
     [promptMessage],
     context,
     {
-      model: input.model ?? PI_CODING_AGENT_VERCEL_MODEL,
+      model,
+      // pi-ai requires an API-key-shaped value before opening an OpenAI
+      // Responses stream. This public sentinel is permitted only for the
+      // credential-free local CTOX gateway; subscription credentials remain
+      // in the Rust daemon and arbitrary remote overrides get no key.
+      apiKey: isCtoxLoopbackGatewayModel(model) ? "ctox-loopback" : undefined,
       convertToLlm: (messages) => messages.filter(isPiMessage),
       toolExecution: "sequential",
       shouldStopAfterTurn: ({ message }) => {

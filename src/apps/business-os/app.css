@@ -3397,6 +3397,77 @@ body[data-auth-state="locked"] .topbar {
   margin-top: 2px;
 }
 
+.runtime-provider-heading,
+.runtime-provider-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.runtime-provider-heading > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.runtime-provider-heading > div > strong,
+.runtime-provider-heading > div > span,
+.runtime-provider-summary > strong {
+  min-width: 0;
+}
+
+.runtime-provider-summary > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-brand-mark {
+  position: relative;
+  flex: 0 0 26px;
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, oklch(0.24 0.01 250));
+  border-radius: 4px;
+  background: oklch(0.24 0.01 250);
+  color: oklch(0.94 0.006 250);
+}
+
+.provider-brand-mark img {
+  position: absolute;
+  inset: 4px;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.provider-brand-fallback {
+  color: inherit !important;
+  font-size: 12px !important;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.provider-brand-mark[data-logo-state="artwork"] .provider-brand-fallback {
+  opacity: 0;
+}
+
+.runtime-provider-pill .provider-brand-mark {
+  flex-basis: 20px;
+  width: 20px;
+  height: 20px;
+}
+
+.runtime-provider-pill .provider-brand-mark img {
+  inset: 3px;
+  width: 14px;
+  height: 14px;
+}
+
 .subscription-device-code {
   display: grid;
   gap: 3px;

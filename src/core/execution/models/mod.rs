@@ -2,8 +2,10 @@
 // License: AGPL-3.0-only
 
 pub mod engine;
+pub mod kimi_coding;
 pub mod local_model;
 pub mod local_transport;
+pub mod minimax_coding;
 pub mod model_adapters;
 pub mod model_manifest;
 pub mod model_registry;

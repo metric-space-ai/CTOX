@@ -4758,19 +4758,23 @@ const emptyAuthSignals = () => ({
 const cssEscape = (value) => globalThis.CSS && typeof globalThis.CSS.escape === "function"
   ? globalThis.CSS.escape(String(value))
   : String(value).replace(/["\\]/g, "\\$&");
-const browserCandidateFields = async (kind) => page.evaluate(({ kind }) => {
+const browserCandidateFieldsInFrame = async (frame, kind, relaxed) => frame.evaluate(({ kind, relaxed }) => {
   const cssEscape = (value) => globalThis.CSS && typeof globalThis.CSS.escape === "function"
     ? globalThis.CSS.escape(String(value))
     : String(value).replace(/["\\]/g, "\\$&");
   const visible = (element) => {
     const style = globalThis.getComputedStyle(element);
     const box = element.getBoundingClientRect();
+    if (style.display === "none" || element.disabled) return false;
+    // The relaxed pass keeps a field that is only *currently* unpaintable: a
+    // step the page has not expanded yet, or an element caught mid-transition
+    // with opacity 0 and a zero-height box. Filling such a field is worth a
+    // try; refusing to even see it is how a login ends as "field missing".
+    if (relaxed) return true;
     return style.visibility !== "hidden"
-      && style.display !== "none"
       && Number(style.opacity || "1") > 0
       && box.width > 0
       && box.height > 0
-      && !element.disabled
       && element.getAttribute("aria-hidden") !== "true";
   };
   const labelFor = (element) => {
@@ -4846,18 +4850,56 @@ const browserCandidateFields = async (kind) => page.evaluate(({ kind }) => {
     .map((element) => ({ element, score: scoreFor(element) }))
     .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score);
-  return fields.slice(0, 8).map((entry) => descriptorFor(entry.element, "heuristic"));
-}, { kind });
+  return fields.slice(0, 8).map((entry) => descriptorFor(entry.element, relaxed ? "heuristic-relaxed" : "heuristic"));
+}, { kind, relaxed });
+// The login form is not always in the main frame. Several vendor logins render
+// it inside an iframe, where page.evaluate() cannot see it at all — the scan
+// then came back empty and the attempt was reported as a missing credential
+// field even though the field was right there. dismissConsent() already
+// searches every frame; the field scan has to do the same.
+const browserCandidateFields = async (kind) => {
+  const frames = page.frames();
+  for (const relaxed of [false, true]) {
+    const collected = [];
+    for (let frameIndex = 0; frameIndex < frames.length; frameIndex += 1) {
+      let found = [];
+      try {
+        found = await browserCandidateFieldsInFrame(frames[frameIndex], kind, relaxed);
+      } catch {
+        continue;
+      }
+      for (const descriptor of found) {
+        collected.push({
+          ...descriptor,
+          frame_index: frameIndex,
+          frame_url: frameIndex === 0 ? null : (frames[frameIndex].url() || null),
+        });
+      }
+    }
+    // Only widen the visibility test when the strict pass found nothing, so a
+    // normal page keeps its precise, well-ordered result.
+    if (collected.length) return collected;
+  }
+  return [];
+};
 const fillField = async (kind, value, configuredSelector = "") => {
   const candidates = [];
   if (configuredSelector && kind === "credential") {
     candidates.push({ selector: configuredSelector, index: 0, source: "configured", configured: true });
   }
   candidates.push(...await browserCandidateFields(kind));
+  const frames = page.frames();
   for (const candidate of candidates) {
     if (!candidate.selector) continue;
+    // A configured selector carries no frame of its own, so it has to be tried
+    // in every frame — otherwise a hand-configured selector for a field inside
+    // an iframe silently resolves to nothing in the main frame.
+    const scopes = Number.isInteger(candidate.frame_index)
+      ? [frames[candidate.frame_index] || page]
+      : frames;
+    for (const scope of scopes) {
     try {
-      const locator = page.locator(candidate.selector).nth(Number(candidate.index || 0));
+      const locator = scope.locator(candidate.selector).nth(Number(candidate.index || 0));
       if ((await locator.count()) < 1) continue;
       await locator.fill(String(value), { timeout: 3500 });
       // A React form that has not finished hydrating drops a programmatic
@@ -4885,8 +4927,11 @@ const fillField = async (kind, value, configuredSelector = "") => {
         autocomplete: candidate.autocomplete || null,
         placeholder_present: !!candidate.placeholder_present,
         value_confirmed: confirmed === String(value),
+        frame_index: frames.indexOf(scope) < 0 ? 0 : frames.indexOf(scope),
+        frame_url: scope === page || scope === frames[0] ? null : (scope.url() || null),
       };
     } catch {}
+    }
   }
   return null;
 };
@@ -4936,9 +4981,16 @@ const clickSubmit = async (credentialField) => {
     "[role='button']:has-text('Weiter')",
     "[role='button']:has-text('Fortfahren')",
   ];
+  // The submit button lives in the same frame as the field it submits. Resolve
+  // that frame first; searching the main frame for a button that sits inside an
+  // iframe finds nothing and loses the form-scoped match.
+  const frames = page.frames();
+  const fieldScope = credentialField && Number.isInteger(credentialField.frame_index)
+    ? (frames[credentialField.frame_index] || page)
+    : page;
   if (credentialField && credentialField.selector) {
     try {
-      const field = page.locator(credentialField.selector).nth(Number(credentialField.index || 0));
+      const field = fieldScope.locator(credentialField.selector).nth(Number(credentialField.index || 0));
       const form = field.locator("xpath=ancestor::form[1]");
       if ((await form.count()) > 0) {
         for (const selector of submitSelectors) {
@@ -4951,16 +5003,18 @@ const clickSubmit = async (credentialField) => {
     } catch {}
   }
   for (const selector of submitSelectors) {
-    try {
-      const locator = page.locator(selector).first();
-      if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
-      await clickThrough(locator);
-      return { mode: "click", selector };
-    } catch {}
+    for (const scope of [fieldScope, ...frames]) {
+      try {
+        const locator = scope.locator(selector).first();
+        if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
+        await clickThrough(locator);
+        return { mode: "click", selector, frame_url: scope === frames[0] ? null : (scope.url() || null) };
+      } catch {}
+    }
   }
   if (credentialField && credentialField.selector) {
     try {
-      await page.locator(credentialField.selector).nth(Number(credentialField.index || 0)).press("Enter", { timeout: 3500 });
+      await fieldScope.locator(credentialField.selector).nth(Number(credentialField.index || 0)).press("Enter", { timeout: 3500 });
       return { mode: "press", key: "Enter", selector: credentialField.selector };
     } catch {}
   }
@@ -7439,7 +7493,22 @@ mod tests {
                 priority: "urgent".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(serde_json::json!({
+                    "source": "business-os",
+                    "idempotency_key": format!("test-ctox.business_os.app.create-{module_id}"),
+                    "business_os_command_id": format!(
+                        "test-ctox.business_os.app.create-{module_id}"
+                    ),
+                    "business_os_module": "creator",
+                    "business_os_inbound_channel": "creator",
+                    "business_os_command_type": "ctox.business_os.app.create",
+                    "business_os_record_id": module_id,
+                    "business_os_attachments": [],
+                    "client_context": {
+                        "source": "business-os-app-creator-test",
+                        "target": "app"
+                    }
+                })),
             },
         )
         .expect("create queue task");

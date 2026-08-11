@@ -259,7 +259,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 52] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 57] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -273,6 +273,7 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 52] = [
     "ctox.business_os.support.export_diagnostics",
     "ctox.business_os.user.upsert",
     "ctox.business_os.why",
+    "ctox.coding.models",
     "ctox.coding.turn",
     "ctox.command.cancel",
     "ctox.file.export",
@@ -281,6 +282,7 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 52] = [
     "ctox.mailserver.delete_user",
     "ctox.mailserver.get_config",
     "ctox.mailserver.save_domain",
+    "ctox.mailserver.save_runtime",
     "ctox.mailserver.save_user",
     "ctox.maintenance.client_ready",
     "ctox.module.assign_founder",
@@ -296,6 +298,9 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 52] = [
     "ctox.module.set_visible",
     "ctox.module.update",
     "ctox.office.settings.save",
+    "ctox.provider_subscription.disconnect",
+    "ctox.provider_subscription.rotate",
+    "ctox.provider_subscription.status",
     "ctox.runtime_settings.save",
     "ctox.secret.delete",
     "ctox.secret.list",
@@ -888,6 +893,7 @@ fn dispatch_business_command(
         | "ctox.command.cancel"
         | "ctox.runtime_settings.save"
         | "ctox.office.settings.save"
+        | "ctox.coding.models"
         | "ctox.coding.turn"
         | "ctox.file.materialize"
         | "ctox.file.export" => handle_workspace_control_command(root, command)
@@ -930,6 +936,9 @@ fn dispatch_business_command(
         "ctox.secret.list"
         | "ctox.secret.put"
         | "ctox.secret.delete"
+        | "ctox.provider_subscription.disconnect"
+        | "ctox.provider_subscription.rotate"
+        | "ctox.provider_subscription.status"
         | "ctox.subscription_auth.start" => {
             handle_secret_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
@@ -1194,6 +1203,7 @@ fn dispatch_business_command(
         }
         "ctox.mailserver.get_config"
         | "ctox.mailserver.save_domain"
+        | "ctox.mailserver.save_runtime"
         | "ctox.mailserver.delete_domain"
         | "ctox.mailserver.save_user"
         | "ctox.mailserver.delete_user" => {

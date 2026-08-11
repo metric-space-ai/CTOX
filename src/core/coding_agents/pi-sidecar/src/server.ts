@@ -44,6 +44,16 @@ export type CtoxTurnResponse = {
 
 let providersRegistered = false;
 
+export const CTOX_PI_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+export const CTOX_PI_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+export const CTOX_PI_TURN_TIMEOUT_MS = 600_000;
+
+export type SocketServerLimits = {
+  maxRequestBytes?: number;
+  maxResponseBytes?: number;
+  turnTimeoutMs?: number;
+};
+
 /**
  * Default provider stream. Routes to pi-ai's registered providers by the
  * request model's api/provider (env-injected keys). The CTOX owner supplies a
@@ -126,15 +136,34 @@ export async function handleTurnRequest(
 export function startSocketServer(
   socketPath: string,
   streamFn: StreamFn = defaultStreamFn(),
+  limits: SocketServerLimits = {},
 ): net.Server {
   const server = net.createServer((socket) => {
+    const maxRequestBytes = limits.maxRequestBytes ?? CTOX_PI_MAX_REQUEST_BYTES;
+    const maxResponseBytes = limits.maxResponseBytes ?? CTOX_PI_MAX_RESPONSE_BYTES;
+    const turnTimeoutMs = limits.turnTimeoutMs ?? CTOX_PI_TURN_TIMEOUT_MS;
     let buffer = "";
+    let bufferBytes = 0;
+    let terminal = false;
+    socket.setTimeout(turnTimeoutMs, () => socket.destroy(new Error("turn timed out")));
     socket.on("data", (chunk) => {
+      if (terminal) return;
+      bufferBytes += chunk.length;
+      if (bufferBytes > maxRequestBytes) {
+        terminal = true;
+        socket.pause();
+        socket.write(
+          `${JSON.stringify({ ok: false, error: "turn request is too large" })}\n`,
+          () => socket.destroy(),
+        );
+        return;
+      }
       buffer += chunk.toString("utf8");
       for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
         const line = buffer.slice(0, nl).trim();
         buffer = buffer.slice(nl + 1);
-        if (line) void dispatchLine(line, socket, streamFn);
+        bufferBytes = Buffer.byteLength(buffer, "utf8");
+        if (line) void dispatchLine(line, socket, streamFn, turnTimeoutMs, maxResponseBytes);
       }
     });
   });
@@ -142,12 +171,33 @@ export function startSocketServer(
   return server;
 }
 
-async function dispatchLine(line: string, socket: net.Socket, streamFn: StreamFn): Promise<void> {
+async function dispatchLine(
+  line: string,
+  socket: net.Socket,
+  streamFn: StreamFn,
+  turnTimeoutMs: number,
+  maxResponseBytes: number,
+): Promise<void> {
   let response: CtoxTurnResponse;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
-    response = await handleTurnRequest(JSON.parse(line) as CtoxTurnRequest, streamFn);
+    response = await Promise.race([
+      handleTurnRequest(JSON.parse(line) as CtoxTurnRequest, streamFn),
+      new Promise<CtoxTurnResponse>((resolve) => {
+        timeoutHandle = setTimeout(
+          () => resolve({ ok: false, error: "turn timed out" }),
+          turnTimeoutMs,
+        );
+      }),
+    ]);
   } catch (error) {
     response = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
-  socket.write(`${JSON.stringify(response)}\n`);
+  let encoded = JSON.stringify(response);
+  if (Buffer.byteLength(encoded, "utf8") > maxResponseBytes) {
+    encoded = JSON.stringify({ ok: false, error: "turn response is too large" });
+  }
+  socket.write(`${encoded}\n`);
 }

@@ -280,6 +280,13 @@ fragmentierte Eingabe, unbekannte Erweiterungen und Grenzfälle umfassen.
 - `defer`, frühe Returns und Goroutine-Abbruch werden als vollständige
   Lifecycle-Tabelle portiert: success, error, cancellation, timeout, drop und
   replacement.
+- Go-Channel- oder Context-Cancellation darf nicht als Atomic plus ungekoppeltes
+  `Condvar::notify_all` übersetzt werden. Statusprüfung, Zustandswechsel und
+  Wait-Registrierung müssen denselben Mutex synchronisieren, sonst kann die
+  Benachrichtigung genau zwischen Check und Sleep verloren gehen. Ein Gate muss
+  Cancel-before-wait, Cancel-during-wait und Join/Drop jeweils mit harter
+  Zeitgrenze ausführen; ein bloßer Happy-Path-Test findet diese Lost-Wakeup-Race
+  oft erst als sporadisch hängenden Gesamtlauf.
 
 ### Datenbanken, Tabellen und Plattformpolicy
 
@@ -893,3 +900,69 @@ Der vollständige Port ist abgeschlossen, wenn gleichzeitig gilt:
 
 Fehlt einer dieser Beweise, lautet der Projektstatus `in_progress` – auch dann,
 wenn einzelne Ledgers korrekt 100 % anzeigen.
+
+## 16. Integrations-Learnings aus dem CTOX-Produktpfad
+
+- Ein direkter SQLite-Writer in einen fremden Dokument-Store muss dessen
+  vollständigen Dokument-Envelope schreiben. Bei RxDB gehören `_rev`,
+  `_meta.lwt`, `_attachments` und Löschmarker sowohl in die SQL-Spalten als
+  auch konsistent in das serialisierte Dokument; reine Spaltenparität reicht
+  für Cache- und Replikationssemantik nicht aus.
+- Produktmodule dürfen optionale Projektionen nur abonnieren, wenn die
+  übergebene Collection-Berechtigung sie tatsächlich freigibt. Ein typisierter
+  Command-Bus bleibt davon unabhängig und darf nicht durch eine unnötige
+  direkte Leseberechtigung ersetzt werden.
+- Browser-Workflows prüfen Vertragsvokabular, das Unit-Tests leicht übersehen:
+  akzeptierte Wait-Ziele, Mount-Berechtigungen, Replikations-Envelopes,
+  Asset-Laden und die tatsächlich sichtbare Modellauswahl.
+- Ein neues Gate ist erst Bestandteil eines Receipts, wenn Producer,
+  Manifest-Closure, Moduszuordnung und unabhängiger Receipt-Checker dieselbe
+  exakte Gate-Menge erwarten. Ein Lauf mit grünem Testlog, aber abweichender
+  Checker-Menge bleibt ein verworfenes forensisches Artefakt.
+- Source-Integration, installierte Release-Integration und Live-Account-E2E
+  sind drei getrennte Abschlussprädikate. Keine davon darf als Prozentwert für
+  die anderen beiden ausgegeben werden.
+- Eine produktionsnahe Integration muss auch den **kalten** Pfad gegen einen
+  realistisch großen Store testen. Ein warmer Endpoint kann in Millisekunden
+  antworten, während die erste Policy-/Grant-Materialisierung nach einem
+  Daemonstart deutlich länger dauert. Browser-Clients brauchen dafür einen
+  expliziten, weiterhin begrenzten Cold-Start-Budget und Singleflight: mehrere
+  gleichzeitige Aufrufer teilen genau einen nativen Request, statt durch
+  unabhängige Retries einen Server-Thread-Sturm zu erzeugen.
+- Ein Liveness-Watchdog darf Fortschritt nicht allein aus sinkender Queue-Tiefe
+  ableiten. Bei laufender Initial-Replikation können bestätigte Frames sofort
+  durch neue Frames ersetzt werden; die Tiefe bleibt dann konstant oder wächst
+  trotz echter Arbeit. Monotone Transportzähler wie gesendete und empfangene
+  Frames gehören in das Fortschrittsprädikat. Ein Timeout wird dadurch nicht
+  pauschal verlängert: Nur ein Backlog ohne Queue-Abbau **und** ohne
+  Framebewegung gilt als festgefahren.
+- Ein erfolgreich verarbeiteter nativer Befehl ist noch kein Browser-E2E. Der
+  Beleg umfasst Request-Push, native terminale Persistenz, Rückreplikation und
+  die sichtbare UI-Reaktion. Gerade bei großen Datenbeständen deckt dieser
+  letzte Schritt falsche Watchdog-, Timeout- und Cache-Annahmen auf.
+- Release-Evidenz bindet sowohl den Quellstand als auch den tatsächlich
+  installierten Stand. Statische Hotfixes erhalten einen neuen Cache-Buster und
+  einen Browserbeleg; Änderungen am nativen Lifecycle werden dagegen erst nach
+  einem neuen verwalteten Binary-Release als installiert gewertet.
+- Framebewegung im Watchdog beseitigt nur falsch-positive Stallurteile. Bleiben
+  Queue-Tiefe **und** Transportzähler stehen, ist der Alarm weiterhin echt. Ein
+  automatisch erholter Cold-Start mit anschließend terminalem Command und
+  sichtbarem Browser-Receipt ist ein bestandener Recovery-Test, aber noch kein
+  Ersatz für mehrzyklige Soak- und Latenzevidenz. Dashboard und Receipt müssen
+  diese Beobachtung getrennt vom funktionalen PASS ausweisen.
+- Ein Business-OS-Statuscommand ist auch dann eine policy-gesteuerte Operation,
+  wenn er fachlich nur liest. Ein CLI-Smoke ohne Actor-/Capability-Kontext darf
+  deshalb korrekt abgewiesen werden. Produkt-E2E muss den autorisierten
+  Browserpfad verwenden; eine Policy-Ablehnung ist weder Providerfehler noch
+  erfolgreicher Providerstatus-Nachweis.
+- Große Rust-Workspace-Releases brauchen eine isolierte, nicht parallel
+  aufräumbare Cargo-Home und ein bewusst gewähltes Build-Target. Wenn ein
+  anderer Updater Registry- oder Target-Caches während des Builds löscht, sind
+  sporadische Fetch-/Linkfehler Infrastruktur-Races und keine Portsemantik.
+  Release-Receipts sollten Cargo-Home, Target, Binary-Hash und atomar
+  aktivierten Release-Pfad festhalten.
+- Nach einem Daemonstart kann die erste Projektion CPU und Store über Minuten
+  binden, obwohl der HTTP-Socket bereits lauscht. Readiness muss deshalb eine
+  echte HTTP-Antwort, die WebRTC-Verbindung, lebende kritische Tasks und einen
+  vollständigen Command-Roundtrip prüfen; `LISTEN` oder ein frischer Heartbeat
+  allein sind nicht hinreichend.

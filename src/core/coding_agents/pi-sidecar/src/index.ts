@@ -29,6 +29,7 @@ export {
   // messages and, in tests, to drive a deterministic stub stream.
   createVercelPiCodingTextMessage,
   createVercelPiCodingToolCallMessage,
+  isCtoxLoopbackGatewayModel,
   vercelPiCodingToolNames,
   type RunVercelPiCodingAgentTurnInput as CtoxPiCodingTurnInput,
   type VercelPiCodingAgentTurnResult as CtoxPiCodingTurnResult,
@@ -40,8 +41,12 @@ export {
   handleTurnRequest,
   startSocketServer,
   defaultStreamFn,
+  CTOX_PI_MAX_REQUEST_BYTES,
+  CTOX_PI_MAX_RESPONSE_BYTES,
+  CTOX_PI_TURN_TIMEOUT_MS,
   type CtoxTurnRequest,
   type CtoxTurnResponse,
+  type SocketServerLimits,
 } from "./server";
 
 // When executed directly (`node ctox-pi-sidecar.mjs <unix-socket-path>`), run as

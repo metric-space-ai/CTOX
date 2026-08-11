@@ -124,6 +124,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::thread;
@@ -165,6 +166,7 @@ const CHATGPT_AUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CHATGPT_AUTH_SECRET_SCOPE: &str = "ctox-auth";
 const CHATGPT_AUTH_SECRET_NAME: &str = "chatgpt_subscription_auth_json";
+const CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID: &str = "codex-instance-primary";
 pub(super) const BUSINESS_OS_SECRET_SCOPE: &str = "business-os";
 const BUSINESS_OS_ROOM_PASSWORD_SECRET_NAME: &str = "webrtc_room_password";
 const BUSINESS_OS_TURN_SECRET_NAME: &str = "webrtc_turn_secret";
@@ -5244,6 +5246,7 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
         })
     });
     let office = load_office_runtime_settings(root)?;
+    let provider_subscriptions = provider_subscription_status_projection(root);
     let updated_at_ms = now_ms() as u64;
     Ok(serde_json::json!({
         "id": "runtime-settings",
@@ -5256,6 +5259,7 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
         "web_stack": web_stack,
         "platform": platform,
         "office": office,
+        "provider_subscriptions": provider_subscriptions,
         "runtime": {
             "source": source,
             "provider": provider,
@@ -7067,10 +7071,30 @@ pub fn start_subscription_auth_command(
         session_has_workspace_permission(root, session, BusinessOsPermission::IntegrationsManage)?,
         "chef or admin role required"
     );
-    subscription_auth_start_payload(root, request.use_device_code())
+    let account_request = ProviderSubscriptionCommandRequest {
+        provider: Some(
+            request
+                .provider
+                .clone()
+                .unwrap_or_else(|| "codex".to_owned()),
+        ),
+        account_id: request.account_id.clone(),
+    };
+    let provider = account_request.normalized_provider()?;
+    request.validate_public_selectors()?;
+    let account_id = request
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if account_id.is_some() {
+        let _ = account_request.required_account_id()?;
+    }
+    provider_subscription_auth_start_payload(root, &provider, request.use_device_code(), account_id)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubscriptionAuthStartCommandRequest {
     #[serde(default)]
     pub provider: Option<String>,
@@ -7078,9 +7102,33 @@ pub struct SubscriptionAuthStartCommandRequest {
     pub auth_mode: Option<String>,
     #[serde(default)]
     pub flow: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 impl SubscriptionAuthStartCommandRequest {
+    fn validate_public_selectors(&self) -> anyhow::Result<()> {
+        if let Some(auth_mode) = self.auth_mode.as_deref() {
+            anyhow::ensure!(
+                matches!(
+                    auth_mode.trim().to_ascii_lowercase().as_str(),
+                    "subscription" | "chatgpt_subscription" | "codex_subscription"
+                ),
+                "unsupported provider auth_mode"
+            );
+        }
+        if let Some(flow) = self.flow.as_deref() {
+            anyhow::ensure!(
+                matches!(
+                    flow.trim().to_ascii_lowercase().as_str(),
+                    "device_code" | "browser_callback" | "auth_url"
+                ),
+                "unsupported provider auth flow"
+            );
+        }
+        Ok(())
+    }
+
     fn use_device_code(&self) -> bool {
         let provider = self
             .provider
@@ -7100,8 +7148,380 @@ impl SubscriptionAuthStartCommandRequest {
             .unwrap_or("device_code")
             .trim()
             .to_ascii_lowercase();
-        provider == "openai" && auth_mode == "chatgpt_subscription" && flow == "device_code"
+        matches!(provider.as_str(), "openai" | "codex")
+            && matches!(auth_mode.as_str(), "chatgpt_subscription" | "subscription")
+            && flow == "device_code"
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSubscriptionCommandRequest {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+impl ProviderSubscriptionCommandRequest {
+    fn normalized_provider(&self) -> anyhow::Result<String> {
+        let provider = self
+            .provider
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let provider = match provider.as_str() {
+            "openai" => "codex",
+            "anthropic" => "claude",
+            "anti-gravity" | "google" => "antigravity",
+            "kimi-code" | "kimi_coding_plan" => "kimi_coding",
+            other => other,
+        };
+        anyhow::ensure!(
+            matches!(
+                provider,
+                "codex" | "claude" | "antigravity" | "kimi" | "kimi_coding" | "minimax"
+            ),
+            "unsupported provider subscription"
+        );
+        Ok(provider.to_owned())
+    }
+
+    fn required_account_id(&self) -> anyhow::Result<&str> {
+        let account_id = self.account_id.as_deref().unwrap_or_default().trim();
+        anyhow::ensure!(!account_id.is_empty(), "provider account_id is required");
+        let mut characters = account_id.chars();
+        anyhow::ensure!(
+            account_id.len() <= 160
+                && characters
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphanumeric())
+                && characters.all(|character| {
+                    character.is_ascii_alphanumeric() || "-_.".contains(character)
+                }),
+            "provider account_id is invalid"
+        );
+        Ok(account_id)
+    }
+}
+
+/// Removes metadata that the Business OS command bus owns and injects into
+/// every command payload. Provider selectors remain strict: arbitrary fields
+/// (especially credential material) are deliberately not discarded here and
+/// continue to fail `deny_unknown_fields` deserialization.
+fn provider_subscription_selector_payload(payload: &Value) -> Value {
+    let mut selectors = payload.clone();
+    if let Some(object) = selectors.as_object_mut() {
+        for transport_field in ["inbound_channel", "dependencies", "command_deadline_at_ms"] {
+            object.remove(transport_field);
+        }
+    }
+    selectors
+}
+
+fn provider_subscription_account_is_projected(
+    root: &Path,
+    provider: &str,
+    account_id: &str,
+) -> bool {
+    provider_subscription_status_projection(root)
+        .get("accounts")
+        .and_then(Value::as_array)
+        .is_some_and(|accounts| {
+            accounts.iter().any(|account| {
+                account.get("provider").and_then(Value::as_str) == Some(provider)
+                    && account.get("id").and_then(Value::as_str) == Some(account_id)
+            })
+        })
+}
+
+fn provider_subscription_status_projection(root: &Path) -> Value {
+    use crate::execution::models::kimi_coding::KimiCodingAccountPhase;
+    use crate::execution::models::minimax_coding::MiniMaxCodingAccountPhase;
+
+    let mut projection = crate::execution::cliproxyapi_host::provider_subscription_status(root);
+    let Some(object) = projection.as_object_mut() else {
+        return projection;
+    };
+    let providers = object
+        .entry("providers")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(providers) = providers.as_array_mut() {
+        for provider in providers.iter_mut() {
+            let Some(provider_object) = provider.as_object_mut() else {
+                continue;
+            };
+            let provider_id = provider_object
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let default_account_id = match provider_id {
+                "codex" => CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID,
+                "claude" => "claude-primary",
+                "antigravity" => "antigravity-primary",
+                "kimi" => "kimi-primary",
+                _ => continue,
+            };
+            provider_object
+                .entry("access_mode")
+                .or_insert_with(|| Value::String("Subscription".to_owned()));
+            provider_object
+                .entry("default_account_id")
+                .or_insert_with(|| Value::String(default_account_id.to_owned()));
+            provider_object
+                .entry("available")
+                .or_insert(Value::Bool(true));
+        }
+        if !providers
+            .iter()
+            .any(|provider| provider.get("id").and_then(Value::as_str) == Some("minimax"))
+        {
+            providers.push(serde_json::json!({
+                "id": "minimax",
+                "label": "MiniMax",
+                "flow": "credential",
+                "access_mode": "Coding Plan",
+                "default_account_id": "minimax-coding-primary",
+                "available": true,
+            }));
+        }
+        if !providers
+            .iter()
+            .any(|provider| provider.get("id").and_then(Value::as_str) == Some("kimi_coding"))
+        {
+            providers.push(serde_json::json!({
+                "id": "kimi_coding",
+                "label": "Kimi Coding Plan",
+                "flow": "credential",
+                "access_mode": "Coding Plan",
+                "default_account_id": "kimi-coding-primary",
+                "available": true,
+            }));
+        }
+    }
+    let accounts = object
+        .entry("accounts")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(accounts) = accounts.as_array_mut() {
+        for status in
+            crate::execution::models::kimi_coding::account_statuses(root).unwrap_or_default()
+        {
+            let (phase, enabled) = match status.phase {
+                KimiCodingAccountPhase::Disabled => ("disabled", false),
+                KimiCodingAccountPhase::MissingCredential => ("missing_credential", false),
+                KimiCodingAccountPhase::Ready => ("ready", true),
+            };
+            let preset_ids = status
+                .models
+                .iter()
+                .map(|model| format!("kimi-coding-{}-{model}", status.id))
+                .collect::<Vec<_>>();
+            accounts.push(serde_json::json!({
+                "id": status.id,
+                "provider": "kimi_coding",
+                "enabled": enabled,
+                "status": phase,
+                "models": status.models,
+                "preset_ids": preset_ids,
+            }));
+        }
+        for status in
+            crate::execution::models::minimax_coding::account_statuses(root).unwrap_or_default()
+        {
+            let (phase, enabled) = match status.phase {
+                MiniMaxCodingAccountPhase::Disabled => ("disabled", false),
+                MiniMaxCodingAccountPhase::MissingCredential => ("missing_credential", false),
+                MiniMaxCodingAccountPhase::Ready => ("ready", true),
+            };
+            let preset_ids = status
+                .models
+                .iter()
+                .map(|model| format!("minimax-coding-{}-{model}", status.id))
+                .collect::<Vec<_>>();
+            accounts.push(serde_json::json!({
+                "id": status.id,
+                "provider": "minimax",
+                "enabled": enabled,
+                "status": phase,
+                "models": status.models,
+                "preset_ids": preset_ids,
+            }));
+        }
+    }
+    projection
+}
+
+const KIMI_CODING_ACCOUNT_ID: &str = "kimi-coding-primary";
+const MINIMAX_CODING_ACCOUNT_ID: &str = "minimax-coding-primary";
+
+fn start_kimi_coding_plan(root: &Path, account_id: &str) -> anyhow::Result<Value> {
+    use crate::execution::models::kimi_coding::{
+        upsert_account, KimiCodingAccount, KimiCodingEndpointProfile, KimiSecretRef,
+    };
+
+    let account_id = account_id.trim();
+    anyhow::ensure!(
+        account_id == KIMI_CODING_ACCOUNT_ID,
+        "Kimi Coding Plan currently supports only the canonical Business OS account"
+    );
+    upsert_account(
+        root,
+        KimiCodingAccount {
+            id: account_id.to_owned(),
+            disabled: false,
+            models: Vec::new(),
+            api_key_secret: KimiSecretRef {
+                scope: crate::secrets::credential_scope().to_owned(),
+                name: "KIMI_API_KEY".to_owned(),
+            },
+            endpoint_profile: KimiCodingEndpointProfile::KimiCoding,
+        },
+    )?;
+    let ready = crate::execution::models::kimi_coding::ready_accounts(root)?
+        .iter()
+        .any(|account| account.id == account_id);
+    Ok(serde_json::json!({
+        "ok": true,
+        "provider": "kimi_coding",
+        "account_id": account_id,
+        "status": if ready { "connected" } else { "credential_required" },
+        "credential_name": "KIMI_API_KEY",
+        "message": if ready {
+            "Kimi Coding Plan Account ist verbunden."
+        } else {
+            "KIMI_API_KEY muss im verschlüsselten CTOX Credential Store hinterlegt werden."
+        },
+        "provider_subscriptions": provider_subscription_status_projection(root),
+    }))
+}
+
+fn start_minimax_coding_plan(root: &Path, account_id: &str) -> anyhow::Result<Value> {
+    use crate::execution::models::minimax_coding::{
+        upsert_account, MiniMaxCodingAccount, MiniMaxCodingEndpointProfile, MiniMaxSecretRef,
+    };
+
+    let account_id = account_id.trim();
+    anyhow::ensure!(
+        account_id == MINIMAX_CODING_ACCOUNT_ID,
+        "MiniMax Coding Plan currently supports only the canonical Business OS account"
+    );
+    upsert_account(
+        root,
+        MiniMaxCodingAccount {
+            id: account_id.to_owned(),
+            disabled: false,
+            models: Vec::new(),
+            api_key_secret: MiniMaxSecretRef {
+                scope: crate::secrets::credential_scope().to_owned(),
+                name: "MINIMAX_API_KEY".to_owned(),
+            },
+            endpoint_profile: MiniMaxCodingEndpointProfile::GlobalAnthropic,
+        },
+    )?;
+    let ready = crate::execution::models::minimax_coding::ready_accounts(root)?
+        .iter()
+        .any(|account| account.id == account_id);
+    Ok(serde_json::json!({
+        "ok": true,
+        "provider": "minimax",
+        "account_id": account_id,
+        "status": if ready { "connected" } else { "credential_required" },
+        "credential_name": "MINIMAX_API_KEY",
+        "message": if ready {
+            "MiniMax Coding Plan Account ist verbunden."
+        } else {
+            "MINIMAX_API_KEY muss im verschlüsselten CTOX Credential Store hinterlegt werden."
+        },
+        "provider_subscriptions": provider_subscription_status_projection(root),
+    }))
+}
+
+fn coding_plan_rotation_payload(
+    root: &Path,
+    provider: &str,
+    account_id: &str,
+) -> anyhow::Result<Value> {
+    let (expected_account_id, credential_name, label) = match provider {
+        "kimi_coding" => (KIMI_CODING_ACCOUNT_ID, "KIMI_API_KEY", "Kimi Coding Plan"),
+        "minimax" => (
+            MINIMAX_CODING_ACCOUNT_ID,
+            "MINIMAX_API_KEY",
+            "MiniMax Coding Plan",
+        ),
+        _ => anyhow::bail!("provider is not a direct coding plan"),
+    };
+    anyhow::ensure!(
+        account_id == expected_account_id,
+        "coding-plan account is not the canonical Business OS account"
+    );
+    Ok(serde_json::json!({
+        "ok": true,
+        "provider": provider,
+        "account_id": account_id,
+        "status": "credential_required",
+        "credential_name": credential_name,
+        "message": format!(
+            "{credential_name} muss im verschlüsselten CTOX Credential Store ersetzt werden; der Browser nimmt keine Provider-Secrets entgegen."
+        ),
+        "label": label,
+        "provider_subscriptions": provider_subscription_status_projection(root),
+    }))
+}
+
+fn disconnect_instance_chatgpt_subscription_at(
+    root: &Path,
+    codex_home: &Path,
+    account_id: &str,
+) -> anyhow::Result<Value> {
+    let _lifecycle = crate::secrets::credential_lifecycle_guard();
+    anyhow::ensure!(
+        account_id == CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID,
+        "ChatGPT subscription account is unavailable"
+    );
+
+    let configured =
+        crate::secrets::secret_exists(root, CHATGPT_AUTH_SECRET_SCOPE, CHATGPT_AUTH_SECRET_NAME)?;
+    if configured {
+        crate::secrets::delete_secret_record(
+            root,
+            CHATGPT_AUTH_SECRET_SCOPE,
+            CHATGPT_AUTH_SECRET_NAME,
+        )?;
+    }
+
+    let auth_manager = ctox_core::AuthManager::new(
+        codex_home.to_path_buf(),
+        false,
+        ctox_core::auth::AuthCredentialsStoreMode::File,
+    );
+    let auth_file_removed = if auth_manager
+        .auth_cached()
+        .as_ref()
+        .is_some_and(|auth| auth.is_chatgpt_auth())
+    {
+        auth_manager.logout()?
+    } else {
+        false
+    };
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "provider": "codex",
+        "account_id": account_id,
+        "disconnected": configured || auth_file_removed,
+        "deleted_secret_records": if configured { 1 } else { 0 },
+        "provider_subscriptions": provider_subscription_status_projection(root),
+    }))
+}
+
+fn disconnect_instance_chatgpt_subscription(
+    root: &Path,
+    account_id: &str,
+) -> anyhow::Result<Value> {
+    let codex_home = ctox_core::config::find_codex_home()
+        .context("cannot resolve Codex home for ChatGPT subscription disconnect")?;
+    disconnect_instance_chatgpt_subscription_at(root, &codex_home, account_id)
 }
 
 pub fn run_channel_command(
@@ -7245,10 +7665,7 @@ fn runtime_settings_api_upstream_base_url(
     env_map: &BTreeMap<String, String>,
 ) -> String {
     let provider = crate::inference::runtime_state::normalize_api_provider(provider);
-    if provider.eq_ignore_ascii_case("ctox_proxy")
-        || (provider.eq_ignore_ascii_case("minimax")
-            && crate::inference::runtime_state::use_ctox_llm_proxy_credentials(env_map))
-    {
+    if provider.eq_ignore_ascii_case("ctox_proxy") {
         return env_map
             .get(crate::inference::runtime_state::CTOX_LLM_PROXY_BASE_URL_ENV)
             .or_else(|| env_map.get("CTOX_UPSTREAM_BASE_URL"))
@@ -7354,6 +7771,300 @@ fn subscription_auth_start_payload(root: &Path, use_device_code: bool) -> anyhow
         "verification_url": login.verification_url,
         "user_code": login.device_user_code,
         "message": "ChatGPT Subscription Autorisierung gestartet."
+    }))
+}
+
+fn provider_subscription_auth_start_payload(
+    root: &Path,
+    provider: &str,
+    use_device_code: bool,
+    account_id: Option<&str>,
+) -> anyhow::Result<Value> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "openai" | "codex" => subscription_auth_start_payload(root, use_device_code),
+        "claude" | "anthropic" => start_claude_subscription_login(
+            root,
+            account_id.context("Claude subscription account_id is required")?,
+        ),
+        "antigravity" | "anti-gravity" | "google" => start_antigravity_subscription_login(
+            root,
+            account_id.context("Antigravity subscription account_id is required")?,
+        ),
+        "kimi" => start_kimi_subscription_login(
+            root,
+            account_id.context("Kimi subscription account_id is required")?,
+        ),
+        "kimi_coding" => start_kimi_coding_plan(
+            root,
+            account_id.context("Kimi coding-plan account_id is required")?,
+        ),
+        "minimax" => start_minimax_coding_plan(
+            root,
+            account_id.context("MiniMax coding-plan account_id is required")?,
+        ),
+        other => anyhow::bail!("unsupported subscription provider: {other}"),
+    }
+}
+
+fn start_kimi_subscription_login(root: &Path, account_id: &str) -> anyhow::Result<Value> {
+    use ctox_cliproxyapi::internal::auth::kimi::KimiDeviceIdentity;
+    use ctox_cliproxyapi::sdk::auth::LoginCancellation;
+
+    let account_id = account_id.trim().to_owned();
+    let device_id = format!(
+        "ctox-{}",
+        channels::stable_digest(root.to_string_lossy().as_ref())
+    );
+    let identity = KimiDeviceIdentity::new(
+        device_id,
+        "CTOX Business OS",
+        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let auth = crate::execution::cliproxyapi_integration::build_instance_kimi_auth(identity);
+    let cancellation = LoginCancellation::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let device_code = runtime
+        .block_on(auth.start_device_flow(&cancellation))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let verification_url = if device_code.verification_uri_complete.trim().is_empty() {
+        device_code.verification_uri.clone()
+    } else {
+        device_code.verification_uri_complete.clone()
+    };
+    anyhow::ensure!(
+        !device_code.user_code.trim().is_empty() && !verification_url.trim().is_empty(),
+        "Kimi device authorization did not return a public code and verification URL"
+    );
+
+    let root = root.to_path_buf();
+    let login_id = Uuid::new_v4().to_string();
+    let worker_id = login_id.clone();
+    let worker_device_code = device_code.clone();
+    let worker_account_id = account_id.clone();
+    thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let bundle = runtime
+                .block_on(auth.wait_for_authorization(&cancellation, &worker_device_code))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let storage = auth.create_token_storage(&bundle);
+            crate::execution::cliproxyapi_integration::install_kimi_subscription(
+                &root,
+                &worker_account_id,
+                &storage,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("CTOX Kimi subscription login {worker_id} failed: {error}");
+        }
+    });
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "status": "device_code",
+        "provider": "kimi",
+        "account_id": account_id,
+        "login_id": login_id,
+        "auth_url": verification_url.clone(),
+        "verification_url": verification_url,
+        "user_code": device_code.user_code,
+        "expires_in": device_code.expires_in,
+        "message": "Kimi Subscription Device-Flow gestartet."
+    }))
+}
+
+fn provider_callback_values(
+    request: Request,
+    callback_path: &str,
+    expected_state: &str,
+) -> anyhow::Result<Option<String>> {
+    let url_raw = request.url().to_owned();
+    let parsed = Url::parse(&format!("http://localhost{url_raw}"))?;
+    if parsed.path() != callback_path {
+        respond_html(request, 404, "Not Found")?;
+        return Ok(None);
+    }
+    let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+    if params.get("state").map(String::as_str) != Some(expected_state) {
+        respond_html(
+            request,
+            400,
+            "CTOX Login konnte nicht abgeschlossen werden: state mismatch.",
+        )?;
+        anyhow::bail!("OAuth state mismatch");
+    }
+    if let Some(error) = params.get("error") {
+        respond_html(request, 400, "CTOX Login wurde vom Provider abgelehnt.")?;
+        anyhow::bail!("provider rejected OAuth login: {error}");
+    }
+    let code = params
+        .get("code")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    if code.is_empty() {
+        respond_html(
+            request,
+            400,
+            "CTOX Login lieferte keinen Autorisierungscode.",
+        )?;
+        anyhow::bail!("OAuth callback contains no authorization code");
+    }
+    respond_html(
+        request,
+        200,
+        "CTOX Subscription wurde autorisiert. Dieses Fenster kann geschlossen werden.",
+    )?;
+    Ok(Some(code.to_owned()))
+}
+
+fn start_claude_subscription_login(root: &Path, account_id: &str) -> anyhow::Result<Value> {
+    use ctox_cliproxyapi::internal::auth::claude::{
+        generate_pkce_codes, AnthropicHttpTransport, ClaudeAuth, SecretString,
+    };
+    let server = Server::http("127.0.0.1:54545")
+        .map_err(|_| anyhow::anyhow!("Claude OAuth callback port 54545 is unavailable"))?;
+    let pkce = generate_pkce_codes().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let state_raw = chatgpt_login_state();
+    let state =
+        SecretString::new(state_raw.clone()).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let transport =
+        AnthropicHttpTransport::new(None).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let auth = ClaudeAuth::new(transport);
+    let (auth_url, _) = auth
+        .generate_auth_url(&state, &pkce)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let root = root.to_path_buf();
+    let account_id = account_id.to_owned();
+    let worker_account_id = account_id.clone();
+    let login_id = Uuid::new_v4().to_string();
+    let worker_id = login_id.clone();
+    thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let request = server
+                .recv_timeout(Duration::from_secs(300))?
+                .context("Claude OAuth callback timed out")?;
+            let Some(code) = provider_callback_values(request, "/callback", &state_raw)? else {
+                anyhow::bail!("unexpected Claude callback path");
+            };
+            let code =
+                SecretString::new(code).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let bundle = runtime
+                .block_on(auth.exchange_code_for_tokens(&code, &state, &pkce))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let tokens = bundle.token_data();
+            let credentials =
+                ctox_cliproxyapi::internal::auth::claude::ClaudeStoredCredentials::new(
+                    tokens.access_token().clone(),
+                    tokens.refresh_token().clone(),
+                );
+            crate::execution::cliproxyapi_host::install_claude_subscription(
+                &root,
+                &worker_account_id,
+                &credentials,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("CTOX Claude subscription login {worker_id} failed: {error}");
+        }
+        server.unblock();
+    });
+    Ok(serde_json::json!({
+        "ok": true, "status": "auth_url", "provider": "claude", "account_id": account_id, "login_id": login_id,
+        "auth_url": auth_url, "redirect_uri": "http://localhost:54545/callback",
+        "message": "Claude Subscription Autorisierung gestartet."
+    }))
+}
+
+fn start_antigravity_subscription_login(root: &Path, account_id: &str) -> anyhow::Result<Value> {
+    use ctox_cliproxyapi::internal::auth::antigravity::{
+        build_auth_url, AntigravityAuth, AntigravityHttpTransport, SecretString, CALLBACK_PORT,
+    };
+    use ctox_cliproxyapi::sdk::auth::LoginCancellation;
+    let server = Server::http(format!("127.0.0.1:{CALLBACK_PORT}")).map_err(|_| {
+        anyhow::anyhow!("Antigravity OAuth callback port {CALLBACK_PORT} is unavailable")
+    })?;
+    let state = chatgpt_login_state();
+    let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/oauth-callback");
+    let auth_url = build_auth_url(&state, Some(&redirect_uri));
+    let root = root.to_path_buf();
+    let account_id = account_id.to_owned();
+    let worker_account_id = account_id.clone();
+    let login_id = Uuid::new_v4().to_string();
+    let worker_id = login_id.clone();
+    let worker_redirect = redirect_uri.clone();
+    thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let request = server
+                .recv_timeout(Duration::from_secs(300))?
+                .context("Antigravity OAuth callback timed out")?;
+            let Some(code) = provider_callback_values(request, "/oauth-callback", &state)? else {
+                anyhow::bail!("unexpected Antigravity callback path");
+            };
+            let transport = AntigravityHttpTransport::new(None)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let auth = AntigravityAuth::new(Arc::new(transport));
+            let cancellation = LoginCancellation::default();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let (token, _email, project_id) = runtime
+                .block_on(async {
+                    let token = auth
+                        .exchange_code_for_tokens(&cancellation, &code, &worker_redirect)
+                        .await?;
+                    let email = auth
+                        .fetch_user_info(&cancellation, token.access_token())
+                        .await?;
+                    let project_id = auth
+                        .fetch_project_id(&cancellation, token.access_token())
+                        .await?;
+                    Ok::<_, ctox_cliproxyapi::internal::auth::antigravity::AntigravityAuthError>((
+                        token, email, project_id,
+                    ))
+                })
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let refresh = token
+                .refresh_token()
+                .cloned()
+                .context("Antigravity did not return a refresh token")?;
+            let expiry = SystemTime::now()
+                .checked_add(Duration::from_secs(token.expires_in.max(0) as u64))
+                .context("Antigravity token expiry overflow")?;
+            let credentials =
+                ctox_cliproxyapi::internal::auth::antigravity::AntigravityStoredCredentials::new(
+                    SecretString::new(token.access_token().expose_secret().to_owned())?,
+                    refresh,
+                    expiry,
+                    project_id,
+                )?;
+            crate::execution::cliproxyapi_host::install_antigravity_subscription(
+                &root,
+                &worker_account_id,
+                &credentials,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("CTOX Antigravity subscription login {worker_id} failed: {error}");
+        }
+        server.unblock();
+    });
+    Ok(serde_json::json!({
+        "ok": true, "status": "auth_url", "provider": "antigravity", "account_id": account_id, "login_id": login_id,
+        "auth_url": auth_url, "redirect_uri": redirect_uri,
+        "message": "Antigravity Subscription Autorisierung gestartet."
     }))
 }
 
@@ -16731,6 +17442,38 @@ pub(super) fn handle_workspace_control_command(
             )?
             .into_outcome();
         }
+        "ctox.coding.models" => {
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    let module_id = source_sanitize_slug(
+                        command
+                            .payload
+                            .get("module_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+                    Ok(CommandPolicyRequirement::module(
+                        BusinessOsPermission::AppsView,
+                        module_id,
+                    ))
+                },
+                |_session| {
+                    let outcome = crate::coding_agents::pi_sidecar::coding_model_capabilities(root);
+                    write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    )
+                },
+            )?
+            .into_outcome();
+        }
         "ctox.coding.turn" => {
             return enforce_command_policy(
                 root,
@@ -16767,14 +17510,23 @@ pub(super) fn handle_workspace_control_command(
                         .get("faux")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    // Optional model override: by default the coding agent uses the same
-                    // model/provider as CTOX (the gateway); a payload `model` (any pi-ai
-                    // provider model) overrides it, like plain pi.
-                    let model_override = command.payload.get("model").cloned();
                     // Delegate one bounded coding turn to the pi-sidecar owner. Errors
                     // (e.g. sidecar not built, gateway unreachable) become an ok:false
                     // outcome rather than a failed command.
                     let outcome = (|| -> anyhow::Result<Value> {
+                        anyhow::ensure!(
+                            command.payload.get("model").is_none(),
+                            "raw coding model overrides are not accepted"
+                        );
+                        let preset_id = command
+                            .payload
+                            .get("preset_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("ctox");
+                        let model_override =
+                            crate::coding_agents::pi_sidecar::resolve_coding_model_preset(
+                                root, preset_id,
+                            )?;
                         let dist = crate::coding_agents::pi_sidecar::resolve_sidecar_dist(root)?;
                         crate::coding_agents::pi_sidecar::run_module_coding_turn(
                             root,
@@ -17240,9 +17992,45 @@ pub(super) fn handle_mailserver_command(
                 users.push(r?);
             }
 
+            let db_path = crate::paths::core_db(root).to_string_lossy().into_owned();
+            let mail_store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
+            let runtime_config = mail_store.load_runtime_settings()?;
+            let runtime_status = ctox_mailserver::runtime_status();
+            let bind_ip = runtime_config.bind_host.parse::<std::net::IpAddr>()
+                .context("invalid configured mailserver bind address")?;
+            let smtp_address = std::net::SocketAddr::new(bind_ip, runtime_config.smtp_port);
+            let imap_address = std::net::SocketAddr::new(bind_ip, runtime_config.imap_port);
+            let smtp_reachable = runtime_config.enabled
+                && std::net::TcpStream::connect_timeout(
+                    &smtp_address,
+                    std::time::Duration::from_millis(250),
+                ).is_ok();
+            let imap_reachable = runtime_config.enabled
+                && std::net::TcpStream::connect_timeout(
+                    &imap_address,
+                    std::time::Duration::from_millis(250),
+                ).is_ok();
+            let (queue_pending, delivery_success, delivery_failed): (i64, i64, i64) = conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM stalwart_smtp_queue WHERE status = 'pending'),
+                    (SELECT COUNT(*) FROM stalwart_smtp_delivery_log WHERE outcome = 'delivered'),
+                    (SELECT COUNT(*) FROM stalwart_smtp_delivery_log WHERE outcome <> 'delivered')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
             let outcome = serde_json::json!({
                 "domains": domains,
-                "users": users
+                "users": users,
+                "runtime_config": runtime_config,
+                "runtime_status": runtime_status,
+                "health": {
+                    "smtp_reachable": smtp_reachable,
+                    "imap_reachable": imap_reachable,
+                    "queue_pending": queue_pending,
+                    "delivery_success": delivery_success,
+                    "delivery_failed": delivery_failed,
+                }
             });
 
             return write_rxdb_control_command_outcome(
@@ -17256,6 +18044,122 @@ pub(super) fn handle_mailserver_command(
             },
         )?
         .into_outcome();
+        }
+        "ctox.mailserver.save_runtime" => {
+            let session = rxdb_authenticated_session(root, &command)?;
+            let current_db_path = crate::paths::core_db(root).to_string_lossy().into_owned();
+            let mail_store = ctox_mailserver::store::sqlite::SqliteStore::new(&current_db_path);
+            mail_store.init()?;
+            let current = mail_store.load_runtime_settings()?;
+            let string_value = |key: &str, fallback: &str| {
+                command
+                    .payload
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(fallback)
+                    .to_string()
+            };
+            let number_value = |key: &str, fallback: u64| {
+                command
+                    .payload
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .unwrap_or(fallback)
+            };
+            let settings = ctox_mailserver::MailserverRuntimeSettings {
+                enabled: command
+                    .payload
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(current.enabled),
+                hostname: string_value("hostname", &current.hostname),
+                bind_host: string_value("bind_host", &current.bind_host),
+                smtp_port: u16::try_from(number_value("smtp_port", current.smtp_port as u64))
+                    .context("smtp_port must be between 1 and 65535")?,
+                imap_port: u16::try_from(number_value("imap_port", current.imap_port as u64))
+                    .context("imap_port must be between 1 and 65535")?,
+                outbound_throttle_per_min: usize::try_from(number_value(
+                    "outbound_throttle_per_min",
+                    current.outbound_throttle_per_min as u64,
+                ))
+                .context("outbound_throttle_per_min is out of range")?,
+                max_connections: usize::try_from(number_value(
+                    "max_connections",
+                    current.max_connections as u64,
+                ))
+                .context("max_connections is out of range")?,
+                tracking_base_url: command
+                    .payload
+                    .get("tracking_base_url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or(&current.tracking_base_url)
+                    .trim_end_matches('/')
+                    .to_string(),
+            };
+            anyhow::ensure!(
+                settings.smtp_port > 0 && settings.imap_port > 0,
+                "ports must be greater than zero"
+            );
+            anyhow::ensure!(
+                settings.smtp_port != settings.imap_port,
+                "SMTP and IMAP ports must differ"
+            );
+            anyhow::ensure!(
+                settings.outbound_throttle_per_min > 0,
+                "outbound_throttle_per_min must be greater than zero"
+            );
+            anyhow::ensure!(
+                settings.max_connections > 0,
+                "max_connections must be greater than zero"
+            );
+            settings
+                .stalwart_config(current_db_path.clone())
+                .map_err(anyhow::Error::msg)?;
+            if !settings.tracking_base_url.is_empty() {
+                let parsed = url::Url::parse(&settings.tracking_base_url)
+                    .context("tracking_base_url must be an absolute HTTP(S) URL")?;
+                anyhow::ensure!(
+                    matches!(parsed.scheme(), "http" | "https"),
+                    "tracking_base_url must use HTTP or HTTPS"
+                );
+                anyhow::ensure!(
+                    parsed.host_str().is_some(),
+                    "tracking_base_url must include a host"
+                );
+                anyhow::ensure!(
+                    parsed.username().is_empty() && parsed.password().is_none(),
+                    "tracking_base_url must not contain credentials"
+                );
+            }
+            let safe_command = mailserver_command_safe_command(
+                &command,
+                &session,
+                serde_json::to_value(&settings)?,
+            );
+            let decision =
+                workspace_policy_decision(root, &session, BusinessOsPermission::SecretsManage)?;
+            if let Some(outcome) = reject_command_if_policy_denied(root, &safe_command, &decision)?
+            {
+                return Ok(outcome);
+            }
+            mail_store.save_runtime_settings(&settings)?;
+            ctox_mailserver::apply_runtime_settings(settings.clone())?;
+            let outcome = serde_json::json!({
+                "saved": true,
+                "runtime_config": settings,
+                "runtime_status": ctox_mailserver::runtime_status(),
+            });
+            return write_rxdb_control_command_outcome(
+                root,
+                &safe_command,
+                "completed",
+                None,
+                Some("completed"),
+                outcome,
+            );
         }
         "ctox.mailserver.save_domain" => {
             let domain_name = command
@@ -17308,8 +18212,22 @@ pub(super) fn handle_mailserver_command(
                 dkim_private_key_opt
             };
 
-            let spf_record = format!("v=spf1 mx a ip4:203.0.113.10 ~all");
-            let dmarc_record = format!("v=DMARC1; p=none; rua=mailto:dmarc@{}", domain_name);
+            let spf_record = command
+                .payload
+                .get("spf_record")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("v=spf1 mx a ~all")
+                .to_string();
+            let dmarc_record = command
+                .payload
+                .get("dmarc_record")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("v=DMARC1; p=none; rua=mailto:dmarc@{}", domain_name));
 
             let conn = open_mailserver_store_connection(root)?;
             conn.execute(
@@ -17388,6 +18306,15 @@ pub(super) fn handle_mailserver_command(
                 .unwrap_or_default()
                 .trim()
                 .to_string();
+            let owner_user_id = command
+                .payload
+                .get("owner_user_id")
+                .or_else(|| command.payload.get("user_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&username)
+                .to_string();
             let password = command
                 .payload
                 .get("password")
@@ -17404,6 +18331,7 @@ pub(super) fn handle_mailserver_command(
                 &session,
                 serde_json::json!({
                     "username": username,
+                    "owner_user_id": owner_user_id,
                     "password_set": true,
                     "secret_value_in_payload": false
                 }),
@@ -17420,8 +18348,27 @@ pub(super) fn handle_mailserver_command(
             store.init()?;
             store.add_user(&username, &password)?;
 
+            let mailbox_address = username.to_ascii_lowercase();
+            let account_key = format!("email:{mailbox_address}");
+            let mut channel_conn = channels::open_channel_db(&crate::paths::core_db(root))?;
+            channels::upsert_communication_account(
+                &mut channel_conn,
+                &account_key,
+                "email",
+                &mailbox_address,
+                "ctox-mailserver",
+                serde_json::json!({
+                    "owner_user_id": owner_user_id,
+                    "mailbox_address": mailbox_address,
+                    "mailbox_status": "ready",
+                    "mailserver_managed": true,
+                }),
+            )?;
+
             let outcome = serde_json::json!({
                 "username": username,
+                "communication_account_key": account_key,
+                "owner_user_id": owner_user_id,
                 "saved": true
             });
 
@@ -17461,9 +18408,12 @@ pub(super) fn handle_mailserver_command(
                         "DELETE FROM stalwart_mailboxes WHERE owner = ?1",
                         params![username],
                     )?;
+                    let account_key = format!("email:{}", username.to_ascii_lowercase());
+                    channels::disconnect_communication_account_for_business_os(root, &account_key)?;
 
                     let outcome = serde_json::json!({
                         "username": username,
+                        "communication_account_key": account_key,
                         "deleted": true
                     });
 
@@ -18065,7 +19015,7 @@ pub(super) fn handle_secret_command(
         }
         "ctox.subscription_auth.start" => {
             let request: SubscriptionAuthStartCommandRequest =
-                serde_json::from_value(command.payload.clone())
+                serde_json::from_value(provider_subscription_selector_payload(&command.payload))
                     .context("invalid ctox.subscription_auth.start payload")?;
             return enforce_command_policy(
                 root,
@@ -18085,6 +19035,153 @@ pub(super) fn handle_secret_command(
                         Some("completed"),
                         outcome,
                     );
+                },
+            )?
+            .into_outcome();
+        }
+        "ctox.provider_subscription.status" => {
+            let request: ProviderSubscriptionCommandRequest =
+                serde_json::from_value(provider_subscription_selector_payload(&command.payload))
+                    .context("invalid ctox.provider_subscription.status payload")?;
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::IntegrationsManage,
+                    ))
+                },
+                |_session| {
+                    if request.provider.is_some() {
+                        let _ = request.normalized_provider()?;
+                    }
+                    if request.account_id.is_some() {
+                        let _ = request.required_account_id()?;
+                    }
+                    write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        serde_json::json!({
+                            "ok": true,
+                        "provider_subscriptions": provider_subscription_status_projection(root),
+                        }),
+                    )
+                },
+            )?
+            .into_outcome();
+        }
+        "ctox.provider_subscription.rotate" => {
+            let request: ProviderSubscriptionCommandRequest =
+                serde_json::from_value(provider_subscription_selector_payload(&command.payload))
+                    .context("invalid ctox.provider_subscription.rotate payload")?;
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::IntegrationsManage,
+                    ))
+                },
+                |_session| {
+                    let provider = request.normalized_provider()?;
+                    let account_id = request.required_account_id()?;
+                    anyhow::ensure!(
+                        provider_subscription_account_is_projected(root, &provider, account_id),
+                        "provider account is unavailable"
+                    );
+                    let outcome = if matches!(provider.as_str(), "kimi_coding" | "minimax") {
+                        coding_plan_rotation_payload(root, &provider, account_id)?
+                    } else {
+                        provider_subscription_auth_start_payload(
+                            root,
+                            &provider,
+                            false,
+                            Some(account_id),
+                        )?
+                    };
+                    write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        Some(account_id),
+                        Some("completed"),
+                        outcome,
+                    )
+                },
+            )?
+            .into_outcome();
+        }
+        "ctox.provider_subscription.disconnect" => {
+            let request: ProviderSubscriptionCommandRequest =
+                serde_json::from_value(provider_subscription_selector_payload(&command.payload))
+                    .context("invalid ctox.provider_subscription.disconnect payload")?;
+            return enforce_command_policy(
+                root,
+                &command,
+                |_| {
+                    Ok(CommandPolicyRequirement::workspace(
+                        BusinessOsPermission::IntegrationsManage,
+                    ))
+                },
+                |_session| {
+                    let provider = request.normalized_provider()?;
+                    let account_id = request.required_account_id()?;
+                    anyhow::ensure!(
+                        provider_subscription_account_is_projected(root, &provider, account_id),
+                        "provider account is unavailable"
+                    );
+                    let mut outcome = if provider == "codex"
+                        && account_id == CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID
+                    {
+                        disconnect_instance_chatgpt_subscription(root, account_id)?
+                    } else if provider == "minimax" {
+                        let disconnected =
+                            crate::execution::models::minimax_coding::disconnect_account(
+                                root, account_id,
+                            )?;
+                        serde_json::json!({
+                            "ok": true,
+                            "provider": provider,
+                            "account_id": account_id,
+                            "disconnected": disconnected,
+                            "provider_subscriptions": provider_subscription_status_projection(root),
+                        })
+                    } else if provider == "kimi_coding" {
+                        let disconnected =
+                            crate::execution::models::kimi_coding::disconnect_account(
+                                root, account_id,
+                            )?;
+                        serde_json::json!({
+                            "ok": true,
+                            "provider": provider,
+                            "account_id": account_id,
+                            "disconnected": disconnected,
+                            "provider_subscriptions": provider_subscription_status_projection(root),
+                        })
+                    } else {
+                        crate::execution::cliproxyapi_host::disconnect_provider_subscription(
+                            root, &provider, account_id,
+                        )?
+                    };
+                    if let Some(object) = outcome.as_object_mut() {
+                        object.insert("ok".to_owned(), Value::Bool(true));
+                        object.insert("disconnected".to_owned(), Value::Bool(true));
+                        object.insert(
+                            "provider_subscriptions".to_owned(),
+                            provider_subscription_status_projection(root),
+                        );
+                    }
+                    write_rxdb_control_command_outcome(
+                        root,
+                        &command,
+                        "completed",
+                        Some(account_id),
+                        Some("completed"),
+                        outcome,
+                    )
                 },
             )?
             .into_outcome();
@@ -32632,6 +33729,490 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn subscription_auth_flow_is_provider_specific() {
+        let codex: SubscriptionAuthStartCommandRequest = serde_json::from_value(
+            serde_json::json!({"provider": "codex", "auth_mode": "subscription", "flow": "device_code"}),
+        )
+        .unwrap();
+        let claude: SubscriptionAuthStartCommandRequest = serde_json::from_value(
+            serde_json::json!({"provider": "claude", "auth_mode": "subscription", "flow": "browser_callback"}),
+        )
+        .unwrap();
+        assert!(codex.validate_public_selectors().is_ok());
+        assert!(claude.validate_public_selectors().is_ok());
+        assert!(codex.use_device_code());
+        assert!(!claude.use_device_code());
+
+        let normalized: ProviderSubscriptionCommandRequest = serde_json::from_value(
+            serde_json::json!({"provider": "Anthropic", "account_id": "claude-owner_1"}),
+        )
+        .unwrap();
+        assert_eq!(normalized.normalized_provider().unwrap(), "claude");
+        assert_eq!(normalized.required_account_id().unwrap(), "claude-owner_1");
+        let invalid: ProviderSubscriptionCommandRequest = serde_json::from_value(
+            serde_json::json!({"provider": "claude", "account_id": "../credential"}),
+        )
+        .unwrap();
+        assert!(invalid.required_account_id().is_err());
+        let invalid_prefix: ProviderSubscriptionCommandRequest = serde_json::from_value(
+            serde_json::json!({"provider": "kimi", "account_id": "-hidden"}),
+        )
+        .unwrap();
+        assert!(invalid_prefix.required_account_id().is_err());
+        assert!(
+            serde_json::from_value::<SubscriptionAuthStartCommandRequest>(serde_json::json!({
+                "provider": "claude",
+                "account_id": "claude-primary",
+                "access_token": "must-never-enter-the-command-plane",
+            }),)
+            .is_err()
+        );
+        let selector_smuggling: SubscriptionAuthStartCommandRequest =
+            serde_json::from_value(serde_json::json!({
+                "provider": "claude",
+                "account_id": "claude-primary",
+                "flow": "access-token-must-not-be-stored",
+            }))
+            .unwrap();
+        assert!(selector_smuggling.validate_public_selectors().is_err());
+
+        let transport_envelope = provider_subscription_selector_payload(&serde_json::json!({
+            "provider": "codex",
+            "inbound_channel": "ctox",
+            "dependencies": [],
+            "command_deadline_at_ms": 123456,
+        }));
+        let enveloped: ProviderSubscriptionCommandRequest =
+            serde_json::from_value(transport_envelope).unwrap();
+        assert_eq!(enveloped.normalized_provider().unwrap(), "codex");
+
+        let credential_smuggling = provider_subscription_selector_payload(&serde_json::json!({
+            "provider": "codex",
+            "inbound_channel": "ctox",
+            "access_token": "must-never-enter-the-command-plane",
+        }));
+        assert!(
+            serde_json::from_value::<ProviderSubscriptionCommandRequest>(credential_smuggling)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn minimax_coding_plan_connect_is_typed_and_secret_gated() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let pending = start_minimax_coding_plan(root, "minimax-coding-primary")?;
+        assert_eq!(
+            pending.get("status").and_then(Value::as_str),
+            Some("credential_required")
+        );
+        assert_eq!(
+            pending.get("credential_name").and_then(Value::as_str),
+            Some("MINIMAX_API_KEY")
+        );
+        assert!(!serde_json::to_string(&pending)?.contains("secret-value"));
+
+        crate::secrets::set_credential(root, "MINIMAX_API_KEY", "secret-value")?;
+        let connected = start_minimax_coding_plan(root, "minimax-coding-primary")?;
+        assert_eq!(
+            connected.get("status").and_then(Value::as_str),
+            Some("connected")
+        );
+        let account = connected
+            .pointer("/provider_subscriptions/accounts/0")
+            .context("MiniMax projection account")?;
+        assert_eq!(
+            account.get("provider").and_then(Value::as_str),
+            Some("minimax")
+        );
+        assert_eq!(account.get("status").and_then(Value::as_str), Some("ready"));
+        assert!(!serde_json::to_string(&connected)?.contains("secret-value"));
+        assert!(start_minimax_coding_plan(root, "second-account").is_err());
+        let rotation = coding_plan_rotation_payload(root, "minimax", MINIMAX_CODING_ACCOUNT_ID)?;
+        assert_eq!(
+            rotation.get("status").and_then(Value::as_str),
+            Some("credential_required")
+        );
+        assert_eq!(
+            rotation.get("credential_name").and_then(Value::as_str),
+            Some("MINIMAX_API_KEY")
+        );
+        assert!(!serde_json::to_string(&rotation)?.contains("secret-value"));
+        Ok(())
+    }
+
+    #[test]
+    fn kimi_coding_plan_connect_uses_one_canonical_secret_owner() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let pending = start_kimi_coding_plan(root, KIMI_CODING_ACCOUNT_ID)?;
+        assert_eq!(
+            pending.get("status").and_then(Value::as_str),
+            Some("credential_required")
+        );
+        assert!(start_kimi_coding_plan(root, "second-account").is_err());
+        let rotation = coding_plan_rotation_payload(root, "kimi_coding", KIMI_CODING_ACCOUNT_ID)?;
+        assert_eq!(
+            rotation.get("status").and_then(Value::as_str),
+            Some("credential_required")
+        );
+        assert_eq!(
+            rotation.get("credential_name").and_then(Value::as_str),
+            Some("KIMI_API_KEY")
+        );
+        Ok(())
+    }
+
+    fn fake_chatgpt_id_token(plan_type: &str, account_id: &str) -> String {
+        let payload = serde_json::json!({
+            "email": "business-os-test@example.invalid",
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": plan_type,
+                "chatgpt_user_id": "business-os-test-user",
+                "chatgpt_account_id": account_id,
+            }
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("fake ChatGPT claims serialize"));
+        format!("e30.{payload}.signature")
+    }
+
+    fn provider_lifecycle_command(
+        root: &Path,
+        command_id: &str,
+        command_type: &str,
+        provider: &str,
+        account_id: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        let mut payload = serde_json::json!({ "provider": provider });
+        if let Some(account_id) = account_id {
+            payload["account_id"] = Value::String(account_id.to_owned());
+        }
+        accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": command_id,
+                "module": "ctox",
+                "type": command_type,
+                "payload": payload,
+                "client_context": {
+                    "actor": {
+                        "id": "provider_admin",
+                        "display_name": "Provider Admin"
+                    }
+                }
+            }),
+        )
+    }
+
+    #[test]
+    fn provider_account_lifecycle_is_secret_safe_for_all_six_modes() -> anyhow::Result<()> {
+        use ctox_cliproxyapi::internal::auth::antigravity::{
+            AntigravityStoredCredentials, SecretString as AntigravitySecretString,
+        };
+        use ctox_cliproxyapi::internal::auth::claude::{
+            ClaudeStoredCredentials, SecretString as ClaudeSecretString,
+        };
+        use ctox_cliproxyapi::internal::auth::kimi::{
+            KimiAuthBundle, KimiTokenData, KimiTokenStorage, SecretString as KimiSecretString,
+        };
+
+        let temp = tempdir()?;
+        let root = temp.path();
+        let codex_home = root.join("test-codex-home");
+        fs::create_dir_all(&codex_home)?;
+        seed_test_business_os_app_root(root)?;
+        fs::create_dir_all(root.join("runtime"))?;
+        seed_business_user(root, "provider_admin", "admin")?;
+
+        let codex_tokens = ChatgptTokenExchangeResponse {
+            id_token: fake_chatgpt_id_token("business", "workspace-lifecycle"),
+            access_token: "codex-access-must-not-leak".to_owned(),
+            refresh_token: "codex-refresh-must-not-leak".to_owned(),
+        };
+        persist_chatgpt_subscription_auth(root, &codex_home, codex_tokens)?;
+        crate::execution::cliproxyapi_host::install_claude_subscription(
+            root,
+            "claude-lifecycle",
+            &ClaudeStoredCredentials::new(
+                ClaudeSecretString::new("claude-access-must-not-leak")?,
+                ClaudeSecretString::new("claude-refresh-must-not-leak")?,
+            ),
+        )?;
+        crate::execution::cliproxyapi_host::install_antigravity_subscription(
+            root,
+            "antigravity-lifecycle",
+            &AntigravityStoredCredentials::new(
+                AntigravitySecretString::new("antigravity-access-must-not-leak")?,
+                AntigravitySecretString::new("antigravity-refresh-must-not-leak")?,
+                SystemTime::now() + Duration::from_secs(3600),
+                "project-lifecycle",
+            )?,
+        )?;
+        let kimi_token = KimiTokenData::new(
+            KimiSecretString::new("kimi-access-must-not-leak")?,
+            Some(KimiSecretString::new("kimi-refresh-must-not-leak")?),
+            "Bearer",
+            Some(SystemTime::now() + Duration::from_secs(3600)),
+            "kimi-code",
+        );
+        let kimi_storage =
+            KimiTokenStorage::from_bundle(&KimiAuthBundle::new(kimi_token, "device-lifecycle"));
+        crate::execution::cliproxyapi_integration::install_kimi_subscription(
+            root,
+            "kimi-lifecycle",
+            &kimi_storage,
+        )?;
+        crate::secrets::set_credential(root, "KIMI_API_KEY", "kimi-key-must-not-leak")?;
+        crate::secrets::set_credential(root, "MINIMAX_API_KEY", "minimax-key-must-not-leak")?;
+        start_kimi_coding_plan(root, KIMI_CODING_ACCOUNT_ID)?;
+        start_minimax_coding_plan(root, MINIMAX_CODING_ACCOUNT_ID)?;
+
+        // Fake the completed provider side of each subscription rotation. The
+        // selected account id stays stable while its encrypted tuple is
+        // replaced; no token travels through a Business OS command document.
+        persist_chatgpt_subscription_auth(
+            root,
+            &codex_home,
+            ChatgptTokenExchangeResponse {
+                id_token: fake_chatgpt_id_token("business", "workspace-lifecycle"),
+                access_token: "codex-access-rotated-must-not-leak".to_owned(),
+                refresh_token: "codex-refresh-rotated-must-not-leak".to_owned(),
+            },
+        )?;
+        crate::execution::cliproxyapi_host::install_claude_subscription(
+            root,
+            "claude-lifecycle",
+            &ClaudeStoredCredentials::new(
+                ClaudeSecretString::new("claude-access-rotated-must-not-leak")?,
+                ClaudeSecretString::new("claude-refresh-rotated-must-not-leak")?,
+            ),
+        )?;
+        crate::execution::cliproxyapi_host::install_antigravity_subscription(
+            root,
+            "antigravity-lifecycle",
+            &AntigravityStoredCredentials::new(
+                AntigravitySecretString::new("antigravity-access-rotated-must-not-leak")?,
+                AntigravitySecretString::new("antigravity-refresh-rotated-must-not-leak")?,
+                SystemTime::now() + Duration::from_secs(7200),
+                "project-lifecycle-rotated",
+            )?,
+        )?;
+        let rotated_kimi_token = KimiTokenData::new(
+            KimiSecretString::new("kimi-access-rotated-must-not-leak")?,
+            Some(KimiSecretString::new("kimi-refresh-rotated-must-not-leak")?),
+            "Bearer",
+            Some(SystemTime::now() + Duration::from_secs(7200)),
+            "kimi-code",
+        );
+        crate::execution::cliproxyapi_integration::install_kimi_subscription(
+            root,
+            "kimi-lifecycle",
+            &KimiTokenStorage::from_bundle(&KimiAuthBundle::new(
+                rotated_kimi_token,
+                "device-lifecycle-rotated",
+            )),
+        )?;
+        for (name, expected) in [
+            (
+                "claude-lifecycle-access-token",
+                "claude-access-rotated-must-not-leak",
+            ),
+            (
+                "antigravity-lifecycle-access-token",
+                "antigravity-access-rotated-must-not-leak",
+            ),
+            (
+                "kimi-lifecycle-access-token",
+                "kimi-access-rotated-must-not-leak",
+            ),
+        ] {
+            assert_eq!(
+                crate::secrets::read_secret_value(root, "provider-subscriptions", name)?,
+                expected,
+            );
+        }
+        let codex_snapshot = crate::secrets::read_secret_value(
+            root,
+            CHATGPT_AUTH_SECRET_SCOPE,
+            CHATGPT_AUTH_SECRET_NAME,
+        )?;
+        assert!(codex_snapshot.contains("codex-access-rotated-must-not-leak"));
+        assert!(!codex_snapshot.contains("codex-access-must-not-leak"));
+
+        let status = provider_lifecycle_command(
+            root,
+            "provider_lifecycle_status",
+            "ctox.provider_subscription.status",
+            "codex",
+            None,
+        )?;
+        assert_eq!(
+            status.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        let projection = status
+            .pointer("/result/provider_subscriptions")
+            .context("provider subscription status projection")?;
+        let account_keys = projection
+            .get("accounts")
+            .and_then(Value::as_array)
+            .context("provider subscription accounts")?
+            .iter()
+            .map(|account| {
+                format!(
+                    "{}:{}",
+                    account
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    account
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "codex:codex-instance-primary",
+            "claude:claude-lifecycle",
+            "antigravity:antigravity-lifecycle",
+            "kimi:kimi-lifecycle",
+            "kimi_coding:kimi-coding-primary",
+            "minimax:minimax-coding-primary",
+        ] {
+            assert!(
+                account_keys.contains(expected),
+                "missing projected account {expected}"
+            );
+        }
+        let rendered = serde_json::to_string(&status)?;
+        for secret in [
+            "codex-access-must-not-leak",
+            "codex-refresh-must-not-leak",
+            "claude-access-must-not-leak",
+            "claude-refresh-must-not-leak",
+            "antigravity-access-must-not-leak",
+            "antigravity-refresh-must-not-leak",
+            "kimi-access-must-not-leak",
+            "kimi-refresh-must-not-leak",
+            "kimi-key-must-not-leak",
+            "minimax-key-must-not-leak",
+            "codex-access-rotated-must-not-leak",
+            "codex-refresh-rotated-must-not-leak",
+            "claude-access-rotated-must-not-leak",
+            "claude-refresh-rotated-must-not-leak",
+            "antigravity-access-rotated-must-not-leak",
+            "antigravity-refresh-rotated-must-not-leak",
+            "kimi-access-rotated-must-not-leak",
+            "kimi-refresh-rotated-must-not-leak",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "status leaked provider credential"
+            );
+        }
+
+        for (suffix, provider, account_id, credential_name) in [
+            (
+                "kimi-coding",
+                "kimi_coding",
+                KIMI_CODING_ACCOUNT_ID,
+                "KIMI_API_KEY",
+            ),
+            (
+                "minimax",
+                "minimax",
+                MINIMAX_CODING_ACCOUNT_ID,
+                "MINIMAX_API_KEY",
+            ),
+        ] {
+            let rotation = provider_lifecycle_command(
+                root,
+                &format!("provider_lifecycle_rotate_{suffix}"),
+                "ctox.provider_subscription.rotate",
+                provider,
+                Some(account_id),
+            )?;
+            assert_eq!(
+                rotation.get("status").and_then(Value::as_str),
+                Some("completed")
+            );
+            assert_eq!(
+                rotation.pointer("/result/status").and_then(Value::as_str),
+                Some("credential_required")
+            );
+            assert_eq!(
+                rotation
+                    .pointer("/result/credential_name")
+                    .and_then(Value::as_str),
+                Some(credential_name)
+            );
+            assert!(!serde_json::to_string(&rotation)?.contains("must-not-leak"));
+        }
+
+        let codex_disconnect = disconnect_instance_chatgpt_subscription_at(
+            root,
+            &codex_home,
+            CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID,
+        )?;
+        assert_eq!(
+            codex_disconnect
+                .get("disconnected")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!codex_home.join("auth.json").exists());
+        assert!(!crate::secrets::secret_exists(
+            root,
+            CHATGPT_AUTH_SECRET_SCOPE,
+            CHATGPT_AUTH_SECRET_NAME,
+        )?);
+
+        for (suffix, provider, account_id) in [
+            ("claude", "claude", "claude-lifecycle"),
+            ("antigravity", "antigravity", "antigravity-lifecycle"),
+            ("kimi", "kimi", "kimi-lifecycle"),
+            ("kimi-coding", "kimi_coding", KIMI_CODING_ACCOUNT_ID),
+            ("minimax", "minimax", MINIMAX_CODING_ACCOUNT_ID),
+        ] {
+            let outcome = provider_lifecycle_command(
+                root,
+                &format!("provider_lifecycle_disconnect_{suffix}"),
+                "ctox.provider_subscription.disconnect",
+                provider,
+                Some(account_id),
+            )?;
+            assert_eq!(
+                outcome.get("status").and_then(Value::as_str),
+                Some("completed"),
+                "disconnect failed for {provider}"
+            );
+            assert!(
+                !serde_json::to_string(&outcome)?.contains("must-not-leak"),
+                "disconnect leaked provider credential for {provider}"
+            );
+        }
+
+        let remaining = provider_subscription_status_projection(root);
+        assert_eq!(
+            remaining
+                .get("accounts")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        for name in ["KIMI_API_KEY", "MINIMAX_API_KEY"] {
+            assert!(!crate::secrets::secret_exists(
+                root,
+                crate::secrets::credential_scope(),
+                name,
+            )?);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn installed_catalog_visibility_does_not_depend_on_instance_history() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -32831,6 +34412,39 @@ pub(super) mod tests {
                 serde_json::json!({
                     "provider": "openai",
                     "auth_mode": "chatgpt_subscription"
+                }),
+                "integrations.manage",
+                "workspace",
+                None,
+            ),
+            (
+                "cmd_deny_provider_subscription_status",
+                "ctox.provider_subscription.status",
+                "provider-subscriptions",
+                serde_json::json!({}),
+                "integrations.manage",
+                "workspace",
+                None,
+            ),
+            (
+                "cmd_deny_provider_subscription_rotate",
+                "ctox.provider_subscription.rotate",
+                "claude-primary",
+                serde_json::json!({
+                    "provider": "claude",
+                    "account_id": "claude-primary"
+                }),
+                "integrations.manage",
+                "workspace",
+                None,
+            ),
+            (
+                "cmd_deny_provider_subscription_disconnect",
+                "ctox.provider_subscription.disconnect",
+                "kimi-primary",
+                serde_json::json!({
+                    "provider": "kimi",
+                    "account_id": "kimi-primary"
                 }),
                 "integrations.manage",
                 "workspace",
@@ -41582,6 +43196,27 @@ pub(super) mod tests {
         assert!(
             !serde_json::to_string(&stored_user)?.contains(admin_password),
             "completed mailserver user command leaked the password into business_commands"
+        );
+        let accounts = channels::list_communication_accounts_for_business_os(root)?;
+        let mailbox_account = accounts
+            .get("accounts")
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row.get("account_key").and_then(Value::as_str)
+                        == Some("email:admin@example.test")
+                })
+            })
+            .context("mailserver user was not projected as a communication account")?;
+        assert_eq!(
+            mailbox_account.get("provider").and_then(Value::as_str),
+            Some("ctox-mailserver")
+        );
+        assert_eq!(
+            mailbox_account
+                .pointer("/profile_json/owner_user_id")
+                .and_then(Value::as_str),
+            Some("admin@example.test")
         );
 
         // Valid, non-production PKCS#8 fixture. The previous marker-only string

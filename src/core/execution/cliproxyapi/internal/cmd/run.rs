@@ -39,6 +39,10 @@ pub struct ServiceCancellation {
 }
 impl ServiceCancellation {
     pub fn cancel(&self) {
+        // Coordinate the state transition with `wait`'s condition lock.  Merely
+        // storing the flag before `notify_all` allows a waiter to observe
+        // `false`, lose the notification, and then sleep forever.
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         self.cancelled.store(true, Ordering::Release);
         self.changed.notify_all();
     }

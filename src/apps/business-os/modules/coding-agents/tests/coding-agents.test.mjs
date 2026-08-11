@@ -98,7 +98,7 @@ test('task validation requires a meaningful instruction', () => {
   assert.equal(hooks.validateTaskPrompt('Fix failing billing parser test').valid, true);
 });
 
-test('turn payload omits the model on the CTOX default preset', () => {
+test('turn payload carries only the server-authored preset id', () => {
   const payload = hooks.buildTurnPayload({
     moduleId: 'notes',
     prompt: 'Add an empty state to the list',
@@ -108,26 +108,55 @@ test('turn payload omits the model on the CTOX default preset', () => {
   assert.deepEqual(payload, {
     module_id: 'notes',
     prompt: 'Add an empty state to the list',
+    preset_id: 'ctox',
   });
   assert.equal('model' in payload, false);
 });
 
-test('turn payload only carries a model for an explicit provider pick', () => {
-  // The shipped preset list is honest (CTOX default only); explicit models
-  // arrive via real discovery. The payload logic must still forward them.
+test('unknown browser preset ids fail closed to the known CTOX preset id', () => {
   const explicit = hooks.buildTurnPayload({
     moduleId: 'notes',
     prompt: 'Add an empty state to the list',
-    preset: { id: 'custom', label: 'Custom', model: { provider: 'anthropic', api: 'anthropic-messages', id: 'claude-sonnet-4-5', name: 'Sonnet' } },
+    presetId: 'browser-forged',
   });
-  if (explicit.model) {
-    assert.equal(explicit.model.provider, 'anthropic');
-    assert.equal(typeof explicit.model.id, 'string');
-  } else {
-    // buildTurnPayload resolves by presetId — unknown ids fall back to the
-    // CTOX default and must then omit the model entirely.
-    assert.equal(explicit.model, undefined);
-  }
+  assert.equal(explicit.preset_id, 'ctox');
+  assert.equal(explicit.model, undefined);
+});
+
+test('server capability validation preserves provider routing headers', () => {
+  const presets = hooks.normalizeModelCapabilities({
+    schema: 'ctox.coding.models.v1',
+    presets: [
+      { id: 'ctox', label: 'CTOX', default: true, model: null },
+      {
+        id: 'codex-sol',
+        label: 'Codex Sol',
+        model: {
+          id: 'gpt-5.6-sol', name: 'Sol', api: 'openai-responses',
+          provider: 'ctox-gateway', baseUrl: 'http://127.0.0.1:12435/v1',
+          headers: {
+            'X-CTOX-Provider': 'codex',
+            Authorization: 'Bearer must-not-reach-browser-state',
+            'x-api-key': 'must-not-reach-browser-state',
+          }, reasoning: true,
+        },
+      },
+    ],
+  });
+  assert.equal(presets.length, 2);
+  assert.equal(presets[1].model.headers['X-CTOX-Provider'], 'codex');
+  assert.equal(presets[1].model.headers.Authorization, undefined);
+  assert.equal(presets[1].model.headers['x-api-key'], undefined);
+  assert.equal(presets[1].model.reasoning, true);
+});
+
+test('invalid capability documents fail closed', () => {
+  assert.equal(hooks.normalizeModelCapabilities(null), null);
+  assert.equal(hooks.normalizeModelCapabilities({ schema: 'wrong', presets: [] }), null);
+  assert.equal(hooks.normalizeModelCapabilities({
+    schema: 'ctox.coding.models.v1',
+    presets: [{ id: 'remote', label: 'Remote', default: true, model: { id: 'x' } }],
+  }), null);
 });
 
 test('JSON export serializes only the records in the visible center view', () => {
@@ -225,6 +254,35 @@ test('projection errors surface policy denials and failed commands', () => {
 test('module stays free of idle polling loops', () => {
   const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
   assert.equal(source.includes('setInterval('), false);
+});
+
+test('ungranted transcript projections stay optional while the typed command bus remains usable', () => {
+  const permissions = {
+    canReadCollection(name) {
+      return name === 'coding_agent_events';
+    },
+  };
+  assert.deepEqual(
+    hooks.filterReadableCollectionNames({ permissions }, [
+      'business_commands',
+      'coding_agent_sessions',
+      'coding_agent_events',
+    ]),
+    ['coding_agent_events'],
+  );
+  assert.deepEqual(
+    hooks.filterReadableCollectionNames({}, ['business_commands']),
+    ['business_commands'],
+    'test/degraded contexts without a permission facade retain compatibility',
+  );
+});
+
+test('model capability discovery waits on the command bus terminal contract', () => {
+  const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  assert.match(source, /CODING_MODELS_COMMAND[\s\S]*until: 'terminal'/);
+  assert.match(source, /CODING_MODELS_WAIT_TIMEOUT_MS = 120_000/);
+  assert.match(source, /until: 'terminal', timeoutMs: CODING_MODELS_WAIT_TIMEOUT_MS/);
+  assert.doesNotMatch(source, /until: 'completed'/);
 });
 
 test('data-driven empty center views become sync states until collections are live', () => {

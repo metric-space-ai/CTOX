@@ -667,6 +667,8 @@ where
                     capture.write(&chunk);
                 }
                 chunk_result?;
+                // Translator chunks contain one SSE event without its blank-line
+                // record terminator. Preserve event boundaries on the wire.
                 let delimiter_result = stream.write_all(b"\n\n").await;
                 if let Some(capture) = capture.as_deref_mut() {
                     capture.write(b"\n\n");
@@ -702,6 +704,11 @@ where
                     capture.write(&chunk);
                 }
                 chunk_result?;
+                let delimiter_result = stream.write_all(b"\n\n").await;
+                if let Some(capture) = capture.as_deref_mut() {
+                    capture.write(b"\n\n");
+                }
+                delimiter_result?;
             }
             stream.shutdown().await
         }

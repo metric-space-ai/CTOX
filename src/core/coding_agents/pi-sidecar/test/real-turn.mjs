@@ -1,18 +1,15 @@
 // Real-turn smoke: drives the built sidecar through one NON-faux turn against a
 // REAL model, verifying the whole pipeline end-to-end — sidecar -> pi-ai provider
 // -> real LLM -> real tool call -> applied to the projected source. This is the
-// same path a live CTOX-gateway turn takes (the gateway is just another
-// pi-ai-compatible endpoint); the model here can point at the gateway or any pi
-// provider.
+// same path a live CTOX-gateway turn takes. The model must point at an
+// owner-controlled loopback gateway; direct provider endpoints and provider
+// keys in the sidecar environment are intentionally unsupported.
 //
-// SKIPS by default. To run, set CTOX_PI_REAL_MODEL to a pi-ai model JSON and put
-// the matching provider key in the environment. Verified 2026-07-18 against
-// Kimi K3 (v=1 -> v=2 end-to-end), e.g.:
-//   ANTHROPIC_API_KEY="$(cat ~/.config/kimi/api-key)" \
-//   CTOX_PI_REAL_MODEL='{"id":"k3[1m]","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.kimi.com/coding","input":["text"],"maxTokens":8192,"contextWindow":200000,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"reasoning":false}' \
-//   node test/real-turn.mjs
-// For the CTOX gateway: model api "openai-responses", baseUrl
-// "http://127.0.0.1:12434", id = the gateway's active model.
+// SKIPS by default. Run it only with the public model descriptor issued by the
+// Rust owner for a live, capability-protected turn. For the main CTOX gateway,
+// use api "openai-responses", provider "ctox-gateway", loopback baseUrl and the
+// active gateway model. Coding-plan live receipts must use the native owner so
+// it can issue the per-turn capability; this script cannot manufacture one.
 import assert from "node:assert/strict";
 import net from "node:net";
 import os from "node:os";
@@ -24,7 +21,7 @@ import { fileURLToPath } from "node:url";
 const modelEnv = process.env.CTOX_PI_REAL_MODEL;
 if (!modelEnv) {
   console.log(
-    "SKIP: set CTOX_PI_REAL_MODEL (pi-ai model JSON) + the provider key env to run a real-LLM turn",
+    "SKIP: set CTOX_PI_REAL_MODEL to an owner-issued CTOX loopback model descriptor",
   );
   process.exit(0);
 }

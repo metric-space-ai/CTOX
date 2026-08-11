@@ -7,7 +7,15 @@ import { loadModuleMessages } from '../../shared/i18n.js';
 // (.ctox-workspace--two-pane with data-resize-frame) stays.
 
 const ROOT_CLASSES = 'ctox-workspace coding-agents-module';
+const CODING_MODELS_COMMAND = 'ctox.coding.models';
 const CODING_TURN_COMMAND = 'ctox.coding.turn';
+// Model discovery is a read-only control command, but it still shares the
+// durable Business OS command queue with provider/status work. A cold native
+// peer or a short command burst can legitimately exceed the command bus's
+// generic 45 s acceptance window. Keep this bounded while allowing the
+// server-authored model list to reach the UI instead of silently freezing the
+// static fallback label.
+const CODING_MODELS_WAIT_TIMEOUT_MS = 120_000;
 const COMMAND_LOG_COLLECTION = 'business_commands';
 const SESSIONS_COLLECTION = 'coding_agent_sessions';
 const EVENTS_COLLECTION = 'coding_agent_events';
@@ -17,13 +25,7 @@ const RECENT_TURNS_LIMIT = 8;
 // runs on the SAME model/provider as CTOX (the gateway). Only an explicit
 // non-default pick sends a pi-ai provider model.
 const MODEL_PRESETS = [
-  // Honest list: exactly what the native sidecar contract serves today
-  // (pi_sidecar.rs): the gateway default resolves to Kimi K3; explicit picks
-  // ride the same gateway by public model id. True dynamic discovery needs a
-  // typed `ctox.coding.models` command — never invented labels.
-  { id: 'ctox', label: 'CTOX (Standard · Kimi K3)', model: null },
-  { id: 'kimi-k3', label: 'Kimi K3 (Gateway)', model: { provider: 'ctox-gateway', api: 'openai-responses', id: 'kimi-k3', name: 'Kimi K3 (CTOX gateway)' } },
-  { id: 'minimax-m3', label: 'MiniMax M3 (Gateway)', model: { provider: 'ctox-gateway', api: 'openai-responses', id: 'minimax-m3', name: 'MiniMax M3 (CTOX gateway)' } },
+  { id: 'ctox', label: 'CTOX (Standard)', default: true, model: null },
 ];
 const DEFAULT_MODEL_PRESET = MODEL_PRESETS[0].id;
 
@@ -165,6 +167,7 @@ export async function mount(ctx) {
   // handle inside the `[data-resize-frame]` root — no module JS needed here.
 
   loadApps();
+  void loadModelCapabilities();
 
   return () => {
     clearProjectionTimers();
@@ -536,6 +539,78 @@ function modelPresetById(id) {
   return MODEL_PRESETS.find((preset) => preset.id === id) || MODEL_PRESETS[0];
 }
 
+function normalizeModelCapabilities(value) {
+  if (!value || value.schema !== 'ctox.coding.models.v1' || !Array.isArray(value.presets)) {
+    return null;
+  }
+  const seen = new Set();
+  const presets = [];
+  for (const candidate of value.presets) {
+    if (!candidate || typeof candidate !== 'object') return null;
+    const id = String(candidate.id || '').trim();
+    const label = String(candidate.label || '').trim();
+    if (!id || !label || seen.has(id)) return null;
+    seen.add(id);
+    if (candidate.model == null) {
+      presets.push({ id, label, default: candidate.default === true, model: null });
+      continue;
+    }
+    const model = candidate.model;
+    if (!model || typeof model !== 'object'
+      || !String(model.id || '').trim()
+      || !String(model.name || '').trim()
+      || !String(model.api || '').trim()
+      || !String(model.provider || '').trim()
+      || !String(model.baseUrl || '').trim()) return null;
+    // Preserve the server-authored pi-ai model, but project only the one
+    // explicitly public routing header. This keeps a future server regression
+    // from copying Authorization/API keys into RxDB or browser memory.
+    const normalizedModel = { ...model };
+    if (model.headers && typeof model.headers === 'object') {
+      const provider = String(model.headers['X-CTOX-Provider'] || '').trim();
+      normalizedModel.headers = provider ? { 'X-CTOX-Provider': provider } : {};
+    }
+    presets.push({ id, label, default: candidate.default === true, model: normalizedModel });
+  }
+  if (!presets.length || !presets.some((preset) => preset.default && preset.model === null)) {
+    return null;
+  }
+  return presets;
+}
+
+async function loadModelCapabilities() {
+  if (!state.ctx?.commandBus?.dispatch) return false;
+  const commandId = `cmd_coding_models_${newId()}`;
+  try {
+    const projection = await state.ctx.commandBus.dispatch({
+      id: commandId,
+      module: 'ctox',
+      type: CODING_MODELS_COMMAND,
+      record_id: 'coding-agents:coding-models',
+      inbound_channel: 'coding-agents',
+      payload: { module_id: 'coding-agents' },
+      client_context: {
+        source: 'business-os-coding-agents',
+        module: 'coding-agents',
+        actor: actorContext(state.ctx.session),
+      },
+    }, { until: 'terminal', timeoutMs: CODING_MODELS_WAIT_TIMEOUT_MS });
+    const presets = normalizeModelCapabilities(projection?.result);
+    if (!presets) return false;
+    const selected = els.modelSelect?.value;
+    MODEL_PRESETS.splice(0, MODEL_PRESETS.length, ...presets);
+    renderModelSelect();
+    if (selected && MODEL_PRESETS.some((preset) => preset.id === selected)) {
+      els.modelSelect.value = selected;
+      renderModelBadge();
+    }
+    return true;
+  } catch (error) {
+    console.warn('[coding-agents] model capability discovery failed:', error);
+    return false;
+  }
+}
+
 function renderModelSelect() {
   const select = els.modelSelect;
   if (!select) return;
@@ -566,14 +641,12 @@ function validateTaskPrompt(input) {
 }
 
 function buildTurnPayload({ moduleId, prompt, presetId }) {
+  const preset = modelPresetById(presetId);
   const payload = {
     module_id: String(moduleId || '').trim(),
     prompt: String(prompt || '').trim(),
+    preset_id: preset.id,
   };
-  // Only an explicit non-default provider pick sends a model override;
-  // omitted = the SAME model/provider as CTOX (default).
-  const preset = modelPresetById(presetId);
-  if (preset.model) payload.model = { ...preset.model };
   return payload;
 }
 
@@ -714,7 +787,11 @@ function collectionReadiness(name) {
 // True only when the readiness API answers and at least one transcript source
 // (turn log, sessions, events) is still pre-live.
 function transcriptSourcesNotReady() {
-  const snapshots = [COMMAND_LOG_COLLECTION, SESSIONS_COLLECTION, EVENTS_COLLECTION]
+  const snapshots = readableCollectionNames([
+    COMMAND_LOG_COLLECTION,
+    SESSIONS_COLLECTION,
+    EVENTS_COLLECTION,
+  ])
     .map((name) => collectionReadiness(name))
     .filter(Boolean);
   return snapshots.length > 0 && snapshots.some((snap) => snap.ready !== true);
@@ -730,24 +807,28 @@ function renderSyncingShell(box) {
 function subscribeReadinessUpdates() {
   const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
   if (typeof subscribe !== 'function') return [];
-  return [COMMAND_LOG_COLLECTION, SESSIONS_COLLECTION, EVENTS_COLLECTION]
+  return readableCollectionNames([
+    COMMAND_LOG_COLLECTION,
+    SESSIONS_COLLECTION,
+    EVENTS_COLLECTION,
+  ])
     .map((name) => subscribe.call(state.ctx.sync, name, () => renderRecentTurns()))
     .filter((unsubscribe) => typeof unsubscribe === 'function');
 }
 
 function subscribeProjectionUpdates() {
   const subscriptions = [];
-  const commandLog = state.ctx?.db?.collection?.(COMMAND_LOG_COLLECTION);
+  const commandLog = readableCollection(COMMAND_LOG_COLLECTION);
   const commandSub = commandLog?.$?.subscribe?.(() => {
     scheduleProjectionRefresh(COMMAND_LOG_COLLECTION, () => loadRecentTurns());
   });
   if (commandSub) subscriptions.push(commandSub);
-  const sessions = state.ctx?.db?.collection?.(SESSIONS_COLLECTION);
+  const sessions = readableCollection(SESSIONS_COLLECTION);
   const sessionSub = sessions?.$?.subscribe?.(() => {
     scheduleProjectionRefresh(SESSIONS_COLLECTION, () => loadActiveSession());
   });
   if (sessionSub) subscriptions.push(sessionSub);
-  const events = state.ctx?.db?.collection?.(EVENTS_COLLECTION);
+  const events = readableCollection(EVENTS_COLLECTION);
   const eventsSub = events?.$?.subscribe?.(() => {
     scheduleProjectionRefresh(EVENTS_COLLECTION, () => loadSessionEvents());
   });
@@ -1202,7 +1283,7 @@ function renderSessionBanner() {
 /* Helpers */
 
 async function readCollectionDocs(collectionName) {
-  const collection = state.ctx?.db?.collection?.(collectionName);
+  const collection = readableCollection(collectionName);
   if (!collection) return null;
   if (typeof collection.find === 'function') {
     const query = collection.find();
@@ -1214,6 +1295,21 @@ async function readCollectionDocs(collectionName) {
   }
   if (Array.isArray(collection.items)) return collection.items.map(toPlainDoc);
   return null;
+}
+
+function filterReadableCollectionNames(ctx, names) {
+  const permissionCheck = ctx?.permissions?.canReadCollection;
+  if (typeof permissionCheck !== 'function') return [...names];
+  return names.filter((name) => permissionCheck.call(ctx.permissions, name) === true);
+}
+
+function readableCollectionNames(names) {
+  return filterReadableCollectionNames(state.ctx, names);
+}
+
+function readableCollection(name) {
+  if (!readableCollectionNames([name]).length) return null;
+  return state.ctx?.db?.collection?.(name) || null;
 }
 
 function toPlainDoc(doc) {
@@ -1260,11 +1356,13 @@ export const __codingAgentsTestHooks = {
   DEFAULT_MODEL_PRESET,
   CODING_TURN_COMMAND,
   modelPresetById,
+  normalizeModelCapabilities,
   normalizeCatalogModules,
   validateTaskPrompt,
   buildTurnPayload,
   buildCodingAgentsExport,
   turnFromCommand,
   turnErrorFromProjection,
+  filterReadableCollectionNames,
   escapeHtml,
 };

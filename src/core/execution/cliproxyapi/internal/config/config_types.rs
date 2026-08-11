@@ -394,6 +394,21 @@ fn default_account_weight() -> i64 {
 
 impl CliproxyRuntimeConfig {
     pub fn validate(self) -> Result<ValidatedRuntimeConfig, RuntimeConfigError> {
+        self.validate_inner(true)
+    }
+
+    /// Validate a portable runtime embedded by an outer host whose executable
+    /// routes can live entirely in host extensions (for example CTOX Kimi).
+    /// Ordinary portable runtimes remain strict and must have an enabled
+    /// portable account through [`Self::validate`].
+    pub fn validate_for_extension_host(self) -> Result<ValidatedRuntimeConfig, RuntimeConfigError> {
+        self.validate_inner(false)
+    }
+
+    fn validate_inner(
+        self,
+        require_enabled_portable_account: bool,
+    ) -> Result<ValidatedRuntimeConfig, RuntimeConfigError> {
         if self.request_timeout_ms == 0 || self.request_timeout_ms > MAX_REQUEST_TIMEOUT_MS {
             return Err(RuntimeConfigError::InvalidTimeout);
         }
@@ -416,7 +431,8 @@ impl CliproxyRuntimeConfig {
                 return Err(RuntimeConfigError::DuplicateAccountId);
             }
         }
-        if !self.claude_accounts.iter().any(|account| !account.disabled)
+        if require_enabled_portable_account
+            && !self.claude_accounts.iter().any(|account| !account.disabled)
             && !self.codex_accounts.iter().any(|account| !account.disabled)
             && !self
                 .antigravity_accounts
@@ -627,6 +643,25 @@ mod tests {
             .upstream_target()
             .unwrap()
             .is_anthropic_api());
+    }
+
+    #[test]
+    fn extension_host_may_validate_an_empty_portable_account_set() {
+        let empty = CliproxyRuntimeConfig {
+            request_timeout_ms: 30_000,
+            routing_strategy: SchedulerStrategy::RoundRobin,
+            claude_accounts: Vec::new(),
+            codex_accounts: Vec::new(),
+            antigravity_accounts: Vec::new(),
+        };
+        assert_eq!(
+            empty.clone().validate(),
+            Err(RuntimeConfigError::NoEnabledAccounts)
+        );
+        let validated = empty.validate_for_extension_host().unwrap();
+        assert!(validated.claude_accounts().is_empty());
+        assert!(validated.codex_accounts().is_empty());
+        assert!(validated.antigravity_accounts().is_empty());
     }
 
     #[test]

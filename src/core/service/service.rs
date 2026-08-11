@@ -1477,6 +1477,30 @@ pub fn run_foreground(root: &Path) -> Result<()> {
         eprintln!("ctox service: Business OS native RxDB peer autostart disabled");
     }
     start_business_os_surfaces(root, state.clone());
+    match crate::execution::cliproxyapi_host::start_instance_codex_proxy_supervisor(
+        root.to_path_buf(),
+    ) {
+        Ok(()) => push_event(
+            &state,
+            format!(
+                "CLIProxyAPI Codex subscription gateway supervising {}",
+                crate::execution::cliproxyapi_host::instance_codex_proxy_base_url()
+            ),
+        ),
+        Err(error) => eprintln!("ctox service: Codex subscription gateway failed: {error:#}"),
+    }
+    match crate::execution::cliproxyapi_host::start_instance_management_supervisor(
+        root.to_path_buf(),
+    ) {
+        Ok(()) => push_event(
+            &state,
+            format!(
+                "CLIProxyAPI management gateway supervising {}",
+                crate::execution::cliproxyapi_host::instance_management_base_url()
+            ),
+        ),
+        Err(error) => eprintln!("ctox service: CLIProxyAPI management gateway failed: {error:#}"),
+    }
     #[cfg(unix)]
     let socket_path = service_socket_path(root);
     let mut announced_ready = false;
@@ -7665,7 +7689,6 @@ fn start_prompt_worker(
                                 } else {
                                     "pending"
                                 };
-                            let mut terminal_review_failure_reason: Option<String> = None;
                             let (ack_result, ack_label) = if let Some((reason, summary)) =
                                 &approved_completion_hold
                             {
@@ -7707,8 +7730,6 @@ fn start_prompt_worker(
                                         _ => "terminal queue failure",
                                     }
                                 };
-                                terminal_review_failure_reason =
-                                    Some(failure_reason.to_string());
                                 (
                                     channels::ack_leased_messages_for_attempt(
                                         &root,
@@ -7739,32 +7760,6 @@ fn start_prompt_worker(
                                     &ack_label,
                                     &job.leased_message_keys,
                                 );
-                            // Terminal path of the same defect class (restored
-                            // after the 1a0fd9fc3 port wave dropped it): an
-                            // exhausted validation / terminal-queue-failure acked
-                            // the queue item as failed but only refreshed the
-                            // projection - the Business OS command stayed
-                            // `accepted` forever and no continuation decision was
-                            // recorded. Drive the command failure path, which
-                            // owns both. See I-071b / plan-v2-review-heal.
-                            if let Some(reason) = terminal_review_failure_reason.as_deref() {
-                                for message_key in &job.leased_message_keys {
-                                    if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
-                                        &root,
-                                        message_key,
-                                        reason,
-                                    ) {
-                                        push_event_locked(
-                                            &mut shared,
-                                            format!(
-                                                "Failed to project terminal review failure for {}: {}",
-                                                message_key,
-                                                clip_text(&err.to_string(), 180)
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
                         }
                         if !job.leased_ticket_event_keys.is_empty() && should_handle_messages {
                             record_ack_failure_locked(
@@ -8052,19 +8047,21 @@ fn start_prompt_worker(
                                                     clip_text(&feedback, 220)
                                                 ),
                                             );
-                                            for message_key in &job.leased_message_keys {
-                                                if let Err(projection_err) = crate::business_os::store::refresh_business_command_queue_task_projection(
-                                                    &root,
-                                                    message_key,
-                                                ) {
-                                                    push_event_locked(
-                                                        &mut shared,
-                                                        format!(
-                                                            "Failed to refresh Business OS app validation rework projection for {}: {}",
-                                                            message_key,
-                                                            clip_text(&projection_err.to_string(), 180)
-                                                        ),
-                                                    );
+                                            if updated > 0 {
+                                                for message_key in &job.leased_message_keys {
+                                                    if let Err(projection_err) = crate::business_os::store::refresh_business_command_queue_task_projection(
+                                                        &root,
+                                                        message_key,
+                                                    ) {
+                                                        push_event_locked(
+                                                            &mut shared,
+                                                            format!(
+                                                                "Failed to refresh Business OS app validation rework projection for {}: {}",
+                                                                message_key,
+                                                                clip_text(&projection_err.to_string(), 180)
+                                                            ),
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -26812,6 +26809,23 @@ mod tests {
     static DURABLE_STATUS_SNAPSHOT_CACHE_TEST_LOCK: std::sync::Mutex<()> =
         std::sync::Mutex::new(());
 
+    fn business_os_app_queue_metadata(module_id: &str, command_type: &str) -> Value {
+        json!({
+            "source": "business-os",
+            "idempotency_key": format!("test-{command_type}-{module_id}"),
+            "business_os_command_id": format!("test-{command_type}-{module_id}"),
+            "business_os_module": "creator",
+            "business_os_inbound_channel": "creator",
+            "business_os_command_type": command_type,
+            "business_os_record_id": module_id,
+            "business_os_attachments": [],
+            "client_context": {
+                "source": "business-os-app-creator-test",
+                "target": "app"
+            }
+        })
+    }
+
     #[test]
     fn canonical_business_command_prompt_context_is_compact_and_non_redundant() {
         let repeated_instruction = "search bearings ".repeat(20_000);
@@ -26857,23 +26871,6 @@ mod tests {
         assert!(serialized.contains("source_catalog"));
         assert!(!serialized.contains("search bearings"));
         assert!(!serialized.contains("capability_token"));
-    }
-
-    fn business_os_app_queue_metadata(module_id: &str, command_type: &str) -> Value {
-        json!({
-            "source": "business-os",
-            "idempotency_key": format!("test-{command_type}-{module_id}"),
-            "business_os_command_id": format!("test-{command_type}-{module_id}"),
-            "business_os_module": "creator",
-            "business_os_inbound_channel": "creator",
-            "business_os_command_type": command_type,
-            "business_os_record_id": module_id,
-            "business_os_attachments": [],
-            "client_context": {
-                "source": "business-os-app-creator-test",
-                "target": "app"
-            }
-        })
     }
 
     #[test]
@@ -34387,7 +34384,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create canonical app queue task");
@@ -34776,7 +34776,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -34846,7 +34849,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35662,7 +35668,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35773,7 +35782,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "projects",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35962,7 +35974,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create pending app queue task");
@@ -36313,7 +36328,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36483,7 +36501,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36538,7 +36559,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "projects",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -37213,7 +37237,7 @@ Business OS command:
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
                 extra_metadata: Some(business_os_app_queue_metadata(
-                    "contracts",
+                    "inventory",
                     "ctox.business_os.app.create",
                 )),
             },
@@ -37266,7 +37290,10 @@ Business OS command:
                 priority: "normal".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create pending app rework task");
@@ -37329,7 +37356,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create pending app queue task");
@@ -41492,8 +41522,11 @@ Use shell tools to create or update these files."
 
         let repaired =
             release_stale_service_communication_leases(&root).expect("release stale leases");
+        let repeated =
+            release_stale_service_communication_leases(&root).expect("repeat release stale leases");
 
         assert_eq!(repaired, 0);
+        assert_eq!(repeated, 0);
         let reloaded = channels::load_queue_task(&root, &task.message_key)
             .expect("load failed")
             .expect("missing queue task");
@@ -41901,7 +41934,10 @@ Use shell tools to create or update these files."
                 priority: "normal".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "bench",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to seed durable queue task");
@@ -42034,7 +42070,10 @@ Use shell tools to create or update these files."
                 priority: "normal".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "bench-next",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to seed durable queue task");
@@ -44597,6 +44636,7 @@ Was jetzt zu tun ist:\n\
         // A generic scraping artifact (no complete-list signal) bound to the same
         // no-contract skill is NOT gated -> the fallback does not over-gate.
         let job_generic = QueuedPrompt {
+            queue_task_metadata: Value::Null,
             prompt: "Bitte die Tabelle von example.com auslesen.".to_string(),
             goal: "scrape".to_string(),
             ..job.clone()

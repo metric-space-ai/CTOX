@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { __reactSettingsTestHooks as hooks } from './react-settings.js';
@@ -28,6 +29,261 @@ test('CTOX proxy model options follow the discovered proxy catalog', () => {
       ['MiniMax-M3', 'MiniMax-M3'],
       ['kimi-k3', 'kimi-k3'],
     ],
+  );
+});
+
+test('runtime settings render independent Kimi subscription and MiniMax coding-plan accounts', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: { provider: 'local', chat_model: '' },
+      auth: { mode: 'local', configured: true },
+      diagnostics: {},
+      provider_subscriptions: {
+        schema: 'ctox.provider-subscriptions.v1',
+        providers: [
+          { id: 'codex', label: 'ChatGPT / Codex' },
+          { id: 'claude', label: 'Claude' },
+          { id: 'antigravity', label: 'Google Antigravity' },
+          { id: 'kimi', label: 'Kimi', access_mode: 'Subscription', preset_ids: ['kimi-subscription-kimi-k3'] },
+          { id: 'kimi_coding', label: 'Kimi Coding Plan', access_mode: 'Coding Plan', preset_ids: ['kimi-coding-kimi-k3'] },
+          { id: 'minimax', label: 'MiniMax', access_mode: 'Coding Plan', preset_ids: ['minimax-coding-minimax-m3'] },
+        ],
+        accounts: [
+          { id: 'claude-primary', provider: 'claude', enabled: true },
+          {
+            id: 'kimi-primary', provider: 'kimi', enabled: true, status: 'ready',
+            models: ['kimi-k3[1m]'], preset_ids: ['kimi-subscription-kimi-k3'],
+            access_token: 'must-never-render', refresh_token: 'also-secret',
+          },
+          {
+            id: 'minimax-coding-primary', provider: 'minimax', enabled: true,
+            models: ['MiniMax-M3'], preset_ids: ['minimax-coding-minimax-m3'],
+          },
+        ],
+      },
+    },
+  });
+  assert.match(html, /Provider Subscriptions/);
+  assert.match(html, /data-provider-logo="kimi" data-logo-state="artwork"/);
+  assert.match(html, /assets\/provider-logos\/kimi\.svg/);
+  assert.match(html, /data-provider-logo="kimi_coding" data-logo-state="artwork"/);
+  assert.match(html, /data-provider-logo="minimax" data-logo-state="artwork"/);
+  assert.match(html, /assets\/provider-logos\/minimax\.svg/);
+  assert.match(html, /claude-primary/);
+  assert.match(html, /data-runtime-authorize-subscription="codex"/);
+  assert.match(html, /data-runtime-authorize-subscription="claude"/);
+  assert.match(html, /data-runtime-authorize-subscription="antigravity"/);
+  assert.match(html, /data-runtime-authorize-subscription="kimi"/);
+  assert.match(html, /data-runtime-authorize-subscription="kimi_coding"/);
+  assert.match(html, /data-runtime-authorize-subscription="minimax"/);
+  assert.match(html, /Kimi Coding Plan/);
+  assert.match(html, /kimi-primary/);
+  assert.match(html, /minimax-coding-primary/);
+  assert.match(html, /Coding Plan/);
+  assert.match(html, /kimi-subscription-kimi-k3/);
+  assert.match(html, /data-provider-subscription-action="rotate"/);
+  assert.match(html, /data-provider-subscription-action="disconnect"/);
+  assert.doesNotMatch(html, /must-never-render|also-secret|access_token|refresh_token/);
+});
+
+test('provider logo mapping reuses brand artwork across access modes and fails closed to a mark', () => {
+  assert.deepEqual(hooks.providerLogoSpec('codex'), {
+    provider: 'codex', asset: 'openai.svg', fallbackMark: 'O',
+  });
+  assert.deepEqual(hooks.providerLogoSpec('kimi_coding'), {
+    provider: 'kimi_coding', asset: 'kimi.svg', fallbackMark: 'K',
+  });
+  assert.deepEqual(hooks.providerLogoSpec('unknown-provider'), {
+    provider: 'unknown-provider', asset: '', fallbackMark: 'U',
+  });
+  const fallback = hooks.providerLogoHtml('unknown-provider');
+  assert.match(fallback, /data-logo-state="fallback"/);
+  assert.match(fallback, />U<\/span>/);
+  assert.doesNotMatch(fallback, /<img/);
+});
+
+test('provider logo loader exposes the fallback when an artwork asset cannot load', () => {
+  const parentElement = { dataset: { logoState: 'artwork' } };
+  const image = {
+    complete: true,
+    naturalWidth: 0,
+    hidden: false,
+    parentElement,
+    addEventListener() {},
+  };
+  hooks.wireProviderLogoFallbacks({
+    querySelectorAll: () => [image],
+  });
+  assert.equal(image.hidden, true);
+  assert.equal(parentElement.dataset.logoState, 'fallback');
+});
+
+test('subscription provider artwork preserves the pinned Workjet byte hashes', () => {
+  // Source: metric-space-ai/claude-workjet@4341f5d, Resources/Providers/*.svg.
+  const expected = {
+    'openai.svg': '14ebfcb27d0afdf729c8c2cc086b0793ace642bd03fbccea98688479222f5c65',
+    'anthropic.svg': 'b09586c10df19be04289eaa70f15b98e797ffdcd8cbe71f998d17dbebae5faa4',
+    'antigravity.svg': 'd30cdf2e33d2c1c694f0096694d518a2db05b0f5311a330aabb2ac68df4e3789',
+    'kimi.svg': 'cf348773f67e13abb6d3d15ae94798028085918d131dab93e3192450ba035d34',
+  };
+  for (const [fileName, expectedSha256] of Object.entries(expected)) {
+    const bytes = readFileSync(new URL(`../assets/provider-logos/${fileName}`, import.meta.url));
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), expectedSha256, fileName);
+  }
+});
+
+test('provider account commands carry only typed non-secret selectors', () => {
+  assert.deepEqual(
+    hooks.providerSubscriptionCommandRequest('connect', 'kimi_coding', 'kimi-coding-primary'),
+    {
+      commandType: 'ctox.subscription_auth.start',
+      payload: { provider: 'kimi_coding', account_id: 'kimi-coding-primary' },
+    },
+  );
+  assert.deepEqual(
+    hooks.providerSubscriptionCommandRequest('connect', 'kimi', 'kimi-primary'),
+    {
+      commandType: 'ctox.subscription_auth.start',
+      payload: { provider: 'kimi', account_id: 'kimi-primary' },
+    },
+  );
+  assert.deepEqual(
+    hooks.providerSubscriptionCommandRequest('rotate', 'minimax', 'minimax-coding-primary'),
+    {
+      commandType: 'ctox.provider_subscription.rotate',
+      payload: { provider: 'minimax', account_id: 'minimax-coding-primary' },
+    },
+  );
+  assert.deepEqual(
+    hooks.providerSubscriptionCommandRequest('disconnect', 'kimi', 'kimi-primary'),
+    {
+      commandType: 'ctox.provider_subscription.disconnect',
+      payload: { provider: 'kimi', account_id: 'kimi-primary' },
+    },
+  );
+  assert.deepEqual(
+    hooks.providerSubscriptionCommandRequest('status'),
+    { commandType: 'ctox.provider_subscription.status', payload: {} },
+  );
+});
+
+test('all subscription providers expose one secret-free connect/status/rotate/disconnect story', () => {
+  const accounts = {
+    codex: 'codex-instance-primary',
+    claude: 'claude-primary',
+    antigravity: 'antigravity-primary',
+    kimi: 'kimi-primary',
+  };
+  for (const [provider, accountId] of Object.entries(accounts)) {
+    assert.deepEqual(hooks.providerSubscriptionCommandRequest('connect', provider, accountId), {
+      commandType: 'ctox.subscription_auth.start',
+      payload: { provider, account_id: accountId },
+    });
+    assert.deepEqual(hooks.providerSubscriptionCommandRequest('status', provider), {
+      commandType: 'ctox.provider_subscription.status',
+      payload: { provider },
+    });
+    assert.deepEqual(hooks.providerSubscriptionCommandRequest('rotate', provider, accountId), {
+      commandType: 'ctox.provider_subscription.rotate',
+      payload: { provider, account_id: accountId },
+    });
+    assert.deepEqual(hooks.providerSubscriptionCommandRequest('disconnect', provider, accountId), {
+      commandType: 'ctox.provider_subscription.disconnect',
+      payload: { provider, account_id: accountId },
+    });
+  }
+});
+
+test('coding-plan credential guidance is allowlisted and never renders native secrets or URLs', () => {
+  assert.deepEqual(
+    hooks.providerCredentialRequirement({
+      status: 'credential_required',
+      credential_name: 'KIMI_API_KEY',
+      message: 'ignore native text https://secret.invalid token=abc',
+      token: 'abc',
+    }, 'kimi_coding'),
+    {
+      credentialName: 'KIMI_API_KEY',
+      instruction: 'KIMI_API_KEY im verschlüsselten CTOX Credential-Bereich hinterlegen und danach den Account erneut verbinden.',
+    },
+  );
+  assert.throws(
+    () => hooks.providerCredentialRequirement({
+      status: 'credential_required', credential_name: 'OTHER_SECRET',
+    }, 'minimax'),
+    /ungültige Credential-Anforderung/,
+  );
+
+  const html = baseTemplate({
+    tab: 'runtime',
+    subscriptionAuth: {
+      status: 'credential_required', provider: 'kimi_coding', accountId: 'kimi-coding-primary',
+      credentialName: 'KIMI_API_KEY',
+    },
+    runtimeSettings: {
+      can_manage: true,
+      runtime: { provider: 'local', chat_model: '' },
+      auth: { mode: 'local', configured: true },
+      diagnostics: {},
+      provider_subscriptions: {
+        schema: 'ctox.provider-subscriptions.v1',
+        providers: [{ id: 'kimi_coding', label: 'Kimi Coding Plan', access_mode: 'Coding Plan' }],
+        accounts: [],
+      },
+    },
+  });
+  assert.match(html, /KIMI_API_KEY erforderlich/);
+  assert.match(html, /verschlüsselten CTOX Credential-Bereich/);
+  assert.match(html, /nicht in dieses Browser-Formular eingegeben/);
+  assert.doesNotMatch(html, /secret\.invalid|token=abc|OTHER_SECRET/);
+});
+
+test('provider account command validation fails closed', () => {
+  assert.throws(
+    () => hooks.providerSubscriptionCommandRequest('connect', 'unknown', 'primary'),
+    /Unbekannter Subscription-Provider/,
+  );
+  assert.throws(
+    () => hooks.providerSubscriptionCommandRequest('rotate', 'kimi', '../secret'),
+    /Account-ID/,
+  );
+  assert.throws(
+    () => hooks.providerSubscriptionCommandRequest('delete', 'kimi', 'kimi-primary'),
+    /Unbekannte Provider-Aktion/,
+  );
+});
+
+test('provider projection normalizer retains only public account and preset fields', () => {
+  const projection = hooks.normalizeProviderSubscriptions({
+    schema: 'ctox.provider-subscriptions.v1',
+    revision: 4,
+    providers: [{ id: 'kimi', label: 'Kimi', access_mode: 'Subscription' }],
+    accounts: [{
+      id: 'kimi-primary', provider: 'kimi', enabled: true, status: 'ready',
+      models: ['kimi-k3[1m]'], preset_ids: ['kimi-subscription-kimi-k3'],
+      access_token: 'secret', upstream_url: 'private-route',
+    }],
+  });
+  assert.equal(projection.revision, 4);
+  assert.deepEqual(projection.accounts, [{
+    id: 'kimi-primary',
+    provider: 'kimi',
+    enabled: true,
+    status: 'ready',
+    models: ['kimi-k3[1m]'],
+    presetIds: ['kimi-subscription-kimi-k3'],
+  }]);
+  assert.equal('access_token' in projection.accounts[0], false);
+  assert.equal('upstream_url' in projection.accounts[0], false);
+  assert.deepEqual(
+    hooks.normalizeProviderSubscriptions({
+      schema: 'forged',
+      providers: [{ id: 'kimi' }],
+      accounts: [{ id: 'forged', provider: 'kimi', enabled: true }],
+    }).accounts,
+    [],
   );
 });
 

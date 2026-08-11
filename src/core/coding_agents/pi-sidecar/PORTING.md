@@ -38,6 +38,31 @@ primitive, **not** a terminal UI. `pi-tui` is not used.
    (P0 history); applying them to a live module still goes through the
    server-side policy-gated `ctox.source.*` commands.
 
+## Independent coding-plan routes
+
+Provider and model selection are independent dimensions. The browser sends an
+opaque server-authored `preset_id`; native CTOX resolves the account, model,
+fixed endpoint profile and encrypted-store secret handle immediately before a
+turn. A model name must never silently reinterpret MiniMax as `ctox_proxy`.
+
+Direct Anthropic-compatible coding plans use a turn-scoped native loopback
+bridge. Pi receives only a public sentinel and calls the loopback URL; the Rust
+owner injects `x-api-key` and streams the response. The provider secret is
+never copied into the sidecar request or process environment. The shared bridge
+mechanism supports MiniMax Coding Plan (`https://api.minimax.io/anthropic`) and
+can carry Kimi Coding Plan (`https://api.kimi.com/coding/`) through separate
+typed account configurations and allow-lists.
+
+The descriptors are cross-checked against the direct Workjet integrations:
+Kimi uses `k3[1m]` with a 1,048,576-token context window; MiniMax uses
+`MiniMax-M3`. Those public model facts are fixed by the server-side preset and
+remain independent of CTOX's main model.
+
+MiniMax capacity is a separate explicit operation against
+`https://www.minimax.io/v1/token_plan/remains` using Bearer authentication.
+Only labeled general/MiniMax/coding usage windows are accepted; media quotas,
+ambiguous counters and malformed used/limit pairs remain unknown.
+
 ## Boundaries
 
 - No `pi-tui`, no host shell/process/filesystem, no generic network tools.
@@ -57,7 +82,14 @@ and `dist/` are build/runtime output and are not committed.
 
 ## Status
 
-Vendoring verified (pi packages install cleanly, 239 deps). Remaining:
-`src/execution-env.mjs` (app-source projection), `src/turn.mjs` (the turn
-adapter over the pinned Pi loop), `src/index.mjs` (LocalTransport server), the
-esbuild bundle, and the native Rust owner wiring.
+The bounded TypeScript sidecar, self-contained esbuild bundle, native Rust
+owner, app-source projection and server-resolved provider presets are wired.
+The LocalTransport request, response and turn limits have offline socket tests;
+direct Kimi/MiniMax coding-plan routes use a turn-scoped native capability
+bridge.
+
+This status is not a provider-integration completion claim. Subscription routes
+still require their own turn-bound gateway capability, live provider accounts
+still require redacted E2E receipts, and credential refresh/rollback remains a
+separate Track-B gate. The authoritative per-provider state is
+`src/core/execution/cliproxyapi_integration/provider-integration.json`.

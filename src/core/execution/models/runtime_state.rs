@@ -484,12 +484,12 @@ pub fn use_ctox_llm_proxy_credentials(env_map: &BTreeMap<String, String>) -> boo
 
 pub fn api_key_env_var_for_provider_with_env_map(
     provider: &str,
-    env_map: &BTreeMap<String, String>,
+    _env_map: &BTreeMap<String, String>,
 ) -> &'static str {
-    if normalize_api_provider(provider).eq_ignore_ascii_case(API_PROVIDER_CTOX_PROXY)
-        || (normalize_api_provider(provider).eq_ignore_ascii_case(API_PROVIDER_MINIMAX)
-            && use_ctox_llm_proxy_credentials(env_map))
-    {
+    // Provider identity is explicit authority. The presence of an unrelated
+    // proxy credential must never reinterpret a MiniMax account as
+    // `ctox_proxy`; callers selecting the proxy pass `ctox_proxy` themselves.
+    if normalize_api_provider(provider).eq_ignore_ascii_case(API_PROVIDER_CTOX_PROXY) {
         CTOX_LLM_PROXY_API_KEY_ENV
     } else {
         api_key_env_var_for_provider(provider)
@@ -1663,6 +1663,10 @@ mod tests {
         );
         assert_eq!(
             api_key_env_var_for_provider_with_env_map("minimax", &env_map),
+            "MINIMAX_API_KEY"
+        );
+        assert_eq!(
+            api_key_env_var_for_provider_with_env_map("ctox_proxy", &env_map),
             CTOX_LLM_PROXY_API_KEY_ENV
         );
     }

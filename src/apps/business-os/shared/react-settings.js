@@ -19,6 +19,32 @@ import {
 } from './roles.js?v=20260811-verlauf-startet-heute-v98';
 import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-verlauf-startet-heute-v98';
 
+const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
+  codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),
+  claude: Object.freeze({ label: 'Claude', accessMode: 'Subscription', defaultAccountId: 'claude-primary' }),
+  antigravity: Object.freeze({ label: 'Google Antigravity', accessMode: 'Subscription', defaultAccountId: 'antigravity-primary' }),
+  kimi: Object.freeze({ label: 'Kimi', accessMode: 'Subscription', defaultAccountId: 'kimi-primary' }),
+  kimi_coding: Object.freeze({ label: 'Kimi Coding Plan', accessMode: 'Coding Plan', defaultAccountId: 'kimi-coding-primary', credentialName: 'KIMI_API_KEY' }),
+  minimax: Object.freeze({ label: 'MiniMax', accessMode: 'Coding Plan', defaultAccountId: 'minimax-coding-primary', credentialName: 'MINIMAX_API_KEY' }),
+});
+
+const PROVIDER_LOGO_ASSETS = Object.freeze({
+  codex: Object.freeze({ asset: 'openai.svg', fallbackMark: 'O' }),
+  openai: Object.freeze({ asset: 'openai.svg', fallbackMark: 'O' }),
+  claude: Object.freeze({ asset: 'anthropic.svg', fallbackMark: 'A' }),
+  anthropic: Object.freeze({ asset: 'anthropic.svg', fallbackMark: 'A' }),
+  antigravity: Object.freeze({ asset: 'antigravity.svg', fallbackMark: 'A' }),
+  kimi: Object.freeze({ asset: 'kimi.svg', fallbackMark: 'K' }),
+  kimi_coding: Object.freeze({ asset: 'kimi.svg', fallbackMark: 'K' }),
+  minimax: Object.freeze({ asset: 'minimax.svg', fallbackMark: 'M' }),
+});
+
+const PROVIDER_SUBSCRIPTION_COMMANDS = Object.freeze({
+  status: 'ctox.provider_subscription.status',
+  rotate: 'ctox.provider_subscription.rotate',
+  disconnect: 'ctox.provider_subscription.disconnect',
+});
+
 export async function openReactSettings({
   mount,
   modules = [],
@@ -369,6 +395,7 @@ export async function openReactSettings({
       channels: settingsState.channels,
       mcp: settingsState.mcp,
     });
+    wireProviderLogoFallbacks(body);
     body.querySelector('[data-close-settings]')?.addEventListener('click', () => {
       try { channelsAccountsSub?.unsubscribe?.(); } catch {}
       channelsAccountsSub = null;
@@ -492,15 +519,22 @@ export async function openReactSettings({
         render();
       });
     });
-    body.querySelector('[data-runtime-authorize-subscription]')?.addEventListener('click', async () => {
-      const authWindow = window.open('', 'ctox-chatgpt-subscription');
-      settingsState.subscriptionAuth = { status: 'starting', message: 'Geräte-Code wird bei CTOX angefordert.' };
-      settingsState.commandStatus = 'ChatGPT Login wird vorbereitet...';
+    body.querySelectorAll('[data-runtime-authorize-subscription]').forEach((button) => button.addEventListener('click', async () => {
+      const providerId = String(button.dataset.runtimeAuthorizeSubscription || 'codex');
+      const profile = providerSubscriptionProfile(providerId);
+      const providerLabel = profile.label;
+      const accountInput = body.querySelector(`[data-provider-account-id="${cssEscape(providerId)}"]`);
+      const accountId = normalizeProviderAccountId(accountInput?.value || profile.defaultAccountId);
+      const authWindow = window.open('', `ctox-${providerId}-subscription`);
+      settingsState.subscriptionAuth = {
+        status: 'starting', provider: providerId, accountId, action: 'connect', message: 'Login wird bei CTOX angefordert.',
+      };
+      settingsState.commandStatus = `${providerLabel} Login wird vorbereitet...`;
       const runtimePayload = runtimePayloadFromForm(body);
       writeSubscriptionAuthWindow(
         authWindow,
-        'ChatGPT Login wird vorbereitet',
-        'CTOX fordert den Geräte-Code an. Der Code erscheint gleich in den Settings.',
+        `${providerLabel} Login wird vorbereitet`,
+        'CTOX startet den sicheren Provider-Login.',
       );
       render();
       try {
@@ -508,36 +542,59 @@ export async function openReactSettings({
           settingsState.runtimeSettings,
           runtimePayload,
         );
-        const payload = await startSubscriptionAuth({ commandBus, db, session, sync });
-        if (!payload.auth_url && !payload.verification_url) throw new Error('CTOX hat keine Login-URL geliefert.');
+        const payload = await startSubscriptionAuth(providerId, accountId, { commandBus, db, session, sync });
+        const credentialRequirement = providerCredentialRequirement(payload, providerId);
+        if (credentialRequirement) {
+          if (authWindow && !authWindow.closed) authWindow.close();
+          settingsState.subscriptionAuth = {
+            status: 'credential_required',
+            provider: providerId,
+            accountId,
+            action: 'connect',
+            credentialName: credentialRequirement.credentialName,
+          };
+          settingsState.commandStatus = credentialRequirement.instruction;
+          render();
+          return;
+        }
+        if (!payload.auth_url && !payload.verification_url && payload.status !== 'connected') {
+          throw new Error('CTOX hat weder eine Login-URL noch einen verbundenen Account bestätigt.');
+        }
         if (payload.status === 'device_code' && payload.user_code) {
           settingsState.subscriptionAuth = {
             status: 'device_code',
+            provider: providerId,
+            accountId,
+            action: 'connect',
             userCode: payload.user_code,
             verificationUrl: payload.verification_url || payload.auth_url,
             source: payload.source || 'ctox',
             message: 'Code im OpenAI-Fenster eingeben.',
           };
-          settingsState.commandStatus = `ChatGPT Geräte-Code: ${payload.user_code}. Code im OpenAI-Fenster eingeben.`;
+          settingsState.commandStatus = `${providerLabel} Geräte-Code: ${payload.user_code}. Code im Provider-Fenster eingeben.`;
           render();
         }
         const authUrl = payload.auth_url || payload.verification_url;
-        if (authWindow && !authWindow.closed) {
+        if (authUrl && authWindow && !authWindow.closed) {
           authWindow.location.href = authUrl;
-        } else {
+        } else if (authUrl) {
           window.location.href = authUrl;
+        } else if (authWindow && !authWindow.closed) {
+          authWindow.close();
         }
-        settingsState.commandStatus = payload.user_code
-          ? `ChatGPT Geräte-Code: ${payload.user_code}. Danach Status neu laden.`
-          : 'ChatGPT Login geöffnet. Danach Status neu laden.';
-        saveRuntimeSettings(runtimePayload, {
+        settingsState.commandStatus = payload.status === 'connected'
+          ? `${providerLabel} Account ${accountId} ist verbunden.`
+          : payload.user_code
+          ? `${providerLabel} Geräte-Code: ${payload.user_code}. Danach Status neu laden.`
+          : `${providerLabel} Login geöffnet. Danach Status neu laden.`;
+        if (providerId === 'codex') saveRuntimeSettings(runtimePayload, {
           commandBus,
           db,
           session,
           sync,
           waitForProjection: false,
         }).catch((error) => {
-          const message = `Runtime konnte nach Start des ChatGPT Logins nicht gespeichert werden: ${String(error?.message || error)}`;
+          const message = `Runtime konnte nach Start des Provider-Logins nicht gespeichert werden: ${String(error?.message || error)}`;
           settingsState.commandStatus = settingsState.subscriptionAuth?.userCode
             ? `${settingsState.commandStatus} ${message}`
             : message;
@@ -550,18 +607,107 @@ export async function openReactSettings({
       } catch (error) {
         writeSubscriptionAuthWindow(
           authWindow,
-          'ChatGPT Login konnte nicht gestartet werden',
+          `${providerLabel} Login konnte nicht gestartet werden`,
           String(error?.message || error),
           true,
         );
         settingsState.subscriptionAuth = {
           status: 'failed',
+          provider: providerId,
+          accountId,
+          action: 'connect',
           error: String(error?.message || error),
         };
         settingsState.commandStatus = String(error?.message || error);
       }
       render();
-    });
+    }));
+    body.querySelectorAll('[data-provider-subscription-action]').forEach((button) => button.addEventListener('click', async () => {
+      const action = String(button.dataset.providerSubscriptionAction || '');
+      const providerId = String(button.dataset.providerId || '');
+      const accountId = String(button.dataset.accountId || '');
+      const profile = providerSubscriptionProfile(providerId);
+      if (action === 'disconnect') {
+        const confirmed = await showBusinessConfirm(
+          `${profile.label} Account ${accountId} wirklich trennen?`,
+          { title: 'Provider-Account trennen', confirmLabel: 'Trennen' },
+        );
+        if (!confirmed) return;
+      }
+      const authWindow = action === 'rotate'
+        ? window.open('', `ctox-${providerId}-subscription-rotate`)
+        : null;
+      if (authWindow) {
+        writeSubscriptionAuthWindow(
+          authWindow,
+          `${profile.label} Credential-Rotation`,
+          'CTOX startet die sichere Provider-Rotation.',
+        );
+      }
+      settingsState.subscriptionAuth = {
+        status: 'starting', provider: providerId, accountId, action,
+      };
+      settingsState.commandStatus = providerSubscriptionActionPendingLabel(action, profile.label, accountId);
+      render();
+      try {
+        const result = await runProviderSubscriptionCommand(action, providerId, accountId, {
+          commandBus, db, session, sync,
+        });
+        const projection = providerSubscriptionProjectionFromResult(result);
+        if (projection) {
+          settingsState.runtimeSettings = {
+            ...(settingsState.runtimeSettings || {}),
+            provider_subscriptions: projection,
+          };
+        }
+        const credentialRequirement = providerCredentialRequirement(result, providerId);
+        if (credentialRequirement) {
+          if (authWindow && !authWindow.closed) authWindow.close();
+          settingsState.subscriptionAuth = {
+            status: 'credential_required',
+            provider: providerId,
+            accountId,
+            action,
+            credentialName: credentialRequirement.credentialName,
+          };
+          settingsState.commandStatus = credentialRequirement.instruction;
+          await refreshRuntimeSettings();
+          render();
+          return;
+        }
+        const authUrl = String(result?.auth_url || result?.verification_url || '').trim();
+        const userCode = String(result?.user_code || '').trim();
+        if (action === 'rotate' && (authUrl || userCode)) {
+          settingsState.subscriptionAuth = {
+            status: 'pending', provider: providerId, accountId, action,
+            userCode, verificationUrl: authUrl,
+          };
+          if (authUrl && authWindow && !authWindow.closed) authWindow.location.href = authUrl;
+          else if (authUrl) window.location.href = authUrl;
+          else if (authWindow && !authWindow.closed) authWindow.close();
+          settingsState.commandStatus = userCode
+            ? `${profile.label} Geräte-Code: ${userCode}. Danach Status neu laden.`
+            : `${profile.label} Rotation geöffnet. Danach Status neu laden.`;
+          setTimeout(refreshRuntimeSettings, 3000);
+          setTimeout(refreshRuntimeSettings, 9000);
+          setTimeout(refreshRuntimeSettings, 30000);
+          render();
+          return;
+        }
+        if (authWindow && !authWindow.closed) authWindow.close();
+        settingsState.subscriptionAuth = null;
+        await refreshRuntimeSettings();
+        settingsState.commandStatus = providerSubscriptionActionCompleteLabel(action, profile.label, accountId);
+        render();
+      } catch (error) {
+        settingsState.subscriptionAuth = {
+          status: 'failed', provider: providerId, accountId, action,
+          error: String(error?.message || error),
+        };
+        settingsState.commandStatus = String(error?.message || error);
+        render();
+      }
+    }));
     body.querySelectorAll('[data-runtime-provider], [data-runtime-auth-mode]').forEach((control) => {
       control.addEventListener('change', () => {
         settingsState.runtimeSettings = runtimeSettingsWithDraft(
@@ -977,7 +1123,7 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
         <span>${escapeHtml(runtimeLoading ? 'Status wird gelesen.' : runtimeAuthSummary(provider, authMode, auth))}</span>
       </header>
       <div class="runtime-status-strip">
-        ${runtimePill('Modelle', providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'nicht geladen', false)}
+        ${runtimeProviderPill(provider, providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'nicht geladen')}
         ${runtimePill('Autorisierung', runtimeAuthSummary(provider, authMode, auth), authNeedsAttention)}
         ${runtimePill('CTOX Service', diagnostics.service_message || 'Status unbekannt', serviceNeedsAttention)}
         ${runtimePill('Route', runtimeRouteSummary(runtime, provider, auth), false)}
@@ -1017,6 +1163,7 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
         </div>
       ` : ''}
     </section>
+    ${providerSubscriptionsPanel(runtimeSettings?.provider_subscriptions, canManage, subscriptionAuth)}
     <section class="settings-section">
       <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
       <div class="settings-grid is-one">
@@ -1353,7 +1500,10 @@ function activityVersionLabel(value) {
 function activityCommandLabel(commandType) {
   return {
     'ctox.runtime_settings.save': 'Runtime ändern',
-    'ctox.subscription_auth.start': 'ChatGPT Login starten',
+    'ctox.subscription_auth.start': 'Provider Subscription verbinden',
+    'ctox.provider_subscription.status': 'Provider-Status prüfen',
+    'ctox.provider_subscription.rotate': 'Provider-Zugang rotieren',
+    'ctox.provider_subscription.disconnect': 'Provider-Account trennen',
     'ctox.business_os.user.upsert': 'Teammitglied speichern',
     'ctox.business_os.audit.list': 'Aktivität ansehen',
     'ctox.channel.configure': 'Channel konfigurieren',
@@ -2096,9 +2246,259 @@ function subscriptionStatus(auth, canManage, subscriptionAuth = null) {
       ` : ''}
       ${failed ? `<div class="subscription-device-error">${escapeHtml(subscriptionAuth.error || 'ChatGPT Login konnte nicht gestartet werden.')}</div>` : ''}
       ${lines.length ? `<dl class="settings-kv">${lines.join('')}</dl>` : ''}
-      ${canManage ? `<button class="text-button" type="button" data-runtime-authorize-subscription>${escapeHtml(configured ? 'Subscription erneuern' : 'Subscription verbinden')}</button>` : ''}
+      ${canManage ? `<button class="text-button" type="button" data-runtime-authorize-subscription="codex">${escapeHtml(configured ? 'Subscription erneuern' : 'Subscription verbinden')}</button>` : ''}
     </div>
   `;
+}
+
+function providerSubscriptionsPanel(projection = {}, canManage = false, subscriptionAuth = null) {
+  const normalized = normalizeProviderSubscriptions(projection);
+  const accounts = normalized.accounts;
+  const presets = normalized.presets;
+  const providers = normalized.providers;
+  const rows = providers.map((provider) => {
+    const providerAccounts = accounts.filter((account) => account.provider === provider.id);
+    const connected = providerAccounts.filter((account) => account.enabled && account.status !== 'disconnected');
+    const busy = subscriptionAuth?.status === 'starting' && subscriptionAuth?.provider === provider.id;
+    const providerPresets = presets.filter((preset) => preset.provider === provider.id);
+    const actionError = subscriptionAuth?.status === 'failed' && subscriptionAuth?.provider === provider.id
+      ? String(subscriptionAuth.error || 'Provider-Aktion fehlgeschlagen.')
+      : '';
+    const credentialRequirement = subscriptionAuth?.status === 'credential_required'
+      && subscriptionAuth?.provider === provider.id
+      ? providerCredentialRequirement({
+        status: 'credential_required',
+        credential_name: subscriptionAuth.credentialName,
+      }, provider.id)
+      : null;
+    return `<div class="runtime-auth-status ${connected.length ? 'is-ok' : ''} ${actionError ? 'is-danger' : ''}" data-provider-subscription="${escapeAttr(provider.id)}">
+      <div class="runtime-provider-heading">
+        ${providerLogoHtml(provider.id)}
+        <div>
+          <strong>${escapeHtml(provider.label)}</strong>
+          <span>${escapeHtml(provider.available
+    ? `${provider.accessMode} · ${connected.length ? `${connected.length} Account${connected.length === 1 ? '' : 's'} aktiv` : 'noch nicht verbunden'}`
+    : `${provider.accessMode} · von dieser CTOX Instanz noch nicht angeboten`)}</span>
+        </div>
+      </div>
+      ${providerPresets.length ? `<div class="runtime-provider-presets"><span>Pi-Presets</span><strong>${escapeHtml(providerPresets.map((preset) => preset.label).join(' · '))}</strong></div>` : ''}
+      ${providerAccounts.map((account) => providerSubscriptionAccountRow(account, provider, canManage, subscriptionAuth)).join('')}
+      ${credentialRequirement ? `<div class="runtime-provider-credential-guidance">
+        <strong>${escapeHtml(credentialRequirement.credentialName)} erforderlich</strong>
+        <span>${escapeHtml(credentialRequirement.instruction)}</span>
+        <em>Der Schlüssel wird nicht in dieses Browser-Formular eingegeben oder über Business OS synchronisiert.</em>
+      </div>` : ''}
+      ${actionError ? `<div class="subscription-device-error">${escapeHtml(actionError)}</div>` : ''}
+      ${canManage ? `<div class="runtime-actions">
+        <label><span>Neue Account-ID</span><input data-provider-account-id="${escapeAttr(provider.id)}" value="${escapeAttr(provider.defaultAccountId)}" ${provider.available && !busy ? '' : 'disabled'} /></label>
+        <button class="text-button" type="button" data-runtime-authorize-subscription="${escapeAttr(provider.id)}" ${provider.available && !busy ? '' : 'disabled'}>${escapeHtml(busy && subscriptionAuth?.action === 'connect' ? 'Login wird gestartet…' : 'Account verbinden')}</button>
+        <button class="text-button" type="button" data-provider-subscription-action="status" data-provider-id="${escapeAttr(provider.id)}" data-account-id="" ${provider.available && !busy ? '' : 'disabled'}>Status prüfen</button>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  return `<section class="settings-section">
+    <header><h3>Provider Subscriptions</h3><span>Provider und Modell werden unabhängig gewählt. Tokens bleiben ausschließlich im CTOX Secret Store.</span></header>
+    <div class="settings-grid">${rows || '<span>Provider-Status wird synchronisiert.</span>'}</div>
+  </section>`;
+}
+
+function providerSubscriptionAccountRow(account, provider, canManage, subscriptionAuth) {
+  const busy = subscriptionAuth?.status === 'starting'
+    && subscriptionAuth?.provider === provider.id
+    && (!subscriptionAuth?.accountId || subscriptionAuth.accountId === account.id);
+  const presetLabels = account.presetIds.length
+    ? `<div><dt>Pi-Presets</dt><dd>${escapeHtml(account.presetIds.join(' · '))}</dd></div>`
+    : '';
+  return `<div class="runtime-provider-account" data-provider-account="${escapeAttr(account.id)}">
+    <dl class="settings-kv">
+      ${kv('Account', account.id)}
+      ${kv('Status', providerSubscriptionStatusLabel(account.status, account.enabled))}
+      ${account.models.length ? kv('Modelle', account.models.join(' · ')) : ''}
+      ${presetLabels}
+    </dl>
+    ${canManage ? `<div class="runtime-actions">
+      <button class="text-button" type="button" data-provider-subscription-action="rotate" data-provider-id="${escapeAttr(provider.id)}" data-account-id="${escapeAttr(account.id)}" ${busy ? 'disabled' : ''}>Zugang rotieren</button>
+      <button class="text-button" type="button" data-provider-subscription-action="disconnect" data-provider-id="${escapeAttr(provider.id)}" data-account-id="${escapeAttr(account.id)}" ${busy ? 'disabled' : ''}>Trennen</button>
+    </div>` : ''}
+  </div>`;
+}
+
+function normalizeProviderSubscriptions(projection = {}) {
+  const schemaValid = projection?.schema === 'ctox.provider-subscriptions.v1';
+  const rawProviders = schemaValid && Array.isArray(projection?.providers) ? projection.providers : [];
+  const rawAccounts = schemaValid && Array.isArray(projection?.accounts) ? projection.accounts : [];
+  const rawPresets = schemaValid && Array.isArray(projection?.presets) ? projection.presets : [];
+  const advertisedProviders = new Map();
+  for (const candidate of rawProviders) {
+    const id = normalizeProviderId(candidate?.id, false);
+    if (!id || advertisedProviders.has(id)) continue;
+    advertisedProviders.set(id, candidate);
+  }
+  const providers = Object.entries(PROVIDER_SUBSCRIPTION_PROFILES).map(([id, profile]) => {
+    const advertised = advertisedProviders.get(id);
+    let defaultAccountId = profile.defaultAccountId;
+    try {
+      defaultAccountId = normalizeProviderAccountId(advertised?.default_account_id || profile.defaultAccountId);
+    } catch {}
+    return {
+      id,
+      label: String(advertised?.label || profile.label),
+      accessMode: String(advertised?.access_mode || advertised?.accessMode || profile.accessMode),
+      defaultAccountId,
+      available: Boolean(advertised) && advertised?.available !== false,
+    };
+  });
+  const accounts = [];
+  const accountIds = new Set();
+  for (const candidate of rawAccounts) {
+    const provider = normalizeProviderId(candidate?.provider, false);
+    let id = '';
+    try { id = normalizeProviderAccountId(candidate?.id); } catch { continue; }
+    if (!provider || accountIds.has(`${provider}:${id}`)) continue;
+    accountIds.add(`${provider}:${id}`);
+    accounts.push({
+      id,
+      provider,
+      enabled: candidate?.enabled !== false,
+      status: normalizeProviderSubscriptionStatus(candidate?.status, candidate?.enabled),
+      models: normalizePublicStringList(candidate?.models || candidate?.model_ids),
+      presetIds: normalizePublicStringList(candidate?.preset_ids || candidate?.presets),
+    });
+  }
+  const presets = [];
+  const presetIds = new Set();
+  const addPreset = (candidate, fallbackProvider = '') => {
+    const provider = normalizeProviderId(candidate?.provider || fallbackProvider, false);
+    const id = normalizePublicId(candidate?.id || candidate);
+    if (!provider || !id || presetIds.has(id)) return;
+    presetIds.add(id);
+    presets.push({
+      id,
+      provider,
+      label: String(candidate?.label || id),
+    });
+  };
+  rawPresets.forEach((preset) => addPreset(preset));
+  for (const candidate of rawProviders) {
+    const provider = normalizeProviderId(candidate?.id, false);
+    normalizePublicStringList(candidate?.preset_ids || candidate?.presets)
+      .forEach((id) => addPreset({ id }, provider));
+  }
+  for (const account of accounts) {
+    account.presetIds.forEach((id) => addPreset({ id }, account.provider));
+  }
+  return {
+    schema: projection?.schema === 'ctox.provider-subscriptions.v1'
+      ? projection.schema
+      : 'ctox.provider-subscriptions.v1',
+    revision: Number(projection?.revision || 0),
+    providers,
+    accounts,
+    presets,
+  };
+}
+
+function normalizePublicStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((entry) => normalizePublicId(entry)).filter(Boolean))];
+}
+
+function normalizePublicId(value) {
+  const normalized = String(value || '').trim();
+  return normalized.length <= 160
+    && /^[a-zA-Z0-9]/.test(normalized)
+    && !/[\s<>&"']/.test(normalized)
+    ? normalized
+    : '';
+}
+
+function normalizeProviderId(value, required = true) {
+  const id = String(value || '').trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(PROVIDER_SUBSCRIPTION_PROFILES, id)) return id;
+  if (required) throw new Error(`Unbekannter Subscription-Provider: ${id || '-'}`);
+  return '';
+}
+
+function normalizeProviderAccountId(value) {
+  const id = String(value || '').trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(id)) {
+    throw new Error('Account-ID darf nur Buchstaben, Zahlen, Punkt, Unterstrich und Bindestrich enthalten.');
+  }
+  return id;
+}
+
+function providerSubscriptionProfile(provider) {
+  const id = normalizeProviderId(provider);
+  return { id, ...PROVIDER_SUBSCRIPTION_PROFILES[id] };
+}
+
+function providerCredentialRequirement(payload, provider) {
+  if (payload?.status !== 'credential_required') return null;
+  const profile = providerSubscriptionProfile(provider);
+  const credentialName = String(payload?.credential_name || '').trim();
+  if (!profile.credentialName || credentialName !== profile.credentialName) {
+    throw new Error(`${profile.label}: ungültige Credential-Anforderung.`);
+  }
+  return {
+    credentialName,
+    instruction: `${credentialName} im verschlüsselten CTOX Credential-Bereich hinterlegen und danach den Account erneut verbinden.`,
+  };
+}
+
+function normalizeProviderSubscriptionStatus(value, enabled) {
+  if (enabled === false) return 'disabled';
+  const status = String(value || '').trim().toLowerCase();
+  return ['connected', 'ready', 'refresh_required', 'error', 'disabled', 'disconnected'].includes(status)
+    ? status
+    : 'connected';
+}
+
+function providerSubscriptionStatusLabel(status, enabled) {
+  if (!enabled || status === 'disabled') return 'deaktiviert';
+  return {
+    connected: 'verbunden',
+    ready: 'bereit',
+    refresh_required: 'Rotation erforderlich',
+    error: 'Fehler',
+    disconnected: 'getrennt',
+  }[status] || 'verbunden';
+}
+
+function providerSubscriptionCommandRequest(action, provider = '', accountId = '') {
+  const normalizedAction = String(action || '').trim().toLowerCase();
+  if (normalizedAction === 'status' && !provider) {
+    return { commandType: PROVIDER_SUBSCRIPTION_COMMANDS.status, payload: {} };
+  }
+  const profile = providerSubscriptionProfile(provider);
+  const needsAccount = normalizedAction !== 'status';
+  const normalizedAccountId = accountId ? normalizeProviderAccountId(accountId) : '';
+  if (needsAccount && !normalizedAccountId) throw new Error(`${profile.label}: Account-ID fehlt.`);
+  if (normalizedAction === 'connect') {
+    return {
+      commandType: 'ctox.subscription_auth.start',
+      payload: { provider: profile.id, account_id: normalizedAccountId },
+    };
+  }
+  const commandType = PROVIDER_SUBSCRIPTION_COMMANDS[normalizedAction];
+  if (!commandType) throw new Error(`Unbekannte Provider-Aktion: ${normalizedAction || '-'}`);
+  return {
+    commandType,
+    payload: normalizedAccountId
+      ? { provider: profile.id, account_id: normalizedAccountId }
+      : { provider: profile.id },
+  };
+}
+
+function providerSubscriptionActionPendingLabel(action, providerLabel, accountId) {
+  if (action === 'status') return `${providerLabel} Status wird geprüft…`;
+  if (action === 'rotate') return `${providerLabel} Zugang für ${accountId} wird rotiert…`;
+  return `${providerLabel} Account ${accountId} wird getrennt…`;
+}
+
+function providerSubscriptionActionCompleteLabel(action, providerLabel, accountId) {
+  if (action === 'status') return `${providerLabel} Status aktualisiert.`;
+  if (action === 'rotate') return `${providerLabel} Zugang für ${accountId} wurde rotiert.`;
+  return `${providerLabel} Account ${accountId} wurde getrennt.`;
 }
 
 function formatDeviceCode(value) {
@@ -2114,6 +2514,49 @@ function runtimePill(label, value, danger) {
       <strong>${escapeHtml(value || '-')}</strong>
     </div>
   `;
+}
+
+function runtimeProviderPill(provider, value) {
+  return `
+    <div class="runtime-pill runtime-provider-pill">
+      <span>Modelle</span>
+      <div class="runtime-provider-summary">
+        ${providerLogoHtml(provider)}
+        <strong>${escapeHtml(value || '-')}</strong>
+      </div>
+    </div>
+  `;
+}
+
+function providerLogoSpec(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  const configured = PROVIDER_LOGO_ASSETS[normalized];
+  if (configured) return { provider: normalized, ...configured };
+  const fallbackMark = normalized.slice(0, 1).toUpperCase() || '?';
+  return { provider: normalized || 'unknown', asset: '', fallbackMark };
+}
+
+function providerLogoHtml(provider) {
+  const spec = providerLogoSpec(provider);
+  const assetUrl = spec.asset
+    ? new URL(`../assets/provider-logos/${spec.asset}`, import.meta.url).href
+    : '';
+  const state = assetUrl ? 'artwork' : 'fallback';
+  return `<span class="provider-brand-mark" data-provider-logo="${escapeAttr(spec.provider)}" data-logo-state="${state}" aria-hidden="true">
+    <span class="provider-brand-fallback">${escapeHtml(spec.fallbackMark)}</span>
+    ${assetUrl ? `<img src="${escapeAttr(assetUrl)}" alt="" data-provider-logo-image />` : ''}
+  </span>`;
+}
+
+function wireProviderLogoFallbacks(root) {
+  root?.querySelectorAll?.('[data-provider-logo-image]').forEach((image) => {
+    const showFallback = () => {
+      image.hidden = true;
+      if (image.parentElement?.dataset) image.parentElement.dataset.logoState = 'fallback';
+    };
+    image.addEventListener?.('error', showFallback, { once: true });
+    if (image.complete && !image.naturalWidth) showFallback();
+  });
 }
 
 function kv(key, value) {
@@ -2761,24 +3204,74 @@ async function waitForWorkspaceBrandingProjection(db, options = {}) {
   throw lastError || new Error('Corporate Design wurde nicht synchronisiert.');
 }
 
-async function startSubscriptionAuth({ commandBus, db, session, sync } = {}) {
+async function startSubscriptionAuth(provider = 'codex', accountId = '', { commandBus, db, session, sync } = {}) {
+  const request = providerSubscriptionCommandRequest('connect', provider, accountId);
   const command = await dispatchModuleCommand({
     commandBus,
     db,
     session,
     sync,
-    commandType: 'ctox.subscription_auth.start',
+    commandType: request.commandType,
     moduleId: 'ctox',
-    recordId: 'subscription-auth',
-    payload: { provider: 'openai', auth_mode: 'chatgpt_subscription', flow: 'device_code' },
+    recordId: `provider-subscription:${request.payload.provider}:${request.payload.account_id}`,
+    payload: request.payload,
     source: 'business-os-settings',
     timeoutMs: 30000,
+    requireResult: true,
   });
   const payload = command.result || command;
+  const credentialRequirement = providerCredentialRequirement(payload, provider);
+  if (credentialRequirement) {
+    return {
+      status: 'credential_required',
+      credential_name: credentialRequirement.credentialName,
+      source: 'business_commands',
+    };
+  }
+  if (payload?.status === 'connected') {
+    return { status: 'connected', source: 'business_commands' };
+  }
   if (payload?.user_code || payload?.auth_url || payload?.verification_url) {
-    return { ...payload, source: payload.source || 'business_commands' };
+    return {
+      status: String(payload.status || 'auth_url'),
+      user_code: String(payload.user_code || ''),
+      auth_url: String(payload.auth_url || ''),
+      verification_url: String(payload.verification_url || ''),
+      source: 'business_commands',
+    };
   }
   throw new Error(`Command ${command.command_id || command.id || ''} lieferte keinen Geräte-Code.`);
+}
+
+async function runProviderSubscriptionCommand(action, provider, accountId, {
+  commandBus, db, session, sync,
+} = {}) {
+  const request = providerSubscriptionCommandRequest(action, provider, accountId);
+  const command = await dispatchModuleCommand({
+    commandBus,
+    db,
+    session,
+    sync,
+    commandType: request.commandType,
+    moduleId: 'ctox',
+    recordId: `provider-subscription:${request.payload.provider || 'all'}:${request.payload.account_id || 'all'}`,
+    payload: request.payload,
+    source: 'business-os-settings',
+    timeoutMs: 30000,
+    requireResult: true,
+  });
+  return command.result || command;
+}
+
+function providerSubscriptionProjectionFromResult(result) {
+  const candidates = [
+    result,
+    result?.provider_subscriptions,
+    result?.outcome,
+    result?.outcome?.provider_subscriptions,
+  ];
+  const projection = candidates.find((candidate) => candidate?.schema === 'ctox.provider-subscriptions.v1');
+  return projection ? normalizeProviderSubscriptions(projection) : null;
 }
 
 function runtimeSettingsReflectPayload(settings, payload, previousUpdatedAtMs = 0) {
@@ -4442,6 +4935,12 @@ function formatMsShort(value) {
 
 export const __reactSettingsTestHooks = {
   confirmedUsersAfterUpsert,
+  normalizeProviderSubscriptions,
+  providerCredentialRequirement,
+  providerSubscriptionCommandRequest,
+  providerLogoHtml,
+  providerLogoSpec,
   runtimeModelOptions,
   settingsTemplate,
+  wireProviderLogoFallbacks,
 };

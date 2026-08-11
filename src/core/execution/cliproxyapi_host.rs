@@ -2123,7 +2123,7 @@ fn effective_instance_proxy_config(
                 codex_accounts: Vec::new(),
                 antigravity_accounts: Vec::new(),
             }
-            .validate()
+            .validate_for_extension_host()
             .map_err(|_| anyhow::anyhow!("empty portable proxy config is invalid"))?;
             ("kimi".to_owned(), runtime)
         }
@@ -2370,10 +2370,17 @@ impl KimiResponsesHandler {
         // is deliberately bounded-buffered until that generic owner lands.
         let mut body = Vec::new();
         while let Some(chunk) = response.chunks.recv().await {
+            let delimiter = if chunk.payload.ends_with(b"\n\n") {
+                &b""[..]
+            } else if chunk.payload.ends_with(b"\n") {
+                &b"\n"[..]
+            } else {
+                &b"\n\n"[..]
+            };
             if chunk.error.is_some()
                 || body
                     .len()
-                    .checked_add(chunk.payload.len())
+                    .checked_add(chunk.payload.len().saturating_add(delimiter.len()))
                     .is_none_or(|len| len > 32 * 1024 * 1024)
             {
                 return OpenAiResponsesRouteResponse::Buffered(OpenAiResponsesHttpResponse::error(
@@ -2382,6 +2389,7 @@ impl KimiResponsesHandler {
                 ));
             }
             body.extend_from_slice(&chunk.payload);
+            body.extend_from_slice(delimiter);
         }
         OpenAiResponsesRouteResponse::Buffered(OpenAiResponsesHttpResponse::event_stream(200, body))
     }
@@ -3810,13 +3818,14 @@ mod tests {
         RefreshHttpResponse, RefreshRequest, RefreshTransportFailure,
     };
     use ctox_cliproxyapi::internal::runtime::executor::{
-        AntigravityGenerateRequest, AntigravityGenerateResponse,
+        AntigravityGenerateRequest, AntigravityGenerateResponse, AntigravityGenerateStreamResponse,
         AntigravityGenerateTransportFailure, ClaudeMessagesRequest, ClaudeMessagesResponse,
         ClaudeMessagesTransportFailure, CodexResponsesRequest, CodexResponsesResponse,
         CodexResponsesTransportFailure,
     };
     use ctox_cliproxyapi::sdk::pluginapi::{
-        HostHttpClient, HttpRequest, HttpResponse, HttpStreamResponse, PluginFuture,
+        HostHttpClient, HttpRequest, HttpResponse, HttpStreamChunk, HttpStreamResponse,
+        PluginFuture,
     };
 
     use super::*;
@@ -3830,6 +3839,190 @@ mod tests {
     #[derive(Default)]
     struct HostKimiHttpProbe {
         requests: Mutex<Vec<HttpRequest>>,
+    }
+
+    #[derive(Default)]
+    struct HostKimiPiStream {
+        requests: Mutex<Vec<HttpRequest>>,
+        turn: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct HostAntigravityPiStream {
+        requests: Mutex<Vec<(String, Vec<u8>)>>,
+        saw_expected_access_token: AtomicBool,
+        turn: AtomicUsize,
+    }
+
+    impl AntigravityGenerateTransport for HostAntigravityPiStream {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a AntigravityGenerateRequest,
+            _timeout: Duration,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            AntigravityGenerateResponse,
+                            AntigravityGenerateTransportFailure,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { panic!("Pi subscription smoke must stream") })
+        }
+    }
+
+    impl AntigravityGenerateStreamingTransport for HostAntigravityPiStream {
+        fn execute_stream<'a>(
+            &'a self,
+            request: &'a AntigravityGenerateRequest,
+            _timeout: Duration,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            AntigravityGenerateStreamResponse,
+                            AntigravityGenerateTransportFailure,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.url().to_owned(), request.body().to_vec()));
+            self.saw_expected_access_token.store(
+                request.access_token().expose_secret() == "antigravity-pi-e2e-access-do-not-leak",
+                Ordering::SeqCst,
+            );
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let responses = if turn == 0 {
+                    vec![
+                        serde_json::json!({"response": {
+                            "responseId":"antigravity-tool",
+                            "modelVersion":"gemini-3-flash-agent",
+                            "candidates":[{"content":{"parts":[{"functionCall":{
+                                "id":"antigravity-edit",
+                                "name":"edit",
+                                "args":{"path":"index.js","edits":[{"oldText":"v = 1","newText":"v = 2"}]}
+                            }}]}}]
+                        }}),
+                        serde_json::json!({"response": {
+                            "responseId":"antigravity-tool",
+                            "candidates":[{"finishReason":"STOP"}],
+                            "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
+                        }}),
+                    ]
+                } else {
+                    vec![serde_json::json!({"response": {
+                        "responseId":"antigravity-done",
+                        "modelVersion":"gemini-3-flash-agent",
+                        "candidates":[{"content":{"parts":[{"text":"Done."}]},"finishReason":"STOP"}],
+                        "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
+                    }})]
+                };
+                let (sender, receiver) = tokio::sync::mpsc::channel(responses.len());
+                for response in responses {
+                    sender
+                        .send(Ok(format!("data: {response}\n\n").into_bytes()))
+                        .await
+                        .unwrap();
+                }
+                drop(sender);
+                Ok(AntigravityGenerateStreamResponse::new(200, None, receiver))
+            })
+        }
+    }
+
+    impl HostHttpClient for HostKimiPiStream {
+        fn execute<'a>(&'a self, _request: HttpRequest) -> PluginFuture<'a, HttpResponse> {
+            Box::pin(async { panic!("Pi subscription smoke must stream") })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            request: HttpRequest,
+        ) -> PluginFuture<'a, HttpStreamResponse> {
+            self.requests.lock().unwrap().push(request);
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let arguments = serde_json::json!({
+                    "path":"index.js",
+                    "edits":[{"oldText":"v = 1","newText":"v = 2"}]
+                })
+                .to_string();
+                let events = if turn == 0 {
+                    let call = serde_json::json!({
+                        "id":"kimi-pi-tool",
+                        "object":"chat.completion.chunk",
+                        "created":1,
+                        "model":"kimi-k3[1m]",
+                        "choices":[{
+                            "index":0,
+                            "delta":{"role":"assistant","tool_calls":[{
+                                "index":0,
+                                "id":"kimi-edit-call",
+                                "type":"function",
+                                "function":{"name":"edit","arguments":arguments}
+                            }]},
+                            "finish_reason":null
+                        }],
+                    });
+                    let done = serde_json::json!({
+                        "id":"kimi-pi-tool","object":"chat.completion.chunk","created":1,
+                        "model":"kimi-k3[1m]","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
+                        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+                    });
+                    vec![
+                        format!("data: {call}\n\n").into_bytes(),
+                        format!("data: {done}\n\n").into_bytes(),
+                        b"data: [DONE]\n\n".to_vec(),
+                    ]
+                } else {
+                    let text = serde_json::json!({
+                        "id":"kimi-pi-done",
+                        "object":"chat.completion.chunk",
+                        "created":1,
+                        "model":"kimi-k3[1m]",
+                        "choices":[{
+                            "index":0,
+                            "delta":{"role":"assistant","content":"Done."},
+                            "finish_reason":null
+                        }],
+                    });
+                    let done = serde_json::json!({
+                        "id":"kimi-pi-done","object":"chat.completion.chunk","created":1,
+                        "model":"kimi-k3[1m]","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+                    });
+                    vec![
+                        format!("data: {text}\n\n").into_bytes(),
+                        format!("data: {done}\n\n").into_bytes(),
+                        b"data: [DONE]\n\n".to_vec(),
+                    ]
+                };
+                let (sender, receiver) = tokio::sync::mpsc::channel(events.len());
+                for payload in events {
+                    sender
+                        .send(HttpStreamChunk {
+                            payload,
+                            error: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+                drop(sender);
+                Ok(HttpStreamResponse {
+                    status_code: 200,
+                    headers: Default::default(),
+                    chunks: receiver,
+                })
+            })
+        }
     }
 
     impl HostHttpClient for HostKimiHttpProbe {
@@ -4985,8 +5178,103 @@ mod tests {
         assert!(upstream.get("prompt_cache_key").is_none());
     }
 
+    async fn read_complete_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "upstream request ended before its headers");
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index;
+            }
+        };
+        let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        if request.len() < body_start + content_length {
+            let available = request.len().saturating_sub(body_start);
+            request.resize(body_start + content_length, 0);
+            stream
+                .read_exact(&mut request[body_start + available..body_start + content_length])
+                .await
+                .unwrap();
+        }
+        request
+    }
+
+    async fn write_http_event_stream(stream: &mut tokio::net::TcpStream, body: &str) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    }
+
+    fn seed_coding_smoke_main_model(root: &Path) {
+        let mut main_env = BTreeMap::new();
+        main_env.insert("CTOX_API_PROVIDER".to_owned(), "openai".to_owned());
+        main_env.insert(
+            "CTOX_CHAT_MODEL_BASE".to_owned(),
+            "main-model-must-stay-selected".to_owned(),
+        );
+        main_env.insert(
+            "CTOX_CHAT_MODEL".to_owned(),
+            "main-model-must-stay-selected".to_owned(),
+        );
+        crate::inference::runtime_env::save_runtime_env_map(root, &main_env).unwrap();
+    }
+
+    fn opaque_subscription_preset(root: &Path, provider: &str, model: &str) -> String {
+        let capabilities = crate::coding_agents::pi_sidecar::coding_model_capabilities(root);
+        capabilities["presets"]
+            .as_array()
+            .and_then(|presets| {
+                presets.iter().find(|preset| {
+                    preset["model"]["headers"]["X-CTOX-Provider"].as_str() == Some(provider)
+                        && preset["model"]["id"].as_str() == Some(model)
+                })
+            })
+            .and_then(|preset| preset["id"].as_str())
+            .unwrap_or_else(|| panic!("opaque {provider} subscription preset: {capabilities}"))
+            .to_owned()
+    }
+
+    async fn spawn_two_turn_instance_proxy(
+        router: Arc<InstanceResponsesRouter>,
+    ) -> (
+        SocketAddr,
+        tokio::task::JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                ctox_cliproxyapi::internal::api::server::serve_one_responses_connection(
+                    &listener,
+                    router.as_ref(),
+                )
+                .await?;
+            }
+            Ok(())
+        });
+        (address, task)
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn real_pi_turn_crosses_local_proxy_and_native_codex_transport() {
+    async fn codex_subscription_preset_drives_real_pi_edit_through_native_transport() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         if std::process::Command::new("node")
@@ -5001,148 +5289,213 @@ mod tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let id_token = fake_chatgpt_jwt("pro", "workspace-pi-e2e");
-        write_instance_chatgpt_snapshot(
-            root.path(),
-            &id_token,
-            "access-pi-e2e-do-not-leak",
-            "refresh-pi-e2e-do-not-leak",
-            "workspace-pi-e2e",
+        let mut main_env = BTreeMap::new();
+        main_env.insert("CTOX_API_PROVIDER".to_owned(), "openai".to_owned());
+        main_env.insert(
+            "CTOX_CHAT_MODEL_BASE".to_owned(),
+            "main-model-must-stay-selected".to_owned(),
         );
+        main_env.insert(
+            "CTOX_CHAT_MODEL".to_owned(),
+            "main-model-must-stay-selected".to_owned(),
+        );
+        crate::inference::runtime_env::save_runtime_env_map(root.path(), &main_env).unwrap();
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let id_token = fake_chatgpt_jwt("pro", "workspace-pi-e2e");
 
         // The native transport points at a controlled loopback upstream. This
         // is a validated test-only config seam, not a production env override.
-        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let upstream_addr = upstream_listener.local_addr().unwrap();
         let secret = |name: &str| RuntimeSecretRef {
             scope: INSTANCE_CODEX_SECRET_SCOPE.to_owned(),
             name: name.to_owned(),
         };
-        let config = CliproxyRuntimeConfig {
+        let runtime = CliproxyRuntimeConfig {
             request_timeout_ms: 10_000,
             routing_strategy: SchedulerStrategy::RoundRobin,
             claude_accounts: Vec::new(),
             codex_accounts: vec![CodexSubscriptionAccountConfig {
-                id: INSTANCE_CODEX_ACCOUNT_ID.to_owned(),
+                id: "codex-pi-e2e".to_owned(),
                 disabled: false,
                 priority: 100,
                 weight: 1,
                 websockets: false,
-                models: Vec::new(),
-                id_token_secret: secret(INSTANCE_CODEX_ID_TOKEN_NAME),
-                access_token_secret: secret(INSTANCE_CODEX_ACCESS_TOKEN_NAME),
-                refresh_token_secret: secret(INSTANCE_CODEX_REFRESH_TOKEN_NAME),
+                models: vec!["gpt-5.6-sol".to_owned()],
+                id_token_secret: secret("codex-pi-e2e-id-token"),
+                access_token_secret: secret("codex-pi-e2e-access-token"),
+                refresh_token_secret: secret("codex-pi-e2e-refresh-token"),
                 upstream_base_url: format!("http://{upstream_addr}/backend-api/codex"),
                 plan_type: "pro".to_owned(),
                 proxy_url_secret: None,
             }],
             antigravity_accounts: Vec::new(),
-        }
-        .validate()
-        .unwrap();
+        };
+        CtoxCodexSecretStore::new(root.path())
+            .store_credentials(
+                &runtime.codex_accounts[0].credential_handles().unwrap(),
+                &codex_auth::CodexStoredCredentials::new(
+                    codex_auth::SecretString::new(id_token).unwrap(),
+                    codex_auth::SecretString::new("access-pi-e2e-do-not-leak").unwrap(),
+                    codex_auth::SecretString::new("refresh-pi-e2e-do-not-leak").unwrap(),
+                ),
+            )
+            .unwrap();
+        save_instance_proxy_config(root.path(), 0, "codex", runtime.clone()).unwrap();
+        mark_instance_codex_proxy_ready_for_test(root.path());
+        assert_eq!(
+            instance_codex_proxy_status(root.path()).phase,
+            InstanceCodexProxyPhase::Ready
+        );
+        let effective = effective_instance_proxy_config(root.path())
+            .expect("effective test subscription topology")
+            .expect("configured test subscription topology");
+        assert_eq!(
+            configured_instance_proxy_route_capabilities(root.path(), &effective),
+            [InstanceProxyRouteCapability {
+                provider: "codex".to_owned(),
+                model: "gpt-5.6-sol".to_owned(),
+                default: true,
+            }]
+        );
+        let config = runtime.validate().unwrap();
         let router = build_codex_responses_router(root.path(), &config).unwrap();
 
         let upstream = tokio::spawn(async move {
-            let (mut stream, _) = upstream_listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let header_end = loop {
-                let mut chunk = [0_u8; 4096];
-                let read = stream.read(&mut chunk).await.unwrap();
-                assert!(read > 0, "upstream request ended before its headers");
-                request.extend_from_slice(&chunk[..read]);
-                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                    break index;
-                }
-            };
-            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap();
-            let body_start = header_end + 4;
-            if request.len() < body_start + content_length {
-                let available = request.len().saturating_sub(body_start);
-                request.resize(body_start + content_length, 0);
-                stream
-                    .read_exact(&mut request[body_start + available..body_start + content_length])
-                    .await
+            let mut requests = Vec::new();
+            for turn in 0..2 {
+                let (mut stream, _) = upstream_listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "upstream request ended before its headers");
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break index;
+                    }
+                };
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
                     .unwrap();
-            }
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    let available = request.len().saturating_sub(body_start);
+                    request.resize(body_start + content_length, 0);
+                    stream
+                        .read_exact(
+                            &mut request[body_start + available..body_start + content_length],
+                        )
+                        .await
+                        .unwrap();
+                }
 
-            let message = serde_json::json!({
-                "id": "msg_pi_e2e",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Ready.", "annotations": []}]
-            });
-            let events = [
-                serde_json::json!({"type":"response.created","response":{"id":"resp_pi_e2e","object":"response","status":"in_progress","model":"gpt-5.6-sol","output":[]}}),
-                serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_pi_e2e","type":"message","status":"in_progress","role":"assistant","content":[]}}),
-                serde_json::json!({"type":"response.content_part.added","item_id":"msg_pi_e2e","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
-                serde_json::json!({"type":"response.output_text.delta","item_id":"msg_pi_e2e","output_index":0,"content_index":0,"delta":"Ready.","logprobs":[]}),
-                serde_json::json!({"type":"response.output_item.done","output_index":0,"item":message.clone()}),
-                serde_json::json!({"type":"response.completed","response":{"id":"resp_pi_e2e","object":"response","status":"completed","model":"gpt-5.6-sol","output":[message],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
-            ];
-            let body = events
-                .iter()
-                .map(|event| format!("data: {event}\n\n"))
-                .collect::<String>();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-            stream.shutdown().await.unwrap();
-            request
+                let events = if turn == 0 {
+                    let arguments = serde_json::json!({
+                        "path": "index.js",
+                        "edits": [{"oldText":"v = 1", "newText":"v = 2"}]
+                    })
+                    .to_string();
+                    let call = serde_json::json!({
+                        "id":"fc_pi_e2e",
+                        "type":"function_call",
+                        "status":"completed",
+                        "call_id":"call_pi_e2e",
+                        "name":"edit",
+                        "arguments":arguments
+                    });
+                    vec![
+                        serde_json::json!({"type":"response.created","response":{"id":"resp_pi_tool","object":"response","status":"in_progress","model":"gpt-5.6-sol","output":[]}}),
+                        serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"id":"fc_pi_e2e","type":"function_call","status":"in_progress","call_id":"call_pi_e2e","name":"edit","arguments":""}}),
+                        serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_pi_e2e","delta":arguments}),
+                        serde_json::json!({"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_pi_e2e","arguments":call["arguments"]}),
+                        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":call.clone()}),
+                        serde_json::json!({"type":"response.completed","response":{"id":"resp_pi_tool","object":"response","status":"completed","model":"gpt-5.6-sol","output":[call],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+                    ]
+                } else {
+                    let message = serde_json::json!({
+                        "id": "msg_pi_e2e",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done.", "annotations": []}]
+                    });
+                    vec![
+                        serde_json::json!({"type":"response.created","response":{"id":"resp_pi_done","object":"response","status":"in_progress","model":"gpt-5.6-sol","output":[]}}),
+                        serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_pi_e2e","type":"message","status":"in_progress","role":"assistant","content":[]}}),
+                        serde_json::json!({"type":"response.content_part.added","item_id":"msg_pi_e2e","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+                        serde_json::json!({"type":"response.output_text.delta","item_id":"msg_pi_e2e","output_index":0,"content_index":0,"delta":"Done.","logprobs":[]}),
+                        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":message.clone()}),
+                        serde_json::json!({"type":"response.completed","response":{"id":"resp_pi_done","object":"response","status":"completed","model":"gpt-5.6-sol","output":[message],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+                    ]
+                };
+                let body = events
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+                requests.push(request);
+            }
+            requests
         });
 
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let proxy = tokio::spawn(async move {
-            ctox_cliproxyapi::internal::api::server::serve_one_responses_connection(
-                &proxy_listener,
-                router.as_ref(),
-            )
-            .await
+            for _ in 0..2 {
+                ctox_cliproxyapi::internal::api::server::serve_one_responses_connection(
+                    &proxy_listener,
+                    router.as_ref(),
+                )
+                .await?;
+            }
+            Ok::<_, std::io::Error>(())
         });
 
         let dist = crate::coding_agents::pi_sidecar::sidecar_dist_path(Path::new(env!(
             "CARGO_MANIFEST_DIR"
         )));
-        let request = serde_json::json!({
-            "id": "pi-proxy-e2e",
-            "prompt": "Reply exactly Ready.",
-            "files": {"index.js": "export const ready = true;\n"},
-            "tools": [],
-            "maxAssistantTurns": 1,
-            "model": {
-                "id": "gpt-5.6-sol",
-                "name": "Codex subscription test",
-                "api": "openai-responses",
-                "provider": "ctox-gateway",
-                "baseUrl": format!("http://{proxy_addr}/v1"),
-                "reasoning": false,
-                "input": ["text"],
-                "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-                "contextWindow": 128000,
-                "maxTokens": 4096
-            }
-        });
-        let pi = tokio::task::spawn_blocking(move || {
-            crate::coding_agents::pi_sidecar::run_pi_turn(&dist, &request, false)
+        let capabilities = crate::coding_agents::pi_sidecar::coding_model_capabilities(root.path());
+        let preset_id = capabilities["presets"]
+            .as_array()
+            .and_then(|presets| {
+                presets.iter().find(|preset| {
+                    preset["model"]["headers"]["X-CTOX-Provider"].as_str() == Some("codex")
+                        && preset["model"]["id"].as_str() == Some("gpt-5.6-sol")
+                })
+            })
+            .and_then(|preset| preset["id"].as_str())
+            .unwrap_or_else(|| panic!("opaque Codex subscription preset: {capabilities}"))
+            .to_owned();
+        let proxy_base_url = format!("http://{proxy_addr}/v1");
+        let root_path = root.path().to_owned();
+        let evidence = tokio::task::spawn_blocking(move || {
+            crate::coding_agents::pi_sidecar::run_coding_preset_smoke_with_subscription_proxy_for_test(
+                &root_path,
+                &dist,
+                &preset_id,
+                &proxy_base_url,
+            )
         })
         .await
         .unwrap()
         .unwrap();
 
         proxy.await.unwrap().unwrap();
-        let upstream_request = upstream.await.unwrap();
+        let upstream_requests = upstream.await.unwrap();
+        assert_eq!(upstream_requests.len(), 2);
+        let upstream_request = &upstream_requests[0];
         let upstream_text = String::from_utf8_lossy(&upstream_request);
         assert!(upstream_text.starts_with("POST /backend-api/codex/responses HTTP/1.1\r\n"));
         assert!(upstream_text
@@ -5160,14 +5513,384 @@ mod tests {
         assert_eq!(upstream_json["model"], "gpt-5.6-sol");
         assert_eq!(upstream_json["stream"], true);
 
-        assert_eq!(pi["ok"], true, "real sidecar response: {pi}");
-        assert!(
-            pi["messages"].to_string().contains("Ready."),
-            "assistant text crossed both transports: {pi}"
+        assert_eq!(evidence["ok"], true, "real preset smoke: {evidence}");
+        assert_eq!(evidence["provider"], "codex");
+        assert_eq!(evidence["model"], "gpt-5.6-sol");
+        assert_eq!(evidence["bounded_edit_verified"], true);
+        assert_eq!(evidence["main_model_unchanged"], true);
+        assert_eq!(
+            crate::inference::runtime_env::effective_chat_model(root.path()).as_deref(),
+            Some("main-model-must-stay-selected")
         );
-        let serialized = pi.to_string();
+        let serialized = evidence.to_string();
         assert!(!serialized.contains("access-pi-e2e-do-not-leak"));
         assert!(!serialized.contains("refresh-pi-e2e-do-not-leak"));
+        assert!(!serialized.contains("workspace-pi-e2e"));
+        assert!(!serialized.contains(&proxy_addr.to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claude_subscription_preset_drives_real_pi_edit_through_format_bridge() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("SKIP: `node` is not available");
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        seed_coding_smoke_main_model(root.path());
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let secret = |name: &str| RuntimeSecretRef {
+            scope: INSTANCE_CODEX_SECRET_SCOPE.to_owned(),
+            name: name.to_owned(),
+        };
+        let runtime = CliproxyRuntimeConfig {
+            request_timeout_ms: 10_000,
+            routing_strategy: SchedulerStrategy::RoundRobin,
+            claude_accounts: vec![ClaudeSubscriptionAccountConfig {
+                id: "claude-pi-e2e".to_owned(),
+                disabled: false,
+                priority: 100,
+                weight: 1,
+                websockets: false,
+                models: vec!["claude-sonnet-4-6".to_owned()],
+                access_token_secret: secret("claude-pi-e2e-access-token"),
+                refresh_token_secret: secret("claude-pi-e2e-refresh-token"),
+                upstream_scheme: "http".to_owned(),
+                upstream_authority: upstream_addr.to_string(),
+                proxy_url_secret: None,
+                device_profile: None,
+                timezone: "UTC".to_owned(),
+            }],
+            codex_accounts: Vec::new(),
+            antigravity_accounts: Vec::new(),
+        };
+        CtoxClaudeSecretStore::new(root.path())
+            .store_credentials(
+                &runtime.claude_accounts[0].credential_handles().unwrap(),
+                &credentials(
+                    "claude-pi-e2e-access-do-not-leak",
+                    "claude-pi-e2e-refresh-do-not-leak",
+                ),
+            )
+            .unwrap();
+        save_instance_proxy_config(root.path(), 0, "claude", runtime).unwrap();
+        mark_instance_codex_proxy_ready_for_test(root.path());
+        let router = build_instance_codex_responses_router(root.path())
+            .unwrap()
+            .expect("native Claude Responses router");
+
+        let upstream = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for turn in 0..2 {
+                let (mut stream, _) = upstream_listener.accept().await.unwrap();
+                let request = read_complete_http_request(&mut stream).await;
+                let body = if turn == 0 {
+                    concat!(
+                        "event: message_start\n",
+                        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-claude-tool\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                        "event: content_block_start\n",
+                        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-claude-edit\",\"name\":\"edit\",\"input\":{}}}\n\n",
+                        "event: content_block_delta\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"index.js\\\",\\\"edits\\\":[{\\\"oldText\\\":\\\"v = 1\\\",\\\"newText\\\":\\\"v = 2\\\"}]}\"}}\n\n",
+                        "event: content_block_stop\n",
+                        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                        "event: message_delta\n",
+                        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":8}}\n\n",
+                        "event: message_stop\n",
+                        "data: {\"type\":\"message_stop\"}\n\n"
+                    )
+                } else {
+                    concat!(
+                        "event: message_start\n",
+                        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-claude-done\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                        "event: content_block_start\n",
+                        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                        "event: content_block_delta\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Done.\"}}\n\n",
+                        "event: content_block_stop\n",
+                        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                        "event: message_delta\n",
+                        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n\n",
+                        "event: message_stop\n",
+                        "data: {\"type\":\"message_stop\"}\n\n"
+                    )
+                };
+                write_http_event_stream(&mut stream, body).await;
+                requests.push(request);
+            }
+            requests
+        });
+        let (proxy_addr, proxy) = spawn_two_turn_instance_proxy(router).await;
+        let preset_id = opaque_subscription_preset(root.path(), "claude", "claude-sonnet-4-6");
+        let dist = crate::coding_agents::pi_sidecar::sidecar_dist_path(Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        )));
+        let root_path = root.path().to_owned();
+        let proxy_base_url = format!("http://{proxy_addr}/v1");
+        let evidence = tokio::task::spawn_blocking(move || {
+            crate::coding_agents::pi_sidecar::run_coding_preset_smoke_with_subscription_proxy_for_test(
+                &root_path,
+                &dist,
+                &preset_id,
+                &proxy_base_url,
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        proxy.await.unwrap().unwrap();
+        let requests = upstream.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let first = String::from_utf8_lossy(&requests[0]);
+        assert!(
+            first.starts_with("POST /v1/messages"),
+            "Claude target: {first}"
+        );
+        assert!(first
+            .to_ascii_lowercase()
+            .contains("authorization: bearer claude-pi-e2e-access-do-not-leak\r\n"));
+        assert_eq!(evidence["provider"], "claude");
+        assert_eq!(evidence["model"], "claude-sonnet-4-6");
+        assert_eq!(evidence["bounded_edit_verified"], true);
+        assert_eq!(evidence["main_model_unchanged"], true);
+        let serialized = evidence.to_string();
+        assert!(!serialized.contains("claude-pi-e2e"));
+        assert!(!serialized.contains("do-not-leak"));
+        assert!(!serialized.contains(&proxy_addr.to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn antigravity_subscription_preset_drives_real_pi_edit_through_format_bridge() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("SKIP: `node` is not available");
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        seed_coding_smoke_main_model(root.path());
+        let secret = |name: &str| RuntimeSecretRef {
+            scope: INSTANCE_CODEX_SECRET_SCOPE.to_owned(),
+            name: name.to_owned(),
+        };
+        let runtime = CliproxyRuntimeConfig {
+            request_timeout_ms: 10_000,
+            routing_strategy: SchedulerStrategy::RoundRobin,
+            claude_accounts: Vec::new(),
+            codex_accounts: Vec::new(),
+            antigravity_accounts: vec![AntigravitySubscriptionAccountConfig {
+                id: "antigravity-pi-e2e".to_owned(),
+                disabled: false,
+                priority: 100,
+                weight: 1,
+                websockets: false,
+                models: vec!["gemini-3-flash-agent".to_owned()],
+                access_token_secret: secret("antigravity-pi-e2e-access-token"),
+                refresh_token_secret: secret("antigravity-pi-e2e-refresh-token"),
+                state_secret: secret("antigravity-pi-e2e-state"),
+                upstream_base_url: "https://daily-cloudcode-pa.googleapis.com".to_owned(),
+                proxy_url_secret: None,
+            }],
+        };
+        CtoxAntigravitySecretStore::new(root.path())
+            .store_credentials(
+                &runtime.antigravity_accounts[0]
+                    .credential_handles()
+                    .unwrap(),
+                &antigravity_credentials(
+                    "antigravity-pi-e2e-access-do-not-leak",
+                    "antigravity-pi-e2e-refresh-do-not-leak",
+                    SystemTime::now() + Duration::from_secs(3_600),
+                    "antigravity-pi-e2e-project",
+                ),
+            )
+            .unwrap();
+        let validated = runtime.clone().validate().unwrap();
+        save_instance_proxy_config(root.path(), 0, "antigravity", runtime).unwrap();
+        mark_instance_codex_proxy_ready_for_test(root.path());
+        let upstream = Arc::new(HostAntigravityPiStream::default());
+        let transports = HashMap::from([(
+            "antigravity-pi-e2e".to_owned(),
+            AntigravityAccountTransports {
+                refresh: Arc::new(UnusedAntigravityRefreshTransport),
+                generate: upstream.clone(),
+                generate_stream: Some(upstream.clone()),
+            },
+        )]);
+        let pool = Arc::new(
+            CtoxCliproxyRuntimeFactory::new(root.path())
+                .build_antigravity_pool(
+                    &validated,
+                    &transports,
+                    Arc::new(
+                        ctox_cliproxyapi::internal::runtime::executor::SystemAntigravityAuthClock,
+                    ),
+                    Arc::new(FixedRuntimeClock),
+                )
+                .unwrap(),
+        );
+        let portable = Arc::new(
+            OpenAiResponsesProviderRouter::new(
+                "antigravity",
+                None,
+                None,
+                Some(Arc::new(OpenAiResponsesAntigravityHandler::new(pool))),
+            )
+            .unwrap(),
+        );
+        let router = Arc::new(InstanceResponsesRouter {
+            default_provider: "antigravity".to_owned(),
+            portable: Some(portable),
+            kimi: None,
+        });
+        let (proxy_addr, proxy) = spawn_two_turn_instance_proxy(router).await;
+        let preset_id =
+            opaque_subscription_preset(root.path(), "antigravity", "gemini-3-flash-agent");
+        let dist = crate::coding_agents::pi_sidecar::sidecar_dist_path(Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        )));
+        let root_path = root.path().to_owned();
+        let proxy_base_url = format!("http://{proxy_addr}/v1");
+        let evidence = tokio::task::spawn_blocking(move || {
+            crate::coding_agents::pi_sidecar::run_coding_preset_smoke_with_subscription_proxy_for_test(
+                &root_path,
+                &dist,
+                &preset_id,
+                &proxy_base_url,
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        proxy.await.unwrap().unwrap();
+        let requests = upstream.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].0.ends_with("/v1internal:streamGenerateContent"));
+        assert!(upstream.saw_expected_access_token.load(Ordering::SeqCst));
+        assert!(!String::from_utf8_lossy(&requests[0].1).contains("do-not-leak"));
+        assert_eq!(evidence["provider"], "antigravity");
+        assert_eq!(evidence["model"], "gemini-3-flash-agent");
+        assert_eq!(evidence["bounded_edit_verified"], true);
+        assert_eq!(evidence["main_model_unchanged"], true);
+        let serialized = evidence.to_string();
+        assert!(!serialized.contains("antigravity-pi-e2e"));
+        assert!(!serialized.contains("do-not-leak"));
+        assert!(!serialized.contains(&proxy_addr.to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kimi_subscription_preset_drives_real_pi_edit_through_format_bridge() {
+        use ctox_cliproxyapi::internal::auth::kimi::{
+            KimiAuthBundle, KimiTokenData, KimiTokenStorage, SecretString as KimiSecretString,
+        };
+
+        if std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("SKIP: `node` is not available");
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        seed_coding_smoke_main_model(root.path());
+        let storage = KimiTokenStorage::from_bundle(&KimiAuthBundle::new(
+            KimiTokenData::new(
+                KimiSecretString::new("kimi-pi-e2e-access-do-not-leak").unwrap(),
+                Some(KimiSecretString::new("kimi-pi-e2e-refresh-do-not-leak").unwrap()),
+                "Bearer",
+                Some(SystemTime::now() + Duration::from_secs(3_600)),
+                "kimi-code",
+            ),
+            "kimi-pi-e2e-device",
+        ));
+        crate::execution::cliproxyapi_integration::install_kimi_subscription(
+            root.path(),
+            "kimi-pi-e2e",
+            &storage,
+        )
+        .unwrap();
+        mark_instance_codex_proxy_ready_for_test(root.path());
+        let effective = effective_instance_proxy_config(root.path())
+            .expect("effective Kimi integration topology")
+            .expect("configured Kimi integration topology");
+        assert!(
+            configured_instance_proxy_route_capabilities(root.path(), &effective)
+                .iter()
+                .any(|route| route.provider == "kimi" && route.model == "kimi-k3[1m]"),
+            "Kimi route capabilities: {:?}",
+            configured_instance_proxy_route_capabilities(root.path(), &effective)
+        );
+        let upstream = Arc::new(HostKimiPiStream::default());
+        let route =
+            crate::execution::cliproxyapi_integration::build_kimi_subscription_route_with_http(
+                root.path(),
+                "kimi-pi-e2e",
+                upstream.clone(),
+            )
+            .unwrap();
+        let router = Arc::new(InstanceResponsesRouter {
+            default_provider: "kimi".to_owned(),
+            portable: None,
+            kimi: Some(Arc::new(KimiResponsesHandler {
+                routes: vec![Arc::new(route)],
+            })),
+        });
+        let (proxy_addr, proxy) = spawn_two_turn_instance_proxy(router).await;
+        let preset_id = opaque_subscription_preset(root.path(), "kimi", "kimi-k3[1m]");
+        let dist = crate::coding_agents::pi_sidecar::sidecar_dist_path(Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        )));
+        let root_path = root.path().to_owned();
+        let proxy_base_url = format!("http://{proxy_addr}/v1");
+        let evidence = tokio::task::spawn_blocking(move || {
+            crate::coding_agents::pi_sidecar::run_coding_preset_smoke_with_subscription_proxy_for_test(
+                &root_path,
+                &dist,
+                &preset_id,
+                &proxy_base_url,
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        proxy.await.unwrap().unwrap();
+        let requests = upstream.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].url,
+            ctox_cliproxyapi::internal::runtime::executor::kimi_executor::KIMI_CHAT_COMPLETIONS_URL
+        );
+        assert_eq!(
+            requests[0].headers["Authorization"],
+            ["Bearer kimi-pi-e2e-access-do-not-leak"]
+        );
+        assert_eq!(evidence["provider"], "kimi");
+        assert_eq!(evidence["model"], "kimi-k3[1m]");
+        assert_eq!(evidence["bounded_edit_verified"], true);
+        assert_eq!(evidence["main_model_unchanged"], true);
+        let serialized = evidence.to_string();
+        assert!(!serialized.contains("kimi-pi-e2e"));
+        assert!(!serialized.contains("do-not-leak"));
+        assert!(!serialized.contains(&proxy_addr.to_string()));
     }
 
     #[test]

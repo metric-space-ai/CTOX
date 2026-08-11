@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import {
   startSocketServer,
+  CTOX_PI_MAX_REQUEST_BYTES,
   createVercelPiCodingTextMessage,
   createVercelPiCodingToolCallMessage,
 } from "../dist/ctox-pi-sidecar.mjs";
@@ -33,9 +34,13 @@ const streamFn = (_model, context) => {
 
 const dir = mkdtempSync(path.join(os.tmpdir(), "ctox-pi-sock-"));
 const socketPath = path.join(dir, "sidecar.sock");
-const server = startSocketServer(socketPath, streamFn);
+const smokeRequestLimit = 64 * 1024;
+const server = startSocketServer(socketPath, streamFn, {
+  maxRequestBytes: smokeRequestLimit,
+});
 
 const response = await new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => reject(new Error("socket turn timed out")), 15000);
   const client = net.createConnection(socketPath, () => {
     client.write(
       `${JSON.stringify({
@@ -53,20 +58,53 @@ const response = await new Promise((resolve, reject) => {
     if (nl >= 0) {
       client.end();
       try {
+        clearTimeout(timeout);
         resolve(JSON.parse(buffer.slice(0, nl)));
       } catch (error) {
+        clearTimeout(timeout);
         reject(error);
       }
     }
   });
-  client.on("error", reject);
-  setTimeout(() => reject(new Error("socket turn timed out")), 15000);
+  client.on("error", (error) => {
+    clearTimeout(timeout);
+    reject(error);
+  });
+});
+
+const oversized = await new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => reject(new Error("oversized socket test timed out")), 15000);
+  const client = net.createConnection(socketPath, () => {
+    client.write(`{"prompt":"${"x".repeat(smokeRequestLimit + 1024)}"}`);
+  });
+  let buffer = "";
+  client.on("data", (chunk) => {
+    buffer += chunk.toString("utf8");
+    const nl = buffer.indexOf("\n");
+    if (nl >= 0) {
+      client.end();
+      try {
+        clearTimeout(timeout);
+        resolve(JSON.parse(buffer.slice(0, nl)));
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    }
+  });
+  client.on("error", (error) => {
+    clearTimeout(timeout);
+    reject(error);
+  });
 });
 
 server.close();
 rmSync(dir, { recursive: true, force: true });
 
 assert.equal(response.ok, true, "socket turn ok");
+assert.equal(CTOX_PI_MAX_REQUEST_BYTES, 8 * 1024 * 1024, "production request bound");
+assert.equal(oversized.ok, false, "oversized turn rejected");
+assert.match(oversized.error, /too large/i, "oversized turn has bounded failure");
 assert.equal(response.id, "sock-1", "response echoes the request id over the wire");
 assert.ok(
   response.snapshot.some(

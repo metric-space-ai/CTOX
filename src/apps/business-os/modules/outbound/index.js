@@ -6,7 +6,7 @@ import {
   openUniversalImporter,
   parseDelimitedText,
 } from '../../shared/universal-importer.js';
-import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../shared/dialogs.js';
+import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-verlauf-startet-heute-v98';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import {
   configureActiveOutreach,
@@ -1191,19 +1191,6 @@ async function waitForCampaignProjection(campaignId, minUpdatedAtMs, timeoutMs =
     await new Promise((resolve) => window.setTimeout(resolve, 400));
   }
   return null;
-}
-
-async function dispatchBusinessCommandWithRxdbFallback(command, options = {}) {
-  const commandId = command.id || command.command_id || `cmd_${crypto.randomUUID()}`;
-  const prepared = {
-    ...command,
-    id: commandId,
-  };
-  const dispatchResult = state.ctx?.commandBus?.dispatch
-    ? await withTimeout(state.ctx.commandBus.dispatch(prepared), options.timeoutMs || 45000, null)
-    : null;
-  if (dispatchResult) return dispatchResult;
-  throw new Error('CTOX command bus is required for outbound command dispatch');
 }
 
 async function enqueueBusinessCommandForProjection(command) {
@@ -6488,7 +6475,7 @@ async function saveCampaignInlineEdit(campaignId) {
     },
   };
   try {
-    await dispatchBusinessCommandWithRxdbFallback(updateCommand, { timeoutMs: 5000 });
+    await state.ctx.commandBus.dispatch(updateCommand, { timeoutMs: 5000 });
   } catch (error) {
     showBusinessAlert(error?.message || String(error));
     return;

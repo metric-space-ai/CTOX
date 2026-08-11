@@ -1,0 +1,37 @@
+{
+  "schema": "ctox.provider-logo-provenance.v1",
+  "source_repository": "https://github.com/metric-space-ai/claude-workjet",
+  "source_checkout_head": "e5f2f88af1f38ba74ba24f2a0058d2431da78a58",
+  "source_state": "local-uncommitted-assets",
+  "transferred_at": "2026-08-06",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 metric space AI",
+  "trademark_notice": "Provider names and logos are trademarks of their respective owners. Display is solely for identifying configured interoperability targets and does not imply endorsement or affiliation.",
+  "files": [
+    {
+      "file": "openai.svg",
+      "source": "app/Sources/WorkjetApp/Resources/Providers/openai.svg",
+      "sha256": "14ebfcb27d0afdf729c8c2cc086b0793ace642bd03fbccea98688479222f5c65"
+    },
+    {
+      "file": "anthropic.svg",
+      "source": "app/Sources/WorkjetApp/Resources/Providers/anthropic.svg",
+      "sha256": "b09586c10df19be04289eaa70f15b98e797ffdcd8cbe71f998d17dbebae5faa4"
+    },
+    {
+      "file": "antigravity.svg",
+      "source": "app/Sources/WorkjetApp/Resources/Providers/antigravity.svg",
+      "sha256": "d30cdf2e33d2c1c694f0096694d518a2db05b0f5311a330aabb2ac68df4e3789"
+    },
+    {
+      "file": "kimi.svg",
+      "source": "app/Sources/WorkjetApp/Resources/Providers/kimi.svg",
+      "sha256": "cf348773f67e13abb6d3d15ae94798028085918d131dab93e3192450ba035d34"
+    },
+    {
+      "file": "minimax.svg",
+      "source": "app/Sources/WorkjetApp/Resources/Providers/minimax.svg",
+      "sha256": "e0352be4a19dcd1c8464556a113c13dde1ad3957d1ddc740187e5acf659fbebe"
+    }
+  ]
+}

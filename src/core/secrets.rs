@@ -15,7 +15,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -27,6 +27,7 @@ use crate::persistence;
 
 const MASTER_KEY_STORAGE_KEY: &str = "secret_master_key_b64";
 const SECRET_STORE_FILE: &str = "ctox-secrets.sqlite3";
+const SECRET_MASTER_KEY_FILE: &str = "ctox-secrets.key";
 const SECRET_KV_TABLE: &str = "ctox_secret_kv";
 const SECRET_PUT_USAGE: &str = "usage: ctox secret put --scope <scope> --name <name> (--value <text>|--value-stdin) [--description <text>] [--metadata-json <json>]";
 const SECRET_INTAKE_USAGE: &str = "usage: ctox secret intake --scope <scope> --name <name> (--value <text>|--value-stdin) [--description <text>] [--metadata-json <json>] [--db <path> --conversation-id <id> --match-text <text> [--label <text>]]";
@@ -1007,14 +1008,72 @@ fn open_secret_db(root: &Path) -> Result<Connection> {
         fs::create_dir_all(parent).with_context(|| {
             format!("failed to create secret DB directory {}", parent.display())
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
     }
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
+    }
     conn.busy_timeout(persistence::sqlite_busy_timeout_duration())
         .context("failed to configure secret DB busy_timeout")?;
     ensure_secret_schema(&conn)?;
     migrate_legacy_secret_store(root, &conn)?;
     Ok(conn)
+}
+
+fn master_key_path(root: &Path) -> PathBuf {
+    root.join("runtime").join(SECRET_MASTER_KEY_FILE)
+}
+
+fn persist_master_key_file(root: &Path, encoded: &str) -> Result<()> {
+    let path = master_key_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(encoded.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read_to_string(&path)?;
+            anyhow::ensure!(
+                existing.trim() == encoded.trim(),
+                "secret master key file conflicts with the stored key"
+            );
+        }
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn decode_master_key(raw: &str, context: &'static str) -> Result<SecretMaterial> {
+    let bytes = BASE64_STANDARD.decode(raw.trim()).context(context)?;
+    anyhow::ensure!(
+        bytes.len() == 32,
+        "stored secret master key must decode to exactly 32 bytes"
+    );
+    Ok(Zeroizing::new(bytes))
 }
 
 fn ensure_secret_schema(conn: &Connection) -> Result<()> {
@@ -1065,7 +1124,50 @@ fn ensure_secret_schema(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str)> {
+    static MASTER_KEY_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = MASTER_KEY_GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let conn = open_secret_db(root)?;
+    let key_path = master_key_path(root);
+    if key_path.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+        }
+        let raw = fs::read_to_string(&key_path).context("failed to read secret master key file")?;
+        if let Some(embedded) = conn
+            .query_row(
+                &format!("SELECT value FROM {SECRET_KV_TABLE} WHERE key = ?1"),
+                [MASTER_KEY_STORAGE_KEY],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        {
+            anyhow::ensure!(
+                embedded.trim() == raw.trim(),
+                "secret master key file conflicts with the embedded legacy key"
+            );
+            conn.execute(
+                &format!("DELETE FROM {SECRET_KV_TABLE} WHERE key = ?1"),
+                [MASTER_KEY_STORAGE_KEY],
+            )?;
+        }
+        if let Some(legacy) = persistence::load_text_value(root, MASTER_KEY_STORAGE_KEY)? {
+            anyhow::ensure!(
+                legacy.trim() == raw.trim(),
+                "secret master key file conflicts with the legacy runtime key"
+            );
+            persistence::store_text_value(root, MASTER_KEY_STORAGE_KEY, None)?;
+        }
+        return Ok((
+            decode_master_key(&raw, "failed to decode secret master key file")?,
+            "protected_file",
+        ));
+    }
     if let Some(raw) = conn
         .query_row(
             &format!("SELECT value FROM {SECRET_KV_TABLE} WHERE key = ?1"),
@@ -1075,27 +1177,23 @@ fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str
         .optional()?
         .flatten()
     {
-        let bytes = BASE64_STANDARD
-            .decode(raw.trim())
-            .context("failed to decode stored secret master key")?;
-        if bytes.len() != 32 {
-            anyhow::bail!("stored secret master key must decode to exactly 32 bytes");
-        }
-        return Ok((Zeroizing::new(bytes), "secret_store"));
+        let key = decode_master_key(&raw, "failed to decode stored secret master key")?;
+        persist_master_key_file(root, &raw)?;
+        conn.execute(
+            &format!("DELETE FROM {SECRET_KV_TABLE} WHERE key = ?1"),
+            [MASTER_KEY_STORAGE_KEY],
+        )?;
+        return Ok((key, "migrated_protected_file"));
     }
 
     if let Some(raw) = persistence::load_text_value(root, MASTER_KEY_STORAGE_KEY)? {
-        conn.execute(
-            &format!("INSERT OR REPLACE INTO {SECRET_KV_TABLE} (key, value) VALUES (?1, ?2)"),
-            params![MASTER_KEY_STORAGE_KEY, raw],
+        let key = decode_master_key(
+            &raw,
+            "failed to decode legacy SQLite-stored secret master key",
         )?;
-        let bytes = BASE64_STANDARD
-            .decode(raw.trim())
-            .context("failed to decode legacy SQLite-stored secret master key")?;
-        if bytes.len() != 32 {
-            anyhow::bail!("legacy stored secret master key must decode to exactly 32 bytes");
-        }
-        return Ok((Zeroizing::new(bytes), "migrated_secret_store"));
+        persist_master_key_file(root, &raw)?;
+        persistence::store_text_value(root, MASTER_KEY_STORAGE_KEY, None)?;
+        return Ok((key, "migrated_protected_file"));
     }
 
     let mut key = Zeroizing::new(vec![0u8; 32]);
@@ -1103,11 +1201,8 @@ fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str
         .fill(&mut key)
         .map_err(|_| anyhow::anyhow!("failed to generate secret master key"))?;
     let encoded = BASE64_STANDARD.encode(&key);
-    conn.execute(
-        &format!("INSERT OR REPLACE INTO {SECRET_KV_TABLE} (key, value) VALUES (?1, ?2)"),
-        params![MASTER_KEY_STORAGE_KEY, encoded],
-    )?;
-    Ok((key, "generated_secret_store"))
+    persist_master_key_file(root, &encoded)?;
+    Ok((key, "generated_protected_file"))
 }
 
 fn migrate_legacy_secret_store(root: &Path, target: &Connection) -> Result<()> {
@@ -1375,6 +1470,7 @@ const CREDENTIAL_CATALOG: &[(&str, &str)] = &[
     ("OPENROUTER_API_KEY", "OpenRouter API key"),
     ("MISTRAL_API_KEY", "Mistral API key"),
     ("CTOX_MISTRAL_API_KEY", "Mistral API key (CTOX-scoped)"),
+    ("KIMI_API_KEY", "Kimi Coding Plan API key"),
     ("MINIMAX_API_KEY", "MiniMax API key"),
     ("CTOX_LLM_PROXY_API_KEY", "CTOX LLM proxy API key"),
     ("CTOX_TURN_EDGE_KEY", "CTOX TURN edge key"),
@@ -1569,9 +1665,106 @@ mod tests {
         let raw = fs::read(&db_path)?;
         let raw_text = String::from_utf8_lossy(&raw);
         assert!(!raw_text.contains("super-secret-token"));
+        let conn = Connection::open(&db_path)?;
+        let embedded_master_key = conn
+            .query_row(
+                &format!("SELECT value FROM {SECRET_KV_TABLE} WHERE key = ?1"),
+                [MASTER_KEY_STORAGE_KEY],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        assert!(embedded_master_key.is_none());
+        assert!(master_key_path(&root).is_file());
+        let raw_master_key = fs::read_to_string(master_key_path(&root))?;
+        conn.execute(
+            &format!(
+                "INSERT INTO {SECRET_KV_TABLE} (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            ),
+            params![MASTER_KEY_STORAGE_KEY, raw_master_key.trim()],
+        )?;
+        let _ = ensure_secret_master_key(&root)?;
+        let recovered_embedded_key = conn
+            .query_row(
+                &format!("SELECT value FROM {SECRET_KV_TABLE} WHERE key = ?1"),
+                [MASTER_KEY_STORAGE_KEY],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        assert!(recovered_embedded_key.is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(fs::metadata(&db_path)?.permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(master_key_path(&root))?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         let records = list_secrets(&root, Some("ticket:zammad"))?;
         assert_eq!(records.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn credential_tuple_delete_is_atomic_and_idempotent() -> Result<()> {
+        let root = temp_root("tuple-delete");
+        fs::create_dir_all(&root)?;
+        write_secret_records(
+            &root,
+            &[
+                SecretRecordWrite {
+                    scope: "provider-subscriptions",
+                    name: "account-access",
+                    value: "access-do-not-leak",
+                    description: None,
+                    metadata: json!({}),
+                },
+                SecretRecordWrite {
+                    scope: "provider-subscriptions",
+                    name: "account-refresh",
+                    value: "refresh-do-not-leak",
+                    description: None,
+                    metadata: json!({}),
+                },
+            ],
+        )?;
+
+        assert_eq!(
+            delete_secret_records(
+                &root,
+                &[
+                    ("provider-subscriptions", "account-access"),
+                    ("provider-subscriptions", "account-refresh"),
+                ],
+            )?,
+            2
+        );
+        assert!(!secret_exists(
+            &root,
+            "provider-subscriptions",
+            "account-access"
+        )?);
+        assert!(!secret_exists(
+            &root,
+            "provider-subscriptions",
+            "account-refresh"
+        )?);
+        assert_eq!(
+            delete_secret_records(
+                &root,
+                &[
+                    ("provider-subscriptions", "account-access"),
+                    ("provider-subscriptions", "account-refresh"),
+                ],
+            )?,
+            0
+        );
 
         let _ = fs::remove_dir_all(&root);
         Ok(())

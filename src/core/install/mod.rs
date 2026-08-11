@@ -5328,7 +5328,9 @@ mod tests {
             // Genau die Reihenfolge aus `apply_update`: erst anlegen, dann
             // begrenzen — und danach passiert in diesem Test nichts mehr,
             // der Lauf gilt als abgebrochen.
-            let backup = state_root.join("backups").join(format!("update-{round:04}"));
+            let backup = state_root
+                .join("backups")
+                .join(format!("update-{round:04}"));
             ensure_dir(&backup).unwrap();
             prune_old_update_backups(&state_root, UPDATE_BACKUP_RETENTION_COUNT);
 

@@ -268,8 +268,19 @@ function contentForForbiddenHttpScan(file, content) {
     );
   }
 
+  if (rel === 'src/apps/business-os/shared/sync.js') {
+    // Nur der SYNC-30-Kommentar nennt den Control-Plane-Pfad woertlich; der
+    // eigentliche Refresh-Aufruf nutzt die vom Server gelieferte URL.
+    allow(
+      /`\/api\/business-os\/sync\/config`/g,
+    );
+  }
+
   if (rel === 'src/apps/business-os/app.js') {
     allow(
+      // Statischer Shell-Bootstrap: in server.rs ausdruecklich als
+      // Control-Plane gegated (is_business_os_control_plane_path).
+      /['"]\/api\/business-os\/launch-context['"]/g,
       /['"]\/api\/business-os\/sync\/config['"]/g,
       /['"]\/api\/business-os\/ctox\/update\/check['"]/g,
       /['"]\/api\/business-os\/ctox\/update\/apply['"]/g,
@@ -349,13 +360,19 @@ function assertSubscriptionAuthStartsThroughRxdbCommand() {
   if (!/commandType:\s*['"]ctox\.subscription_auth\.start['"]/.test(settings)) {
     offenders.push('src/apps/business-os/shared/react-settings.js: ChatGPT subscription auth must start through business_commands');
   }
-  if (!/flow:\s*['"]device_code['"]/.test(settings)) {
-    offenders.push('src/apps/business-os/shared/react-settings.js: remote ChatGPT subscription auth must request device_code flow');
+  // Die Flow-Wahl (device_code vs. browser_callback) liegt serverseitig in
+  // store.rs (`use_device_code`, Default device_code). Der Browser darf keinen
+  // eigenen Flow mehr waehlen und muss den gelieferten Device-Code rendern.
+  if (/['"]flow['"]\s*:/.test(settings)) {
+    offenders.push('src/apps/business-os/shared/react-settings.js: browser must not choose the subscription auth flow — server decides');
+  }
+  if (!/status === ['"]device_code['"] && payload\.user_code/.test(settings)) {
+    offenders.push('src/apps/business-os/shared/react-settings.js: subscription auth must render the delivered device code');
   }
   if (!/saveRuntimeSettings\(\s*runtimePayload,\s*\{[\s\S]*?waitForProjection:\s*false[\s\S]*?\}\s*\)/.test(settings)) {
     offenders.push('src/apps/business-os/shared/react-settings.js: ChatGPT subscription auth must not wait for runtime projection before starting device auth');
   }
-  const startIndex = settings.indexOf('const payload = await startSubscriptionAuth({ commandBus, db, session, sync })');
+  const startIndex = settings.indexOf('const payload = await startSubscriptionAuth(providerId, accountId, { commandBus, db, session, sync })');
   const saveIndex = settings.indexOf('saveRuntimeSettings(runtimePayload, {', startIndex);
   if (startIndex < 0 || saveIndex < 0 || saveIndex < startIndex) {
     offenders.push('src/apps/business-os/shared/react-settings.js: ChatGPT subscription auth must request and render the device code before saving runtime settings');
@@ -694,7 +711,9 @@ function assertFileChunkIntegrityContract() {
       offenders.push(`src/apps/business-os/shared/file-integrity.js: file chunk integrity missing ${marker}`);
     }
   }
-  for (const marker of ['readStoredFileFromDemandChunks', 'file-integrity.js?v=20260708-canonical-rechunk1']) {
+  // Versionsneutral pruefen: Der Cache-Buster wird regelmaessig angehoben;
+  // gepinnt ist, DASS der geteilte Integritaetspfad importiert wird.
+  for (const marker of ['readStoredFileFromDemandChunks', 'file-integrity.js?v=']) {
     if (!fileViewer.includes(marker)) {
       offenders.push(`src/apps/business-os/desktop-apps/file-viewer/app.js: file chunk integrity missing ${marker}`);
     }
