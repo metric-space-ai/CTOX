@@ -7665,6 +7665,7 @@ fn start_prompt_worker(
                                 } else {
                                     "pending"
                                 };
+                            let mut terminal_review_failure_reason: Option<String> = None;
                             let (ack_result, ack_label) = if let Some((reason, summary)) =
                                 &approved_completion_hold
                             {
@@ -7706,6 +7707,8 @@ fn start_prompt_worker(
                                         _ => "terminal queue failure",
                                     }
                                 };
+                                terminal_review_failure_reason =
+                                    Some(failure_reason.to_string());
                                 (
                                     channels::ack_leased_messages_for_attempt(
                                         &root,
@@ -7736,6 +7739,32 @@ fn start_prompt_worker(
                                     &ack_label,
                                     &job.leased_message_keys,
                                 );
+                            // Terminal path of the same defect class (restored
+                            // after the 1a0fd9fc3 port wave dropped it): an
+                            // exhausted validation / terminal-queue-failure acked
+                            // the queue item as failed but only refreshed the
+                            // projection - the Business OS command stayed
+                            // `accepted` forever and no continuation decision was
+                            // recorded. Drive the command failure path, which
+                            // owns both. See I-071b / plan-v2-review-heal.
+                            if let Some(reason) = terminal_review_failure_reason.as_deref() {
+                                for message_key in &job.leased_message_keys {
+                                    if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
+                                        &root,
+                                        message_key,
+                                        reason,
+                                    ) {
+                                        push_event_locked(
+                                            &mut shared,
+                                            format!(
+                                                "Failed to project terminal review failure for {}: {}",
+                                                message_key,
+                                                clip_text(&err.to_string(), 180)
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         if !job.leased_ticket_event_keys.is_empty() && should_handle_messages {
                             record_ack_failure_locked(
@@ -29353,7 +29382,10 @@ mod tests {
                 priority: "normal".to_string(),
                 suggested_skill: None,
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("create app queue task");
@@ -34273,7 +34305,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -34465,7 +34500,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -34567,7 +34605,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "projects",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -34873,7 +34914,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -34936,7 +34980,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -34995,7 +35042,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35009,7 +35059,10 @@ Business OS command:
                 priority: "normal".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create next app queue task");
@@ -35111,7 +35164,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35202,7 +35258,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35252,7 +35311,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35298,7 +35360,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35335,7 +35400,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35381,7 +35449,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35416,7 +35487,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35474,7 +35548,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35536,7 +35613,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35627,7 +35707,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35734,7 +35817,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "projects",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35779,7 +35865,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -35815,7 +35904,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create completed app queue task");
@@ -35837,7 +35929,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create next app queue task");
@@ -35896,7 +35991,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create leased app queue task");
@@ -35917,7 +36015,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create pending app queue task");
@@ -35961,7 +36062,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36015,7 +36119,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36070,7 +36177,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "projects",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36160,7 +36270,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36252,7 +36365,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "projects",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create red app queue task");
@@ -36274,7 +36390,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create pending app queue task");
@@ -36314,7 +36433,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36804,7 +36926,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36865,7 +36990,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create pending app queue task");
@@ -36910,7 +37038,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -36951,7 +37082,7 @@ Business OS command:
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
                 extra_metadata: Some(business_os_app_queue_metadata(
-                    "contracts",
+                    "inventory",
                     "ctox.business_os.app.create",
                 )),
             },
@@ -36984,7 +37115,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "quality",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create current app queue task");
@@ -37001,7 +37135,7 @@ Business OS command:
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
                 extra_metadata: Some(business_os_app_queue_metadata(
-                    "inventory",
+                    "subscriptions",
                     "ctox.business_os.app.create",
                 )),
             },
@@ -37238,7 +37372,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "contracts",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create stale app queue task");
@@ -37260,7 +37397,10 @@ Business OS command:
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "inventory",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create fresh app queue task");
@@ -41340,7 +41480,10 @@ Use shell tools to create or update these files."
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
@@ -41416,7 +41559,10 @@ Use shell tools to create or update these files."
                 priority: "high".to_string(),
                 suggested_skill: Some("business-os-app-module-development".to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(business_os_app_queue_metadata(
+                    "subscriptions",
+                    "ctox.business_os.app.create",
+                )),
             },
         )
         .expect("failed to create app queue task");
