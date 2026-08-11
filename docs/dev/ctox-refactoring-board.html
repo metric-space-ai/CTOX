@@ -189,11 +189,12 @@ footer{
   </div>
   <div style="margin-top:10px;font-size:13px;line-height:1.55;color:var(--muted);max-width:100ch">
     <b style="color:var(--fg,inherit)">Messtore für die Produktnote (je: Messaufbau + Zahl + Wiederholbarkeit):</b>
-    <b>M1 Kaltstart</b> — Daemon-Start → Shell antwortet (HTTP) und → Peer/Replikation bereit; Sekunden, je 5 Läufe.
-    <b>M2 Browser-Boot</b> — Navigation → Shell interaktiv → kritische Collections live; Sekunden (die nie gemessene P4-Zahl).
-    <b>M3 Command-Bus</b> — Dispatch→Receipt p50/p95 über ≥50 Commands; Randfälle: Kaltstartfenster, Offline-Dispatch, Timeout-Pfad.
-    <b>M4 Abbruch-Churn</b> — 10 Zyklen erzwungener Verbindungsabbruch (Peer-Kill/Netztrennung), je: Zeit bis Wiederanlauf, Datenverlust ja/nein.
-    <b>M5 Multi-User</b> — zwei Browser-Sitzungen, Schreiben in A sichtbar in B: Latenz, Konfliktverhalten bei gleichzeitigen Schreibern.
+    <b>M1 Kaltstart: GEMESSEN</b> — Median <b>15,5 s</b> bis HTTP (8–27 s Streuung, leerer Store, Debug-Binary; Erststart 88 s; Release-Nachmessung läuft).
+    <b>M2 Browser-Boot: GEMESSEN</b> — Shell interaktiv 1,75 s, aber alle 15 Boot-Collections erst nach <b>15,9 s</b> live: serielle Start-Queue ~1 s/Collection + desktop_icons allein 11,1 s.
+    <b>M3 Command-Bus: DEFEKT</b> — 30/30 Dispatches scheitern an <code>SQLITE_QUERY_STREAM_UNSUPPORTED</code> (query-fetch verweigert nicht-SQL-kompilierbare Mango-Query); Command-Plane-Zähler dieser frischen Instanz: leer. Latenz erst nach Fix messbar.
+    <b>M4 Abbruch-Churn: Zyklus 1/10</b> — Daemon-Kill, 20 s Ausfall: volle Resynchronisation ~30 s nach Serverrückkehr, kein Hängen, Circuit blieb zu. Offen: 9 Zyklen + Datenverlustprüfung.
+    <b>M5 Multi-User: OFFEN</b> — braucht zweite echte Nutzersitzung (Invite-Flow).
+    Beweis: <code>docs/dev/beweise/produkt-messung-m1-m5-2026-08-12.md</code> (Commit 0169d1ebb). Nach aktueller Faktenlage wäre die Produktnote schlecht — langsamer Boot, ein Kernpfad defekt; Erholung funktioniert.
   </div>
 </header>
 
