@@ -30,6 +30,7 @@ use super::{
     record_ticket_self_work_list_cache_miss_for_tests,
     record_ticket_workflow_materialize_cache_miss_for_tests,
 };
+use crate::mission::plan;
 use crate::mission::ticket_adapters;
 use crate::mission::ticket_protocol;
 use anyhow::{anyhow, bail, Context, Result};
@@ -58,6 +59,7 @@ pub(crate) fn put_ticket_self_work_item(
         requested_status
     };
     let item = upsert_ticket_self_work_item_internal(
+        root,
         &mut conn,
         TicketSelfWorkUpsertInput {
             source_system: input.source_system,
@@ -542,7 +544,7 @@ pub(crate) fn transition_ticket_self_work_item(
             remote_event_ids.first().map(String::as_str),
         )?;
     }
-    let item = set_ticket_self_work_state_internal(&mut conn, work_id, state, note)?;
+    let item = set_ticket_self_work_state_internal(root, &mut conn, work_id, state, note)?;
     record_audit(
         &mut conn,
         AuditRequest {
@@ -1559,7 +1561,8 @@ pub(crate) fn set_ticket_self_work_state_with_failure_reason(
     failure_reason: Option<&str>,
 ) -> Result<TicketSelfWorkItemView> {
     let mut conn = open_ticket_db(root)?;
-    let item = set_ticket_self_work_state_internal(&mut conn, work_id, state, failure_reason)?;
+    let item =
+        set_ticket_self_work_state_internal(root, &mut conn, work_id, state, failure_reason)?;
     record_audit(
         &mut conn,
         AuditRequest {
@@ -1643,6 +1646,7 @@ pub(crate) fn set_ticket_approval_gate_state_from_authorized_reply(
     let failure_reason = (status == WorkItemStatus::Failed)
         .then_some("authorized approval reply rejected the internal work item");
     let item = set_ticket_self_work_state_internal_with_policy(
+        root,
         &mut conn,
         work_id,
         state,
@@ -2024,15 +2028,24 @@ pub(super) fn ticket_self_work_core_event(state: &str) -> Result<CoreEvent> {
 }
 
 pub(super) fn set_ticket_self_work_state_internal(
+    root: &Path,
     conn: &mut Connection,
     work_id: &str,
     state: &str,
     failure_reason: Option<&str>,
 ) -> Result<TicketSelfWorkItemView> {
-    set_ticket_self_work_state_internal_with_policy(conn, work_id, state, failure_reason, None)
+    set_ticket_self_work_state_internal_with_policy(
+        root,
+        conn,
+        work_id,
+        state,
+        failure_reason,
+        None,
+    )
 }
 
 pub(super) fn set_ticket_self_work_state_internal_with_policy(
+    root: &Path,
     conn: &mut Connection,
     work_id: &str,
     state: &str,
@@ -2041,10 +2054,12 @@ pub(super) fn set_ticket_self_work_state_internal_with_policy(
 ) -> Result<TicketSelfWorkItemView> {
     let status = parse_work_item_status(state)?;
     let state = status.as_str();
-    let existing = load_ticket_self_work_item_raw(conn, work_id)?
+    plan::ensure_wait_resolution_schema(root, conn)?;
+    let tx = conn.transaction()?;
+    let existing = load_ticket_self_work_item_raw(&tx, work_id)?
         .context("ticket internal work item not found")?;
     enforce_ticket_self_work_state_transition(
-        conn,
+        &tx,
         work_id,
         &existing.state,
         state,
@@ -2054,7 +2069,7 @@ pub(super) fn set_ticket_self_work_state_internal_with_policy(
         terminal_policy_grant,
     )?;
     let now = now_iso_string();
-    conn.execute(
+    tx.execute(
         r#"
         UPDATE ticket_self_work_items
         SET state = ?2,
@@ -2063,7 +2078,10 @@ pub(super) fn set_ticket_self_work_state_internal_with_policy(
         "#,
         params![work_id, state, now],
     )?;
+    let satisfied_waits = plan::satisfy_wait_for_work_item_tx(&tx, work_id, state)?;
+    tx.commit()?;
     clear_ticket_self_work_list_cache();
+    plan::finish_satisfied_wait_write(root, satisfied_waits)?;
     let item = load_ticket_self_work_item_raw(conn, work_id)?
         .context("ticket internal work item not found")?;
     hydrate_ticket_self_work_item(conn, item)
@@ -2223,6 +2241,7 @@ pub(crate) fn put_ticket_knowledge_entry(
 }
 
 pub(super) fn upsert_ticket_self_work_item_internal(
+    root: &Path,
     conn: &mut Connection,
     input: TicketSelfWorkUpsertInput,
 ) -> Result<TicketSelfWorkItemView> {
@@ -2244,9 +2263,11 @@ pub(super) fn upsert_ticket_self_work_item_internal(
             input.kind, input.title, input.body_text, now
         )),)
     );
-    if let Some(existing) = load_ticket_self_work_item_raw(conn, &work_id)? {
+    plan::ensure_wait_resolution_schema(root, conn)?;
+    let tx = conn.transaction()?;
+    if let Some(existing) = load_ticket_self_work_item_raw(&tx, &work_id)? {
         enforce_ticket_self_work_state_transition(
-            conn,
+            &tx,
             &existing.work_id,
             &existing.state,
             state,
@@ -2256,7 +2277,7 @@ pub(super) fn upsert_ticket_self_work_item_internal(
             None,
         )?;
     }
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO ticket_self_work_items (
             work_id, source_system, kind, title, body_text, state, metadata_json,
@@ -2284,8 +2305,7 @@ pub(super) fn upsert_ticket_self_work_item_internal(
             WorkItemStatus::Published.as_str(),
         ],
     )?;
-    clear_ticket_self_work_list_cache();
-    conn.query_row(
+    let item = tx.query_row(
         r#"
         SELECT work_id, source_system, kind, title, body_text, state, metadata_json, remote_ticket_id, remote_locator, created_at, updated_at
         FROM ticket_self_work_items
@@ -2294,8 +2314,12 @@ pub(super) fn upsert_ticket_self_work_item_internal(
         "#,
         params![work_id],
         map_ticket_self_work_row,
-    )
-    .map_err(anyhow::Error::from)
+    )?;
+    let satisfied_waits = plan::satisfy_wait_for_work_item_tx(&tx, &item.work_id, &item.state)?;
+    tx.commit()?;
+    clear_ticket_self_work_list_cache();
+    plan::finish_satisfied_wait_write(root, satisfied_waits)?;
+    Ok(item)
 }
 
 pub(super) fn mark_ticket_self_work_published(

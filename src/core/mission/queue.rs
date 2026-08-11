@@ -4,7 +4,6 @@ use rusqlite::params;
 use rusqlite::params_from_iter;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
-use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use sha2::Digest;
@@ -16,11 +15,10 @@ use std::process::Command;
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::OnceLock;
+#[cfg(test)]
 use std::time::Duration;
 
 use crate::channels;
-use crate::execution::agent::direct_session::PersistentSession;
-use crate::inference::runtime_env;
 use crate::service::harness_flow::{
     record_harness_flow_event_lossy, RecordHarnessFlowEventRequest,
 };
@@ -30,9 +28,6 @@ const DEFAULT_LIST_LIMIT: usize = 20;
 const DEFAULT_CLEANUP_SCAN_LIMIT: usize = 10_000;
 const DEFAULT_TICKET_SYSTEM: &str = "internal";
 const SPILL_RESTORE_TITLE_PREFIX: &str = "spill restore: ";
-const QUEUE_REPAIR_TIMEOUT_SECS: u64 = 300;
-const QUEUE_REPAIR_SKILL_RELATIVE_PATH: &str =
-    "skills/system/mission_orchestration/queue-cleanup/SKILL.md";
 const QUEUE_SPILL_CANDIDATE_LOOKUP_CHUNK_SIZE: usize = 500;
 const QUEUE_METADATA_LOOKUP_CHUNK_SIZE: usize = 500;
 const QUEUE_ADD_USAGE: &str = "usage: ctox queue add --title <label> --prompt <text> [--thread-key <key>] [--workspace-root <path>] [--skill <name>] [--priority <urgent|high|normal|low>] [--parent-message-key <key>]";
@@ -53,73 +48,7 @@ const QUEUE_USAGE: &str = "usage:
   ctox queue restore --message-key <key> [--priority <urgent|high|normal|low>] [--note <text>]
   ctox queue cleanup-scope [--all-open] [--match-run-id <id>] [--match-thread-prefix <prefix>] [--match-workspace-prefix <path>] [--match-title-prefix <prefix>] [--source-label <label>] [--message-key <key>] [--status <pending|leased|blocked|failed|handled|cancelled|review_rework>]... [--limit <n>] [--dry-run] [--cancel-open|--release-open|--block-open] [--stop-watchers] [--watcher-pattern <text>] [--reason <text>]
   ctox queue assert-clean-scope [--all-open] [--match-run-id <id>] [--match-thread-prefix <prefix>] [--match-workspace-prefix <path>] [--match-title-prefix <prefix>] [--source-label <label>] [--message-key <key>] [--status <pending|leased|blocked|failed|handled|cancelled|review_rework>]... [--limit <n>] [--empty]
-  ctox queue repair [--dry-run] [--mechanical]";
-
-const QUEUE_REPAIR_SYSTEM_PROMPT: &str = r#"You are CTOX Queue Repair.
-
-You run a dedicated external queue-repair pass.
-This is not normal execution. Gather facts yourself from the runtime SQLite store, queue state,
-internal work and ticket state, active strategic directives, founder or owner communication state,
-review state, and service status.
-
-Use the queue-cleanup skill first and follow it.
-
-Primary goals:
-- preserve the canonical mission hot path
-- stop stale, duplicate, superseded, or flooding queue work
-- keep founder or owner visible work separate from internal queue churn
-- avoid deleting valid work when block, release, or reprioritize would be safer
-
-Do not mutate the queue directly from this run.
-Return a repair plan only. The caller will apply the plan deterministically.
-
-Use exact output format:
-
-STATE: READY|NOOP|BLOCKED|PARTIAL
-SUMMARY: <one sentence>
-CANONICAL_HOT_PATH:
-- <message_key or thread> :: <why>
-STALE_QUEUE_ITEMS:
-- <message_key> :: <why>
-SURVIVING_QUEUE_ITEMS:
-- <message_key> :: <why>
-REPAIR_ACTIONS:
-- cancel <message_key> :: <reason>
-- block <message_key> :: <reason>
-- release <message_key> :: <reason>
-- reprioritize <message_key> <urgent|high|normal|low> :: <reason>
-- none
-EVIDENCE:
-- <check> => <result>
-HANDOFF:
-- <only when another queue repair pass should continue; otherwise write "none">
-"#;
-
-const QUEUE_REPAIR_VERIFY_SYSTEM_PROMPT: &str = r#"You are CTOX Queue Repair Verification.
-
-You verify a queue repair after deterministic actions were applied.
-Gather facts yourself from the runtime SQLite store, queue state, strategic directives,
-founder or owner communication state, and service status.
-
-Use the queue-cleanup skill first and follow it.
-
-Decide whether the queue is now stable enough to resume the canonical hot path.
-
-Use exact output format:
-
-STATE: STABLE|UNSTABLE|PARTIAL
-SUMMARY: <one sentence>
-CANONICAL_HOT_PATH:
-- <message_key or thread> :: <why>
-REMAINING_RISKS:
-- <risk or "none">
-FOLLOW_UP_ACTIONS:
-- <action or "none">
-EVIDENCE:
-- <check> => <result>
-HANDOFF:
-- <only when another verification pass should continue; otherwise write "none">
-"#;
+  ctox queue repair";
 
 #[cfg(test)]
 static QUEUE_BRIDGE_DB_OPEN_COUNTS: OnceLock<Mutex<HashMap<std::path::PathBuf, u64>>> =
@@ -170,40 +99,6 @@ struct QueueSpillCandidateView {
 struct QueueRepairView {
     open_queue_count: usize,
     open_queue_preview: Vec<channels::QueueTaskView>,
-    agentic: Option<AgenticQueueRepairView>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AgenticQueueRepairView {
-    state: String,
-    summary: String,
-    canonical_hot_path: Vec<String>,
-    stale_queue_items: Vec<String>,
-    surviving_queue_items: Vec<String>,
-    repair_actions: Vec<QueueRepairActionView>,
-    evidence: Vec<String>,
-    handoff: Option<String>,
-    applied_actions: Vec<QueueRepairActionView>,
-    verification: Option<QueueRepairVerificationView>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct QueueRepairActionView {
-    action: String,
-    message_key: String,
-    priority: Option<String>,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-struct QueueRepairVerificationView {
-    state: String,
-    summary: String,
-    canonical_hot_path: Vec<String>,
-    remaining_risks: Vec<String>,
-    follow_up_actions: Vec<String>,
-    evidence: Vec<String>,
-    handoff: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -335,6 +230,7 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             let thread_key = find_flag_value(args, "--thread-key")
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| default_thread_key(title));
+            let idempotency_key = queue_add_argv_sha256(args)?;
             let task = channels::create_queue_task(
                 root,
                 channels::QueueTaskCreateRequest {
@@ -350,7 +246,7 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     suggested_skill: find_flag_value(args, "--skill").map(ToOwned::to_owned),
                     parent_message_key: find_flag_value(args, "--parent-message-key")
                         .map(ToOwned::to_owned),
-                    extra_metadata: None,
+                    extra_metadata: Some(json!({"idempotency_key": idempotency_key})),
                 },
             )?;
             print_json(&json!({"ok": true, "task": task}))
@@ -456,18 +352,6 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            // The channels write alone leaves the Business OS projection stale:
-            // the browser kept showing a cancelled run as `running` and blocked
-            // its resume button. Refresh the projection the same way the queue
-            // worker does after an ack.
-            if let Err(err) =
-                crate::business_os::store::refresh_business_command_queue_task_projection(
-                    root,
-                    message_key,
-                )
-            {
-                eprintln!("[ctox] queue projection refresh for {message_key} failed: {err}");
-            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "complete" => {
@@ -483,18 +367,6 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            // The channels write alone leaves the Business OS projection stale:
-            // the browser kept showing a cancelled run as `running` and blocked
-            // its resume button. Refresh the projection the same way the queue
-            // worker does after an ack.
-            if let Err(err) =
-                crate::business_os::store::refresh_business_command_queue_task_projection(
-                    root,
-                    message_key,
-                )
-            {
-                eprintln!("[ctox] queue projection refresh for {message_key} failed: {err}");
-            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "fail" => {
@@ -511,15 +383,6 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            // Terminal failure must reach the Business OS command: it owns the
-            // durable failure record and the research continuation decision.
-            if let Err(err) = crate::business_os::store::fail_business_command_from_queue_error(
-                root,
-                message_key,
-                reason,
-            ) {
-                eprintln!("[ctox] queue fail projection for {message_key} failed: {err}");
-            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "cancel" => {
@@ -535,18 +398,6 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     ..Default::default()
                 },
             )?;
-            // The channels write alone leaves the Business OS projection stale:
-            // the browser kept showing a cancelled run as `running` and blocked
-            // its resume button. Refresh the projection the same way the queue
-            // worker does after an ack.
-            if let Err(err) =
-                crate::business_os::store::refresh_business_command_queue_task_projection(
-                    root,
-                    message_key,
-                )
-            {
-                eprintln!("[ctox] queue projection refresh for {message_key} failed: {err}");
-            }
             print_json(&json!({"ok": true, "task": task}))
         }
         "spill" => {
@@ -599,27 +450,17 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             Ok(())
         }
         "repair" => {
-            let repaired = repair_queue_state(
-                root,
-                args.iter().any(|arg| arg == "--mechanical"),
-                args.iter().any(|arg| arg == "--dry-run"),
-            )?;
+            let repaired = repair_queue_state(root)?;
             print_json(&json!({"ok": true, "repair": repaired}))
         }
         _ => anyhow::bail!("{QUEUE_USAGE}"),
     }
 }
 
-fn repair_queue_state(
-    root: &Path,
-    mechanical_only: bool,
-    dry_run: bool,
-) -> Result<QueueRepairView> {
-    let agentic = if mechanical_only {
-        None
-    } else {
-        Some(run_agentic_queue_repair(root, dry_run)?)
-    };
+// Seit die agentische Reparatur fort ist, schreibt dieser Pfad nichts mehr: er
+// zaehlt die offenen Eintraege und zeigt die ersten zwanzig. Der Name `repair`
+// stammt aus der Zeit davor und ist damit ungenau — siehe Commit-Nachricht.
+fn repair_queue_state(root: &Path) -> Result<QueueRepairView> {
     let open_statuses = vec![
         "pending".to_string(),
         "leased".to_string(),
@@ -630,7 +471,6 @@ fn repair_queue_state(
     Ok(QueueRepairView {
         open_queue_count,
         open_queue_preview,
-        agentic,
     })
 }
 
@@ -1244,522 +1084,6 @@ fn cleanup_command_is_watcher_like(command: &str) -> bool {
     ]
     .iter()
     .any(|marker| lowered.contains(marker))
-}
-
-fn run_agentic_queue_repair(root: &Path, dry_run: bool) -> Result<AgenticQueueRepairView> {
-    let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
-    let report = run_queue_repair_agent(
-        root,
-        &settings,
-        QUEUE_REPAIR_SYSTEM_PROMPT,
-        &build_queue_repair_prompt(root, dry_run),
-    )?;
-    let parsed = parse_queue_repair_report(&report);
-    let applied_actions = if dry_run {
-        Vec::new()
-    } else {
-        apply_queue_repair_actions(root, &parsed.repair_actions, &parsed.canonical_hot_path)?
-    };
-    let verification = if dry_run {
-        None
-    } else {
-        let verify_report = run_queue_repair_agent(
-            root,
-            &settings,
-            QUEUE_REPAIR_VERIFY_SYSTEM_PROMPT,
-            &build_queue_repair_verify_prompt(root, &report, &applied_actions),
-        )?;
-        Some(parse_queue_repair_verification(&verify_report))
-    };
-
-    Ok(AgenticQueueRepairView {
-        state: parsed.state,
-        summary: parsed.summary,
-        canonical_hot_path: parsed.canonical_hot_path,
-        stale_queue_items: parsed.stale_queue_items,
-        surviving_queue_items: parsed.surviving_queue_items,
-        repair_actions: parsed.repair_actions,
-        evidence: parsed.evidence,
-        handoff: parsed.handoff,
-        applied_actions,
-        verification,
-    })
-}
-
-fn run_queue_repair_agent(
-    root: &Path,
-    settings: &std::collections::BTreeMap<String, String>,
-    system_prompt: &str,
-    prompt: &str,
-) -> Result<String> {
-    let mut session =
-        PersistentSession::start_review_with_read_only_tools(root, settings, Some(system_prompt))?;
-    let report = session.run_turn(
-        prompt,
-        Some(Duration::from_secs(QUEUE_REPAIR_TIMEOUT_SECS)),
-        None,
-        Some(false),
-        0,
-    )?;
-    session.shutdown();
-    Ok(report)
-}
-
-fn build_queue_repair_prompt(root: &Path, dry_run: bool) -> String {
-    let skill_path = root.join(QUEUE_REPAIR_SKILL_RELATIVE_PATH);
-    let skill = if skill_path.exists() {
-        skill_path.to_string_lossy().into_owned()
-    } else {
-        "(missing)".to_string()
-    };
-    let runtime_db_path = crate::paths::core_db(&root);
-    let harness_block = render_confirmed_harness_findings_block(root);
-    format!(
-        "== QUEUE REPAIR ASSIGNMENT ==\n\
-\n\
-Workspace root: {}\n\
-Runtime DB: {}\n\
-Queue cleanup skill: {}\n\
-Dry run: {}\n\
-{}\
-Open the queue cleanup skill first and follow it.\n\
-\n\
-Gather the queue-repair facts yourself from the runtime SQLite store, queue state, ticket/internal-work state, active strategic directives, founder or owner communication threads, review findings, and service status.\n\
-\n\
-Required work:\n\
-1. identify the canonical hot path that should survive\n\
-2. identify stale, duplicate, superseded, or contaminated queue work\n\
-3. pay special attention to founder or owner communication drift contaminating queue work\n\
-4. for every confirmed harness finding listed above whose entity touches the queue scope, decide: block the entity (with `ctox queue block --reason \"harness-mining: ...\"`) and then `ctox harness-mining finding-mitigate --finding-id <id> --by agent --note \"<what was done>\"`. Do NOT release a queue item that appears as a confirmed stuck-case finding without mitigating the finding first.\n\
-5. propose the minimum safe queue actions needed to recover focus\n\
-6. do not mutate anything directly; only return the repair plan\n",
-        root.display(),
-        runtime_db_path.display(),
-        skill,
-        if dry_run { "yes" } else { "no" },
-        harness_block,
-    )
-}
-
-fn render_confirmed_harness_findings_block(root: &Path) -> String {
-    // Read-only peek into ctox_hm_findings before constructing the prompt.
-    // If the audit-tick has not run yet (table missing) or the read fails
-    // for any reason we silently skip the block — the agent then falls
-    // back to gathering signals via `ctox harness-mining findings` itself.
-    let db_path = crate::paths::core_db(&root);
-    let conn =
-        match Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Ok(c) => c,
-            Err(_) => return String::new(),
-        };
-    let table_exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ctox_hm_findings'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if table_exists == 0 {
-        return String::new();
-    }
-    let findings =
-        match crate::service::harness_mining::findings::list(&conn, Some("confirmed"), None, 15) {
-            Ok(rows) => rows,
-            Err(_) => return String::new(),
-        };
-    if findings.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from(
-        "\nConfirmed harness-mining findings (mitigate or acknowledge before resuming protected work):\n",
-    );
-    for f in &findings {
-        let id = f
-            .get("finding_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("?");
-        let kind = f
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("?");
-        let severity = f
-            .get("severity")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("?");
-        let entity_type = f
-            .get("entity_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let entity_id = f
-            .get("entity_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let lane = f
-            .get("lane")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        out.push_str(&format!(
-            "- [{severity}] {kind} :: {id} (entity_type={entity_type}, lane={lane})"
-        ));
-        if !entity_id.is_empty() {
-            out.push_str(&format!(" entity_id={entity_id}"));
-        }
-        out.push('\n');
-    }
-    out.push('\n');
-    out
-}
-
-fn build_queue_repair_verify_prompt(
-    root: &Path,
-    prior_report: &str,
-    applied_actions: &[QueueRepairActionView],
-) -> String {
-    let skill_path = root.join(QUEUE_REPAIR_SKILL_RELATIVE_PATH);
-    let skill = if skill_path.exists() {
-        skill_path.to_string_lossy().into_owned()
-    } else {
-        "(missing)".to_string()
-    };
-    let runtime_db_path = crate::paths::core_db(&root);
-    let mut actions_rendered = String::new();
-    if applied_actions.is_empty() {
-        actions_rendered.push_str("- none\n");
-    } else {
-        for action in applied_actions {
-            let priority = action
-                .priority
-                .as_deref()
-                .map(|value| format!(" {value}"))
-                .unwrap_or_default();
-            actions_rendered.push_str(&format!(
-                "- {} {}{} :: {}\n",
-                action.action, action.message_key, priority, action.reason
-            ));
-        }
-    }
-    format!(
-        "== QUEUE REPAIR VERIFICATION ==\n\
-\n\
-Workspace root: {}\n\
-Runtime DB: {}\n\
-Queue cleanup skill: {}\n\
-\n\
-Open the queue cleanup skill first and follow it.\n\
-\n\
-Prior repair report:\n\
-{}\n\
-\n\
-Applied actions:\n\
-{}\n\
-Verify the current queue state and judge whether the canonical hot path is now clear enough to resume.\n",
-        root.display(),
-        runtime_db_path.display(),
-        skill,
-        prior_report.trim(),
-        actions_rendered
-    )
-}
-
-#[derive(Debug, Clone, Default)]
-struct ParsedQueueRepairReport {
-    state: String,
-    summary: String,
-    canonical_hot_path: Vec<String>,
-    stale_queue_items: Vec<String>,
-    surviving_queue_items: Vec<String>,
-    repair_actions: Vec<QueueRepairActionView>,
-    evidence: Vec<String>,
-    handoff: Option<String>,
-}
-
-fn parse_queue_repair_report(report: &str) -> ParsedQueueRepairReport {
-    ParsedQueueRepairReport {
-        state: parse_prefixed_line(report, "STATE:")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "PARTIAL".to_string()),
-        summary: parse_prefixed_line(report, "SUMMARY:")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| clip_text(report, 220)),
-        canonical_hot_path: parse_section_items(report, "CANONICAL_HOT_PATH:"),
-        stale_queue_items: parse_section_items(report, "STALE_QUEUE_ITEMS:"),
-        surviving_queue_items: parse_section_items(report, "SURVIVING_QUEUE_ITEMS:"),
-        repair_actions: parse_queue_repair_actions(report),
-        evidence: parse_section_items(report, "EVIDENCE:"),
-        handoff: parse_handoff_block(report),
-    }
-}
-
-fn parse_queue_repair_verification(report: &str) -> QueueRepairVerificationView {
-    QueueRepairVerificationView {
-        state: parse_prefixed_line(report, "STATE:")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "PARTIAL".to_string()),
-        summary: parse_prefixed_line(report, "SUMMARY:")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| clip_text(report, 220)),
-        canonical_hot_path: parse_section_items(report, "CANONICAL_HOT_PATH:"),
-        remaining_risks: parse_section_items(report, "REMAINING_RISKS:"),
-        follow_up_actions: parse_section_items(report, "FOLLOW_UP_ACTIONS:"),
-        evidence: parse_section_items(report, "EVIDENCE:"),
-        handoff: parse_handoff_block(report),
-    }
-}
-
-fn parse_queue_repair_actions(report: &str) -> Vec<QueueRepairActionView> {
-    parse_section_items(report, "REPAIR_ACTIONS:")
-        .into_iter()
-        .filter_map(|item| parse_queue_repair_action_line(&item))
-        .collect()
-}
-
-fn parse_queue_repair_action_line(value: &str) -> Option<QueueRepairActionView> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
-        return None;
-    }
-    let (command_part, reason_part) = trimmed.rsplit_once("::")?;
-    let reason = reason_part.trim();
-    if reason.is_empty() {
-        return None;
-    }
-    let mut tokens = command_part.split_whitespace();
-    let action = tokens.next()?.trim().to_ascii_lowercase();
-    let message_key = tokens.next()?.trim().to_string();
-    let priority = if action == "reprioritize" {
-        Some(tokens.next()?.trim().to_string())
-    } else {
-        None
-    };
-    match action.as_str() {
-        "cancel" | "block" | "release" | "reprioritize" | "complete" => {
-            Some(QueueRepairActionView {
-                action,
-                message_key,
-                priority,
-                reason: reason.to_string(),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn apply_queue_repair_actions(
-    root: &Path,
-    actions: &[QueueRepairActionView],
-    canonical_hot_path: &[String],
-) -> Result<Vec<QueueRepairActionView>> {
-    // Best-effort hot-path keys: the leading whitespace token of each canonical
-    // hot-path entry. message_keys carry no whitespace, so a hot-path queue item
-    // listed by key yields its key here; thread/prose entries match nothing
-    // (fail-safe). Used ONLY to REFUSE a mutation, never to authorize one.
-    let hot_path_keys: std::collections::HashSet<&str> = canonical_hot_path
-        .iter()
-        .filter_map(|entry| entry.split_whitespace().next())
-        .collect();
-    let mut applied = Vec::new();
-    for action in actions {
-        if channels::load_queue_task(root, &action.message_key)?.is_none() {
-            continue;
-        }
-        if hot_path_keys.contains(action.message_key.as_str()) {
-            record_queue_repair_event(
-                root,
-                action,
-                "queue.repair_rejected",
-                "hot-path queue item refused",
-            );
-            continue;
-        }
-        if action.action.as_str() == "complete"
-            && !channels::queue_complete_action_has_terminal_proof(root, &action.message_key)?
-        {
-            // A `complete` with no accepted terminal-success proof would be
-            // rejected by the Completed gate and abort the whole repair+verify
-            // pass via `?`. Pre-classify deterministically and skip it instead,
-            // so valid actions in the batch still commit and the verify pass runs.
-            record_queue_repair_event(
-                root,
-                action,
-                "queue.repair_rejected",
-                "complete without terminal-success proof refused",
-            );
-            continue;
-        }
-        match action.action.as_str() {
-            "cancel" => {
-                channels::update_queue_task(
-                    root,
-                    channels::QueueTaskUpdateRequest {
-                        message_key: action.message_key.clone(),
-                        route_status: Some("cancelled".to_string()),
-                        status_note: Some(action.reason.clone()),
-                        ..Default::default()
-                    },
-                )?;
-            }
-            "block" => {
-                channels::update_queue_task(
-                    root,
-                    channels::QueueTaskUpdateRequest {
-                        message_key: action.message_key.clone(),
-                        route_status: Some("blocked".to_string()),
-                        status_note: Some(action.reason.clone()),
-                        ..Default::default()
-                    },
-                )?;
-            }
-            "release" => {
-                channels::update_queue_task(
-                    root,
-                    channels::QueueTaskUpdateRequest {
-                        message_key: action.message_key.clone(),
-                        route_status: Some("pending".to_string()),
-                        status_note: Some(action.reason.clone()),
-                        ..Default::default()
-                    },
-                )?;
-            }
-            "reprioritize" => {
-                let Some(priority) = action.priority.clone() else {
-                    continue;
-                };
-                channels::update_queue_task(
-                    root,
-                    channels::QueueTaskUpdateRequest {
-                        message_key: action.message_key.clone(),
-                        priority: Some(priority),
-                        status_note: Some(action.reason.clone()),
-                        ..Default::default()
-                    },
-                )?;
-            }
-            "complete" => {
-                channels::update_queue_task(
-                    root,
-                    channels::QueueTaskUpdateRequest {
-                        message_key: action.message_key.clone(),
-                        route_status: Some("handled".to_string()),
-                        status_note: Some(action.reason.clone()),
-                        ..Default::default()
-                    },
-                )?;
-            }
-            _ => continue,
-        }
-        record_queue_repair_event(root, action, "queue.repair_applied", &action.reason);
-        applied.push(action.clone());
-    }
-    Ok(applied)
-}
-
-fn record_queue_repair_event(
-    root: &Path,
-    action: &QueueRepairActionView,
-    event_kind: &'static str,
-    note: &str,
-) {
-    record_harness_flow_event_lossy(
-        root,
-        RecordHarnessFlowEventRequest {
-            event_kind,
-            title: "Queue repair action",
-            body_text: note,
-            message_key: Some(&action.message_key),
-            work_id: None,
-            ticket_key: None,
-            attempt_index: None,
-            metadata: json!({
-                "action": action.action.clone(),
-                "message_key": action.message_key.clone(),
-            }),
-        },
-    );
-}
-
-fn parse_prefixed_line(report: &str, prefix: &str) -> Option<String> {
-    for line in report.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix(prefix) else {
-            continue;
-        };
-        let value = rest.trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn parse_section_items(report: &str, header: &str) -> Vec<String> {
-    let mut collecting = false;
-    let mut items = Vec::new();
-    for line in report.lines() {
-        let trimmed = line.trim();
-        if trimmed == header {
-            collecting = true;
-            continue;
-        }
-        if collecting {
-            if trimmed.ends_with(':') && !trimmed.starts_with("- ") && trimmed != header {
-                break;
-            }
-            if let Some(item) = trimmed.strip_prefix("- ") {
-                let value = item.trim();
-                if !value.is_empty() && !value.eq_ignore_ascii_case("none") {
-                    items.push(value.to_string());
-                }
-            }
-        }
-    }
-    items
-}
-
-fn parse_handoff_block(report: &str) -> Option<String> {
-    let mut collecting = false;
-    let mut lines = Vec::new();
-    for line in report.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("HANDOFF:") {
-            collecting = true;
-            let remainder = rest.trim();
-            if !remainder.is_empty() {
-                lines.push(remainder.to_string());
-            }
-            continue;
-        }
-        if collecting {
-            if trimmed.ends_with(':') && !trimmed.starts_with("- ") {
-                break;
-            }
-            if !trimmed.is_empty() {
-                lines.push(trimmed.to_string());
-            }
-        }
-    }
-    let joined = lines.join("\n");
-    let normalized = joined.trim();
-    if normalized.is_empty()
-        || normalized.eq_ignore_ascii_case("none")
-        || normalized.eq_ignore_ascii_case("- none")
-    {
-        None
-    } else {
-        Some(normalized.to_string())
-    }
-}
-
-fn clip_text(value: &str, max_chars: usize) -> String {
-    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= max_chars {
-        return collapsed;
-    }
-    let mut clipped = collapsed
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    clipped.push('…');
-    clipped
 }
 
 fn spill_queue_task_to_ticket(
@@ -2626,6 +1950,18 @@ fn stable_digest(input: &str) -> String {
     hex[..12].to_string()
 }
 
+fn queue_add_argv_sha256(args: &[String]) -> Result<String> {
+    // CliCommandLedger hashes the complete argv after argv[0], while this
+    // handler receives the slice after "queue". Reconstruct that exact array
+    // so a retried command uses the same natural key already recorded by the
+    // audit ledger.
+    let audited_args = std::iter::once("queue")
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let argv_json = serde_json::to_string(&audited_args)?;
+    Ok(format!("{:x}", Sha256::digest(argv_json.as_bytes())))
+}
+
 fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     find_flag_value(args, flag)
 }
@@ -2674,6 +2010,103 @@ mod tests {
         std::fs::create_dir_all(&root)?;
 
         handle_queue_command(&root, &["add".to_string(), "--help".to_string()])?;
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn queue_add_retry_reuses_message_key_from_argv_sha256_idempotency_key() -> Result<()> {
+        let root = temp_root("queue-add-idempotency");
+        std::fs::create_dir_all(&root)?;
+        let args = vec![
+            "add".to_string(),
+            "--title".to_string(),
+            "Retry-safe task".to_string(),
+            "--prompt".to_string(),
+            "Create exactly one durable queue row.".to_string(),
+            "--thread-key".to_string(),
+            "queue/retry-safe".to_string(),
+            "--priority".to_string(),
+            "high".to_string(),
+        ];
+        let expected_argv_sha256 =
+            "5e647ae83c3808874e6ac213aa4ab715227b37f0b20351f4e4b6d6c3b1dde0fa";
+        assert_eq!(queue_add_argv_sha256(&args)?, expected_argv_sha256);
+
+        handle_queue_command(&root, &args)?;
+        let conn = Connection::open(crate::paths::core_db(&root))?;
+        let (first_message_key, stored_idempotency_key): (String, Option<String>) = conn
+            .query_row(
+                "SELECT message_key, json_extract(metadata_json, '$.idempotency_key') \
+             FROM communication_messages \
+             WHERE thread_key = 'queue/retry-safe'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+        if stored_idempotency_key.is_none() {
+            std::thread::sleep(Duration::from_millis(1_100));
+        }
+
+        handle_queue_command(&root, &args)?;
+        let (row_count, distinct_message_keys, second_message_key): (i64, i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT message_key), MAX(message_key) \
+                 FROM communication_messages \
+                 WHERE thread_key = 'queue/retry-safe'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert_eq!(row_count, 1);
+        assert_eq!(distinct_message_keys, 1);
+        assert_eq!(second_message_key, first_message_key);
+        assert_eq!(
+            stored_idempotency_key.as_deref(),
+            Some(expected_argv_sha256)
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    // Der Wert dieses Tests liegt im zweiten Aufruf: `queue repair` berichtet
+    // ueber die Warteschlange und ruehrt sie nicht an. Frueher konnte an dieser
+    // Stelle ein Modell Eintraege umschreiben; dass zwei Laeufe denselben
+    // Zustand sehen, ist der Beweis, dass dieser Pfad nichts mehr tut.
+    #[test]
+    fn queue_repair_reports_open_tasks_without_changing_them() -> Result<()> {
+        let root = temp_root("queue-repair-deterministic");
+        std::fs::create_dir_all(&root)?;
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Visible deterministic repair task".to_string(),
+                prompt: "Remain visible without starting a model.".to_string(),
+                thread_key: "queue/repair-deterministic".to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )?;
+
+        let first = repair_queue_state(&root)?;
+        assert_eq!(first.open_queue_count, 1);
+        assert_eq!(first.open_queue_preview[0].message_key, task.message_key);
+        assert_eq!(first.open_queue_preview[0].route_status, "pending");
+
+        let second = repair_queue_state(&root)?;
+        assert_eq!(second.open_queue_count, first.open_queue_count);
+        assert_eq!(
+            second.open_queue_preview[0].message_key,
+            first.open_queue_preview[0].message_key
+        );
+        assert_eq!(
+            second.open_queue_preview[0].route_status,
+            first.open_queue_preview[0].route_status
+        );
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
@@ -3061,45 +2494,6 @@ mod tests {
     }
 
     #[test]
-    fn render_confirmed_harness_findings_block_includes_confirmed_findings() -> Result<()> {
-        let root = temp_root("pm5-confirmed-block");
-        std::fs::create_dir_all(&root)?;
-
-        // No findings table / no findings yet -> empty block (the agent then
-        // gathers signals via `ctox harness-mining findings` itself).
-        assert!(render_confirmed_harness_findings_block(&root).is_empty());
-
-        // Seed a confirmed finding into the core db (paths::core_db nests it
-        // under root/runtime, so create that parent dir first).
-        let core_db = crate::paths::core_db(&root);
-        std::fs::create_dir_all(core_db.parent().unwrap())?;
-        let conn = Connection::open(&core_db)?;
-        crate::service::harness_mining::findings::ensure_findings_schema(&conn)?;
-        conn.execute(
-            "INSERT INTO ctox_hm_findings \
-             (finding_id, signature, kind, severity, status, detected_at, last_seen_at) \
-             VALUES ('f1','sig1','drift','critical','confirmed','t','t')",
-            [],
-        )?;
-        drop(conn);
-
-        // pm-5: a confirmed finding must actually reach the queue-repair prompt
-        // block, guarding the silent String::new() regression.
-        let block = render_confirmed_harness_findings_block(&root);
-        assert!(
-            !block.is_empty(),
-            "a confirmed finding must reach the queue-repair prompt block"
-        );
-        assert!(
-            block.contains("drift"),
-            "block should name the finding kind: {block}"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        Ok(())
-    }
-
-    #[test]
     fn spills_list_returns_joined_queue_and_ticket_state() -> Result<()> {
         let root = temp_root("spills-list");
         std::fs::create_dir_all(&root)?;
@@ -3140,136 +2534,6 @@ mod tests {
                 .as_ref()
                 .map(|item| item.route_status.as_str()),
             Some("blocked")
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        Ok(())
-    }
-
-    #[test]
-    fn parse_queue_repair_action_line_supports_reprioritize() {
-        let parsed = parse_queue_repair_action_line(
-            "reprioritize queue:system::abc123 urgent :: founder mail must preempt stale review churn",
-        )
-        .expect("action should parse");
-        assert_eq!(parsed.action, "reprioritize");
-        assert_eq!(parsed.message_key, "queue:system::abc123");
-        assert_eq!(parsed.priority.as_deref(), Some("urgent"));
-        assert!(parsed.reason.contains("founder mail"));
-    }
-
-    #[test]
-    fn apply_queue_repair_actions_updates_queue_state() -> Result<()> {
-        let root = temp_root("queue-repair-actions");
-        std::fs::create_dir_all(&root)?;
-
-        let task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Stale review rework".to_string(),
-                prompt: "Cancel me".to_string(),
-                thread_key: "example-supervisor".to_string(),
-                workspace_root: None,
-                priority: "normal".to_string(),
-                suggested_skill: Some("queue-orchestrator".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )?;
-        let actions = vec![QueueRepairActionView {
-            action: "cancel".to_string(),
-            message_key: task.message_key.clone(),
-            priority: None,
-            reason: "superseded by canonical supervisor task".to_string(),
-        }];
-        let applied = apply_queue_repair_actions(&root, &actions, &[])?;
-        assert_eq!(applied.len(), 1);
-        let updated =
-            channels::load_queue_task(&root, &task.message_key)?.expect("updated task missing");
-        assert_eq!(updated.route_status, "cancelled");
-        assert_eq!(
-            updated.status_note.as_deref(),
-            Some("superseded by canonical supervisor task")
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        Ok(())
-    }
-
-    #[test]
-    fn apply_queue_repair_actions_refuses_hot_path_and_unproven_complete() -> Result<()> {
-        let root = temp_root("queue-repair-refusals");
-        std::fs::create_dir_all(&root)?;
-
-        let make = |title: &str| -> Result<String> {
-            Ok(channels::create_queue_task(
-                &root,
-                channels::QueueTaskCreateRequest {
-                    title: title.to_string(),
-                    prompt: "work".to_string(),
-                    thread_key: format!("thread-{title}"),
-                    workspace_root: None,
-                    priority: "normal".to_string(),
-                    suggested_skill: None,
-                    parent_message_key: None,
-                    extra_metadata: None,
-                },
-            )?
-            .message_key)
-        };
-        let hot_key = make("hot-path-item")?;
-        let cancel_key = make("cancel-target")?;
-        let complete_key = make("complete-target")?;
-
-        let actions = vec![
-            QueueRepairActionView {
-                action: "cancel".to_string(),
-                message_key: hot_key.clone(),
-                priority: None,
-                reason: "should be refused".to_string(),
-            },
-            QueueRepairActionView {
-                action: "complete".to_string(),
-                message_key: complete_key.clone(),
-                priority: None,
-                reason: "unproven complete".to_string(),
-            },
-            QueueRepairActionView {
-                action: "cancel".to_string(),
-                message_key: cancel_key.clone(),
-                priority: None,
-                reason: "valid cancel".to_string(),
-            },
-        ];
-        let hot_path = vec![format!("{hot_key} :: canonical supervisor")];
-
-        let applied = apply_queue_repair_actions(&root, &actions, &hot_path)?;
-
-        // Only the valid cancel committed; the hot-path and unproven-complete
-        // actions were refused WITHOUT aborting the loop (the valid cancel sits
-        // after both refusals and still committed).
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].message_key, cancel_key);
-        assert_eq!(
-            channels::load_queue_task(&root, &hot_key)?
-                .unwrap()
-                .route_status,
-            "pending",
-            "hot-path queue item must not be mutated"
-        );
-        assert_eq!(
-            channels::load_queue_task(&root, &complete_key)?
-                .unwrap()
-                .route_status,
-            "pending",
-            "a complete without terminal-success proof must be refused, not applied"
-        );
-        assert_eq!(
-            channels::load_queue_task(&root, &cancel_key)?
-                .unwrap()
-                .route_status,
-            "cancelled",
-            "the valid cancel after both refusals must still commit"
         );
 
         let _ = std::fs::remove_dir_all(&root);
