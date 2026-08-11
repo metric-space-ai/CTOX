@@ -468,7 +468,7 @@ footer{
     <span class="chip c-alert">OWNER: Workjet-Update blockiert alle lokalen Worker</span>
     <h3>Neues 64-MiB-Snapshot-Limit vs. 398-MiB-ctox-Archiv</h3>
     <p>Seit dem Workjet-Update vom 11.08. früh (erkennbar an der Sol-Umbenennung) scheitert JEDER lokale Worker-Start auf ctox: erst „Verschachtelte Git-Repositories" (behoben: tote ats-parse1-Worktree-Hülse nach <code>archive/</code>, Vendor-<code>.git</code>s unter runtime/ geparkt mit Restore-Notiz), dann hart „Git-Snapshot überschreitet das Limit von 64 MiB" — <code>git archive HEAD</code> misst 398 MiB. Betrifft beide Completion-Worker; Kampagnen-Delegation steht.</p>
-    <span class="ev"><b>Nötig</b> Workjet-Konfiguration: Limit anheben oder Snapshot für ctox abschalten<br><b>Bis dahin</b> Orchestrator arbeitet direkt (P3-Messung läuft); S2b-3 wartet</span>
+    <span class="ev"><b>WORKAROUND AKTIV (08:14)</b> Start aus Mini-Launchpad-Repo (/Volumes/tmp/ctox-pipeline/workjet-launchpad), Worker cd-t per Brief in den Checkout — Probe OK, S2b-3 läuft wieder als Workjet-Lauf<br><b>Sauberer Fix bleibt nötig</b> Workjet-Konfiguration: Limit anheben oder Snapshot für ctox abschalten</span>
   </article>
 
   <article class="karte s-owner">
