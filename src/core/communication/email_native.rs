@@ -1,8 +1,8 @@
+use crate::communication::tls_sync::{TlsConnector, TlsStream};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use mailparse::{parse_mail, DispositionType, MailHeaderMap, ParsedMail};
-use native_tls::{TlsConnector, TlsStream};
 use roxmltree::Document;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};

@@ -6,7 +6,6 @@ use base64::Engine;
 use bytes::BytesMut;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, Utc};
 pub use ctox_sqlserver_adapter::{validate_read_statement, validate_write_statement, SqlParameter};
-use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
 use std::error::Error;
@@ -17,6 +16,36 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::{to_sql_checked, FromSql, IsNull, Kind, ToSql, Type};
 use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
+
+/// TLS-Konfiguration fuer PostgreSQL: rustls mit den Systemzertifikaten.
+///
+/// Frueher `native-tls`, was auf Linux OpenSSL hereinzog und dort mit dem
+/// BoringSSL aus `wreq` um `-lssl`/`-lcrypto` kollidierte. Vertrauensanker
+/// bleiben dieselben Systemzertifikate wie zuvor.
+fn rustls_client_config() -> Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    let loaded = rustls_native_certs::load_native_certs();
+    for cert in loaded.certs {
+        let _ = roots.add(cert);
+    }
+    if roots.is_empty() {
+        let details = loaded
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!("no system trust anchors available for PostgreSQL TLS: {details}");
+    }
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to select PostgreSQL TLS protocol versions")?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(config)
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -235,10 +264,8 @@ impl PostgresAdapter {
                 }
                 PostgresSslMode::Require => {
                     config.ssl_mode(tokio_postgres::config::SslMode::Require);
-                    let connector = native_tls::TlsConnector::builder()
-                        .build()
-                        .context("failed to build PostgreSQL TLS connector")?;
-                    let connector = MakeTlsConnector::new(connector);
+                    let connector =
+                        tokio_postgres_rustls::MakeRustlsConnect::new(rustls_client_config()?);
                     let (client, connection) =
                         tokio::time::timeout(timeout, config.connect(connector))
                             .await

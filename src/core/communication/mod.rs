@@ -18,5 +18,6 @@ pub(crate) mod runtime;
 pub(crate) mod slack_native;
 pub(crate) mod teams_native;
 pub(crate) mod telegram_native;
+pub(crate) mod tls_sync;
 pub(crate) mod whatsapp_native;
 pub(crate) mod zulip_native;

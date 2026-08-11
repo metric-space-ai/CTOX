@@ -221,7 +221,15 @@ ratatui = "0.29.0"
 ratatui-macros = "0.6.0"
 regex = "1.12.3"
 regex-lite = "0.1.8"
-reqwest = "0.12"
+# rustls statt der Vorgabe: `default-tls` zieht hyper-tls -> native-tls -> openssl,
+# und OpenSSL kollidiert auf Linux mit dem BoringSSL aus wreq (beide beanspruchen
+# -lssl/-lcrypto). charset/http2/system-proxy bleiben, damit sich sonst nichts aendert.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "charset",
+    "http2",
+    "system-proxy",
+] }
 rmcp = { version = "0.15.0", default-features = false }
 runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
 rustls = { version = "0.23", default-features = false, features = [
@@ -233,7 +241,18 @@ rustls-pki-types = "1.14.0"
 schemars = "0.8.22"
 seccompiler = "0.5.0"
 semver = "1.0"
-sentry = "0.46.0"
+# Sentrys Vorgabe enthaelt `transport = ["reqwest", "native-tls"]`, und
+# `native-tls` schaltet `reqwest/default-tls` ein -> hyper-tls -> openssl.
+# Gleiche Bausteine, nur mit rustls statt native-tls.
+sentry = { version = "0.46.0", default-features = false, features = [
+    "backtrace",
+    "contexts",
+    "debug-images",
+    "panic",
+    "release-health",
+    "reqwest",
+    "rustls",
+] }
 serde = "1"
 serde_json = "1"
 serde_path_to_error = "0.1.20"

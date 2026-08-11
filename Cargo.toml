@@ -37,11 +37,14 @@ ctox-postgres-adapter = { path = "src/tools/postgres-adapter" }
 rxdb = { package = "ctox-rxdb", path = "src/core/rxdb" }
 ctox-mailserver = { path = "src/core/mailserver" }
 crossterm = "0.28"
-git2 = "0.20"
+# Ohne Vorgabemerkmale: `https` bindet libgit2 gegen OpenSSL, und OpenSSL
+# kollidiert auf Linux mit dem BoringSSL aus wreq. Die Wurzel benutzt git2 nur
+# lokal (jami_native: Repository/Sort); die einzige Kiste mit Fernzugriff
+# (cliproxyapi) deklariert git2 selbst schon ohne Vorgabemerkmale.
+git2 = { version = "0.20", default-features = false }
 include_dir = "0.7"
 libc = "0.2"
 mailparse = "0.16"
-native-tls = "0.2"
 notify = "8.2"
 polars = { version = "0.52", default-features = false, features = [
     "lazy", "parquet", "csv", "json",
@@ -62,12 +65,14 @@ rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 # `s + other.as_str()` (not `s + &other`) anywhere in this crate.
 rhai = { version = "1", features = ["serde"] }
 ring = "0.17"
+rustls-native-certs = "0.8"
 scraper = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tiny_http = "0.12"
-ureq = { version = "2.12", features = ["native-tls"] }
+# `tls` ist ureqs rustls-Rueckwand; `native-tls` wuerde OpenSSL hereinziehen.
+ureq = { version = "2.12", features = ["tls"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
@@ -110,6 +115,7 @@ members = [
     "src/tools/postgres-adapter",
 ]
 exclude = [
+    "src/apps/desktop",
     "src/core/communication/whatsapp_rust",
     "src/core/harness",
     "src/core/inference/models/qwen3_embedding_0_6b",
