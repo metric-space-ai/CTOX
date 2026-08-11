@@ -1313,3 +1313,36 @@ test('ein unvollstaendig geladener Lead meldet nicht "0 Quellen"', () => {
   const leer = hooks.researchFieldReview({ ...lead, evidence: [] });
   assert.equal(leer.evidenceUnloaded, false);
 });
+
+test('gepflegte CRM-Kontaktdaten werden uebernommen, nicht neu erraten', async () => {
+  // Am 11.08.2026 stand im gesamten Lead-Bestand KEINE einzige E-Mail-Adresse an
+  // einem Ansprechpartner — die Serien-E-Mail war damit unmoeglich. Im CRM lagen
+  // gleichzeitig 60.021 von 60.640 Personen MIT Adresse, fuer denselben Roger
+  // Wintzen woertlich roger.wintzen@chemofast.com.
+  const lead = {
+    id: 'lead_test',
+    contacts: [
+      { id: 'c1', name: 'Roger Wintzen', email: '', phone: '', position: '' },
+      { id: 'c2', name: 'Eigene Recherche', email: 'schon@da.example', phone: '' },
+      { id: 'c3', name: 'Nicht im CRM', email: '', phone: '' },
+    ],
+  };
+  const context = {
+    contextAvailable: true,
+    people: [
+      { display_name: 'Roger Wintzen', email: 'roger.wintzen@chemofast.com', phone: '+4921548123', position: 'Geschäftsführer', person_id: 4711 },
+      { display_name: 'Eigene Recherche', email: 'crm@example.com' },
+    ],
+  };
+  const geaendert = await hooks.uebernehmeCrmKontaktdaten(lead, context);
+  assert.equal(geaendert, true);
+  assert.equal(lead.contacts[0].email, 'roger.wintzen@chemofast.com', 'fehlende Adresse wird uebernommen');
+  assert.equal(lead.contacts[0].sellify_person_id, 4711);
+  assert.equal(lead.contacts[1].email, 'schon@da.example', 'vorhandener Wert bleibt stehen — er kann aktueller sein');
+  assert.equal(lead.contacts[2].email, '', 'wer nicht im CRM steht, bekommt nichts erfunden');
+
+  // Ohne CRM-Kontext bleibt alles unveraendert.
+  const unberuehrt = { id: 'x', contacts: [{ id: 'c', name: 'A', email: '' }] };
+  assert.equal(await hooks.uebernehmeCrmKontaktdaten(unberuehrt, { contextAvailable: false, people: [] }), false);
+  assert.equal(unberuehrt.contacts[0].email, '');
+});

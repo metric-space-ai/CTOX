@@ -1716,6 +1716,64 @@ async function loadSellifyRecipientContext(lead) {
   }
 }
 
+// Was im CRM gepflegt ist, wird uebernommen — nicht neu erraten.
+//
+// Am 11.08.2026 stand im gesamten Lead-Bestand KEINE einzige E-Mail-Adresse an
+// einem Ansprechpartner. Damit war die Serien-E-Mail fachlich unmoeglich: der
+// Knopf war aktiv, filterte aber auf gueltige Adressen und behielt null
+// Empfaenger. Gleichzeitig lagen im CRM 60.021 von 60.640 Personen MIT Adresse,
+// fuer denselben Roger Wintzen von CHEMOFAST woertlich
+// roger.wintzen@chemofast.com. Die Recherche suchte im offenen Netz nach etwas,
+// das zwei Handgriffe entfernt gepflegt bereitlag.
+//
+// Uebernommen wird nur, was FEHLT. Ein am Lead vorhandener Wert bleibt stehen —
+// er kann aus der Recherche stammen und aktueller sein als das CRM. Und es wird
+// nichts erfunden: jeder Wert kommt aus einem echten CRM-Datensatz.
+function crmSchluessel(text) {
+  return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+async function uebernehmeCrmKontaktdaten(lead, context) {
+  if (!context?.contextAvailable || !Array.isArray(context.people) || !context.people.length) return false;
+  const nachName = new Map();
+  for (const person of context.people) {
+    const schluessel = crmSchluessel(personDisplayName(person));
+    if (schluessel && !nachName.has(schluessel)) nachName.set(schluessel, person);
+  }
+  const kontakte = Array.isArray(lead?.contacts) ? lead.contacts : [];
+  let geaendert = false;
+  const neueKontakte = kontakte.map((kontakt) => {
+    const person = nachName.get(crmSchluessel(personDisplayName(kontakt)));
+    if (!person) return kontakt;
+    const ergaenzt = { ...kontakt };
+    const uebernehmen = (feld, wert) => {
+      const vorhanden = String(ergaenzt[feld] || '').trim();
+      const neu = String(wert || '').trim();
+      if (vorhanden || !neu) return;
+      ergaenzt[feld] = neu;
+      geaendert = true;
+    };
+    uebernehmen('email', person.email);
+    uebernehmen('person_email', person.email);
+    uebernehmen('phone', person.phone || person.telephone);
+    uebernehmen('person_telefon', person.phone || person.telephone);
+    uebernehmen('position', person.position || person.function);
+    if (!ergaenzt.sellify_person_id && person.person_id) {
+      ergaenzt.sellify_person_id = person.person_id;
+      geaendert = true;
+    }
+    return ergaenzt;
+  });
+  if (!geaendert) return false;
+  lead.contacts = neueKontakte;
+  try {
+    await patchLead(lead.id, { contacts: neueKontakte });
+  } catch (error) {
+    console.warn('[thesen-outbound] CRM-Kontaktdaten konnten nicht gespeichert werden', error);
+  }
+  return true;
+}
+
 async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
   if (!lead?.id) return new Map();
   if (!force && state.recipientEligibilityReady.has(lead.id)) {
@@ -1745,6 +1803,7 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
   if (context.timedOut) {
     console.warn('[thesen-outbound] Sperrvermerkspruefung hat die Frist ueberschritten', lead.id);
   }
+  await uebernehmeCrmKontaktdaten(lead, context);
   const decisions = deriveLeadRecipientEligibility(lead, context);
   for (const [contactId, decision] of decisions) {
     state.recipientEligibility.set(recipientEligibilityKey(lead.id, contactId), decision);
@@ -4159,6 +4218,7 @@ export const __thesenOutboundTestHooks = {
   leadReadyForValidation,
   renderResearchReview,
   researchFieldReview,
+  uebernehmeCrmKontaktdaten,
   researchFieldValue,
   validationBlockers,
   RESEARCH_FIELD_GROUPS,
