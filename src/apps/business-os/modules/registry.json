@@ -420,8 +420,8 @@
         "editable_after_install": true,
         "distribution": "catalog-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -441,8 +441,8 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
       "deletable": true
     },

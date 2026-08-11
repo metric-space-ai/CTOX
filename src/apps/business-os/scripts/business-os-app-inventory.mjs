@@ -42,11 +42,11 @@ export function loadBusinessOsAppInventory() {
   const coreApps = sourceApps.filter((app) => app.installScope === 'core');
   assertExactIds(systemAppIds, coreApps.map((app) => app.id), 'system-apps.json', 'core module manifests');
 
-  if (sourceApps.length !== 34) {
-    throw new Error(`Business OS source inventory must contain exactly 34 apps; found ${sourceApps.length}`);
+  if (sourceApps.length !== 35) {
+    throw new Error(`Business OS source inventory must contain exactly 35 apps; found ${sourceApps.length}`);
   }
-  if (coreApps.length !== 11) {
-    throw new Error(`Business OS system inventory must contain exactly 11 apps; found ${coreApps.length}`);
+  if (coreApps.length !== 13) {
+    throw new Error(`Business OS system inventory must contain exactly 13 apps; found ${coreApps.length}`);
   }
 
   return Object.freeze({
