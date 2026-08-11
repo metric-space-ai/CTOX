@@ -1850,6 +1850,15 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
   await uebernehmeCrmKontaktdaten(lead, context);
   const decisions = deriveLeadRecipientEligibility(lead, context);
   for (const [contactId, decision] of decisions) {
+    if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('urteilsfalle')) {
+      const vorher = state.recipientEligibility.get(recipientEligibilityKey(lead.id, contactId));
+      if (vorher && vorher.status !== decision.status) {
+        console.warn('[URTEILSFALLE]', lead.id, contactId,
+          `${vorher.status} -> ${decision.status}`, `force=${force}`,
+          `timedOut=${!!context?.timedOut}`, `personen=${(context?.people || []).length}`,
+          '\n', new Error('Aufrufspur').stack);
+      }
+    }
     state.recipientEligibility.set(recipientEligibilityKey(lead.id, contactId), decision);
   }
   state.recipientEligibilityReady.add(lead.id);
