@@ -54,6 +54,7 @@ const ROOM_CIRCUIT_OPEN_MS = 120_000;
 const ROOM_RETRY_BASE_MS = 1_000;
 const ROOM_RETRY_MAX_MS = 30_000;
 const COLLECTION_START_GAP_MS = 500;
+const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
 const DESKTOP_ICON_SAFE_FIELDS = new Set([
   'id',
@@ -74,6 +75,7 @@ const DESKTOP_ICON_SAFE_FIELDS = new Set([
   '_attachments',
 ]);
 const desktopIconRepairPromises = new WeakMap();
+const desktopIconReplicationCollections = new WeakMap();
 const RETRYABLE_CONTROL_PLANE_CODES = new Set([
   'control_plane_token_expired',
   'temporary_unavailable',
@@ -92,6 +94,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   const collectionLeaseCounts = new Map();
   const suspendedCollections = new Set();
   let globalRestartTimer = null;
+  let repairCycleInProgress = false;
   let collectionStartQueue = Promise.resolve();
   let multiTabCoordinator = null;
   const multiTabUnsubscribers = [];
@@ -187,48 +190,6 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       `Direct multi-tab failover for ${collection} did not reach the native WebRTC peer before the deadline.`
     ));
   };
-  const resetRoomCircuit = () => {
-    roomCircuit.state = 'closed';
-    roomCircuit.consecutiveFailures = 0;
-    roomCircuit.openUntilMs = 0;
-    roomCircuit.nextProbeAtMs = 0;
-    roomCircuit.permanent = false;
-    roomCircuit.lastError = null;
-    roomCircuit.updatedAtMs = Date.now();
-  };
-  const registerRoomFailure = (error) => {
-    const serialized = serializeError(error) || {};
-    const now = Date.now();
-    const failureKey = `${serialized.code || ''}|${serialized.message || ''}`;
-    const duplicate = roomCircuit.lastFailureKey === failureKey
-      && now - Number(roomCircuit.lastFailureAtMs || 0) < 1_000;
-    roomCircuit.lastFailureKey = failureKey;
-    roomCircuit.lastFailureAtMs = now;
-    roomCircuit.lastError = serialized;
-    roomCircuit.updatedAtMs = now;
-    if (serialized.retryable === false) {
-      roomCircuit.state = 'open';
-      roomCircuit.permanent = true;
-      roomCircuit.openUntilMs = 0;
-      roomCircuit.nextProbeAtMs = 0;
-      return null;
-    }
-    if (!duplicate) roomCircuit.consecutiveFailures += 1;
-    if (
-      roomCircuit.state === 'half_open'
-      || roomCircuit.consecutiveFailures >= ROOM_CIRCUIT_FAILURE_THRESHOLD
-    ) {
-      roomCircuit.state = 'open';
-      roomCircuit.permanent = false;
-      roomCircuit.openUntilMs = now + ROOM_CIRCUIT_OPEN_MS;
-      roomCircuit.nextProbeAtMs = roomCircuit.openUntilMs;
-      return ROOM_CIRCUIT_OPEN_MS;
-    }
-    roomCircuit.state = 'closed';
-    const exponent = Math.max(0, roomCircuit.consecutiveFailures - 1);
-    const base = Math.min(ROOM_RETRY_MAX_MS, ROOM_RETRY_BASE_MS * (2 ** exponent));
-    return base + Math.floor(Math.random() * Math.max(1, Math.floor(base / 4)));
-  };
   const recordCollection = (collection, update) => {
     const current = diagnostics.collections[collection] || {};
     const updatedAt = new Date().toISOString();
@@ -291,7 +252,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   const scheduleRestartOfUnhealthyCollections = (triggerCollection, delayMs = 5000) => {
     if (stopped) return;
     if (roomCircuit.permanent) return;
-    if (globalRestartTimer) return;
+    if (globalRestartTimer || repairCycleInProgress) return;
     const now = Date.now();
     if (roomCircuit.state === 'open' && roomCircuit.openUntilMs > now) {
       delayMs = Math.max(delayMs, roomCircuit.openUntilMs - now);
@@ -299,7 +260,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     globalRestartTimer = setTimeout(async () => {
       if (stopped) return;
       globalRestartTimer = null;
-      if (roomCircuit.permanent) return;
+      if (roomCircuit.permanent || repairCycleInProgress) return;
       if (roomCircuit.state === 'open') {
         const remaining = Number(roomCircuit.openUntilMs || 0) - Date.now();
         if (remaining > 0) {
@@ -312,19 +273,21 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       }
       const collections = [...activeCollections].filter(collectionNeedsRestart);
       let nextDelay = 0;
+      repairCycleInProgress = true;
       try {
         if (collections.length) {
-          await syncRuntime.restartCollections(collections);
-          resetRoomCircuit();
+          const stableBridges = await syncRuntime.restartCollections(collections);
+          applyRoomRepairCycleOutcome(roomCircuit, { stableCount: stableBridges.length });
         }
       } catch (restartError) {
         const restartSerialized = serializeError(restartError);
-        nextDelay = registerRoomFailure(restartSerialized) || 0;
-        if (triggerCollection) {
-          recordCollection(triggerCollection, { status: 'failed', connectionStatus: 'error', lastError: restartSerialized });
-        }
+        // The circuit receives one verdict for the whole repair cycle. Per-
+        // collection watchdogs only mark their own collection unhealthy and
+        // cannot independently advance or reopen the room circuit.
+        nextDelay = applyRoomRepairCycleOutcome(roomCircuit, { errors: [restartSerialized] }) || 0;
         emitDiagnostic({ phase: 'failed', lastError: restartSerialized });
       } finally {
+        repairCycleInProgress = false;
         if (!stopped && [...activeCollections].some(collectionNeedsRestart)) {
           scheduleRestartOfUnhealthyCollections(triggerCollection, nextDelay || ROOM_RETRY_BASE_MS);
         }
@@ -334,22 +297,22 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   const scheduleGlobalRestart = (triggerCollection, error) => {
     if (stopped) return;
     const serialized = serializeError(error);
-    const retryDelay = registerRoomFailure(serialized);
     const lifecycleEvent = isLifecycleEvent(error) ? serialized : null;
+    const retryable = serialized?.retryable !== false;
     const reconnectingSince = new Date().toISOString();
     recordCollection(triggerCollection, {
-      status: retryDelay == null ? 'error' : 'reconnecting',
-      connectionStatus: retryDelay == null ? 'error' : 'reconnecting',
+      status: retryable ? 'reconnecting' : 'error',
+      connectionStatus: retryable ? 'reconnecting' : 'error',
       lastError: !lifecycleEvent ? serialized : diagnostics.collections[triggerCollection]?.lastError || null,
       lastLifecycleEvent: lifecycleEvent || diagnostics.collections[triggerCollection]?.lastLifecycleEvent || null,
-      reconnectingSince,
+      reconnectingSince: retryable ? reconnectingSince : null,
     });
     emitDiagnostic({
-      phase: retryDelay == null ? 'failed' : 'reconnecting',
+      phase: retryable ? 'reconnecting' : 'failed',
       lastError: lifecycleEvent ? null : serialized,
       lastLifecycleEvent: lifecycleEvent,
     });
-    if (retryDelay != null) scheduleRestartOfUnhealthyCollections(triggerCollection, retryDelay);
+    if (retryable) scheduleRestartOfUnhealthyCollections(triggerCollection, ROOM_RETRY_BASE_MS);
   };
   const onlineListener = () => scheduleRestartOfUnhealthyCollections(null, 250);
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
@@ -358,7 +321,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260811-verlauf-startet-heute-v98');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260807-indexeddb-version-floor-v91');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -646,7 +609,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       // Every collection shares one bounded room send queue. Pacing initial
       // catch-up keeps a legitimate multi-collection bootstrap below the
       // wedged-peer recycle threshold while preserving deterministic order.
-      collectionStartQueue = bridgePromise.catch(() => {}).then(() => delay(COLLECTION_START_GAP_MS));
+      collectionStartQueue = boundedCollectionStartQueueStep(bridgePromise);
       bridges.set(collection, bridgePromise);
       publishResourceBudget();
       try {
@@ -657,6 +620,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
             collection,
             reason: 'startup-in-progress',
             state: null,
+            ready: bridgePromise,
             stop: async () => {
               const resolvedBridge = await bridgePromise.catch(() => null);
               await resolvedBridge?.stop?.();
@@ -707,7 +671,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         reconnectingSince: new Date().toISOString(),
       });
       try {
-        const bridge = await bridgePromise;
+        const bridge = await withTimeout(bridgePromise, 3000);
         await withTimeout(bridge?.stop?.(), 3000);
       } catch {
         // The old bridge is already unusable. Dropping it from the cache is enough.
@@ -751,36 +715,45 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       for (const collection of requested) suspendedCollections.delete(collection);
       if (!suspendedCollections.size) suspensionReason = '';
       for (const collection of restartable) activeCollections.add(collection);
-      for (const collection of restartable) {
-        await this.stopCollection(collection, { preserveLeases: true, preservePin: true });
-      }
-      const startBatch = async () => {
+      await Promise.all(restartable.map((collection) => this.stopCollection(collection, {
+        preserveLeases: true,
+        preservePin: true,
+      })));
+      const startBatch = async (batchCollections) => {
         collectionStartQueue = Promise.resolve();
-        const batch = [];
-        for (const collection of restartable) {
-          batch.push(await this.startCollection(collection, {
+        const starts = [];
+        for (const collection of batchCollections) {
+          starts.push(this.startCollection(collection, {
             pin: pinnedBeforeRestart.get(collection) === true,
-          }));
+          }).then(
+            (bridge) => ({ collection, bridge }),
+            (error) => ({ collection, error }),
+          ));
           await delay(COLLECTION_RESTART_GAP_MS);
         }
-        return batch;
+        return Promise.all(starts);
       };
-      const waitForStableBatch = async (batch) => {
-        for (let index = 0; index < restartable.length; index += 1) {
+      const restarted = await repairRestartBatch(await startBatch(restartable), {
+        waitForStable: async ({ collection, bridge, error }) => {
+          if (error) throw error;
+          let readyBridge = bridge;
+          if (!readyBridge?.state && readyBridge?.ready) {
+            readyBridge = await withRejectingTimeout(
+              () => readyBridge.ready,
+              NATIVE_PEER_RESTART_OPEN_TIMEOUT_MS,
+              `Native peer bridge did not start for ${collection} within ${NATIVE_PEER_RESTART_OPEN_TIMEOUT_MS}ms.`,
+            );
+          }
           await waitForStableNativePeerOpenState(
-            batch[index]?.state,
-            restartable[index],
+            readyBridge?.state,
+            collection,
             NATIVE_PEER_RESTART_OPEN_TIMEOUT_MS,
             NATIVE_PEER_RESTART_STABLE_MS,
           );
-        }
-      };
-      let restarted = await startBatch();
-      try {
-        await waitForStableBatch(restarted);
-      } catch (error) {
-        const lifecycleEvent = serializeError(error);
-        for (const collection of restartable) {
+          return readyBridge;
+        },
+        stopFailed: async ({ collection, error }) => {
+          const lifecycleEvent = serializeError(error);
           recordCollection(collection, {
             status: 'reconnecting',
             connectionStatus: 'reconnecting',
@@ -789,15 +762,37 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
             reconnectingSince: new Date().toISOString(),
           });
           await this.stopCollection(collection, { preserveLeases: true, preservePin: true });
-        }
-        restarted = await startBatch();
-        try {
-          await waitForStableBatch(restarted);
-        } catch (retryError) {
-          throw new Error(`Native peer did not open for restarted collections after batch retry: ${formatLifecycleError(retryError)}`);
-        }
+        },
+        restartFailed: (failed) => startBatch(failed.map(({ collection }) => collection)),
+      });
+      for (const { collection, bridge } of restarted.stable) {
+        recordCollection(collection, {
+          status: 'connected',
+          connectionStatus: 'connected',
+          reconnectingSince: null,
+          lastError: null,
+          lastLifecycleEvent: null,
+        });
       }
-      return restarted;
+      for (const { collection, error } of restarted.failed) {
+        recordCollection(collection, {
+          status: 'reconnecting',
+          connectionStatus: 'reconnecting',
+          lastError: null,
+          lastLifecycleEvent: serializeError(error),
+          reconnectingSince: new Date().toISOString(),
+        });
+      }
+      if (!restarted.stable.length && restarted.failed.length) {
+        const retryError = new AggregateError(
+          restarted.failed.map(({ error }) => error),
+          `Native peer did not open for any restarted collection after individual retry: ${restarted.failed.map(({ error }) => formatLifecycleError(error)).join('; ')}`,
+        );
+        retryError.code = 'peer_connect_timeout';
+        retryError.retryable = true;
+        throw retryError;
+      }
+      return restarted.stable.map(({ bridge }) => bridge);
     },
     async suspendCollections(collections, reason = 'sync-suspended') {
       if (stopped) throw new Error('Business OS sync runtime has been stopped');
@@ -937,6 +932,107 @@ function peerSessionKey(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function boundedCollectionStartQueueStep(
+  bridgePromise,
+  timeoutMs = COLLECTION_START_QUEUE_STEP_TIMEOUT_MS,
+  gapMs = COLLECTION_START_GAP_MS,
+) {
+  return withTimeout(Promise.resolve(bridgePromise).catch(() => undefined), timeoutMs)
+    .then(() => delay(gapMs));
+}
+
+async function settleRestartEntries(entries, waitForStable) {
+  const outcomes = await Promise.all((entries || []).map(async (entry) => {
+    try {
+      const bridge = await waitForStable(entry);
+      return { status: 'stable', collection: entry.collection, bridge };
+    } catch (error) {
+      return { status: 'failed', collection: entry.collection, error };
+    }
+  }));
+  return {
+    stable: outcomes.filter(({ status }) => status === 'stable'),
+    failed: outcomes.filter(({ status }) => status === 'failed'),
+  };
+}
+
+async function repairRestartBatch(entries, { waitForStable, stopFailed, restartFailed }) {
+  const firstAttempt = await settleRestartEntries(entries, waitForStable);
+  if (!firstAttempt.failed.length) return firstAttempt;
+
+  // Each failed member is isolated. Stable peers remain untouched while the
+  // failed subset is stopped and receives its one bounded retry.
+  await Promise.all(firstAttempt.failed.map((failure) => stopFailed(failure)));
+  let retryEntries;
+  try {
+    retryEntries = await restartFailed(firstAttempt.failed);
+  } catch (error) {
+    retryEntries = firstAttempt.failed.map(({ collection }) => ({ collection, error }));
+  }
+  const retryAttempt = await settleRestartEntries(retryEntries, waitForStable);
+  return {
+    stable: [...firstAttempt.stable, ...retryAttempt.stable],
+    failed: retryAttempt.failed,
+  };
+}
+
+function resetRoomCircuitState(roomCircuit, now = Date.now()) {
+  roomCircuit.state = 'closed';
+  roomCircuit.consecutiveFailures = 0;
+  roomCircuit.openUntilMs = 0;
+  roomCircuit.nextProbeAtMs = 0;
+  roomCircuit.permanent = false;
+  roomCircuit.lastError = null;
+  roomCircuit.lastFailureKey = '';
+  roomCircuit.lastFailureAtMs = 0;
+  roomCircuit.updatedAtMs = now;
+}
+
+function registerRoomRepairCycleFailure(
+  roomCircuit,
+  error,
+  now = Date.now(),
+  random = Math.random,
+) {
+  const serialized = serializeError(error) || {};
+  roomCircuit.lastFailureKey = `${serialized.code || ''}|${serialized.message || ''}`;
+  roomCircuit.lastFailureAtMs = now;
+  roomCircuit.lastError = serialized;
+  roomCircuit.updatedAtMs = now;
+  roomCircuit.consecutiveFailures += 1;
+  if (
+    roomCircuit.state === 'half_open'
+    || roomCircuit.consecutiveFailures >= ROOM_CIRCUIT_FAILURE_THRESHOLD
+  ) {
+    roomCircuit.state = 'open';
+    roomCircuit.permanent = false;
+    roomCircuit.openUntilMs = now + ROOM_CIRCUIT_OPEN_MS;
+    roomCircuit.nextProbeAtMs = roomCircuit.openUntilMs;
+    return ROOM_CIRCUIT_OPEN_MS;
+  }
+  roomCircuit.state = 'closed';
+  const exponent = Math.max(0, roomCircuit.consecutiveFailures - 1);
+  const base = Math.min(ROOM_RETRY_MAX_MS, ROOM_RETRY_BASE_MS * (2 ** exponent));
+  return base + Math.floor(random() * Math.max(1, Math.floor(base / 4)));
+}
+
+function applyRoomRepairCycleOutcome(roomCircuit, { stableCount = 0, errors = [] } = {}, options = {}) {
+  if (stableCount > 0) {
+    resetRoomCircuitState(roomCircuit, options.now);
+    return 0;
+  }
+  if (!errors.length) return 0;
+  const cycleError = errors.length === 1
+    ? errors[0]
+    : new AggregateError(errors, `${errors.length} collections failed in one room repair cycle.`);
+  return registerRoomRepairCycleFailure(
+    roomCircuit,
+    cycleError,
+    options.now,
+    options.random,
+  );
 }
 
 function withTimeout(value, ms) {
@@ -1094,10 +1190,11 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     recordCollection?.(collection, { status: 'pending', reason: 'collection-not-registered' });
     return { mode: 'pending', collection, reason: 'collection-not-registered' };
   }
-  if (collection === 'desktop_icons') {
+  if (collection === 'desktop_icons' && typeof rxCollection.find === 'function') {
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260811-verlauf-startet-heute-v98');
+  const replicationCollection = collectionForReplication(collection, rxCollection);
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260807-indexeddb-version-floor-v91');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -1161,7 +1258,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
   subscriptions.push({ unsubscribe: unregisterSignalingErrorHandler });
   let nativePeerOpenWatchdog = null;
   const replicationState = await rxdb.replicateWebRTC({
-    collection: rxCollection,
+    collection: replicationCollection,
     // Phase 3: pass the BARE sync room so every collection multiplexes onto a
     // single shared CtoxWebRtcNativePeer for this room.
     topic: room,
@@ -1443,6 +1540,87 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
   };
 }
 
+// desktop_icons is a permissive, field-merging browser cache. Keep the
+// destructive preflight repair above, and also project at the storage boundary
+// so a row written while replication is live cannot leak browser-only fields.
+function collectionForReplication(collectionName, collection) {
+  if (collectionName !== 'desktop_icons' || !collection?.storageCollection) return collection;
+  const cached = desktopIconReplicationCollections.get(collection);
+  if (cached) return cached;
+
+  const storage = collection.storageCollection;
+  const replicationStorage = new Proxy(storage, {
+    get(target, property) {
+      if (property === 'getChangedDocumentsSince' && typeof target.getChangedDocumentsSince === 'function') {
+        return async (...args) => {
+          const result = await target.getChangedDocumentsSince(...args);
+          if (!result || typeof result !== 'object') return result;
+          return {
+            ...result,
+            documents: Array.isArray(result.documents)
+              ? result.documents.map(projectDesktopIconForReplication)
+              : [],
+          };
+        };
+      }
+      if (property === 'bulkWrite' && typeof target.bulkWrite === 'function') {
+        return (rows, ...args) => target.bulkWrite(
+          Array.isArray(rows) ? rows.map(projectDesktopIconStorageRow) : rows,
+          ...args,
+        );
+      }
+      return boundProxyMember(target, property);
+    },
+  });
+  const replicationCollection = new Proxy(collection, {
+    get(target, property) {
+      if (property === 'storageCollection') return replicationStorage;
+      return boundProxyMember(target, property);
+    },
+  });
+  desktopIconReplicationCollections.set(collection, replicationCollection);
+  return replicationCollection;
+}
+
+function boundProxyMember(target, property) {
+  const value = Reflect.get(target, property, target);
+  return typeof value === 'function' ? value.bind(target) : value;
+}
+
+function projectDesktopIconStorageRow(row) {
+  if (row?.document && typeof row.document === 'object') {
+    return { ...row, document: projectDesktopIconForReplication(row.document) };
+  }
+  return projectDesktopIconForReplication(row);
+}
+
+function projectDesktopIconForReplication(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const updatedAtMs = boundedPositiveNumber(source.updated_at_ms, source._meta?.lwt);
+  const lwt = boundedPositiveNumber(source._meta?.lwt, updatedAtMs);
+  const icon = {
+    id: boundedString(source.id, 128),
+    target_type: boundedString(source.target_type, 32) || 'app',
+    target_module: boundedString(source.target_module, 128),
+    target_record_id: boundedString(source.target_record_id, 256),
+    label: boundedString(source.label, 256),
+    glyph: isSafeDesktopIconGlyph(source.glyph) ? String(source.glyph).trim() : '◻︎',
+    x: boundedNumber(source.x),
+    y: boundedNumber(source.y),
+    pinned: Boolean(source.pinned),
+    hidden: Boolean(source.hidden),
+    sort_index: boundedNumber(source.sort_index),
+    updated_at_ms: updatedAtMs,
+    _deleted: Boolean(source._deleted),
+    _meta: { lwt },
+  };
+  const revision = boundedString(source._rev, 256);
+  if (revision) icon._rev = revision;
+  const hybridLogicalClock = boundedString(source._meta?.ctoxHlc, 256);
+  if (hybridLogicalClock) icon._meta.ctoxHlc = hybridLogicalClock;
+  return icon;
+}
+
 async function repairDesktopIconsBeforeReplication(collection) {
   let repairPromise = desktopIconRepairPromises.get(collection);
   if (repairPromise) return repairPromise;
@@ -1540,6 +1718,16 @@ function boundedNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.max(-100_000, Math.min(100_000, number));
+}
+
+function boundedPositiveNumber(value, fallback = 1) {
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) return Math.min(number, 1_000_000_000_000_000);
+  const fallbackNumber = Number(fallback);
+  if (Number.isFinite(fallbackNumber) && fallbackNumber > 0) {
+    return Math.min(fallbackNumber, 1_000_000_000_000_000);
+  }
+  return 1;
 }
 
 function formatLifecycleError(error) {
@@ -2517,6 +2705,12 @@ export const __ctoxSyncTestHooks = {
   checkpointDiagnosticFields,
   maxCheckpointLwt,
   snapshotDiagnostics,
+  boundedCollectionStartQueueStep,
+  repairRestartBatch,
+  applyRoomRepairCycleOutcome,
+  resetRoomCircuitState,
+  collectionForReplication,
+  projectDesktopIconForReplication,
 };
 
 function replicationIoMessageFor(code) {

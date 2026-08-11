@@ -9,7 +9,12 @@ const COMMAND_SYNC_FLUSH_TIMEOUT_MS = 15000;
 // by a native browser dialog. That failover legitimately takes longer than a
 // normal leader-side push, so it needs a separate deadline.
 const COMMAND_FOLLOWER_SYNC_FLUSH_TIMEOUT_MS = 45000;
-const COMMAND_CAPABILITY_TIMEOUT_MS = 5000;
+// A cold native runtime may still be materializing the exact collection grant
+// baseline when the shell asks for its first capability. That work can exceed
+// the normal control-plane request budget on a large Business OS store. Keep a
+// bounded cold-start window and, below, share one request across all callers so
+// bootstrap/maintenance retries cannot create a server-side request storm.
+const COMMAND_CAPABILITY_TIMEOUT_MS = 120000;
 const COMMAND_CAPABILITY_TERMINAL_NEGATIVE_CACHE_MS = 10000;
 // Transient failures only need enough suppression to avoid an immediate request
 // storm. The submit retry waits slightly longer, so it always performs a fresh
@@ -106,6 +111,7 @@ let capabilityTokenCache = {
   failureCode: '',
   failureTransient: false,
 };
+let capabilityTokenRequestInFlight = null;
 
 export async function getBusinessOsCapabilityToken({
   timeoutMs = COMMAND_CAPABILITY_TIMEOUT_MS,
@@ -137,6 +143,20 @@ async function acquireBusinessOsCapabilityToken({
     };
     return capabilityAcquisitionResult({ token: capabilityTokenCache.token });
   }
+  if (!capabilityTokenRequestInFlight) {
+    capabilityTokenRequestInFlight = requestBusinessOsCapabilityToken(timeoutMs);
+  }
+  const inFlight = capabilityTokenRequestInFlight;
+  try {
+    return await inFlight;
+  } finally {
+    if (capabilityTokenRequestInFlight === inFlight) {
+      capabilityTokenRequestInFlight = null;
+    }
+  }
+}
+
+async function requestBusinessOsCapabilityToken(timeoutMs) {
   const abortController = typeof AbortController === 'function' ? new AbortController() : null;
   try {
     const res = await withTimeout(
@@ -194,6 +214,7 @@ export function resetBusinessOsCapabilityTokenCacheForTests() {
     failureCode: '',
     failureTransient: false,
   };
+  capabilityTokenRequestInFlight = null;
 }
 
 function capabilityAcquisitionResult({ token = null, code = '', transient = false } = {}) {
@@ -1134,10 +1155,12 @@ function commandReceipt(command, commandId) {
       ? ''
       : compatibilityTaskId
   );
+  const status = commandReceiptStatus(command);
+  const legacyTaskStatus = String(command?.task_status || '').trim();
   return {
     ok: !commandIsFailed(command),
     command_id: commandId,
-    status: String(command?.status || command?.execution_phase || 'accepted'),
+    status,
     execution_mode: command?.execution_mode || null,
     execution_task_id: taskId,
     task_id: taskId,
@@ -1145,11 +1168,24 @@ function commandReceipt(command, commandId) {
       taskId ? '' : compatibilityTaskId
     ),
     target_record_id: command?.target_record_id || command?.record_id || '',
-    task_status: String(command?.task_status || command?.status || ''),
+    task_status: legacyTaskStatus && legacyTaskStatus !== 'pending_sync' ? legacyTaskStatus : status,
     payload: command?.payload || null,
     result: command?.result || null,
     transport: 'rxdb-command-bus',
   };
+}
+
+function commandReceiptStatus(command) {
+  const executionPhase = String(command?.execution_phase || '').trim();
+  if (executionPhase === 'terminal') {
+    return String(command?.terminal_status || command?.status || 'terminal');
+  }
+  if (executionPhase) return executionPhase;
+  const legacyStatus = String(command?.status || '').trim();
+  if (command?.replication_phase === 'native_observed' && legacyStatus === 'pending_sync') {
+    return 'accepted';
+  }
+  return legacyStatus || 'accepted';
 }
 
 async function findDoc(collection, id, { swallowErrors = true } = {}) {

@@ -717,6 +717,41 @@ test('capability lookup aborts a hanging request and negatively caches the outag
   assert.equal(calls, 1);
 });
 
+test('concurrent cold capability lookups share one native request', async (context) => {
+  delete globalThis.CTOX_BUSINESS_OS_SESSION;
+  resetBusinessOsCapabilityTokenCacheForTests();
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let resolveFetch;
+  globalThis.fetch = () => {
+    calls += 1;
+    return new Promise((resolve) => { resolveFetch = resolve; });
+  };
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+    resetBusinessOsCapabilityTokenCacheForTests();
+  });
+
+  const first = getBusinessOsCapabilityToken({ timeoutMs: 1000 });
+  const second = getBusinessOsCapabilityToken({ timeoutMs: 1000 });
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  resolveFetch({
+    ok: true,
+    async json() {
+      return {
+        capability_token: 'cold-start-capability',
+        expires_at_ms: Date.now() + 60 * 60 * 1000,
+      };
+    },
+  });
+  assert.deepEqual(await Promise.all([first, second]), [
+    'cold-start-capability',
+    'cold-start-capability',
+  ]);
+  assert.equal(calls, 1);
+});
+
 test('command mutation fails before local insertion when authorization is unavailable', async (context) => {
   delete globalThis.CTOX_BUSINESS_OS_SESSION;
   resetBusinessOsCapabilityTokenCacheForTests();
