@@ -23,6 +23,7 @@ mod person_research_command;
 pub mod policy;
 mod rxdb_peer;
 mod rxdb_peer_browser;
+mod rxdb_peer_desktop_files;
 pub mod server;
 mod session;
 pub mod store;
