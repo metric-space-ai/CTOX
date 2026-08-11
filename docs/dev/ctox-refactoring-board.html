@@ -184,8 +184,16 @@ footer{
   <h1>Der Kern ist nicht instabil, weil Code fehlt. Er ist instabil, weil nichts ihn festhält.</h1>
   <p class="pfad"><b>Kritischer Pfad (11.08. abends):</b> <b>Der Arbeitsbaum ist leer</b> (<code>git status</code> = 0). Alle ~135 ungespeicherten Einträge sind in 10 geprüften Commits gelandet (DOM-Stabilität, Sync/Command-Bus, RxDB v91+Antwortdecke, Mission, Web-Stack, Design-Vorlagen, rustls-Migration, Multi-Provider+Coding-Agents, Mail-Modul, Doku) oder begründet archiviert (Track-B-Infra, SKF-Berichte, hr-enrich, 2 unfertige Tests, Creator-Katalogrest). Wächter: assert-rxdb-only <b>grün</b> (vorher 5 rot), app-quality-contracts <b>grün 35/35</b> (vorher Crash), JS-Suite 86/9 (HEAD vorher 77/15). <b>SCHNITT-6 ist gelandet</b> (Commit <code>b9ed00757</code>, gepusht): alle sechs Module move-only unter Budget geschnitten (store 27356, service 26225, office 13561, lcm 5310, channels 7035, outbound 5108 + sechs Companion-Dateien mit eigenen Budgetzeilen), kein Budget angehoben. Der module_size-Wächter ist <b>grün</b> — eigener Beweis im frischen Archiv+Patch, voller Testbau Exit 0; Sol-Abnahme zweifach service_loop 383/5 und mission 308/5. Grok-Gegenprüfung läuft (Run <code>…8ff5bee2</code>). Bei dir liegen: Release-Upgrade brand-demo/leadyoda, Auth-Assist-Entscheid. Kimi-Gesamtreview ab 18.08. <span style="opacity:.65">(Vorheriger Befund vom 09.08. bleibt unten als Historie.)</span></p>
   <div class="notenband">
-    <span class="note">Note B</span>
-    <span class="warum">Hochgestuft von B− am 11.08. spät: Arbeitsbaum leer, main baut aus der Historie, alles gepusht, service_loop exakt auf Baseline (383/5), und jetzt sind <b>alle</b> Wächter grün — rxdb-only, app-quality (35/35) und module_size (SCHNITT-6, Commit b9ed00757, kein Budget angehoben). Auf A fehlen: das unabhängige Kimi-Gesamtreview ab 18.08., die fünf klassifizierten echten Regressionen und die offenen Owner-Punkte (Releases, Auth-Assist).</span>
+    <span class="note">Repo B · Produkt ?</span>
+    <span class="warum"><b>Korrektur 11.08. nachts (Owner-Einwand):</b> Die bisherige Note maß nur Repo-Gesundheit (baut aus Historie, Baum leer, alle drei Wächter grün, Baseline reproduziert) — <b>nicht das Produkt</b>. Ladezeit einer Instanz, Verhalten unter ständigen Verbindungsabbrüchen, Command-Bus-Latenz und -Randfälle, Multi-User-Sync: dafür existiert keine einzige Messung (die Baseline-Tabelle sagt selbst „nie gemessen“). Die Produktnote bleibt offen, bis die Messtore M1–M5 unten mit Zahlen belegt sind; erst dann gibt es eine Gesamtnote.</span>
+  </div>
+  <div style="margin-top:10px;font-size:13px;line-height:1.55;color:var(--muted);max-width:100ch">
+    <b style="color:var(--fg,inherit)">Messtore für die Produktnote (je: Messaufbau + Zahl + Wiederholbarkeit):</b>
+    <b>M1 Kaltstart</b> — Daemon-Start → Shell antwortet (HTTP) und → Peer/Replikation bereit; Sekunden, je 5 Läufe.
+    <b>M2 Browser-Boot</b> — Navigation → Shell interaktiv → kritische Collections live; Sekunden (die nie gemessene P4-Zahl).
+    <b>M3 Command-Bus</b> — Dispatch→Receipt p50/p95 über ≥50 Commands; Randfälle: Kaltstartfenster, Offline-Dispatch, Timeout-Pfad.
+    <b>M4 Abbruch-Churn</b> — 10 Zyklen erzwungener Verbindungsabbruch (Peer-Kill/Netztrennung), je: Zeit bis Wiederanlauf, Datenverlust ja/nein.
+    <b>M5 Multi-User</b> — zwei Browser-Sitzungen, Schreiben in A sichtbar in B: Latenz, Konfliktverhalten bei gleichzeitigen Schreibern.
   </div>
 </header>
 
