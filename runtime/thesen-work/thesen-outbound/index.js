@@ -1656,6 +1656,22 @@ async function findSellifyRecords(collection, selector) {
 }
 
 async function loadSellifyRecipientContext(lead) {
+  // Die Sperrvermerkspruefung darf nicht daran scheitern, dass zufaellig noch
+  // niemand sellifyReadCollection() gerufen hat. state.sellifyPeople ist ein
+  // Zwischenspeicher, der erst beim ersten Zugriff gefuellt wird — beim Rendern
+  // der Empfaengerliste passierte das nie. Ergebnis am 11.08.2026: jeder Kontakt
+  // stand auf "Sellify-Sperrvermerk nicht pruefbar", das Haekchen war
+  // deaktiviert, und damit endete die Kette vor der Uebergabe. Das System hat
+  // dabei richtig gehandelt — ohne Pruefung der Kontaktsperre darf niemand
+  // angeschrieben werden; es konnte nur nicht pruefen.
+  if (!state.sellifyPeople?.find || !state.sellifyCompanies?.find) {
+    try {
+      sellifyReadCollection('sellify_companies');
+      sellifyReadCollection('sellify_people');
+    } catch (error) {
+      console.warn('[thesen-outbound] Sellify-Projektion fuer die Sperrvermerkspruefung nicht erreichbar', error);
+    }
+  }
   if (!state.sellifyPeople?.find || !state.sellifyCompanies?.find) {
     return { people: [], companies: [], contextAvailable: false };
   }

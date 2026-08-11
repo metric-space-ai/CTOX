@@ -1,11 +1,11 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from './dialogs.js?v=20260811-leiste-blockiert-nicht-v107';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+} from './file-integrity.js?v=20260811-leiste-blockiert-nicht-v107';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-leiste-blockiert-nicht-v107';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -3884,7 +3884,16 @@ function installChatStyles() {
     }
     .ctox-chat-dock {
       --ctox-date-pill-width: 146px;
-      pointer-events: auto;
+      /* Die Leiste faengt nur dort Klicks, wo sie etwas anzeigt.
+         .ctox-chat-root steht auf pointer-events:none, damit die App darunter
+         bedienbar bleibt — das Dock hob das fuer seine GESAMTE Flaeche wieder
+         auf, einschliesslich der durchsichtigen Zwischenraeume. Am 11.08.2026 lag
+         die Empfaengerauswahl von THESEN Outbound genau in diesem toten Streifen:
+         Haekchen sichtbar, jeder Klick landete im Dock. Ohne Empfaenger keine
+         Sellify-Uebergabe, kein Serienbrief, keine Serien-E-Mail — die Kette
+         endete an einem unsichtbaren Rechteck. Die Kinder holen sich
+         pointer-events unten einzeln zurueck. */
+      pointer-events: none;
       grid-row: 2;
       display: grid;
       grid-template-columns: 88px var(--ctox-date-pill-width) 34px;
@@ -3925,6 +3934,18 @@ function installChatStyles() {
     .ctox-chat-dock.has-many-chats .ctox-chat-strip {
       width: auto;
     }
+    /* Die sichtbaren Bedienelemente holen sich die Klicks zurueck, die der
+       Container abgegeben hat. Alles, was hier nicht steht, ist durchsichtiger
+       Zwischenraum — und der gehoert der App darunter. */
+    .ctox-chat-dock > *,
+    .ctox-chat-fab,
+    .ctox-chat-date-pill,
+    .ctox-chat-nav,
+    .ctox-chat-strip,
+    .ctox-chat-new {
+      pointer-events: auto;
+    }
+
     .ctox-chat-date-pill {
       display: inline-flex;
       align-items: center;

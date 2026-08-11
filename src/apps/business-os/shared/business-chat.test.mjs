@@ -2350,3 +2350,20 @@ test('eine Antwort auf einen alten Chat holt sich die Ansicht nicht', () => {
   assert.equal(state.selectedDate, heute);
   assert.notEqual(state.selectedDate, '2026-07-26');
 });
+
+test('die Chat-Leiste faengt nur dort Klicks, wo sie etwas anzeigt', () => {
+  // Am 11.08.2026 lag die Empfaengerauswahl von THESEN Outbound im
+  // durchsichtigen Zwischenraum des Docks. Der Detailbereich war bis zum
+  // Anschlag gescrollt, das Haekchen sichtbar — und jeder Klick landete im
+  // Dock. elementsFromPoint zeigte SECTION.ctox-chat-dock zuoberst. Ohne
+  // Empfaenger keine Sellify-Uebergabe, kein Serienbrief, keine Serien-E-Mail:
+  // die gesamte Kette endete an einem unsichtbaren Rechteck.
+  const css = businessChatSource;
+  const dockRegel = css.slice(css.indexOf('.ctox-chat-dock {'), css.indexOf('.ctox-chat-dock {') + 400);
+  assert.match(dockRegel, /pointer-events:\s*none/,
+    'Der Dock-Container darf keine Klicks der App darunter abfangen');
+
+  // Und die Bedienelemente muessen sie zurueckbekommen, sonst ist die Leiste tot.
+  assert.match(css, /\.ctox-chat-dock > \*,[\s\S]{0,200}pointer-events:\s*auto/,
+    'Die sichtbaren Kinder des Docks brauchen pointer-events: auto');
+});
