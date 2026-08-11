@@ -1696,9 +1696,13 @@ async function loadSellifyRecipientContext(lead) {
       // Registerzeichen traegt.
       // Auch hier gezielt statt Scan — siehe firmenNamensvarianten.
       if (!exakt.length) {
+        // ALLE Varianten sammeln, nicht beim ersten Treffer aufhoeren. CHEMOFAST
+        // wird im CRM unter zwei contact_ids gefuehrt (17714 und 18255); nur in
+        // 17714 hat Roger Wintzen seine Adresse. Wer nach dem ersten Treffer
+        // abbricht, erwischt die halbe Wahrheit — am 12.08.2026 genau die leere
+        // Haelfte, und die Kontaktuebernahme hatte nichts zu uebernehmen.
         for (const variante of firmenNamensvarianten(lead?.name)) {
-          const treffer = await findSellifyRecords(state.sellifyCompanies, { name: { $eq: variante } });
-          if (treffer.length) { companies.push(...treffer); break; }
+          companies.push(...await findSellifyRecords(state.sellifyCompanies, { name: { $eq: variante } }));
         }
       }
     }
@@ -1746,10 +1750,20 @@ function crmSchluessel(text) {
 
 async function uebernehmeCrmKontaktdaten(lead, context) {
   if (!context?.contextAvailable || !Array.isArray(context.people) || !context.people.length) return false;
+  // Bei mehreren CRM-Datensaetzen zum selben Namen gewinnt der VOLLSTAENDIGERE.
+  // CHEMOFAST wird im CRM unter zwei contact_ids gefuehrt (17714 und 18255);
+  // Roger Wintzen steht in beiden, seine Adresse roger.wintzen@chemofast.com aber
+  // nur in 17714. Wer einfach den ersten Treffer nimmt, erwischt in der Haelfte
+  // der Faelle den leeren Datensatz und uebernimmt nichts — genau das war am
+  // 12.08.2026 der Fall.
+  const inhalt = (person) => [person?.email, person?.phone || person?.telephone,
+    person?.position || person?.function].filter((wert) => String(wert || '').trim()).length;
   const nachName = new Map();
   for (const person of context.people) {
     const schluessel = crmSchluessel(personDisplayName(person));
-    if (schluessel && !nachName.has(schluessel)) nachName.set(schluessel, person);
+    if (!schluessel) continue;
+    const bisher = nachName.get(schluessel);
+    if (!bisher || inhalt(person) > inhalt(bisher)) nachName.set(schluessel, person);
   }
   const kontakte = Array.isArray(lead?.contacts) ? lead.contacts : [];
   let geaendert = false;

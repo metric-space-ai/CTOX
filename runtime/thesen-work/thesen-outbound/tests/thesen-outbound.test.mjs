@@ -1379,3 +1379,22 @@ test('Namensvarianten werden gezielt abgefragt, nicht die ganze Collection gelad
   assert.deepEqual(hooks.firmenNamensvarianten(''), []);
   assert.deepEqual(hooks.firmenNamensvarianten(null), []);
 });
+
+test('bei zwei CRM-Datensaetzen zum selben Namen gewinnt der vollstaendigere', async () => {
+  // CHEMOFAST wird im CRM unter zwei contact_ids gefuehrt (17714 und 18255).
+  // Roger Wintzen steht in beiden, seine Adresse nur in 17714. Wer den ersten
+  // Treffer nimmt, erwischt in der Haelfte der Faelle den leeren Datensatz.
+  const lead = { id: 'l', contacts: [{ id: 'c1', name: 'Roger Wintzen', email: '' }] };
+  const context = { contextAvailable: true, people: [
+    { display_name: 'Roger Wintzen', email: '', phone: '', person_id: 18255 },
+    { display_name: 'Roger Wintzen', email: 'roger.wintzen@chemofast.com', phone: '+49215481230', person_id: 17714 },
+  ] };
+  await hooks.uebernehmeCrmKontaktdaten(lead, context);
+  assert.equal(lead.contacts[0].email, 'roger.wintzen@chemofast.com');
+  assert.equal(lead.contacts[0].sellify_person_id, 17714);
+
+  // Auch in umgekehrter Reihenfolge.
+  const lead2 = { id: 'l2', contacts: [{ id: 'c1', name: 'Roger Wintzen', email: '' }] };
+  await hooks.uebernehmeCrmKontaktdaten(lead2, { contextAvailable: true, people: [...context.people].reverse() });
+  assert.equal(lead2.contacts[0].email, 'roger.wintzen@chemofast.com');
+});
