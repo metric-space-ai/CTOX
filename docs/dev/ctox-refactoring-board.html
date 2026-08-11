@@ -245,7 +245,14 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">22 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">23 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-ok">Plan-v2 · S2b</span>
+    <h3>S2b-3: Projektions-Gerüst aus dem Peer — <code>2cc008e4c</code></h3>
+    <p><code>rxdb_peer.rs</code> 10.661 → <b>10.165</b>; 21 Funktionen + 12 Statics als reiner Umzug (+67/−558) nach <code>rxdb_peer_projections.rs</code> (551). Stamp-/Scheduling-Semantik blieb bewusst im Peer — die Verbleibs-Begründungen im Report sind die Vorarbeit für die Runner-Vereinheitlichung. Erster Lauf über den Launchpad-Workaround. <b>Peer-Kampagnenbilanz: 25.292 → 10.165 — nur noch 165 Zeilen über dem 10.000er-Plan-Tor.</b></p>
+    <span class="ev"><b>Verifiziert</b> Schnittmenge 0 · SHA-identisch · dirty-only 0/591 · projection 103/1 = bekannter Roter · Gate nur Fremd-OVERs</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-neg">Negatives Ergebnis</span>
