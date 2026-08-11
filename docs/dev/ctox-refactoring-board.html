@@ -189,9 +189,9 @@ footer{
   </div>
   <div style="margin-top:10px;font-size:13px;line-height:1.55;color:var(--muted);max-width:100ch">
     <b style="color:var(--fg,inherit)">Messtore für die Produktnote (je: Messaufbau + Zahl + Wiederholbarkeit):</b>
-    <b>M1 Kaltstart: GEMESSEN</b> — Median <b>15,5 s</b> bis HTTP (8–27 s Streuung, leerer Store, Debug-Binary; Erststart 88 s; Release-Nachmessung läuft).
-    <b>M2 Browser-Boot: GEMESSEN</b> — Shell interaktiv 1,75 s, aber alle 15 Boot-Collections erst nach <b>15,9 s</b> live: serielle Start-Queue ~1 s/Collection + desktop_icons allein 11,1 s.
-    <b>M3 Command-Bus: GEMESSEN + 1 Defekt</b> — Verarbeitung funktioniert (60/60 nativ completed), Roundtrip <b>p50 3,6 s / p95 7,5 s</b> für einen trivialen Status-Command (Sekunden statt Millisekunden). Defekt: <code>waitForTerminal</code> wirft <code>SQLITE_QUERY_STREAM_UNSUPPORTED</code> trotz Erfolg — die UI meldet Fehlschlag bei serverseitigem Erfolg. Rand: <code>idempotencyKey</code> im Dispatch wird ignoriert.
+    <b>M1 Kaltstart: GEMESSEN, Release korrigiert</b> — Debug-Median 15,5 s war ein Build-Artefakt; <b>Release: Median 1,45 s</b> (0,3–2,5 s). Der Daemon ist in Ordnung.
+    <b>M2 Browser-Boot: GEMESSEN, Release bestätigt</b> — alle 15 Boot-Collections erst nach <b>15,1 s</b> live (Release wie Debug): die serielle Start-Queue ~1 s/Collection ist <b>strukturell</b> und der Haupthebel.
+    <b>M3 Command-Bus: GEMESSEN + 1 Defekt</b> — Verarbeitung funktioniert (90/90 nativ completed). Roundtrip Release: <b>p50 1,4 s / p95 4,3 s</b> (Debug: 3,6/7,5) für einen trivialen Status-Command — weiterhin Sekunden statt Millisekunden. Defekt (build-unabhängig): <code>waitForTerminal</code> wirft <code>SQLITE_QUERY_STREAM_UNSUPPORTED</code> trotz Erfolg — die UI meldet Fehlschlag bei serverseitigem Erfolg. Rand: <code>idempotencyKey</code> im Dispatch wird ignoriert.
     <b>M4 Abbruch-Churn: 2/10 Zyklen, beide sauber</b> — volle Resynchronisation ~30 s nach Serverrückkehr, kein Hängen; <b>Verlustprobe bestanden</b>: Write 252 ms vor dem Kill überlebt und wird nach Rückkehr nativ verarbeitet.
     <b>M5 Multi-User: OFFEN</b> — braucht zweite echte Nutzersitzung (Invite-Flow).
     Beweis: <code>docs/dev/beweise/produkt-messung-m1-m5-2026-08-12.md</code> (Commit 0169d1ebb). Nach aktueller Faktenlage wäre die Produktnote schlecht — langsamer Boot, ein Kernpfad defekt; Erholung funktioniert.

@@ -1,4 +1,22 @@
-# Produktmessung M1–M5 — erste Fakten (12.08.2026, 21:00–21:35)
+# Produktmessung M1–M5 — erste Fakten (12.08.2026, 21:00–22:00)
+
+## WICHTIGE KORREKTUR (22:00): Release-Nachmessung
+
+Die Debug-Zahlen unten für M1 waren ein **Mess-Artefakt des Debug-Builds**.
+Mit Release-Binary (identischer Root, identischer Aufbau):
+
+| Messtor | Debug | **Release** | Einordnung |
+|---|---|---|---|
+| M1 Kaltstart bis HTTP | Median 15,5 s | **Median 1,45 s** (0,29/0,83/1,45/2,48 s; Erstlauf des frischen Binaries einmalig 49 s) | Daemon ist ok |
+| M2 Browser-Boot bis alle 15 Collections live | 15,9 s | **15,1 s** | **strukturell**, kein Debug-Artefakt: serielle Start-Queue ~1 s/Collection |
+| M3 Command-Roundtrip (30 Commands, completed) | p50 3,56 s / p95 7,47 s | **p50 1,42 s / p95 4,28 s** (min 0,74, max 9,2) | besser, aber weiterhin Sekunden statt Millisekunden |
+| M3 waitForTerminal-Defekt | reproduziert | **unverändert vorhanden** | Architektur, kein Build-Effekt |
+| M4 Churn-Erholung + Verlustprobe | 2/10 sauber | (nicht wiederholt) | — |
+
+Konsequenz für die Hebel: ① Tracking-Defekt und ② serielle Start-Queue
+bleiben die Haupthebel; ③ desktop_icons trat im Release-Lauf nicht als
+Ausreißer auf (Cache-Verdacht, weiter beobachten); ④ Roundtrip-Sekunden
+bleiben real (p50 1,4 s für einen No-op-Status).
 
 Messaufbau: isolierter Root `/Volumes/tmp/ctox-pipeline/m1-root` (CTOX_ROOT),
 Debug-Binary aus `b9ed00757`-Nachfolge, `ctox business-os serve --addr
