@@ -9,6 +9,14 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+/// Generic ceiling for one master pull response before transport framing.
+///
+/// The WebRTC wire allows transfers up to 8 MiB, but a count-only pull batch can
+/// combine many individually valid documents into one response above that hard
+/// limit. Keep ordinary collections comfortably below the wire ceiling; known
+/// chunk-heavy collections may install tighter exact-name overrides below.
+pub const DEFAULT_MASTER_RESPONSE_CEILING_BYTES: usize = 1024 * 1024;
+
 /// A collection/context-specific write decision applied by a storage backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WriteGuard {
@@ -158,6 +166,17 @@ impl CollectionPolicy {
             .map(|rule| rule.ceiling_bytes)
     }
 
+    /// Returns the byte ceiling for every master pull response.
+    ///
+    /// Exact collection rules only tighten the generic ceiling. Returning a
+    /// concrete default here is load-bearing: otherwise an ordinary collection
+    /// with many large JSON documents can exceed the framed WebRTC transfer
+    /// limit even though every individual document is valid.
+    pub fn master_response_ceiling_bytes(&self, collection: &str) -> usize {
+        self.transfer_ceiling_bytes(collection)
+            .unwrap_or(DEFAULT_MASTER_RESPONSE_CEILING_BYTES)
+    }
+
     pub fn is_demand_only_chunk_collection(&self, collection: &str) -> bool {
         self.demand_only_chunk_collections
             .iter()
@@ -219,7 +238,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{CollectionPolicy, WriteGuard};
+    use super::{CollectionPolicy, WriteGuard, DEFAULT_MASTER_RESPONSE_CEILING_BYTES};
 
     #[test]
     fn default_write_guard_is_exact_and_preserves_status_semantics() {
@@ -269,6 +288,14 @@ mod tests {
             Some(512 * 1024)
         );
         assert_eq!(policy.transfer_ceiling_bytes("documents"), None);
+        assert_eq!(
+            policy.master_response_ceiling_bytes("documents"),
+            DEFAULT_MASTER_RESPONSE_CEILING_BYTES
+        );
+        assert_eq!(
+            policy.master_response_ceiling_bytes("desktop_file_chunks"),
+            96 * 1024
+        );
         assert!(policy.is_demand_only_chunk_collection("desktop_file_chunks"));
         assert!(policy.is_demand_only_chunk_collection("document_blob_chunks"));
         assert!(policy.is_demand_only_chunk_collection("spreadsheet_blob_chunks"));

@@ -277,12 +277,11 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         checkpoint: Option<serde_json::Value>,
         batch_size: u64,
     ) -> Result<crate::types::DocumentsWithCheckpoint, crate::rx_error::RxError> {
-        use crate::replication_protocol::helper::write_doc_to_doc_state;
         use crate::rx_schema_helper::get_primary_field_of_primary_key;
 
         let has_attachments = self.instance.schema().extra.contains_key("attachments");
         let transfer_ceiling_bytes = crate::collection_policy::collection_policy()
-            .transfer_ceiling_bytes(self.instance.collection_name());
+            .master_response_ceiling_bytes(self.instance.collection_name());
         let result = self
             .instance
             .get_changed_documents_since(batch_size, checkpoint.as_ref())
@@ -295,28 +294,21 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         } else {
             result.checkpoint
         };
-        let (documents, response_checkpoint) = if let Some(max_bytes) = transfer_ceiling_bytes {
-            let primary_path =
-                get_primary_field_of_primary_key(&self.instance.schema().primary_key);
-            let limited = limit_master_response(
-                result.documents,
-                &primary_path,
-                has_attachments,
-                self.keep_meta,
-                max_bytes,
-                &next_checkpoint,
-            );
-            (limited.documents, limited.checkpoint)
-        } else {
-            (
-                result
-                    .documents
-                    .into_iter()
-                    .map(|d| write_doc_to_doc_state(&d, has_attachments, self.keep_meta))
-                    .collect(),
-                next_checkpoint,
-            )
-        };
+        // Every response is byte-bounded, not only historically large chunk
+        // collections. A count-only batch of ordinary JSON documents can exceed
+        // the framed WebRTC transfer limit and then fail forever at the same
+        // checkpoint. The limiter advances only to the last document actually
+        // sent, so the browser's drain-until-empty loop receives the remainder.
+        let primary_path = get_primary_field_of_primary_key(&self.instance.schema().primary_key);
+        let limited = limit_master_response(
+            result.documents,
+            &primary_path,
+            has_attachments,
+            self.keep_meta,
+            transfer_ceiling_bytes,
+            &next_checkpoint,
+        );
+        let (documents, response_checkpoint) = (limited.documents, limited.checkpoint);
         Ok(crate::types::DocumentsWithCheckpoint {
             documents,
             checkpoint: response_checkpoint,
@@ -453,6 +445,10 @@ struct LimitedMasterResponse {
     checkpoint: serde_json::Value,
 }
 
+/// Hard framing limit of the WebRTC transport. A payload above this can never be
+/// delivered, no matter how the response is batched.
+const WIRE_TRANSFER_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
 fn limit_master_response(
     raw_documents: Vec<serde_json::Value>,
     primary_path: &str,
@@ -474,12 +470,32 @@ fn limit_master_response(
     let mut documents = Vec::with_capacity(total_count);
     let mut checkpoint = fallback_checkpoint.clone();
     let mut bytes = 2usize; // JSON array brackets.
+    let mut skipped = 0usize;
 
     for raw in raw_documents.into_iter() {
         let document = write_doc_to_doc_state(&raw, has_attachments, keep_meta);
         let document_bytes = serde_json::to_vec(&document)
             .map(|encoded| encoded.len().saturating_add(1))
             .unwrap_or(max_bytes.saturating_add(1));
+        // A single document above the wire limit can never be framed. Sending it
+        // alone wedges the stream forever: the peer retries the same checkpoint,
+        // fails again, and every collection behind it starves. One 18 MiB command
+        // document did exactly that and left the whole browser data plane empty.
+        // Skip it loudly and advance past it so the remainder still drains.
+        if document_bytes > WIRE_TRANSFER_LIMIT_BYTES {
+            let id = raw
+                .get(primary_path)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            eprintln!(
+                "[ctox-rxdb] skipping undeliverable document `{id}` ({document_bytes} bytes) — \
+                 above the {WIRE_TRANSFER_LIMIT_BYTES} byte wire transfer limit"
+            );
+            checkpoint = checkpoint_from_document(&raw, primary_path)
+                .unwrap_or_else(|| fallback_checkpoint.clone());
+            skipped += 1;
+            continue;
+        }
         if !documents.is_empty() && bytes.saturating_add(document_bytes) > max_bytes {
             break;
         }
@@ -489,7 +505,7 @@ fn limit_master_response(
         documents.push(document);
     }
 
-    if documents.len() == total_count {
+    if documents.len().saturating_add(skipped) == total_count {
         checkpoint = fallback_checkpoint.clone();
     }
 
@@ -527,7 +543,7 @@ mod tests {
     };
     use crate::rxjs_compat::DEFAULT_SUBJECT_BUFFER;
     use crate::types::{
-        BulkWriteRow, FirstSyncDone, ReplicationEvents, ReplicationStats,
+        BulkWriteRow, DocumentsWithCheckpoint, FirstSyncDone, ReplicationEvents, ReplicationStats,
         RxReplicationMasterChange, RxStorageInstance, RxStorageInstanceCreationParams,
         RxStorageInstanceReplicationInput, RxStorageInstanceReplicationState,
         RxStorageReplicationDirection, StreamQueue,
@@ -670,6 +686,115 @@ mod tests {
 
         assert_eq!(limited.documents.len(), 2);
         assert_eq!(limited.checkpoint, fallback);
+    }
+
+    #[test]
+    fn a_single_undeliverable_document_does_not_wedge_the_stream() {
+        // One 18 MiB `sellify.sync.refresh` command whose result carried the whole
+        // projection list froze the tenant's browser data plane: it exceeded the
+        // wire limit on its own, so every retry failed at the same checkpoint and
+        // no collection behind it ever replicated.
+        let oversized = json!({
+            "id": "cmd-oversized",
+            "payload": "x".repeat(9 * 1024 * 1024),
+            "_meta": { "lwt": 1.0 },
+        });
+        let small = json!({
+            "id": "cmd-small",
+            "payload": "ok",
+            "_meta": { "lwt": 2.0 },
+        });
+        let fallback = json!({ "id": "cmd-small", "lwt": 2.0 });
+
+        let limited = limit_master_response(
+            vec![oversized, small],
+            "id",
+            false,
+            false,
+            crate::collection_policy::DEFAULT_MASTER_RESPONSE_CEILING_BYTES,
+            &fallback,
+        );
+
+        let ids = limited
+            .documents
+            .iter()
+            .map(|doc| doc["id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["cmd-small".to_string()],
+            "the undeliverable document must be skipped, the deliverable one sent"
+        );
+        assert!(
+            serde_json::to_vec(&limited.documents).unwrap().len() < 8 * 1024 * 1024,
+            "the response must stay under the wire transfer limit"
+        );
+        assert_eq!(
+            limited.checkpoint, fallback,
+            "the checkpoint must advance past the skipped document so the drain continues"
+        );
+    }
+
+    #[test]
+    fn generic_master_response_ceiling_drains_twenty_one_large_documents() {
+        let docs = (0..21usize)
+            .map(|index| {
+                json!({
+                    "id": format!("lead-{index:02}"),
+                    "payload": "x".repeat(600 * 1024),
+                    "_meta": { "lwt": index as f64 + 1.0 },
+                })
+            })
+            .collect::<Vec<_>>();
+        let first_count_only_page = DocumentsWithCheckpoint {
+            documents: docs[..20].to_vec(),
+            checkpoint: checkpoint_from_document(&docs[19], "id").unwrap(),
+        };
+        assert!(
+            serde_json::to_vec(&first_count_only_page).unwrap().len() > 8 * 1024 * 1024,
+            "the regression fixture must exceed the framed WebRTC transfer ceiling"
+        );
+
+        let max_bytes = crate::collection_policy::collection_policy()
+            .master_response_ceiling_bytes("ordinary_large_documents");
+        let mut offset = 0usize;
+        let mut received_ids = Vec::new();
+        while offset < docs.len() {
+            let page_end = (offset + 20).min(docs.len());
+            let page = docs[offset..page_end].to_vec();
+            let fallback = checkpoint_from_document(page.last().unwrap(), "id").unwrap();
+            let limited = limit_master_response(page, "id", false, true, max_bytes, &fallback);
+            assert!(
+                !limited.documents.is_empty(),
+                "bounded pull made no progress"
+            );
+            let encoded = serde_json::to_vec(&DocumentsWithCheckpoint {
+                documents: limited.documents.clone(),
+                checkpoint: limited.checkpoint.clone(),
+            })
+            .unwrap();
+            assert!(
+                encoded.len() <= max_bytes + 1024,
+                "bounded response is {} bytes for a {} byte ceiling",
+                encoded.len(),
+                max_bytes
+            );
+            received_ids.extend(
+                limited
+                    .documents
+                    .iter()
+                    .filter_map(|document| document.get("id").and_then(Value::as_str))
+                    .map(str::to_owned),
+            );
+            offset += limited.documents.len();
+        }
+
+        assert_eq!(
+            received_ids,
+            (0..21usize)
+                .map(|index| format!("lead-{index:02}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
