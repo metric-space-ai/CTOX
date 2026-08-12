@@ -309,8 +309,18 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   // while a manual restartCollection() fixed it in under 6 s. The repair was
   // healthy the whole time; nobody knocked.
   //
-  // This sweep owes nothing to any event. It re-arms while such a collection
-  // exists and stops as soon as none is left.
+  // This sweep owes nothing to any event and it KEEPS RUNNING while the runtime
+  // lives. The first version stopped when a pass found nothing — and that is
+  // exactly the bug it was written to fix, repeated one level up: during boot
+  // the first collection arms the timer, all later calls are dropped because a
+  // timer already exists, the pass fires three seconds later, finds nothing
+  // because the losing collection is not on 'pending' yet, and nobody re-arms.
+  // Measured on a customer instance: updatedAt of the stuck collection was
+  // FROZEN across 138 s — the pass never touched it once.
+  //
+  // A pass is one filter over a short list, so a steady heartbeat is cheap; the
+  // previous "stop when idle" was the expensive choice, because it cost the
+  // whole repair.
   const scheduleUnregisteredCollectionSweep = (delayMs = UNREGISTERED_SWEEP_DELAY_MS) => {
     if (stopped || unregisteredSweepTimer) return;
     unregisteredSweepTimer = setTimeout(async () => {
@@ -321,7 +331,6 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         const status = current.connectionStatus || current.status || '';
         return status === 'pending' && current.reason === 'collection-not-registered';
       });
-      if (!stuck.length) return;
       for (const collection of stuck) {
         if (stopped) return;
         try {
