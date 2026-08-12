@@ -72,6 +72,11 @@ const COLLECTION_START_GAP_MS = 60;
 // was as slow as the sum of all bridges; unbounded would hand a slow peer
 // fifteen simultaneous negotiations and push the send queue toward its budget.
 const COLLECTION_START_LANES = 4;
+// Erster Durchgang kurz nach dem Start (die meisten Rennen sind bis dahin
+// entschieden), danach traeger, damit ein dauerhaft fehlendes Schema nicht
+// zum Dauerlauf wird.
+const UNREGISTERED_SWEEP_DELAY_MS = 3000;
+const UNREGISTERED_SWEEP_RETRY_MS = 15000;
 const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
 const DESKTOP_ICON_SAFE_FIELDS = new Set([
@@ -112,6 +117,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   const collectionLeaseCounts = new Map();
   const suspendedCollections = new Set();
   let globalRestartTimer = null;
+  let unregisteredSweepTimer = null;
   let repairCycleInProgress = false;
   // Collection starts used to hang off ONE promise chain: every collection
   // waited for the previous one to finish its bridge before it even began. At a
@@ -291,6 +297,44 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     // credentials change. Replaying it in a timer only hammers signaling.
     return current.lastError?.retryable !== false;
   };
+  // Unconditional sweep for collections that lost the startup race.
+  //
+  // They sit on status 'pending' with reason 'collection-not-registered' and
+  // emit NO event: db.raw simply did not have them yet, nothing threw. Every
+  // event-driven path is therefore blind to them, and the repair-cycle trigger
+  // additionally drops any request while another timer is pending (see
+  // `if (globalRestartTimer || repairCycleInProgress) return` below). Measured
+  // on a customer instance: user_thread_states stayed pending for 75 s with a
+  // matching predicate, a closed circuit and the collection present in db.raw —
+  // while a manual restartCollection() fixed it in under 6 s. The repair was
+  // healthy the whole time; nobody knocked.
+  //
+  // This sweep owes nothing to any event. It re-arms while such a collection
+  // exists and stops as soon as none is left.
+  const scheduleUnregisteredCollectionSweep = (delayMs = UNREGISTERED_SWEEP_DELAY_MS) => {
+    if (stopped || unregisteredSweepTimer) return;
+    unregisteredSweepTimer = setTimeout(async () => {
+      unregisteredSweepTimer = null;
+      if (stopped) return;
+      const stuck = [...activeCollections].filter((collection) => {
+        const current = diagnostics.collections[collection] || {};
+        const status = current.connectionStatus || current.status || '';
+        return status === 'pending' && current.reason === 'collection-not-registered';
+      });
+      if (!stuck.length) return;
+      for (const collection of stuck) {
+        if (stopped) return;
+        try {
+          await syncRuntime.restartCollection(collection);
+        } catch (error) {
+          recordCollection(collection, { lastError: serializeError(error) });
+        }
+      }
+      scheduleUnregisteredCollectionSweep(UNREGISTERED_SWEEP_RETRY_MS);
+    }, delayMs);
+    unregisteredSweepTimer.unref?.();
+  };
+
   const scheduleRestartOfUnhealthyCollections = (triggerCollection, delayMs = 5000) => {
     if (stopped) return;
     if (roomCircuit.permanent) return;
@@ -554,6 +598,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       }
       if (options.pin !== false) pinnedCollections.add(collection);
       activeCollections.add(collection);
+      scheduleUnregisteredCollectionSweep();
       publishResourceBudget();
       if (coordinator && !coordinator.isLeader() && options.forceDirect !== true) {
         const follower = createFollowerBridge(
@@ -879,6 +924,8 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       stopped = true;
       if (globalRestartTimer) clearTimeout(globalRestartTimer);
       globalRestartTimer = null;
+      if (unregisteredSweepTimer) clearTimeout(unregisteredSweepTimer);
+      unregisteredSweepTimer = null;
       if (diagnosticEmitTimer) {
         clearTimeout(diagnosticEmitTimer);
         diagnosticEmitTimer = null;
@@ -1237,6 +1284,11 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
   const rxCollection = db?.raw?.[collection] || db?.collection?.(collection);
   if (!rxCollection) {
     recordCollection?.(collection, { status: 'pending', reason: 'collection-not-registered' });
+    // Losing the startup race produces NO event — the collection simply is not
+    // in db.raw yet and nothing fails. An event-driven repair cycle can never
+    // wake for a state that never announced itself. The unconditional sweep in
+    // the runtime closure (scheduleUnregisteredCollectionSweep) picks this up;
+    // the call below only shortens the wait when a repair cycle is idle anyway.
     // This is a RACE, not a verdict: the collection may be registered moments
     // later. The caller already knows how to recover — it drops a cached
     // 'pending' stub and starts fresh (see the `currentBridge?.mode === 'pending'`
