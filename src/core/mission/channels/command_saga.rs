@@ -2044,6 +2044,43 @@ pub(crate) fn record_business_command_intake_failure(
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     let tx = conn.transaction()?;
+    let existing_exhausted_attempt = tx
+        .query_row(
+            "SELECT attempt
+             FROM business_command_intake_failures
+             WHERE command_id = ?1 AND resolved_at_ms IS NULL AND exhausted = 1
+             ORDER BY attempt DESC
+             LIMIT 1",
+            params![claim.command_id],
+            |row| row.get::<_, u32>(0),
+        )
+        .optional()?;
+    if let Some(attempt) = existing_exhausted_attempt {
+        let now_ms = epoch_millis();
+        tx.execute(
+            "UPDATE business_command_intake_failures
+             SET observed_at_ms = ?3, error_message = ?4
+             WHERE command_id = ?1 AND attempt = ?2 AND resolved_at_ms IS NULL AND exhausted = 1",
+            params![claim.command_id, attempt, now_ms, error_message],
+        )?;
+        let canonical_exists = tx
+            .query_row(
+                "SELECT 1 FROM business_command_aggregates WHERE command_id = ?1",
+                params![claim.command_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        tx.commit()?;
+        return Ok(json!({
+            "command_id": claim.command_id,
+            "attempt": attempt,
+            "exhausted": true,
+            "canonical_exists": canonical_exists,
+            "canonical_failure_created": false,
+            "failure_document": claim.intent,
+        }));
+    }
     let attempt = tx.query_row(
         "SELECT COALESCE(MAX(attempt), 0) + 1
          FROM business_command_intake_failures

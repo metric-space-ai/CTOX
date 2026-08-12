@@ -2,7 +2,7 @@
 // License: Apache-2.0
 
 use super::rxdb_peer::{
-    fill_projection_document_envelope, now_ms, projection_sleep_secs,
+    incremental_upsert_projection_if_changed, now_ms, projection_sleep_secs,
     upsert_business_record_projection, BUSINESS_COMMAND_ACTIVE_POLL_SECS,
     BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS, BUSINESS_COMMAND_IDLE_POLL_SECS,
     NATIVE_RXDB_WRITE_LOCK,
@@ -111,17 +111,18 @@ pub(super) async fn enqueue_business_command_document_with_database(
     Ok(document)
 }
 
+/// Schreibt nur, wenn sich der Inhalt wirklich unterscheidet. Ohne diesen
+/// Umweg stempelt jeder Replay denselben Envelope neu und hebt allein
+/// `_rev`/`updated_at_ms` — auf einer Kundeninstanz waren das 93 Revisionen je
+/// Minute auf sechs unveraenderten Dokumenten und eine 2,29-GB-Store-Datei.
 pub(super) async fn incremental_upsert_document_with_envelope(
     collection: &Arc<RxCollection>,
     document: Value,
     label: &str,
 ) -> anyhow::Result<()> {
-    let document = fill_projection_document_envelope(collection, document, label)?;
-    collection
-        .incremental_upsert(document)
+    incremental_upsert_projection_if_changed(collection, document, label)
         .await
         .map(|_| ())
-        .map_err(|err| anyhow::anyhow!("upsert {label}: {err}"))
 }
 
 pub(super) fn command_id_from_document(document: &Value) -> anyhow::Result<String> {

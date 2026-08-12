@@ -646,6 +646,11 @@ impl NativePeerCircuitBreaker {
 
 static NATIVE_PEER_CIRCUIT_BREAKER: OnceLock<Mutex<NativePeerCircuitBreaker>> = OnceLock::new();
 
+/// Je Prozesslauf einmal melden, dass ein Command mit erschoepftem
+/// Intake-Fehler uebersprungen wird — sonst ersetzt die Meldung die Schleife,
+/// die sie beschreibt.
+static LOGGED_EXHAUSTED_BUSINESS_COMMAND_SKIPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
 fn native_peer_circuit_breaker() -> &'static Mutex<NativePeerCircuitBreaker> {
     NATIVE_PEER_CIRCUIT_BREAKER.get_or_init(|| Mutex::new(NativePeerCircuitBreaker::default()))
 }
@@ -4185,6 +4190,40 @@ async fn consume_pending_business_commands(
     let rows = pending_business_command_documents(root, 25)
         .await
         .context("load pending business_commands from RxDB SQLite")?;
+    // Commands mit erschoepftem, unaufgeloestem Intake-Fehler bleiben im
+    // Kandidatenfenster haengen: der Claim scheitert jede Runde am
+    // Idempotenz-Konflikt, der Replay stempelt den Envelope neu, und der
+    // Status bleibt genau so, dass die naechste Runde sie wieder aufgreift.
+    // Auf einer Kundeninstanz liefen so sechs Dokumente lautlos mit 93
+    // Revisionen je Minute weiter. Sie werden uebersprungen, bis der
+    // Intake-Fehler aufgeloest ist.
+    let exhausted_command_ids = unresolved_exhausted_business_command_ids(root)
+        .await
+        .context("load exhausted business command intake failures")?;
+    let rows = rows
+        .into_iter()
+        .filter(|document| {
+            let command_id = document
+                .get("command_id")
+                .or_else(|| document.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !exhausted_command_ids.contains(command_id) {
+                return true;
+            }
+            let logged =
+                LOGGED_EXHAUSTED_BUSINESS_COMMAND_SKIPS.get_or_init(|| Mutex::new(HashSet::new()));
+            let mut logged = logged
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if logged.insert(command_id.to_string()) {
+                eprintln!(
+                    "[business-os] skipping business command `{command_id}` with unresolved exhausted intake failure"
+                );
+            }
+            false
+        })
+        .collect::<Vec<_>>();
     let pending_count = rows.len();
     for document in rows {
         COMMAND_PLANE_METRICS.record_attempt();
@@ -4372,6 +4411,61 @@ async fn consume_pending_business_commands(
         }
     }
     Ok(pending_count)
+}
+
+async fn unresolved_exhausted_business_command_ids(root: &Path) -> anyhow::Result<HashSet<String>> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || unresolved_exhausted_business_command_ids_sync(&root))
+        .await
+        .context("join exhausted business command intake failure load")?
+}
+
+fn unresolved_exhausted_business_command_ids_sync(root: &Path) -> anyhow::Result<HashSet<String>> {
+    let path = crate::paths::core_db(root);
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "open channel DB for exhausted business command intake failures {}",
+            path.display()
+        )
+    })?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
+        .context("configure exhausted business command intake failure busy_timeout")?;
+    let table_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'business_command_intake_failures'
+             LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("check business_command_intake_failures table")?
+        .is_some();
+    if !table_exists {
+        return Ok(HashSet::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT command_id
+             FROM business_command_intake_failures
+             WHERE resolved_at_ms IS NULL AND exhausted = 1",
+        )
+        .context("prepare exhausted business command intake failure query")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query exhausted business command intake failures")?;
+    let mut command_ids = HashSet::new();
+    for row in rows {
+        command_ids.insert(row.context("read exhausted business command id")?);
+    }
+    Ok(command_ids)
 }
 
 async fn pending_business_command_documents(
@@ -7212,7 +7306,7 @@ pub(super) async fn sync_channel_state_with_database(
     Ok(synced)
 }
 
-async fn incremental_upsert_projection_if_changed(
+pub(super) async fn incremental_upsert_projection_if_changed(
     collection: &Arc<RxCollection>,
     document: Value,
     label: &str,
@@ -10603,6 +10697,159 @@ pub(in crate::business_os) mod tests {
             "closed desktop file watcher channels must not return immediately and hot-spin"
         );
         Ok(())
+    }
+
+    #[test]
+    fn exhausted_conflicting_command_is_not_rewritten_or_recorded_again() {
+        let root = tempfile::tempdir().expect("temp root");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let command_id = "cmd_exhausted_conflicting_replay";
+            channels::claim_business_control_command(
+                root.path(),
+                channels::BusinessCommandClaimRequest {
+                    command_id: command_id.to_string(),
+                    idempotency_key: command_id.to_string(),
+                    payload_hash: "sha256:canonical-intent".to_string(),
+                    module: "inventory".to_string(),
+                    command_type: "external_sql.sync.refresh".to_string(),
+                    record_id: "inventory-sync-status".to_string(),
+                    intent: json!({
+                        "command_id": command_id,
+                        "module": "inventory",
+                        "command_type": "external_sql.sync.refresh",
+                        "record_id": "inventory-sync-status",
+                        "payload": {"source_id": "canonical"},
+                        "client_context": {},
+                    }),
+                    created_at_ms: now_ms() as i64,
+                },
+            )
+            .expect("seed conflicting canonical aggregate");
+
+            let database = open_test_database(store::rxdb_store_path(root.path()))
+                .await
+                .expect("open rxdb sqlite");
+            database
+                .add_collections(collection_creators())
+                .await
+                .expect("register collections");
+            let commands = database
+                .collection("business_commands")
+                .expect("business_commands collection");
+            let failed_command = json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "inventory",
+                "command_type": "external_sql.sync.refresh",
+                "record_id": "inventory-sync-status",
+                "status": "failed",
+                "task_status": "failed",
+                "terminal_status": "none",
+                "payload": {"source_id": "conflicting"},
+                "client_context": {},
+                "updated_at_ms": now_ms() as u64,
+            });
+            commands
+                .insert(failed_command.clone())
+                .await
+                .expect("insert failed conflicting command");
+
+            for attempt in 1..=BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET {
+                let failure = store::record_business_command_intake_failure(
+                    root.path(),
+                    &failed_command,
+                    "idempotency_conflict: seeded retry failure",
+                    BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET,
+                )
+                .expect("seed intake failure");
+                assert_eq!(
+                    failure.get("attempt").and_then(Value::as_u64),
+                    Some(attempt as u64)
+                );
+            }
+
+            let before = commands
+                .find_one(Some(MangoQuery {
+                    selector: Some(json!({"id": {"$eq": command_id}})),
+                    ..Default::default()
+                }))
+                .expect("before query")
+                .exec(false)
+                .await
+                .expect("before document");
+            let before_revision = before
+                .get("_rev")
+                .and_then(Value::as_str)
+                .expect("before revision")
+                .to_string();
+            let failure_count = || {
+                let conn = Connection::open(crate::paths::core_db(root.path()))
+                    .expect("open channel database");
+                conn.query_row(
+                    "SELECT COUNT(*) FROM business_command_intake_failures
+                     WHERE command_id = ?1 AND resolved_at_ms IS NULL",
+                    params![command_id],
+                    |row| row.get::<_, u64>(0),
+                )
+                .expect("count intake failures")
+            };
+            let before_failure_count = failure_count();
+            assert_eq!(
+                before_failure_count,
+                BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET as u64
+            );
+
+            assert_eq!(
+                consume_pending_business_commands(root.path(), &database, &mut HashMap::new())
+                    .await
+                    .expect("first exhausted sweep"),
+                0
+            );
+            assert_eq!(
+                consume_pending_business_commands(root.path(), &database, &mut HashMap::new())
+                    .await
+                    .expect("second exhausted sweep"),
+                0
+            );
+
+            let after = commands
+                .find_one(Some(MangoQuery {
+                    selector: Some(json!({"id": {"$eq": command_id}})),
+                    ..Default::default()
+                }))
+                .expect("after query")
+                .exec(false)
+                .await
+                .expect("after document");
+            assert_eq!(
+                after.get("_rev").and_then(Value::as_str),
+                Some(before_revision.as_str()),
+                "exhausted replay must produce no RxDB write"
+            );
+            assert_eq!(
+                failure_count(),
+                before_failure_count,
+                "exhausted replay must produce no new intake failure row"
+            );
+
+            let repeated = store::record_business_command_intake_failure(
+                root.path(),
+                &failed_command,
+                "idempotency_conflict: observed again",
+                BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET,
+            )
+            .expect("observe exhausted intake failure again");
+            assert_eq!(
+                repeated.get("attempt").and_then(Value::as_u64),
+                Some(BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET as u64)
+            );
+            assert_eq!(failure_count(), before_failure_count);
+        });
     }
 
     #[test]
