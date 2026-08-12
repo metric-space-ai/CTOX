@@ -3141,7 +3141,26 @@ async function findSellifyCompanyDuplicate(lead) {
     return sameDomain || sameAddress;
   });
   if (strong.length === 1) return strong[0];
-  throw new Error('Die Sellify-Dublettenprüfung ist nicht eindeutig. Bitte den Lead und die vorhandenen Organisationen prüfen.');
+  // Mehrere Treffer sind im CRM der Normalfall, nicht die Ausnahme: CHEMOFAST
+  // wird unter ZWEI contact_ids gefuehrt (17714 und 18255), nur 17714 traegt die
+  // Ansprechpartner mit ihren Adressen. Bis zum 12.08.2026 warf die Pruefung
+  // hier und brach damit die gesamte Uebergabe ab — der Nutzer sah "Die
+  // Sellify-Dublettenpruefung ist nicht eindeutig" und hatte keinen Weg weiter.
+  //
+  // Statt abzubrechen waehlen wir den GEPFLEGTESTEN Datensatz: den mit den
+  // meisten belastbaren Angaben. Das ist genau der, an dem die Ansprechpartner
+  // haengen, und damit der, den ein Mensch auch nehmen wuerde. Bleibt es
+  // gleichstaendig, entscheidet die kleinere contact_id — der aeltere, historisch
+  // gewachsene Eintrag. Die Entscheidung ist damit reproduzierbar statt zufaellig.
+  const kandidaten = strong.length ? strong : active;
+  const gehalt = (firma) => [
+    firma?.street || firma?.address, firma?.postal_code, firma?.city,
+    firma?.website_url, firma?.phone, firma?.industry,
+  ].filter((wert) => String(wert || '').trim()).length;
+  const sortiert = [...kandidaten].sort((a, b) => (
+    gehalt(b) - gehalt(a) || (Number(a?.contact_id) || 0) - (Number(b?.contact_id) || 0)
+  ));
+  return sortiert[0] || null;
 }
 
 // Das CRM ist die erste Quelle, nicht die letzte Ablage.
@@ -4362,6 +4381,7 @@ export const __thesenOutboundTestHooks = {
   firmenSchluessel,
   firmenNamensvarianten,
   refreshAllRecipientEligibility,
+  findSellifyCompanyDuplicate,
   researchFieldValue,
   validationBlockers,
   RESEARCH_FIELD_GROUPS,

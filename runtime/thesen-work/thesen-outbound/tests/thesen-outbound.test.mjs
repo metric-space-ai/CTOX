@@ -1422,3 +1422,38 @@ test('die Sperrpruefung laeuft nur, wo Empfaenger ausgewaehlt sind', () => {
   assert.equal(filter({ selected_contact_ids: [] }), false);
   assert.equal(filter({}), false);
 });
+
+test('mehrere CRM-Organisationen brechen die Uebergabe nicht ab', () => {
+  // CHEMOFAST wird im CRM unter ZWEI contact_ids gefuehrt (17714 und 18255),
+  // nur 17714 traegt die Ansprechpartner mit ihren Adressen. Bis zum 12.08.2026
+  // warf findSellifyCompanyDuplicate hier und brach die gesamte Uebergabe ab:
+  // "Die Sellify-Dublettenpruefung ist nicht eindeutig" — ohne Weg weiter.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const block = quelle.slice(
+    quelle.indexOf('async function findSellifyCompanyDuplicate'),
+    quelle.indexOf('async function sellifyVorwissen'),
+  );
+  assert.doesNotMatch(block, /throw new Error\('Die Sellify-Dublettenpruefung/,
+    'die Pruefung darf die Uebergabe nicht mehr abbrechen');
+  assert.match(block, /gehalt\(b\) - gehalt\(a\)/,
+    'der gepflegtere Datensatz gewinnt');
+  assert.match(block, /contact_id.*?-.*?contact_id/s,
+    'bei Gleichstand entscheidet die contact_id — reproduzierbar statt zufaellig');
+
+  // Die Auswahlregel selbst, unabhaengig vom Modulzustand geprueft:
+  const gehalt = (f) => [f?.street || f?.address, f?.postal_code, f?.city,
+    f?.website_url, f?.phone, f?.industry].filter((w) => String(w || '').trim()).length;
+  const kandidaten = [
+    { contact_id: 18255 },
+    { contact_id: 17714, street: 'Hanns-Martin-Schleyer-Str. 23', postal_code: '47877',
+      city: 'Willich', phone: '+4921548123', industry: 'Chemie' },
+  ];
+  const gewaehlt = [...kandidaten].sort((a, b) =>
+    gehalt(b) - gehalt(a) || (Number(a?.contact_id) || 0) - (Number(b?.contact_id) || 0))[0];
+  assert.equal(gewaehlt.contact_id, 17714);
+
+  // Gleichstand: der aeltere Eintrag gewinnt.
+  const gleich = [{ contact_id: 900 }, { contact_id: 100 }];
+  assert.equal([...gleich].sort((a, b) =>
+    gehalt(b) - gehalt(a) || a.contact_id - b.contact_id)[0].contact_id, 100);
+});
