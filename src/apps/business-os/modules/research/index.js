@@ -3885,7 +3885,13 @@ function validateSelectedResearchTask(task, knowledgeBases = []) {
   const domain = String(task.knowledge_domain || '').trim();
   if (!domain) return { valid: false, message: state.t('missingDomain', 'Die Research-Aufgabe hat keine Knowledge Domain.') };
   if (!knowledgeBases.some((base) => base.domain === domain)) {
-    return { valid: false, message: state.t('domainNotLoaded', 'Die Knowledge Domain ist lokal nicht geladen.') };
+    // A declared-new domain has no local tables until the first server-side
+    // writeback creates them (knowledge_tables is pull-only, the browser never
+    // seeds it). Blocking those runs makes new-topic research impossible - it
+    // stranded both SKF test dashboards. Every other task keeps the guard.
+    if (task?.payload?.new_domain !== true) {
+      return { valid: false, message: state.t('domainNotLoaded', 'Die Knowledge Domain ist lokal nicht geladen.') };
+    }
   }
   return { valid: true, message: '' };
 }
@@ -4192,12 +4198,18 @@ async function runSelectedResearch() {
     ...sourceUrlsFromRows(candidateRows),
     ...sourceUrlsFromRows(launchSourceModels.map((source) => source.row)),
   ])];
-  const targetVerifiedSources = effectiveTargetVerifiedSources(
-    task?.payload?.target_verified_sources,
-    rawVerifiedSourceModels.length,
-    verifiedSourceModels.length,
-    verifiedSourceCount,
-  );
+  // An explicitly configured target is a decision, not a projection artefact.
+  // The anti-gaming heuristic below cannot tell them apart - it once rejected a
+  // deliberate 40 purely because the run happened to hold 20 verified sources
+  // at that moment - so an explicit flag bypasses the guessing entirely.
+  const targetVerifiedSources = task?.payload?.target_verified_sources_explicit === true
+    ? Math.max(20, Number(task?.payload?.target_verified_sources || 0) || 100)
+    : effectiveTargetVerifiedSources(
+      task?.payload?.target_verified_sources,
+      rawVerifiedSourceModels.length,
+      verifiedSourceModels.length,
+      verifiedSourceCount,
+    );
   const minimumCandidateSources = Math.max(
     targetVerifiedSources * 2,
     Number(task?.payload?.minimum_candidate_sources || 0),
