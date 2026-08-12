@@ -471,7 +471,23 @@ footer{
 </section>
 
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">5 Karten</span></div>
+  <div class="spalte-kopf"><h2>Als Nächstes</h2><span class="zaehler">7 Karten</span></div>
+
+  <article class="karte s-todo">
+    <h3>Sechs Neustartversuche, bevor einer hält</h3>
+    <p>Der Startrennen-Defekt ist behoben, aber der Weg dorthin ist teuer: der Wächter greift zu, der Neustart fällt nach 1–2 s auf <code>pending</code> zurück — <b>sechsmal</b> — und hält erst danach. Gesamt 37 bzw. 39 s in zwei Läufen.</p>
+    <span class="ev"><b>Zweimal exakt sechs</b> — Muster, kein Rauschen<br>
+    <b>Zum Vergleich</b> der Handaufruf <code>restartCollection()</code> hält beim ERSTEN Versuch in unter 6 s<br>
+    <b>Vorher verdeckt</b> von dem Defekt, der jetzt weg ist</span>
+    <span class="ausloeser">Auslöser <span>zuerst messen, warum die ersten sechs zurückfallen — nicht raten. In dieser Sache lag ich fünfmal plausibel daneben.</span></span>
+  </article>
+
+  <article class="karte s-todo">
+    <h3>Flattern nach dem Verbinden</h3>
+    <p>Nach <code>connected</code> ging eine Collection zurück auf <code>connecting/reconnecting</code> und stand 10 s später noch dort, <code>connectedAt</code> null. Im zweiten Lauf dagegen: 26 von 26 stabil.</p>
+    <span class="ev"><b>Nicht zugeordnet</b> — Sync-Naht oder die breitere Peer-Bedingung (<code>peer_connect_timeout</code> trat auch bei <code>business_workspace_branding</code> auf). Nicht gemessen, deshalb keine Behauptung.</span>
+    <span class="ausloeser">Auslöser <span>wenn es erneut auftritt — im zweiten Lauf war es weg.</span></span>
+  </article>
 
   <article class="karte s-todo">
     <h3>F-01b: Revisionsformat aus <code>store.rs</code></h3>
@@ -583,6 +599,13 @@ footer{
     <div class="eintrag"><b><code>cp</code> über ein laufendes Binär gibt „Text file busy"</b><span>Nach <code>.neu</code> kopieren und mit <code>mv -f</code> darüber. Auf leadyoda hält der jami-daemon dieselbe Datei seit 53 Tagen.</span></div>
     <div class="eintrag"><b><code>pgrep -fc</code> gibt bei null Treffern „0" UND einen Fehlercode</b><span>Ein angehängtes <code>|| echo 0</code> erzeugt eine zweite Null, jeder Vergleich kippt.</span></div>
     <div class="eintrag"><b>Verwaiste Worker-Arbeit wandert per <code>--include-dirty</code> weiter</b><span>Unversionierte Arbeit im Hauptcheckout wird in JEDEN neuen Arbeitsbaum mitkopiert und sieht dort wie eigene Arbeit aus. Herkunft immer mit <code>git log --all -S</code> prüfen: nur <code>preserve run</code>/<code>wip:</code>-Treffer und 0 auf <code>main</code> heißt verwaist.</span></div>
+    <div class="eintrag"><b>Ein Buster ist Einweg</b><span>Er beweist nicht „neu", sondern nur „anders als vorher". Sobald eine URL einmal ausgeliefert wurde, ist sie in der ctox.dev-Randschicht für immer an diesen Inhalt gebunden — auch ein einzelner Abruf zum Messen verbrennt den Namen. Buster heben ist keine Maßnahme pro Sitzung, sondern <b>eine pro Auslieferung</b>. Zweimal daran gescheitert: drei Fixes lagen auf der VM und wurden nie geladen.</span></div>
+    <div class="eintrag"><b>Wer nicht prüft, welche Datei der Browser ausführt, misst seine eigene Erwartung</b><span>Vier Proben, drei Fixes, zwei Sitzungen — alles gegen eine Datei, die keiner von beiden geschrieben hatte. <code>cache:'no-store'</code> hilft nicht: es steuert den Browser-Cache, nicht den Rand. Immer zuerst <code>performance.getEntriesByType('resource')</code> auf die tatsächlich geladene URL und <code>transferSize &gt; 0</code> prüfen — <b>vor</b> jeder Diagnose, nicht danach.</span></div>
+    <div class="eintrag"><b>Ein Anstoß, der ins Leere läuft, sieht aus wie ein fehlender Anstoß</b><span>Derselbe Defekt ließ sich fünfmal plausibel diagnostizieren: Anstoß fehlt → Empfänger kennt den Fall nicht → niemand klopft → das Klopfen hört nach einem Versuch auf → der Filter liest das falsche Feld. Jede Stufe war im Code belegbar und trotzdem nicht die Ursache. Wer einen Auslöser ergänzt, muss prüfen, ob der Empfänger den Fall überhaupt kennt.</span></div>
+    <div class="eintrag"><b>Ein Zustand ohne Ereignis ist für jede ereignisgetriebene Reparatur unsichtbar</b><span>Eine Collection, die das Startrennen verliert, wirft nichts und meldet nichts — sie ist nur noch nicht da. Für solche Zustände braucht es einen Wächter, der von selbst klopft, statt auf ein Signal zu warten, das per Bauart nie kommt.</span></div>
+    <div class="eintrag"><b>Ein Zustand aus mehreren Feldern lügt im günstigeren</b><span><code>status: 'pending'</code> neben <code>connectionStatus: 'connecting'</code> — ein Filter, der <code>connectionStatus || status</code> las, sah „connecting", hielt es für gesund und übersprang genau die Collection, für die er geschrieben war. Bei widersprüchlichen Feldern auf den <b>Defektmarker</b> abstellen (hier <code>reason</code>), nicht auf den Fortschrittsstatus.</span></div>
+    <div class="eintrag"><b>Ein Aufgeben-Pfad muss die Wiederaufnahme ANSTOSSEN, nicht nur ermöglichen</b><span>Siebenmal in einer Nacht gefunden, über zwei Schichten und zwei Sitzungen: leere Peer-Liste, gescheiterte Aushandlung, verlorenes Collection-Startrennen, Pull-Retry-Lücke, abgelaufener Wartender, Sperrvermerk bei Fristablauf, sequenzieller Abgleich. Jedes Mal war die Erholung bereits gebaut — es fehlte der Anstoß. Der Rückgabewert sieht dabei aus wie ein Ergebnis, deshalb steht nichts im Log und alle Gesundheitszeichen bleiben grün.</span></div>
+    <div class="eintrag"><b>Ein Kommentar, der das Problem beschreibt, liest sich wie eine Lösung</b><span>In <code>replication-webrtc.mjs</code> stand die vollständige Diagnose im Kommentar — „a pull that failed past its in-band attempts was simply LOST until the next remote write" — und drei Zeilen darunter fehlte der Anstoß. In <code>sync.js</code> beschrieb ein Kommentar exakt, wie ein <code>pending</code>-Stub die Collection bis zum Neuladen lahmlegt; der Auslöser wurde als Parameter hereingereicht und nie gerufen. Selbstauskünfte im Code sind Hinweise, keine Belege.</span></div>
     <div class="eintrag"><b>Die ctox.dev-Fehlertafel kommt mit HTTP 200</b><span>Eine tote Instanz liefert 200 in 0,19 s. Jede <code>curl</code>-Prüfung auf Statuscode meldet „gesund". Nur der Seiteninhalt zeigt den Ausfall — im Browser nachsehen, nicht messen.</span></div>
     <div class="eintrag"><b>Verwaltete Instanzen erreichen neue API-Pfade nicht</b><span><code>app/instance/[tenant]/[[...path]]/route.ts</code> hat eine harte Positivliste (maintenance, runtime-settings, auth/capability, subscription-auth) und beantwortet jeden anderen Business-OS-Pfad mit <b>410</b>. Ein neuer Endpunkt ist dort unerreichbar, egal was <code>is_business_os_control_plane_path</code> lokal erlaubt. Bootstrap muss über das Dokument gehen, nicht über einen zweiten Abruf.</span></div>
     <div class="eintrag"><b>Mandanten-VMs: Zugang und Werkzeuge</b><span>Nicht über <code>ssh_credentials</code>, sondern über <code>fleet_instances.vm_encrypted_private_key</code> (AES-256-GCM, <code>iv.tag.ciphertext</code> base64url, Schlüssel aus <code>CTOX_ENCRYPTION_KEY</code>/<code>CTOX_COOKIE_SECRET</code>, siehe <code>lib/crypto.ts</code>). Direkt: <code>ssh -p 2201x ctox@217.182.134.181</code>. Werkzeuge in <code>ctox-dev/output/</code>: fleet-run, fleet-push, fleet-disk-audit, tenant-vm-map. <b>Entschlüsselte Schlüssel danach löschen</b> — ich habe sechs davon auf dem Flottenwirt liegen lassen.</span></div>
