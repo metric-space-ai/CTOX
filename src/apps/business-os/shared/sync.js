@@ -328,8 +328,22 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       if (stopped) return;
       const stuck = [...activeCollections].filter((collection) => {
         const current = diagnostics.collections[collection] || {};
-        const status = current.connectionStatus || current.status || '';
-        return status === 'pending' && current.reason === 'collection-not-registered';
+        // Key off the DEFECT MARKER, not the connection status. A collection
+        // that lost the startup race reports two fields that disagree: status
+        // 'pending' but connectionStatus 'connecting'. Reading
+        // `connectionStatus || status` — as this filter did — sees 'connecting',
+        // which looks healthy, and skips the very collection it exists for.
+        // Measured on a customer instance: reason stayed
+        // 'collection-not-registered' and nothing moved for over 50 s while the
+        // sweep passed it by every 15 s.
+        //
+        // `reason` is the defect itself and does not depend on which phase the
+        // bridge claims to be in. The health check below keeps a collection that
+        // genuinely came up from being restarted for a stale reason string.
+        if (current.reason !== 'collection-not-registered') return false;
+        const healthy = isHealthyCollectionStatus(current.connectionStatus)
+          || isHealthyCollectionStatus(current.status);
+        return !healthy;
       });
       for (const collection of stuck) {
         if (stopped) return;
