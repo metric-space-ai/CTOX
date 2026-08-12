@@ -4069,7 +4069,7 @@ async fn consume_business_commands_loop(root: PathBuf, database: Arc<RxDatabase>
     let mut last_source_stamp: Option<BusinessCommandsSourceStamp> = None;
     // Do not run the comparatively expensive invariant sweep before the first
     // command intake opportunity after peer startup.
-    let mut consecutive_idle_rounds = 1u32;
+    let mut consecutive_idle_rounds = 0u32;
     loop {
         let started = Instant::now();
         let result: anyhow::Result<usize> = async {
@@ -4100,8 +4100,15 @@ async fn consume_business_commands_loop(root: PathBuf, database: Arc<RxDatabase>
                 eprintln!("[business-os] native rxdb command consumer failed: {err:#}");
             }
         }
-        wait_for_business_command_wake(&root, last_source_stamp.as_ref(), consecutive_idle_rounds)
-            .await;
+        // The current empty result has already incremented the counter. Base
+        // the wait on prior idle rounds so the first observed empty poll keeps
+        // the active cadence before the event-driven 30-second fallback.
+        wait_for_business_command_wake(
+            &root,
+            last_source_stamp.as_ref(),
+            consecutive_idle_rounds.saturating_sub(1),
+        )
+        .await;
     }
 }
 
@@ -10600,8 +10607,9 @@ pub(in crate::business_os) mod tests {
 
     #[test]
     fn business_command_poll_sleep_backs_off_after_idle_round() {
+        let first_empty_round = 1u32;
         assert_eq!(
-            business_command_poll_sleep_secs(0),
+            business_command_poll_sleep_secs(first_empty_round.saturating_sub(1)),
             BUSINESS_COMMAND_ACTIVE_POLL_SECS
         );
         assert_eq!(
