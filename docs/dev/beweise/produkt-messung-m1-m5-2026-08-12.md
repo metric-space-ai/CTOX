@@ -119,3 +119,56 @@ ein Ersatzmaß.
 Produktnote bleibt bis zum vollständigen M1–M5-Satz offen; nach aktueller
 Faktenlage wäre sie schlecht („funktioniert, aber langsam, ein Kernpfad
 defekt“). Repo-Note (B) und Produktnote sind getrennte Größen.
+
+---
+
+# NACHMESSUNG M3 nach TEMPO-1 (12.08., ~09:40)
+
+Aufbau identisch zur Vormessung, aber diesmal **gegen einen sauberen
+`git archive HEAD`-Auszug** gebaut und ausgeliefert (nicht gegen den geteilten
+Arbeitsbaum): Release-Binary aus `2cde146c0`, Shell-Assets aus demselben Auszug
+(`command-bus.js` mit 2× `findDocumentsById` verifiziert, Bundle-Buster
+`20260812-tempo1-v95`), isolierter Root, 30 Commands
+`ctox.provider_subscription.status`.
+
+## Ergebnis
+
+| Größe | Vorher | Nachher | Bewertung |
+|---|---|---|---|
+| `SQLITE_QUERY_STREAM_UNSUPPORTED` / `QUERY_NOT_SUPPORTED` | bei **jedem** Tracking-Aufruf | **0 von 30** | **behoben** |
+| Fehlgemeldete Commands (UI-Fehlschlag bei Server-Erfolg) | 30/30 | **0/30** | **behoben** |
+| Command-Status | 30/30 completed | 30/30 completed | unverändert gut |
+| Dokument-Roundtrip (created→updated) p50 | 1.420 ms | **1.497 ms** | unverändert |
+| Dokument-Roundtrip p95 | 4.282 ms | 6.227 ms | schlechter, siehe Vorbehalt |
+| Dispatch-Wanduhr p50 / p95 | (nicht erhoben) | 4.149 / 15.216 ms | neue Basiszahl |
+
+## Zwei Messfehler auf meiner Seite, die ich offenlege
+
+1. **Falsche Kennung.** Mein erster Nachmesslauf übergab `waitForTerminal` das
+   ganze Dispatch-Ergebnis statt der Kennung — das Feld heißt `command_id`
+   (snake_case), nicht `commandId`. Folge: 20-s-Zeitabläufe, die wie ein
+   Produktdefekt aussahen. Es war mein Aufbau. Korrigiert und neu gemessen.
+   Nebenbefund: `dispatch()` wartet bereits intern auf den Endzustand und
+   liefert `status: "completed"` zurück — ein separates `waitForTerminal` ist
+   für den Normalfall gar nicht nötig.
+2. **Vergleich zweier verschiedener Größen.** Die Vorher-Zahl (1,42 s) stammt
+   aus Dokument-Zeitstempeln, die naheliegende Nachher-Zahl (4,1 s) ist
+   Wanduhr-Zeit des ganzen Dispatch-Aufrufs. Nicht vergleichbar. Oben steht
+   deshalb beides getrennt; vergleichbar ist nur die Dokument-Zeile.
+
+## Vorbehalt zur p95-Verschlechterung
+
+Der Nachher-Lauf lief unter deutlich höherer Maschinenlast (5-Minuten-Mittel
+14–28, parallel ein Sol-Worker-Bau) als der Vorher-Lauf. p50 ist praktisch
+unverändert (1,42 → 1,50 s), p95 ist von 4,3 auf 6,2 s gestiegen. Ich werte
+das **nicht** als Regression durch TEMPO-1, aber auch nicht als Verbesserung:
+Der Latenz-Hebel ist damit **nicht** eingelöst. Die Sekunden bleiben.
+
+## Was TEMPO-1 tatsächlich eingelöst hat
+
+Der Rückmelde-Defekt ist weg — die Oberfläche meldet keinen Fehlschlag mehr,
+wenn der Server erfolgreich war. Das war der schwerwiegendere der beiden
+Punkte (falsche Fehlanzeige ist schlimmer als langsam). Die Latenz selbst
+bleibt offen; der nächste Hebel dafür ist nicht der Consumer-Backoff, sondern
+die Kette aus festen Takten (nativer Intake-Poll 1 s, Browser-Revalidate,
+Projektions-Refresh) plus der Multi-RTT-Handshake.
