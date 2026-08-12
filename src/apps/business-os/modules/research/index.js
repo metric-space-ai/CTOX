@@ -4202,20 +4202,26 @@ async function runSelectedResearch() {
     targetVerifiedSources * 2,
     Number(task?.payload?.minimum_candidate_sources || 0),
   );
+  // Depth and round counts decide whether a run fits inside one model session.
+  // These were hard-wired to the exhaustive profile, so a dashboard configured
+  // for a smaller sweep still dispatched a multi-hour run and died against the
+  // session ceiling before it could ever validate. Honor the configuration and
+  // keep the exhaustive profile as the default for unconfigured dashboards.
+  const discoveryDepth = researchDiscoveryDepth(task?.payload?.discovery_depth);
   const minimumDiscoveryRounds = Math.max(
-    6,
-    Number(task?.payload?.minimum_discovery_rounds || 0),
+    2,
+    Number(task?.payload?.minimum_discovery_rounds || 0) || 6,
   );
   const minimumScholarlyRounds = Math.max(
-    2,
-    Number(task?.payload?.minimum_scholarly_rounds || 0),
+    1,
+    Number(task?.payload?.minimum_scholarly_rounds || 0) || 2,
   );
   const instruction = [
     `Führe die systematische Recherche für "${task.title}" mit dem System-Skill systematic-research fort.`,
     `Research Task ID: ${task.id}`,
     `Research Run ID: ${researchRunId}`,
     `Research Command ID: ${commandId}`,
-    'Requested Discovery Depth: exhaustive',
+    `Requested Discovery Depth: ${discoveryDepth}`,
     `Target Verified Sources: ${targetVerifiedSources}`,
     `Minimum Candidate Sources: ${minimumCandidateSources}`,
     `Minimum Discovery Rounds: ${minimumDiscoveryRounds}`,
@@ -4251,7 +4257,7 @@ async function runSelectedResearch() {
     web_stack_plan: {
       strategy: 'agentic_iterative_systematic_research',
       seed_query: task.prompt || task.title,
-      depth: 'exhaustive',
+      depth: discoveryDepth,
       target_verified_sources: targetVerifiedSources,
       minimum_candidate_sources: minimumCandidateSources,
       minimum_discovery_rounds: minimumDiscoveryRounds,
@@ -4429,6 +4435,16 @@ function boundedVerifiedSourceCount(sourceModels = [], sourceTable = null) {
     'projected_row_count',
   ]);
   return declaredCount ? Math.min(modelCount, declaredCount) : modelCount;
+}
+
+// Only the three profiles the systematic-research skill understands; anything
+// else falls back to the strict default rather than reaching the skill as an
+// unknown token.
+const RESEARCH_DISCOVERY_DEPTHS = new Set(['standard', 'deep', 'exhaustive']);
+
+function researchDiscoveryDepth(configured) {
+  const value = String(configured || '').trim().toLowerCase();
+  return RESEARCH_DISCOVERY_DEPTHS.has(value) ? value : 'exhaustive';
 }
 
 function effectiveTargetVerifiedSources(
