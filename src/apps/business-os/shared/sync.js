@@ -351,7 +351,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260812-tempo1-v95');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260812-peer-negotiation-retry-v94');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1225,22 +1225,13 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
   const rxCollection = db?.raw?.[collection] || db?.collection?.(collection);
   if (!rxCollection) {
     recordCollection?.(collection, { status: 'pending', reason: 'collection-not-registered' });
-    // This is a RACE, not a verdict: the collection may be registered moments
-    // later. The caller already knows how to recover — it drops a cached
-    // 'pending' stub and starts fresh (see the `currentBridge?.mode === 'pending'`
-    // branch in startCollection). Nothing ever triggered that path, so a
-    // collection that lost this race stayed unsynced until a page reload.
-    // Observed on a customer instance: user_thread_states sat on
-    // reason='collection-not-registered' while it was demonstrably present in
-    // db.raw, right next to user_thread_links which had connected normally.
-    scheduleRestart?.(collection);
     return { mode: 'pending', collection, reason: 'collection-not-registered' };
   }
   if (collection === 'desktop_icons' && typeof rxCollection.find === 'function') {
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260812-tempo1-v95');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260812-peer-negotiation-retry-v94');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
