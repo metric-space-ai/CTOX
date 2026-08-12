@@ -15,6 +15,8 @@ import { queryFingerprint } from './query-fingerprint.mjs';
 
 export const DEFAULT_WINDOW_LIMIT = 200;
 const CONTROL_PLANE_QUERY_REVALIDATE_MS = 1000;
+const TRACKED_CONTROL_PLANE_QUERY_REVALIDATE_MS = 250;
+const ACTIVE_COMMAND_STORAGE_KEY = 'ctox.businessOs.activeCommandIds.v1';
 const EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5000;
 const MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS = 5000;
 
@@ -85,9 +87,10 @@ export function createQueryDemandLoader({
         cached.complete = false;
         bumpStatus(status, 'queryFetchEvictedWindowMissCount');
       }
+      const controlPlaneRevalidateMs = controlPlaneQueryRevalidateMs(collectionName, query);
       const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName)
         && cached
-        && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= CONTROL_PLANE_QUERY_REVALIDATE_MS;
+        && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= controlPlaneRevalidateMs;
       // An empty response can be authoritative at fetch time and still become
       // stale without a local document change to invalidate it. This happens
       // during projection/startup races: the browser queries before the native
@@ -398,6 +401,32 @@ export function createQueryDemandLoader({
 
 function isControlPlaneStatusCollection(collectionName) {
   return collectionName === 'business_commands' || collectionName === 'ctox_queue_tasks';
+}
+
+function controlPlaneQueryRevalidateMs(collectionName, query) {
+  if (!isControlPlaneStatusCollection(collectionName)) return CONTROL_PLANE_QUERY_REVALIDATE_MS;
+  const selector = query?.selector || {};
+  const trackedId = exactSelectorValue(selector.id)
+    || exactSelectorValue(selector.command_id)
+    || exactSelectorValue(selector.commandId);
+  if (!trackedId) return CONTROL_PLANE_QUERY_REVALIDATE_MS;
+  try {
+    const activeIds = JSON.parse(
+      globalThis.localStorage?.getItem?.(ACTIVE_COMMAND_STORAGE_KEY) || '[]',
+    );
+    if (Array.isArray(activeIds) && activeIds.some((id) => String(id) === trackedId)) {
+      return TRACKED_CONTROL_PLANE_QUERY_REVALIDATE_MS;
+    }
+  } catch {}
+  return CONTROL_PLANE_QUERY_REVALIDATE_MS;
+}
+
+function exactSelectorValue(value) {
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (value && typeof value === 'object' && Object.keys(value).length === 1 && '$eq' in value) {
+    return String(value.$eq || '');
+  }
+  return '';
 }
 
 function isMutableMembershipCollection(collectionName) {

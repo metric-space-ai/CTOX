@@ -22,8 +22,8 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260812-sweep-marker-v108';
-import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260812-sweep-marker-v108';
+} from './sync-contract.js?v=20260812-dedup-import-v109';
+import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260812-dedup-import-v109';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';

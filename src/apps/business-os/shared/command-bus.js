@@ -1038,6 +1038,12 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
           // Close the subscribe/read race and every data-plane rebind window.
           inspect(await findDoc(commands, commandId, { swallowErrors: false }));
         } catch (error) {
+          if (isUnsupportedCommandTrackingQueryError(error)) {
+            try {
+              inspect(await findLocalDoc(currentDb?.raw?.business_commands, commandId));
+            } catch {}
+            return;
+          }
           settle(reject, error);
         } finally {
           rebindInFlight = false;
@@ -1198,6 +1204,22 @@ async function findDoc(collection, id, { swallowErrors = true } = {}) {
     throw error;
   }
   return doc?.toJSON?.() || doc || null;
+}
+
+async function findLocalDoc(collection, id) {
+  const storageCollection = collection?.storageCollection;
+  if (!storageCollection?.findDocumentsById || !id) return null;
+  const documents = await storageCollection.findDocumentsById([id]);
+  const doc = documents?.[id] || documents?.[String(id)] || null;
+  return doc?.toJSON?.() || doc;
+}
+
+function isUnsupportedCommandTrackingQueryError(error) {
+  const codes = [error?.code, error?.cause?.code, error?.data?.code]
+    .map((code) => String(code || ''));
+  const message = String(error?.message || error || '');
+  return ['SQLITE_QUERY_STREAM_UNSUPPORTED', 'QUERY_FETCH_STREAM_UNSUPPORTED', 'QUERY_NOT_SUPPORTED']
+    .some((code) => codes.includes(code) || message.includes(code));
 }
 
 async function waitForSyncBridgeReady(bridge, timeoutMs) {

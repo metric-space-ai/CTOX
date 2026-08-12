@@ -665,6 +665,49 @@ test('completed control command treats legacy task_id as a target rather than an
   assert.equal(result.target_task_id, 'workspace-branding');
 });
 
+test('terminal tracking falls back to the local store when demand queries are unsupported', async () => {
+  const commandId = 'cmd-native-completed-query-unsupported';
+  const completed = {
+    id: commandId,
+    command_id: commandId,
+    status: 'completed',
+    result: { outcome: { ok: true } },
+  };
+  let demandReads = 0;
+  let localReads = 0;
+  const commands = {
+    storageCollection: {
+      async findDocumentsById(ids) {
+        localReads += 1;
+        return ids.includes(commandId) ? { [commandId]: completed } : {};
+      },
+    },
+    findOne(id) {
+      assert.equal(id, commandId);
+      return {
+        $: { subscribe() { return { unsubscribe() {} }; } },
+        async exec() {
+          demandReads += 1;
+          const error = new Error('SQLITE_QUERY_STREAM_UNSUPPORTED');
+          error.code = 'SQLITE_QUERY_STREAM_UNSUPPORTED';
+          throw error;
+        },
+      };
+    },
+  };
+  const bus = createCommandBus({ db: { raw: { business_commands: commands } } });
+
+  const receipt = await bus.waitForTerminal(commandId, {
+    timeoutMs: 1000,
+    sync_queue_tasks: false,
+  });
+
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.status, 'completed');
+  assert.equal(demandReads, 1);
+  assert.equal(localReads, 1);
+});
+
 test('sync push errors remain typed instead of becoming a command timeout', async () => {
   const collection = {
     async insert() {},

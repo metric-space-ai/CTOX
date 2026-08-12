@@ -6915,6 +6915,8 @@ function canonicalizeWindow(window2) {
 // src/apps/business-os/rxdb/src/query-demand-loader.mjs
 var DEFAULT_WINDOW_LIMIT = 200;
 var CONTROL_PLANE_QUERY_REVALIDATE_MS = 1e3;
+var TRACKED_CONTROL_PLANE_QUERY_REVALIDATE_MS = 250;
+var ACTIVE_COMMAND_STORAGE_KEY = "ctox.businessOs.activeCommandIds.v1";
 var EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5e3;
 var MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS = 5e3;
 function createQueryDemandLoader({
@@ -6975,7 +6977,8 @@ function createQueryDemandLoader({
           cached.complete = false;
           bumpStatus(status, "queryFetchEvictedWindowMissCount");
         }
-        const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName) && cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= CONTROL_PLANE_QUERY_REVALIDATE_MS;
+        const controlPlaneRevalidateMs = controlPlaneQueryRevalidateMs(collectionName, query);
+        const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName) && cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= controlPlaneRevalidateMs;
         const emptyWindowStale = cached && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0) && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
         const mutableMembershipWindowStale = isMutableMembershipCollection(collectionName) && cached && Array.isArray(cached.documentIds) && cached.documentIds.length > 0 && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS;
         if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale && !mutableMembershipWindowStale) {
@@ -7207,6 +7210,29 @@ function createQueryDemandLoader({
 }
 function isControlPlaneStatusCollection(collectionName) {
   return collectionName === "business_commands" || collectionName === "ctox_queue_tasks";
+}
+function controlPlaneQueryRevalidateMs(collectionName, query) {
+  if (!isControlPlaneStatusCollection(collectionName)) return CONTROL_PLANE_QUERY_REVALIDATE_MS;
+  const selector = query?.selector || {};
+  const trackedId = exactSelectorValue(selector.id) || exactSelectorValue(selector.command_id) || exactSelectorValue(selector.commandId);
+  if (!trackedId) return CONTROL_PLANE_QUERY_REVALIDATE_MS;
+  try {
+    const activeIds = JSON.parse(
+      globalThis.localStorage?.getItem?.(ACTIVE_COMMAND_STORAGE_KEY) || "[]"
+    );
+    if (Array.isArray(activeIds) && activeIds.some((id) => String(id) === trackedId)) {
+      return TRACKED_CONTROL_PLANE_QUERY_REVALIDATE_MS;
+    }
+  } catch {
+  }
+  return CONTROL_PLANE_QUERY_REVALIDATE_MS;
+}
+function exactSelectorValue(value) {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (value && typeof value === "object" && Object.keys(value).length === 1 && "$eq" in value) {
+    return String(value.$eq || "");
+  }
+  return "";
 }
 function isMutableMembershipCollection(collectionName) {
   return collectionName === "knowledge_tables";
