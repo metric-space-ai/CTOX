@@ -3015,6 +3015,14 @@ async function sendLeadToSellify(id, { includeCampaign = false } = {}) {
       command_id: workflowId,
       payload: {
         ...lead.payload,
+        // Ein alter Fehlertext neben einem frischen Erfolgsstatus ist keine
+        // Kosmetik, sondern eine MESSFALLE: am 12.08.2026 stand
+        // sellify_status=completed und daneben unveraendert "Die
+        // Sellify-Dublettenpruefung ist nicht eindeutig" von 00:02:28. Das hat in
+        // dieser Nacht zwei Sitzungen in die falsche Richtung geschickt — man
+        // liest den Fehler und haelt den Vorgang fuer gescheitert, obwohl er
+        // durchlief. Wer erfolgreich ist, raeumt seine Fehlerspur weg.
+        sellify_error: '',
         sellify_finished_at_ms: Date.now(),
         sellify_company_id: company.id,
         sellify_contact_id: company.contact_id,

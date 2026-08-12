@@ -1457,3 +1457,17 @@ test('mehrere CRM-Organisationen brechen die Uebergabe nicht ab', () => {
   assert.equal([...gleich].sort((a, b) =>
     gehalt(b) - gehalt(a) || a.contact_id - b.contact_id)[0].contact_id, 100);
 });
+
+test('ein Erfolg raeumt seine Fehlerspur weg', () => {
+  // Am 12.08.2026 stand sellify_status=completed und daneben unveraendert
+  // "Die Sellify-Dublettenpruefung ist nicht eindeutig" von 00:02:28. Zwei
+  // Sitzungen haben den Vorgang deshalb fuer gescheitert gehalten, obwohl er
+  // durchlief. Ein alter Fehlertext neben einem frischen Erfolgsstatus ist eine
+  // Messfalle, keine Kosmetik.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const i = quelle.indexOf("sellify_status: 'completed'");
+  assert.ok(i > 0, 'der Erfolgspfad existiert');
+  const block = quelle.slice(i, i + 900);
+  assert.match(block, /sellify_error:\s*''/,
+    'der Erfolgspfad muss die Fehlerspur leeren');
+});
