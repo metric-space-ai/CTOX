@@ -16,6 +16,9 @@ use super::rxdb_peer::{
     now_ms, record_native_peer_loop_result, rxdb_collection_version_table_name,
     NativePeerLoopMetrics,
 };
+use super::rxdb_peer_tombstones::{
+    sweep_tombstones_once, TOMBSTONE_SWEEP_DRAIN_INTERVAL_SECS, TOMBSTONE_SWEEP_IDLE_INTERVAL_SECS,
+};
 use super::store;
 use anyhow::Context;
 use base64::Engine;
@@ -827,7 +830,28 @@ pub(super) async fn browser_runtime_maintenance_loop(
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let mut consecutive_idle_rounds = 0u32;
+    // This loop is the daemon's only maintenance tick that runs whether or not a
+    // browser session exists, which is why the tombstone sweep rides it. The
+    // sweep must sit ABOVE the early return below: tombstones accumulate in every
+    // collection, most of all while nobody is browsing.
+    let mut last_tombstone_sweep: Option<Instant> = None;
     loop {
+        let sweep_due = last_tombstone_sweep.is_none_or(|last| {
+            last.elapsed() >= Duration::from_secs(TOMBSTONE_SWEEP_IDLE_INTERVAL_SECS)
+        });
+        if sweep_due {
+            let more_remains = sweep_tombstones_once(&database, &database_write_lock).await;
+            // A full batch means backlog. Come back promptly instead of sleeping
+            // half an hour on a database with six figures of tombstones.
+            last_tombstone_sweep = Some(if more_remains {
+                Instant::now()
+                    - Duration::from_secs(
+                        TOMBSTONE_SWEEP_IDLE_INTERVAL_SECS - TOMBSTONE_SWEEP_DRAIN_INTERVAL_SECS,
+                    )
+            } else {
+                Instant::now()
+            });
+        }
         if browser_runtime_manager().active_session_ids().is_empty() {
             consecutive_idle_rounds = 0;
             tokio::time::sleep(Duration::from_secs(

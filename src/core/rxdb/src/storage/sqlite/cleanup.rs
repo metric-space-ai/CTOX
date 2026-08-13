@@ -8,6 +8,22 @@ use crate::rx_error::RxResult;
 use super::sql::quote_identifier;
 use super::types::{sqlite_error, SharedSqliteConnection};
 
+/// How many tombstones one cleanup call may delete.
+///
+/// The statement used to be unbounded. That is harmless while a database is
+/// young and a live hazard once it is not: the first run against a real
+/// instance would delete a six-figure row count inside a single write lock,
+/// stalling every replication write behind it. Bounding the batch turns the
+/// first run into many short pauses instead of one long one.
+// ref: rxdb/src/plugins/cleanup/cleanup.ts (cleanupPolicy.awaitReplicationsInSync)
+const CLEANUP_BATCH_LIMIT: usize = 2_000;
+
+/// Delete at most [`CLEANUP_BATCH_LIMIT`] tombstones older than the retention
+/// window. Returns `true` when the collection is clean, `false` when the batch
+/// was full and more tombstones remain — the caller is expected to come back.
+///
+/// The `bool` is the upstream RxDB contract and it was previously a lie: this
+/// function always returned `true`. Nothing called it, so nothing noticed.
 pub fn cleanup_deleted_documents(
     connection: &SharedSqliteConnection,
     table_name: &str,
@@ -16,13 +32,18 @@ pub fn cleanup_deleted_documents(
     let max_deletion_time = now() - minimum_deleted_time as f64;
     let conn = crate::storage::sqlite::instance::lock_sqlite_writer(connection);
     let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
-    conn.execute(
-        &format!(
-            "DELETE FROM {} WHERE deleted = 1 AND lastWriteTime < ?",
-            quote_identifier(table_name)
-        ),
-        params![max_deletion_time],
-    )
-    .map_err(sqlite_error)?;
-    Ok(true)
+    let quoted = quote_identifier(table_name);
+    let deleted = conn
+        .execute(
+            &format!(
+                "DELETE FROM {quoted} WHERE rowid IN (
+                     SELECT rowid FROM {quoted}
+                     WHERE deleted = 1 AND lastWriteTime < ?
+                     LIMIT ?
+                 )"
+            ),
+            params![max_deletion_time, CLEANUP_BATCH_LIMIT as i64],
+        )
+        .map_err(sqlite_error)?;
+    Ok(deleted < CLEANUP_BATCH_LIMIT)
 }

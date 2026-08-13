@@ -2018,6 +2018,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_deletes_in_bounded_batches_and_reports_when_more_remains() {
+        // The unbounded statement was a live hazard, not a style question: on a
+        // measured customer instance 301.449 tombstones sat in one table, and
+        // deleting them in a single statement holds the write lock against every
+        // replication write. The bool "am I done" is part of the upstream
+        // contract and used to always be true.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
+            database_path: dir.path().join("ctox.sqlite3"),
+        });
+        let instance = create_storage_instance(&storage, params(test_schema()))
+            .await
+            .unwrap();
+
+        const TOMBSTONES: usize = 2_500;
+        let rows = (0..TOMBSTONES)
+            .map(|index| BulkWriteRow {
+                previous: None,
+                document: doc(&format!("gone-{index}"), "1-a", 1, true, 1.0),
+            })
+            .collect::<Vec<_>>();
+        instance.bulk_write(rows, "seed").await.unwrap();
+        instance
+            .bulk_write(
+                vec![BulkWriteRow {
+                    previous: None,
+                    document: doc("alive", "1-a", 1, false, 1.0),
+                }],
+                "seed",
+            )
+            .await
+            .unwrap();
+
+        // First pass hits the batch cap, so it must say it is not finished.
+        assert!(
+            !instance.cleanup(0).await.unwrap(),
+            "a full batch must report that tombstones remain"
+        );
+        // Second pass clears the rest and reports completion.
+        assert!(
+            instance.cleanup(0).await.unwrap(),
+            "the remaining tombstones fit in one batch, so cleanup is done"
+        );
+        assert!(
+            instance.cleanup(0).await.unwrap(),
+            "a clean collection stays done"
+        );
+
+        let survivors = instance
+            .find_documents_by_id(&["alive".to_string(), "gone-0".to_string()], true)
+            .await
+            .unwrap();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "cleanup must remove tombstones and keep live documents"
+        );
+    }
+
+    #[tokio::test]
     async fn find_documents_by_id_file_backed_uses_read_only_connection() {
         let dir = tempfile::tempdir().unwrap();
         let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
