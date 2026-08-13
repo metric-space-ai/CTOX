@@ -172,3 +172,35 @@ Punkte (falsche Fehlanzeige ist schlimmer als langsam). Die Latenz selbst
 bleibt offen; der nächste Hebel dafür ist nicht der Consumer-Backoff, sondern
 die Kette aus festen Takten (nativer Intake-Poll 1 s, Browser-Revalidate,
 Projektions-Refresh) plus der Multi-RTT-Handshake.
+
+---
+
+# KORREKTUR (13.08.): "Beweistest grün" war zunächst unbelegt
+
+Beim Landen von SCHLEIFE-1 (147b2aaf2) habe ich den Beweistest als grün
+gemeldet. Der Lauf hatte aber `0 passed; 2828 filtered out` ausgegeben — ich
+hatte `cargo test <kurzname> -- --exact` aufgerufen, und `--exact` verlangt den
+VOLLEN Pfad. Kein Test hatte gepasst; „ok" bezog sich auf einen leeren Lauf.
+
+Nachgeholt mit korrektem Filter:
+
+```
+test business_os::rxdb_peer::tests::exhausted_conflicting_command_is_not_rewritten_or_recorded_again ... ok
+test result: ok. 1 passed; 0 failed; ... finished in 56.20s
+```
+
+Der Fix ist damit **tatsächlich** belegt: zwei Consumer-Sweeps über dasselbe
+Konfliktdokument lassen Revision und Intake-Failure-Zeilenzahl unverändert.
+Die Behauptung war richtig, der Beweis fehlte — das ist derselbe Fehlertyp wie
+„im Repo gelandet" gleich „beim Kunden wirksam", nur eine Ebene tiefer.
+
+**Regel daraus:** Bei jedem Testlauf die Zahl gelaufener Tests zitieren. Ein
+Lauf mit 0 gelaufenen Tests ist kein grüner Lauf. Diese Regel steht jetzt in
+jedem Worker-Brief.
+
+## Zweiter Befund: mein Commit hat den Größenwächter rot gemacht
+
+`rxdb_peer.rs` steht nach 147b2aaf2 bei **10.042** Produktionszeilen gegen ein
+Budget von **9.941** — 101 zu viel. Gefunden hat das nicht ich, sondern der
+Planungslauf. Das Budget wird nicht angehoben; der Schnitt (Command-Intake in
+eine eigene Datei) läuft als Arbeitspaket AP4.
