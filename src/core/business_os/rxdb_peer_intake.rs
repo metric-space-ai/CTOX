@@ -1,0 +1,1205 @@
+// Origin: CTOX
+// License: Apache-2.0
+
+use super::app_runtime;
+use super::desktop_files::{upsert_desktop_file_with_policy, DesktopFileContentPolicy};
+use super::rxdb_peer::{
+    latest_rxdb_collection_table, now_ms, projection_sleep_secs, sqlite_quote_identifier,
+    sqlite_table_has_column, sync_business_users_with_database, sync_module_catalog_with_database,
+    sync_runtime_settings_with_database, sync_ticket_state_with_database,
+    sync_workspace_branding_with_database, upsert_business_record_projection,
+    BUSINESS_COMMAND_ACTIVE_POLL_SECS, BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS,
+    BUSINESS_COMMAND_IDLE_POLL_SECS, COMMAND_PLANE_METRICS,
+};
+use super::rxdb_peer_browser::{
+    apply_browser_runtime_command, is_browser_runtime_command, mark_browser_runtime_command_failed,
+};
+use super::rxdb_peer_commands::{
+    command_id_from_document, incremental_upsert_document_with_envelope,
+    project_appsec_command_result, project_support_command_result, project_threads_command_result,
+    typed_app_action_error_code,
+};
+use super::rxdb_peer_projections::{
+    record_native_peer_loop_result, BUSINESS_COMMANDS_LOOP_METRICS,
+};
+use super::store;
+use anyhow::Context;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rxdb::rx_database::RxDatabase;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
+
+/// Je Prozesslauf einmal melden, dass ein Command mit erschoepftem
+/// Intake-Fehler uebersprungen wird — sonst ersetzt die Meldung die Schleife,
+/// die sie beschreibt.
+static LOGGED_EXHAUSTED_BUSINESS_COMMAND_SKIPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BusinessCommandsSourceStamp {
+    pub(super) table: BusinessCommandsTableStamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BusinessCommandsTableStamp {
+    pub(super) table_name: Option<String>,
+    pub(super) pending_count: i64,
+    pub(super) latest_pending_lwt_bits: u64,
+}
+
+pub(super) async fn business_commands_source_change(
+    root: &Path,
+    last_source_stamp: &mut Option<BusinessCommandsSourceStamp>,
+) -> anyhow::Result<Option<BusinessCommandsSourceStamp>> {
+    let source_stamp = business_commands_source_stamp(root).await?;
+    if source_stamp.table.pending_count == 0 {
+        *last_source_stamp = Some(source_stamp);
+        return Ok(None);
+    }
+    Ok(Some(source_stamp))
+}
+
+pub(super) async fn refresh_business_commands_source_stamp(
+    root: &Path,
+    last_source_stamp: &mut Option<BusinessCommandsSourceStamp>,
+) -> anyhow::Result<()> {
+    *last_source_stamp = Some(business_commands_source_stamp(root).await?);
+    Ok(())
+}
+
+pub(super) async fn business_commands_source_stamp(
+    root: &Path,
+) -> anyhow::Result<BusinessCommandsSourceStamp> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        Ok(BusinessCommandsSourceStamp {
+            table: business_commands_table_stamp(&root)?,
+        })
+    })
+    .await
+    .context("join business commands source stamp")?
+}
+
+pub(super) fn business_commands_table_stamp(
+    root: &Path,
+) -> anyhow::Result<BusinessCommandsTableStamp> {
+    let path = store::rxdb_store_path(root);
+    if !path.exists() {
+        return Ok(empty_business_commands_table_stamp(None));
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "open Business OS RxDB store for command source stamp {}",
+            path.display()
+        )
+    })?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
+        .context("configure business command source stamp busy_timeout")?;
+    let Some(table) = latest_rxdb_collection_table(&conn, "business_commands")? else {
+        return Ok(empty_business_commands_table_stamp(None));
+    };
+    let quoted = sqlite_quote_identifier(&table);
+    let deleted_expr = if sqlite_table_has_column(&conn, &table, "deleted")? {
+        "deleted"
+    } else {
+        "0"
+    };
+    let lwt_expr = if sqlite_table_has_column(&conn, &table, "lastWriteTime")? {
+        "COALESCE(lastWriteTime, 0)"
+    } else {
+        "CAST(COALESCE(json_extract(data, '$._meta.lwt'), json_extract(data, '$.updated_at_ms'), 0) AS REAL)"
+    };
+    let (pending_count, latest_pending_lwt): (i64, f64) = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(MAX({lwt_expr}), 0)
+                 FROM {quoted}
+                 WHERE {deleted_expr} = 0
+                   AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .with_context(|| format!("stamp pending business_commands rows in {table}"))?;
+    Ok(BusinessCommandsTableStamp {
+        table_name: Some(table),
+        pending_count,
+        latest_pending_lwt_bits: latest_pending_lwt.to_bits(),
+    })
+}
+
+pub(super) fn empty_business_commands_table_stamp(
+    table_name: Option<String>,
+) -> BusinessCommandsTableStamp {
+    BusinessCommandsTableStamp {
+        table_name,
+        pending_count: 0,
+        latest_pending_lwt_bits: 0,
+    }
+}
+
+pub(super) async fn consume_business_commands_loop(root: PathBuf, database: Arc<RxDatabase>) {
+    // Per-command failure budget. A command that keeps failing to accept
+    // (e.g. a corrupt document) used to abort the WHOLE round via `?`, get
+    // re-sorted to the head on the next 1s tick, and starve every command
+    // behind it — browser-issued commands then appeared to hang forever.
+    let mut accept_failures: HashMap<String, u32> = HashMap::new();
+    let mut last_source_stamp: Option<BusinessCommandsSourceStamp> = None;
+    // Do not run the comparatively expensive invariant sweep before the first
+    // command intake opportunity after peer startup.
+    let mut consecutive_idle_rounds = 0u32;
+    loop {
+        let started = Instant::now();
+        let result: anyhow::Result<usize> = async {
+            if business_commands_source_change(&root, &mut last_source_stamp)
+                .await?
+                .is_some()
+            {
+                let consumed =
+                    consume_pending_business_commands(&root, &database, &mut accept_failures)
+                        .await?;
+                refresh_business_commands_source_stamp(&root, &mut last_source_stamp).await?;
+                return Ok(consumed);
+            }
+
+            Ok(0)
+        }
+        .await;
+        record_native_peer_loop_result(&BUSINESS_COMMANDS_LOOP_METRICS, &result, started.elapsed());
+        match result {
+            Ok(0) => {
+                consecutive_idle_rounds = consecutive_idle_rounds.saturating_add(1);
+            }
+            Ok(_) => {
+                consecutive_idle_rounds = 0;
+            }
+            Err(err) => {
+                consecutive_idle_rounds = 0;
+                eprintln!("[business-os] native rxdb command consumer failed: {err:#}");
+            }
+        }
+        // The current empty result has already incremented the counter. Base
+        // the wait on prior idle rounds so the first observed empty poll keeps
+        // the active cadence before the event-driven 30-second fallback.
+        wait_for_business_command_wake(
+            &root,
+            last_source_stamp.as_ref(),
+            consecutive_idle_rounds.saturating_sub(1),
+        )
+        .await;
+    }
+}
+
+pub(super) fn business_command_poll_sleep_secs(consecutive_idle_rounds: u32) -> u64 {
+    projection_sleep_secs(
+        BUSINESS_COMMAND_ACTIVE_POLL_SECS,
+        BUSINESS_COMMAND_IDLE_POLL_SECS,
+        BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS,
+        consecutive_idle_rounds,
+    )
+}
+
+pub(super) async fn wait_for_business_command_wake(
+    root: &Path,
+    last_source_stamp: Option<&BusinessCommandsSourceStamp>,
+    consecutive_idle_rounds: u32,
+) {
+    let sleep_for = Duration::from_secs(business_command_poll_sleep_secs(consecutive_idle_rounds));
+    if consecutive_idle_rounds < BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS {
+        tokio::time::sleep(sleep_for).await;
+        return;
+    }
+    let Some(table_name) = last_source_stamp
+        .and_then(|stamp| stamp.table.table_name.as_deref())
+        .filter(|name| !name.is_empty())
+    else {
+        tokio::time::sleep(sleep_for).await;
+        return;
+    };
+    let database_path = store::rxdb_store_path(root);
+    let seen_generation = rxdb::storage::sqlite::instance::table_change_generation_for_path(
+        &database_path,
+        table_name,
+    )
+    .unwrap_or(0);
+    rxdb::storage::sqlite::instance::wait_for_table_change_for_path(
+        &database_path,
+        table_name,
+        seen_generation,
+        sleep_for,
+    )
+    .await;
+}
+
+/// How often a single command may fail `accept_pending_business_command`
+/// before it is marked `failed` and dropped from the pending queue.
+pub(super) const BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET: u32 = 5;
+pub(super) const BUSINESS_COMMAND_RETRY_CANDIDATE_SQL: &str = r#"(
+  json_extract(data, '$.status') IN ('pending_sync', 'waiting_dependencies')
+  OR (
+    (
+      json_extract(data, '$.status') = 'accepted'
+      OR (
+        json_extract(data, '$.status') = 'failed'
+        AND COALESCE(json_extract(data, '$.terminal_status'), 'none') = 'none'
+      )
+    )
+    AND json_extract(data, '$.command_type') IN (
+      'external_sql.sync.refresh',
+      'external_sql.write',
+      'outbound.research_source.generate_adapter',
+      'outbound.research_source.test',
+      'outbound.research_source.auth_assist',
+      'web_stack.person_research'
+    )
+  )
+)"#;
+
+pub(super) async fn consume_pending_business_commands(
+    root: &Path,
+    database: &Arc<RxDatabase>,
+    accept_failures: &mut HashMap<String, u32>,
+) -> anyhow::Result<usize> {
+    let rows = pending_business_command_documents(root, 25)
+        .await
+        .context("load pending business_commands from RxDB SQLite")?;
+    // Commands mit erschoepftem, unaufgeloestem Intake-Fehler bleiben im
+    // Kandidatenfenster haengen: der Claim scheitert jede Runde am
+    // Idempotenz-Konflikt, der Replay stempelt den Envelope neu, und der
+    // Status bleibt genau so, dass die naechste Runde sie wieder aufgreift.
+    // Auf einer Kundeninstanz liefen so sechs Dokumente lautlos mit 93
+    // Revisionen je Minute weiter. Sie werden uebersprungen, bis der
+    // Intake-Fehler aufgeloest ist.
+    let exhausted_command_ids = unresolved_exhausted_business_command_ids(root)
+        .await
+        .context("load exhausted business command intake failures")?;
+    let rows = rows
+        .into_iter()
+        .filter(|document| {
+            let command_id = document
+                .get("command_id")
+                .or_else(|| document.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !exhausted_command_ids.contains(command_id) {
+                return true;
+            }
+            let logged =
+                LOGGED_EXHAUSTED_BUSINESS_COMMAND_SKIPS.get_or_init(|| Mutex::new(HashSet::new()));
+            let mut logged = logged
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if logged.insert(command_id.to_string()) {
+                eprintln!(
+                    "[business-os] skipping business command `{command_id}` with unresolved exhausted intake failure"
+                );
+            }
+            false
+        })
+        .collect::<Vec<_>>();
+    let pending_count = rows.len();
+    for document in rows {
+        COMMAND_PLANE_METRICS.record_attempt();
+        // Isolate failures per command: one broken document must not stall
+        // the entire queue (it would be re-sorted to the head every tick).
+        let command_id = document
+            .get("command_id")
+            .or_else(|| document.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match accept_pending_business_command(root, database, document.clone()).await {
+            Ok(()) => {
+                COMMAND_PLANE_METRICS.record_processed(&document);
+                if !command_id.is_empty() {
+                    accept_failures.remove(&command_id);
+                    let resolve_root = root.to_path_buf();
+                    let resolved_command_id = command_id.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        store::resolve_business_command_intake_failures(
+                            &resolve_root,
+                            &resolved_command_id,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => eprintln!(
+                            "[business-os] resolving intake failure history for `{command_id}` failed: {error:#}"
+                        ),
+                        Err(error) => eprintln!(
+                            "[business-os] joining intake failure resolution for `{command_id}` failed: {error}"
+                        ),
+                    }
+                }
+            }
+            Err(err) => {
+                COMMAND_PLANE_METRICS
+                    .errors_total
+                    .fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "[business-os] accepting business command `{command_id}` failed: {err:#}"
+                );
+                if command_id.is_empty() {
+                    continue;
+                }
+                let failure_root = root.to_path_buf();
+                let failed_document = document.clone();
+                let failure_message = format!("{err:#}");
+                let persisted_failure_message = failure_message.clone();
+                let persisted_failure = match tokio::task::spawn_blocking(move || {
+                    store::record_business_command_intake_failure(
+                        &failure_root,
+                        &failed_document,
+                        &persisted_failure_message,
+                        BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(persist_error)) => {
+                        eprintln!(
+                            "[business-os] persisting intake failure for `{command_id}` failed: {persist_error:#}"
+                        );
+                        let fallback_attempt = accept_failures
+                            .get(&command_id)
+                            .copied()
+                            .unwrap_or_default()
+                            .saturating_add(1);
+                        json!({
+                            "attempt": fallback_attempt,
+                            "exhausted": false,
+                            "canonical_exists": false,
+                            "canonical_failure_created": false,
+                        })
+                    }
+                    Err(join_error) => {
+                        eprintln!(
+                            "[business-os] joining intake failure persistence for `{command_id}` failed: {join_error}"
+                        );
+                        let fallback_attempt = accept_failures
+                            .get(&command_id)
+                            .copied()
+                            .unwrap_or_default()
+                            .saturating_add(1);
+                        json!({
+                            "attempt": fallback_attempt,
+                            "exhausted": false,
+                            "canonical_exists": false,
+                            "canonical_failure_created": false,
+                        })
+                    }
+                };
+                let failures = persisted_failure
+                    .get("attempt")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1) as u32;
+                accept_failures.insert(command_id.clone(), failures);
+                let exhausted = persisted_failure
+                    .get("exhausted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(failures >= BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET);
+                if !exhausted {
+                    if let Some(retry_document) = transient_business_command_retry_document(
+                        &document,
+                        failure_message.as_str(),
+                        failures,
+                    ) {
+                        let commands = database
+                            .collection("business_commands")
+                            .context("business_commands collection is not registered")?;
+                        incremental_upsert_document_with_envelope(
+                            &commands,
+                            retry_document,
+                            "retryable business_command",
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "requeue transient business_command {command_id}: {error}"
+                            )
+                        })?;
+                        COMMAND_PLANE_METRICS
+                            .retries_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                }
+                if exhausted {
+                    COMMAND_PLANE_METRICS
+                        .exhausted_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    accept_failures.remove(&command_id);
+                    let canonical_failure_created = persisted_failure
+                        .get("canonical_failure_created")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if canonical_failure_created {
+                        let failed_patch = persisted_failure
+                            .get("failure_document")
+                            .cloned()
+                            .unwrap_or_else(|| document.clone());
+                        let commands = database
+                            .collection("business_commands")
+                            .context("business_commands collection is not registered")?;
+                        if let Err(write_err) = incremental_upsert_document_with_envelope(
+                            &commands,
+                            failed_patch,
+                            "failed business_command",
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "[business-os] marking command `{command_id}` failed did not stick: {write_err}"
+                            );
+                        }
+                    } else if persisted_failure
+                        .get("canonical_exists")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        // Acceptance may already be canonical while only its
+                        // RxDB projection is failing. Never overwrite that
+                        // aggregate with a projection-only terminal failure.
+                        if let Err(write_err) = upsert_business_record_projection(
+                            root.to_path_buf(),
+                            database,
+                            "business_commands",
+                            command_id.clone(),
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "[business-os] replaying canonical command `{command_id}` after projection failure did not stick: {write_err:#}"
+                            );
+                        }
+                    }
+                } else {
+                    COMMAND_PLANE_METRICS
+                        .retries_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    Ok(pending_count)
+}
+
+pub(super) async fn unresolved_exhausted_business_command_ids(
+    root: &Path,
+) -> anyhow::Result<HashSet<String>> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || unresolved_exhausted_business_command_ids_sync(&root))
+        .await
+        .context("join exhausted business command intake failure load")?
+}
+
+pub(super) fn unresolved_exhausted_business_command_ids_sync(
+    root: &Path,
+) -> anyhow::Result<HashSet<String>> {
+    let path = crate::paths::core_db(root);
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "open channel DB for exhausted business command intake failures {}",
+            path.display()
+        )
+    })?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
+        .context("configure exhausted business command intake failure busy_timeout")?;
+    let table_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'business_command_intake_failures'
+             LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("check business_command_intake_failures table")?
+        .is_some();
+    if !table_exists {
+        return Ok(HashSet::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT command_id
+             FROM business_command_intake_failures
+             WHERE resolved_at_ms IS NULL AND exhausted = 1",
+        )
+        .context("prepare exhausted business command intake failure query")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query exhausted business command intake failures")?;
+    let mut command_ids = HashSet::new();
+    for row in rows {
+        command_ids.insert(row.context("read exhausted business command id")?);
+    }
+    Ok(command_ids)
+}
+
+pub(super) async fn pending_business_command_documents(
+    root: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<Value>> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || pending_business_command_documents_sync(&root, limit))
+        .await
+        .context("join pending business_commands SQLite load")?
+}
+
+pub(super) fn pending_business_command_documents_sync(
+    root: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<Value>> {
+    let path = store::rxdb_store_path(root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "open Business OS RxDB store for pending commands {}",
+            path.display()
+        )
+    })?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
+        .context("configure pending business command busy_timeout")?;
+    let Some(table) = latest_rxdb_collection_table(&conn, "business_commands")? else {
+        return Ok(Vec::new());
+    };
+    let quoted = sqlite_quote_identifier(&table);
+    let deleted_expr = if sqlite_table_has_column(&conn, &table, "deleted")? {
+        "deleted"
+    } else {
+        "0"
+    };
+    let lwt_expr = if sqlite_table_has_column(&conn, &table, "lastWriteTime")? {
+        "COALESCE(lastWriteTime, 0)"
+    } else {
+        "CAST(COALESCE(json_extract(data, '$._meta.lwt'), json_extract(data, '$.updated_at_ms'), 0) AS REAL)"
+    };
+    let oldest_limit = limit.saturating_add(1) / 2;
+    let newest_limit = limit.saturating_sub(oldest_limit);
+    let mut documents = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for (direction, batch_limit) in [("ASC", oldest_limit), ("DESC", newest_limit)] {
+        if batch_limit == 0 {
+            continue;
+        }
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT data
+                 FROM {quoted}
+                 WHERE {deleted_expr} = 0
+                   AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}
+                 ORDER BY {lwt_expr} {direction}
+                 LIMIT ?1"
+            ))
+            .with_context(|| {
+                format!("prepare pending business_commands {direction} scan in {table}")
+            })?;
+        let rows = stmt
+            .query_map([batch_limit as i64], |row| row.get::<_, String>(0))
+            .with_context(|| format!("query pending business_commands {direction} in {table}"))?;
+        for row in rows {
+            let raw = row.context("read pending business_command row")?;
+            let document = serde_json::from_str::<Value>(&raw)
+                .with_context(|| format!("parse pending business_command JSON in {table}"))?;
+            let id = document
+                .get("command_id")
+                .or_else(|| document.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if id.is_empty() || seen_ids.insert(id) {
+                documents.push(document);
+            }
+        }
+    }
+    Ok(documents)
+}
+
+pub(super) async fn accept_pending_business_command(
+    root: &Path,
+    database: &Arc<RxDatabase>,
+    document: Value,
+) -> anyhow::Result<()> {
+    let command_type = document
+        .get("command_type")
+        .or_else(|| document.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let command_payload = document.get("payload").cloned().unwrap_or(Value::Null);
+
+    if is_browser_runtime_command(&command_type) {
+        let command_id = document
+            .get("command_id")
+            .or_else(|| document.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let accepted = json!({
+            "id": command_id,
+            "command_id": command_id,
+            "status": "accepted",
+            "task_status": "accepted"
+        });
+        if let Err(err) = apply_browser_runtime_command(root, database, &document, &accepted).await
+        {
+            eprintln!("[business-os] browser runtime command failed: {err:#}");
+            mark_browser_runtime_command_failed(database, &command_id, &command_payload, &err)
+                .await?;
+        }
+        return Ok(());
+    }
+
+    let root = root.to_path_buf();
+    let accept_root = root.clone();
+    let document_for_store = document.clone();
+    // This document was replicated from a browser/device peer over WebRTC/RxDB:
+    // its client_context (incl. actor) is attacker-controllable, so it is tagged
+    // ReplicatedPeer and cannot authorize a privileged role without a verified
+    // capability token (see store::rxdb_session_from_command).
+    let accepted_result = tokio::task::spawn_blocking(move || {
+        store::accept_rxdb_business_command_with_origin(
+            &accept_root,
+            document_for_store,
+            store::CommandOrigin::ReplicatedPeer,
+        )
+    })
+    .await;
+
+    let mut accepted = match accepted_result {
+        Ok(Ok(val)) => val,
+        Ok(Err(err)) if is_transient_business_command_store_error(&err) => {
+            return Err(err).context("transient native business command store contention");
+        }
+        Ok(Err(err)) => {
+            eprintln!("[business-os] native business command store execution failed: {err:#}");
+            let command_id = document
+                .get("command_id")
+                .or_else(|| document.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !command_id.is_empty() {
+                let commands = database
+                    .collection("business_commands")
+                    .context("business_commands collection is not registered")?;
+                let mut next = if document.is_object() {
+                    document.clone()
+                } else {
+                    json!({ "id": command_id, "command_id": command_id })
+                };
+                if let Some(obj) = next.as_object_mut() {
+                    let error_message = err.to_string();
+                    obj.insert("status".to_string(), Value::String("failed".to_string()));
+                    obj.insert("error".to_string(), Value::String(error_message.clone()));
+                    if let Some(code) = typed_app_action_error_code(&error_message) {
+                        obj.insert("error_code".to_string(), Value::String(code.to_owned()));
+                    }
+                    obj.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+                }
+                incremental_upsert_document_with_envelope(
+                    &commands,
+                    next,
+                    "failed business_command",
+                )
+                .await
+                .map_err(|err| {
+                    anyhow::anyhow!("upsert failed business_command {command_id}: {err}")
+                })?;
+            }
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(err.into());
+        }
+    };
+
+    if command_type == app_runtime::APP_ACTION_COMMAND_TYPE
+        && accepted.get("already_accepted").and_then(Value::as_bool) != Some(true)
+    {
+        let snapshot = accepted
+            .get("_app_action_snapshot")
+            .cloned()
+            .context("app_runtime_reconfiguring: admitted action has no immutable snapshot")?;
+        let execution = app_runtime::execute(
+            root.as_path(),
+            database,
+            &command_id_from_document(&document)?,
+            &snapshot,
+        )
+        .await?;
+        let mut result = execution.result;
+        if let Some(object) = result.as_object_mut() {
+            if let Some(code) = execution.error_code {
+                object.insert("error_code".to_owned(), Value::String(code.to_owned()));
+            }
+            if let Some(message) = execution.error_message {
+                object.insert("error".to_owned(), Value::String(message));
+            }
+        }
+        accepted = store::finalize_runtime_app_action(
+            root.as_path(),
+            &document,
+            execution.status,
+            result,
+        )?;
+    }
+
+    let command_id = accepted
+        .get("command_id")
+        .or_else(|| accepted.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .context("accepted command is missing command_id")?;
+
+    if accepted
+        .get("already_accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        upsert_business_record_projection(
+            root.to_path_buf(),
+            database,
+            "business_commands",
+            command_id.clone(),
+        )
+        .await?;
+        if let Some(task_id) = accepted
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            upsert_business_record_projection(
+                root.to_path_buf(),
+                database,
+                "ctox_queue_tasks",
+                task_id.to_string(),
+            )
+            .await?;
+        }
+        if let Some(chat_id) = accepted
+            .get("chat_id")
+            .or_else(|| {
+                accepted
+                    .get("result")
+                    .and_then(|result| result.get("chat_id"))
+            })
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            upsert_business_record_projection(
+                root.to_path_buf(),
+                database,
+                "business_chats",
+                chat_id.to_string(),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
+    let commands = database
+        .collection("business_commands")
+        .context("business_commands collection is not registered")?;
+    let accepted_status = accepted
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("accepted");
+    let existing_status = document.get("status").and_then(Value::as_str).unwrap_or("");
+    if accepted_status == "already_accepted"
+        && !existing_status.is_empty()
+        && existing_status != "pending_sync"
+    {
+        return Ok(());
+    }
+    let mut next = if document.is_object() {
+        document.clone()
+    } else {
+        json!({ "id": command_id, "command_id": command_id })
+    };
+    if let Some(obj) = next.as_object_mut() {
+        obj.insert(
+            "status".to_string(),
+            Value::String(accepted_status.to_string()),
+        );
+        if accepted.get("task_id").is_some() || !obj.contains_key("task_id") {
+            obj.insert(
+                "task_id".to_string(),
+                accepted
+                    .get("task_id")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(String::new())),
+            );
+        }
+        obj.insert(
+            "task_status".to_string(),
+            accepted.get("task_status").cloned().unwrap_or_else(|| {
+                obj.get("status")
+                    .cloned()
+                    .unwrap_or(Value::String("accepted".to_string()))
+            }),
+        );
+        if let Some(result) = accepted.get("result") {
+            obj.insert("result".to_string(), result.clone());
+        }
+        for key in ["outbound_text", "response", "answer", "summary"] {
+            if let Some(value) = accepted.get(key) {
+                obj.insert(key.to_string(), value.clone());
+            }
+        }
+        for key in ["report_id", "report_status"] {
+            if let Some(value) = accepted.get(key) {
+                obj.insert(key.to_string(), value.clone());
+            }
+        }
+        obj.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+    }
+    enrich_native_command_lifecycle(&mut next, &accepted)?;
+    if next.get("contract_version").and_then(Value::as_u64) == Some(2) {
+        let persist_root = root.clone();
+        let persisted = next.clone();
+        tokio::task::spawn_blocking(move || {
+            store::persist_business_command_lifecycle_projection(&persist_root, &persisted)
+        })
+        .await
+        .context("join native command lifecycle projection persistence")??;
+    }
+    incremental_upsert_document_with_envelope(&commands, next, "accepted business_command")
+        .await
+        .map_err(|err| anyhow::anyhow!("upsert accepted business_command {command_id}: {err}"))?;
+
+    if let Some(task_id) = accepted.get("task_id").and_then(Value::as_str) {
+        if !task_id.is_empty() {
+            upsert_business_record_projection(
+                root.clone(),
+                database,
+                "ctox_queue_tasks",
+                task_id.to_string(),
+            )
+            .await?;
+        }
+    }
+    if let Some(report_id) = accepted.get("report_id").and_then(Value::as_str) {
+        if !report_id.is_empty() {
+            upsert_business_record_projection(
+                root.clone(),
+                database,
+                "business_module_reports",
+                report_id.to_string(),
+            )
+            .await?;
+            upsert_business_record_projection(
+                root.clone(),
+                database,
+                "ctox_bug_reports",
+                report_id.to_string(),
+            )
+            .await?;
+        }
+    }
+    if let Some(source_file_ids) = accepted
+        .get("result")
+        .and_then(|result| result.get("source_file_ids"))
+        .and_then(Value::as_array)
+    {
+        for source_file_id in source_file_ids.iter().filter_map(Value::as_str) {
+            if !source_file_id.is_empty() {
+                upsert_business_record_projection(
+                    root.clone(),
+                    database,
+                    "business_module_source_files",
+                    source_file_id.to_string(),
+                )
+                .await?;
+            }
+        }
+    }
+    if command_type == "ctox.business_os.user.upsert" {
+        sync_business_users_with_database(&root, database).await?;
+    }
+    if command_type == "ctox.runtime_settings.save" {
+        sync_runtime_settings_with_database(&root, database).await?;
+    }
+    if command_type == "ctox.business_os.branding.update" {
+        sync_workspace_branding_with_database(&root, database).await?;
+    }
+    if command_type.starts_with("ctox.ticket.") {
+        sync_ticket_state_with_database(&root, database).await?;
+    }
+    if command_type.starts_with("support.") {
+        project_support_command_result(root.clone(), database, &accepted).await?;
+    }
+    if command_type.starts_with("ctox.appsec.") {
+        project_appsec_command_result(root.clone(), database, &accepted).await?;
+    }
+    if command_type.starts_with("threads.") {
+        project_threads_command_result(root.clone(), database, &accepted).await?;
+    }
+    if command_type == "ctox.file.materialize" {
+        if let Some(materialized_path) = accepted
+            .get("result")
+            .and_then(|result| result.get("path"))
+            .or_else(|| command_payload.get("path"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            upsert_desktop_file_with_policy(
+                &root,
+                database,
+                PathBuf::from(materialized_path),
+                DesktopFileContentPolicy::Eager,
+                true,
+            )
+            .await
+            .with_context(|| {
+                format!("project materialized desktop file {materialized_path} into native RxDB")
+            })?;
+        }
+    }
+    if matches!(
+        command_type.as_str(),
+        "ctox.module.save"
+            | "ctox.module.delete"
+            | "ctox.module.install_template"
+            | "ctox.module.assign_founder"
+            | "ctox.module.release"
+            | "ctox.module.rollback"
+            | "ctox.module.rollback_version"
+            | "ctox.module.repair_lifecycle_projection"
+            | "ctox.app_store.install"
+            | "ctox.app_store.uninstall"
+    ) {
+        sync_module_catalog_with_database(&root, database).await?;
+    }
+    let mut projected_acl = false;
+    if let Some(acl_ids) = accepted
+        .get("result")
+        .and_then(|result| result.get("business_module_acl_ids"))
+        .and_then(Value::as_array)
+    {
+        for acl_id in acl_ids.iter().filter_map(Value::as_str) {
+            if !acl_id.is_empty() {
+                upsert_business_record_projection(
+                    root.clone(),
+                    database,
+                    "business_module_acl",
+                    acl_id.to_string(),
+                )
+                .await?;
+                projected_acl = true;
+            }
+        }
+    }
+    if !projected_acl && command_type == "ctox.module.assign_founder" {
+        let module_id = command_payload
+            .get("module_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let user_id = command_payload
+            .get("user_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if !module_id.is_empty() && !user_id.is_empty() {
+            upsert_business_record_projection(
+                root.clone(),
+                database,
+                "business_module_acl",
+                format!("{module_id}:founder:{user_id}"),
+            )
+            .await?;
+        }
+    }
+    if let Some(release_ids) = accepted
+        .get("result")
+        .and_then(|result| result.get("business_module_release_ids"))
+        .and_then(Value::as_array)
+    {
+        for release_id in release_ids.iter().filter_map(Value::as_str) {
+            if !release_id.is_empty() {
+                upsert_business_record_projection(
+                    root.clone(),
+                    database,
+                    "business_module_releases",
+                    release_id.to_string(),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn enrich_native_command_lifecycle(
+    document: &mut Value,
+    accepted: &Value,
+) -> anyhow::Result<()> {
+    if document.get("contract_version").and_then(Value::as_u64) != Some(2) {
+        return Ok(());
+    }
+    let object = document
+        .as_object_mut()
+        .context("v2 business command lifecycle document must be an object")?;
+    let status = accepted
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("accepted");
+    let execution_mode = accepted
+        .get("execution_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("queue")
+        .to_string();
+    let execution_task_id = accepted
+        .get("execution_task_id")
+        .or_else(|| {
+            (execution_mode == "queue")
+                .then_some(accepted.get("task_id"))
+                .flatten()
+        })
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let terminal_status = if crate::command_lifecycle::terminal_status_is_outcome(status) {
+        status
+    } else {
+        "none"
+    };
+    let execution_phase = if terminal_status != "none" {
+        "terminal"
+    } else if execution_mode == "queue" && !execution_task_id.is_empty() {
+        "queued"
+    } else {
+        "accepted"
+    };
+    let previous_version = object
+        .get("projection_version")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let target_task_id = accepted
+        .get("target_task_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let target_record_id = accepted
+        .get("target_record_id")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("record_id").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string();
+
+    object.insert("execution_mode".to_string(), Value::String(execution_mode));
+    object.insert(
+        "execution_task_id".to_string(),
+        Value::String(execution_task_id),
+    );
+    object.insert("target_task_id".to_string(), Value::String(target_task_id));
+    object.insert(
+        "target_record_id".to_string(),
+        Value::String(target_record_id),
+    );
+    object.insert(
+        "replication_phase".to_string(),
+        Value::String("native_observed".to_string()),
+    );
+    object.insert(
+        "execution_phase".to_string(),
+        Value::String(execution_phase.to_string()),
+    );
+    object.insert(
+        "terminal_status".to_string(),
+        Value::String(terminal_status.to_string()),
+    );
+    object.insert(
+        "projection_version".to_string(),
+        Value::from(previous_version.saturating_add(1)),
+    );
+    object
+        .entry("attempt".to_string())
+        .or_insert_with(|| Value::from(0_u64));
+    if terminal_status == "failed" {
+        object.insert(
+            "error_code".to_string(),
+            Value::String("command_terminal_failure".to_string()),
+        );
+        object.insert("retryable".to_string(), Value::Bool(false));
+    }
+    crate::command_lifecycle::validate_document(document).map_err(|error| anyhow::anyhow!(error))
+}
+
+pub(super) fn is_transient_business_command_store_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    [
+        "database is locked",
+        "database table is locked",
+        "sqlite_busy",
+        "cannot promote read transaction",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+pub(super) fn transient_business_command_retry_document(
+    document: &Value,
+    error_message: &str,
+    attempt: u32,
+) -> Option<Value> {
+    let command_type = document
+        .get("command_type")
+        .or_else(|| document.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !store::is_recoverable_background_control_command_type(command_type) {
+        return None;
+    }
+    let mut retry = document.clone();
+    let object = retry.as_object_mut()?;
+    object.insert(
+        "status".to_string(),
+        Value::String("pending_sync".to_string()),
+    );
+    object.insert(
+        "task_status".to_string(),
+        Value::String("pending_sync".to_string()),
+    );
+    object.insert("retryable".to_string(), Value::Bool(true));
+    object.insert("retry_attempt".to_string(), Value::from(attempt));
+    object.insert(
+        "last_retry_error".to_string(),
+        Value::String(error_message.to_string()),
+    );
+    object.remove("error");
+    object.remove("error_code");
+    object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+    Some(retry)
+}

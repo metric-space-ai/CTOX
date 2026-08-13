@@ -249,6 +249,5 @@ pub(super) async fn project_appsec_command_result(
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {}
