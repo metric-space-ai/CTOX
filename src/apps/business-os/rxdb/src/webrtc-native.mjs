@@ -35,6 +35,9 @@ import { CTOX_PRESENCE_RPC } from './protocol-contract.generated.mjs';
 const SEND_BUFFER_HIGH_WATER = 512 * 1024;
 const SEND_BUFFER_LOW_WATER = 128 * 1024;
 const SEND_BUFFER_STALL_TIMEOUT_MS = 30_000;
+// The replication channel. Every other label is an auxiliary channel and is
+// handed to its consumer untouched — see attachChannel / openAuxChannel.
+const CTOX_REPLICATION_CHANNEL_LABEL = 'ctox-rxdb';
 const MAX_PEER_SEND_QUEUE_FRAMES = 1024;
 const MAX_PEER_SEND_QUEUE_BYTES = 16 * 1024 * 1024;
 const FAIR_SEND_SCHEDULE = ['high', 'high', 'high', 'high', 'normal', 'normal', 'low'];
@@ -175,6 +178,9 @@ export class CtoxWebRtcNativePeer {
     this.events = new CtoxEventEmitter();
     this.socket = null;
     this.connections = new Map();
+    // label -> { label, options }. A standing subscription, not a one-shot:
+    // survives reconnects and is replayed onto every new PeerConnection.
+    this.auxChannelRegistrations = new Map();
     this.peerMetadata = new Map();
     this.pending = new Map();
     this.pendingFrameAcks = new Map();
@@ -871,6 +877,7 @@ export class CtoxWebRtcNativePeer {
     const connection = {
       peer,
       channel: null,
+      auxChannels: new Map(),
       remotePeerId,
       pendingCandidates: [],
       createdAtMs: Date.now(),
@@ -969,6 +976,12 @@ export class CtoxWebRtcNativePeer {
 
     if (this.shouldInitiate(remotePeerId, connection)) {
       this.attachChannel(connection, peer.createDataChannel('ctox-rxdb'));
+      // Re-open every registered auxiliary channel on THIS connection. A
+      // reconnect rebuilds the PeerConnection, so a channel opened once would
+      // otherwise die silently — the exact shape of defect that cost this
+      // codebase four separate fixes in one night. Registration is therefore a
+      // standing subscription, not a one-shot action.
+      this.reopenAuxChannels(connection, peer);
       this.createOffer(remotePeerId, peer).catch((error) => {
         this.events.emit('error', normalizePeerSignalError(error, remotePeerId));
       });
@@ -1082,7 +1095,17 @@ export class CtoxWebRtcNativePeer {
     }
   }
 
+  // Channels whose label is not the replication label are handed through
+  // untouched. Before this branch existed, EVERY incoming channel was written
+  // into the single `connection.channel` slot — a second channel opened by any
+  // consumer silently replaced the replication channel while 25 call sites kept
+  // reading the slot as if it were still theirs. Opening an auxiliary channel
+  // was therefore not "unsupported", it was destructive.
   attachChannel(connection, channel) {
+    if (channel?.label && channel.label !== CTOX_REPLICATION_CHANNEL_LABEL) {
+      this.attachAuxChannel(connection, channel);
+      return;
+    }
     connection.channel = channel;
     connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
     connection.inboundFrameChain = Promise.resolve();
@@ -1569,6 +1592,78 @@ export class CtoxWebRtcNativePeer {
     return true;
   }
 
+  // Register an auxiliary channel. Returns the live RTCDataChannel when the peer
+  // is already connected, otherwise null — the 'aux-channel' event fires as soon
+  // as it exists, and again after every reconnect. Callers must handle the event,
+  // not the return value, if they want to survive a reconnect.
+  openAuxChannel(peerId, label, options = {}) {
+    const key = String(label || '').trim();
+    if (!key || key === CTOX_REPLICATION_CHANNEL_LABEL) {
+      throw new Error(`openAuxChannel: invalid label "${label}"`);
+    }
+    this.auxChannelRegistrations.set(key, { label: key, options: { ...options } });
+    const connection = this.connections.get(String(peerId || ''));
+    if (!connection?.peer) return null;
+    const existing = connection.auxChannels?.get(key);
+    if (existing && existing.readyState !== 'closed') return existing;
+    return this.createAuxChannel(connection, connection.peer, key, options);
+  }
+
+  closeAuxChannel(label) {
+    const key = String(label || '').trim();
+    this.auxChannelRegistrations.delete(key);
+    for (const connection of this.connections.values()) {
+      const channel = connection.auxChannels?.get(key);
+      if (!channel) continue;
+      try { channel.close(); } catch {}
+      connection.auxChannels.delete(key);
+    }
+  }
+
+  createAuxChannel(connection, peer, label, options = {}) {
+    let channel = null;
+    try {
+      channel = peer.createDataChannel(label, options);
+    } catch (error) {
+      this.events.emit('error', { code: 'ctox_aux_channel_failed', label, error });
+      return null;
+    }
+    this.attachAuxChannel(connection, channel);
+    return channel;
+  }
+
+  attachAuxChannel(connection, channel) {
+    const label = String(channel?.label || '');
+    if (!label) return;
+    connection.auxChannels ??= new Map();
+    const previous = connection.auxChannels.get(label);
+    if (previous && previous !== channel) {
+      try { previous.close(); } catch {}
+    }
+    connection.auxChannels.set(label, channel);
+    channel.onclose = () => {
+      if (connection.auxChannels?.get(label) === channel) {
+        connection.auxChannels.delete(label);
+      }
+    };
+    this.events.emit('aux-channel', { peerId: connection.remotePeerId, label, channel });
+  }
+
+  reopenAuxChannels(connection, peer) {
+    if (!this.auxChannelRegistrations.size) return;
+    for (const { label, options } of this.auxChannelRegistrations.values()) {
+      this.createAuxChannel(connection, peer, label, options);
+    }
+  }
+
+  closeAuxChannelsFor(connection) {
+    if (!connection?.auxChannels?.size) return;
+    for (const channel of connection.auxChannels.values()) {
+      try { channel.close(); } catch {}
+    }
+    connection.auxChannels.clear();
+  }
+
   removeConnection(remotePeerId, reason = 'closed', pendingError = null, { reconnect = true } = {}) {
     const peerId = String(remotePeerId || '');
     this.clearObservedRequestsForPeer(
@@ -1586,6 +1681,7 @@ export class CtoxWebRtcNativePeer {
       connection.handshakeTimer = null;
     }
     try { connection.channel?.close?.(); } catch {}
+    this.closeAuxChannelsFor(connection);
     try { connection.peer?.close?.(); } catch {}
     this.rejectPendingForPeer(peerId, pendingError || createPeerClosedError(peerId, reason));
     this.events.emit('peer-close', { peerId, reason });

@@ -19,9 +19,14 @@ function newConnection(peer, remotePeerId = 'ctox-core-ordering') {
   return connection;
 }
 
-function newChannel(label) {
+// These fixtures stand in for the REPLICATION channel, so they must carry the
+// replication label: attachChannel() dispatches on the label and hands anything
+// else to the auxiliary path. `name` keeps the per-case label readable without
+// changing what is under test.
+function newChannel(name) {
   return {
-    label,
+    name,
+    label: 'ctox-rxdb',
     readyState: 'open',
     close() { this.readyState = 'closed'; },
   };
