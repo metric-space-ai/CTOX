@@ -1,5 +1,14 @@
 import { withTimeout } from './async-timeout.js';
 import { CTOX_COMMAND_AUTHORIZATION } from './command-lifecycle.generated.js';
+import {
+  DATA_PLANE_NO_PROGRESS_CODE,
+  evaluateDataPlaneProgress,
+  expectDataPlaneProgress,
+  getDefaultDataPlaneProgressMonitor,
+  noteDataPlaneProgress,
+  releaseDataPlaneProgressExpectation,
+  tryDataPlaneStallRepair,
+} from '../rxdb/src/v1_5_status.mjs';
 
 const COMMAND_ACCEPT_TIMEOUT_MS = 45000;
 const COMMAND_SYNC_READY_TIMEOUT_MS = 45000;
@@ -24,6 +33,61 @@ const COMMAND_CAPABILITY_REFRESH_RETRY_BACKOFF_MS = 125;
 const MAX_COMMAND_DOCUMENT_BYTES = 6 * 1024 * 1024;
 const MAX_SIMULTANEOUS_COMMAND_WATCHERS = 128;
 let activeCommandWatcherCount = 0;
+const COMMAND_WAIT_REBIND_MS = 1500;
+
+function commandProgressToken(command) {
+  if (!command) return '';
+  return [
+    command.id || '',
+    command.status || '',
+    command.execution_phase || '',
+    command.replication_phase || '',
+    command.terminal_status || '',
+    command.updated_at_ms || '',
+    command.execution_task_id || command.task_id || '',
+    command.error_code || '',
+  ].join('|');
+}
+
+function commandDataPlaneMonitor(sync) {
+  return sync?.dataPlaneMonitor || getDefaultDataPlaneProgressMonitor();
+}
+
+function expectCommandDataPlaneProgress(sync, collection, token, atMs) {
+  return expectDataPlaneProgress(commandDataPlaneMonitor(sync), {
+    collection: collection || 'business_commands',
+    token,
+    atMs,
+  });
+}
+
+function releaseCommandDataPlaneProgress(sync, collection) {
+  return releaseDataPlaneProgressExpectation(
+    commandDataPlaneMonitor(sync),
+    collection || 'business_commands',
+  );
+}
+
+function noteCommandDataPlaneProgress(sync, collection, token, atMs) {
+  return noteDataPlaneProgress(commandDataPlaneMonitor(sync), {
+    collection: collection || 'business_commands',
+    token,
+    atMs,
+  });
+}
+
+function evaluateCommandDataPlaneProgress(sync) {
+  return evaluateDataPlaneProgress(commandDataPlaneMonitor(sync));
+}
+
+async function repairCommandDataPlaneStall(sync, collection, repairFn) {
+  return tryDataPlaneStallRepair(
+    commandDataPlaneMonitor(sync),
+    collection || 'business_commands',
+    repairFn,
+  );
+}
+
 const DEMAND_ONLY_SYNC_COLLECTIONS = new Set([
   'desktop_file_chunks',
   'document_blob_chunks',
@@ -976,11 +1040,13 @@ function subscribeToCommand({ db, sync, commandId, observer }) {
 async function waitForCommandState({ db, sync, commandId, until, options = {} }) {
   const releaseWatcher = reserveCommandWatcher(commandId);
   const timeoutMs = commandWaitTimeoutMs(options);
+  const progressCollection = 'business_commands';
   let currentDb = null;
   let syncPlan = null;
   let lastCommand = null;
   let subscription = null;
   let boundRawDb = null;
+  let progressWatchHeld = false;
   rememberActiveCommandId(commandId);
   try {
     currentDb = await resolveCommandDb(db);
@@ -992,14 +1058,25 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        clearInterval(rebindTimer);
+        clearTimeout(rebindTimer);
+        clearInterval(progressTimer);
         subscription?.unsubscribe?.();
         if (commandIsTerminal(lastCommand)) forgetActiveCommandId(commandId);
         handler(value);
       };
+      const observeProgress = (command) => {
+        const token = commandProgressToken(command);
+        if (!progressWatchHeld) {
+          expectCommandDataPlaneProgress(sync, progressCollection, token);
+          progressWatchHeld = true;
+          return;
+        }
+        noteCommandDataPlaneProgress(sync, progressCollection, token);
+      };
       const inspect = (value) => {
         if (settled || !value) return;
         lastCommand = value?.toJSON?.() || value;
+        observeProgress(lastCommand);
         if (commandIsFailed(lastCommand)) {
           const outcome = lastCommand.result?.outcome || lastCommand.payload?.outcome || null;
           settle(reject, commandError(
@@ -1063,13 +1140,28 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
           },
         ));
       }, timeoutMs);
-      const rebindTimer = setInterval(() => {
-        bind();
-        refreshProjectionBridges(syncPlan?.afterCommand).catch(() => {});
-      }, 1500);
+      // One scheduled projection refresh, then a local inspect. Repeating
+      // pull/rebind here was a repair storm that still left health green when
+      // the pull itself hung.
+      const rebindTimer = setTimeout(() => {
+        refreshProjectionBridges(syncPlan?.afterCommand)
+          .catch(() => {})
+          .finally(() => { bind(); });
+      }, COMMAND_WAIT_REBIND_MS);
+      const progressTimer = setInterval(() => {
+        if (settled) return;
+        const evaluation = evaluateCommandDataPlaneProgress(sync);
+        if (evaluation.ok !== false) return;
+        recordCommandMetric(sync, DATA_PLANE_NO_PROGRESS_CODE, commandId, evaluation.stalledMs);
+        repairCommandDataPlaneStall(sync, evaluation.collection, async () => {
+          await refreshProjectionBridges(syncPlan?.afterCommand);
+          await bind();
+        }).catch(() => {});
+      }, 250);
       bind();
     });
   } finally {
+    if (progressWatchHeld) releaseCommandDataPlaneProgress(sync, progressCollection);
     subscription?.unsubscribe?.();
     releaseWatcher();
     await releaseSyncPlan(syncPlan);

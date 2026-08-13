@@ -4,13 +4,20 @@
 // the well-known shape.
 
 import { CTOX_QUERY_FETCH_CAPABILITY } from './protocol-contract.generated.mjs';
-import { snapshotV1_5Status } from './v1_5_status.mjs';
+import {
+  applyDataPlaneHealthToStatus,
+  evaluateDataPlaneProgress,
+  getDefaultDataPlaneProgressMonitor,
+  snapshotDataPlaneHealth,
+  snapshotV1_5Status,
+} from './v1_5_status.mjs';
 
 export function buildBusinessOsAdvancedStatus({
   v15Status,
   peerSessions = [],
   remoteProtocol = null,
   feature = {},
+  dataPlaneMonitor = null,
 } = {}) {
   const snapshot = snapshotV1_5Status(v15Status);
   const remoteCapabilities = Array.isArray(remoteProtocol?.capabilities)
@@ -18,14 +25,28 @@ export function buildBusinessOsAdvancedStatus({
     : [];
   const v15Negotiated = remoteCapabilities.includes(CTOX_QUERY_FETCH_CAPABILITY)
     && remoteProtocol?.v1_5?.queryDemandLoadingEnabled !== false;
-  const ok =
+  const monitor = dataPlaneMonitor
+    || v15Status?.dataPlaneMonitor
+    || getDefaultDataPlaneProgressMonitor();
+  const dataPlane = evaluateDataPlaneProgress(monitor, {
+    peerConnected: snapshot.peerConnected,
+    replicationUp: v15Status?.replicationUp,
+    heartbeatFresh: v15Status?.heartbeatFresh,
+  });
+  applyDataPlaneHealthToStatus(snapshot, dataPlane);
+  const connectionOk =
     snapshot.peerConnected === true &&
     snapshot.queryFetchErrorCount < 5 &&
     snapshot.fileStreamErrors < 5;
+  // Formal connection green is not health. Observed command/collection
+  // progress can flip ok=false while peerConnected and replicationUp stay true.
+  const ok = connectionOk && dataPlane.ok !== false;
+  const dataPlaneSnapshot = snapshotDataPlaneHealth(monitor);
 
   return {
     version: 'business-os-advanced-status-v1',
     ok,
+    code: dataPlane.ok === false ? dataPlane.code : snapshot.code,
     rxdbRuntime: {
       name: 'ctox-rxdb-js',
       publicName: 'CTOX Sync Engine',
@@ -50,6 +71,14 @@ export function buildBusinessOsAdvancedStatus({
       peerSessions,
       featureFlag: feature.queryDemandLoadingEnabled ?? null,
       v15Negotiated,
+    },
+    dataPlane: {
+      ok: dataPlaneSnapshot.ok,
+      code: dataPlaneSnapshot.code,
+      collection: dataPlaneSnapshot.collection,
+      stalledMs: dataPlaneSnapshot.stalledMs,
+      repairAttempts: dataPlaneSnapshot.repairAttempts,
+      stallReports: dataPlaneSnapshot.stallReports,
     },
     v1_5: {
       query: {

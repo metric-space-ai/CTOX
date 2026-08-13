@@ -8394,6 +8394,83 @@ var V1_5_STATUS_FIELDS = Object.freeze([
   "nativeClockObservedAtMs",
   "code"
 ]);
+var DATA_PLANE_NO_PROGRESS_CODE = "data_plane_no_progress";
+var DATA_PLANE_STALL_MS = 8e3;
+function healthyEvaluation() {
+  return {
+    ok: true,
+    code: null,
+    collection: null,
+    stalledMs: 0
+  };
+}
+var DEFAULT_MONITOR_KEY = "__ctoxDataPlaneProgressMonitor";
+function createDataPlaneProgressMonitor(options = {}) {
+  const stallMs = Number(options.stallMs);
+  return {
+    now: typeof options.now === "function" ? options.now : () => Date.now(),
+    stallMs: Number.isFinite(stallMs) && stallMs > 0 ? stallMs : DATA_PLANE_STALL_MS,
+    watches: /* @__PURE__ */ new Map(),
+    lastProgressByCollection: /* @__PURE__ */ new Map(),
+    repairAttempts: 0,
+    stallReports: 0,
+    lastEvaluation: healthyEvaluation()
+  };
+}
+function getDefaultDataPlaneProgressMonitor() {
+  const root = globalThis;
+  if (!root[DEFAULT_MONITOR_KEY]) {
+    root[DEFAULT_MONITOR_KEY] = createDataPlaneProgressMonitor();
+  }
+  return root[DEFAULT_MONITOR_KEY];
+}
+function evaluateDataPlaneProgress(monitor, _connectionFlags = {}) {
+  const current = monitor || getDefaultDataPlaneProgressMonitor();
+  const now = current.now();
+  for (const [collection, watch] of current.watches) {
+    const last = current.lastProgressByCollection.get(collection);
+    const token = last?.token ?? watch.baselineToken;
+    if (token !== watch.baselineToken) continue;
+    const stalledMs = Math.max(0, now - Number(watch.sinceMs || now));
+    if (stalledMs < current.stallMs) continue;
+    if (!watch.stallReported) {
+      watch.stallReported = true;
+      current.stallReports += 1;
+    }
+    const evaluation2 = {
+      ok: false,
+      code: DATA_PLANE_NO_PROGRESS_CODE,
+      collection,
+      stalledMs
+    };
+    current.lastEvaluation = evaluation2;
+    return evaluation2;
+  }
+  const evaluation = healthyEvaluation();
+  current.lastEvaluation = evaluation;
+  return evaluation;
+}
+function applyDataPlaneHealthToStatus(state, evaluation) {
+  if (!state) return state;
+  if (evaluation?.ok === false && evaluation.code) {
+    state.code = evaluation.code;
+  } else if (state.code === DATA_PLANE_NO_PROGRESS_CODE) {
+    state.code = null;
+  }
+  return state;
+}
+function snapshotDataPlaneHealth(monitor) {
+  const current = monitor || getDefaultDataPlaneProgressMonitor();
+  const evaluation = current.lastEvaluation || healthyEvaluation();
+  return {
+    ok: evaluation.ok !== false,
+    code: evaluation.code || null,
+    collection: evaluation.collection || null,
+    stalledMs: Number(evaluation.stalledMs || 0),
+    repairAttempts: Number(current.repairAttempts || 0),
+    stallReports: Number(current.stallReports || 0)
+  };
+}
 function createV1_5StatusState() {
   return {
     rxdbRuntime: "ctox-rxdb-js",
@@ -12128,15 +12205,26 @@ function buildBusinessOsAdvancedStatus({
   v15Status,
   peerSessions = [],
   remoteProtocol = null,
-  feature = {}
+  feature = {},
+  dataPlaneMonitor = null
 } = {}) {
   const snapshot = snapshotV1_5Status(v15Status);
   const remoteCapabilities = Array.isArray(remoteProtocol?.capabilities) ? remoteProtocol.capabilities : [];
   const v15Negotiated = remoteCapabilities.includes(CTOX_QUERY_FETCH_CAPABILITY) && remoteProtocol?.v1_5?.queryDemandLoadingEnabled !== false;
-  const ok = snapshot.peerConnected === true && snapshot.queryFetchErrorCount < 5 && snapshot.fileStreamErrors < 5;
+  const monitor = dataPlaneMonitor || v15Status?.dataPlaneMonitor || getDefaultDataPlaneProgressMonitor();
+  const dataPlane = evaluateDataPlaneProgress(monitor, {
+    peerConnected: snapshot.peerConnected,
+    replicationUp: v15Status?.replicationUp,
+    heartbeatFresh: v15Status?.heartbeatFresh
+  });
+  applyDataPlaneHealthToStatus(snapshot, dataPlane);
+  const connectionOk = snapshot.peerConnected === true && snapshot.queryFetchErrorCount < 5 && snapshot.fileStreamErrors < 5;
+  const ok = connectionOk && dataPlane.ok !== false;
+  const dataPlaneSnapshot = snapshotDataPlaneHealth(monitor);
   return {
     version: "business-os-advanced-status-v1",
     ok,
+    code: dataPlane.ok === false ? dataPlane.code : snapshot.code,
     rxdbRuntime: {
       name: "ctox-rxdb-js",
       publicName: "CTOX Sync Engine",
@@ -12161,6 +12249,14 @@ function buildBusinessOsAdvancedStatus({
       peerSessions,
       featureFlag: feature.queryDemandLoadingEnabled ?? null,
       v15Negotiated
+    },
+    dataPlane: {
+      ok: dataPlaneSnapshot.ok,
+      code: dataPlaneSnapshot.code,
+      collection: dataPlaneSnapshot.collection,
+      stalledMs: dataPlaneSnapshot.stalledMs,
+      repairAttempts: dataPlaneSnapshot.repairAttempts,
+      stallReports: dataPlaneSnapshot.stallReports
     },
     v1_5: {
       query: {
