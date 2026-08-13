@@ -5,9 +5,11 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  consumeCommandRoundtripTiming,
   createCommandBus,
   getBusinessOsCapabilityToken,
   normalizeCommandClientContext,
+  peekCommandRoundtripTiming,
   resetBusinessOsCapabilityTokenCacheForTests,
 } from './command-bus.js';
 
@@ -847,4 +849,96 @@ test('command subscriptions are bounded and release capacity on unsubscribe', as
   await replacement.ready;
   replacement.unsubscribe();
   subscriptions.slice(1).forEach((subscription) => subscription.unsubscribe());
+});
+
+test('command timing probe records seven correlated marks only when requested', async () => {
+  const listeners = new Set();
+  let stored = null;
+  const collection = {
+    async insert(document) {
+      stored = { ...document };
+    },
+    findOne(id) {
+      return {
+        $: {
+          subscribe(listener) {
+            listeners.add(listener);
+            if (stored?.id === id) listener({ toJSON: () => ({ ...stored }) });
+            return { unsubscribe: () => listeners.delete(listener) };
+          },
+        },
+        async exec() {
+          return stored?.id === id ? { toJSON: () => ({ ...stored }) } : null;
+        },
+      };
+    },
+  };
+  const metrics = [];
+  const bus = createCommandBus({
+    db: { raw: { business_commands: collection } },
+    sync: {
+      recordCommandMetric(metric) { metrics.push(metric); },
+      async startCollection() {
+        return {
+          state: {
+            async pushDocumentsToRemotePeers() {
+              stored = {
+                ...stored,
+                status: 'completed',
+                execution_phase: 'terminal',
+                terminal_status: 'completed',
+                updated_at_ms: Date.now(),
+                result: {
+                  ok: true,
+                  command_timing: {
+                    native_dispatch_entered: Date.now(),
+                    native_handler_completed: Date.now(),
+                    native_rxdb_projection_committed: Date.now(),
+                  },
+                },
+              };
+              listeners.forEach((listener) => listener({ toJSON: () => ({ ...stored }) }));
+            },
+          },
+        };
+      },
+    },
+  });
+
+  const quiet = await bus.dispatch({
+    id: 'cmd-timing-quiet',
+    command_type: 'ctox.provider_subscription.status',
+    until: 'terminal',
+    sync_queue_tasks: false,
+  });
+  assert.equal(quiet.status, 'completed');
+  assert.equal(peekCommandRoundtripTiming('cmd-timing-quiet'), null);
+
+  const receipt = await bus.dispatch({
+    id: 'cmd-timing-probe',
+    command_type: 'ctox.provider_subscription.status',
+    until: 'terminal',
+    sync_queue_tasks: false,
+    client_context: { command_timing_probe: true },
+  });
+  assert.equal(receipt.status, 'completed');
+  const sample = consumeCommandRoundtripTiming('cmd-timing-probe');
+  assert.equal(sample.command_id, 'cmd-timing-probe');
+  assert.deepEqual(Object.keys(sample.marks).sort(), [
+    'browser_dispatch_started',
+    'browser_local_inserted',
+    'browser_push_confirmed',
+    'browser_terminal_observed',
+    'native_dispatch_entered',
+    'native_handler_completed',
+    'native_rxdb_projection_committed',
+  ]);
+  const marks = sample.marks;
+  assert.ok(marks.browser_local_inserted >= marks.browser_dispatch_started);
+  assert.ok(marks.browser_push_confirmed >= marks.browser_local_inserted);
+  assert.ok(marks.native_handler_completed >= marks.native_dispatch_entered);
+  assert.ok(marks.native_rxdb_projection_committed >= marks.native_handler_completed);
+  assert.ok(marks.browser_terminal_observed >= marks.browser_push_confirmed);
+  assert.ok(metrics.some((metric) => metric.name === 'roundtrip_total'));
+  assert.ok(!JSON.stringify(sample).includes('capability_token'));
 });

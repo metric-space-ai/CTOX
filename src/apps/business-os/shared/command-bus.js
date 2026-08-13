@@ -32,7 +32,23 @@ const COMMAND_CAPABILITY_TRANSIENT_ANTI_STORM_MS = 100;
 const COMMAND_CAPABILITY_REFRESH_RETRY_BACKOFF_MS = 125;
 const MAX_COMMAND_DOCUMENT_BYTES = 6 * 1024 * 1024;
 const MAX_SIMULTANEOUS_COMMAND_WATCHERS = 128;
+const MAX_COMMAND_TIMING_PROBES = 64;
+const COMMAND_ROUNDTRIP_MARK_NAMES = Object.freeze([
+  'browser_dispatch_started',
+  'browser_local_inserted',
+  'browser_push_confirmed',
+  'native_dispatch_entered',
+  'native_handler_completed',
+  'native_rxdb_projection_committed',
+  'browser_terminal_observed',
+]);
+const COMMAND_LIFECYCLE_TIMING_MARKS = Object.freeze({
+  dispatch_started: 'browser_dispatch_started',
+  local_inserted: 'browser_local_inserted',
+  push_confirmed: 'browser_push_confirmed',
+});
 let activeCommandWatcherCount = 0;
+const commandTimingProbes = new Map();
 const COMMAND_WAIT_REBIND_MS = 1500;
 
 function commandProgressToken(command) {
@@ -143,8 +159,18 @@ export function createCommandBus({ db, sync = null, session = null } = {}) {
     },
     async dispatch(command, options = {}) {
       const commandId = command.id || '';
+      const dispatchStartedAt = Date.now();
+      if (commandTimingProbeEnabled(command)) {
+        rememberCommandTimingProbe(commandId, dispatchStartedAt);
+      }
       emitCommandLifecycle(commandId, command.command_type || command.type, 'dispatch_started');
-      const receipt = await submitRxdbCommand({ db, sync, session, command });
+      const receipt = await submitRxdbCommand({
+        db,
+        sync,
+        session,
+        command,
+        dispatchStartedAt,
+      });
       emitCommandLifecycle(receipt.command_id, command.command_type || command.type, 'local_receipt');
       const until = options.until || command?.until || 'accepted';
       if (until === 'local') return receipt;
@@ -279,6 +305,24 @@ export function resetBusinessOsCapabilityTokenCacheForTests() {
     failureTransient: false,
   };
   capabilityTokenRequestInFlight = null;
+  resetCommandRoundtripTimingForTests();
+}
+
+export function resetCommandRoundtripTimingForTests() {
+  commandTimingProbes.clear();
+}
+
+export function consumeCommandRoundtripTiming(commandId) {
+  const key = String(commandId || '');
+  const sample = commandTimingProbes.get(key);
+  if (!sample) return null;
+  commandTimingProbes.delete(key);
+  return cloneCommandTimingSample(sample);
+}
+
+export function peekCommandRoundtripTiming(commandId) {
+  const sample = commandTimingProbes.get(String(commandId || ''));
+  return sample ? cloneCommandTimingSample(sample) : null;
 }
 
 function capabilityAcquisitionResult({ token = null, code = '', transient = false } = {}) {
@@ -335,9 +379,18 @@ async function acquireCapabilityTokenForSubmit() {
   return result;
 }
 
-async function submitRxdbCommand({ db, sync, session, command }) {
+async function submitRxdbCommand({ db, sync, session, command, dispatchStartedAt = 0 }) {
   const submitStartedAt = Date.now();
   const commandId = command.id || `cmd_${crypto.randomUUID()}`;
+  if (commandTimingProbeEnabled(command)) {
+    rememberCommandTimingProbe(commandId, Number(dispatchStartedAt) || submitStartedAt);
+    transferCommandTimingProbe('', commandId);
+    recordCommandTimingMark(
+      commandId,
+      'browser_dispatch_started',
+      Number(dispatchStartedAt) || submitStartedAt,
+    );
+  }
   const capability = await acquireCapabilityTokenForSubmit();
   const capabilityToken = capability.token;
   emitCommandLifecycle(commandId, command.command_type || command.type, 'capability_resolved', submitStartedAt);
@@ -486,6 +539,7 @@ function emitCommandLifecycle(commandId, commandType, phase, startedAt = 0) {
     phase: String(phase || '').slice(0, 80),
     elapsed_ms: startedAt ? Math.max(0, Date.now() - Number(startedAt)) : 0,
   };
+  recordCommandTimingFromLifecycle(detail.command_id, detail.phase);
   globalThis.dispatchEvent?.(new CustomEvent('ctox-business-command-lifecycle', { detail }));
   console.info('[command-bus]', JSON.stringify(detail));
 }
@@ -1195,6 +1249,11 @@ function recordObservedCommandMetrics(sync, commandId, command) {
     if (terminalAtMs > 0) {
       recordCommandMetric(sync, 'terminal_to_browser_observed', commandId, Math.max(0, Date.now() - terminalAtMs));
     }
+    if (commandTimingProbeEnabled(command) || commandTimingProbes.has(String(commandId || ''))) {
+      mergeNativeCommandTimingMarks(commandId, command);
+      recordCommandTimingMark(commandId, 'browser_terminal_observed');
+      recordCommandRoundtripStageMetrics(sync, commandId);
+    }
   }
 }
 
@@ -1534,4 +1593,104 @@ function isRxDbConflictError(error) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function commandTimingProbeEnabled(source) {
+  const context = source?.client_context && typeof source.client_context === 'object'
+    ? source.client_context
+    : source;
+  return context?.command_timing_probe === true;
+}
+
+function rememberCommandTimingProbe(commandId, startedAtMs) {
+  const key = String(commandId || '');
+  const existing = commandTimingProbes.get(key);
+  if (existing) return existing;
+  if (commandTimingProbes.size >= MAX_COMMAND_TIMING_PROBES) {
+    const oldest = commandTimingProbes.keys().next().value;
+    if (oldest !== undefined) commandTimingProbes.delete(oldest);
+  }
+  const sample = {
+    command_id: key,
+    started_at_ms: Number(startedAtMs) || Date.now(),
+    marks: {},
+  };
+  commandTimingProbes.set(key, sample);
+  return sample;
+}
+
+function transferCommandTimingProbe(fromId, toId) {
+  const fromKey = String(fromId || '');
+  const toKey = String(toId || '');
+  if (!toKey || fromKey === toKey) return;
+  const sample = commandTimingProbes.get(fromKey);
+  if (!sample) return;
+  commandTimingProbes.delete(fromKey);
+  sample.command_id = toKey;
+  commandTimingProbes.set(toKey, sample);
+}
+
+function recordCommandTimingMark(commandId, markName, atMs = Date.now()) {
+  if (!COMMAND_ROUNDTRIP_MARK_NAMES.includes(markName)) return;
+  const sample = commandTimingProbes.get(String(commandId || ''));
+  if (!sample) return;
+  const stamp = Number(atMs);
+  if (!Number.isFinite(stamp)) return;
+  if (!Number.isFinite(sample.marks[markName])) {
+    sample.marks[markName] = stamp;
+  }
+}
+
+function recordCommandTimingFromLifecycle(commandId, phase) {
+  const markName = COMMAND_LIFECYCLE_TIMING_MARKS[String(phase || '')];
+  if (!markName) return;
+  recordCommandTimingMark(commandId, markName);
+}
+
+function mergeNativeCommandTimingMarks(commandId, command) {
+  const timing = command?.result?.command_timing;
+  if (!timing || typeof timing !== 'object') return;
+  for (const markName of [
+    'native_dispatch_entered',
+    'native_handler_completed',
+    'native_rxdb_projection_committed',
+  ]) {
+    const stamp = Number(timing[markName]);
+    if (Number.isFinite(stamp) && stamp > 0) {
+      recordCommandTimingMark(commandId, markName, stamp);
+    }
+  }
+}
+
+function recordCommandRoundtripStageMetrics(sync, commandId) {
+  const sample = commandTimingProbes.get(String(commandId || ''));
+  if (!sample) return;
+  const stages = commandRoundtripStagesFromMarks(sample.marks);
+  if (!stages) return;
+  for (const [name, durationMs] of Object.entries(stages)) {
+    recordCommandMetric(sync, `roundtrip_${name}`, commandId, durationMs);
+  }
+}
+
+export function commandRoundtripStagesFromMarks(marks = {}) {
+  if (!COMMAND_ROUNDTRIP_MARK_NAMES.every((name) => Number.isFinite(Number(marks[name])))) {
+    return null;
+  }
+  return {
+    browser_insert: marks.browser_local_inserted - marks.browser_dispatch_started,
+    push: marks.browser_push_confirmed - marks.browser_local_inserted,
+    push_to_native_intake: marks.native_dispatch_entered - marks.browser_push_confirmed,
+    native_processing: marks.native_handler_completed - marks.native_dispatch_entered,
+    projection_commit: marks.native_rxdb_projection_committed - marks.native_handler_completed,
+    commit_to_browser_observed: marks.browser_terminal_observed - marks.native_rxdb_projection_committed,
+    total: marks.browser_terminal_observed - marks.browser_dispatch_started,
+  };
+}
+
+function cloneCommandTimingSample(sample) {
+  return {
+    command_id: String(sample.command_id || ''),
+    started_at_ms: Number(sample.started_at_ms) || 0,
+    marks: { ...sample.marks },
+  };
 }

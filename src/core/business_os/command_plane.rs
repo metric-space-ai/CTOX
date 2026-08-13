@@ -37,9 +37,12 @@ use anyhow::Context;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::path::Path;
 
 const BUSINESS_COMMAND_REPLAY_RECEIPT_CONTRACT: &str = "ctox-business-command-replay-receipt-v1";
+const COMMAND_TIMING_PROBE_FIELD: &str = "command_timing_probe";
+const COMMAND_TIMING_RESULT_FIELD: &str = "command_timing";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -319,6 +322,97 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 57] = [
     "web_stack.person_research",
 ];
 
+thread_local! {
+    static COMMAND_TIMING_PROBE: RefCell<Option<CommandTimingProbe>> = RefCell::new(None);
+}
+
+struct CommandTimingProbe {
+    native_dispatch_entered: i64,
+    native_handler_completed: Option<i64>,
+    native_rxdb_projection_committed: Option<i64>,
+}
+
+struct CommandTimingProbeGuard;
+
+impl Drop for CommandTimingProbeGuard {
+    fn drop(&mut self) {
+        COMMAND_TIMING_PROBE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+fn command_timing_probe_requested(command: &BusinessCommand) -> bool {
+    command
+        .client_context
+        .get(COMMAND_TIMING_PROBE_FIELD)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+fn install_command_timing_probe(command: &BusinessCommand) -> Option<CommandTimingProbeGuard> {
+    if !command_timing_probe_requested(command) {
+        return None;
+    }
+    COMMAND_TIMING_PROBE.with(|slot| {
+        *slot.borrow_mut() = Some(CommandTimingProbe {
+            native_dispatch_entered: now_ms() as i64,
+            native_handler_completed: None,
+            native_rxdb_projection_committed: None,
+        });
+    });
+    Some(CommandTimingProbeGuard)
+}
+
+fn mark_command_timing_handler_completed() {
+    COMMAND_TIMING_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            if probe.native_handler_completed.is_none() {
+                probe.native_handler_completed = Some(now_ms() as i64);
+            }
+        }
+    });
+}
+
+fn mark_command_timing_projection_committed() {
+    COMMAND_TIMING_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            if probe.native_rxdb_projection_committed.is_none() {
+                probe.native_rxdb_projection_committed = Some(now_ms() as i64);
+            }
+        }
+    });
+}
+
+fn attach_command_timing_to_result(result: &mut Value) {
+    COMMAND_TIMING_PROBE.with(|slot| {
+        // Den Borrow an eine Bindung heften: `slot.borrow()` waere sonst ein
+        // Temporary, das am Ende des let-else-Statements faellt, waehrend
+        // `probe` noch daraus leiht.
+        let borrowed = slot.borrow();
+        let Some(probe) = borrowed.as_ref() else {
+            return;
+        };
+        let Some(object) = result.as_object_mut() else {
+            return;
+        };
+        let handler_completed = probe
+            .native_handler_completed
+            .unwrap_or(probe.native_dispatch_entered);
+        let projection_committed = probe
+            .native_rxdb_projection_committed
+            .unwrap_or(handler_completed);
+        object.insert(
+            COMMAND_TIMING_RESULT_FIELD.to_string(),
+            serde_json::json!({
+                "native_dispatch_entered": probe.native_dispatch_entered,
+                "native_handler_completed": handler_completed,
+                "native_rxdb_projection_committed": projection_committed,
+            }),
+        );
+    });
+}
+
 /// Accept a command that originated in trusted, in-process code (operator CLI,
 /// server-side handlers, internal projections, tests). The claimed actor in
 /// `client_context` is trusted. Network-originated commands MUST use
@@ -368,6 +462,7 @@ pub fn accept_rxdb_business_command_with_origin(
             .cloned()
             .unwrap_or(Value::Null),
     };
+    let _command_timing_probe = install_command_timing_probe(&command);
     let native_authorization = recoverable_background_control_claim_authorization(root, &command);
     let control_claim = if is_rxdb_control_command_type(&command.command_type) {
         Some(channels::claim_business_control_command(
@@ -867,6 +962,7 @@ fn dispatch_business_command_with_outcome(
 ) -> anyhow::Result<Value> {
     let dispatched =
         dispatch_business_command(root, command_id, command, prepared, authorized_session)?;
+    mark_command_timing_handler_completed();
     write_business_command_dispatch_outcome(root, command, dispatched)
 }
 
@@ -1314,6 +1410,7 @@ fn write_rxdb_control_command_state(
     terminal: bool,
 ) -> anyhow::Result<Value> {
     let command_id = command.id.as_deref().context("command id is required")?;
+    mark_command_timing_handler_completed();
     let now = now_ms() as i64;
     let target_task_id = if command.command_type.starts_with("ctox.task.") {
         task_id.unwrap_or_default()
@@ -1411,7 +1508,13 @@ fn write_rxdb_control_command_state(
         projection.clone(),
     )?;
     record_business_module_lifecycle_event(root, command, status, &result)?;
-    upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection)?;
+    upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection.clone())?;
+    mark_command_timing_projection_committed();
+    if command_timing_probe_requested(command) {
+        attach_command_timing_to_result(&mut result);
+        projection["result"] = result.clone();
+        upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection)?;
+    }
     // Readers treat the canonical terminal transition as a completion barrier.
     // Publish it only after the chat and all local/RxDB projections are durable.
     if let Some(terminal_status) = canonical_terminal_status {
@@ -1911,6 +2014,83 @@ mod tests {
         )?;
         assert_eq!(count, 1);
         assert_eq!(status, "completed");
+        Ok(())
+    }
+
+    #[test]
+    fn command_timing_probe_is_absent_without_explicit_marker() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        drop(create_repair_rxdb_tables(root.path())?);
+        let command_id = "cmd_timing_probe_off";
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some(command_id.to_string()),
+            module: "ctox".to_string(),
+            command_type: "ctox.provider_subscription.status".to_string(),
+            record_id: None,
+            payload: serde_json::json!({}),
+            client_context: serde_json::json!({ "actor": { "id": "local-dev" } }),
+        };
+        let outcome = write_rxdb_control_command_outcome(
+            root.path(),
+            &command,
+            "completed",
+            None,
+            Some("completed"),
+            serde_json::json!({ "ok": true }),
+        )?;
+        assert!(outcome.get(COMMAND_TIMING_RESULT_FIELD).is_none());
+        let rxdb_conn = Connection::open(rxdb_store_path(root.path()))?;
+        let projected: String = rxdb_conn.query_row(
+            "SELECT data FROM ctox_business_os__business_commands__v1 WHERE id = ?1",
+            params![command_id],
+            |row| row.get(0),
+        )?;
+        let projected: Value = serde_json::from_str(&projected)?;
+        assert!(projected["result"].get(COMMAND_TIMING_RESULT_FIELD).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn command_timing_probe_writes_ordered_native_marks() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        drop(create_repair_rxdb_tables(root.path())?);
+        let command_id = "cmd_timing_probe_on";
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some(command_id.to_string()),
+            module: "ctox".to_string(),
+            command_type: "ctox.provider_subscription.status".to_string(),
+            record_id: None,
+            payload: serde_json::json!({}),
+            client_context: serde_json::json!({
+                "actor": { "id": "local-dev" },
+                "command_timing_probe": true
+            }),
+        };
+        let _guard = install_command_timing_probe(&command);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let outcome = write_rxdb_control_command_outcome(
+            root.path(),
+            &command,
+            "completed",
+            None,
+            Some("completed"),
+            serde_json::json!({ "ok": true }),
+        )?;
+        let timing = outcome
+            .get("result")
+            .and_then(|value| value.get(COMMAND_TIMING_RESULT_FIELD))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let entered = timing["native_dispatch_entered"].as_i64().unwrap();
+        let completed = timing["native_handler_completed"].as_i64().unwrap();
+        let committed = timing["native_rxdb_projection_committed"].as_i64().unwrap();
+        assert!(entered > 0);
+        assert!(completed >= entered);
+        assert!(committed >= completed);
+        assert!(timing.get("capability_token").is_none());
+        assert!(timing.get("payload").is_none());
         Ok(())
     }
 }
