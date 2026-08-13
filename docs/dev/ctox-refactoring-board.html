@@ -266,7 +266,18 @@ footer{
 
 <div class="kanban">
 <section class="spalte">
-  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">27 Karten</span></div>
+  <div class="spalte-kopf"><h2>Erledigt · belegt</h2><span class="zaehler">28 Karten</span></div>
+
+  <article class="karte s-done">
+    <span class="chip c-neg">Befund · zerstörerischer Erweiterungspunkt</span>
+    <h3>Ein zweiter DataChannel hätte thesen still zerstört — <code>26de84c54</code></h3>
+    <p>Die thesen-Sitzung wollte die Live-View-Frames aus der Replikation herausziehen und fragte nach einem zweiten DataChannel. Gemessen: <code>attachChannel()</code> schrieb <b>jeden</b> eingehenden Kanal in den einen Slot <code>connection.channel</code>, den <b>25 Aufrufstellen</b> der Replikation lesen. Ein zweiter Kanal war damit nicht „nicht unterstützt", sondern hat die Replikation lautlos ersetzt. Hätte sie es einfach probiert, wäre thesen still kaputtgegangen.</p>
+    <p>Jetzt unterscheidet <code>attachChannel()</code> am Label: <code>ctox-rxdb</code> ist Replikation, alles andere geht unberührt an seinen Verbraucher. <code>openAuxChannel(peerId, label, options)</code> ist ein <b>stehendes Abonnement</b>, keine einmalige Handlung — ein Neuverbinden baut die PeerConnection neu auf, also wird jeder registrierte Nebenkanal neu geöffnet und <code>aux-channel</code> feuert erneut. Der stumm gestorbene Kanal ist Fehlermuster 1; er wurde hier nicht ein fünftes Mal eingebaut.</p>
+    <span class="ev"><b>Wächter</b> <code>src/apps/business-os/rxdb/tests/aux-data-channel-smoke.mjs</code> — hält alle drei Eigenschaften fest (Slot unberührt · Registrierung überlebt Neuverbinden · <code>closeAuxChannel</code> meldet dauerhaft ab)<br>
+    <b>Gleiche-Bedingungen-Messung</b> gestripptes business-os, HEAD 21 rot → danach 16 rot, echte Teilmenge, kein neuer roter Test. Echter Baum 87 grün / 9 rot / 2 übersprungen; die 9 fallen auch ohne die Änderung.<br>
+    <b>Nebenfund</b> <code>inbound-frame-ordering-smoke.mjs</code> trug Phantasielabels in den Vorrichtungen, die jetzt Bedeutung haben — auf das Replikationslabel gezogen, keine Zusicherung angefasst<br>
+    <b>Buster</b> <code>20260813-auxkanal-v96</code> in <code>shared/db.js</code> und <code>shared/sync.js</code>, alle drei Stellen</span>
+  </article>
 
   <article class="karte s-done">
     <span class="chip c-neg">Befund · Hebel-Bilanz komplett</span>
