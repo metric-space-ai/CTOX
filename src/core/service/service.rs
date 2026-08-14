@@ -2,7 +2,6 @@ use anyhow::Context;
 use anyhow::Result;
 #[path = "service_runtime_support.rs"]
 mod runtime_support;
-use runtime_support::*;
 use chrono::DateTime;
 use chrono::Utc;
 #[cfg(unix)]
@@ -23,6 +22,7 @@ use libc::RLIMIT_NOFILE;
 use libc::SIGPIPE;
 #[cfg(unix)]
 use libc::SIG_IGN;
+use runtime_support::*;
 use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -13501,10 +13501,19 @@ fn validate_systematic_research_workspace(
             .get("run_id")
             .and_then(Value::as_str)
             .context("evidence manifest is missing run_id")?;
+        // The attempt id deliberately does NOT take part in this comparison.
+        // A systematic research run spans many harness turns - every retry
+        // starts a new attempt - and the manifest is the run's accumulated
+        // evidence, not one turn's output. Requiring the current attempt id
+        // invalidated the previous turn's work on every retry: the model had
+        // to spend its budget rebinding the manifest instead of researching,
+        // and the SKF baseline died with three identical binding fields and a
+        // single differing attempt. Run id and command id bind the manifest to
+        // this run; the attempt is recorded for provenance only.
+        let _ = actual_attempt_id;
         if actual_run_id != expected_run_id
             || manifest_run_id != expected_run_id
             || actual_command_id != expected_command_id
-            || actual_attempt_id != expected_attempt_id
         {
             anyhow::bail!(
                 "stale or foreign evidence manifest {}: expected run/command/attempt {expected_run_id}/{expected_command_id}/{expected_attempt_id}, found {actual_run_id}/{actual_command_id}/{actual_attempt_id}",
@@ -26055,6 +26064,17 @@ fn render_runtime_retry_prompt_with_original_task(
         "finish only after the real durable outcome exists in the state machine",
         "if the runtime is still unavailable, leave this work pending for another retry instead of claiming completion",
     ];
+    if is_systematic_research_job(job) {
+        // "Smallest step" and the systematic-research validation gate
+        // contradicted each other: the gate requires at least one typed
+        // discovery call in the run, the retry told the model to do as little
+        // as possible, and the model dutifully did nothing discoverable - then
+        // burned the whole validation budget failing that gate. Say plainly
+        // that a research retry still owes its discovery evidence.
+        required_actions.push(
+            "this is a systematic research run: the smallest useful step still includes at least one typed discovery call (ctox_deep_research, ctox_web_search or ctox_scholarly_search) persisted in this run - completion validation rejects a turn without one, no matter how much inherited evidence the workspace already holds",
+        );
+    }
     let problem = if is_no_assistant_message_blocker(error_text) {
         required_actions.insert(
             0,
@@ -26221,7 +26241,6 @@ fn existing_timeout_continuation(
         })
         .map(|task| task.title))
 }
-
 
 #[cfg(test)]
 mod tests {
