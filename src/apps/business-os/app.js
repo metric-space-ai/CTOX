@@ -1,33 +1,33 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260811-fremde-collection-mitladen-v106';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260811-fremde-collection-mitladen-v106';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260811-fremde-collection-mitladen-v106';
-import { createAppActions } from './shared/app-actions.js?v=20260811-fremde-collection-mitladen-v106';
+import { CtoxResizer } from './shared/resizer.js?v=20260812-schema-once-v99';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260812-schema-once-v99';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260812-schema-once-v99';
+import { createAppActions } from './shared/app-actions.js?v=20260812-schema-once-v99';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/app-lifecycle.js?v=20260812-schema-once-v99';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/permissions.js?v=20260812-schema-once-v99';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260811-fremde-collection-mitladen-v106';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/branding.js?v=20260812-schema-once-v99';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260812-schema-once-v99';
 import {
   launchesInWindow,
   resolvePresentation,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/presentation.js?v=20260812-schema-once-v99';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -38,9 +38,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260811-fremde-collection-mitladen-v106';
-import { createDocumentsFacade } from './shared/documents.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/shell-permissions-ui.js?v=20260812-schema-once-v99';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260812-schema-once-v99';
+import { createDocumentsFacade } from './shared/documents.js?v=20260812-schema-once-v99';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -48,16 +48,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/maintenance-state.js?v=20260812-schema-once-v99';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/workspace-session.js?v=20260812-schema-once-v99';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260811-fremde-collection-mitladen-v106';
+} from './shared/taskbar-pins.js?v=20260812-schema-once-v99';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260811-fremde-collection-mitladen-v106';
+const APP_BUILD = '20260812-schema-once-v99';
 
 ensureShellStylesheets();
 
@@ -1196,7 +1196,29 @@ async function openBusinessDataPlane(syncConfig) {
     // collection has opened leaves the whole room at least privilege until a
     // reconnect even though command submission itself is already authorized.
     const commandBusModule = await loadCommandBusModule();
-    await commandBusModule.getBusinessOsCapabilityToken?.();
+    // Der Token darf den Start NICHT abreissen lassen.
+    //
+    // Bis 14.08.2026 stand dieser Aufruf ungeschuetzt in der Startkette. Wirft
+    // er — abgelaufener Token, Zeitueberschreitung, Endpunkt kurz nicht
+    // erreichbar —, springt die Ausfuehrung in den catch dieses try-Blocks, und
+    // `state.commandBus` (Zeile darunter) wird NIE gesetzt. Danach scheitert
+    // jeder Klick an requireCommandBus, ohne Meldung, ohne Protokolleintrag.
+    //
+    // Genau dieses Symptom: die Browser-App erzeugte beim Klick auf "Los"
+    // keinen einzigen Befehl, 17 Stunden lang, und nichts sagte warum.
+    // Serverseitig eingespeist lief derselbe Befehl in 30 s durch — Chromium
+    // startete, Sitzung active, Bildstrom lief. Der Rueckweg war nie defekt.
+    //
+    // Der Token wird ohnehin bei jedem Befehl nachgeholt (acquireBusinessOs
+    // CapabilityToken prueft expiresAtMs und fordert neu an). Ihn beim Start
+    // vorzuwaermen ist eine Optimierung — sie darf die Shell nicht lahmlegen.
+    try {
+      await commandBusModule.getBusinessOsCapabilityToken?.();
+    } catch (tokenError) {
+      console.warn('[business-os] Faehigkeitstoken beim Start nicht erhalten — '
+        + 'der Befehlsbus wird trotzdem aufgebaut und holt ihn beim ersten Befehl nach.',
+        tokenError);
+    }
     const { createSyncRuntime } = await loadSyncModule();
     state.sync = createSyncRuntime({
       db: state.db,
