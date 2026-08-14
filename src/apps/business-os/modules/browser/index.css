@@ -401,3 +401,37 @@
     flex: 1 1 auto;
   }
 }
+
+/* Sitzungszustand: wer steuert, und wo jemand eingreifen muss.
+   Bei 34 Sitzungen findet man "Eingriff noetig" nicht, indem man jede Zeile
+   liest — deshalb traegt das Symbol die Information, nicht nur der Text. */
+.browser-session-zustand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  min-width: 1.25rem;
+  margin-right: 0.4rem;
+  font-size: 0.9rem;
+  line-height: 1;
+  vertical-align: baseline;
+}
+.browser-session.is-eingriff .browser-session-zustand {
+  color: var(--ctox-warn, #e0a33a);
+}
+/* Der einzige Zustand, der jemanden BRAUCHT — darf auffallen, aber ohne
+   dicken Rand: dafuer gibt es einen Gestaltungs-Waechter, und er hat recht.
+   Ein leichter Farbschleier hebt die Zeile hervor, ohne das Raster zu brechen. */
+.browser-session.is-eingriff {
+  background: color-mix(in srgb, var(--ctox-warn, #e0a33a) 10%, transparent);
+}
+.browser-session.is-nutzer .browser-session-zustand {
+  color: var(--ctox-accent, #7fd4b0);
+}
+.browser-session.is-automatik .browser-session-zustand {
+  color: var(--ctox-text-muted, #8a93a0);
+}
+.browser-session.is-ruhend .browser-session-zustand {
+  color: var(--ctox-text-muted, #8a93a0);
+  opacity: 0.5;
+}

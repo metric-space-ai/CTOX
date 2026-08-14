@@ -327,30 +327,9 @@ test('detail pane reviews all 21 research fields in three groups and keeps scrol
   // the handover only updates the record or also adds it to the campaign.
   assert.match(source, /data-action="sellify-update-only"/);
   assert.match(source, /data-action="sellify-update-campaign"/);
-  assert.match(source, /data-action="mail-series-email"/);
-  assert.match(source, /openSeriesEmailFromLead/);
   assert.match(source, /data-action="edit-lead"/);
 });
 
-test('Sellify recipient selection hands eligible addresses to Mail series email', () => {
-  const lead = {
-    id: 'lead-mail', campaign: 'August-Welle',
-    contacts: [
-      { id: 'a', email: 'A@Example.test' },
-      { id: 'b', person_email: 'b@example.test' },
-      { id: 'blocked', email: 'blocked@example.test' },
-    ],
-    selected_contact_ids: ['a', 'b', 'blocked'],
-  };
-  const decisions = new Map([
-    ['a', { status: 'free' }], ['b', { status: 'free' }], ['blocked', { status: 'blocked' }],
-  ]);
-  const handoff = hooks.seriesEmailHandoffForLead(lead, decisions);
-  assert.deepEqual(handoff.recipients, ['a@example.test', 'b@example.test']);
-  assert.match(handoff.hash, /^#mail\?action=series-email&source_module=sellify/);
-  assert.match(handoff.hash, /recipients=a%40example\.test%2Cb%40example\.test/);
-  assert.equal(handoff.excluded.length, 1);
-});
 
 test('native person research result writes typed values, contacts, and field evidence', () => {
   const candidate = (sourceId, value) => ({
@@ -1347,6 +1326,159 @@ test('gepflegte CRM-Kontaktdaten werden uebernommen, nicht neu erraten', async (
   assert.equal(unberuehrt.contacts[0].email, '');
 });
 
+test('ein aus dem CRM uebernommenes Feld traegt einen Sellify-Beleg mit Datensatzkennung', async () => {
+  const lead = {
+    id: 'lead_crm_beleg',
+    contacts: [
+      { id: 'c1', name: 'Roger Wintzen', email: '', phone: '', position: '' },
+      { id: 'c2', name: 'Nur Extern', email: 'extern@example.com', phone: '' },
+    ],
+    evidence: [
+      {
+        field_key: 'firma_name',
+        value: 'CHEMOFAST Anchoring GmbH',
+        source_id: 'impressum',
+        source_url: 'https://chemofast.com/impressum',
+        label: 'impressum',
+      },
+    ],
+  };
+  const context = {
+    contextAvailable: true,
+    companies: [{ contact_id: 17714, name: 'CHEMOFAST Anchoring GmbH' }],
+    people: [
+      {
+        display_name: 'Roger Wintzen',
+        email: 'roger.wintzen@chemofast.com',
+        phone: '+4921548123',
+        position: 'Geschäftsführer',
+        person_id: 4711,
+        contact_id: 17714,
+      },
+    ],
+  };
+  await hooks.uebernehmeCrmKontaktdaten(lead, context);
+
+  const crmBelege = (lead.evidence || []).filter((entry) => entry.source_id === hooks.SELLIFY_SOURCE_ID);
+  assert.ok(crmBelege.length >= 1, 'uebernommenes Feld braucht einen Sellify-Beleg');
+  const emailBeleg = crmBelege.find((entry) => entry.field_key === 'person_email');
+  assert.equal(emailBeleg.value, 'roger.wintzen@chemofast.com');
+  assert.equal(emailBeleg.label, 'Sellify (eigenes CRM)');
+  assert.equal(emailBeleg.person_id, 4711);
+  assert.equal(emailBeleg.contact_id, 17714);
+  assert.match(emailBeleg.note, /person_id 4711/);
+  assert.match(emailBeleg.note, /contact_id 17714/);
+
+  const review = hooks.researchFieldReview(lead);
+  const emailFeld = review.fields.find((item) => item.key === 'person_email');
+  assert.equal(emailFeld.value, 'roger.wintzen@chemofast.com');
+  assert.ok(emailFeld.sources.some((source) => source.key === 'sellify'), 'Sellify muss als Quelle sichtbar sein');
+  assert.equal(emailFeld.independentCount, 1);
+  assert.match(
+    hooks.renderResearchReview(lead),
+    /Sellify \(eigenes CRM\).*eigene Angabe/,
+    'die Anzeige muss die eigene gepflegte Angabe kennzeichnen',
+  );
+
+  // Ein zweiter, externer Beleg macht das CRM zu einer eigenstaendigen Quelle.
+  lead.evidence = [
+    ...lead.evidence,
+    {
+      field_key: 'person_email',
+      value: 'roger.wintzen@chemofast.com',
+      source_id: 'impressum',
+      source_url: 'https://chemofast.com/impressum',
+      label: 'impressum',
+    },
+  ];
+  assert.equal(hooks.independentFieldEvidenceCount(lead, 'person_email'), 2);
+  assert.equal(hooks.researchFieldReview(lead).fields.find((item) => item.key === 'person_email').sufficient, true);
+});
+
+test('ein rein extern gefundenes Feld traegt keinen Sellify-Beleg', () => {
+  const result = hooks.researchOutcomeWriteback({
+    data: {},
+    contacts: [],
+    evidence: [],
+    payload: {},
+  }, {
+    result: {
+      fields: {
+        firma_name: {
+          value: 'Example GmbH',
+          candidates: [
+            {
+              value: 'Example GmbH',
+              source_id: 'handelsregister.de',
+              source_url: 'https://www.handelsregister.de/example',
+            },
+            {
+              value: 'Example GmbH',
+              source_id: 'northdata.de',
+              source_url: 'https://www.northdata.de/example',
+            },
+          ],
+        },
+        person_email: {
+          value: 'ada@example.com',
+          candidates: [
+            {
+              value: 'ada@example.com',
+              source_id: 'impressum',
+              source_url: 'https://example.com/impressum',
+            },
+          ],
+        },
+      },
+    },
+  });
+  assert.ok(!(result.evidence || []).some((entry) => entry.source_id === hooks.SELLIFY_SOURCE_ID));
+  const email = hooks.researchFieldReview(result).fields.find((item) => item.key === 'person_email');
+  assert.equal(email.value, 'ada@example.com');
+  assert.ok(!email.sources.some((source) => source.key === 'sellify'));
+  assert.doesNotMatch(hooks.renderResearchReview(result), /Sellify \(eigenes CRM\)/);
+});
+
+test('Sellify steht in der Quellenliste als interne Quelle ohne Anmeldung', () => {
+  assert.ok(!hooks.SOURCE_DEFS.some((item) => item.id === 'sellify'),
+    'Sellify ist kein Adapter und gehoert nicht in SOURCE_DEFS');
+  hooks.__render.setState({
+    sources: [],
+    sellifyCompanies: { find() { return { exec: async () => [] }; } },
+    sellifyPeople: { find() { return { exec: async () => [] }; } },
+    sellifyMatch: null,
+    selectedLeadId: '',
+    leads: [],
+  });
+  const listed = hooks.listedSources();
+  assert.equal(listed[0].id, 'sellify');
+  assert.equal(listed[0].label, 'Sellify (eigenes CRM)');
+  assert.equal(listed[0].payload.internal, true);
+  assert.equal(hooks.isInternalResearchSource(listed[0]), true);
+  assert.equal(hooks.sourceNeedsBrowserAuthorization(listed[0], null), false);
+
+  const bereit = hooks.sourceStatus(listed[0], null);
+  assert.equal(bereit.code, 'internal_ready');
+  assert.match(bereit.label, /keine Anmeldung/);
+
+  hooks.__render.setState({
+    sellifyCompanies: null,
+    sellifyPeople: null,
+    sellifyMatch: null,
+  });
+  assert.equal(hooks.sourceStatus(listed[0], null).code, 'internal_unavailable');
+
+  hooks.__render.setState({
+    sellifyCompanies: { find() { return { exec: async () => [] }; } },
+    sellifyMatch: { reachable: true, leadId: 'lead_x', contactId: 17714, name: 'CHEMOFAST' },
+    selectedLeadId: 'lead_x',
+    leads: [{ id: 'lead_x', name: 'CHEMOFAST' }],
+  });
+  const mitDatensatz = hooks.sourceStatus(listed[0], null);
+  assert.equal(mitDatensatz.code, 'internal_matched');
+  assert.match(mitDatensatz.label, /contact_id 17714/);
+});
+
 test('ein Registerzeichen darf den CRM-Abgleich nicht abschneiden', () => {
   // Der Lead hiess "CHEMOFAST Anchoring GmbH", die CRM-Organisation
   // "CHEMOFAST® Anchoring GmbH". Der exakte Vergleich fand das nicht — und damit
@@ -1470,4 +1602,295 @@ test('ein Erfolg raeumt seine Fehlerspur weg', () => {
   const block = quelle.slice(i, i + 900);
   assert.match(block, /sellify_error:\s*''/,
     'der Erfolgspfad muss die Fehlerspur leeren');
+});
+
+// Die Versandknoepfe wurden am 13.08.2026 auf Eigentuemerentscheidung aus
+// Outbound entfernt: Serien-E-Mail und Serienbrief starten aus SELLIFY.
+// Outbound recherchiert und uebergibt; der Versand gehoert nicht hierher.
+// Dieser Waechter haelt die Grenze fest.
+test('Outbound bietet keinen Versand an', () => {
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  for (const spur of ['mail-series-email', 'serienbrief-dokument',
+                      'openSeriesEmailFromLead', 'erzeugeSerienbriefDokument',
+                      'serienbriefMarkdown']) {
+    assert.equal(quelle.includes(spur), false,
+      `${spur} gehoert nach Sellify, nicht in Outbound`);
+  }
+  const manifest = JSON.parse(
+    readFileSync(new URL('../module.json', import.meta.url), 'utf8'));
+  for (const c of ['documents', 'document_versions', 'document_blob_chunks']) {
+    assert.equal(manifest.collections.includes(c), false,
+      `${c} war nur fuer den Serienbrief angemeldet`);
+  }
+});
+
+test('null ausgewaehlte Personen melden die Auswahl, nicht eine laufende Pruefung', () => {
+  // Die Sperrpruefung laeuft nur fuer Leads MIT Auswahl. Ohne Auswahl kam sie
+  // nie zu einem Ergebnis, und die Oberflaeche schrieb dauerhaft "werden noch
+  // geprueft" — ein Wartetext auf ein Ereignis, das per Bauart nie eintritt.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const i = quelle.indexOf('function sellifyHandoffPrecondition');
+  assert.ok(i > 0, 'sellifyHandoffPrecondition existiert');
+  const block = quelle.slice(i, i + 1600);
+  const auswahl = block.indexOf('mindestens eine Person auswählen');
+  const warten = block.indexOf('werden noch geprüft');
+  assert.ok(auswahl > 0, 'der Auswahlhinweis existiert');
+  assert.ok(warten > 0, 'der Wartetext existiert weiterhin fuer den echten Fall');
+  assert.ok(auswahl < warten,
+    'die Auswahlpruefung muss VOR dem Wartetext greifen');
+});
+
+test('der geoeffnete Lead wird geprueft, sonst verklemmt die Auswahl', () => {
+  // Verklemmung vom 12.08.2026: ohne Auswahl lief keine Sperrpruefung, ohne
+  // Pruefung blieb der Kontrollkasten gesperrt, ohne Kasten keine Auswahl.
+  // Gegen die urspruengliche Sorge (21 Leads in der Schlange) bleibt der Filter
+  // bestehen — er bekommt nur den geoeffneten Lead dazu.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const i = quelle.indexOf('async function refreshAllRecipientEligibility');
+  assert.ok(i > 0, 'refreshAllRecipientEligibility existiert');
+  const block = quelle.slice(i, i + 1600);
+  assert.match(block, /lead\?\.id === state\.selectedLeadId/,
+    'der geoeffnete Lead muss geprueft werden');
+  assert.match(block, /selected_contact_ids\.length > 0/,
+    'Leads mit Auswahl bleiben drin');
+  assert.ok(!/state\.leads\.filter\(\(lead\) => true\)/.test(block),
+    'es darf NICHT wieder ueber alle Leads laufen');
+});
+
+test('das Oeffnen eines Leads stoesst seine Sperrpruefung an', () => {
+  // Ohne diesen Anstoss blieb der geoeffnete Lead ungeprueft und der
+  // Kontrollkasten dauerhaft gesperrt — eine Verklemmung, kein Wartezustand.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const i = quelle.indexOf("if (action === 'select-lead')");
+  assert.ok(i > 0, 'der Auswahlpfad existiert');
+  const block = quelle.slice(i, i + 1800);
+  assert.match(block, /refreshLeadRecipientEligibility\(geoeffnet\)/,
+    'das Oeffnen muss die Pruefung anstossen');
+  assert.match(block, /recipientEligibilityReady\.has\(id\)/,
+    'ein bereits vorliegendes Urteil darf nicht neu geholt werden');
+  assert.match(block, /state\.selectedLeadId === id/,
+    'nur neu zeichnen, wenn der Lead noch offen ist');
+});
+
+test('die Sperrvermerkspruefung verschluckt ihren Fehler nicht mehr', () => {
+  // Stummes catch: "nicht pruefbar" ohne jede Spur, waehrend dieselbe Abfrage
+  // aus der Konsole den Kontakt sofort fand. Ein Fehler ohne Spur sieht aus wie
+  // eine Eigenschaft der Daten.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const i = quelle.indexOf('async function loadSellifyRecipientContext');
+  const block = quelle.slice(i, i + 6000);
+  assert.ok(!/\}\s*catch\s*\{\s*\n\s*return \{ people: \[\], companies: \[\], contextAvailable: false \}/.test(block),
+    'kein stummes catch mehr');
+  assert.match(block, /console\.error\('\[thesen-outbound\] Sperrvermerkspruefung fehlgeschlagen'/,
+    'der Fehler muss sichtbar werden');
+});
+
+test('die Frist der Sperrpruefung passt zur neuen Dauer', () => {
+  // Vorher: 50360 ms gemessen, Frist 120 s als Linderung. Nach der
+  // Parallelisierung muss die Frist zur Ziel-Dauer (< 3 s) passen und darf die
+  // alte 50-s-Welt nicht mehr abbilden.
+  const quelle = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  const m = quelle.match(/const RECIPIENT_ELIGIBILITY_TIMEOUT_MS = ([\d_]+);/);
+  assert.ok(m, 'die Frist existiert');
+  const ms = Number(m[1].replace(/_/g, ''));
+  assert.ok(ms >= 3_000, `die Frist (${ms} ms) muss mindestens das 3-s-Ziel abdecken`);
+  assert.ok(ms < 50_360, `die Frist (${ms} ms) darf nicht mehr an der alten 50-s-Messung haengen`);
+  assert.match(quelle, /Promise\.all/, 'die Abfragen muessen nebenlaeufig laufen');
+});
+
+test('Sperrvermerksabfragen laufen nebenlaeufig und die Schutzlogik bleibt hart', async () => {
+  // Belegt den groessten Hebel der Heilung: unabhaengige Abfragen starten
+  // gleichzeitig (Promise.all), statt N × Latenz seriell. Und belegt, dass
+  // parallelisierte Abfragen die Schutzlogik nicht aufweichen.
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const findSelectors = [];
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const track = async (result) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await delay(50);
+    inFlight -= 1;
+    return result;
+  };
+
+  const companyA = {
+    id: 'sellify-company-17714', contact_id: 17714, name: 'CHEMOFAST Anchoring GmbH',
+    is_deleted: false, note_text: '',
+  };
+  const companyB = {
+    id: 'sellify-company-18255', contact_id: 18255, name: 'CHEMOFAST® Anchoring GmbH',
+    is_deleted: false, note_text: '',
+  };
+  const freePerson = {
+    id: 'sellify-person-1', person_id: 1, contact_id: 17714,
+    display_name: 'Roger Wintzen', email: 'roger.wintzen@chemofast.com',
+    note_text: '', title: '', is_deleted: false,
+  };
+  const blockedPerson = {
+    id: 'sellify-person-2', person_id: 2, contact_id: 17714,
+    display_name: 'Britta Babis', email: 'britta@example.test',
+    note_text: ' Kontaktsperre !!!', title: '', is_deleted: false,
+  };
+  const peopleByContact = new Map([
+    [17714, [freePerson, blockedPerson]],
+    [18255, []],
+  ]);
+  const peopleByEmail = new Map([
+    ['roger.wintzen@chemofast.com', [freePerson]],
+    ['britta@example.test', [blockedPerson]],
+  ]);
+  const peopleByName = new Map([
+    ['Roger Wintzen', [freePerson]],
+    ['Britta Babis', [blockedPerson]],
+  ]);
+  const peopleById = new Map([
+    [1, freePerson],
+    [2, blockedPerson],
+  ]);
+  const companiesByName = new Map([
+    ['CHEMOFAST Anchoring GmbH', [companyA]],
+    ['CHEMOFAST® Anchoring GmbH', [companyB]],
+  ]);
+
+  const matchSelector = (record, selector) => {
+    for (const [field, clause] of Object.entries(selector || {})) {
+      const value = record?.[field];
+      if (clause && typeof clause === 'object' && '$eq' in clause) {
+        if (value !== clause.$eq) return false;
+      } else if (clause && typeof clause === 'object' && '$in' in clause) {
+        if (!clause.$in.includes(value)) return false;
+      } else if (value !== clause) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const sellifyCompanies = {
+    find: ({ selector } = {}) => ({
+      exec: async () => {
+        findSelectors.push(selector);
+        return track(
+          [...companiesByName.values()].flat().filter((row) => matchSelector(row, selector)),
+        );
+      },
+    }),
+    findOne: (id) => ({
+      exec: async () => track(
+        [companyA, companyB].find((row) => row.id === id) || null,
+      ),
+    }),
+  };
+  const sellifyPeople = {
+    find: ({ selector } = {}) => ({
+      exec: async () => {
+        findSelectors.push(selector);
+        if (selector?.contact_id?.$in) {
+          return track(selector.contact_id.$in.flatMap((id) => peopleByContact.get(id) || []));
+        }
+        if (selector?.contact_id?.$eq != null) {
+          return track(peopleByContact.get(selector.contact_id.$eq) || []);
+        }
+        if (selector?.email?.$in) {
+          return track(selector.email.$in.flatMap((email) => peopleByEmail.get(email) || []));
+        }
+        if (selector?.email?.$eq != null) {
+          return track(peopleByEmail.get(selector.email.$eq) || []);
+        }
+        if (selector?.display_name?.$in) {
+          return track(selector.display_name.$in.flatMap((name) => peopleByName.get(name) || []));
+        }
+        if (selector?.display_name?.$eq != null) {
+          return track(peopleByName.get(selector.display_name.$eq) || []);
+        }
+        return track([]);
+      },
+    }),
+    findOne: (id) => ({
+      exec: async () => {
+        const personId = Number(String(id).replace(/^sellify-person-/, '')) || 0;
+        return track(peopleById.get(personId) || null);
+      },
+    }),
+  };
+
+  hooks.__render.setState({
+    sellifyCompanies,
+    sellifyPeople,
+    lastEligibilityError: '',
+  });
+
+  const lead = {
+    id: 'lead_b7nl4a',
+    name: 'CHEMOFAST Anchoring GmbH',
+    payload: { sellify_contact_id: 17714 },
+    contacts: [
+      {
+        id: 'c-roger', name: 'Roger Wintzen', sellify_person_id: 1,
+        email: 'roger.wintzen@chemofast.com', note_text: '', title: '',
+      },
+      {
+        id: 'c-britta', name: 'Britta Babis', sellify_person_id: 2,
+        email: 'britta@example.test', note_text: '', title: '',
+      },
+      {
+        id: 'c-angela', name: 'Angela Grün', email: '', note_text: '', title: '',
+      },
+    ],
+  };
+
+  const t0 = Date.now();
+  const context = await hooks.loadSellifyRecipientContext(lead);
+  const elapsed = Date.now() - t0;
+
+  assert.equal(context.contextAvailable, true);
+  assert.ok(context.companies.some((c) => Number(c.contact_id) === 17714));
+  assert.ok(context.people.some((p) => p.person_id === 1));
+  assert.ok(context.people.some((p) => p.person_id === 2));
+  // Mehrere Abfragen muessen gleichzeitig offen gewesen sein — sonst sind wir
+  // wieder in der seriellen 50-s-Schleife.
+  assert.ok(maxInFlight >= 2, `erwartet nebenlaeufige Abfragen, maxInFlight=${maxInFlight}`);
+  // Zwei Phasen (Firmen, dann Personen) mit je 50 ms kuenstlicher Latenz:
+  // parallel ~100 ms, seriell waeren es viele 50-ms-Schritte. Unter 3 s bleibt
+  // die Akzeptanzgrenze des Auftrags.
+  assert.ok(elapsed < 3_000, `nebenlaeufige Abfragen dauerten unerwartet lang: ${elapsed} ms`);
+  // Mehrfachwerte gehen als EINE $in-Abfrage, nicht als N $eq-Abfragen.
+  assert.ok(
+    findSelectors.some((selector) => Array.isArray(selector?.name?.$in) && selector.name.$in.length > 1),
+    'Firmennamen muessen per $in gebuendelt werden',
+  );
+  assert.ok(
+    findSelectors.some((selector) => Array.isArray(selector?.email?.$in) && selector.email.$in.length > 1)
+      || findSelectors.some((selector) => Array.isArray(selector?.contact_id?.$in) && selector.contact_id.$in.length > 1)
+      || findSelectors.some((selector) => Array.isArray(selector?.display_name?.$in) && selector.display_name.$in.length > 1),
+    'Personenfelder muessen per $in gebuendelt werden, wo mehrere Werte anliegen',
+  );
+  // Kein find() ohne Selektor — das friert sellify_people (17k+) ein.
+  assert.ok(findSelectors.every((selector) => selector && Object.keys(selector).length > 0),
+    'kein Scan der ganzen Collection');
+
+  const decisions = hooks.deriveLeadRecipientEligibility(lead, context);
+  assert.equal(decisions.get('c-roger').status, 'free', 'freier Kontakt bleibt frei');
+  assert.equal(decisions.get('c-britta').status, 'blocked', 'gesperrt bleibt gesperrt');
+  assert.equal(decisions.get('c-britta').label, 'Kontaktsperre');
+
+  // Nicht pruefbar bleibt gesperrt — Schutzwirkung unveraendert.
+  const unavailable = hooks.deriveLeadRecipientEligibility(lead, {
+    people: [], companies: [], contextAvailable: false,
+  });
+  assert.equal(unavailable.get('c-roger').status, 'review');
+  assert.equal(unavailable.get('c-roger').pending, true);
+  assert.match(unavailable.get('c-roger').label, /nicht prüfbar|zu prüfen/);
+  // Lokaler Sperrvermerk am Kontakt greift auch ohne CRM-Kontext.
+  const localBlockedLead = {
+    ...lead,
+    contacts: [{
+      id: 'c-local', name: 'Lokal Gesperrt', note_text: 'keine Werbung', title: '',
+    }],
+  };
+  const localBlocked = hooks.deriveLeadRecipientEligibility(localBlockedLead, {
+    people: [], companies: [], contextAvailable: false,
+  });
+  assert.equal(localBlocked.get('c-local').status, 'blocked');
 });

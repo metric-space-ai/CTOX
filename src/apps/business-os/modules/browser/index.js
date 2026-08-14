@@ -200,7 +200,7 @@ export async function mount(ctx) {
       band: detail.band || 'all',
       filters: detail.filters || {},
     };
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs));
+    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
   };
   root.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
@@ -568,7 +568,7 @@ export async function mount(ctx) {
         filters: grammar.filters || {},
       };
     }
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs));
+    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
     // Auto-reveal: the remote work surface is meaningful once a session is
     // selected (visible = hasSelection && !userCollapsed). No session -> the
     // canvas shows its empty state instead of stale chrome.
@@ -1572,7 +1572,7 @@ function sessionTabCounts(tabs) {
 // Rebuild the sessions well ONLY when the rendered data changed (signature
 // guard). Selection is applied in place via markActiveSession so a re-render
 // never clamps the well scroll or moves the operator.
-function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}) {
+function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}, ctx = null) {
   if (!refs.sessions) return;
   const all = Array.isArray(sessions) ? sessions : [];
   const filtered = filterSessionsForView(all, view);
@@ -1583,7 +1583,7 @@ function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}
   if (refs.sessions.dataset.sig !== signature) {
     refs.sessions.dataset.sig = signature;
     refs.sessions.innerHTML = filtered
-      .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0))
+      .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0, ctx))
       .join('');
   }
   if (refs.sessionsEmpty) refs.sessionsEmpty.hidden = filtered.length > 0;
@@ -1609,27 +1609,76 @@ function markActiveSession(refs, sessionId) {
   }
 }
 
-function sessionShardMarkup(session, tabCount) {
+function sessionShardMarkup(session, tabCount, ctx = null) {
   const url = session.current_url || session.payload?.target_url || '';
   const title = browserDisplayTitle(null, session, url);
-  const meta = browserSessionShardMeta(session, tabCount);
+  const meta = browserSessionShardMeta(session, tabCount, ctx);
   const importedClass = session.__imported ? ' browser-session--imported' : '';
+  // Das Symbol traegt den Zustand, nicht nur der Text: bei 34 Sitzungen findet
+  // man "Eingriff noetig" sonst nicht, ohne jede Zeile zu lesen.
+  const z = browserSitzungZustand(session, ctx);
   return `
-    <div class="ctox-list-item browser-session${importedClass}" role="option" aria-selected="false" tabindex="0"
+    <div class="ctox-list-item browser-session${importedClass} ${z.klasse}" role="option" aria-selected="false" tabindex="0"
       data-browser-session-id="${escapeHtml(session.id)}"
+      data-browser-zustand="${escapeHtml(z.klasse)}"
       data-context-record-id="${escapeHtml(session.id)}"
       data-context-record-type="browser_session"
       data-context-label="${escapeHtml(title)}">
+      <span class="browser-session-zustand" title="${escapeHtml(z.text)}" aria-label="${escapeHtml(z.text)}">${z.symbol}</span>
       <span class="browser-session-title">${escapeHtml(title)}</span>
       <span class="browser-session-meta">${escapeHtml(meta)}</span>
     </div>`;
 }
 
-function browserSessionShardMeta(session, tabCount = 0) {
+// WER STEUERT DIESE SITZUNG, und muss jemand eingreifen?
+//
+// Bis 13.08.2026 stand in jeder Zeile nur "Persoenlich · Bereit · 1 Tab". Bei
+// 34 Sitzungen war die Liste damit wertlos: man sah nicht, ob eine Sitzung dem
+// Nutzer gehoert oder von der Recherche gefahren wird, und vor allem nicht, wo
+// jemand eingreifen muss. Eine Automatik, die auf eine Anmeldung oder eine
+// Bot-Pruefung wartet, lief still in ihre Zeitueberschreitung — der Klick, der
+// gereicht haette, wurde nie angefordert.
+//
+// Die vier Zustaende kommen ohne neue Felder aus; sie stehen alle schon im
+// Sitzungsdatensatz.
+const SITZUNG_ZUSTAENDE = Object.freeze({
+  eingriff: { symbol: '⚠', klasse: 'is-eingriff', text: 'Eingriff nötig' },
+  nutzer: { symbol: '👤', klasse: 'is-nutzer', text: 'Sie steuern' },
+  automatik: { symbol: '⚙', klasse: 'is-automatik', text: 'Automatik' },
+  ruhend: { symbol: '○', klasse: 'is-ruhend', text: 'Ruhend' },
+});
+
+function browserSitzungZustand(session, ctx, jetzt = Date.now()) {
+  if (!session?.id) return SITZUNG_ZUSTAENDE.ruhend;
+  // 1. Eingriff zuerst — er ist der einzige Zustand, der jemanden BRAUCHT.
+  const fehler = String(browserSessionError(session) || '').toLowerCase();
+  const titel = String(session.title || '').toLowerCase();
+  const wartetAufMensch = /anmeld|login|sign in|captcha|verify|bot|zustimm|consent|just a moment/
+    .test(`${fehler} ${titel}`);
+  const lauft = ['active', 'running', 'ready', 'capturing'].includes(
+    String(session.runtime_status || session.status || '').toLowerCase());
+  if (lauft && wartetAufMensch) return SITZUNG_ZUSTAENDE.eingriff;
+  if (!lauft) return SITZUNG_ZUSTAENDE.ruhend;
+
+  // 2. Steuert der angemeldete Nutzer selbst — mit GUELTIGER Pacht?
+  const meine = browserActorIds(ctx?.session) || [];
+  const steuernder = String(session.controller_user_id || '');
+  const pachtBis = Number(session.controller_lease_expires_at_ms || 0);
+  if (steuernder && meine.includes(steuernder) && pachtBis > jetzt) {
+    return SITZUNG_ZUSTAENDE.nutzer;
+  }
+  // 3. Sonst faehrt sie jemand anderes — Recherche, Adapter, anderer Nutzer.
+  //    Diese Sitzungen NICHT versehentlich uebernehmen: ein Zugriff bricht
+  //    einen laufenden Rechercheschritt ab.
+  return SITZUNG_ZUSTAENDE.automatik;
+}
+
+function browserSessionShardMeta(session, tabCount = 0, ctx = null) {
   const status = browserStatusLabel(session);
   const profile = (session.profile_mode || session.payload?.profile_mode) === 'private' ? 'Privat' : 'Persönlich';
   const count = Number(tabCount || 0);
-  const parts = [profile, status, `${count} ${count === 1 ? 'Tab' : 'Tabs'}`];
+  const zustand = browserSitzungZustand(session, ctx);
+  const parts = [zustand.text, profile, status, `${count} ${count === 1 ? 'Tab' : 'Tabs'}`];
   const error = browserSessionError(session);
   if (error) parts.push(error);
   if (session.__imported) parts.push('Import');
@@ -1688,6 +1737,11 @@ function sessionListSignature(filteredSessions, listView, tabCounts = {}) {
     Number(tabCounts[session.id] || 0),
     Number(session.updated_at_ms || 0),
     session.__imported ? 'i' : '',
+    // Der Zustand haengt an Steuerndem und Pacht — ohne diese beiden
+    // Werte in der Signatur bliebe das Symbol stehen, wenn eine Pacht
+    // ablaeuft oder jemand anderes uebernimmt.
+    String(session.controller_user_id || ''),
+    Number(session.controller_lease_expires_at_ms || 0) > Date.now() ? 'p' : '-',
   ].join(':'));
   return `${listView}::${rows.join('|')}`;
 }
@@ -1804,7 +1858,7 @@ function importBrowserSessions(ctx, state, refs) {
       return;
     }
     state.importedSessions = imported;
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs));
+    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
     ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: `${imported.length} Sitzungen geladen (nur lokal).` });
   });
   input.click();
@@ -2407,6 +2461,7 @@ export const __browserTestHooks = {
   browserAuthRequestFromArgs,
   shouldRenewControllerLease,
   shouldReacquireControllerLease,
+  browserSitzungZustand,
   eingabeSperrgrund,
   browserCommandRequiresController,
   browserSurfaceIsFocused,

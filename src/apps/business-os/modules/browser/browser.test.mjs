@@ -796,3 +796,41 @@ function pointerEvent(overrides = {}) {
     'die Merkliste darf nicht mehr die erste Bedingung sein',
   );
 }
+
+// --- Sitzungszustand: wer steuert, wo muss jemand eingreifen (13.08.2026) ---
+// Vorher stand in jeder Zeile nur "Persoenlich · Bereit · 1 Tab". Bei 34
+// Sitzungen sah niemand, ob eine Sitzung dem Nutzer gehoert, von der Recherche
+// gefahren wird, oder auf einen menschlichen Klick wartet.
+{
+  const ich = { user: { id: 'user-1' } };
+  const jetzt = 1_000_000;
+  const z = (s, ctx = { session: ich }) =>
+    __browserTestHooks.browserSitzungZustand(s, ctx, jetzt).text;
+
+  // Eingriff schlaegt alles: eine laufende Sitzung, die auf einen Menschen wartet.
+  assert.equal(z({ id: 's', runtime_status: 'active', title: 'Just a moment...' }),
+    'Eingriff nötig', 'eine Bot-Pruefung braucht den Nutzer');
+  assert.equal(z({ id: 's', runtime_status: 'active', error: 'Anmeldung erforderlich' }),
+    'Eingriff nötig', 'eine Anmeldung braucht den Nutzer');
+
+  // Eigene Steuerung mit gueltiger Pacht.
+  assert.equal(z({ id: 's', runtime_status: 'active', controller_user_id: 'user-1',
+    controller_lease_expires_at_ms: jetzt + 60_000 }), 'Sie steuern');
+
+  // Abgelaufene Pacht ist KEINE eigene Steuerung mehr.
+  assert.equal(z({ id: 's', runtime_status: 'active', controller_user_id: 'user-1',
+    controller_lease_expires_at_ms: jetzt - 1 }), 'Automatik',
+    'eine abgelaufene Pacht darf nicht als eigene Steuerung gelten');
+
+  // Fremd gesteuert = Automatik. Diese Sitzungen nicht versehentlich uebernehmen.
+  assert.equal(z({ id: 's', runtime_status: 'active', controller_user_id: 'recherche',
+    controller_lease_expires_at_ms: jetzt + 60_000 }), 'Automatik');
+
+  // Nicht laufend = ruhend, unabhaengig von allem anderen.
+  assert.equal(z({ id: 's', runtime_status: 'disconnected', controller_user_id: 'user-1',
+    controller_lease_expires_at_ms: jetzt + 60_000 }), 'Ruhend');
+
+  // Eine ruhende Sitzung mit Anmelde-Titel ist KEIN Eingriff — da laeuft nichts,
+  // worauf jemand warten koennte.
+  assert.equal(z({ id: 's', runtime_status: 'ended', title: 'Login' }), 'Ruhend');
+}

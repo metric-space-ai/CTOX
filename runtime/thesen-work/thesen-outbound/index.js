@@ -24,6 +24,11 @@ const SOURCE_DEFS = Object.freeze([
   source('zefix.ch', 'Zefix', 'https://www.zefix.ch/', ['CH'], ['Register', 'Sitz', 'Status']),
   source('experte.de', 'E-Mail-Prüfung', 'https://www.experte.de/email-pruefen', ['DE', 'AT', 'CH'], ['E-Mail-Prüfung']),
 ]);
+// Sellify ist keine Adapter-Quelle: keine Anmeldung, kein Scrape-Target.
+// Sie erscheint in der Quellenliste als interne Quelle und als Beleg an
+// jedem Feld, das aus dem eigenen CRM uebernommen wurde.
+const SELLIFY_SOURCE_ID = 'sellify';
+const SELLIFY_SOURCE_LABEL = 'Sellify (eigenes CRM)';
 
 const RESEARCH_FIELDS = Object.freeze([
   'firma_name',
@@ -157,10 +162,20 @@ const RESEARCH_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
 // Sekunden; 30 Minuten lassen Warteschlange und Wiederholung reichlich Luft und
 // beenden trotzdem den Zustand, in dem ANGUS Chemie ueber fuenf Stunden hing.
 const RESEARCH_RUNNING_MAX_MS = 30 * 60 * 1000;
-// Frist fuer die Sperrvermerkspruefung gegen die CRM-Projektion. Grosszuegig
-// genug fuer eine kalte Bedarfsabfrage ueber 60.639 Personen, kurz genug, dass
-// ein Knopfdruck nicht ins Leere laeuft.
-const RECIPIENT_ELIGIBILITY_TIMEOUT_MS = 12_000;
+// Frist fuer die Sperrvermerkspruefung gegen die CRM-Projektion.
+// Am 12.08.2026 auf CHEMOFAST gemessen, serielle Einzelabfragen:
+//   "Sperrvermerkspruefung hat die Frist ueberschritten"   (bei 12 s)
+//   "Sperrvermerkspruefung lead_b7nl4a: 50360 ms, 1 Firmen, 3 Personen"
+// Die Pruefung LIEF durch und fand die Daten — nur 38 Sekunden nach ihrer
+// damaligen Frist. Ursache: viele serielle await-Abfragen gegen
+// sellify_people/sellify_companies (je Firma contact_id, je Kontakt person_id,
+// email, display_name, plus bis zu zwoelf Namensvarianten).
+// Heilung: unabhaengige Abfragen laufen nebenlaeufig (Promise.all), gleiche
+// Selektoren nur einmal, Mehrfachwerte per $in. Ziel: unter 3 s je Lead.
+// Gemessen: vorher 50360 ms fuer 1 Firma / 3 Personen; mit Parallelisierung
+// und $in liegt die Frist grosszuegig ueber dem 3-s-Ziel, aber weit unter
+// der alten 50-s-Welt — ein haengender Vorgang blockiert die Kette nicht mehr.
+const RECIPIENT_ELIGIBILITY_TIMEOUT_MS = 10_000;
 const LEGACY_RESEARCH_POLICY_IMPORT_ID = 'settings_research_policy';
 const REPLICATED_COLLECTIONS = Object.freeze([
   'thesen_outbound_sources',
@@ -219,6 +234,7 @@ const state = {
   commandRefreshTimer: null,
   sellifyCompanies: null,
   sellifyPeople: null,
+  sellifyMatch: null,
   recipientEligibility: new Map(),
   recipientEligibilityReady: new Set(),
   recipientEligibilitySignatures: new Map(),
@@ -387,6 +403,72 @@ async function seedSources() {
       updated_at_ms: now,
     });
   }
+  const sellifyVorhanden = await state.collections.sources.findOne(SELLIFY_SOURCE_ID).exec();
+  if (!sellifyVorhanden) {
+    await state.collections.sources.insert(sellifyQuellenEintrag(now));
+  }
+}
+
+function sellifyQuellenEintrag(now = Date.now()) {
+  return {
+    id: SELLIFY_SOURCE_ID,
+    label: SELLIFY_SOURCE_LABEL,
+    url: '',
+    countries: ['DE', 'AT', 'CH'],
+    field_keys: ['Firma', 'Anschrift', 'Person', 'E-Mail', 'Telefon'],
+    enabled: true,
+    requires_credential: false,
+    credential_secret_name: '',
+    target_key: SELLIFY_SOURCE_ID,
+    adapter_status: 'not_required',
+    scrape_status: 'not_required',
+    auth_status: 'not_required',
+    payload: { builtin: true, internal: true, secret_value_in_payload: false },
+    created_at_ms: now,
+    updated_at_ms: now,
+  };
+}
+
+function isInternalResearchSource(item) {
+  return item?.id === SELLIFY_SOURCE_ID || item?.payload?.internal === true;
+}
+
+function listedSources() {
+  const sellify = state.sources.find((item) => item.id === SELLIFY_SOURCE_ID) || sellifyQuellenEintrag();
+  return [sellify, ...state.sources.filter((item) => item.id !== SELLIFY_SOURCE_ID)];
+}
+
+function merkeSellifyProjektion(reachable, lead = null, firma = null) {
+  state.sellifyMatch = {
+    reachable: Boolean(reachable),
+    leadId: lead?.id || '',
+    contactId: firma?.contact_id || null,
+    name: String(firma?.name || '').trim(),
+  };
+}
+
+function sellifySourceStatus() {
+  const eintrag = state.sources.find((item) => item.id === SELLIFY_SOURCE_ID);
+  if (eintrag?.enabled === false) {
+    return { code: 'disabled', label: tr('sourceDisabled', 'Deaktiviert — wird bei der Recherche übersprungen.'), chip: null };
+  }
+  const projectionDa = Boolean(state.sellifyCompanies?.find);
+  const match = state.sellifyMatch;
+  if (!projectionDa && match?.reachable !== true) {
+    return { code: 'internal_unavailable', label: tr('sellifyProjectionMissing', 'CRM-Projektion nicht erreichbar'), chip: null };
+  }
+  const lead = selectedLead();
+  if (lead && match?.leadId === lead.id && match.contactId) {
+    return {
+      code: 'internal_matched',
+      label: `Bereit · Datensatz vorhanden (contact_id ${match.contactId})`,
+      chip: null,
+    };
+  }
+  if (lead && match?.leadId === lead.id) {
+    return { code: 'internal_empty', label: 'Bereit · kein Datensatz zur Firma', chip: null };
+  }
+  return { code: 'internal_ready', label: 'Bereit · interne Quelle, keine Anmeldung', chip: null };
 }
 
 function bindCollections() {
@@ -575,7 +657,7 @@ function renderSourcePanel() {
     return;
   }
   const needle = state.sourceSearch.trim().toLowerCase();
-  const sources = state.sources.filter((item) => !needle || `${item.label} ${item.url}`.toLowerCase().includes(needle));
+  const sources = listedSources().filter((item) => !needle || `${item.label} ${item.url}`.toLowerCase().includes(needle));
   const showingPolicy = state.sourcePanelView === 'policy';
   const panelCount = showingPolicy ? 7 : sources.length;
   const panelTitle = showingPolicy
@@ -614,6 +696,7 @@ function renderResearchPolicy() {
 }
 
 function sourceStatus(item, adapter, now = Date.now()) {
+  if (isInternalResearchSource(item)) return sellifySourceStatus();
   const status = String(adapter?.status ?? item?.adapter_status ?? '').toLowerCase();
   const scrapeStatus = String(adapter?.scrape_status ?? item?.scrape_status ?? '').toLowerCase();
   const authStatus = String(adapter?.auth_status ?? item?.auth_status ?? '').toLowerCase();
@@ -709,23 +792,25 @@ function sourceStatus(item, adapter, now = Date.now()) {
 }
 
 function renderSourceRow(item) {
-  const adapter = state.adapters.find((entry) => entry.source_id === item.id);
+  const intern = isInternalResearchSource(item);
+  const adapter = intern ? null : state.adapters.find((entry) => entry.source_id === item.id);
   const status = sourceStatus(item, adapter);
-  const ready = status.code === 'ready';
-  const needsBrowserAuthorization = sourceNeedsBrowserAuthorization(item, adapter);
+  const ready = intern ? !['internal_unavailable', 'disabled'].includes(status.code) : status.code === 'ready';
+  const needsBrowserAuthorization = intern ? false : sourceNeedsBrowserAuthorization(item, adapter);
+  const hintergrund = intern ? ' · interne Quelle' : '';
   return `<div class="thesen-source-row" data-source-id="${escapeHtml(item.id)}" data-context-record-id="${escapeHtml(item.id)}" data-context-record-type="research-source" data-context-label="${escapeHtml(item.label)}">
     <button class="thesen-source-toggle" data-action="toggle-source" aria-pressed="${item.enabled}" title="Quelle ${item.enabled ? 'deaktivieren' : 'aktivieren'}"><span class="thesen-toggle-dot"></span></button>
     <div class="thesen-source-copy">
       <strong>${escapeHtml(item.label)}</strong>
-      <span>${escapeHtml(item.countries.join('/'))} · ${escapeHtml(item.field_keys.join(', '))}</span>
+      <span>${escapeHtml(item.countries.join('/'))} · ${escapeHtml(item.field_keys.join(', '))}${escapeHtml(hintergrund)}</span>
       <span class="thesen-adapter-state ${ready ? 'is-ready' : ''}">${ready ? icon('check') : '<i></i>'}${escapeHtml(status.label)}</span>
       ${status.chip ? `<span class="thesen-source-credential is-${escapeHtml(status.chip.code)}">${escapeHtml(status.chip.label)}</span>` : ''}
     </div>
-    <div class="thesen-source-actions">
+    ${intern ? '' : `<div class="thesen-source-actions">
       <button class="ctox-pane-icon" data-action="build-adapter" title="${tr('buildAdapter', 'Datenzugriff einrichten')}" aria-label="${tr('buildAdapter', 'Datenzugriff einrichten')}">${icon('wrench')}</button>
       <button class="ctox-pane-icon" data-action="test-adapter" title="${tr('testAdapter', 'Datenzugriff prüfen')}" aria-label="${tr('testAdapter', 'Datenzugriff prüfen')}">${icon('test')}</button>
       ${needsBrowserAuthorization ? `<button class="ctox-pane-icon" data-action="auth-source" title="${tr('browserSignIn', 'Im CTOX-Browser anmelden')}" aria-label="${tr('signIn', 'Anmelden')}">${icon('login')}</button>` : ''}
-    </div>
+    </div>`}
   </div>`;
 }
 
@@ -940,7 +1025,6 @@ function renderDetail() {
         <button class="ctox-button" data-action="validate-lead" data-id="${escapeHtml(lead.id)}" ${readyForValidation ? '' : 'disabled'} title="${escapeHtml(validateLabel)}">${icon('check')}<span>${escapeHtml(validateLabel)}</span></button>
         <button class="ctox-button" data-action="sellify-update-only" data-id="${escapeHtml(lead.id)}" ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(handoffTitle || tr('sellifyUpdateOnlyTitle', 'Organisation und ausgewählte Personen in Sellify aktualisieren.'))}">${icon('send')}<span>${tr('sellifyUpdateOnly', 'Zu Sellify (nur aktualisieren)')}</span></button>
         <button class="ctox-button" data-action="sellify-update-campaign" data-id="${escapeHtml(lead.id)}" ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(handoffTitle || tr('sellifyUpdateCampaignTitle', 'Organisation und ausgewählte Personen aktualisieren und der Kampagne hinzufügen.'))}">${icon('send')}<span>${tr('sellifyUpdateCampaign', 'Zu Sellify (aktualisieren & Kampagne)')}</span></button>
-        <button class="ctox-button" data-action="mail-series-email" data-id="${escapeHtml(lead.id)}" ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(handoffTitle || tr('mailSeriesEmailTitle', 'Ausgewählte, freigegebene Personen in eine Serien-E-Mail übernehmen.'))}">${icon('send')}<span>${tr('mailSeriesEmail', 'Als Serien-E-Mail')}</span></button>
       </div>
       ${renderResearchReviewGroups(review, lead)}
     </div>`;
@@ -1000,6 +1084,20 @@ async function handleClick(event) {
       state.selectedLeadId = id;
       renderCenter();
       renderDetail();
+      // Das Oeffnen eines Leads ist der Ausloeser fuer seine Sperrpruefung.
+      // Ohne diesen Anstoss blieb der geoeffnete Lead ungeprueft: der
+      // Kontrollkasten stand dauerhaft auf "Sperrvermerk wird geprueft" und war
+      // gesperrt, also konnte niemand eine Person auswaehlen — und ohne Auswahl
+      // lief die Pruefung erst recht nicht. Am 12.08.2026 auf CHEMOFAST
+      // gemessen. Die Pruefung selbst war die ganze Zeit heil; es klopfte nur
+      // niemand. Ein Zustand ohne Ereignis weckt keinen ereignisgetriebenen
+      // Vorgang.
+      const geoeffnet = state.leads.find((entry) => entry.id === id);
+      if (geoeffnet && !state.recipientEligibilityReady.has(id)) {
+        refreshLeadRecipientEligibility(geoeffnet)
+          .then(() => { if (state.selectedLeadId === id) renderDetail(); })
+          .catch(() => {});
+      }
     }
   }
   if (action === 'select-campaign') {
@@ -1104,7 +1202,6 @@ async function handleClick(event) {
   }
   if (action === 'sellify-update-only') await sendLeadToSellify(id, { includeCampaign: false });
   if (action === 'sellify-update-campaign') await sendLeadToSellify(id, { includeCampaign: true });
-  if (action === 'mail-series-email') await openSeriesEmailFromLead(id);
   if (action === 'add-source') await addSource();
 }
 
@@ -1677,56 +1774,119 @@ async function loadSellifyRecipientContext(lead) {
     }
   }
   if (!state.sellifyPeople?.find || !state.sellifyCompanies?.find) {
+    merkeSellifyProjektion(false, lead, null);
     return { people: [], companies: [], contextAvailable: false };
   }
   try {
+    // Unabhaengige Abfragen laufen nebenlaeufig. Am 12.08.2026 brauchten die
+    // seriellen await-Schleifen 50360 ms fuer 1 Firma und 3 Personen — jede
+    // contact_id, person_id, email, display_name und jede Namensvariante war
+    // ein eigener Round-Trip. Promise.all + $in halten denselben Schutzzweck
+    // und senken die Dauer unter 3 s.
     const companies = [];
     const linkedContactId = Number(lead?.payload?.sellify_contact_id) || 0;
+    const leadName = String(lead?.name || '').trim();
+    const companyNameValues = leadName
+      ? [...new Set([leadName, ...firmenNamensvarianten(leadName)])]
+      : [];
+
+    const companyLookups = [];
     if (linkedContactId && state.sellifyCompanies.findOne) {
-      const linked = await state.sellifyCompanies.findOne(`sellify-company-${linkedContactId}`).exec();
-      if (linked) companies.push(docJson(linked));
+      companyLookups.push(
+        state.sellifyCompanies.findOne(`sellify-company-${linkedContactId}`).exec()
+          .then((linked) => (linked ? [docJson(linked)] : [])),
+      );
     }
-    if (String(lead?.name || '').trim()) {
-      const exakt = await findSellifyRecords(state.sellifyCompanies, {
-        name: { $eq: String(lead.name).trim() },
-      });
-      companies.push(...exakt);
-      // Ohne exakten Treffer normalisiert nachschlagen — sonst bleibt der
-      // Sperrvermerk fuer jede Firma ungeprueft, deren Name im CRM ein
-      // Registerzeichen traegt.
-      // Auch hier gezielt statt Scan — siehe firmenNamensvarianten.
-      if (!exakt.length) {
-        // ALLE Varianten sammeln, nicht beim ersten Treffer aufhoeren. CHEMOFAST
-        // wird im CRM unter zwei contact_ids gefuehrt (17714 und 18255); nur in
-        // 17714 hat Roger Wintzen seine Adresse. Wer nach dem ersten Treffer
-        // abbricht, erwischt die halbe Wahrheit — am 12.08.2026 genau die leere
-        // Haelfte, und die Kontaktuebernahme hatte nichts zu uebernehmen.
-        for (const variante of firmenNamensvarianten(lead?.name)) {
-          companies.push(...await findSellifyRecords(state.sellifyCompanies, { name: { $eq: variante } }));
-        }
-      }
+    if (companyNameValues.length === 1) {
+      companyLookups.push(findSellifyRecords(state.sellifyCompanies, {
+        name: { $eq: companyNameValues[0] },
+      }));
+    } else if (companyNameValues.length > 1) {
+      // Eine Abfrage mit $in statt N Abfragen mit $eq — gleiche Treffer,
+      // ein Round-Trip. Varianten werden IMMER mit abgefragt (nicht erst nach
+      // leerem Exakt-Treffer), damit doppelte CRM-contact_ids wie CHEMOFAST
+      // 17714/18255 nicht an einer Schreibweise haengen bleiben.
+      companyLookups.push(findSellifyRecords(state.sellifyCompanies, {
+        name: { $in: companyNameValues },
+      }));
+    }
+    for (const batch of await Promise.all(companyLookups)) {
+      companies.push(...batch);
     }
     const activeCompanies = uniqueSellifyRecords(companies);
-    const people = [];
-    for (const company of activeCompanies) {
-      const contactId = Number(company?.contact_id) || 0;
-      if (contactId) people.push(...await findSellifyRecords(state.sellifyPeople, { contact_id: { $eq: contactId } }));
-    }
+
+    const contactIds = [...new Set(
+      activeCompanies
+        .map((company) => Number(company?.contact_id) || 0)
+        .filter(Boolean),
+    )];
+    const personIds = new Set();
+    const emails = new Set();
+    const displayNames = new Set();
     for (const contact of lead?.contacts || []) {
       const personId = normalizedPersonId(contact?.sellify_person_id || contact?.person_id || contact?.id);
-      if (personId && state.sellifyPeople.findOne) {
-        const person = await state.sellifyPeople.findOne(`sellify-person-${personId}`).exec();
-        if (person) people.push(docJson(person));
-      }
+      if (personId) personIds.add(personId);
       const email = String(contact?.email || contact?.person_email || '').trim();
-      if (email) people.push(...await findSellifyRecords(state.sellifyPeople, { email: { $eq: email } }));
+      if (email) emails.add(email);
       const displayName = personDisplayName(contact);
       if (normalizeProtectionText(displayName).split(' ').length >= 2) {
-        people.push(...await findSellifyRecords(state.sellifyPeople, { display_name: { $eq: displayName } }));
+        displayNames.add(displayName);
       }
     }
+
+    const peopleLookups = [];
+    if (contactIds.length === 1) {
+      peopleLookups.push(findSellifyRecords(state.sellifyPeople, {
+        contact_id: { $eq: contactIds[0] },
+      }));
+    } else if (contactIds.length > 1) {
+      peopleLookups.push(findSellifyRecords(state.sellifyPeople, {
+        contact_id: { $in: contactIds },
+      }));
+    }
+    if (emails.size === 1) {
+      peopleLookups.push(findSellifyRecords(state.sellifyPeople, {
+        email: { $eq: [...emails][0] },
+      }));
+    } else if (emails.size > 1) {
+      peopleLookups.push(findSellifyRecords(state.sellifyPeople, {
+        email: { $in: [...emails] },
+      }));
+    }
+    if (displayNames.size === 1) {
+      peopleLookups.push(findSellifyRecords(state.sellifyPeople, {
+        display_name: { $eq: [...displayNames][0] },
+      }));
+    } else if (displayNames.size > 1) {
+      peopleLookups.push(findSellifyRecords(state.sellifyPeople, {
+        display_name: { $in: [...displayNames] },
+      }));
+    }
+    if (state.sellifyPeople.findOne) {
+      for (const personId of personIds) {
+        peopleLookups.push(
+          state.sellifyPeople.findOne(`sellify-person-${personId}`).exec()
+            .then((person) => (person ? [docJson(person)] : [])),
+        );
+      }
+    }
+
+    const people = [];
+    for (const batch of await Promise.all(peopleLookups)) {
+      people.push(...batch);
+    }
+    merkeSellifyProjektion(true, lead, activeCompanies[0] || null);
     return { people: uniqueSellifyRecords(people), companies: activeCompanies, contextAvailable: true };
-  } catch {
+  } catch (error) {
+    // Dieser Zweig war ein stummes catch. Die Folge: die Sperrpruefung meldete
+    // "nicht pruefbar", der Kontrollkasten blieb gesperrt, und WARUM war
+    // nirgends zu sehen — am 12.08.2026 stand Roger Wintzen auf "nicht
+    // pruefbar", waehrend dieselbe Abfrage aus der Konsole ihn sofort fand
+    // (note_text leer, also frei). Ein Fehler ohne Spur ist nicht
+    // diagnostizierbar; er sieht aus wie eine Eigenschaft der Daten.
+    console.error('[thesen-outbound] Sperrvermerkspruefung fehlgeschlagen', error);
+    state.lastEligibilityError = String(error?.message || error);
+    merkeSellifyProjektion(false, lead, null);
     return { people: [], companies: [], contextAvailable: false };
   }
 }
@@ -1748,6 +1908,27 @@ function crmSchluessel(text) {
   return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+function sellifyCrmBeleg(fieldKey, value, { contactId = '', personId = '' } = {}) {
+  const kennung = [
+    contactId ? `contact_id ${contactId}` : '',
+    personId ? `person_id ${personId}` : '',
+  ].filter(Boolean).join(' · ');
+  return {
+    field_key: fieldKey,
+    field: fieldKey,
+    value,
+    confidence: 'crm',
+    source_id: SELLIFY_SOURCE_ID,
+    source_url: '',
+    tier: 'I',
+    via: 'sellify-crm',
+    label: SELLIFY_SOURCE_LABEL,
+    note: kennung ? `${kennung} · eigene gepflegte Angabe` : 'eigene gepflegte Angabe',
+    contact_id: contactId || '',
+    person_id: personId || '',
+  };
+}
+
 async function uebernehmeCrmKontaktdaten(lead, context) {
   if (!context?.contextAvailable || !Array.isArray(context.people) || !context.people.length) return false;
   // Bei mehreren CRM-Datensaetzen zum selben Namen gewinnt der VOLLSTAENDIGERE.
@@ -1766,23 +1947,37 @@ async function uebernehmeCrmKontaktdaten(lead, context) {
     if (!bisher || inhalt(person) > inhalt(bisher)) nachName.set(schluessel, person);
   }
   const kontakte = Array.isArray(lead?.contacts) ? lead.contacts : [];
+  const belege = [];
   let geaendert = false;
   const neueKontakte = kontakte.map((kontakt) => {
     const person = nachName.get(crmSchluessel(personDisplayName(kontakt)));
     if (!person) return kontakt;
     const ergaenzt = { ...kontakt };
+    const contactId = person.contact_id || context.companies?.[0]?.contact_id || '';
+    const personId = person.person_id || '';
+    const leer = (...felder) => !felder.some((feld) => String(ergaenzt[feld] || '').trim());
     const uebernehmen = (feld, wert) => {
       const vorhanden = String(ergaenzt[feld] || '').trim();
       const neu = String(wert || '').trim();
-      if (vorhanden || !neu) return;
+      if (vorhanden || !neu) return '';
       ergaenzt[feld] = neu;
       geaendert = true;
+      return neu;
     };
-    uebernehmen('email', person.email);
+    const emailWarLeer = leer('email', 'person_email');
+    const telefonWarLeer = leer('phone', 'person_telefon');
+    const positionWarLeer = leer('position', 'person_position');
+    const email = uebernehmen('email', person.email) || uebernehmen('person_email', person.email);
     uebernehmen('person_email', person.email);
-    uebernehmen('phone', person.phone || person.telephone);
+    const telefon = uebernehmen('phone', person.phone || person.telephone)
+      || uebernehmen('person_telefon', person.phone || person.telephone);
     uebernehmen('person_telefon', person.phone || person.telephone);
-    uebernehmen('position', person.position || person.function);
+    const position = uebernehmen('position', person.position || person.function)
+      || uebernehmen('person_position', person.position || person.function);
+    uebernehmen('person_position', person.position || person.function);
+    if (emailWarLeer && email) belege.push(sellifyCrmBeleg('person_email', email, { contactId, personId }));
+    if (telefonWarLeer && telefon) belege.push(sellifyCrmBeleg('person_telefon', telefon, { contactId, personId }));
+    if (positionWarLeer && position) belege.push(sellifyCrmBeleg('person_position', position, { contactId, personId }));
     if (!ergaenzt.sellify_person_id && person.person_id) {
       ergaenzt.sellify_person_id = person.person_id;
       geaendert = true;
@@ -1791,8 +1986,14 @@ async function uebernehmeCrmKontaktdaten(lead, context) {
   });
   if (!geaendert) return false;
   lead.contacts = neueKontakte;
+  const evidence = belege.length
+    ? deduplicateEvidence([...(lead.evidence || []), ...belege])
+    : lead.evidence;
+  if (belege.length) lead.evidence = evidence;
   try {
-    await patchLead(lead.id, { contacts: neueKontakte });
+    await patchLead(lead.id, belege.length
+      ? { contacts: neueKontakte, evidence }
+      : { contacts: neueKontakte });
   } catch (error) {
     console.warn('[thesen-outbound] CRM-Kontaktdaten konnten nicht gespeichert werden', error);
   }
@@ -1880,8 +2081,20 @@ async function refreshLeadRecipientEligibility(lead, { force = false } = {}) {
 // passiert spaeter beim Oeffnen oder beim Auswaehlen, wo sie allein laeuft und
 // die Frist muehelos haelt.
 async function refreshAllRecipientEligibility() {
+  // Die Pruefung laeuft NICHT ueber alle Leads — das stellte 21 Vorgaenge in die
+  // Schlange und blockierte die App. Sie laeuft fuer Leads mit Auswahl UND fuer
+  // den gerade geoeffneten Lead.
+  //
+  // Der geoeffnete Lead ist der Teil, der am 12.08.2026 gefehlt hat, und sein
+  // Fehlen war eine VERKLEMMUNG, kein Schoenheitsfehler:
+  //   keine Auswahl -> keine Pruefung -> Kontrollkasten bleibt "wird geprueft"
+  //   -> gesperrt -> keine Auswahl moeglich.
+  // Auf CHEMOFAST gemessen: Roger Wintzen dauerhaft "zu pruefen", alle vier
+  // Uebergabe-Schaltflaechen gesperrt, auch die Serien-E-Mail, die vorher lief.
+  // Wer einen Lead ansieht, braucht sein Urteil; wer ihn nicht ansieht, nicht.
   const relevant = state.leads.filter((lead) => (
-    Array.isArray(lead?.selected_contact_ids) && lead.selected_contact_ids.length > 0
+    lead?.id === state.selectedLeadId
+    || (Array.isArray(lead?.selected_contact_ids) && lead.selected_contact_ids.length > 0)
   ));
   for (const lead of relevant) await refreshLeadRecipientEligibility(lead);
   return relevant.length;
@@ -2242,6 +2455,7 @@ function adapterCommandRecordPatch(adapter, command) {
 }
 
 function sourceNeedsBrowserAuthorization(item, adapter) {
+  if (isInternalResearchSource(item)) return false;
   if (item?.requires_credential) return true;
   const status = String(adapter?.status || item?.adapter_status || '').toLowerCase();
   const scrapeStatus = String(adapter?.scrape_status || item?.scrape_status || '').toLowerCase();
@@ -2904,6 +3118,17 @@ function sellifyHandoffPrecondition(lead) {
   if (!lead || lead.validation_status !== 'validated') {
     return 'Bitte den Lead vor der Übergabe validieren.';
   }
+  // Ohne Auswahl gibt es nichts zu pruefen. Die Sperrpruefung laeuft seit
+  // 0.8.4 nur noch fuer Leads MIT ausgewaehlten Personen (sonst stand sie fuer
+  // alle 21 Leads in der Schlange). Die Folge war eine Beschriftung, die auf
+  // ein Ergebnis wartete, das per Bauart nie kam: "werden noch geprueft",
+  // dauerhaft, bei null ausgewaehlten Personen. Am 12.08.2026 auf CHEMOFAST
+  // gemessen — vier Uebergabe-Schaltflaechen dauerhaft gesperrt.
+  // Ein Zustand ohne Ereignis darf keinen Wartetext bekommen, sondern muss
+  // sagen, was der Nutzer zu tun hat.
+  if (!normalizeLeadRecipientShape(lead).selected_contact_ids.length) {
+    return 'Bitte zuerst mindestens eine Person auswählen.';
+  }
   if (!state.recipientEligibilityReady.has(lead.id)) {
     return 'Die Sellify-Sperrvermerke werden noch geprüft.';
   }
@@ -3052,43 +3277,6 @@ async function sendLeadToSellify(id, { includeCampaign = false } = {}) {
   }
 }
 
-function seriesEmailHandoffForLead(lead, decisions = null) {
-  const plan = buildCampaignRecipientList(lead, decisions);
-  const recipients = [...new Set(plan.recipients
-    .map((contact) => String(contact.email || contact.person_email || '').trim().toLowerCase())
-    .filter((address) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)))];
-  const params = new URLSearchParams({
-    action: 'series-email',
-    source_module: 'sellify',
-    recipients: recipients.join(','),
-    subject: String(lead?.campaign || state.selectedCampaign || '').trim(),
-  });
-  return { recipients, hash: `#mail?${params.toString()}`, excluded: plan.excluded };
-}
-
-async function openSeriesEmailFromLead(id) {
-  const lead = state.leads.find((entry) => entry.id === id);
-  if (!lead || lead.validation_status !== 'validated') {
-    showBusinessAlert('Bitte den Lead vor der Serien-E-Mail validieren.');
-    return;
-  }
-  const decisions = await refreshLeadRecipientEligibility(lead, { force: true });
-  const handoff = seriesEmailHandoffForLead(lead, decisions);
-  if (!handoff.recipients.length) {
-    showBusinessAlert(handoff.excluded.length
-      ? 'Die ausgewählten Personen sind gesperrt oder müssen zuerst geprüft werden.'
-      : 'Bitte mindestens eine Person mit gültiger E-Mail-Adresse auswählen.');
-    return;
-  }
-  // Reihenfolge ist entscheidend: openApp setzt den Hash auf die geoeffnete App
-  // (#desktop) und ueberschreibt damit die Empfaengerliste, wenn sie vorher
-  // gesetzt wurde. Am 12.08.2026 gemessen: die Mail-App ging auf, aber mit
-  // hash=#desktop und ohne einen einzigen Empfaenger — Kampagnen 0,
-  // Massen-Ausgang 0. Der Serienbrief uebergab ins Leere.
-  // Erst oeffnen, dann die Empfaenger anhaengen.
-  await state.ctx?.openApp?.('mail');
-  location.hash = handoff.hash;
-}
 
 // Namensvarianten, die ein CRM ueblicherweise fuehrt — als GEZIELTE Abfragen.
 //
@@ -3185,7 +3373,14 @@ async function findSellifyCompanyDuplicate(lead) {
 // externe Pruefung nicht — der Zwei-Quellen-Nachweis bleibt unangetastet —, aber
 // die Recherche weiss ab jetzt, was das Haus bereits kennt.
 async function sellifyVorwissen(lead) {
-  const firma = await findSellifyCompanyDuplicate(lead);
+  let firma = null;
+  try {
+    firma = await findSellifyCompanyDuplicate(lead);
+  } catch (error) {
+    merkeSellifyProjektion(false, lead, null);
+    throw error;
+  }
+  merkeSellifyProjektion(true, lead, firma);
   if (!firma) return null;
   let personen = [];
   try {
@@ -3721,7 +3916,9 @@ function sellifyWritebackContract() {
 function enabledSourcePolicy() {
   return {
     skill: 'thesen-outbound-research', min_independent_sources: 2, verification_scope: 'per_field', validation_only_sources: ['experte.de'],
-    sources: state.sources.filter((item) => item.enabled).map((item) => ({ id: item.id, url: item.url, field_keys: item.field_keys, target_key: item.target_key, credential_secret_name: item.credential_secret_name, secret_value_in_payload: false })),
+    sources: state.sources
+      .filter((item) => item.enabled && !isInternalResearchSource(item))
+      .map((item) => ({ id: item.id, url: item.url, field_keys: item.field_keys, target_key: item.target_key, credential_secret_name: item.credential_secret_name, secret_value_in_payload: false })),
   };
 }
 
@@ -4095,9 +4292,17 @@ function renderReviewFieldRow(field, untouched = false, lead = null) {
       : !field.filled
         ? tr('missing', 'fehlt')
         : `${field.independentCount} ${field.independentCount === 1 ? tr('source', 'Quelle') : tr('sources', 'Quellen')}`;
-  const sourceLinks = realSources.map((source) => source.url
-    ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.label)}</a>`
-    : escapeHtml(source.label));
+  const sourceLinks = realSources.map((source) => {
+    const name = source.url
+      ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener">${escapeHtml(source.label)}</a>`
+      : escapeHtml(source.label);
+    if (source.key === SELLIFY_SOURCE_ID) {
+      const kennung = String(source.note || '').replace(/\s*·\s*eigene gepflegte Angabe$/, '');
+      const sichtbar = kennung ? `${name} · ${escapeHtml(kennung)}` : name;
+      return `${sichtbar} <span class="thesen-approved-chip">${tr('ownCrmValue', 'eigene Angabe')}</span>`;
+    }
+    return name;
+  });
   if (approved) sourceLinks.push(`<span class="thesen-approved-chip">✓ ${tr('approved', 'freigegeben')}</span>`);
   // Frueher hatte ein GEFUELLTES Feld ueberhaupt keinen Bearbeitungsweg — nur
   // "freigeben". Ein falscher Wert liess sich nicht korrigieren. Jetzt ist der
@@ -4362,11 +4567,11 @@ export const __thesenOutboundTestHooks = {
   // and no recipient selection could persist.
   sellifyHandoffPrecondition,
   sendLeadToSellify,
-  seriesEmailHandoffForLead,
   setContactRecipientSelection,
   buildCampaignRecipientList,
   classifySellifyPerson,
   deriveLeadRecipientEligibility,
+  loadSellifyRecipientContext,
   normalizeProtectionText,
   repairLeadRecipientSelections,
   refreshLeadRecipientEligibility,
@@ -4405,7 +4610,12 @@ export const __thesenOutboundTestHooks = {
   researchCommandForLead,
   researchCommandObservationKey,
   sellifyVorwissenAlsText,
-  researchFieldReview,
+  sellifyCrmBeleg,
+  sellifySourceStatus,
+  listedSources,
+  isInternalResearchSource,
+  SELLIFY_SOURCE_ID,
+  SELLIFY_SOURCE_LABEL,
   normalizedResearchCommandStatus,
   uniqueCommands,
   resetLeadForImport,
