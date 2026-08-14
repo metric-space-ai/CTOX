@@ -24,6 +24,7 @@ Zwei Bedingungen, ohne die die Zahl wertlos ist:
 |---|---|---:|
 | unmittelbar vor dem Austausch | false / false | **174** |
 | unmittelbar nach dem Austausch | false / false | **0** |
+| Kontrolle, 15 min später | false / false | **0** |
 
 Zum Vergleich die älteren Basiswerte derselben Messung: 92,0/min
 (Parallelsitzung) und 93,0/min (eigene Messung) — die Schleife hatte bis zum
@@ -54,5 +55,8 @@ offen war.
 
 - Die 2,29-GB-Store-Datei schrumpft dadurch **nicht** von selbst; die
   Revisionsgeschichte bleibt. Kompaktierung ist ein eigener Schritt.
-- Kontrollmessung ~15 min nach dem Neustart läuft, damit ein einmaliger
-  Nachlauf nicht als Erfolg durchgeht.
+- Kontrollmessung 15 min nach dem Neustart: **0/min**, und der Zählerstand
+  war unverändert **3.291.459** — derselbe Wert wie unmittelbar nach dem
+  Austausch. In über 15 Minuten also **kein einziger** Schreibvorgang auf
+  diesen Dokumenten. Damit ist ausgeschlossen, dass die Null nur eine
+  Ruhephase direkt nach dem Neustart war.
