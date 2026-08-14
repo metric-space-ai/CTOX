@@ -60,3 +60,58 @@ offen war.
   Austausch. In über 15 Minuten also **kein einziger** Schreibvorgang auf
   diesen Dokumenten. Damit ist ausgeschlossen, dass die Null nur eine
   Ruhephase direkt nach dem Neustart war.
+
+---
+
+# NACHBEFUND (14.08., nach dem Austausch): Symptom behoben, Ursache nicht
+
+Die Schreibvorgänge sind weg (0/min, zweifach + unabhängig bestätigt). Die
+**Schleife selbst läuft weiter** und verbrennt CPU.
+
+## Messung
+
+| Größe | Wert |
+|---|---|
+| CPU des neuen Daemons, Dauerzustand | **58 % eines Kerns** (35 CPU-s je 60 s Wanduhr) |
+| CPU des alten Daemons, Mittel über ~4 Tage | ~11 % eines Kerns (11 h 1 min gesamt) |
+| Sweep-Takt `business_commands` | **29 Durchgänge/min**, `idle_ticks` = **0** |
+| Zeilen je Durchgang | **6**, Dauer ~1,1 s |
+
+## Warum meine Sperre nicht greift
+
+FIX-1 überspringt Commands mit `resolved_at_ms IS NULL AND exhausted = 1`.
+In der Kanal-DB der Kundeninstanz: **12 Zeilen, davon 0 mit `exhausted = 1`**,
+Versuchszähler stehen bei 1–2 und erreichen das Budget 5 nie. Die Bedingung
+tritt also nie ein — die Sperre feuert nicht ein einziges Mal.
+
+## Die echte Kandidatenmenge
+
+```sql
+command_type IN (die sechs Retry-Typen)
+AND (status='accepted' OR (status='failed' AND terminal_status='none'))
+```
+liefert auf der Instanz **exakt 6 Dokumente**:
+
+| command_type | status | Anzahl |
+|---|---|---:|
+| `web_stack.person_research` | failed | 4 |
+| `outbound.research_source.generate_adapter` | failed | 1 |
+| `outbound.research_source.test` | failed | 1 |
+
+Genau diese sechs werden **jeden Durchgang neu ausgewählt**, scheitern, und
+bleiben im Fenster, weil ihr `terminal_status` `none` bleibt. Kein Zustand
+ändert sich, also endet nichts.
+
+## Einordnung
+
+Mein Envelope-No-op-Wächter hat die **Schreibverstärkung** beseitigt — das war
+real und ist gemessen. Meine Sweep-Sperre zielte auf „erschöpfte
+Idempotenz-Konflikte"; dieser Fall existiert auf der Instanz **nicht**. Der
+Live-Fall ist ein anderer: Dokumente, die dauerhaft im Retry-Fenster hängen,
+weil sie nie einen terminalen Zustand erreichen.
+
+**Nächster Fix (nicht: noch ein Deckel auf das Symptom):** Ein Dokument muss
+das Kandidatenfenster verlassen können — entweder über einen echten
+Versuchszähler je Dokument mit Backoff und Aufgabe, oder indem ein endgültig
+gescheiterter Retry-Versuch `terminal_status` setzt. Bis dahin bleiben ~58 %
+eines Kerns Dauerlast auf der Kundenmaschine.
