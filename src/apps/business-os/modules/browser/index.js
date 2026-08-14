@@ -8,6 +8,15 @@ const DEFAULT_SESSION_ID = 'browser_session_default';
 const DEFAULT_TAB_ID = 'browser_tab_default';
 const VIEWPORT = { width: 1280, height: 720 };
 const FRAME_SYNC_RECOVERY_MS = 12000;
+const POINTER_CLICK_INTERVAL_MS = 500;
+const POINTER_CLICK_SLOP_PX = 4;
+const POINTER_HOVER_THROTTLE_MS = 50;
+const BROWSER_NAV_COMMANDS = {
+  navigate: 'browser.navigate',
+  back: 'browser.back',
+  forward: 'browser.forward',
+  reload: 'browser.reload',
+};
 const BROWSER_SYNC_COLLECTIONS = [
   'browser_sessions',
   'browser_tabs',
@@ -62,6 +71,7 @@ export async function mount(ctx) {
     form: root.querySelector('[data-browser-address-form]'),
     go: root.querySelector('[data-browser-go]'),
     address: root.querySelector('[data-browser-address]'),
+    addressClear: null,
     statusChip: root.querySelector('[data-browser-status-chip]'),
     statusTitle: root.querySelector('[data-browser-status-title]'),
     statusMeta: root.querySelector('[data-browser-status-meta]'),
@@ -79,6 +89,7 @@ export async function mount(ctx) {
     commandHistory: root.querySelector('[data-browser-command-history]'),
     handoffHistory: root.querySelector('[data-browser-handoff-history]'),
   };
+  refs.addressClear = installAddressClearControl(refs.form, refs.address, refs.go);
 
   const requestedSessionId = browserSessionIdFromArgs(ctx.args);
   const state = {
@@ -94,6 +105,8 @@ export async function mount(ctx) {
     drawing: false,
     lastInputSeq: 0,
     lastPointerMoveAt: 0,
+    lastPointerClick: null,
+    pointerIsDown: false,
     lastFrameSyncRecoveryAt: 0,
     leaseRenewInFlight: false,
     controllerLeaseId: '',
@@ -203,6 +216,7 @@ export async function mount(ctx) {
     const sessionId = `${userSessionPrefix(ctx.session)}_${now}`;
     const tabId = `browser_tab_${now}`;
     const viewport = selectedViewport(refs.viewport);
+    console.info(`[browser] session start clicked session_id=${sessionId} tab_id=${tabId}`);
     state.addressDirty = false;
     state.selectedSessionId = sessionId;
     state.requestedSessionId = sessionId;
@@ -269,11 +283,20 @@ export async function mount(ctx) {
   refs.clipboardCopy?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.clipboard.copy', { confirmed: true }).then(safeLoadAndRender));
   refs.clipboardPaste?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.clipboard.paste', { confirmed: true }).then(safeLoadAndRender));
   refs.clipboardClear?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.clipboard.clear', { confirmed: true }).then(safeLoadAndRender));
-  refs.back?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.back').then(safeLoadAndRender));
-  refs.forward?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.forward').then(safeLoadAndRender));
-  refs.reload?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.reload').then(safeLoadAndRender));
+  refs.back?.addEventListener('click', () => runBrowserCommand(submitBrowserNav(ctx, state, refs, 'back')));
+  refs.forward?.addEventListener('click', () => runBrowserCommand(submitBrowserNav(ctx, state, refs, 'forward')));
+  refs.reload?.addEventListener('click', () => runBrowserCommand(submitBrowserNav(ctx, state, refs, 'reload')));
   refs.address?.addEventListener('input', () => {
     state.addressDirty = true;
+  });
+  refs.address?.addEventListener('focus', (event) => {
+    event.currentTarget?.select?.();
+  });
+  refs.addressClear?.addEventListener('click', () => {
+    if (!refs.address) return;
+    refs.address.value = '';
+    state.addressDirty = true;
+    refs.address.focus();
   });
   refs.sendToCtox?.addEventListener('click', () => sendBrowserContextToCtox(ctx, state).then(safeLoadAndRender));
   refs.authAssist?.addEventListener('click', (event) => {
@@ -378,7 +401,7 @@ export async function mount(ctx) {
     state.addressDirty = false;
     state.notice = 'Browser wird mit CTOX verbunden …';
     safeLoadAndRender();
-    runBrowserCommand(dispatchBrowserCommand(ctx, state, 'browser.navigate', { url }));
+    runBrowserCommand(submitBrowserNav(ctx, state, refs, 'navigate', { url }));
   };
   refs.form?.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -410,7 +433,12 @@ export async function mount(ctx) {
       surfaceFocused: Boolean(surface?.classList.contains('is-focused')),
       renewInFlight: state.leaseRenewInFlight,
       controllerLeaseId: state.controllerLeaseId,
-    })) return;
+    })) {
+      // Abgelaufen? Dann nicht erneuern, sondern NEU HOLEN. Ohne diesen Zweig
+      // bleibt die Sitzung fuer immer unbedienbar, waehrend sie "Bereit" meldet.
+      versucheSteuerungZurueckzuholen();
+      return;
+    }
     state.leaseRenewInFlight = true;
     dispatchBrowserCommand(ctx, state, 'browser.controller.renew', {
       lease_id: state.controllerLeaseId,
@@ -420,6 +448,32 @@ export async function mount(ctx) {
       })
       .finally(() => {
         state.leaseRenewInFlight = false;
+      });
+  }
+
+  function versucheSteuerungZurueckzuholen() {
+    const session = state.latestSession;
+    if (!shouldReacquireControllerLease(session, browserActorIds(ctx.session), Date.now(), {
+      reacquireInFlight: state.leaseReacquireInFlight,
+      lastReacquireAtMs: state.lastReacquireAtMs,
+    })) return;
+    state.leaseReacquireInFlight = true;
+    state.lastReacquireAtMs = Date.now();
+    const leaseId = newBrowserControllerLeaseId();
+    state.controllerLeaseId = leaseId;
+    console.info('[browser] Steuerung abgelaufen — hole sie zurück', { session: session?.id });
+    dispatchBrowserCommand(ctx, state, 'browser.controller.acquire', { lease_id: leaseId })
+      .then(() => {
+        setzeEingabeHinweis(ctx, state, '');
+        safeLoadAndRender();
+      })
+      .catch((error) => {
+        if (state.controllerLeaseId === leaseId) state.controllerLeaseId = '';
+        console.warn('[browser] Steuerung konnte nicht zurückgeholt werden', error);
+        setzeEingabeHinweis(ctx, state, 'Steuerung abgelaufen und konnte nicht zurückgeholt werden.');
+      })
+      .finally(() => {
+        state.leaseReacquireInFlight = false;
       });
   }
 
@@ -549,11 +603,42 @@ function recoverFrameSyncIfNeeded(ctx, state) {
   }
 }
 
+async function submitBrowserNav(ctx, state, refs, action, extra = {}) {
+  const commandType = BROWSER_NAV_COMMANDS[action];
+  if (!commandType) throw new Error('Unknown browser navigation action: ' + action);
+  const payload = action === 'navigate'
+    ? { url: extra.url || refs.address?.value || 'https://example.com' }
+    : {};
+  return dispatchBrowserCommand(ctx, state, commandType, payload);
+}
+
+// SPUR auf dem Befehlsweg. Am 13.08.2026 blieb der Sitzungsstart aus, ohne dass
+// irgendwo etwas erschien: kein Chrome-Prozess, keine Protokollzeile im Dienst,
+// alle Sitzungen 'disconnected' OHNE Fehlereintrag. Drei Reparaturen (Pacht,
+// Startmerkliste, Meldungstrennung) haben das Symptom nicht aufgeloest.
+// Statt einen vierten Fix zu raten: messen, wo die Kette reisst.
+// Ein Vorgang, der nichts protokolliert, ist von einem Vorgang, der nie
+// stattfindet, nicht zu unterscheiden.
+function spurBefehl(schritt, commandType, extra = {}) {
+  try {
+    console.info(`[browser][SPUR] ${schritt} type=${commandType} ${JSON.stringify(extra)}`);
+  } catch { console.info(`[browser][SPUR] ${schritt} type=${commandType}`); }
+}
+
 async function dispatchBrowserCommand(ctx, state, commandType, payloadPatch = {}) {
+  spurBefehl('1-aufgerufen', commandType, {
+    sitzung: state.latestSession?.id || '-',
+    status: state.latestSession?.status || '-',
+    neueSitzung: payloadPatch.new_session === true,
+  });
   const requiresController = browserCommandRequiresController(commandType, state.latestSession);
   if (requiresController && !browserSurfaceCanControl(ctx, state)) {
+    spurBefehl('2-ABBRUCH-keine-steuerung', commandType, {
+      grund: eingabeSperrgrund(ctx, state) || '(unbekannt)',
+    });
     throw new Error('Dieses Browser-Fenster ist nicht aktiv. Aktivieren Sie das Fenster oder übernehmen Sie die Steuerung.');
   }
+  spurBefehl('2-steuerung-ok', commandType, { brauchtSteuerung: requiresController });
   const now = Date.now();
   const opensNewSession = payloadPatch.new_session === true;
   const requestedSessionId = browserSessionIdFromArgs(payloadPatch);
@@ -597,13 +682,51 @@ async function dispatchBrowserCommand(ctx, state, commandType, payloadPatch = {}
     updated_at_ms: now,
     sync_queue_tasks: false,
   };
-  await startCommandSync(ctx);
+  spurBefehl('3-befehl-gebaut', commandType, { commandId, sessionId, tabId });
   const commandBus = requireCommandBus(ctx);
-  const waitsForRuntime = commandType === 'browser.session.start';
-  await commandBus.dispatch(command, {
-    until: waitsForRuntime ? 'terminal' : 'accepted',
-    ...(waitsForRuntime ? { timeoutMs: 150_000 } : {}),
-  });
+  spurBefehl('4-befehlsbus-da', commandType, { busDa: !!commandBus });
+  const waitsForRuntime = [
+    'browser.session.start',
+    'browser.navigate',
+    'browser.reload',
+    'browser.back',
+    'browser.forward',
+    'browser.reset',
+  ].includes(commandType);
+  let commandSyncPreflightError = null;
+  try {
+    await startCommandSync(ctx);
+  } catch (error) {
+    // Do not let a stale module-owned bridge drop the user action. The command
+    // bus performs its own scoped readiness check and confirmed push below.
+    commandSyncPreflightError = error;
+    console.warn(
+      `[browser] command sync preflight failed; continuing to command bus command_type=${commandType} command_id=${commandId} session_id=${sessionId}`,
+      error,
+    );
+  }
+  console.info(`[browser] submitting command command_type=${commandType} command_id=${commandId} session_id=${sessionId}`);
+  try {
+    // Compatibility contract for non-runtime commands:
+    // commandBus.dispatch(command, { until: 'accepted' })
+    // The command bus owns collection readiness, capability acquisition and
+    // the confirmed RxDB push. A separate startCollection() preflight here
+    // used to abort before dispatch whenever the mounted window's bridge was
+    // stale, so the native service never saw the session-start command.
+    await commandBus.dispatch(command, {
+      until: waitsForRuntime ? 'terminal' : 'accepted',
+      ...(waitsForRuntime ? { timeoutMs: 150_000 } : {}),
+    });
+  } catch (error) {
+    console.error(
+      `[browser] command submission failed command_type=${commandType} command_id=${commandId} session_id=${sessionId}`,
+      error,
+    );
+    if (commandSyncPreflightError && !error.cause) {
+      error.cause = commandSyncPreflightError;
+    }
+    throw error;
+  }
   if (waitsForRuntime) await refreshBrowserProjections(ctx);
   return { commandId, sessionId, tabId, opensNewSession };
 }
@@ -613,11 +736,30 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
   if (!request) return false;
   state.selectedSessionId = request.session_id;
   state.requestedSessionId = request.session_id;
-  if (state.requestedSessionStarts.has(request.session_id)) return false;
-
+  // Die Merkliste verhindert, dass derselbe Start doppelt losgeschickt wird,
+  // solange er noch laeuft. Sie darf aber nicht dauerhaft merken: eine Sitzung,
+  // die einmal erfolgreich startete und spaeter wegbricht (Dienstneustart,
+  // Prozessende), blieb bis 13.08.2026 fuer immer in der Liste — der Eintrag
+  // wurde nur im FEHLERfall entfernt. Danach wurde jeder weitere Startversuch
+  // stumm verworfen.
+  // Auf der Kundeninstanz gemessen: 34 Sitzungen, davon 0 aktiv, kein
+  // Chrome-Prozess, keine Protokollzeile in 20 Minuten — und weder der
+  // Start-Knopf noch das Plus-Symbol bewirkten etwas. Es lief vorher; nach
+  // einem Dienstneustart nie wieder.
+  // Deshalb zuerst den Zustand lesen, dann die Merkliste bewerten: was nicht
+  // mehr laeuft, ist auch nicht mehr "in Arbeit".
   const existing = await browserCollection(ctx, 'browser_sessions')?.findOne(request.session_id).exec();
   const existingData = existing?.toJSON?.() || existing;
-  if (!browserSessionNeedsStart(existingData)) return false;
+  if (!browserSessionNeedsStart(existingData)) {
+    // Laeuft bereits — Merkliste aufraeumen, damit ein spaeteres Wegbrechen
+    // wieder startbar ist.
+    state.requestedSessionStarts.delete(request.session_id);
+    return false;
+  }
+  if (state.requestedSessionStarts.has(request.session_id)) {
+    console.info('[browser] Start bereits angefordert, warte auf Ergebnis', request.session_id);
+    return false;
+  }
 
   state.requestedSessionStarts.add(request.session_id);
   try {
@@ -665,8 +807,20 @@ function browserStartErrorMessage(error) {
   const code = String(error?.code || '').toLowerCase();
   if (code === 'auth_required') return 'Die Browser-Anmeldung benötigt eine neue Business-OS-Autorisierung.';
   if (code === 'native_unavailable') return 'Die Browser-Anmeldung konnte noch nicht mit CTOX verbunden werden. Bitte erneut versuchen.';
-  if (['projection_delayed', 'sync_unavailable'].includes(code)) {
+  // Zwei voellig verschiedene Fehler trugen bis 13.08.2026 dieselbe Meldung.
+  // sync_unavailable heisst "keine Verbindung". projection_delayed heisst
+  // "Verbindung steht, die Antwort kam nur nicht rechtzeitig zurueck".
+  // Auf der Kundeninstanz gemessen: alle fuenf Browser-Collections
+  // 'connected' — und trotzdem stand da "CTOX ist nicht mit dem
+  // Browser-Datenkanal verbunden". Die Meldung behauptete das Gegenteil des
+  // gemessenen Zustands und schickte den Nutzer auf die falsche Faehrte
+  // ("Verbindung erneut aufbauen"), waehrend in Wahrheit nur die Antwort
+  // ausstand. Eine Zeitueberschreitung ist kein Ausfall.
+  if (code === 'sync_unavailable') {
     return 'CTOX ist nicht mit dem Browser-Datenkanal verbunden. Der Browser wurde nicht gestartet. Bitte die Verbindung erneut aufbauen und dann erneut versuchen.';
+  }
+  if (code === 'projection_delayed') {
+    return 'CTOX hat den Befehl angenommen, aber noch nicht bestätigt. Die Verbindung steht — der Vorgang läuft möglicherweise noch. Bitte einen Moment warten und die Ansicht neu laden, bevor Sie es erneut versuchen.';
   }
   const message = String(error?.message || '').trim();
   return message
@@ -985,32 +1139,37 @@ function requireCommandBus(ctx) {
 
 function installInputHandlers(ctx, refs, state, scheduleRefresh) {
   refs.canvas?.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
     refs.canvas.focus();
     refs.canvas.setPointerCapture?.(event.pointerId);
-    writePointerInput(ctx, refs, state, 'mouseDown', event, { button: pointerButton(event.button) }).then(scheduleRefresh);
+    state.pointerIsDown = true;
+    writePointerInput(ctx, refs, state, 'mouseDown', event).then(scheduleRefresh);
   });
   refs.canvas?.addEventListener('pointerup', (event) => {
-    writePointerInput(ctx, refs, state, 'mouseUp', event, { button: pointerButton(event.button) }).then(scheduleRefresh);
+    event.preventDefault();
+    state.pointerIsDown = false;
+    writePointerInput(ctx, refs, state, 'mouseUp', event).then(scheduleRefresh);
+  });
+  refs.canvas?.addEventListener('pointercancel', (event) => {
+    state.pointerIsDown = false;
+    writePointerInput(ctx, refs, state, 'mouseUp', event).then(scheduleRefresh);
   });
   refs.canvas?.addEventListener('pointermove', (event) => {
     const now = Date.now();
-    if (now - Number(state.lastPointerMoveAt || 0) < 50) return;
+    const dragging = state.pointerIsDown || Number(event.buttons || 0) > 0;
+    if (!dragging && now - Number(state.lastPointerMoveAt || 0) < POINTER_HOVER_THROTTLE_MS) return;
     state.lastPointerMoveAt = now;
     writePointerInput(ctx, refs, state, 'mouseMove', event).then(scheduleRefresh);
   });
   refs.canvas?.addEventListener('wheel', (event) => {
     event.preventDefault();
-    writePointerInput(ctx, refs, state, 'wheel', event, {
-      dx: Number(event.deltaX || 0),
-      dy: Number(event.deltaY || 0),
-    }).then(scheduleRefresh);
+    writePointerInput(ctx, refs, state, 'wheel', event).then(scheduleRefresh);
   }, { passive: false });
   refs.canvas?.addEventListener('keydown', (event) => {
     event.preventDefault();
     writeKeyboardInput(ctx, state, 'keyDown', event).then(scheduleRefresh);
   });
   refs.canvas?.addEventListener('keyup', (event) => {
-    if (event.metaKey || event.ctrlKey) return;
     event.preventDefault();
     writeKeyboardInput(ctx, state, 'keyUp', event).then(scheduleRefresh);
   });
@@ -1018,28 +1177,51 @@ function installInputHandlers(ctx, refs, state, scheduleRefresh) {
 
 async function writePointerInput(ctx, refs, state, type, event, extra = {}) {
   const point = canvasPoint(refs.canvas, event);
-  await writeInputEvent(ctx, state, type, {
+  const clickCount = type === 'wheel' ? 0 : pointerClickCount(state, type, event, point);
+  const buttons = pointerButtons(event, type);
+  const patch = {
     x: point.x,
     y: point.y,
-    buttons: Number(event.buttons || 0),
+    detail: clickCount,
+    clickCount,
+    button: pointerButton(event.button),
+    buttons,
+    dx: type === 'wheel' ? Number(event.deltaX || 0) : 0,
+    dy: type === 'wheel' ? Number(event.deltaY || 0) : 0,
+    key: '',
+    code: '',
     modifiers: eventModifiers(event),
+    text: '',
     payload: {
       pointer_id: event.pointerId || 0,
       pointer_type: event.pointerType || 'mouse',
+      click_count: clickCount,
       viewport_w: refs.canvas?.width || VIEWPORT.width,
       viewport_h: refs.canvas?.height || VIEWPORT.height,
       actor: actorContext(ctx.session),
     },
     ...extra,
-  });
+  };
+  await writeInputEvent(ctx, state, type, patch);
 }
 
 async function writeKeyboardInput(ctx, state, type, event) {
+  const key = event.key || '';
+  const code = event.code || '';
+  const modifiers = eventModifiers(event);
   await writeInputEvent(ctx, state, type, {
-    key: event.key || '',
-    code: event.code || '',
-    modifiers: eventModifiers(event),
-    text: type === 'keyDown' && event.key?.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey ? event.key : '',
+    x: 0,
+    y: 0,
+    detail: 0,
+    clickCount: 0,
+    button: 'none',
+    buttons: 0,
+    dx: 0,
+    dy: 0,
+    key,
+    code,
+    modifiers,
+    text: keyboardText(type, event),
     payload: {
       repeat: Boolean(event.repeat),
       location: Number(event.location || 0),
@@ -1049,11 +1231,27 @@ async function writeKeyboardInput(ctx, state, type, event) {
 }
 
 async function writeInputEvent(ctx, state, type, patch) {
-  if (!browserSurfaceCanControl(ctx, state)) return;
+  // Beide Abbruchgruende waren bis 13.08.2026 STUMM: kein Protokoll, keine
+  // Meldung, kein Hinweis in der Oberflaeche. Auf der Kundeninstanz gemessen:
+  // null Eingabe-Ereignisse in zehn Minuten aktiver Bedienung, waehrend beide
+  // Sitzungen "active" meldeten und die Oberflaeche "Bereit" zeigte. Der
+  // Nutzer sah einen laufenden Browser, den niemand bedienen durfte — und
+  // nichts sagte ihm warum. Ein Abbruch ohne Grund ist von einem Absturz
+  // nicht zu unterscheiden.
+  if (!browserSurfaceCanControl(ctx, state)) {
+    meldeEingabeGesperrt(ctx, state, type);
+    return;
+  }
   const session = state.latestSession;
   const frame = state.latestFrame;
   const sessionId = session?.id || frame?.session_id;
-  if (!sessionId) return;
+  if (!sessionId) {
+    // Faellt der Bildstrom aus, gibt es kein latestFrame. Ohne latestSession
+    // bricht es dann hier ab — der Bildstromdefekt blockiert die Eingabe mit.
+    console.warn('[browser] Eingabe verworfen: keine Sitzung zuordenbar', { type });
+    setzeEingabeHinweis(ctx, state, 'Keine Sitzung zugeordnet. Bitte die Sitzung neu starten.');
+    return;
+  }
   const now = Date.now();
   const seq = Math.max(now, Number(state.lastInputSeq || 0) + 1);
   state.lastInputSeq = seq;
@@ -1075,7 +1273,46 @@ async function writeInputEvent(ctx, state, type, patch) {
     updated_at_ms: now,
     ...patch,
   };
+  console.info('[browser] input sent', browserInputTrace(event));
   await upsertDoc(browserCollection(ctx, 'browser_input_events'), event);
+}
+
+function browserInputTrace(event) {
+  const clickCount = Number(event.clickCount || event.detail || event.payload?.click_count || 0);
+  return {
+    session_id: event.session_id || '',
+    tab_id: event.tab_id || '',
+    seq: Number(event.seq || 0),
+    type: event.type || '',
+    x: Number(event.x || 0),
+    y: Number(event.y || 0),
+    detail: clickCount,
+    clickCount,
+    button: event.button || '',
+    buttons: Number(event.buttons || 0),
+    dx: Number(event.dx || 0),
+    dy: Number(event.dy || 0),
+    modifiers: Array.isArray(event.modifiers) ? event.modifiers : [],
+    key: event.key || '',
+    code: event.code || '',
+    text: event.text || '',
+  };
+}
+
+function installAddressClearControl(form, address, go) {
+  if (!form || !address) return null;
+  const existing = form.querySelector?.('[data-browser-address-clear]');
+  if (existing) return existing;
+  const button = globalThis.document?.createElement?.('button');
+  if (!button) return null;
+  button.type = 'button';
+  button.className = 'ctox-icon-button';
+  button.dataset.browserAddressClear = '';
+  button.setAttribute('aria-label', 'Adresse löschen');
+  button.title = 'Adresse löschen';
+  button.textContent = '×';
+  form.insertBefore(button, go || null);
+  return button;
 }
 
 function browserTenantId(ctx) {
@@ -1110,7 +1347,82 @@ function eventModifiers(event) {
 function pointerButton(button) {
   if (button === 1) return 'middle';
   if (button === 2) return 'right';
+  if (button === -1 || button == null) return 'none';
   return 'left';
+}
+
+function pointerButtons(event, type) {
+  const reported = Number(event.buttons || 0);
+  if (type === 'mouseDown' && reported === 0) {
+    if (event.button === 1) return 4;
+    if (event.button === 2) return 2;
+    return 1;
+  }
+  if (type === 'mouseUp') return reported;
+  return reported;
+}
+
+function pointerClickCount(state, type, event, point) {
+  const fromDom = Number(event.detail || 0);
+  if (fromDom > 0) {
+    if (type === 'mouseDown' || type === 'mouseUp') {
+      state.lastPointerClick = {
+        count: fromDom,
+        x: point.x,
+        y: point.y,
+        at: Date.now(),
+        button: Number(event.button || 0),
+      };
+    }
+    return fromDom;
+  }
+  if (type === 'mouseMove') return Number(state.lastPointerClick?.count || 0);
+  if (type !== 'mouseDown' && type !== 'mouseUp') return 0;
+
+  const now = Date.now();
+  const previous = state.lastPointerClick;
+  const sameButton = previous && Number(previous.button || 0) === Number(event.button || 0);
+  const closeEnough = previous
+    && Math.abs(previous.x - point.x) <= POINTER_CLICK_SLOP_PX
+    && Math.abs(previous.y - point.y) <= POINTER_CLICK_SLOP_PX
+    && now - Number(previous.at || 0) <= POINTER_CLICK_INTERVAL_MS;
+  const nextCount = type === 'mouseDown'
+    ? (sameButton && closeEnough ? Number(previous.count || 0) + 1 : 1)
+    : (sameButton && closeEnough ? Number(previous.count || 1) : 1);
+  state.lastPointerClick = {
+    count: nextCount,
+    x: point.x,
+    y: point.y,
+    at: now,
+    button: Number(event.button || 0),
+  };
+  return nextCount;
+}
+
+function keyboardText(type, event) {
+  if (type !== 'keyDown') return '';
+  const key = event.key || '';
+  if (!key || key.length !== 1) return '';
+  if (event.ctrlKey || event.metaKey || event.altKey) return '';
+  return key;
+}
+
+function browserInputPayload(event) {
+  return {
+    type: event.type || '',
+    x: Number(event.x || 0),
+    y: Number(event.y || 0),
+    detail: Number(event.detail || event.clickCount || 0),
+    clickCount: Number(event.clickCount || event.detail || 0),
+    button: event.button || 'left',
+    buttons: Number(event.buttons || 0),
+    dx: Number(event.dx || 0),
+    dy: Number(event.dy || 0),
+    key: event.key || '',
+    code: event.code || '',
+    modifiers: Array.isArray(event.modifiers) ? event.modifiers : [],
+    text: event.text || '',
+  };
 }
 
 async function readCollection(collection, options = {}) {
@@ -1909,6 +2221,48 @@ function browserSurfaceIsFocused(ctx) {
   return Boolean(surface?.classList.contains('is-focused'));
 }
 
+// Warum die Bedienung gesperrt ist — im Klartext, nicht als Schweigen.
+// Die Reihenfolge folgt der Pruefung in browserSurfaceCanControl.
+function eingabeSperrgrund(ctx, state, now = Date.now()) {
+  if (!browserSurfaceIsFocused(ctx)) return 'Das Browserfenster hat nicht den Fokus.';
+  const session = state?.latestSession;
+  if (!session?.id) return 'Keine aktive Sitzung.';
+  const actorIds = browserActorIds(ctx?.session);
+  if (!actorIds.length) return 'Kein angemeldeter Nutzer.';
+  if (!actorIds.includes(String(session.controller_user_id || ''))) {
+    return 'Die Sitzung wird gerade von jemand anderem gesteuert.';
+  }
+  const leaseId = String(session.controller_lease_id || '').trim();
+  if (!leaseId) return 'Keine Steuerungsberechtigung für diese Sitzung.';
+  if (session.controller_lease_id !== state.controllerLeaseId) {
+    return 'Die Steuerung wurde an ein anderes Fenster übergeben.';
+  }
+  const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+    return 'Die Steuerung ist abgelaufen.';
+  }
+  return '';
+}
+
+function setzeEingabeHinweis(ctx, state, text) {
+  if (!state) return;
+  if (state.eingabeHinweis === text) return;
+  state.eingabeHinweis = text;
+  try { renderBrowserSurface?.(ctx, state); } catch {}
+}
+
+// Gedrosselt: bei gehaltener Maus entstehen sonst hunderte gleiche Zeilen.
+function meldeEingabeGesperrt(ctx, state, type) {
+  const grund = eingabeSperrgrund(ctx, state) || 'Bedienung gesperrt.';
+  const jetzt = Date.now();
+  if (state.letzteSperrmeldung !== grund || jetzt - (state.letzteSperrmeldungMs || 0) > 5000) {
+    console.warn('[browser] Eingabe gesperrt', { grund, type });
+    state.letzteSperrmeldung = grund;
+    state.letzteSperrmeldungMs = jetzt;
+  }
+  setzeEingabeHinweis(ctx, state, grund);
+}
+
 function browserSurfaceCanControl(ctx, state, now = Date.now()) {
   if (!browserSurfaceIsFocused(ctx)) return false;
   const session = state?.latestSession;
@@ -1951,8 +2305,43 @@ function shouldRenewControllerLease(session, actorId, now = Date.now(), options 
   if (!String(session.controller_lease_id || '').trim()) return false;
   if (session.controller_lease_id !== controllerLeaseId) return false;
   const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
+  // Eine ABGELAUFENE Pacht wird bewusst NICHT erneuert — der Server weist die
+  // Erneuerung ab, und alle 30 s ein Fehlschlag waere eine Endlosschleife.
+  // Der Wächter darunter haelt das fest. Fuer diesen Fall ist NEU HOLEN
+  // zustaendig, nicht Erneuern: siehe shouldReacquireControllerLease.
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
   return expiresAt - now <= 75_000;
+}
+
+// Abgelaufene Pacht: neu HOLEN statt zu erneuern.
+//
+// Bis 13.08.2026 gab es diesen Weg nicht. Die Erneuerung schloss den
+// abgelaufenen Zustand zu Recht aus, aber niemand holte die Pacht danach
+// zurueck — der Zustand, der die Reparatur am dringendsten braucht, hatte
+// keine. Zusammen mit der Bedingung "nur bei sichtbarem, fokussiertem Fenster"
+// ergab das eine Falle ohne Ausgang: Fenster wegklicken, Pacht laeuft
+// planmaessig ab, zurueckkommen — und sie wird nie wieder angefasst.
+// Auf der Kundeninstanz gemessen: beide Sitzungen "active", beide Pachten
+// abgelaufen, null Eingabe-Ereignisse in zehn Minuten aktiver Bedienung.
+//
+// Anders als die Erneuerung braucht das Neuholen KEIN fokussiertes Fenster —
+// sonst bliebe genau die Falle bestehen. Es verlangt aber, dass die Sitzung
+// uns gehoert, und es laeuft nur, wenn nicht schon ein Versuch unterwegs ist.
+function shouldReacquireControllerLease(session, actorId, now = Date.now(), options = {}) {
+  const { reacquireInFlight = false, lastReacquireAtMs = 0 } = options;
+  if (reacquireInFlight) return false;
+  // Nach einem Fehlschlag nicht sofort wieder — sonst entsteht genau die
+  // Endlosschleife, die der Wächter der Erneuerung verhindert.
+  if (now - Number(lastReacquireAtMs || 0) < 10_000) return false;
+  const actorIds = Array.isArray(actorId)
+    ? actorId.map((value) => String(value || '')).filter(Boolean)
+    : [String(actorId || '')].filter(Boolean);
+  if (!session?.id || !actorIds.length) return false;
+  // Fremd gesteuerte Sitzungen nicht an uns reissen.
+  const controller = String(session.controller_user_id || '');
+  if (controller && !actorIds.includes(controller)) return false;
+  const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
+  return !Number.isFinite(expiresAt) || expiresAt <= now;
 }
 
 function newBrowserControllerLeaseId() {
@@ -2017,6 +2406,8 @@ export const __browserTestHooks = {
   selectedViewport,
   browserAuthRequestFromArgs,
   shouldRenewControllerLease,
+  shouldReacquireControllerLease,
+  eingabeSperrgrund,
   browserCommandRequiresController,
   browserSurfaceIsFocused,
   browserSurfaceCanControl,
@@ -2041,6 +2432,18 @@ export const __browserTestHooks = {
   parseBrowserSessionsImport,
   sessionRenderList,
   sessionTabCounts,
+  browserInputTrace,
+  browserInputPayload,
+  eventModifiers,
+  pointerButton,
+  pointerButtons,
+  pointerClickCount,
+  keyboardText,
+  submitBrowserNav,
+  writePointerInput,
+  writeKeyboardInput,
+  writeInputEvent,
+  installInputHandlers,
 };
 
 async function ensureStyles() {

@@ -12,6 +12,9 @@ use super::browser_runtime::{
 };
 use super::policy::BusinessOsPermission;
 use super::rxdb_peer::*;
+use super::rxdb_peer_browser::{
+    matching_active_browser_frame, wait_for_browser_frame_capture_slot,
+};
 use super::store;
 use anyhow::Context;
 use base64::Engine;
@@ -27,16 +30,59 @@ use tokio::sync::Mutex as AsyncMutex;
 pub(super) static BROWSER_RUNTIME_COMMAND_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
-pub(super) const BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS: u64 = 300;
+pub(super) const BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS: u64 = 10;
 pub(super) const BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS: u64 = 10;
 pub(super) const BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS: u32 = 1;
-/// Frames per second a watched session streams at. The 300 ms active
-/// maintenance cadence above carries this comfortably.
-pub(super) const BROWSER_FRAME_RATE_TARGET_DEFAULT: u64 = 2;
+/// Hard upper bound for image generation. A watched session samples at this
+/// rate; unchanged samples are discarded before an RxDB frame is written.
+pub(super) const BROWSER_FRAME_RATE_TARGET_DEFAULT: u64 = 15;
+pub(super) const BROWSER_FRAME_RATE_LIMIT: u64 = 15;
+pub(super) const BROWSER_FRAME_JPEG_QUALITY: u64 = 70;
+pub(super) const BROWSER_FRAME_MAX_WIDTH: u64 = 1280;
+pub(super) const BROWSER_FRAME_MAX_HEIGHT: u64 = 720;
 pub(super) const BROWSER_FRAME_RECENT_KEEP_COUNT: usize = 2;
 pub(super) const BROWSER_FRAME_GC_LIMIT: u64 = 256;
 pub(super) const BROWSER_INPUT_EVENT_GC_LIMIT: u64 = 512;
 pub(super) const BROWSER_INPUT_EVENT_RETENTION_SECS: u64 = 60 * 60;
+
+/// Bound a capture to the live-view envelope without changing the browser's
+/// viewport (and therefore without invalidating input coordinates).
+pub(super) fn browser_frame_capture_dimensions(viewport_w: u64, viewport_h: u64) -> (u64, u64) {
+    let viewport_w = viewport_w.max(1);
+    let viewport_h = viewport_h.max(1);
+    if viewport_w <= BROWSER_FRAME_MAX_WIDTH && viewport_h <= BROWSER_FRAME_MAX_HEIGHT {
+        return (viewport_w, viewport_h);
+    }
+    let height_at_max_width = viewport_h
+        .saturating_mul(BROWSER_FRAME_MAX_WIDTH)
+        .checked_div(viewport_w)
+        .unwrap_or(1)
+        .max(1);
+    if height_at_max_width <= BROWSER_FRAME_MAX_HEIGHT {
+        return (BROWSER_FRAME_MAX_WIDTH, height_at_max_width);
+    }
+    let width_at_max_height = viewport_w
+        .saturating_mul(BROWSER_FRAME_MAX_HEIGHT)
+        .checked_div(viewport_h)
+        .unwrap_or(1)
+        .max(1);
+    (width_at_max_height, BROWSER_FRAME_MAX_HEIGHT)
+}
+
+/// Parameters understood by the persistent browser runner's screenshot
+/// operation. The request/response channel does not expose unsolicited CDP
+/// events, so `Page.startScreencast` and `screencastFrameAck` cannot be driven
+/// through it; this bounded JPEG request is the producer-side fallback.
+pub(super) fn browser_frame_capture_request(viewport_w: u64, viewport_h: u64) -> Value {
+    let (max_width, max_height) = browser_frame_capture_dimensions(viewport_w, viewport_h);
+    json!({
+        "format": "jpeg",
+        "quality": BROWSER_FRAME_JPEG_QUALITY,
+        "maxWidth": max_width,
+        "maxHeight": max_height,
+        "everyNthFrame": 1,
+    })
+}
 
 pub fn browser_session_status(root: &Path, session_id: &str) -> anyhow::Result<Value> {
     let session_id = session_id.trim().to_string();
@@ -278,12 +324,19 @@ pub(super) async fn browser_session_automation_with_database(
         .get("can_go_forward")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let next_seq = session_doc
+    let mut next_seq = session_doc
         .get("last_frame_seq")
         .and_then(Value::as_u64)
         .unwrap_or(0)
         + 1;
-    let screenshot = manager.request(&session, "screenshot", json!({})).await?;
+    wait_for_browser_frame_capture_slot(database, &session_id).await?;
+    let screenshot = manager
+        .request(
+            &session,
+            "screenshot",
+            browser_frame_capture_request(session.viewport_w, session.viewport_h),
+        )
+        .await?;
     let data = screenshot
         .get("screenshot")
         .and_then(|frame| frame.get("base64"))
@@ -294,29 +347,42 @@ pub(super) async fn browser_session_automation_with_database(
         .get("screenshot")
         .and_then(|frame| frame.get("mimeType"))
         .and_then(Value::as_str)
-        .unwrap_or("image/png")
+        .unwrap_or("image/jpeg")
         .to_string();
-    let frame_id = format!("browser_frame_{}_{}", session_id, next_seq);
+    let mut frame_id = format!("browser_frame_{}_{}", session_id, next_seq);
     let frame_hash = browser_frame_hash(&data);
     let size_bytes = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .map(|bytes| bytes.len() as u64)
         .unwrap_or_else(|_| data.len() as u64);
-    upsert_browser_frame(
-        database,
-        &frame_id,
-        &session_id,
-        &tab_id,
-        next_seq,
-        &mime_type,
-        &data,
-        session.viewport_w,
-        session.viewport_h,
-        size_bytes,
-        &frame_hash,
-        None,
-    )
-    .await?;
+    let matching_frame =
+        matching_active_browser_frame(database, &session_doc, Some(&frame_hash)).await?;
+    if let Some(frame) = matching_frame.as_ref() {
+        next_seq = frame.get("seq").and_then(Value::as_u64).unwrap_or(next_seq);
+        frame_id = frame
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or(&frame_id)
+            .to_string();
+    } else {
+        let (frame_width, frame_height) =
+            browser_frame_capture_dimensions(session.viewport_w, session.viewport_h);
+        upsert_browser_frame(
+            database,
+            &frame_id,
+            &session_id,
+            &tab_id,
+            next_seq,
+            &mime_type,
+            &data,
+            frame_width,
+            frame_height,
+            size_bytes,
+            &frame_hash,
+            None,
+        )
+        .await?;
+    }
     upsert_browser_tab(
         database,
         &tab_id,
@@ -357,6 +423,10 @@ pub(super) async fn browser_session_automation_with_database(
         object.insert("frame_id".to_string(), Value::String(frame_id));
         object.insert("frame_hash".to_string(), Value::String(frame_hash));
         object.insert("size_bytes".to_string(), Value::from(size_bytes));
+        object.insert(
+            "frame_changed".to_string(),
+            Value::Bool(matching_frame.is_none()),
+        );
         object.insert(
             "browser_stream".to_string(),
             Value::String("rxdb".to_string()),

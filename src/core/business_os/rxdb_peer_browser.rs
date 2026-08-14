@@ -3,9 +3,11 @@
 
 use super::browser_control::{
     browser_context_related_document, browser_context_snapshot_with_database,
+    browser_frame_capture_dimensions, browser_frame_capture_request,
     browser_session_automation_with_database, browser_session_status_with_database,
     redact_browser_frame_data, redacted_browser_context_capture, redacted_browser_session_status,
-    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_FRAME_RECENT_KEEP_COUNT,
+    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_JPEG_QUALITY, BROWSER_FRAME_RATE_LIMIT,
+    BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_FRAME_RECENT_KEEP_COUNT,
     BROWSER_INPUT_EVENT_GC_LIMIT, BROWSER_INPUT_EVENT_RETENTION_SECS,
     BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS, BROWSER_RUNTIME_COMMAND_LOCK,
     BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS, BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
@@ -26,14 +28,15 @@ use rxdb::rx_database::RxDatabase;
 use rxdb::types::MangoQuery;
 use serde_json::{json, Value};
 use sha2::Digest;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub(super) static BROWSER_RUNTIME_LOOP_METRICS: NativePeerLoopMetrics =
     NativePeerLoopMetrics::new("browser_runtime");
+static BROWSER_FRAME_CAPTURE_SLOTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 pub(super) fn is_browser_runtime_command(command_type: &str) -> bool {
     matches!(
@@ -77,6 +80,15 @@ pub(super) async fn apply_browser_runtime_command(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("browser_tab_default")
         .to_string();
+    let command_id = document
+        .get("command_id")
+        .or_else(|| document.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    eprintln!(
+        "{}",
+        browser_runtime_command_log_line("received", command_type, command_id, &session_id, None,)
+    );
     let viewport_w = payload
         .get("viewport_w")
         .and_then(Value::as_u64)
@@ -390,6 +402,16 @@ pub(super) async fn apply_browser_runtime_command(
     }
 
     let browser_runtime_dir = browser_runtime_reference_dir(root);
+    eprintln!(
+        "{}",
+        browser_runtime_command_log_line(
+            "process_start",
+            command_type,
+            command_id,
+            &session_id,
+            None,
+        )
+    );
     let session = match manager
         .ensure_session(
             root.to_path_buf(),
@@ -406,6 +428,16 @@ pub(super) async fn apply_browser_runtime_command(
         Ok(session) => session,
         Err(err) => {
             let detail = format!("{err:#}");
+            eprintln!(
+                "{}",
+                browser_runtime_command_log_line(
+                    "failed",
+                    command_type,
+                    command_id,
+                    &session_id,
+                    Some(&detail),
+                )
+            );
             mark_browser_session_runtime_error(
                 database,
                 &session_id,
@@ -455,6 +487,16 @@ pub(super) async fn apply_browser_runtime_command(
             // respawns, and persist the exact failure on the session.
             manager.drop_session_after_crash(&session_id);
             let detail = format!("{err:#}");
+            eprintln!(
+                "{}",
+                browser_runtime_command_log_line(
+                    "failed",
+                    command_type,
+                    command_id,
+                    &session_id,
+                    Some(&detail),
+                )
+            );
             mark_browser_session_runtime_error(
                 database,
                 &session_id,
@@ -523,7 +565,15 @@ pub(super) async fn apply_browser_runtime_command(
         return Ok(());
     }
 
-    let screenshot = match manager.request(&session, "screenshot", json!({})).await {
+    wait_for_browser_frame_capture_slot(database, &session_id).await?;
+    let screenshot = match manager
+        .request(
+            &session,
+            "screenshot",
+            browser_frame_capture_request(viewport_w, viewport_h),
+        )
+        .await
+    {
         Ok(value) => value,
         Err(err) => {
             manager.drop_session_after_crash(&session_id);
@@ -554,34 +604,47 @@ pub(super) async fn apply_browser_runtime_command(
         .get("screenshot")
         .and_then(|frame| frame.get("mimeType"))
         .and_then(Value::as_str)
-        .unwrap_or("image/png")
+        .unwrap_or("image/jpeg")
         .to_string();
-    let next_seq = existing_session
+    let mut next_seq = existing_session
         .get("last_frame_seq")
         .and_then(Value::as_u64)
         .unwrap_or(0)
         + 1;
-    let frame_id = format!("browser_frame_{}_{}", session_id, next_seq);
+    let mut frame_id = format!("browser_frame_{}_{}", session_id, next_seq);
     let frame_hash = browser_frame_hash(&data);
     let size_bytes = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .map(|bytes| bytes.len() as u64)
         .unwrap_or_else(|_| data.len() as u64);
-    upsert_browser_frame(
-        database,
-        &frame_id,
-        &session_id,
-        &tab_id,
-        next_seq,
-        &mime_type,
-        &data,
-        viewport_w,
-        viewport_h,
-        size_bytes,
-        &frame_hash,
-        Some(&access),
-    )
-    .await?;
+    let matching_frame =
+        matching_active_browser_frame(database, &existing_session, Some(&frame_hash)).await?;
+    if let Some(frame) = matching_frame.as_ref() {
+        next_seq = frame.get("seq").and_then(Value::as_u64).unwrap_or(next_seq);
+        frame_id = frame
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or(&frame_id)
+            .to_string();
+    }
+    if matching_frame.is_none() {
+        let (frame_width, frame_height) = browser_frame_capture_dimensions(viewport_w, viewport_h);
+        upsert_browser_frame(
+            database,
+            &frame_id,
+            &session_id,
+            &tab_id,
+            next_seq,
+            &mime_type,
+            &data,
+            frame_width,
+            frame_height,
+            size_bytes,
+            &frame_hash,
+            Some(&access),
+        )
+        .await?;
+    }
     upsert_browser_tab(
         database,
         &tab_id,
@@ -641,6 +704,7 @@ pub(super) async fn apply_browser_runtime_command(
             "title": title,
             "frame_hash": frame_hash,
             "size_bytes": size_bytes,
+            "frame_changed": matching_frame.is_none(),
             "can_go_back": can_go_back,
             "can_go_forward": can_go_forward,
             "navigation_error": navigation_error,
@@ -649,6 +713,10 @@ pub(super) async fn apply_browser_runtime_command(
         }),
     )
     .await?;
+    eprintln!(
+        "[business-os] browser runtime command phase=completed command_type={} command_id={} session_id={} url={} can_go_back={} can_go_forward={}",
+        command_type, command_id, session_id, final_url, can_go_back, can_go_forward,
+    );
     Ok(())
 }
 
@@ -968,8 +1036,70 @@ fn browser_frame_capture_due(
     if lease_expires_ms.is_some_and(|expires_ms| expires_ms <= now_ms) {
         return false;
     }
-    let min_interval_ms = 1000 / frame_rate_target.max(1);
+    let min_interval_ms = browser_frame_capture_interval_ms(frame_rate_target);
     now_ms.saturating_sub(last_frame_ms) >= min_interval_ms
+}
+
+fn browser_frame_capture_interval_ms(frame_rate_target: u64) -> u64 {
+    let bounded_rate = frame_rate_target.clamp(1, BROWSER_FRAME_RATE_LIMIT);
+    1000_u64.div_ceil(bounded_rate)
+}
+
+pub(super) async fn wait_for_browser_frame_capture_slot(
+    database: &Arc<RxDatabase>,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let session = find_browser_document(database, "browser_sessions", session_id).await?;
+    let frame_rate_target = session
+        .get("frame_rate_target")
+        .and_then(Value::as_u64)
+        .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT);
+    let min_interval = Duration::from_millis(browser_frame_capture_interval_ms(frame_rate_target));
+    let slots = BROWSER_FRAME_CAPTURE_SLOTS.get_or_init(|| Mutex::new(HashMap::new()));
+    loop {
+        let wait_for = {
+            let mut slots = slots
+                .lock()
+                .map_err(|_| anyhow::anyhow!("browser frame capture slots poisoned"))?;
+            let now = Instant::now();
+            match slots.get(session_id).copied() {
+                Some(last_capture) if now.duration_since(last_capture) < min_interval => {
+                    min_interval - now.duration_since(last_capture)
+                }
+                _ => {
+                    slots.insert(session_id.to_string(), now);
+                    Duration::ZERO
+                }
+            }
+        };
+        if wait_for.is_zero() {
+            return Ok(());
+        }
+        tokio::time::sleep(wait_for).await;
+    }
+}
+
+pub(super) async fn matching_active_browser_frame(
+    database: &Arc<RxDatabase>,
+    session: &Value,
+    frame_hash: Option<&str>,
+) -> anyhow::Result<Option<Value>> {
+    let Some(frame_id) = session
+        .get("active_frame_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let frame = find_browser_document(database, "browser_frames", frame_id).await?;
+    if !frame.is_object() {
+        return Ok(None);
+    }
+    if frame_hash.is_some_and(|hash| frame.get("frame_hash").and_then(Value::as_str) != Some(hash))
+    {
+        return Ok(None);
+    }
+    Ok(Some(frame))
 }
 
 /// Capture a frame for one live session when one is due, so the browser has a
@@ -1006,24 +1136,33 @@ async fn refresh_browser_session_frame(
         .and_then(|row| row.get("captured_at_ms"))
         .and_then(Value::as_u64);
 
+    let lease_expires_ms = session_doc
+        .get("controller_lease_expires_at_ms")
+        .and_then(Value::as_u64)
+        .filter(|expires_ms| *expires_ms > 0);
     let due = browser_frame_capture_due(
         now_ms() as u64,
         last_frame_ms,
-        session_doc
-            .get("controller_lease_expires_at_ms")
-            .and_then(Value::as_u64)
-            .filter(|expires_ms| *expires_ms > 0),
+        lease_expires_ms,
         session_doc
             .get("frame_rate_target")
             .and_then(Value::as_u64)
             .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT),
     );
     if !due {
-        return Ok(0);
+        // A live stream remains active between capture slots so the maintenance
+        // loop does not back off for ten seconds. Only an expired lease is idle.
+        return Ok(usize::from(
+            lease_expires_ms.is_none_or(|expires_ms| expires_ms > now_ms() as u64),
+        ));
     }
 
     // A failed capture must not abort the maintenance round for the other
     // sessions; the runtime may simply be mid-navigation.
+    if let Err(err) = wait_for_browser_frame_capture_slot(database, session_id).await {
+        eprintln!("[business-os] browser frame rate limiting failed for {session_id}: {err:#}");
+        return Ok(0);
+    }
     if let Err(err) = capture_and_store_browser_frame(database, &session, session_id, None).await {
         eprintln!("[business-os] browser frame capture failed for {session_id}: {err:#}");
         return Ok(0);
@@ -1074,18 +1213,12 @@ async fn drain_browser_session_inputs(
     for row in rows {
         let seq = row.get("seq").and_then(Value::as_u64).unwrap_or(0);
         max_seq = max_seq.max(seq);
-        events.push(json!({
-            "type": row.get("type").and_then(Value::as_str).unwrap_or_default(),
-            "x": row.get("x").and_then(Value::as_f64).unwrap_or(0.0),
-            "y": row.get("y").and_then(Value::as_f64).unwrap_or(0.0),
-            "button": row.get("button").and_then(Value::as_str).unwrap_or("left"),
-            "buttons": row.get("buttons").and_then(Value::as_u64).unwrap_or(0),
-            "dx": row.get("dx").and_then(Value::as_f64).unwrap_or(0.0),
-            "dy": row.get("dy").and_then(Value::as_f64).unwrap_or(0.0),
-            "key": row.get("key").and_then(Value::as_str).unwrap_or_default(),
-            "code": row.get("code").and_then(Value::as_str).unwrap_or_default(),
-            "text": row.get("text").and_then(Value::as_str).unwrap_or_default()
-        }));
+        let event = browser_runtime_input_event(row);
+        eprintln!(
+            "{}",
+            browser_input_log_line("received", session_id, seq, &event)
+        );
+        events.push(event);
     }
 
     let response = match manager
@@ -1166,6 +1299,14 @@ async fn drain_browser_session_inputs(
 
     if ok {
         let nav = response.get("nav").cloned().unwrap_or(Value::Null);
+        eprintln!(
+            "[business-os] browser input phase=applied session_id={} events={} applied={} url={}",
+            session_id,
+            rows.len(),
+            response.get("applied").and_then(Value::as_u64).unwrap_or(0),
+            nav.get("url").and_then(Value::as_str).unwrap_or_default(),
+        );
+        wait_for_browser_frame_capture_slot(database, session_id).await?;
         capture_and_store_browser_frame(database, &session, session_id, Some(&nav)).await?;
         update_browser_session_input_state(database, session_id, max_seq).await?;
     }
@@ -1174,7 +1315,9 @@ async fn drain_browser_session_inputs(
 
 /// Capture a fresh frame from the live page and persist it plus the derived
 /// tab/session navigation state. `nav` may carry the most recent navigation
-/// snapshot; otherwise it is read from the screenshot response.
+/// snapshot; otherwise it is read from the screenshot response. The persistent
+/// runtime channel is request/response only, so it cannot deliver unsolicited
+/// `Page.screencastFrame` events; bounded JPEG snapshots are used here instead.
 async fn capture_and_store_browser_frame(
     database: &Arc<RxDatabase>,
     session: &Arc<super::browser_runtime::LiveBrowserSession>,
@@ -1182,7 +1325,13 @@ async fn capture_and_store_browser_frame(
     nav_hint: Option<&Value>,
 ) -> anyhow::Result<()> {
     let manager = browser_runtime_manager();
-    let screenshot = manager.request(session, "screenshot", json!({})).await?;
+    let screenshot = manager
+        .request(
+            session,
+            "screenshot",
+            browser_frame_capture_request(session.viewport_w, session.viewport_h),
+        )
+        .await?;
     let data = screenshot
         .get("screenshot")
         .and_then(|frame| frame.get("base64"))
@@ -1193,7 +1342,7 @@ async fn capture_and_store_browser_frame(
         .get("screenshot")
         .and_then(|frame| frame.get("mimeType"))
         .and_then(Value::as_str)
-        .unwrap_or("image/png")
+        .unwrap_or("image/jpeg")
         .to_string();
     let nav = browser_capture_navigation(&screenshot, nav_hint);
 
@@ -1227,17 +1376,25 @@ async fn capture_and_store_browser_frame(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
+    let frame_hash = browser_frame_hash(&data);
+    if matching_active_browser_frame(database, &session_doc, Some(&frame_hash))
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
     let next_seq = session_doc
         .get("last_frame_seq")
         .and_then(Value::as_u64)
         .unwrap_or(0)
         + 1;
     let frame_id = format!("browser_frame_{}_{}", session_id, next_seq);
-    let frame_hash = browser_frame_hash(&data);
     let size_bytes = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .map(|bytes| bytes.len() as u64)
         .unwrap_or_else(|_| data.len() as u64);
+    let (frame_width, frame_height) =
+        browser_frame_capture_dimensions(session.viewport_w, session.viewport_h);
     upsert_browser_frame(
         database,
         &frame_id,
@@ -1246,8 +1403,8 @@ async fn capture_and_store_browser_frame(
         next_seq,
         &mime_type,
         &data,
-        session.viewport_w,
-        session.viewport_h,
+        frame_width,
+        frame_height,
         size_bytes,
         &frame_hash,
         None,
@@ -1303,6 +1460,62 @@ fn browser_capture_navigation(screenshot: &Value, nav_hint: Option<&Value>) -> V
         .filter(|value| !value.is_null())
         .or_else(|| nav_hint.cloned().filter(|value| !value.is_null()))
         .unwrap_or(Value::Null)
+}
+
+fn browser_runtime_input_event(row: &Value) -> Value {
+    let click_count = row
+        .get("detail")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            row.get("payload")
+                .and_then(|payload| payload.get("click_count"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    json!({
+        "type": row.get("type").and_then(Value::as_str).unwrap_or_default(),
+        "x": row.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+        "y": row.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+        "detail": click_count,
+        "clickCount": click_count,
+        "button": row.get("button").and_then(Value::as_str).unwrap_or("left"),
+        "buttons": row.get("buttons").and_then(Value::as_u64).unwrap_or(0),
+        "dx": row.get("dx").and_then(Value::as_f64).unwrap_or(0.0),
+        "dy": row.get("dy").and_then(Value::as_f64).unwrap_or(0.0),
+        "key": row.get("key").and_then(Value::as_str).unwrap_or_default(),
+        "code": row.get("code").and_then(Value::as_str).unwrap_or_default(),
+        "modifiers": row.get("modifiers").cloned().unwrap_or_else(|| json!([])),
+        "text": row.get("text").and_then(Value::as_str).unwrap_or_default()
+    })
+}
+
+fn browser_input_log_line(phase: &str, session_id: &str, seq: u64, event: &Value) -> String {
+    let modifiers = event
+        .get("modifiers")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .unwrap_or_default();
+    format!(
+        "[business-os] browser input phase={} session_id={} seq={} type={} x={} y={} detail={} button={} buttons={} modifiers={} key={} code={}",
+        phase.trim(),
+        session_id.trim(),
+        seq,
+        event.get("type").and_then(Value::as_str).unwrap_or_default(),
+        event.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+        event.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+        event.get("detail").and_then(Value::as_u64).unwrap_or(0),
+        event.get("button").and_then(Value::as_str).unwrap_or_default(),
+        event.get("buttons").and_then(Value::as_u64).unwrap_or(0),
+        modifiers,
+        event.get("key").and_then(Value::as_str).unwrap_or_default(),
+        event.get("code").and_then(Value::as_str).unwrap_or_default(),
+    )
 }
 
 /// Recompute `last_input_seq` and the live pending input count on a session
@@ -1798,7 +2011,8 @@ pub(super) async fn upsert_browser_session(
         .get("frame_rate_target")
         .and_then(Value::as_u64)
         .filter(|rate| *rate > 0)
-        .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT);
+        .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT)
+        .min(BROWSER_FRAME_RATE_LIMIT);
     let tenant_id = access
         .and_then(|value| value.tenant_id.as_deref())
         .unwrap_or(preserved_tenant_id);
@@ -1994,7 +2208,7 @@ pub(super) async fn upsert_browser_frame(
         "height": height,
         "viewport_w": width,
         "viewport_h": height,
-        "quality": 100,
+        "quality": if mime_type == "image/jpeg" { BROWSER_FRAME_JPEG_QUALITY } else { 0 },
         "size_bytes": size_bytes,
         "frame_hash": frame_hash,
         "captured_at_ms": now,
@@ -2094,6 +2308,27 @@ pub(super) async fn mark_browser_runtime_command_failed(
     Ok(())
 }
 
+fn browser_runtime_command_log_line(
+    phase: &str,
+    command_type: &str,
+    command_id: &str,
+    session_id: &str,
+    error: Option<&str>,
+) -> String {
+    let mut line = format!(
+        "[business-os] browser runtime command phase={} command_type={} command_id={} session_id={}",
+        phase.trim(),
+        command_type.trim(),
+        command_id.trim(),
+        session_id.trim(),
+    );
+    if let Some(error) = error.map(str::trim).filter(|value| !value.is_empty()) {
+        line.push_str(" error=");
+        line.push_str(&error.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    line
+}
+
 fn normalize_browser_runtime_url(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2123,6 +2358,30 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn browser_runtime_command_trace_is_single_line_and_identifies_start() {
+        assert_eq!(
+            browser_runtime_command_log_line(
+                "received",
+                "browser.session.start",
+                "browser_cmd_123",
+                "browser_session_test_123",
+                None,
+            ),
+            "[business-os] browser runtime command phase=received command_type=browser.session.start command_id=browser_cmd_123 session_id=browser_session_test_123"
+        );
+        assert_eq!(
+            browser_runtime_command_log_line(
+                "failed",
+                "browser.session.start",
+                "browser_cmd_123",
+                "browser_session_test_123",
+                Some("runner exited\nwithout a frame"),
+            ),
+            "[business-os] browser runtime command phase=failed command_type=browser.session.start command_id=browser_cmd_123 session_id=browser_session_test_123 error=runner exited without a frame"
+        );
+    }
+
+    #[test]
     fn browser_capture_prefers_fresh_screenshot_navigation() {
         let screenshot = json!({ "nav": { "url": "https://iana.org/" } });
         let stale_hint = json!({ "url": "https://example.com/" });
@@ -2132,6 +2391,51 @@ mod tests {
         );
         assert!(!browser_updates_command_watermark("browser.input"));
         assert!(browser_updates_command_watermark("browser.navigate"));
+    }
+
+    #[test]
+    fn browser_frame_capture_is_bounded_jpeg() {
+        assert_eq!(browser_frame_capture_interval_ms(0), 1_000);
+        assert_eq!(browser_frame_capture_interval_ms(5), 200);
+        assert_eq!(browser_frame_capture_interval_ms(15), 67);
+        assert_eq!(browser_frame_capture_interval_ms(120), 67);
+        assert_eq!(browser_frame_capture_dimensions(1280, 720), (1280, 720));
+        assert_eq!(browser_frame_capture_dimensions(1920, 947), (1280, 631));
+        assert_eq!(browser_frame_capture_dimensions(1000, 1000), (720, 720));
+        assert_eq!(
+            browser_frame_capture_request(1920, 947),
+            json!({
+                "format": "jpeg",
+                "quality": 70,
+                "maxWidth": 1280,
+                "maxHeight": 631,
+                "everyNthFrame": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn browser_input_transport_preserves_click_count_and_modifiers() {
+        let row = json!({
+            "type": "mouseDown",
+            "x": 42.0,
+            "y": 84.0,
+            "detail": 3,
+            "button": "left",
+            "buttons": 1,
+            "modifiers": ["Meta", "Shift"],
+            "key": "a",
+            "code": "KeyA",
+            "text": ""
+        });
+        let event = browser_runtime_input_event(&row);
+        assert_eq!(event["detail"], 3);
+        assert_eq!(event["clickCount"], 3);
+        assert_eq!(event["modifiers"], json!(["Meta", "Shift"]));
+        assert_eq!(
+            browser_input_log_line("received", "browser_session_test", 17, &event),
+            "[business-os] browser input phase=received session_id=browser_session_test seq=17 type=mouseDown x=42 y=84 detail=3 button=left buttons=1 modifiers=Meta+Shift key=a code=KeyA"
+        );
     }
 
     #[test]
@@ -2649,7 +2953,7 @@ mod tests {
     #[test]
     fn browser_frame_capture_breaks_the_cold_start_deadlock() {
         const NOW: u64 = 1_000_000;
-        const RATE: u64 = BROWSER_FRAME_RATE_TARGET_DEFAULT; // 2 fps -> 500 ms
+        const RATE: u64 = BROWSER_FRAME_RATE_TARGET_DEFAULT; // 15 fps -> 67 ms
 
         // A session that never produced a frame is captured even though no
         // controller holds a lease. Without this the UI never shows a picture,
@@ -2662,13 +2966,13 @@ mod tests {
         // captured once the rate-limit window has passed, not before.
         assert!(!browser_frame_capture_due(
             NOW,
-            Some(NOW - 100),
+            Some(NOW - 50),
             Some(NOW + 60_000),
             RATE
         ));
         assert!(browser_frame_capture_due(
             NOW,
-            Some(NOW - 500),
+            Some(NOW - 67),
             Some(NOW + 60_000),
             RATE
         ));
@@ -2691,8 +2995,8 @@ mod tests {
         // A session that records no lease at all keeps streaming: several
         // lifecycle writers never record one, and reading "absent" as "expired"
         // would end the stream after its very first frame.
-        assert!(browser_frame_capture_due(NOW, Some(NOW - 500), None, RATE));
-        assert!(!browser_frame_capture_due(NOW, Some(NOW - 100), None, RATE));
+        assert!(browser_frame_capture_due(NOW, Some(NOW - 67), None, RATE));
+        assert!(!browser_frame_capture_due(NOW, Some(NOW - 50), None, RATE));
 
         // A stored rate of zero must never divide by zero or freeze the stream.
         assert!(browser_frame_capture_due(

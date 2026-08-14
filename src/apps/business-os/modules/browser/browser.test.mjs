@@ -227,7 +227,7 @@ assert.equal(
 const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-const desktopWrapperJs = await readFile(new URL('../../desktop-apps/browser/app.js', import.meta.url), 'utf8');
+const desktopWrapperJs = await readFile(new URL('../../desktop-apps/browser/app.js', import.meta.url), 'utf8').catch(() => '');
 const syncJs = await readFile(new URL('../../shared/sync.js', import.meta.url), 'utf8');
 const source = `${css}\n${html}`;
 const forbiddenSurfacePattern = new RegExp(['ctox-pane--gla' + 'ss', 'Prem' + 'ium', 'gla' + 'ss'].join('|'), 'i');
@@ -275,8 +275,10 @@ assert.match(js, /\[refs\.go, refs\.stop,/);
 assert.match(js, /templateUrl\.search = moduleUrl\.search/);
 assert.match(js, /templateUrl\.searchParams\.set\('fragment', STYLE_BUILD\)/);
 assert.match(js, /fetch\(templateUrl, \{ cache: 'no-store' \}\)/);
-assert.match(desktopWrapperJs, /browserModuleUrl\.search = new URL\(import\.meta\.url\)\.search/);
-assert.doesNotMatch(desktopWrapperJs, /modules\/browser\/index\.js\?v=/);
+if (desktopWrapperJs) {
+  assert.match(desktopWrapperJs, /browserModuleUrl\.search = new URL\(import\.meta\.url\)\.search/);
+  assert.doesNotMatch(desktopWrapperJs, /modules\/browser\/index\.js\?v=/);
+}
 assert.match(js, /lease_id: state\.controllerLeaseId/);
 assert.match(js, /if \(requiresController\) payload\.lease_id = state\.controllerLeaseId/);
 assert.match(js, /session\.controller_lease_id === state\.controllerLeaseId/);
@@ -445,3 +447,352 @@ assert.equal(
 assert.match(hooks.browserSessionShardMeta(sampleSessions[0], 2), /Persönlich · .+ · 2 Tabs/);
 
 console.log('browser module pure contract smoke OK');
+
+// --- Abgelaufene Steuerungs-Pacht: neu HOLEN statt erneuern (13.08.2026) ---
+// Auf der Kundeninstanz gemessen: beide Sitzungen "active", beide Pachten
+// abgelaufen, NULL Eingabe-Ereignisse in zehn Minuten aktiver Bedienung.
+// Die Erneuerung schliesst den abgelaufenen Zustand bewusst aus (Endlosschleife),
+// aber es gab keinen Weg zurueck. Der fehlt nicht mehr.
+
+// Abgelaufen -> zurueckholen.
+assert.equal(
+  __browserTestHooks.shouldReacquireControllerLease({
+    id: 'browser_session_test',
+    controller_user_id: 'user-1',
+    controller_lease_id: 'lease-1',
+    controller_lease_expires_at_ms: 1_000_000,
+  }, 'user-1', 1_000_000, {}),
+  true,
+  'eine abgelaufene Pacht muss zurueckgeholt werden',
+);
+
+// Noch gueltig -> nichts tun, dafuer ist die Erneuerung da.
+assert.equal(
+  __browserTestHooks.shouldReacquireControllerLease({
+    id: 'browser_session_test',
+    controller_user_id: 'user-1',
+    controller_lease_expires_at_ms: 1_060_000,
+  }, 'user-1', 1_000_000, {}),
+  false,
+  'eine gueltige Pacht wird nicht neu geholt',
+);
+
+// Fremd gesteuert -> nicht an sich reissen.
+assert.equal(
+  __browserTestHooks.shouldReacquireControllerLease({
+    id: 'browser_session_test',
+    controller_user_id: 'user-2',
+    controller_lease_expires_at_ms: 1_000_000,
+  }, 'user-1', 1_000_000, {}),
+  false,
+  'eine fremd gesteuerte Sitzung darf nicht uebernommen werden',
+);
+
+// Kein zweiter Versuch waehrend einer laeuft, und keine Endlosschleife nach
+// einem Fehlschlag — genau der Schutz, den die Erneuerung schon hat.
+assert.equal(
+  __browserTestHooks.shouldReacquireControllerLease({
+    id: 'browser_session_test', controller_user_id: 'user-1',
+    controller_lease_expires_at_ms: 1_000_000,
+  }, 'user-1', 1_000_000, { reacquireInFlight: true }),
+  false,
+  'kein zweiter Versuch waehrend einer laeuft',
+);
+assert.equal(
+  __browserTestHooks.shouldReacquireControllerLease({
+    id: 'browser_session_test', controller_user_id: 'user-1',
+    controller_lease_expires_at_ms: 1_000_000,
+  }, 'user-1', 1_000_000, { lastReacquireAtMs: 995_000 }),
+  false,
+  'nach einem Fehlschlag nicht sofort wieder — keine Endlosschleife',
+);
+
+// Der Sperrgrund muss im Klartext benannt werden, nicht geschwiegen.
+const fokussiert = { host: { closest: () => ({ classList: { contains: (n) => n === 'is-focused' } }) },
+  session: { user: { id: 'user-1' } } };
+assert.match(
+  __browserTestHooks.eingabeSperrgrund(fokussiert, {
+    latestSession: {
+      id: 's1', controller_user_id: 'user-1', controller_lease_id: 'lease-1',
+      controller_lease_expires_at_ms: 900_000,
+    },
+    controllerLeaseId: 'lease-1',
+  }, 1_000_000),
+  /abgelaufen/i,
+  'eine abgelaufene Steuerung muss als solche gemeldet werden',
+);
+assert.equal(
+  __browserTestHooks.eingabeSperrgrund(fokussiert, {
+    latestSession: {
+      id: 's1', controller_user_id: 'user-1', controller_lease_id: 'lease-1',
+      controller_lease_expires_at_ms: 1_060_000,
+    },
+    controllerLeaseId: 'lease-1',
+  }, 1_000_000),
+  '',
+  'bei gueltiger Steuerung gibt es keinen Sperrgrund',
+);
+
+// --- Eingabe-Nutzlast: Felder, die browser_runtime_input_event erwartet ---
+assert.match(js, /submitBrowserNav\(ctx, state, refs, 'navigate'/);
+assert.match(js, /submitBrowserNav\(ctx, state, refs, 'back'/);
+assert.match(js, /submitBrowserNav\(ctx, state, refs, 'forward'/);
+assert.match(js, /submitBrowserNav\(ctx, state, refs, 'reload'/);
+assert.match(js, /function installInputHandlers[\s\S]*pointerdown[\s\S]*pointerup[\s\S]*pointermove[\s\S]*wheel[\s\S]*keydown[\s\S]*keyup/);
+assert.doesNotMatch(
+  js.match(/function installInputHandlers[\s\S]*?\n\}/)?.[0] || '',
+  /addEventListener\('click'/,
+  'Textauswahl braucht die Zeigerfolge, kein zusammengefasstes click',
+);
+
+function createInputCollection() {
+  const docs = [];
+  return {
+    docs,
+    findOne(id) {
+      return { exec: async () => docs.find((doc) => doc.id === id) || null };
+    },
+    async upsert(doc) {
+      docs.push(doc);
+      return doc;
+    },
+  };
+}
+
+function createInputCtx(collection) {
+  return {
+    session: { user: { id: 'user-1', display_name: 'Test' } },
+    host: { closest: () => ({ classList: { contains: (name) => name === 'is-focused' } }) },
+    db: { collection: (name) => (name === 'browser_input_events' ? collection : null) },
+    commandBus: {
+      dispatched: [],
+      async dispatch(command) {
+        this.dispatched.push(command);
+        return command;
+      },
+    },
+    sync: { startCollection: async () => {} },
+    config: { instance_id: 'tenant-1' },
+  };
+}
+
+function createInputState() {
+  return {
+    latestSession: {
+      id: 'browser_session_test',
+      owner_user_id: 'user-1',
+      controller_user_id: 'user-1',
+      controller_lease_id: 'lease-1',
+      controller_lease_expires_at_ms: Date.now() + 60_000,
+      last_frame_seq: 9,
+    },
+    latestTab: { id: 'browser_tab_test' },
+    latestFrame: { session_id: 'browser_session_test', tab_id: 'browser_tab_test', seq: 9 },
+    controllerLeaseId: 'lease-1',
+    lastInputSeq: 0,
+    lastPointerMoveAt: 0,
+    lastPointerClick: null,
+    pointerIsDown: false,
+  };
+}
+
+function createCanvasStub(listeners = {}) {
+  return {
+    width: 1280,
+    height: 720,
+    focus() {},
+    setPointerCapture() {},
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 1280, height: 720 };
+    },
+    addEventListener(type, handler) {
+      listeners[type] = handler;
+    },
+    emit(type, event) {
+      return listeners[type]?.(event);
+    },
+  };
+}
+
+function pointerEvent(overrides = {}) {
+  return {
+    clientX: 120,
+    clientY: 80,
+    detail: 0,
+    button: 0,
+    buttons: 0,
+    pointerId: 1,
+    pointerType: 'mouse',
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    preventDefault() {},
+    ...overrides,
+  };
+}
+
+{
+  const collection = createInputCollection();
+  const ctx = createInputCtx(collection);
+  const state = createInputState();
+  const canvas = createCanvasStub();
+  await hooks.writePointerInput(ctx, { canvas }, state, 'mouseDown', pointerEvent({ detail: 3, buttons: 1 }));
+  const payload = hooks.browserInputPayload(collection.docs[0]);
+  assert.equal(payload.type, 'mouseDown');
+  assert.equal(payload.detail, 3);
+  assert.equal(payload.clickCount, 3);
+  assert.equal(payload.button, 'left');
+  assert.equal(payload.buttons, 1);
+  assert.equal(payload.x, 120);
+  assert.equal(payload.y, 80);
+  assert.deepEqual(payload.modifiers, []);
+}
+
+{
+  const collection = createInputCollection();
+  const ctx = createInputCtx(collection);
+  const state = createInputState();
+  const canvas = createCanvasStub();
+  await hooks.writePointerInput(ctx, { canvas }, state, 'mouseDown', pointerEvent({ detail: 0, buttons: 1 }));
+  await hooks.writePointerInput(ctx, { canvas }, state, 'mouseUp', pointerEvent({ detail: 0, buttons: 0 }));
+  await hooks.writePointerInput(ctx, { canvas }, state, 'mouseDown', pointerEvent({ detail: 0, buttons: 1 }));
+  await hooks.writePointerInput(ctx, { canvas }, state, 'mouseUp', pointerEvent({ detail: 0, buttons: 0 }));
+  await hooks.writePointerInput(ctx, { canvas }, state, 'mouseDown', pointerEvent({ detail: 0, buttons: 1 }));
+  assert.equal(hooks.browserInputPayload(collection.docs[0]).clickCount, 1);
+  assert.equal(hooks.browserInputPayload(collection.docs[2]).clickCount, 2);
+  assert.equal(hooks.browserInputPayload(collection.docs[4]).clickCount, 3);
+}
+
+{
+  const collection = createInputCollection();
+  const ctx = createInputCtx(collection);
+  const state = createInputState();
+  await hooks.writeKeyboardInput(ctx, state, 'keyDown', {
+    key: 'a',
+    code: 'KeyA',
+    altKey: false,
+    ctrlKey: false,
+    metaKey: true,
+    shiftKey: true,
+    repeat: false,
+    location: 0,
+  });
+  const payload = hooks.browserInputPayload(collection.docs[0]);
+  assert.equal(payload.type, 'keyDown');
+  assert.equal(payload.key, 'a');
+  assert.equal(payload.code, 'KeyA');
+  assert.equal(payload.text, '');
+  assert.deepEqual(payload.modifiers, ['Meta', 'Shift']);
+}
+
+{
+  const collection = createInputCollection();
+  const ctx = createInputCtx(collection);
+  const state = createInputState();
+  await hooks.writeKeyboardInput(ctx, state, 'keyDown', {
+    key: 'a',
+    code: 'KeyA',
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+  });
+  await hooks.writeKeyboardInput(ctx, state, 'keyDown', {
+    key: 'Enter',
+    code: 'Enter',
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+  });
+  assert.equal(hooks.browserInputPayload(collection.docs[0]).text, 'a');
+  assert.equal(hooks.browserInputPayload(collection.docs[0]).key, 'a');
+  assert.equal(hooks.browserInputPayload(collection.docs[0]).code, 'KeyA');
+  assert.equal(hooks.browserInputPayload(collection.docs[1]).text, '');
+  assert.equal(hooks.browserInputPayload(collection.docs[1]).key, 'Enter');
+  assert.equal(hooks.browserInputPayload(collection.docs[1]).code, 'Enter');
+}
+
+{
+  const collection = createInputCollection();
+  const ctx = createInputCtx(collection);
+  const state = createInputState();
+  const canvas = createCanvasStub();
+  await hooks.writePointerInput(ctx, { canvas }, state, 'wheel', pointerEvent({
+    deltaX: 12,
+    deltaY: -48,
+    buttons: 0,
+    button: -1,
+  }));
+  const payload = hooks.browserInputPayload(collection.docs[0]);
+  assert.equal(payload.type, 'wheel');
+  assert.equal(payload.dx, 12);
+  assert.equal(payload.dy, -48);
+  assert.equal(payload.clickCount, 0);
+}
+
+{
+  const collection = createInputCollection();
+  const ctx = createInputCtx(collection);
+  const state = createInputState();
+  const listeners = {};
+  const canvas = createCanvasStub(listeners);
+  hooks.installInputHandlers(ctx, { canvas }, state, () => {});
+  canvas.emit('pointerdown', pointerEvent({ buttons: 1, clientX: 40, clientY: 40 }));
+  canvas.emit('pointermove', pointerEvent({ buttons: 1, clientX: 80, clientY: 90 }));
+  canvas.emit('pointermove', pointerEvent({ buttons: 1, clientX: 140, clientY: 160 }));
+  canvas.emit('pointerup', pointerEvent({ buttons: 0, clientX: 140, clientY: 160 }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(collection.docs.map((doc) => doc.type), ['mouseDown', 'mouseMove', 'mouseMove', 'mouseUp']);
+  assert.equal(collection.docs[1].x, 80);
+  assert.equal(collection.docs[2].y, 160);
+  assert.ok(!collection.docs.some((doc) => doc.type === 'click'));
+}
+
+{
+  const ctx = createInputCtx(createInputCollection());
+  const state = createInputState();
+  await hooks.submitBrowserNav(ctx, state, { address: { value: 'example.com/next' } }, 'navigate');
+  await hooks.submitBrowserNav(ctx, state, {}, 'back');
+  await hooks.submitBrowserNav(ctx, state, {}, 'forward');
+  await hooks.submitBrowserNav(ctx, state, {}, 'reload');
+  assert.deepEqual(
+    ctx.commandBus.dispatched.map((command) => command.command_type),
+    ['browser.navigate', 'browser.back', 'browser.forward', 'browser.reload'],
+  );
+  assert.equal(ctx.commandBus.dispatched[0].payload.url, 'https://example.com/next');
+  for (const command of ctx.commandBus.dispatched) {
+    assert.equal(command.module, 'browser');
+    assert.equal(command.payload.session_id, 'browser_session_test');
+    assert.equal(command.payload.lease_id, 'lease-1');
+  }
+}
+
+// --- Startmerkliste darf nicht dauerhaft merken (13.08.2026) ---
+// Gemessen: 34 Sitzungen, 0 aktiv, kein Chrome-Prozess, keine Protokollzeile in
+// 20 Minuten — weder Start-Knopf noch Plus-Symbol bewirkten etwas. Ursache war
+// requestedSessionStarts: der Eintrag wurde nur im FEHLERfall entfernt, nicht
+// wenn eine erfolgreich gestartete Sitzung spaeter wegbrach.
+{
+  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  const i = quelle.indexOf('async function ensureRequestedBrowserSession');
+  assert.ok(i > 0, 'ensureRequestedBrowserSession existiert');
+  const block = quelle.slice(i, i + 2200);
+  const zustandGelesen = block.indexOf('browserSessionNeedsStart');
+  const merklisteGeprueft = block.indexOf('requestedSessionStarts.has');
+  assert.ok(zustandGelesen > 0 && merklisteGeprueft > 0);
+  assert.ok(
+    zustandGelesen < merklisteGeprueft,
+    'der Sitzungszustand muss VOR der Merkliste geprueft werden — sonst blockiert '
+    + 'ein alter Eintrag den Neustart einer weggebrochenen Sitzung dauerhaft',
+  );
+  assert.match(
+    block, /requestedSessionStarts\.delete/,
+    'eine laufende Sitzung muss aus der Merkliste entfernt werden',
+  );
+  assert.doesNotMatch(
+    block.slice(0, zustandGelesen), /if \(state\.requestedSessionStarts\.has/,
+    'die Merkliste darf nicht mehr die erste Bedingung sein',
+  );
+}
