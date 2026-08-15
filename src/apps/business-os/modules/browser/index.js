@@ -392,9 +392,19 @@ export async function mount(ctx) {
     safeLoadAndRender();
   });
   const submitAddress = () => {
-    const canNavigate = browserSurfaceCanControl(ctx, state);
+    // Am 15.08.2026 auf der Kundeninstanz gemessen, und es war die Ursache:
+    // Die Entscheidung "navigieren oder neu starten" haing allein an der PACHT,
+    // nie an der LEBENDIGKEIT der Sitzung. Zustand der Sitzung des Nutzers:
+    //   status = disconnected, Pacht gueltig, Steuerung = der Nutzer selbst.
+    // Damit war canNavigate wahr, der Start-Zweig unerreichbar, und jede
+    // eingegebene Adresse ging als browser.navigate an eine tote Sitzung.
+    // Beleg: letzter Sitzungsstart aus der Oberflaeche 13.08. 12:51, danach in
+    // 48 h nur noch 259 x browser.controller.acquire — eine gueltige Pacht auf
+    // einer Leiche, die meine eigene Wiederbeschaffung frisch hielt.
+    // Eine tote Sitzung MUSS in den Start-Zweig fuehren, sonst gibt es keinen
+    // Weg zurueck.
     const url = refs.address?.value || 'https://example.com';
-    if (!canNavigate) {
+    if (browserAddressAction(state.latestSession, browserSurfaceCanControl(ctx, state)) === 'start') {
       startNewBrowserSession(url);
       return;
     }
@@ -405,7 +415,19 @@ export async function mount(ctx) {
   };
   refs.form?.addEventListener('submit', (event) => {
     event.preventDefault();
-    submitAddress();
+    // OHNE dieses catch stirbt der Klick lautlos. Am 14.08.2026 gemessen: der
+    // Nutzer drueckt "Los", nichts passiert, keine Meldung, kein Befehl in der
+    // Datenbank. Der Rueckweg war dabei nachweislich intakt — ein serverseitig
+    // eingespeister Startbefehl lieferte in 30 s eine aktive Sitzung mit
+    // Bildstrom. Wirft irgendetwas in dieser Kette, sieht es fuer den Nutzer
+    // aus wie ein toter Knopf.
+    try {
+      submitAddress();
+    } catch (error) {
+      console.error('[browser] Adresse absenden fehlgeschlagen', error);
+      state.notice = `Der Vorgang konnte nicht gestartet werden: ${error?.message || error}`;
+      safeLoadAndRender();
+    }
   });
   installInputHandlers(ctx, refs, state, scheduleRefresh);
   const leaseRenewTimer = globalThis.setInterval(renewControllerLeaseIfNeeded, 30_000);
@@ -839,6 +861,14 @@ function browserSessionError(session) {
 function browserSessionIsLive(session) {
   const status = String(session?.runtime_status || session?.status || '').toLowerCase();
   return status === 'active';
+}
+
+// Was die Adressleiste tun muss: navigieren oder eine neue Sitzung starten.
+// Beide Bedingungen sind noetig. Die Steuerung allein genuegt nicht — eine
+// gueltige Pacht auf einer toten Sitzung ist genau die Falle, in der die
+// Kundeninstanz vom 13.08. bis 15.08.2026 sass.
+function browserAddressAction(session, canControl) {
+  return browserSessionIsLive(session) && canControl ? 'navigate' : 'start';
 }
 
 function browserSessionNeedsStart(session) {
@@ -2394,6 +2424,12 @@ function shouldReacquireControllerLease(session, actorId, now = Date.now(), opti
   // Fremd gesteuerte Sitzungen nicht an uns reissen.
   const controller = String(session.controller_user_id || '');
   if (controller && !actorIds.includes(controller)) return false;
+  // Eine tote Sitzung braucht einen START, keine Pacht. Ohne diese Zeile hielt
+  // die Wiederbeschaffung genau den Zustand fest, den sie heilen sollte: am
+  // 15.08.2026 gemessen 259 erfolgreiche acquire in 48 h auf einer Sitzung mit
+  // status=disconnected. Die stets gueltige Pacht liess submitAddress den
+  // Navigations-Zweig waehlen und machte den Start-Zweig unerreichbar.
+  if (browserSessionNeedsStart(session)) return false;
   const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
   return !Number.isFinite(expiresAt) || expiresAt <= now;
 }
@@ -2471,6 +2507,7 @@ export const __browserTestHooks = {
   mergeRequestedDocument,
   browserSessionError,
   browserSessionIsLive,
+  browserAddressAction,
   browserSessionNeedsStart,
   browserStartErrorIsRetryable,
   newBrowserControllerLeaseId,

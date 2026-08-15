@@ -458,6 +458,10 @@ console.log('browser module pure contract smoke OK');
 assert.equal(
   __browserTestHooks.shouldReacquireControllerLease({
     id: 'browser_session_test',
+    // Der Kommentar oben haelt fest: beide Sitzungen waren "active". Das
+    // Fixture trug den Status nur nie. Seit dem 15.08.2026 ist er tragend —
+    // eine tote Sitzung braucht einen Start, keine frische Pacht.
+    status: 'active',
     controller_user_id: 'user-1',
     controller_lease_id: 'lease-1',
     controller_lease_expires_at_ms: 1_000_000,
@@ -833,4 +837,55 @@ function pointerEvent(overrides = {}) {
   // Eine ruhende Sitzung mit Anmelde-Titel ist KEIN Eingriff — da laeuft nichts,
   // worauf jemand warten koennte.
   assert.equal(z({ id: 's', runtime_status: 'ended', title: 'Login' }), 'Ruhend');
+}
+
+// --- Tote Sitzung mit gueltiger Pacht (gemessen 15.08.2026, Kundeninstanz) ---
+// Zustand, der die Adressleiste zwei Tage lang lahmlegte:
+//   status = disconnected, controller_user = der Nutzer, Pacht gueltig.
+// Die Entscheidung hing allein an der Pacht, also wurde immer navigiert —
+// an eine Sitzung, die es nicht mehr gab. Der Start-Zweig war unerreichbar.
+{
+  const toteSitzungMitPacht = {
+    id: 'browser_session_michael-welsch-metric-space-ai_1786625483977',
+    status: 'disconnected',
+    controller_user_id: 'michael.welsch@metric-space.ai',
+    controller_lease_id: '809bfc72-d13c-4a33-9b4d-7d92186e1b93',
+    controller_lease_expires_at_ms: 2_000_000_000_000,
+  };
+  const lebendeSitzung = { ...toteSitzungMitPacht, status: 'active' };
+
+  assert.equal(
+    __browserTestHooks.browserAddressAction(toteSitzungMitPacht, true),
+    'start',
+    'tote Sitzung muss in den Start-Zweig fuehren, auch mit gueltiger Pacht',
+  );
+  assert.equal(
+    __browserTestHooks.browserAddressAction(lebendeSitzung, true),
+    'navigate',
+    'lebende Sitzung mit Steuerung navigiert',
+  );
+  assert.equal(
+    __browserTestHooks.browserAddressAction(lebendeSitzung, false),
+    'start',
+    'ohne Steuerung wird eine neue Sitzung gestartet',
+  );
+  assert.equal(__browserTestHooks.browserAddressAction(null, true), 'start');
+
+  // Die Wiederbeschaffung darf eine tote Sitzung nicht warmhalten: 259
+  // erfolgreiche acquire in 48 h hielten genau den Fehlerzustand fest.
+  const abgelaufen = { ...toteSitzungMitPacht, controller_lease_expires_at_ms: 1 };
+  assert.equal(
+    __browserTestHooks.shouldReacquireControllerLease(
+      abgelaufen, ['michael.welsch@metric-space.ai'], 1_000_000,
+    ),
+    false,
+    'tote Sitzung braucht einen Start, keine neue Pacht',
+  );
+  assert.equal(
+    __browserTestHooks.shouldReacquireControllerLease(
+      { ...abgelaufen, status: 'active' }, ['michael.welsch@metric-space.ai'], 1_000_000,
+    ),
+    true,
+    'lebende Sitzung mit abgelaufener Pacht wird weiterhin zurueckgeholt',
+  );
 }
