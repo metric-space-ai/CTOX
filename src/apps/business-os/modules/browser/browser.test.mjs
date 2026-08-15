@@ -845,14 +845,27 @@ function pointerEvent(overrides = {}) {
 // Die Entscheidung hing allein an der Pacht, also wurde immer navigiert —
 // an eine Sitzung, die es nicht mehr gab. Der Start-Zweig war unerreichbar.
 {
+  // BEIDE Statusfelder, wie das echte Dokument sie traegt. Die erste Fassung
+  // dieses Fixtures kannte nur `status` — die Gegenprobe fiel dadurch im
+  // Browserlauf am 15.08.2026 durch, weil `runtime_status` in
+  // browserSessionIsLive Vorrang hat und weiter auf 'disconnected' stand.
+  // Ein Fixture, das nur ein Feld kennt, kann aus dem falschen Grund gruen sein.
   const toteSitzungMitPacht = {
     id: 'browser_session_michael-welsch-metric-space-ai_1786625483977',
     status: 'disconnected',
+    runtime_status: 'disconnected',
     controller_user_id: 'michael.welsch@metric-space.ai',
     controller_lease_id: '809bfc72-d13c-4a33-9b4d-7d92186e1b93',
     controller_lease_expires_at_ms: 2_000_000_000_000,
   };
-  const lebendeSitzung = { ...toteSitzungMitPacht, status: 'active' };
+  const lebendeSitzung = { ...toteSitzungMitPacht, status: 'active', runtime_status: 'active' };
+
+  // runtime_status hat Vorrang: 'active' allein im Statusfeld genuegt NICHT.
+  assert.equal(
+    __browserTestHooks.browserAddressAction({ ...toteSitzungMitPacht, status: 'active' }, true),
+    'start',
+    'runtime_status=disconnected schlaegt status=active — sonst navigiert man in eine Leiche',
+  );
 
   assert.equal(
     __browserTestHooks.browserAddressAction(toteSitzungMitPacht, true),
@@ -883,7 +896,8 @@ function pointerEvent(overrides = {}) {
   );
   assert.equal(
     __browserTestHooks.shouldReacquireControllerLease(
-      { ...abgelaufen, status: 'active' }, ['michael.welsch@metric-space.ai'], 1_000_000,
+      { ...lebendeSitzung, controller_lease_expires_at_ms: 1 },
+      ['michael.welsch@metric-space.ai'], 1_000_000,
     ),
     true,
     'lebende Sitzung mit abgelaufener Pacht wird weiterhin zurueckgeholt',
