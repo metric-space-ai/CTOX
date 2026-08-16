@@ -291,6 +291,13 @@ Rollout-Zwischenstand vom 16.08.2026:
   `duplicate_service_polls_are_suppressed_until_dirty_or_ttl` mit exakt `1/1`
   Treffern grün. `cargo fmt --all -- --check` ist ebenfalls grün. Rollout und
   erneute Kurzprobe stehen noch aus.
+- Der nächste Rollout wird ausschließlich aus dem isolierten Snapshot
+  `/Volumes/tmp/ctox-idle-b41cc74ca.vu2vmY` von Commit `b41cc74ca` gebaut.
+  Das zugehörige Archiv
+  `/Volumes/tmp/ctox-idle-b41cc74ca.vu2vmY.tar` hat SHA-256
+  `de7bcbb0390550fb7d87b89efcde9562b9710df0bebaf87b49e3dc115d08e3da`;
+  die extrahierte Quelle enthält das geprüfte Outbox-Gate. Fremde
+  Arbeitsbaumänderungen sind damit weiterhin vom Release ausgeschlossen.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
