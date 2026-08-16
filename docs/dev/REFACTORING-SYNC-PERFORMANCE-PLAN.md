@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | ja | finaler Release aktiv; drei Hotspots gezielt getestet | nein | Kurz- und Ein-Stunden-Probe offen |
+| Idle-CPU des Dienstes | ja | finaler Release aktiv; Korrektheitsgates grün, CPU-Kurzprobe noch rot | nein | periodischen Rest-Peak beheben; Kurz- und Ein-Stunden-Probe wiederholen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -202,8 +202,34 @@ Rollout-Zwischenstand vom 16.08.2026:
   Der neue Dienst läuft unter der von `launchd` überwachten PID `45237`, ist
   nicht beschäftigt und hat weder wartende Tasks noch aktive Worker. Der
   native Peer hat einen frischen Heartbeat, keine Health-Fehler und meldet
-  ohne Browser korrekt `replicationUp=false`. Formale Kurz- und
-  Ein-Stunden-Messung bleiben offen.
+  ohne Browser korrekt `replicationUp=false`.
+- Die erste formale 30-Sekunden-Messung dieses finalen Releases lief nach
+  Abschluss der Startphase gegen PID `45237`. OA-6 ist dabei betrieblich
+  sauber: Kandidatenmenge und offene Intake-Fehler blieben null, der
+  vollständige Command-Revisionshash blieb unverändert und die RxDB-Idle-Ticks
+  stiegen. Das CPU-Tor ist knapp rot: 5,68 % Prozess-CPU über die Messdauer bei
+  p50 0,9 %, p95/Maximum 45,7 %. Damit ist kein Dauer-Spin mehr vorhanden,
+  aber ein periodischer Rest-Peak muss vor der Ein-Stunden-Abnahme noch
+  lokalisiert und behoben werden. Die Rohmessung liegt vorerst unter
+  `/tmp/ctox-idle-probes/idle-30s-60ff9c957.json` und wird erst zusammen mit
+  dem bestandenen finalen Nachweis versioniert.
+- Ein anschließender 30-Sekunden-Stack-Sample hat den periodischen Rest-Peak
+  vollständig aufgelöst: Ein unverändertes `detected`-Harness-Finding erzwang
+  alle fünf Minuten einen vollständigen Audit-/Conformance-Replay von rund
+  12,8 Sekunden. Parallel öffnete der AppSec-Poller alle zehn Sekunden die
+  Kerndatenbank neu; allein das erneute SQLite-Schema-Parsing beanspruchte in
+  der Stichprobe rund 0,7 bis 0,9 Sekunden.
+- Der Projection-Clock der Queue wird nun über eine thread-lokale
+  Read-only-Verbindung gelesen. Der Cache ist an kanonischen Pfad,
+  Dateisystem-Gerät und Inode gebunden, beobachtet WAL-Commits weiter und wird
+  bei Datenbankaustausch oder Abfragefehler neu geöffnet. Unveränderte
+  Harness-Findings werden nach dem ersten Lauf anhand ihres exakten
+  Quellstempels bis zum einstündigen Safety-Audit übersprungen; neue oder
+  geänderte Auditquellen öffnen das Gate weiterhin beim nächsten Tick.
+- Commit `b42c55efa` enthält beide Korrekturen. Die gezielten
+  Regressionstests sind jeweils 1/1 grün; außerdem ist
+  `cargo fmt --all -- --check` grün. Isolierter Rollout und erneute
+  CPU-Abnahme stehen als nächster Schritt an.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
@@ -418,6 +444,7 @@ Kein Commit darf:
 | `f9017f579` | redundanten teuren Idle-Queue-Poll begrenzen |
 | `071fda4bc` | reproduzierbaren Dauer-Idle-Probe ergänzen |
 | `0a4ab13b2` | irrelevantes Modul-Asset-Hashing im External-SQL-Idle-Poll vermeiden |
+| `b42c55efa` | Projection-Clock-Verbindung wiederverwenden und unveränderte Harness-Findings bis zum Safety-Audit schlafen lassen |
 | `07c2ef0ca` | nachweislich transiente Intake-Failures konservativ auflösen |
 | `43889102a` | Knowledge-Katalog über eine SQLite-Verbindung aufbauen |
 
@@ -437,16 +464,18 @@ Kein Commit darf:
 
 ## Nächste Ausführungsreihenfolge
 
-1. Kurzprobe und einstündige Idle-Nachhermessung mit dem finalen Release
-   durchführen und als Rohdaten versionieren.
-2. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
-3. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
-4. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
-5. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
-6. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
+1. Periodischen Idle-Rest-Peak des Releases `idle-cpu-60ff9c957` lokalisieren,
+   beheben und aus einem isolierten Snapshot ausrollen.
+2. Kurzprobe und einstündige Idle-Nachhermessung mit dem danach finalen
+   Release durchführen und als Rohdaten versionieren.
+3. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
+4. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
+5. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
+6. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
+7. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
    bereinigen, ohne Budgets anzuheben.
-7. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
-8. OA-7-Kompaktierung im exklusiven Wartungsfenster.
+8. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
+9. OA-7-Kompaktierung im exklusiven Wartungsfenster.
 
 ## Definition of Done
 
