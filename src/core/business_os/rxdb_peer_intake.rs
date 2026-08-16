@@ -17,7 +17,13 @@ use super::rxdb_peer_browser::{
 use super::rxdb_peer_commands::{
     command_id_from_document, incremental_upsert_document_with_envelope,
     project_appsec_command_result, project_support_command_result, project_threads_command_result,
-    typed_app_action_error_code,
+};
+use super::rxdb_peer_intake_state::{
+    business_command_document_is_terminal, resolve_business_command_intake_failure_history,
+    PendingBusinessCommandIntakeOutcome,
+};
+pub(super) use super::rxdb_peer_intake_state::{
+    is_transient_business_command_store_error, transient_business_command_retry_document,
 };
 use super::rxdb_peer_projections::{
     record_native_peer_loop_result, BUSINESS_COMMANDS_LOOP_METRICS,
@@ -33,15 +39,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
-
-/// Je Prozesslauf einmal melden, dass ein Command mit erschoepftem
-/// Intake-Fehler uebersprungen wird — sonst ersetzt die Meldung die Schleife,
-/// die sie beschreibt.
-static LOGGED_EXHAUSTED_BUSINESS_COMMAND_SKIPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BusinessCommandsSourceStamp {
@@ -60,6 +59,9 @@ pub(super) async fn business_commands_source_change(
     last_source_stamp: &mut Option<BusinessCommandsSourceStamp>,
 ) -> anyhow::Result<Option<BusinessCommandsSourceStamp>> {
     let source_stamp = business_commands_source_stamp(root).await?;
+    if last_source_stamp.as_ref() == Some(&source_stamp) {
+        return Ok(None);
+    }
     if source_stamp.table.pending_count == 0 {
         *last_source_stamp = Some(source_stamp);
         return Ok(None);
@@ -184,21 +186,21 @@ pub(super) async fn consume_business_commands_loop(root: PathBuf, database: Arc<
             }
             Ok(_) => {
                 consecutive_idle_rounds = 0;
+                // Drain an already-arrived burst without imposing the former
+                // one-second post-command sleep.  Once the queue is empty the
+                // table-change notifier below becomes the bounded idle wait.
+                continue;
             }
             Err(err) => {
                 consecutive_idle_rounds = 0;
                 eprintln!("[business-os] native rxdb command consumer failed: {err:#}");
             }
         }
-        // The current empty result has already incremented the counter. Base
-        // the wait on prior idle rounds so the first observed empty poll keeps
-        // the active cadence before the event-driven 30-second fallback.
-        wait_for_business_command_wake(
-            &root,
-            last_source_stamp.as_ref(),
-            consecutive_idle_rounds.saturating_sub(1),
-        )
-        .await;
+        // The current empty result has already incremented the counter. Enter
+        // the event-driven wait immediately; its timeout is only a bounded
+        // fallback when the SQLite notifier is unavailable.
+        wait_for_business_command_wake(&root, last_source_stamp.as_ref(), consecutive_idle_rounds)
+            .await;
     }
 }
 
@@ -275,40 +277,6 @@ pub(super) async fn consume_pending_business_commands(
     let rows = pending_business_command_documents(root, 25)
         .await
         .context("load pending business_commands from RxDB SQLite")?;
-    // Commands mit erschoepftem, unaufgeloestem Intake-Fehler bleiben im
-    // Kandidatenfenster haengen: der Claim scheitert jede Runde am
-    // Idempotenz-Konflikt, der Replay stempelt den Envelope neu, und der
-    // Status bleibt genau so, dass die naechste Runde sie wieder aufgreift.
-    // Auf einer Kundeninstanz liefen so sechs Dokumente lautlos mit 93
-    // Revisionen je Minute weiter. Sie werden uebersprungen, bis der
-    // Intake-Fehler aufgeloest ist.
-    let exhausted_command_ids = unresolved_exhausted_business_command_ids(root)
-        .await
-        .context("load exhausted business command intake failures")?;
-    let rows = rows
-        .into_iter()
-        .filter(|document| {
-            let command_id = document
-                .get("command_id")
-                .or_else(|| document.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !exhausted_command_ids.contains(command_id) {
-                return true;
-            }
-            let logged =
-                LOGGED_EXHAUSTED_BUSINESS_COMMAND_SKIPS.get_or_init(|| Mutex::new(HashSet::new()));
-            let mut logged = logged
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if logged.insert(command_id.to_string()) {
-                eprintln!(
-                    "[business-os] skipping business command `{command_id}` with unresolved exhausted intake failure"
-                );
-            }
-            false
-        })
-        .collect::<Vec<_>>();
     let pending_count = rows.len();
     for document in rows {
         COMMAND_PLANE_METRICS.record_attempt();
@@ -320,29 +288,24 @@ pub(super) async fn consume_pending_business_commands(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        match accept_pending_business_command(root, database, document.clone()).await {
+        let intake_result =
+            match accept_pending_business_command(root, database, document.clone()).await {
+                Ok(PendingBusinessCommandIntakeOutcome::Accepted)
+                | Ok(PendingBusinessCommandIntakeOutcome::Terminalized) => Ok(()),
+                Ok(PendingBusinessCommandIntakeOutcome::CanonicalReplayed) => Err(anyhow::anyhow!(
+                    "canonical command replay remained nonterminal"
+                )),
+                Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure { error }) => {
+                    Err(anyhow::anyhow!(error))
+                }
+                Err(error) => Err(error),
+            };
+        match intake_result {
             Ok(()) => {
                 COMMAND_PLANE_METRICS.record_processed(&document);
                 if !command_id.is_empty() {
                     accept_failures.remove(&command_id);
-                    let resolve_root = root.to_path_buf();
-                    let resolved_command_id = command_id.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        store::resolve_business_command_intake_failures(
-                            &resolve_root,
-                            &resolved_command_id,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => eprintln!(
-                            "[business-os] resolving intake failure history for `{command_id}` failed: {error:#}"
-                        ),
-                        Err(error) => eprintln!(
-                            "[business-os] joining intake failure resolution for `{command_id}` failed: {error}"
-                        ),
-                    }
+                    resolve_business_command_intake_failure_history(root, &command_id).await;
                 }
             }
             Err(err) => {
@@ -443,11 +406,11 @@ pub(super) async fn consume_pending_business_commands(
                         .exhausted_total
                         .fetch_add(1, Ordering::Relaxed);
                     accept_failures.remove(&command_id);
-                    let canonical_failure_created = persisted_failure
-                        .get("canonical_failure_created")
+                    let terminal_projection_ready = persisted_failure
+                        .get("terminal_projection_ready")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    if canonical_failure_created {
+                    if terminal_projection_ready {
                         let failed_patch = persisted_failure
                             .get("failure_document")
                             .cloned()
@@ -465,6 +428,9 @@ pub(super) async fn consume_pending_business_commands(
                             eprintln!(
                                 "[business-os] marking command `{command_id}` failed did not stick: {write_err}"
                             );
+                        } else {
+                            resolve_business_command_intake_failure_history(root, &command_id)
+                                .await;
                         }
                     } else if persisted_failure
                         .get("canonical_exists")
@@ -496,65 +462,6 @@ pub(super) async fn consume_pending_business_commands(
         }
     }
     Ok(pending_count)
-}
-
-pub(super) async fn unresolved_exhausted_business_command_ids(
-    root: &Path,
-) -> anyhow::Result<HashSet<String>> {
-    let root = root.to_path_buf();
-    tokio::task::spawn_blocking(move || unresolved_exhausted_business_command_ids_sync(&root))
-        .await
-        .context("join exhausted business command intake failure load")?
-}
-
-pub(super) fn unresolved_exhausted_business_command_ids_sync(
-    root: &Path,
-) -> anyhow::Result<HashSet<String>> {
-    let path = crate::paths::core_db(root);
-    if !path.exists() {
-        return Ok(HashSet::new());
-    }
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| {
-        format!(
-            "open channel DB for exhausted business command intake failures {}",
-            path.display()
-        )
-    })?;
-    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
-        .context("configure exhausted business command intake failure busy_timeout")?;
-    let table_exists = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'business_command_intake_failures'
-             LIMIT 1",
-            [],
-            |_| Ok(()),
-        )
-        .optional()
-        .context("check business_command_intake_failures table")?
-        .is_some();
-    if !table_exists {
-        return Ok(HashSet::new());
-    }
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT command_id
-             FROM business_command_intake_failures
-             WHERE resolved_at_ms IS NULL AND exhausted = 1",
-        )
-        .context("prepare exhausted business command intake failure query")?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .context("query exhausted business command intake failures")?;
-    let mut command_ids = HashSet::new();
-    for row in rows {
-        command_ids.insert(row.context("read exhausted business command id")?);
-    }
-    Ok(command_ids)
 }
 
 pub(super) async fn pending_business_command_documents(
@@ -646,7 +553,7 @@ pub(super) async fn accept_pending_business_command(
     root: &Path,
     database: &Arc<RxDatabase>,
     document: Value,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PendingBusinessCommandIntakeOutcome> {
     let command_type = document
         .get("command_type")
         .or_else(|| document.get("type"))
@@ -673,8 +580,9 @@ pub(super) async fn accept_pending_business_command(
             eprintln!("[business-os] browser runtime command failed: {err:#}");
             mark_browser_runtime_command_failed(database, &command_id, &command_payload, &err)
                 .await?;
+            return Ok(PendingBusinessCommandIntakeOutcome::Terminalized);
         }
-        return Ok(());
+        return Ok(PendingBusinessCommandIntakeOutcome::Accepted);
     }
 
     let root = root.to_path_buf();
@@ -696,48 +604,20 @@ pub(super) async fn accept_pending_business_command(
     let mut accepted = match accepted_result {
         Ok(Ok(val)) => val,
         Ok(Err(err)) if is_transient_business_command_store_error(&err) => {
-            return Err(err).context("transient native business command store contention");
+            return Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure {
+                error: format!("transient native business command store contention: {err:#}"),
+            });
         }
         Ok(Err(err)) => {
             eprintln!("[business-os] native business command store execution failed: {err:#}");
-            let command_id = document
-                .get("command_id")
-                .or_else(|| document.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if !command_id.is_empty() {
-                let commands = database
-                    .collection("business_commands")
-                    .context("business_commands collection is not registered")?;
-                let mut next = if document.is_object() {
-                    document.clone()
-                } else {
-                    json!({ "id": command_id, "command_id": command_id })
-                };
-                if let Some(obj) = next.as_object_mut() {
-                    let error_message = err.to_string();
-                    obj.insert("status".to_string(), Value::String("failed".to_string()));
-                    obj.insert("error".to_string(), Value::String(error_message.clone()));
-                    if let Some(code) = typed_app_action_error_code(&error_message) {
-                        obj.insert("error_code".to_string(), Value::String(code.to_owned()));
-                    }
-                    obj.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
-                }
-                incremental_upsert_document_with_envelope(
-                    &commands,
-                    next,
-                    "failed business_command",
-                )
-                .await
-                .map_err(|err| {
-                    anyhow::anyhow!("upsert failed business_command {command_id}: {err}")
-                })?;
-            }
-            return Ok(());
+            return Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure {
+                error: format!("native business command store execution failed: {err:#}"),
+            });
         }
         Err(err) => {
-            return Err(err.into());
+            return Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure {
+                error: format!("joining native business command store execution failed: {err}"),
+            });
         }
     };
 
@@ -824,7 +704,11 @@ pub(super) async fn accept_pending_business_command(
             )
             .await?;
         }
-        return Ok(());
+        return Ok(if business_command_document_is_terminal(&accepted) {
+            PendingBusinessCommandIntakeOutcome::Terminalized
+        } else {
+            PendingBusinessCommandIntakeOutcome::CanonicalReplayed
+        });
     }
 
     let commands = database
@@ -839,7 +723,7 @@ pub(super) async fn accept_pending_business_command(
         && !existing_status.is_empty()
         && existing_status != "pending_sync"
     {
-        return Ok(());
+        return Ok(PendingBusinessCommandIntakeOutcome::CanonicalReplayed);
     }
     let mut next = if document.is_object() {
         document.clone()
@@ -1058,7 +942,11 @@ pub(super) async fn accept_pending_business_command(
             }
         }
     }
-    Ok(())
+    Ok(if business_command_document_is_terminal(&accepted) {
+        PendingBusinessCommandIntakeOutcome::Terminalized
+    } else {
+        PendingBusinessCommandIntakeOutcome::Accepted
+    })
 }
 
 pub(super) fn enrich_native_command_lifecycle(
@@ -1155,51 +1043,4 @@ pub(super) fn enrich_native_command_lifecycle(
         object.insert("retryable".to_string(), Value::Bool(false));
     }
     crate::command_lifecycle::validate_document(document).map_err(|error| anyhow::anyhow!(error))
-}
-
-pub(super) fn is_transient_business_command_store_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}").to_ascii_lowercase();
-    [
-        "database is locked",
-        "database table is locked",
-        "sqlite_busy",
-        "cannot promote read transaction",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
-pub(super) fn transient_business_command_retry_document(
-    document: &Value,
-    error_message: &str,
-    attempt: u32,
-) -> Option<Value> {
-    let command_type = document
-        .get("command_type")
-        .or_else(|| document.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !store::is_recoverable_background_control_command_type(command_type) {
-        return None;
-    }
-    let mut retry = document.clone();
-    let object = retry.as_object_mut()?;
-    object.insert(
-        "status".to_string(),
-        Value::String("pending_sync".to_string()),
-    );
-    object.insert(
-        "task_status".to_string(),
-        Value::String("pending_sync".to_string()),
-    );
-    object.insert("retryable".to_string(), Value::Bool(true));
-    object.insert("retry_attempt".to_string(), Value::from(attempt));
-    object.insert(
-        "last_retry_error".to_string(),
-        Value::String(error_message.to_string()),
-    );
-    object.remove("error");
-    object.remove("error_code");
-    object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
-    Some(retry)
 }

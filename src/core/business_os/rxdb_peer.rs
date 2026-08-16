@@ -9556,7 +9556,7 @@ pub(in crate::business_os) mod tests {
     }
 
     #[test]
-    fn exhausted_conflicting_command_is_not_rewritten_or_recorded_again() {
+    fn exhausted_conflicting_command_projects_one_terminal_conflict_and_leaves_intent_immutable() {
         let root = tempfile::tempdir().expect("temp root");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -9629,15 +9629,23 @@ pub(in crate::business_os) mod tests {
                 );
             }
 
-            let before = commands
-                .find_one(Some(MangoQuery {
-                    selector: Some(json!({"id": {"$eq": command_id}})),
-                    ..Default::default()
-                }))
-                .expect("before query")
-                .exec(false)
-                .await
-                .expect("before document");
+            let persisted_command = || {
+                let conn = Connection::open(store::rxdb_store_path(root.path()))
+                    .expect("open persisted RxDB command store");
+                let table = latest_rxdb_collection_table(&conn, "business_commands")
+                    .expect("resolve persisted command table")
+                    .expect("persisted command table exists");
+                let table = sqlite_quote_identifier(&table);
+                let raw: String = conn
+                    .query_row(
+                        &format!("SELECT data FROM {table} WHERE id = ?1"),
+                        params![command_id],
+                        |row| row.get(0),
+                    )
+                    .expect("load persisted command projection");
+                serde_json::from_str::<Value>(&raw).expect("parse persisted command projection")
+            };
+            let before = persisted_command();
             let before_revision = before
                 .get("_rev")
                 .and_then(Value::as_str)
@@ -9664,8 +9672,14 @@ pub(in crate::business_os) mod tests {
                 consume_pending_business_commands(root.path(), &database, &mut HashMap::new())
                     .await
                     .expect("first exhausted sweep"),
-                0
+                1
             );
+            let after_first = persisted_command();
+            let terminal_revision = after_first
+                .get("_rev")
+                .and_then(Value::as_str)
+                .expect("terminal revision")
+                .to_string();
             assert_eq!(
                 consume_pending_business_commands(root.path(), &database, &mut HashMap::new())
                     .await
@@ -9673,51 +9687,56 @@ pub(in crate::business_os) mod tests {
                 0
             );
 
-            let after = commands
-                .find_one(Some(MangoQuery {
-                    selector: Some(json!({"id": {"$eq": command_id}})),
-                    ..Default::default()
-                }))
-                .expect("after query")
-                .exec(false)
-                .await
-                .expect("after document");
+            let after = persisted_command();
             assert_eq!(
                 after.get("_rev").and_then(Value::as_str),
-                Some(before_revision.as_str()),
-                "exhausted replay must produce no RxDB write"
+                Some(terminal_revision.as_str()),
+                "terminal conflict projection must remain stable after the first write"
             );
+            assert_ne!(
+                after.get("_rev").and_then(Value::as_str),
+                Some(before_revision.as_str()),
+                "the first exhausted sweep must publish the terminal conflict"
+            );
+            assert_eq!(after["status"], "failed");
+            assert_eq!(after["terminal_status"], "failed");
+            assert_eq!(after["retryable"], false);
+            assert_eq!(after["error_code"], "idempotency_conflict");
             assert_eq!(
                 failure_count(),
-                before_failure_count,
-                "exhausted replay must produce no new intake failure row"
+                0,
+                "history resolves only after the terminal conflict is projected"
             );
-
-            let repeated = store::record_business_command_intake_failure(
-                root.path(),
-                &failed_command,
-                "idempotency_conflict: observed again",
-                BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET,
-            )
-            .expect("observe exhausted intake failure again");
+            let conn = Connection::open(crate::paths::core_db(root.path()))
+                .expect("open canonical command database");
+            let canonical_intent: String = conn
+                .query_row(
+                    "SELECT intent_json FROM business_command_aggregates WHERE command_id = ?1",
+                    params![command_id],
+                    |row| row.get(0),
+                )
+                .expect("load canonical intent");
+            let canonical_intent: Value =
+                serde_json::from_str(&canonical_intent).expect("parse canonical intent");
             assert_eq!(
-                repeated.get("attempt").and_then(Value::as_u64),
-                Some(BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET as u64)
+                canonical_intent.pointer("/payload/source_id"),
+                Some(&Value::String("canonical".to_string())),
+                "the conflicting replicated payload must not mutate the canonical intent"
             );
-            assert_eq!(failure_count(), before_failure_count);
         });
     }
 
     #[test]
     fn business_command_poll_sleep_backs_off_after_idle_round() {
-        let first_empty_round = 1u32;
         assert_eq!(
-            business_command_poll_sleep_secs(first_empty_round.saturating_sub(1)),
-            BUSINESS_COMMAND_ACTIVE_POLL_SECS
+            business_command_poll_sleep_secs(0),
+            BUSINESS_COMMAND_ACTIVE_POLL_SECS,
+            "active work may retain the short fallback"
         );
         assert_eq!(
             business_command_poll_sleep_secs(1),
-            BUSINESS_COMMAND_IDLE_POLL_SECS
+            BUSINESS_COMMAND_IDLE_POLL_SECS,
+            "the first empty round enters the event-driven idle wait"
         );
         assert_eq!(
             business_command_poll_sleep_secs(u32::MAX),
@@ -9792,7 +9811,8 @@ pub(in crate::business_os) mod tests {
                 business_commands_source_change(root.path(), &mut last_source_stamp)
                     .await
                     .expect("pending command source stamp after refresh")
-                    .is_some()
+                    .is_none(),
+                "an unchanged pending command must not hot-loop after its source stamp was committed"
             );
 
             commands

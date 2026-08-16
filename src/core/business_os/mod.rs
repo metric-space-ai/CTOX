@@ -27,6 +27,7 @@ mod rxdb_peer_commands;
 mod rxdb_peer_demand_files;
 mod rxdb_peer_desktop_files;
 mod rxdb_peer_intake;
+mod rxdb_peer_intake_state;
 mod rxdb_peer_projections;
 mod rxdb_peer_tombstones;
 pub mod server;

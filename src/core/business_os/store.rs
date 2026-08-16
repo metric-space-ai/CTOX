@@ -28128,13 +28128,16 @@ pub(super) mod tests {
             Some("failed")
         );
 
-        let conn = open_store(root.path())?;
-        let status = conn.query_row(
+        let projection_conn = open_store(root.path())?;
+        let status = projection_conn.query_row(
             "SELECT status FROM business_commands WHERE command_id = ?1",
             params!["cmd_intake_failure"],
             |row| row.get::<_, String>(0),
         )?;
         assert_eq!(status, "failed");
+        drop(projection_conn);
+
+        let conn = Connection::open(crate::paths::core_db(root.path()))?;
         let open_failures = conn.query_row(
             "SELECT COUNT(*) FROM business_command_intake_failures
              WHERE command_id = ?1 AND resolved_at_ms IS NULL",
@@ -28144,24 +28147,217 @@ pub(super) mod tests {
         assert_eq!(open_failures, 2);
         drop(conn);
 
-        let diagnostics = business_command_diagnostics(root.path())?;
+        let diagnostics = channels::business_command_core_diagnostics(root.path())?;
         assert_eq!(
             diagnostics
-                .pointer("/intake_failures/exhausted_count")
+                .get("exhausted_intake_failures")
                 .and_then(Value::as_u64),
             Some(1)
-        );
-        assert_eq!(
-            diagnostics
-                .pointer("/projections/canonical_without_projection")
-                .and_then(Value::as_u64),
-            Some(0)
         );
 
         assert_eq!(
             resolve_business_command_intake_failures(root.path(), "cmd_intake_failure")?,
             2
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_intake_failure_terminalizes_existing_aggregate_once() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let command_id = "cmd_existing_intake_failure";
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some(command_id.to_string()),
+            module: "web_stack".to_string(),
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some("person-1".to_string()),
+            payload: serde_json::json!({"person_id": "person-1"}),
+            client_context: serde_json::json!({}),
+        };
+        let claim = business_command_core_claim(command_id, &command)?;
+        let document = claim.intent.clone();
+        let initial = channels::claim_business_control_command(root.path(), claim)?;
+        assert_eq!(initial.disposition, "new");
+
+        let first =
+            record_business_command_intake_failure(root.path(), &document, "first failure", 2)?;
+        assert_eq!(first.get("attempt").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            first
+                .get("terminal_projection_ready")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let exhausted =
+            record_business_command_intake_failure(root.path(), &document, "second failure", 2)?;
+        assert_eq!(
+            exhausted.get("canonical_exists").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            exhausted
+                .get("canonical_failure_created")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            exhausted
+                .pointer("/failure_document/execution_phase")
+                .and_then(Value::as_str),
+            Some("terminal")
+        );
+        assert_eq!(
+            exhausted
+                .pointer("/failure_document/retryable")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let conn = Connection::open(crate::paths::core_db(root.path()))?;
+        let aggregate = conn.query_row(
+            "SELECT execution_phase, terminal_status, attempt, projection_version, retryable
+             FROM business_command_aggregates WHERE command_id = ?1",
+            params![command_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            aggregate,
+            ("terminal".to_string(), "failed".to_string(), 2, 2, false)
+        );
+        let transition_count = conn.query_row(
+            "SELECT COUNT(*) FROM business_command_transitions
+             WHERE command_id = ?1 AND reason = 'native intake retry budget exhausted'",
+            params![command_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        assert_eq!(transition_count, 1);
+        drop(conn);
+
+        let repeated =
+            record_business_command_intake_failure(root.path(), &document, "observed again", 2)?;
+        assert_eq!(repeated.get("attempt").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            repeated
+                .get("canonical_already_terminal")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            repeated
+                .get("canonical_failure_created")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        let conn = Connection::open(crate::paths::core_db(root.path()))?;
+        let transition_count = conn.query_row(
+            "SELECT COUNT(*) FROM business_command_transitions
+             WHERE command_id = ?1 AND reason = 'native intake retry budget exhausted'",
+            params![command_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        assert_eq!(transition_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn customer_intake_pattern_reaches_budget_for_six_existing_aggregates() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let retry_budget = 5;
+        for index in 0..6 {
+            let command_id = format!("cmd_customer_intake_{index}");
+            let command = BusinessCommand {
+                origin: CommandOrigin::TrustedLocal,
+                id: Some(command_id.clone()),
+                module: "web_stack".to_string(),
+                command_type: "web_stack.person_research".to_string(),
+                record_id: Some(format!("person-{index}")),
+                payload: serde_json::json!({"person_id": format!("person-{index}")}),
+                client_context: serde_json::json!({}),
+            };
+            let claim = business_command_core_claim(&command_id, &command)?;
+            let mut document = claim.intent.clone();
+            document["status"] = Value::String("failed".to_string());
+            document["execution_phase"] = Value::String("native_observed".to_string());
+            document["terminal_status"] = Value::String("none".to_string());
+            document["retryable"] = Value::Bool(true);
+            assert_eq!(
+                channels::claim_business_control_command(root.path(), claim)?.disposition,
+                "new"
+            );
+
+            // Reproduce the live store: each of the six documents already had
+            // one or two unresolved failures, but none had reached the budget.
+            let seeded_attempts = 1 + (index % 2);
+            for attempt in 1..=seeded_attempts {
+                let seeded = record_business_command_intake_failure(
+                    root.path(),
+                    &document,
+                    "seeded customer intake failure",
+                    retry_budget,
+                )?;
+                assert_eq!(seeded["attempt"], Value::from(attempt));
+                assert_eq!(seeded["exhausted"], Value::Bool(false));
+            }
+
+            let terminal = loop {
+                let failure = record_business_command_intake_failure(
+                    root.path(),
+                    &document,
+                    "replayed customer intake failure",
+                    retry_budget,
+                )?;
+                if failure["exhausted"] == Value::Bool(true) {
+                    break failure;
+                }
+            };
+            assert_eq!(terminal["attempt"], Value::from(retry_budget));
+            assert_eq!(terminal["canonical_failure_created"], Value::Bool(true));
+            assert_eq!(terminal["failure_document"]["execution_phase"], "terminal");
+            assert_eq!(terminal["failure_document"]["terminal_status"], "failed");
+            assert_eq!(terminal["failure_document"]["retryable"], false);
+            assert_eq!(
+                resolve_business_command_intake_failures(root.path(), &command_id)?,
+                retry_budget as usize
+            );
+        }
+
+        let conn = Connection::open(crate::paths::core_db(root.path()))?;
+        let terminal_aggregates: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_command_aggregates
+             WHERE command_id LIKE 'cmd_customer_intake_%'
+               AND execution_phase = 'terminal' AND terminal_status = 'failed' AND retryable = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(terminal_aggregates, 6);
+        let transitions: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_command_transitions
+             WHERE command_id LIKE 'cmd_customer_intake_%'
+               AND reason = 'native intake retry budget exhausted'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            transitions, 6,
+            "exactly one terminal transition per command"
+        );
+        let open_failures: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_command_intake_failures
+             WHERE command_id LIKE 'cmd_customer_intake_%' AND resolved_at_ms IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(open_failures, 0);
         Ok(())
     }
 

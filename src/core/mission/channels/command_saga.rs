@@ -2055,96 +2055,129 @@ pub(crate) fn record_business_command_intake_failure(
             |row| row.get::<_, u32>(0),
         )
         .optional()?;
-    if let Some(attempt) = existing_exhausted_attempt {
-        let now_ms = epoch_millis();
+    let now_ms = epoch_millis();
+    let (attempt, exhausted) = if let Some(attempt) = existing_exhausted_attempt {
         tx.execute(
             "UPDATE business_command_intake_failures
              SET observed_at_ms = ?3, error_message = ?4
              WHERE command_id = ?1 AND attempt = ?2 AND resolved_at_ms IS NULL AND exhausted = 1",
             params![claim.command_id, attempt, now_ms, error_message],
         )?;
-        let canonical_exists = tx
-            .query_row(
-                "SELECT 1 FROM business_command_aggregates WHERE command_id = ?1",
-                params![claim.command_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        tx.commit()?;
-        return Ok(json!({
-            "command_id": claim.command_id,
-            "attempt": attempt,
-            "exhausted": true,
-            "canonical_exists": canonical_exists,
-            "canonical_failure_created": false,
-            "failure_document": claim.intent,
-        }));
-    }
-    let attempt = tx.query_row(
-        "SELECT COALESCE(MAX(attempt), 0) + 1
-         FROM business_command_intake_failures
-         WHERE command_id = ?1 AND resolved_at_ms IS NULL",
-        params![claim.command_id],
-        |row| row.get::<_, u32>(0),
-    )?;
-    let exhausted = attempt >= retry_budget.max(1);
-    let now_ms = epoch_millis();
-    tx.execute(
-        "INSERT INTO business_command_intake_failures
-            (command_id, attempt, error_message, exhausted, observed_at_ms, resolved_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-        params![
-            claim.command_id,
-            attempt,
-            error_message,
-            if exhausted { 1 } else { 0 },
-            now_ms,
-        ],
-    )?;
-    let canonical_exists = tx
-        .query_row(
-            "SELECT 1 FROM business_command_aggregates WHERE command_id = ?1",
+        (attempt, true)
+    } else {
+        let attempt = tx.query_row(
+            "SELECT COALESCE(MAX(attempt), 0) + 1
+             FROM business_command_intake_failures
+             WHERE command_id = ?1 AND resolved_at_ms IS NULL",
             params![claim.command_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    let canonical_failure_created = exhausted && !canonical_exists;
-    if canonical_failure_created {
+            |row| row.get::<_, u32>(0),
+        )?;
+        let exhausted = attempt >= retry_budget.max(1);
         tx.execute(
-            "INSERT INTO business_command_aggregates
-                (command_id, idempotency_key, payload_hash, module, command_type, record_id,
-                 execution_mode, execution_phase, terminal_status, attempt, projection_version,
-                 intent_json, result_json, error_code, error_message, retryable,
-                 created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'control', 'terminal', 'failed', ?7, 1,
-                     ?8, ?9, 'native_unavailable', ?10, 0, ?11, ?12)",
+            "INSERT INTO business_command_intake_failures
+                (command_id, attempt, error_message, exhausted, observed_at_ms, resolved_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
             params![
                 claim.command_id,
-                claim.idempotency_key,
-                claim.payload_hash,
-                claim.module,
-                claim.command_type,
-                claim.record_id,
                 attempt,
-                serde_json::to_string(&claim.intent)?,
-                serde_json::to_string(&json!({
-                    "ok": false,
-                    "error_code": "native_unavailable",
-                    "error_message": error_message,
-                }))?,
                 error_message,
-                claim.created_at_ms,
+                if exhausted { 1 } else { 0 },
                 now_ms,
             ],
         )?;
+        (attempt, exhausted)
+    };
+    let canonical = tx
+        .query_row(
+            "SELECT idempotency_key, payload_hash, execution_phase, terminal_status,
+                    projection_version
+             FROM business_command_aggregates WHERE command_id = ?1",
+            params![claim.command_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let canonical_exists = canonical.is_some();
+    let idempotency_conflict =
+        canonical
+            .as_ref()
+            .is_some_and(|(idempotency_key, payload_hash, _, _, _)| {
+                idempotency_key != &claim.idempotency_key || payload_hash != &claim.payload_hash
+            });
+    let canonical_already_terminal =
+        canonical
+            .as_ref()
+            .is_some_and(|(_, _, phase, terminal_status, _)| {
+                phase == "terminal" || terminal_status != "none"
+            });
+    let mut canonical_failure_created = false;
+    let mut next_projection_version = 1_i64;
+    let mut prior_phase = "native_observed".to_string();
+    if exhausted && !idempotency_conflict && !canonical_already_terminal {
+        let failure_result = json!({
+            "ok": false,
+            "error_code": "native_unavailable",
+            "error_message": error_message,
+        });
+        if let Some((_, _, phase, _, projection_version)) = canonical.as_ref() {
+            prior_phase = phase.clone();
+            next_projection_version = projection_version.saturating_add(1);
+            tx.execute(
+                "UPDATE business_command_aggregates
+                 SET execution_phase = 'terminal', terminal_status = 'failed', attempt = ?2,
+                     projection_version = ?3, result_json = ?4,
+                     error_code = 'native_unavailable', error_message = ?5,
+                     retryable = 0, updated_at_ms = ?6
+                 WHERE command_id = ?1 AND execution_phase != 'terminal'",
+                params![
+                    claim.command_id,
+                    attempt,
+                    next_projection_version,
+                    serde_json::to_string(&failure_result)?,
+                    error_message,
+                    now_ms,
+                ],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO business_command_aggregates
+                    (command_id, idempotency_key, payload_hash, module, command_type, record_id,
+                     execution_mode, execution_phase, terminal_status, attempt, projection_version,
+                     intent_json, result_json, error_code, error_message, retryable,
+                     created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'control', 'terminal', 'failed', ?7, 1,
+                         ?8, ?9, 'native_unavailable', ?10, 0, ?11, ?12)",
+                params![
+                    claim.command_id,
+                    claim.idempotency_key,
+                    claim.payload_hash,
+                    claim.module,
+                    claim.command_type,
+                    claim.record_id,
+                    attempt,
+                    serde_json::to_string(&claim.intent)?,
+                    serde_json::to_string(&failure_result)?,
+                    error_message,
+                    claim.created_at_ms,
+                    now_ms,
+                ],
+            )?;
+        }
         tx.execute(
             "INSERT INTO business_command_transitions
                 (command_id, projection_version, from_phase, to_phase, terminal_status, reason, evidence_json, created_at_ms)
-             VALUES (?1, 1, 'native_observed', 'terminal', 'failed', 'native intake retry budget exhausted', ?2, ?3)",
+             VALUES (?1, ?2, ?3, 'terminal', 'failed', 'native intake retry budget exhausted', ?4, ?5)",
             params![
                 claim.command_id,
+                next_projection_version,
+                prior_phase,
                 serde_json::to_string(&json!({
                     "attempt": attempt,
                     "error_message": error_message,
@@ -2155,20 +2188,32 @@ pub(crate) fn record_business_command_intake_failure(
         insert_business_command_outbox_rows(
             &tx,
             &claim.command_id,
-            1,
+            next_projection_version,
             "command.intake_exhausted",
             &json!({
                 "command_id": claim.command_id,
                 "execution_phase": "terminal",
                 "terminal_status": "failed",
-                "projection_version": 1,
+                "projection_version": next_projection_version,
             }),
             now_ms,
         )?;
+        canonical_failure_created = true;
     }
     tx.commit()?;
-    let failure_document = if canonical_failure_created {
+    let terminal_projection_ready = exhausted
+        && (canonical_failure_created || canonical_already_terminal || idempotency_conflict);
+    let failure_document = if canonical_failure_created || canonical_already_terminal {
         business_command_projection(root, &claim.command_id)?
+    } else if idempotency_conflict {
+        intake_failure_projection(
+            &claim.intent,
+            &claim.command_id,
+            attempt,
+            now_ms,
+            "idempotency_conflict",
+            "command id was already claimed with different immutable intent",
+        )
     } else {
         claim.intent
     };
@@ -2178,8 +2223,61 @@ pub(crate) fn record_business_command_intake_failure(
         "exhausted": exhausted,
         "canonical_exists": canonical_exists,
         "canonical_failure_created": canonical_failure_created,
+        "canonical_already_terminal": canonical_already_terminal,
+        "idempotency_conflict": idempotency_conflict,
+        "terminal_projection_ready": terminal_projection_ready,
         "failure_document": failure_document,
     }))
+}
+
+fn intake_failure_projection(
+    intent: &Value,
+    command_id: &str,
+    attempt: u32,
+    updated_at_ms: i64,
+    error_code: &str,
+    error_message: &str,
+) -> Value {
+    let mut projection = intent.clone();
+    if !projection.is_object() {
+        projection = json!({});
+    }
+    let object = projection.as_object_mut().expect("projection is an object");
+    let updated_at_ms = object
+        .get("updated_at_ms")
+        .and_then(Value::as_i64)
+        .map(|previous| updated_at_ms.max(previous.saturating_add(1)))
+        .unwrap_or(updated_at_ms);
+    object.insert("id".to_string(), Value::String(command_id.to_string()));
+    object.insert(
+        "command_id".to_string(),
+        Value::String(command_id.to_string()),
+    );
+    object.insert("status".to_string(), Value::String("failed".to_string()));
+    object.insert(
+        "task_status".to_string(),
+        Value::String("failed".to_string()),
+    );
+    object.insert(
+        "execution_phase".to_string(),
+        Value::String("terminal".to_string()),
+    );
+    object.insert(
+        "terminal_status".to_string(),
+        Value::String("failed".to_string()),
+    );
+    object.insert("attempt".to_string(), Value::from(attempt));
+    object.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
+    object.insert("retryable".to_string(), Value::Bool(false));
+    object.insert(
+        "error_code".to_string(),
+        Value::String(error_code.to_string()),
+    );
+    object.insert(
+        "error_message".to_string(),
+        Value::String(error_message.to_string()),
+    );
+    projection
 }
 
 pub(crate) fn resolve_business_command_intake_failures(
