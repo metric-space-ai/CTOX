@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { __ctoxSyncTestHooks } from '../../shared/sync.js';
 import {
   V1_5_STATUS_FIELDS,
   createSidecarWithMemoryBackend,
@@ -32,6 +35,19 @@ assert(snapshot.localPushChangedSinceCalls === 0, 'local push changed-since call
 assert(snapshot.localPushChangedSinceScannedRows === 0, 'local push changed-since scanned rows default to zero');
 assert(snapshot.localPushChangedSinceScanLimitHits === 0, 'local push scan-limit hits default to zero');
 assert(snapshot.localPushChangedSinceMaxScannedRows === 0, 'local push max scanned rows default to zero');
+
+const frameTransport = __ctoxSyncTestHooks.sanitizeReplicationTransportStatus({
+  protocol: 'ctox-rxdb-frame-v1',
+  localDevicePeerId: '000-browser-stable-device',
+  localSignalingPeerId: 'socket-scoped-peer',
+});
+assert(frameTransport.localDevicePeerId === '000-browser-stable-device', 'sync diagnostics preserve durable browser device id');
+assert(frameTransport.localSignalingPeerId === 'socket-scoped-peer', 'sync diagnostics preserve ephemeral signaling peer id separately');
+
+const appSource = readFileSync(fileURLToPath(new URL('../../app.js', import.meta.url)), 'utf8');
+assert(/browserDeviceId,\s*\n\s*browserPeerId,/.test(appSource), 'advanced status exposes sync.browserDeviceId beside sync.browserPeerId');
+assert(/localDevicePeerId/.test(appSource), 'advanced status derives browserDeviceId from durable transport status');
+assert(/localSignalingPeerId/.test(appSource), 'advanced status keeps browserPeerId sourced from signaling status');
 
 console.log('ctox-rxdb-js status projection smoke OK');
 

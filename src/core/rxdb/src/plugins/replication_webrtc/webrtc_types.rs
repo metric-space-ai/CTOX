@@ -203,8 +203,13 @@ pub trait WebRTCConnectionHandler: Send + Sync {
     }
 }
 
-/// Peer admission predicate shared by WebRTC replication options.
+/// Signaling-peer admission predicate shared by WebRTC replication options.
 pub type WebRTCPeerValidator<P> = Arc<dyn Fn(&P) -> bool + Send + Sync>;
+
+/// Stable `ctoxProtocol.peerSession.sessionId` admission predicate. Unlike the
+/// signaling peer id, this identity survives socket reconnects and can back
+/// durable browser-device revocation.
+pub type WebRTCPeerSessionValidator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Per-peer document visibility predicate shared by replication and query fetch.
 pub type WebRTCDocumentFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;

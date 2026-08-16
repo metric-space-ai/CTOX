@@ -2492,13 +2492,19 @@ async fn run_native_peer(
         let multi_signaling_url_provider = std::sync::Arc::clone(&signaling_url_provider);
         let multi_peer_session_id = peer_session_id.clone();
         let multi_ice_servers = ice_servers.clone();
-        // Server-authoritative per-device revocation: deny any signaling peer id
-        // present in the revocation registry at connect time. The browser cannot
-        // override this — the gate runs on the native (master-authoritative) peer.
-        let revocation_root = root.clone();
+        // Server-authoritative revocation checks both identities against the
+        // same store. The signaling id gate remains for existing revocations
+        // and diagnostics; the peerSession session id is the durable browser
+        // device identity that survives socket reconnects.
+        let signaling_revocation_root = root.clone();
         let is_peer_valid: std::sync::Arc<dyn Fn(&String) -> bool + Send + Sync> =
             std::sync::Arc::new(move |peer_id: &String| {
-                !store::is_business_peer_revoked(&revocation_root, peer_id)
+                !store::is_business_peer_revoked(&signaling_revocation_root, peer_id)
+            });
+        let session_revocation_root = root.clone();
+        let is_peer_session_valid: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> =
+            std::sync::Arc::new(move |session_id: &str| {
+                !store::is_business_peer_revoked(&session_revocation_root, session_id)
             });
         // Server-authoritative exact per-collection read authz. Missing,
         // expired, revoked, or stale-epoch capabilities fail closed.
@@ -2542,13 +2548,14 @@ async fn run_native_peer(
             ))
         };
         let mut bringup = tokio::spawn(async move {
-            rxdb::plugins::replication_webrtc::replicate_web_rtc_rs_multi_with_url_list_provider(
+            rxdb::plugins::replication_webrtc::replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
                 collection_list,
                 multi_signaling_url_provider,
                 topic,
                 multi_peer_session_id,
                 multi_ice_servers,
                 Some(is_peer_valid),
+                Some(is_peer_session_valid),
                 collection_authz,
                 collection_write_authz,
                 document_read_authz,

@@ -5,6 +5,7 @@ const {
   classifyPeerLifecycleEvent,
   classifyReplicationIoError,
   extractReplicationErrorDetails,
+  serializeError,
 } = __ctoxSyncTestHooks;
 
 const signalingCases = [
@@ -146,6 +147,16 @@ const cases = [
 ];
 
 const failures = [];
+
+const revokedError = new Error('The native peer rejected this browser device.');
+revokedError.name = 'CtoxWebRTCResponseError';
+revokedError.code = 'peer_revoked';
+revokedError.phase = 'peer-handshake';
+revokedError.retryable = false;
+const serializedRevocation = serializeError(revokedError);
+if (serializedRevocation?.code !== 'peer_revoked' || serializedRevocation?.retryable !== false) {
+  failures.push(`structured peer_revoked response was flattened: ${JSON.stringify(serializedRevocation)}`);
+}
 
 for (const item of cases) {
   const details = extractReplicationErrorDetails(item.error);

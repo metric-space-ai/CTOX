@@ -134,6 +134,7 @@ export class CtoxWebRtcNativePeer {
     tokenIssuedAt = null,
     tokenExpiresAt = null,
     clientId = randomId('browser'),
+    localDevicePeerId = clientId,
     role = 'browser',
     instanceId = '',
     capabilities = [],
@@ -159,6 +160,7 @@ export class CtoxWebRtcNativePeer {
       tokenIssuedAt,
       tokenExpiresAt,
       clientId,
+      localDevicePeerId,
       role,
       instanceId,
       capabilities,
@@ -1232,7 +1234,11 @@ export class CtoxWebRtcNativePeer {
       this.pending.delete(payload.id);
       clearTimeout(pending.timer);
       if (payload.error) {
-        pending.reject(payload.error);
+        pending.reject(createWebRtcResponseError(payload.error, {
+          method: pending.method,
+          peerId: pending.peerId,
+          collection: payload.collection || null,
+        }));
       } else {
         pending.resolve(payload.result);
       }
@@ -1587,7 +1593,7 @@ export class CtoxWebRtcNativePeer {
     }
     return buildProtocolPayload({
       role: this.options.role,
-      peerSessionId: `${this.options.role}:${this.options.clientId}`,
+      peerSessionId: this.options.localDevicePeerId,
       peerGeneration: 1,
       capabilities: this.options.capabilities,
     });
@@ -1880,6 +1886,7 @@ export class CtoxWebRtcNativePeer {
       ...this.transportStats,
       collection: collectionNameFromTopic(this.options.room),
       topic: this.options.room,
+      localDevicePeerId: this.options.localDevicePeerId,
       localSignalingPeerId: this.localSignalingPeerId,
       activePeerCount: this.connections.size,
       pendingAcks: this.pendingFrameAcks.size,
@@ -2585,6 +2592,24 @@ function nextHighPriorityInlineSend(queue) {
 
 function shouldRecycleConnectionAfterRequestTimeout(method = '') {
   return ['ctoxProtocol', 'token'].includes(String(method || ''));
+}
+
+function createWebRtcResponseError(responseError, context = {}) {
+  const source = responseError && typeof responseError === 'object' ? responseError : null;
+  const code = String(source?.code || responseError || 'ctox_webrtc_response_error').trim()
+    || 'ctox_webrtc_response_error';
+  const message = String(source?.message || (code === 'peer_revoked'
+    ? 'The native peer rejected this browser device because its pairing was revoked.'
+    : `WebRTC request failed: ${code}`));
+  const error = new Error(message);
+  error.name = 'CtoxWebRTCResponseError';
+  error.code = code;
+  error.phase = 'peer-handshake';
+  error.retryable = code !== 'peer_revoked';
+  error.peerId = context.peerId || null;
+  error.method = context.method || null;
+  error.collection = context.collection || null;
+  return error;
 }
 
 function classifySendPriority(payload = {}, text = '') {

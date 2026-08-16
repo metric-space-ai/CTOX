@@ -405,6 +405,15 @@ Room-level, two request/answer round-trips, driven by the Rust side
    for them, the room stays up for the rest (both sides:
    `index_mod.rs`, `replication-webrtc.mjs`). The browser additionally
    rejects peers whose `peerSession.role` is not `ctox_instance`.
+
+   The browser has two deliberately separate local identities. Its
+   `localDevicePeerId` is derived from the persisted, origin/partition/room-
+   scoped device seed and is used both as the signaling connection `clientId`
+   and as `peerSession.sessionId`; this is the durable revocation subject.
+   `localSignalingPeerId` is the random socket-scoped `yourPeerId` assigned by
+   the signaling server on each connect and remains available as
+   `sync.browserPeerId` for diagnostics and backward-compatible revocations.
+   Advanced status exposes the durable value as `sync.browserDeviceId`.
 2. **`token`** — each side requests the other's storage token. An **empty or
    non-string token is a handshake failure** (it corrupts the master election
    and collapses the replication identifier so distinct peers would share one
@@ -647,7 +656,8 @@ by `checkpoint-contract-smoke.mjs`, which drives the real
 | Failure | Mechanism | Where |
 |---|---|---|
 | Signaling socket drops (browser) | Self-reconnect with exponential backoff 1 s → 30 s; re-join re-broadcasts the peer list. Backoff resets on the `joined` broadcast, **not** on socket open — open-then-rejected sockets must keep backing off. | `webrtc-native.mjs::scheduleSignalingReconnect`, `handleSignalingMessage` |
-| Browser guest is recreated | The browser signaling identity is derived from a random device id persisted in origin-scoped `localStorage`. It therefore survives reloads and Workjet guest recreation inside the same isolated pairing partition, so native per-device revocation remains authoritative. Clearing/removing the pairing partition rotates the identity. If storage is unavailable, sync remains available with a page-session fallback. | `replication-webrtc.mjs::resolveBrowserPeerDeviceId`, `browserInitiatorPeerId` |
+| Browser guest is recreated | The durable browser identity is derived from a random device id persisted in origin-scoped `localStorage`, then scoped again by room. It survives reloads and Workjet guest recreation inside the same isolated pairing partition and is sent as `peerSession.sessionId` on every `ctoxProtocol` response. Clearing/removing the pairing partition rotates it. If storage is unavailable, sync remains available with a page-session fallback. | `replication-webrtc.mjs::resolveBrowserPeerDeviceId`, `browserInitiatorPeerId` |
+| Browser pairing is revoked | Native checks both the ephemeral signaling peer id (backward compatibility) and the durable browser `peerSession.sessionId` against the same authoritative revocation store. When the durable validator rejects a missing, empty, or revoked id, native replies to the inbound `ctoxProtocol` request with the same id/collection, `result: null`, `error: "peer_revoked"`, then closes the peer without continuing the handshake. The native-initiated handshake applies the same check after receiving the remote payload. Browser request correlation turns `peer_revoked` into a structured terminal error with `code: "peer_revoked"`. | `rxdb_peer.rs`, `index_mod.rs`, `webrtc-native.mjs` |
 | Signaling socket drops (native) | Supervisor task reconnects with 1 s → 30 s backoff using **fresh URLs from the `url_provider` failover list**: sticky on the last-working candidate, rotates to the next one only after a failed establish attempt (rotation never resets the backoff; that still happens only on `joined`). All configured signaling URLs participate — the list used to be cosmetic (only the first entry was ever tried). Covered by chaos tests in the same file (the extra test-only `TcpListener` binds raised the data-plane-guard ratchet for `signaling_client.rs` from 2 to 7 — an architecture-decision record for that allowlist change). | `signaling_client.rs`, `rxdb_peer.rs::signaling_url_provider` |
 | Control-plane rejection | `ctoxError` frames are parsed and surfaced on both sides (the server closes the socket right after); otherwise a rejected join is indistinguishable from a blip and reconnects hammer silently. The browser shell additionally observes them via a WebSocket wrapper and treats them as fatal, non-retryable. | `signaling_client.rs`, `webrtc-native.mjs`, `sync.js::installSignalingErrorObserver` |
 | Request vs disconnect race | `send_message_and_await_answer` subscribes to response **and** disconnect streams before sending and races them against a 60 s deadline; a peer dying mid-request fails the request instead of hanging the handshake/fork forever. Browser requests default to 15 s; a timed-out `ctoxProtocol`/`token` recycles the connection with `forceInitiator`. | `webrtc_helper.rs`, `webrtc-native.mjs::request` |
@@ -888,7 +898,7 @@ A mismatch makes the browser load a **second copy of the bundle** — two
 module graphs, two shared-room-peer registries, duplicate peers in the room.
 After any `src/` change: rebuild dist with the command above **and** bump the
 buster in both files (current value at the time of writing:
-`20260816-browser-peer-device-rxdb-v123`).
+`20260816-durable-browser-revocation-rxdb-v124`).
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build
 anything: it verifies the manifest identity (name/public name,
@@ -912,7 +922,7 @@ not noise — never delete or weaken a test to make the suite pass.*
 |---|---|
 | `active-collections-catchup-smoke` | **Regression:** a collection transitioning inactive→active triggers one catch-up pull through the real shared-peer registry wiring (§8.1 gating invariant). |
 | `advanced-status-bridge-smoke` | V1.5 → `business-os-advanced-status-v1` envelope mapping. |
-| `browser-peer-device-id-smoke` | **Regression:** browser signaling identity survives page/guest recreation in one storage partition, rotates when that partition is cleared, and falls back safely when storage is unavailable. |
+| `browser-peer-device-id-smoke` | **Regression:** the durable browser identity survives page/guest recreation in one storage partition, rotates when that partition is cleared, and is identical across connection `clientId`, `peerSession.sessionId`, and `localDevicePeerId` status. |
 | `bundle-reproducible-smoke` | **Guard:** dist must be byte-reproducible from src with the pinned esbuild (skips loudly offline; CI enforces). |
 | `checkpoint-age-diagnostics-smoke` | Per-collection checkpoint staleness: lwt recorded on transport activity (max across peers), `pull/pushCheckpointAgeMs` derived at snapshot time — no idle timers. |
 | `checkpoint-contract-smoke` | **Guard:** checkpoint wire shape (status fields, epoch derivation, validity-key v1/v2 formats) matches the `webrtc-checkpoint-contract.json` fixture; drives the real validity-key code through the replication harness. |
@@ -937,6 +947,7 @@ not noise — never delete or weaken a test to make the suite pass.*
 | `hlc-conflict-smoke` | Hybrid Logical Clock formatting, ordering and deterministic whole-document conflict decisions, incl. the HLC-ordered pull-gate veto both ways (SYNC-11). |
 | `mixed-mode-handshake-smoke` | V1.5 browser vs V1 server handshake compatibility. |
 | `multi-tab-broker-smoke` | BroadcastChannel leader election (and absence of BroadcastChannel). |
+| `peer-revocation-smoke` | **Regression:** a native `peer_revoked` response rejects the pending browser handshake with a structured terminal error preserving `code: "peer_revoked"`. |
 | `no-package-manager-import-smoke` | Bundle imports with no package manager present. |
 | `orphan-cleanup-smoke` | Aborted fetches leave no partial documents/windows behind. |
 | `presence-smoke` | Presence (ctox-presence-v1): registry union/debounce/refresh-only-while-nonempty, capability gate (no `rxdb.presence.update` toward pre-presence peers), `presence$` push routing, teardown clears remote hints. |

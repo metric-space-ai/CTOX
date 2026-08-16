@@ -71,6 +71,40 @@ assert(
   'origin remains part of peer identity scope',
 );
 
+// The shared room computes the durable id once, then uses that exact value for
+// signaling clientId, transport status, and every returned ctoxProtocol payload.
+storage.setItem(browserPeerDeviceIdStorageKey, firstDeviceId);
+globalThis.localStorage = storage;
+globalThis.location = { origin: 'ctox-business-os://shell' };
+const SharedRoomPeer = replicationWebRtcTestInternals.getSharedRoomPeerClass();
+const shared = new SharedRoomPeer({
+  key: 'device-id-test',
+  signalingUrl: 'wss://signaling.invalid',
+  room: 'ctox-business-os:instance-a',
+  iceServers: [],
+});
+shared.collections.set('documents', {
+  collection: 'documents',
+  state: {
+    async buildProtocolPayload() {
+      return { peerSession: { role: 'browser', sessionId: 'legacy-page-session' } };
+    },
+  },
+});
+const stablePayload = await shared.buildProtocolPayload('documents');
+const transportPeer = shared.ensurePeer();
+assert(shared.localDevicePeerId === firstPeerId, 'shared room stores the scoped durable device id once');
+assert(transportPeer.options.clientId === firstPeerId, 'durable device id is the connection clientId');
+assert(transportPeer.options.localDevicePeerId === firstPeerId, 'transport retains the durable device id explicitly');
+assert(
+  stablePayload.peerSession.sessionId === firstPeerId,
+  'ctoxProtocol peerSession.sessionId is the same durable device id',
+);
+assert(
+  transportPeer.getTransportStatus().localDevicePeerId === firstPeerId,
+  'transport status exposes the durable device id',
+);
+
 console.log('ctox-rxdb browser peer device identity smoke OK');
 
 function memoryStorage() {

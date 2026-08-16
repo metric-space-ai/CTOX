@@ -4023,6 +4023,7 @@ var CtoxWebRtcNativePeer = class {
     tokenIssuedAt = null,
     tokenExpiresAt = null,
     clientId = randomId("browser"),
+    localDevicePeerId = clientId,
     role = "browser",
     instanceId = "",
     capabilities = [],
@@ -4048,6 +4049,7 @@ var CtoxWebRtcNativePeer = class {
       tokenIssuedAt,
       tokenExpiresAt,
       clientId,
+      localDevicePeerId,
       role,
       instanceId,
       capabilities,
@@ -5002,7 +5004,11 @@ var CtoxWebRtcNativePeer = class {
       this.pending.delete(payload.id);
       clearTimeout(pending.timer);
       if (payload.error) {
-        pending.reject(payload.error);
+        pending.reject(createWebRtcResponseError(payload.error, {
+          method: pending.method,
+          peerId: pending.peerId,
+          collection: payload.collection || null
+        }));
       } else {
         pending.resolve(payload.result);
       }
@@ -5325,7 +5331,7 @@ var CtoxWebRtcNativePeer = class {
     }
     return buildProtocolPayload({
       role: this.options.role,
-      peerSessionId: `${this.options.role}:${this.options.clientId}`,
+      peerSessionId: this.options.localDevicePeerId,
       peerGeneration: 1,
       capabilities: this.options.capabilities
     });
@@ -5609,6 +5615,7 @@ var CtoxWebRtcNativePeer = class {
       ...this.transportStats,
       collection: collectionNameFromTopic(this.options.room),
       topic: this.options.room,
+      localDevicePeerId: this.options.localDevicePeerId,
       localSignalingPeerId: this.localSignalingPeerId,
       activePeerCount: this.connections.size,
       pendingAcks: this.pendingFrameAcks.size,
@@ -6199,6 +6206,20 @@ function nextHighPriorityInlineSend(queue) {
 }
 function shouldRecycleConnectionAfterRequestTimeout(method = "") {
   return ["ctoxProtocol", "token"].includes(String(method || ""));
+}
+function createWebRtcResponseError(responseError, context = {}) {
+  const source = responseError && typeof responseError === "object" ? responseError : null;
+  const code = String(source?.code || responseError || "ctox_webrtc_response_error").trim() || "ctox_webrtc_response_error";
+  const message = String(source?.message || (code === "peer_revoked" ? "The native peer rejected this browser device because its pairing was revoked." : `WebRTC request failed: ${code}`));
+  const error = new Error(message);
+  error.name = "CtoxWebRTCResponseError";
+  error.code = code;
+  error.phase = "peer-handshake";
+  error.retryable = code !== "peer_revoked";
+  error.peerId = context.peerId || null;
+  error.method = context.method || null;
+  error.collection = context.collection || null;
+  return error;
 }
 function classifySendPriority(payload = {}, text = "") {
   if (payload?.ctoxFrame === CTOX_FRAME_PROTOCOL) {
@@ -8954,6 +8975,7 @@ var SharedRoomPeer = class {
     this.iceServersRefreshUrl = iceServersRefreshUrl || "";
     this.refreshIceServers = typeof refreshIceServers === "function" ? refreshIceServers : null;
     this.expectedNativePeerId = expectedNativePeerId;
+    this.localDevicePeerId = browserInitiatorPeerId(this.room);
     this.collections = /* @__PURE__ */ new Map();
     this.refCount = 0;
     this.peer = null;
@@ -9189,7 +9211,8 @@ var SharedRoomPeer = class {
       signalingUrl: this.signalingUrl,
       // Phase 3: the room is the bare sync_room — NOT a per-collection topic.
       room: this.room,
-      clientId: browserInitiatorPeerId(this.room),
+      clientId: this.localDevicePeerId,
+      localDevicePeerId: this.localDevicePeerId,
       role: "browser",
       capabilities: BROWSER_CAPABILITIES,
       iceServers: this.iceServers,
@@ -9352,12 +9375,14 @@ var SharedRoomPeer = class {
     if (!registration) {
       return buildProtocolPayload({
         role: "browser",
-        peerSessionId: `browser:${this.room}`,
+        peerSessionId: this.localDevicePeerId,
         peerGeneration: 1,
         capabilities: BROWSER_CAPABILITIES
       });
     }
     const payload = await registration.state.buildProtocolPayload();
+    payload.peerSession = payload.peerSession && typeof payload.peerSession === "object" ? payload.peerSession : {};
+    payload.peerSession.sessionId = this.localDevicePeerId;
     if (this.collections.size > 1) {
       payload.collectionSchemas = await this.collectCollectionSchemas();
       payload.collectionCheckpoints = await this.collectCollectionCheckpoints();
@@ -9736,7 +9761,7 @@ var CtoxWebRtcReplicationState = class {
       schemaVersion: this.collection.schema.version,
       schemaHash: this.schemaHashValue,
       schemaHashSource: schemaHashSource(this.collection.name),
-      peerSessionId: `browser:${this.topic}`,
+      peerSessionId: this.shared?.localDevicePeerId || browserInitiatorPeerId(this.topic),
       peerGeneration: 1,
       checkpoint,
       role: "browser",

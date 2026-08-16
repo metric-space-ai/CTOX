@@ -50,6 +50,7 @@ peer.on('transport-status', (event) => statuses.push(event.detail || event));
 
 try {
   assert(peer.getTransportStatus().localSignalingPeerId === null, 'peer id is absent before init');
+  assert(peer.getTransportStatus().localDevicePeerId === 'browser-test-client', 'stable device id is exposed before signaling init');
   assert(peer.shouldInitiate('browser-z') === true, 'deterministic client id orders peers before init');
 
   // --- 1. token re-stamp on connect ---------------------------------------
@@ -129,6 +130,7 @@ try {
   assert(peer.localSignalingPeerId === null, 'native peer close clears transient peer id');
   assert(statuses.length === emissionCount + 1, 'native peer close emits a prompt clear status');
   assert(statuses.at(-1).localSignalingPeerId === null, 'native peer close status exposes absence');
+  assert(statuses.at(-1).localDevicePeerId === 'browser-test-client', 'socket close does not clear durable device identity');
   assert(peer.options.clientId === 'browser-test-client', 'deterministic client id remains unchanged for the full lifecycle');
 } finally {
   peer.close();

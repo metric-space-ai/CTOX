@@ -3128,6 +3128,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
   const optionalReconnectingCollections = reconnectingCollections
     .filter((collection) => !requiredCollectionSet.has(collection));
   const frameTransport = buildAdvancedStatusFrameTransport(collectionValues, requiredCollections);
+  const browserDeviceId = uniqueAdvancedStatusBrowserDeviceId(collectionValues);
   const browserPeerId = uniqueAdvancedStatusBrowserPeerId(collectionValues);
   const peerSessions = collectionValues
     .filter((item) => item?.remotePeerSession)
@@ -3201,6 +3202,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
       mode: state.sync?.mode || null,
       phase: diagnostics?.phase || null,
       syncRoom: diagnostics?.syncRoom || null,
+      browserDeviceId,
       browserPeerId,
       signalingUrls: diagnostics?.signalingUrls || [],
       iceServersConfigured: diagnostics?.iceServersConfigured || 0,
@@ -3487,6 +3489,17 @@ function sanitizeAdvancedStatusCountMap(value) {
   return result;
 }
 
+function uniqueAdvancedStatusBrowserDeviceId(collectionValues = []) {
+  const deviceIds = new Set();
+  for (const entry of collectionValues) {
+    const value = entry?.frameTransport?.localDevicePeerId;
+    if (typeof value !== 'string' || value.length < 1 || value.length > 256) continue;
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) continue;
+    deviceIds.add(value);
+    if (deviceIds.size > 1) return null;
+  }
+  return deviceIds.values().next().value || null;
+}
 function uniqueAdvancedStatusBrowserPeerId(collectionValues = []) {
   const peerIds = new Set();
   for (const entry of collectionValues) {

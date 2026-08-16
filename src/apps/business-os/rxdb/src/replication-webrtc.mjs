@@ -219,6 +219,10 @@ class SharedRoomPeer {
     this.iceServersRefreshUrl = iceServersRefreshUrl || '';
     this.refreshIceServers = typeof refreshIceServers === 'function' ? refreshIceServers : null;
     this.expectedNativePeerId = expectedNativePeerId;
+    // Durable browser-device identity. The signaling server independently
+    // assigns a socket-scoped yourPeerId on every connect; this persisted,
+    // origin/partition/room-scoped id is the authoritative revocation subject.
+    this.localDevicePeerId = browserInitiatorPeerId(this.room);
     // collection name -> registration { collection, state }
     this.collections = new Map();
     this.refCount = 0;
@@ -502,7 +506,8 @@ class SharedRoomPeer {
       signalingUrl: this.signalingUrl,
       // Phase 3: the room is the bare sync_room — NOT a per-collection topic.
       room: this.room,
-      clientId: browserInitiatorPeerId(this.room),
+      clientId: this.localDevicePeerId,
+      localDevicePeerId: this.localDevicePeerId,
       role: 'browser',
       capabilities: BROWSER_CAPABILITIES,
       iceServers: this.iceServers,
@@ -693,12 +698,18 @@ class SharedRoomPeer {
     if (!registration) {
       return buildProtocolPayload({
         role: 'browser',
-        peerSessionId: `browser:${this.room}`,
+        peerSessionId: this.localDevicePeerId,
         peerGeneration: 1,
         capabilities: BROWSER_CAPABILITIES,
       });
     }
     const payload = await registration.state.buildProtocolPayload();
+    // Keep every response authoritative even if a collection state was
+    // created before it joined this shared room or supplied a legacy value.
+    payload.peerSession = payload.peerSession && typeof payload.peerSession === 'object'
+      ? payload.peerSession
+      : {};
+    payload.peerSession.sessionId = this.localDevicePeerId;
     // Phase 3 schema-validation hardening: under multiplex the handshake runs
     // ONCE off the representative collection, so attach the per-collection
     // schema-hash map for EVERY collection on this connection. The remote
@@ -1150,7 +1161,7 @@ class CtoxWebRtcReplicationState {
       schemaVersion: this.collection.schema.version,
       schemaHash: this.schemaHashValue,
       schemaHashSource: schemaHashSource(this.collection.name),
-      peerSessionId: `browser:${this.topic}`,
+      peerSessionId: this.shared?.localDevicePeerId || browserInitiatorPeerId(this.topic),
       peerGeneration: 1,
       checkpoint,
       role: 'browser',
