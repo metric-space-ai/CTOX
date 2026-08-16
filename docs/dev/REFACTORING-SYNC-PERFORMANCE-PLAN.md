@@ -111,7 +111,8 @@ Noch offen:
 
 ## Etappe 3: OA-2 und OA-1 — Scale-Test und bounded Demand-Sync
 
-Status: **Implementierung und native Baseline erledigt; echte Browsermatrix offen**
+Status: **Implementierung, native Baseline und Browser-Messstrecke erledigt;
+30×30-Abnahme und Latenzziel offen**
 
 Implementiert:
 
@@ -129,6 +130,12 @@ Implementiert:
   Zustand statt still leerer Daten.
 - Cache-Migration, Demand-Loader, Window-Correctness, Sync-Profil und
   Bundle-Reproduzierbarkeit besitzen gezielte Smokes.
+- `business-os-sellify-scale-ui` provisioniert die sechs synthetischen
+  Populationen, rendert eine echte sortierte/filtrierte Activities-Seite und
+  erfasst Query-RPCs, Materialisierung, IndexedDB-Nutzung sowie Readiness.
+- `sellify_scale_browser_matrix.mjs` führt nach einer nicht gewerteten
+  Provisionierung 30 kalte und 30 warme Browserläufe mit reproduzierbarem
+  Profilzustand aus und schreibt ein versioniertes JSON-Artefakt.
 
 Gemessene native Baseline:
 
@@ -136,6 +143,10 @@ Gemessene native Baseline:
 - Vier begrenzte Fenster, maximal 800 materialisierte Dokumente.
 - Query-RPC-Äquivalent: vier.
 - 30 native Läufe: p50 27,998 ms, p95 31,343 ms.
+
+Der reale Einzel-Smoke besteht das strukturelle Gate ohne Vollpull mit vier
+Query-RPCs und höchstens 800 materialisierten Sellify-Dokumenten. Die kalte
+Latenz liegt noch über fünf Sekunden und ist deshalb noch kein Release-Gate.
 
 Noch offene Browserabnahme, jeweils 30 Läufe kalt und warm:
 

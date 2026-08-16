@@ -29,6 +29,7 @@
  *   SMOKE_MODE=business-os-app-audience-ui SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=business-os-agent-scope-ui SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=business-os-threads-rightclick-ui SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
+ *   SMOKE_MODE=business-os-sellify-scale-ui SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=business-os-auth-scope-ui SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=business-os-fresh-profile-ui SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=browser-lifecycle-ui SMOKE_PAGE_PATH=/index.html#browser node src/core/rxdb/tools/browser_rust_smoke.js
@@ -109,6 +110,10 @@ const root = path.resolve(__dirname, '../../../..');
 const runtimeRootProvided = !!process.env.CTOX_SMOKE_ROOT;
 const runtimeRoot = process.env.CTOX_SMOKE_ROOT || fs.mkdtempSync(path.join(os.tmpdir(), 'ctox-rxdb-smoke-'));
 const keepSmokeArtifacts = process.env.CTOX_SMOKE_KEEP_ARTIFACTS === '1';
+const providedBrowserProfileDir = process.env.SMOKE_BROWSER_PROFILE_DIR
+  ? path.resolve(process.env.SMOKE_BROWSER_PROFILE_DIR)
+  : '';
+const sellifyScaleProvisionOnly = process.env.SMOKE_SELLIFY_SCALE_PROVISION_ONLY === '1';
 const smokeRunId = process.env.CTOX_SMOKE_RUN_ID || `smoke-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
 const smokeProcessLifecyclePath = process.env.SMOKE_PROCESS_LIFECYCLE_PATH || '';
 const smokeChildren = new Set();
@@ -187,6 +192,20 @@ const nativeBusinessOsSqlitePath = path.join(runtimeRoot, 'runtime/business-os.s
 // it produced a silent 404 boot and a misleading timeout 30s later.
 const pagePath = process.env.SMOKE_PAGE_PATH || '/index.html';
 const smokeMode = process.env.SMOKE_MODE || 'browser-to-rust';
+const SELLIFY_SCALE_POPULATIONS = Object.freeze({
+  sellify_activities: 139804,
+  sellify_campaigns: 86551,
+  sellify_people: 60640,
+  sellify_companies: 17520,
+  business_commands: 5964,
+  desktop_file_chunks: 3690,
+});
+const SELLIFY_SCALE_COLLECTIONS = Object.freeze([
+  'sellify_activities',
+  'sellify_campaigns',
+  'sellify_people',
+  'sellify_companies',
+]);
 const dynamicOpenModuleFixture = {
   module: {
     id: 'phase13-open-module-guard',
@@ -249,6 +268,9 @@ if (smokeMode === 'business-os-app-release-ui') {
 }
 if (smokeMode === 'business-os-agent-scope-ui') {
   prepareBusinessOsAgentScopeModuleFixture(agentScopeModuleFixture);
+}
+if (smokeMode === 'business-os-sellify-scale-ui') {
+  prepareBusinessOsSellifyScaleModuleFixture();
 }
 const smokeDbId = process.env.SMOKE_DB_ID || `${smokeMode}_${Date.now()}_${token(8)}`;
 const useAppDb = process.env.SMOKE_USE_APP_DB === '1'
@@ -324,6 +346,7 @@ const supportedSmokeModes = [
   'business-os-ui-regression',
   'business-os-roles-permissions-ui',
   'business-os-dynamic-apps-ui',
+  'business-os-sellify-scale-ui',
   'browser-lifecycle-ui',
   'browser-input-runtime',
   'browser-handoff-ui',
@@ -381,6 +404,7 @@ if ([
   'business-os-roles-permissions-ui',
   'business-os-dynamic-apps-ui',
   'business-os-threads-rightclick-ui',
+  'business-os-sellify-scale-ui',
   'presence-merge-two-browsers',
   'concurrent-writers-convergence-browser-to-rust',
   ...businessOsProductionSmokeModes,
@@ -395,6 +419,7 @@ const implementedBusinessOsProductionSmokeModes = new Set([
   'business-os-fresh-profile-ui',
   'business-os-threads-rightclick-ui',
   'business-os-threads-scale-ui',
+  'business-os-sellify-scale-ui',
   'business-os-restore-resync-ui',
   'business-os-client-lifecycle-ui',
 ]);
@@ -912,6 +937,60 @@ function prepareBusinessOsDynamicOpenModuleFixture(fixture) {
 }
 `);
   }
+}
+
+function prepareBusinessOsSellifyScaleModuleFixture() {
+  const moduleRoot = path.join(
+    runtimeRoot,
+    'runtime/business-os/local-modules/sellify-scale-smoke',
+  );
+  fs.mkdirSync(moduleRoot, { recursive: true });
+  const targetRealPath = fs.realpathSync(moduleRoot);
+  const repoRealPath = fs.realpathSync(root);
+  if (targetRealPath === repoRealPath || targetRealPath.startsWith(`${repoRealPath}${path.sep}`)) {
+    throw new Error('Sellify scale fixture would write into the real Business OS source tree');
+  }
+  fs.writeFileSync(path.join(moduleRoot, 'module.json'), `${JSON.stringify({
+    id: 'sellify-scale-smoke',
+    title: 'Synthetic Sellify Scale Smoke',
+    version: '1.0.0',
+    entry: 'local-modules/sellify-scale-smoke/index.js',
+    icon: 'local-modules/sellify-scale-smoke/icon.svg',
+    collections: SELLIFY_SCALE_COLLECTIONS,
+  }, null, 2)}\n`);
+  const schema = {
+    version: 0,
+    primaryKey: 'id',
+    type: 'object',
+    properties: {
+      id: { type: 'string', maxLength: 180 },
+      status: { type: 'string' },
+      sort_key: { type: 'number' },
+      created_at_ms: { type: 'number' },
+      updated_at_ms: { type: 'number' },
+    },
+    required: ['id', 'status', 'updated_at_ms'],
+    indexes: [['status', 'updated_at_ms']],
+    additionalProperties: true,
+  };
+  const collections = Object.fromEntries(SELLIFY_SCALE_COLLECTIONS.map((name) => [
+    name,
+    { syncProfile: 'demand-only', schema },
+  ]));
+  fs.writeFileSync(path.join(moduleRoot, 'collections.schema.json'), `${JSON.stringify({
+    schema_format: 'ctox-business-os-module-collections-v1',
+    collections,
+    migration_strategies: Object.fromEntries(
+      SELLIFY_SCALE_COLLECTIONS.map((name) => [name, {}]),
+    ),
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(moduleRoot, 'index.js'), 'export async function mount() { return () => {}; }\n');
+  fs.writeFileSync(path.join(moduleRoot, 'index.html'), '<section>Synthetic Sellify scale fixture</section>\n');
+  fs.writeFileSync(path.join(moduleRoot, 'schema.js'), 'export const collections = {};\n');
+  fs.writeFileSync(
+    path.join(moduleRoot, 'icon.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#23665f"/></svg>\n',
+  );
 }
 
 function prepareBusinessOsAgentScopeModuleFixture(fixture) {
@@ -1691,6 +1770,191 @@ async function seedBusinessOsThreadsScaleNativeSetup() {
     threads: sqliteRowCount(tables.threads, "id LIKE 'threads_scale_thread_%'"),
     messages: sqliteRowCount(tables.messages, "id LIKE 'threads_scale_message_%'"),
     notifications: sqliteRowCount(tables.notifications, "id LIKE 'threads_scale_notification_%'"),
+  };
+}
+
+async function seedBusinessOsSellifyScaleNativeSetup() {
+  const tables = {
+    sellify_activities: 'ctox_business_os__sellify_activities__v0',
+    sellify_campaigns: 'ctox_business_os__sellify_campaigns__v0',
+    sellify_people: 'ctox_business_os__sellify_people__v0',
+    sellify_companies: 'ctox_business_os__sellify_companies__v0',
+    business_commands: 'ctox_business_os__business_commands__v1',
+    desktop_files: 'ctox_business_os__desktop_files__v0',
+    desktop_file_chunks: 'ctox_business_os__desktop_file_chunks__v0',
+  };
+  sqlite(SELLIFY_SCALE_COLLECTIONS.map((collection) => {
+    const table = quoteSqlIdentifier(tables[collection]);
+    const index = quoteSqlIdentifier(`idx_${tables[collection]}_lwt`);
+    return `
+      CREATE TABLE IF NOT EXISTS ${table} (
+        id TEXT PRIMARY KEY,
+        revision TEXT NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        lastWriteTime REAL NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS ${index} ON ${table} (lastWriteTime DESC);
+    `;
+  }).join('\n'));
+  await waitForSqliteTables(Object.values(tables), 60000);
+  const existingPopulations = Object.fromEntries(Object.entries(tables).map(([collection, table]) => [
+    collection,
+    sqliteRowCount(table),
+  ]));
+  const fixtureAlreadyComplete = Object.entries(SELLIFY_SCALE_POPULATIONS)
+    .every(([collection, population]) => existingPopulations[collection] === population);
+  if (fixtureAlreadyComplete) {
+    return {
+      populations: { ...SELLIFY_SCALE_POPULATIONS },
+      sellifyServerDocuments: SELLIFY_SCALE_COLLECTIONS
+        .reduce((total, collection) => total + SELLIFY_SCALE_POPULATIONS[collection], 0),
+      totalDocuments: Object.values(SELLIFY_SCALE_POPULATIONS)
+        .reduce((total, count) => total + count, 0),
+      databaseBytes: fs.statSync(sqlitePath).size,
+      reused: true,
+    };
+  }
+  const baseTime = 1800000000000;
+  const makeDocument = (collection, index, population) => {
+    const padded = String(index).padStart(7, '0');
+    const id = `${collection}_${padded}`;
+    const updatedAtMs = baseTime - (population - index);
+    const common = {
+      id,
+      status: index % 3 === 0 ? 'active' : index % 3 === 1 ? 'paused' : 'completed',
+      sort_key: population - index,
+      created_at_ms: updatedAtMs,
+      updated_at_ms: updatedAtMs,
+      _deleted: false,
+      is_deleted: false,
+      _rev: '1-sellify-scale-browser',
+      _meta: { lwt: updatedAtMs },
+      _attachments: {},
+    };
+    if (collection === 'sellify_activities') {
+      return {
+        ...common,
+        activity_type: ['email', 'call', 'meeting'][index % 3],
+        campaign_id: `sellify_campaigns_${String(index % 86551).padStart(7, '0')}`,
+        person_id: `sellify_people_${String(index % 60640).padStart(7, '0')}`,
+        summary: `Synthetic activity ${index}`,
+      };
+    }
+    if (collection === 'sellify_campaigns') {
+      return {
+        ...common,
+        name: `Synthetic campaign ${index}`,
+        owner_id: `owner-${index % 32}`,
+        market: ['de', 'at', 'ch'][index % 3],
+      };
+    }
+    if (collection === 'sellify_people') {
+      return {
+        ...common,
+        full_name: `Synthetic Person ${index}`,
+        company_id: `sellify_companies_${String(index % 17520).padStart(7, '0')}`,
+        email: `person-${index}@example.invalid`,
+      };
+    }
+    if (collection === 'sellify_companies') {
+      return {
+        ...common,
+        name: `Synthetic Company ${index}`,
+        domain: `company-${index}.example.invalid`,
+        country: ['DE', 'AT', 'CH'][index % 3],
+      };
+    }
+    if (collection === 'business_commands') {
+      return {
+        ...common,
+        status: 'completed',
+        command_id: id,
+        module: 'sellify-scale',
+        command_type: 'ctox.scale.fixture',
+        record_id: `scale-record-${index}`,
+        inbound_channel: 'production-smoke',
+        execution_phase: 'terminal',
+        terminal_status: 'completed',
+        payload: { synthetic: true, index },
+        client_context: { source: 'sellify-scale-browser-smoke' },
+        result: { synthetic: true },
+      };
+    }
+    return {
+      ...common,
+      file_id: 'sellify-scale-support-file',
+      generation_id: 'sellify-scale-support-generation',
+      idx: index - 1,
+      chunk_index: index - 1,
+      total_chunks: SELLIFY_SCALE_POPULATIONS.desktop_file_chunks,
+      size_bytes: 24,
+      data: Buffer.from(`synthetic-chunk-${padded}`).toString('base64'),
+    };
+  };
+
+  const supportFileTime = baseTime - 1;
+  const supportFile = {
+    id: 'sellify-scale-support-file',
+    path: '/synthetic/sellify-scale-support.bin',
+    name: 'sellify-scale-support.bin',
+    source: 'production-smoke',
+    content_generation_id: 'sellify-scale-support-generation',
+    chunk_count: SELLIFY_SCALE_POPULATIONS.desktop_file_chunks,
+    size_bytes: SELLIFY_SCALE_POPULATIONS.desktop_file_chunks * 24,
+    created_at_ms: supportFileTime,
+    updated_at_ms: supportFileTime,
+    _deleted: false,
+    is_deleted: false,
+    _rev: '1-sellify-scale-browser',
+    _meta: { lwt: supportFileTime },
+    _attachments: {},
+  };
+  sqlite(`
+    INSERT OR REPLACE INTO ${quoteSqlIdentifier(tables.desktop_files)}
+      (id, revision, deleted, lastWriteTime, data)
+    VALUES (
+      '${sqlString(supportFile.id)}',
+      '1-sellify-scale-browser',
+      0,
+      ${supportFileTime},
+      '${sqlString(JSON.stringify(supportFile))}'
+    );
+  `);
+
+  for (const [collection, population] of Object.entries(SELLIFY_SCALE_POPULATIONS)) {
+    const table = tables[collection];
+    for (let start = 1; start <= population; start += 500) {
+      const rows = [];
+      const end = Math.min(population, start + 499);
+      for (let index = start; index <= end; index += 1) {
+        const document = makeDocument(collection, index, population);
+        rows.push(`(
+          '${sqlString(document.id)}',
+          '1-sellify-scale-browser',
+          0,
+          ${document.updated_at_ms},
+          '${sqlString(JSON.stringify(document))}'
+        )`);
+      }
+      sqlite(`
+        BEGIN IMMEDIATE;
+        INSERT OR REPLACE INTO ${quoteSqlIdentifier(table)}
+          (id, revision, deleted, lastWriteTime, data)
+        VALUES ${rows.join(',\n')};
+        COMMIT;
+      `);
+    }
+  }
+  sqlite('PRAGMA wal_checkpoint(TRUNCATE);');
+  return {
+    populations: { ...SELLIFY_SCALE_POPULATIONS },
+    sellifyServerDocuments: SELLIFY_SCALE_COLLECTIONS
+      .reduce((total, collection) => total + SELLIFY_SCALE_POPULATIONS[collection], 0),
+    totalDocuments: Object.values(SELLIFY_SCALE_POPULATIONS)
+      .reduce((total, count) => total + count, 0),
+    databaseBytes: fs.statSync(sqlitePath).size,
+    reused: false,
   };
 }
 
@@ -3930,6 +4194,7 @@ function ensureCtoxSmokeBinary() {
     await seedBusinessOsThreadsRightClickNativeUsers();
   }
   let threadsScaleSeed = null;
+  let sellifyScaleSeed = null;
   let ctox = startCtoxServer();
   const browserDiagnostics = {
     warnings: 0,
@@ -4003,11 +4268,22 @@ function ensureCtoxSmokeBinary() {
       outerPhaseTimings.threadsScaleSeedMs = Date.now() - scaleSeedStartedAt;
       console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
     }
+    if (smokeMode === 'business-os-sellify-scale-ui') {
+      const scaleSeedStartedAt = Date.now();
+      sellifyScaleSeed = await seedBusinessOsSellifyScaleNativeSetup();
+      outerPhaseTimings.sellifyScaleSeedMs = Date.now() - scaleSeedStartedAt;
+      console.log(`business_os_sellify_scale_seed_ms=${outerPhaseTimings.sellifyScaleSeedMs}`);
+    }
     if (smokeMode === 'native-schema-drift-browser-status') {
       await waitForNativePeerSyncConfig(syncConfigWaitMs);
     }
     const browserLaunchStartedAt = Date.now();
-    browserUserDataDir = fs.mkdtempSync(path.join(runtimeRoot, 'browser-profile-'));
+    if (providedBrowserProfileDir) {
+      fs.mkdirSync(providedBrowserProfileDir, { recursive: true });
+      browserUserDataDir = providedBrowserProfileDir;
+    } else {
+      browserUserDataDir = fs.mkdtempSync(path.join(runtimeRoot, 'browser-profile-'));
+    }
     if (smokeMode === 'business-os-fresh-profile-ui') {
       const profileEntries = fs.readdirSync(browserUserDataDir);
       freshProfileInitialStorage = {
@@ -4796,6 +5072,43 @@ function ensureCtoxSmokeBinary() {
         outerPhaseTimings.threadsScaleSeedMs = Date.now() - scaleSeedStartedAt;
         console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
       }
+      if (smokeMode === 'business-os-sellify-scale-ui') {
+        await page.evaluate(async (collectionNames) => {
+          const state = globalThis.ctoxBusinessOsSmoke?.state;
+          const rawDb = state?.db?.raw;
+          if (!rawDb?.addCollections || !state?.sync?.leaseCollection) {
+            throw new Error('Sellify scale smoke requires the shell database and scoped sync leases');
+          }
+          const missing = {};
+          for (const name of collectionNames) {
+            if (rawDb[name]) continue;
+            missing[name] = {
+              syncProfile: 'demand-only',
+              schema: {
+                version: 0,
+                primaryKey: 'id',
+                type: 'object',
+                properties: {
+                  id: { type: 'string', maxLength: 180 },
+                  status: { type: 'string' },
+                  sort_key: { type: 'number' },
+                  created_at_ms: { type: 'number' },
+                  updated_at_ms: { type: 'number' },
+                },
+                required: ['id', 'status', 'updated_at_ms'],
+                indexes: [['status', 'updated_at_ms']],
+                additionalProperties: true,
+              },
+            };
+          }
+          if (Object.keys(missing).length) await rawDb.addCollections(missing);
+          const leases = [];
+          for (const name of collectionNames.slice(0, 1)) {
+            leases.push(await state.sync.leaseCollection(name, 'sellify-scale-browser-smoke'));
+          }
+          globalThis.__ctoxSellifyScaleLeases = leases;
+        }, SELLIFY_SCALE_COLLECTIONS);
+      }
       const startupRequiredCollections = deferredFileCollectionStartupMode
         || largeFileMaterializeSmokeMode
         || smokeMode === 'business-os-client-lifecycle-ui'
@@ -4815,16 +5128,30 @@ function ensureCtoxSmokeBinary() {
       ) {
         startupAdvancedStatusTimeoutMs = 120000;
       }
-      const advancedStatus = await waitForHealthyCompleteStatus(page, {
-        timeoutMs: startupAdvancedStatusTimeoutMs,
-        requiredCollections: startupRequiredCollections,
-      });
+      const advancedStatus = smokeMode === 'business-os-sellify-scale-ui'
+        ? await page.evaluate(async (requiredCollections) => (
+            globalThis.CTOX_BUSINESS_OS_STATUS?.snapshot?.({
+              includeCounts: false,
+              requiredCollections,
+            }) || null
+          ), startupRequiredCollections)
+        : await waitForHealthyCompleteStatus(page, {
+            timeoutMs: startupAdvancedStatusTimeoutMs,
+            requiredCollections: startupRequiredCollections,
+          });
       outerPhaseTimings.startupAdvancedStatusMs = Date.now() - startupAdvancedStatusStartedAt;
-      if (!advancedStatus?.ok) {
+      if (smokeMode !== 'business-os-sellify-scale-ui' && !advancedStatus?.ok) {
         throw new Error(`Business OS advanced status unhealthy after startup: ${JSON.stringify(advancedStatus, null, 2)}`);
       }
-      if (smokeMode !== 'business-os-app-release-ui') {
+      if (
+        smokeMode !== 'business-os-app-release-ui'
+        && smokeMode !== 'business-os-sellify-scale-ui'
+      ) {
         assertHealthyAdvancedStatusContract(advancedStatus);
+      }
+      if (smokeMode === 'business-os-sellify-scale-ui'
+        && advancedStatus?.version !== 'business-os-advanced-status-v1') {
+        throw new Error(`Sellify scale advanced status contract missing: ${JSON.stringify(advancedStatus)}`);
       }
       advancedStatusEvidenceVersion = advancedStatus.version || '';
       advancedStatusEvidenceRuntime = advancedStatus.rxdbRuntime || null;
@@ -7046,7 +7373,7 @@ function ensureCtoxSmokeBinary() {
       ? await runPresenceMergeTwoBrowsersMode(page)
       : smokeMode === 'concurrent-writers-convergence-browser-to-rust'
       ? await runConcurrentWritersConvergenceMode(page)
-      : await page.evaluate(async ({ signalingUrl, smokeMode, rustSeed, useAppDb, browserPayload, backgroundQueueTask, advancedStatusEvidenceVersion, advancedStatusEvidenceRuntime, codingAgentSmoke, rolesPermissionsReloadVerified, dynamicAppsReloadVerified, appReleaseReloadVerified, appAudienceReloadVerified, threadsScaleSeed, threadsRightClickCapabilities, officeRestartFixtureBytes }) => {
+      : await page.evaluate(async ({ signalingUrl, smokeMode, rustSeed, useAppDb, browserPayload, backgroundQueueTask, advancedStatusEvidenceVersion, advancedStatusEvidenceRuntime, codingAgentSmoke, rolesPermissionsReloadVerified, dynamicAppsReloadVerified, appReleaseReloadVerified, appAudienceReloadVerified, threadsScaleSeed, sellifyScaleSeed, sellifyScaleProvisionOnly, threadsRightClickCapabilities, officeRestartFixtureBytes }) => {
       if (!globalThis.process) globalThis.process = {};
       if (typeof globalThis.process.nextTick !== 'function') {
         globalThis.process.nextTick = (callback, ...args) => Promise.resolve().then(() => callback(...args));
@@ -7172,6 +7499,7 @@ function ensureCtoxSmokeBinary() {
       const nativePeerOpenTimeoutMs = businessOsAppReleaseUiSmokeMode ? 240000 : 60000;
       const businessOsThreadsRightClickUiSmokeMode = smokeMode === 'business-os-threads-rightclick-ui';
       const businessOsThreadsScaleUiSmokeMode = smokeMode === 'business-os-threads-scale-ui';
+      const businessOsSellifyScaleUiSmokeMode = smokeMode === 'business-os-sellify-scale-ui';
       const commandSmokeMode = smokeMode === 'command-browser-to-rust'
         || smokeMode === 'command-roundtrip-timing-browser-to-rust'
         || smokeMode === 'migration-version-browser-to-rust'
@@ -7203,7 +7531,7 @@ function ensureCtoxSmokeBinary() {
       const needsCodingAgentCollections = codingAgentsUiSmokeMode;
       const needsTicketCollections = ticketSmokeMode;
       const needsFileCollections = (
-        (!commandSmokeMode && !outboundActiveUiSmokeMode && !codingAgentsUiSmokeMode && !spreadsheetsActiveUiSmokeMode && !documentsActiveUiSmokeMode && !invoicesActiveUiSmokeMode && !buchhaltungActiveUiSmokeMode)
+        (!commandSmokeMode && !outboundActiveUiSmokeMode && !codingAgentsUiSmokeMode && !spreadsheetsActiveUiSmokeMode && !documentsActiveUiSmokeMode && !invoicesActiveUiSmokeMode && !buchhaltungActiveUiSmokeMode && !businessOsSellifyScaleUiSmokeMode)
         || materializeSmokeMode
       )
         && !deferInitialFileCollections
@@ -10076,6 +10404,216 @@ function ensureCtoxSmokeBinary() {
           tenantScope: 'local-workspace',
           advancedStatusVersion: status.version || '',
           advancedStatusRuntime: status.rxdbRuntime || null,
+        };
+      }
+
+      async function runBusinessOsSellifyScaleUiSmoke() {
+        const collections = [
+          'sellify_activities',
+          'sellify_campaigns',
+          'sellify_people',
+          'sellify_companies',
+        ];
+        const state = globalThis.ctoxBusinessOsSmoke?.state;
+        const rawDb = state?.db?.raw;
+        const leases = globalThis.__ctoxSellifyScaleLeases || [];
+        if (!rawDb || leases.length !== 1 || leases[0]?.collection !== 'sellify_activities') {
+          throw new Error('Sellify scale collections or scoped leases are unavailable');
+        }
+        const waitForQueryReady = async (requiredCollections, timeoutMs = 10000) => {
+          const deadline = Date.now() + timeoutMs;
+          let last = {};
+          while (Date.now() < deadline) {
+            last = Object.fromEntries(requiredCollections.map((name) => [
+              name,
+              state?.sync?.diagnostics?.collections?.[name] || {},
+            ]));
+            const incompatible = Object.entries(last).find(([, diagnostic]) => (
+              diagnostic?.reason === 'query-fetch-capability-required'
+              || diagnostic?.lastError?.code === 'ctox_query_fetch_capability_required'
+            ));
+            if (incompatible) {
+              throw new Error(`Sellify query-fetch peer is incompatible: ${JSON.stringify(incompatible)}`);
+            }
+            if (Object.values(last).every((diagnostic) => diagnostic?.queryReady === true)) {
+              return last;
+            }
+            await delay(50);
+          }
+          throw new Error(`Sellify query-fetch readiness timed out: ${JSON.stringify(last)}`);
+        };
+        await waitForQueryReady(['sellify_activities']);
+        const storageEstimateBefore = await navigator.storage?.estimate?.().catch(() => null) || null;
+        const localDocumentCounts = async () => Object.fromEntries(await Promise.all(
+          collections.map(async (name) => {
+            const rows = await rawDb[name]?.storageCollection?.allDocuments?.() || [];
+            return [name, rows.filter((document) => document?._deleted !== true).length];
+          }),
+        ));
+        const beforeCounts = await localDocumentCounts();
+        const cachedDocumentsBeforeQuery = Object.values(beforeCounts)
+          .reduce((total, count) => total + Number(count || 0), 0);
+        const fullPullBeforeRender = cachedDocumentsBeforeQuery > 1000;
+        const transportBaselineByCollection = Object.fromEntries(leases.map((lease) => {
+          const bridge = lease?.bridge?.bridge || lease?.bridge;
+          const status = bridge?.state?.getTransportStatus?.() || {};
+          return [lease.collection, {
+            success: Number(status?.demandLoading?.queryFetchSuccessCount || 0),
+            errors: Number(status?.demandLoading?.queryFetchErrorCount || 0),
+          }];
+        }));
+        const queryStartedAt = performance.now();
+        const queryWindow = async (name, limit = 200) => {
+          const docs = await rawDb[name].find({
+            selector: { status: 'active' },
+            sort: [{ updated_at_ms: 'desc' }],
+            limit,
+          }).exec();
+          return docs.map((doc) => doc?.toJSON?.() || doc);
+        };
+        const windows = {
+          sellify_activities: await queryWindow('sellify_activities', 50),
+        };
+        const firstDataAt = performance.now();
+        const primaryWindow = windows.sellify_activities || [];
+        const sorted = primaryWindow.every((document, index) => (
+          document?.status === 'active'
+          && (index === 0 || Number(primaryWindow[index - 1]?.updated_at_ms || 0)
+            >= Number(document?.updated_at_ms || 0))
+        ));
+        if (!sorted) throw new Error('Sellify scale window is not authoritatively filtered and sorted');
+
+        const host = document.querySelector('[data-module-host], .module-host, main') || document.body;
+        const root = document.createElement('section');
+        root.dataset.sellifyScaleRoot = 'true';
+        root.setAttribute('aria-label', 'Sellify scale result window');
+        const heading = document.createElement('h2');
+        heading.textContent = 'Sellify Scale · Activities';
+        root.appendChild(heading);
+        const interaction = document.createElement('button');
+        interaction.type = 'button';
+        interaction.textContent = 'Sortierung bestätigen';
+        interaction.addEventListener('click', () => {
+          root.dataset.interactionReady = 'true';
+        });
+        root.appendChild(interaction);
+        const table = document.createElement('table');
+        table.innerHTML = '<thead><tr><th>ID</th><th>Status</th><th>Updated</th></tr></thead>';
+        const body = document.createElement('tbody');
+        for (const rowDocument of primaryWindow) {
+          const tr = document.createElement('tr');
+          tr.dataset.sellifyScaleRow = String(rowDocument.id || '');
+          for (const value of [rowDocument.id, rowDocument.status, rowDocument.updated_at_ms]) {
+            const cell = document.createElement('td');
+            cell.textContent = String(value ?? '');
+            tr.appendChild(cell);
+          }
+          body.appendChild(tr);
+        }
+        table.appendChild(body);
+        root.appendChild(table);
+        host.appendChild(root);
+        interaction.click();
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const queryWindowRenderMs = Math.round(performance.now() - queryStartedAt);
+        const usableMs = Math.round(performance.now());
+        const interactionReady = root.dataset.interactionReady === 'true' && !interaction.disabled;
+        const remainingCollections = collections.filter((name) => name !== 'sellify_activities');
+        for (const name of remainingCollections) {
+          leases.push(await state.sync.leaseCollection(name, 'sellify-scale-browser-smoke-after-render'));
+          transportBaselineByCollection[name] = { success: 0, errors: 0 };
+        }
+        await waitForQueryReady(remainingCollections);
+        const remainingWindows = await Promise.all(remainingCollections.map(async (name) => [
+          name,
+          await queryWindow(name),
+        ]));
+        Object.assign(windows, Object.fromEntries(remainingWindows));
+        const afterCounts = await localDocumentCounts();
+        const materializedDocuments = Object.values(afterCounts)
+          .reduce((total, count) => total + Number(count || 0), 0);
+        const transportStatuses = leases.map((lease) => {
+          const bridge = lease?.bridge?.bridge || lease?.bridge;
+          return bridge?.state?.getTransportStatus?.() || {};
+        });
+        const queryFetchResponses = transportStatuses.reduce((total, status, index) => (
+          total
+          + Number(status?.demandLoading?.queryFetchSuccessCount || 0)
+          - Number(transportBaselineByCollection[leases[index]?.collection]?.success || 0)
+        ), 0);
+        const queryFetchErrors = transportStatuses.reduce((total, status, index) => (
+          total
+          + Number(status?.demandLoading?.queryFetchErrorCount || 0)
+          - Number(transportBaselineByCollection[leases[index]?.collection]?.errors || 0)
+        ), 0);
+        const queryFetchRequests = queryFetchResponses + queryFetchErrors;
+        const readiness = Object.fromEntries(collections.map((name) => {
+          const diagnostic = state?.sync?.diagnostics?.collections?.[name] || {};
+          return [name, {
+            syncProfile: diagnostic.syncProfile || '',
+            localCoverage: diagnostic.localCoverage || '',
+            queryReady: diagnostic.queryReady === true,
+            connectionStatus: diagnostic.connectionStatus || '',
+          }];
+        }));
+        const windowedCoverage = Object.values(readiness).every((item) => (
+          item.syncProfile === 'demand-only'
+          && item.localCoverage === 'windowed'
+          && item.queryReady === true
+        ));
+        const storageEstimateAfter = await navigator.storage?.estimate?.().catch(() => null) || null;
+        const serverDocuments = Number(sellifyScaleSeed?.sellifyServerDocuments || 0);
+        const latencyTargetPassed = usableMs < 5000;
+        const budgetPassed = serverDocuments === 304515
+          && queryFetchRequests <= 5
+          && materializedDocuments <= 1000
+          && primaryWindow.length >= 1
+          && primaryWindow.length <= 200
+          && interactionReady
+          && !fullPullBeforeRender
+          && windowedCoverage;
+        if (!budgetPassed) {
+          throw new Error(`Sellify scale browser budget failed: ${JSON.stringify({
+            serverDocuments,
+            queryFetchRequests,
+            queryFetchResponses,
+            materializedDocuments,
+            visibleRows: primaryWindow.length,
+            queryWindowRenderMs,
+            usableMs,
+            interactionReady,
+            fullPullBeforeRender,
+            windowedCoverage,
+            readiness,
+          })}`);
+        }
+        return {
+          mode: smokeMode,
+          serverDocuments,
+          totalDocuments: Number(sellifyScaleSeed?.totalDocuments || 0),
+          queryFetchRequests,
+          queryFetchResponses,
+          materializedDocuments,
+          visibleRows: primaryWindow.length,
+          firstVisibleDataMs: Math.round(firstDataAt),
+          firstRenderMs: usableMs,
+          queryWindowRenderMs,
+          provisionOnly: sellifyScaleProvisionOnly,
+          latencyTargetPassed,
+          interactionReady,
+          fullPullBeforeRender,
+          windowedCoverage,
+          beforeCounts,
+          afterCounts,
+          cachedDocumentsBeforeQuery,
+          readiness,
+          indexedDbUsageBefore: Number(storageEstimateBefore?.usage || 0),
+          indexedDbUsageAfter: Number(storageEstimateAfter?.usage || 0),
+          indexedDbQuota: Number(storageEstimateAfter?.quota || 0),
+          nativeDatabaseBytes: Number(sellifyScaleSeed?.databaseBytes || 0),
+          budgetPassed,
+          advancedStatusVersion: advancedStatusVersion || '',
+          advancedStatusRuntime: advancedStatusRuntime || null,
         };
       }
 
@@ -14666,6 +15204,10 @@ function ensureCtoxSmokeBinary() {
         return await runBusinessOsThreadsScaleUiSmoke();
       }
 
+      if (smokeMode === 'business-os-sellify-scale-ui') {
+        return await runBusinessOsSellifyScaleUiSmoke();
+      }
+
       if (smokeMode === 'business-os-ui-regression') {
         return await runBusinessOsUiRegression();
       }
@@ -16388,7 +16930,7 @@ function ensureCtoxSmokeBinary() {
           desktop_file_chunks: describeReplicationPool(appChunkReplicationState),
         },
       };
-    }, { signalingUrl, smokeMode, rustSeed, useAppDb, browserPayload, backgroundQueueTask, advancedStatusEvidenceVersion, advancedStatusEvidenceRuntime, codingAgentSmoke, rolesPermissionsReloadVerified, dynamicAppsReloadVerified, appReleaseReloadVerified, appAudienceReloadVerified, threadsScaleSeed, threadsRightClickCapabilities, officeRestartFixtureBytes });
+    }, { signalingUrl, smokeMode, rustSeed, useAppDb, browserPayload, backgroundQueueTask, advancedStatusEvidenceVersion, advancedStatusEvidenceRuntime, codingAgentSmoke, rolesPermissionsReloadVerified, dynamicAppsReloadVerified, appReleaseReloadVerified, appAudienceReloadVerified, threadsScaleSeed, sellifyScaleSeed, sellifyScaleProvisionOnly, threadsRightClickCapabilities, officeRestartFixtureBytes });
     outerPhaseTimings.pageEvaluateMs = Date.now() - pageEvaluateStartedAt;
 
     if (result.mode === 'business-os-ui-regression') {
@@ -16733,6 +17275,31 @@ function ensureCtoxSmokeBinary() {
       console.log(`business_os_threads_scale_tenant_scope=${result.tenantScope || ''}`);
       if (result.advancedStatusVersion) console.log(`advanced_status=${result.advancedStatusVersion}`);
       if (result.advancedStatusRuntime) console.log(`rxdb_runtime=${JSON.stringify(result.advancedStatusRuntime)}`);
+    } else if (result.mode === 'business-os-sellify-scale-ui') {
+      console.log(`business_os_sellify_scale_server_documents=${result.serverDocuments || 0}`);
+      console.log(`business_os_sellify_scale_total_documents=${result.totalDocuments || 0}`);
+      console.log(`business_os_sellify_scale_query_rpcs=${result.queryFetchRequests || 0}`);
+      console.log(`business_os_sellify_scale_query_responses=${result.queryFetchResponses || 0}`);
+      console.log(`business_os_sellify_scale_materialized_documents=${result.materializedDocuments || 0}`);
+      console.log(`business_os_sellify_scale_visible_rows=${result.visibleRows || 0}`);
+      console.log(`business_os_sellify_scale_first_visible_data_ms=${result.firstVisibleDataMs || 0}`);
+      console.log(`business_os_sellify_scale_first_render_ms=${result.firstRenderMs || 0}`);
+      console.log(`business_os_sellify_scale_query_window_render_ms=${result.queryWindowRenderMs || 0}`);
+      console.log(`business_os_sellify_scale_cached_documents_before_query=${result.cachedDocumentsBeforeQuery || 0}`);
+      console.log(`business_os_sellify_scale_fixture_reused=${sellifyScaleSeed?.reused ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_provision_only=${result.provisionOnly ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_latency_target_passed=${result.latencyTargetPassed ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_interaction_ready=${result.interactionReady ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_full_pull_before_render=${result.fullPullBeforeRender ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_windowed_coverage=${result.windowedCoverage ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_indexeddb_usage_before=${result.indexedDbUsageBefore || 0}`);
+      console.log(`business_os_sellify_scale_indexeddb_usage_after=${result.indexedDbUsageAfter || 0}`);
+      console.log(`business_os_sellify_scale_indexeddb_quota=${result.indexedDbQuota || 0}`);
+      console.log(`business_os_sellify_scale_native_database_bytes=${result.nativeDatabaseBytes || 0}`);
+      console.log(`business_os_sellify_scale_budget_passed=${result.budgetPassed ? 1 : 0}`);
+      console.log(`business_os_sellify_scale_collection_readiness=${JSON.stringify(result.readiness || {})}`);
+      if (result.advancedStatusVersion) console.log(`advanced_status=${result.advancedStatusVersion}`);
+      if (result.advancedStatusRuntime) console.log(`rxdb_runtime=${JSON.stringify(result.advancedStatusRuntime)}`);
     } else if (result.mode === 'business-os-restore-resync-ui') {
       const replicated = pollSqliteFileAndChunk(result.id);
       if (replicated.payload !== result.browserPayload) {
@@ -16983,7 +17550,7 @@ function ensureCtoxSmokeBinary() {
   } finally {
     setSmokeStartupPhase('cleanup');
     if (browser) await withHostTimeout(browser.close(), 5000).catch(() => {});
-    if (browserUserDataDir) removeSmokePath(browserUserDataDir);
+    if (browserUserDataDir && !providedBrowserProfileDir) removeSmokePath(browserUserDataDir);
     if (codingAgentSmoke?.cleanupWorkspace) removeSmokePath(codingAgentSmoke.workspaceRoot);
     await stopChild(ctox);
     await stopSignalingServer(signaling);
