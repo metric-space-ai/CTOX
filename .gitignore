@@ -63,6 +63,19 @@ tmp_intersolar_*.js
 # Exceptions: the Pages site, legal notices, and files required by
 # the build (include_str!), CI contract scripts, and the release gate.
 /docs/*
+!/docs/dev/
+/docs/dev/*
+!/docs/dev/beweise/
+/docs/dev/beweise/*
+!/docs/dev/beweise/refactoring-kampagne-baseline.md
+!/docs/dev/beweise/raw/
+/docs/dev/beweise/raw/*
+!/docs/dev/beweise/raw/refactoring-baseline-4c9cd8052.json
+!/docs/dev/beweise/raw/*-move-4c9cd8052.json
+!/docs/dev/beweise/raw/sellify-scale-sqlite-window-baseline.json
+!/docs/dev/beweise/raw/command-roundtrip-warm-*.json
+!/docs/dev/beweise/raw/multiplex-handshake-registration-smoke.json
+!/docs/dev/beweise/raw/rxdb-suite-baseline-red-4c9cd8052.json
 !/docs/site
 !/docs/legal
 !/docs/business-os-app-access-and-roles-guide.md

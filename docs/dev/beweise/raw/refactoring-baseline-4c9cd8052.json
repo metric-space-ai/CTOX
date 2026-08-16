@@ -1,0 +1,20 @@
+{
+  "schema": "ctox.refactoring_baseline.v1",
+  "captured_at": "2026-08-16",
+  "baseline_commit": "4c9cd805259c722985fdb023a7090e3cd2136fcb",
+  "baseline_committed_at": "2026-08-16T07:49:20+02:00",
+  "baseline_subject": "docs: 100 Uebergabeantworten ergaenzt — inkl. rotem Groessenwaechter und Messluecken",
+  "measurement_policy": {
+    "source": "git archive snapshot",
+    "runs_per_state": 30,
+    "customer_data_allowed": false
+  },
+  "initial_production_lines": {
+    "src/core/service/service.rs": 26244,
+    "src/core/business_os/store.rs": 27342
+  },
+  "declared_initial_budgets": {
+    "src/core/service/service.rs": 26225,
+    "src/core/business_os/store.rs": 27342
+  }
+}
