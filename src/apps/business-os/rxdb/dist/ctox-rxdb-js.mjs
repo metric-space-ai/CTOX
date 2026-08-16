@@ -8949,6 +8949,13 @@ var SharedRoomPeer = class {
     this.presenceRegistry = getPresenceRegistry();
     this.presenceUnsub = null;
     this.presenceCapable = false;
+    this.handshakeMetrics = {
+      collectionRegistrations: 0,
+      peerOpenEvents: 0,
+      protocolNegotiations: 0,
+      successfulProtocolNegotiations: 0,
+      peakOpenDataChannels: 0
+    };
   }
   representativeCollection() {
     const first = this.collections.keys().next();
@@ -8959,6 +8966,7 @@ var SharedRoomPeer = class {
     this.collections.set(collection, registration);
     this.refCount += 1;
     if (isNewCollection) {
+      this.handshakeMetrics.collectionRegistrations += 1;
       this.schemaMismatchCollections.delete(collection);
       if (this.negotiated) {
         this.negotiated = null;
@@ -9173,6 +9181,11 @@ var SharedRoomPeer = class {
     this.peer.on("transport-status", (event) => this.fanout("transport-status", event.detail || event));
     this.peer.on("peer-open", (event) => {
       const peerId = event.detail.peerId;
+      this.handshakeMetrics.peerOpenEvents += 1;
+      this.handshakeMetrics.peakOpenDataChannels = Math.max(
+        this.handshakeMetrics.peakOpenDataChannels,
+        this.openSharedPeerIds().length
+      );
       this.peerOpenQueue = this.peerOpenQueue.then(async () => {
         try {
           const negotiated = await this.ensureNegotiatedPeer(peerId);
@@ -9423,6 +9436,7 @@ var SharedRoomPeer = class {
     const representative = this.representativeCollection();
     if (!representative) return null;
     if (!this.isPeerOpen(peerId)) return null;
+    this.handshakeMetrics.protocolNegotiations += 1;
     const localProtocol = await this.peer.protocolPayload(peerId, [], representative.collection);
     if (!this.isPeerOpen(peerId)) return null;
     const remoteProtocol = await this.peer.request(
@@ -9471,6 +9485,7 @@ var SharedRoomPeer = class {
     this.presenceCapable = remoteSupportsPresence(normalizedRemoteProtocol);
     this.sendPresenceUpdate();
     this.negotiated = { peerId, remoteProtocol: normalizedRemoteProtocol, queryFetchCapable };
+    this.handshakeMetrics.successfulProtocolNegotiations += 1;
     return this.negotiated;
   }
   isPeerOpen(peerId) {
@@ -9530,9 +9545,19 @@ var SharedRoomPeer = class {
     await delay2(100);
   }
   getTransportStatus() {
+    const openDataChannels = this.openSharedPeerIds().length;
+    this.handshakeMetrics.peakOpenDataChannels = Math.max(
+      this.handshakeMetrics.peakOpenDataChannels,
+      openDataChannels
+    );
     return {
       ...this.peer?.getTransportStatus?.() || {},
-      demandTransport: this.demandTransport?.diagnostics?.() || null
+      demandTransport: this.demandTransport?.diagnostics?.() || null,
+      multiplexHandshake: {
+        ...this.handshakeMetrics,
+        openDataChannels,
+        registeredCollections: this.collections.size
+      }
     };
   }
 };

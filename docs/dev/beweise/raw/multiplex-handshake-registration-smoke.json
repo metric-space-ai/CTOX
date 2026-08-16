@@ -1,0 +1,13 @@
+{
+  "schema": "ctox.business_os.multiplex_handshake_metrics.v1",
+  "capturedAt": "2026-08-16",
+  "synthetic": true,
+  "collectionRegistrations": 25,
+  "registeredCollections": 25,
+  "peerOpenEvents": 0,
+  "protocolNegotiations": 0,
+  "successfulProtocolNegotiations": 0,
+  "openDataChannels": 1,
+  "peakOpenDataChannels": 1,
+  "interpretation": "Collection registration uses the existing multiplex room and creates no protocol roundtrip before peer-open."
+}
