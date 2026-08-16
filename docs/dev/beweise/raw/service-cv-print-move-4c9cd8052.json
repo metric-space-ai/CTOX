@@ -1,0 +1,17 @@
+{
+  "schema": "ctox.rust_move_verification.v1",
+  "before_ref": "4c9cd8052",
+  "before_path": "src/core/service/service.rs",
+  "after_path": "src/core/service/service_cv_print_recovery.rs",
+  "results": [
+    {"symbol":"cv_print_heading_matches","before_sha256":"6d42fadc32baa9333b92f882e7fcaf5538b02e2eea6e6af637c1ce09898196c2","after_sha256":"6d42fadc32baa9333b92f882e7fcaf5538b02e2eea6e6af637c1ce09898196c2","equal":true},
+    {"symbol":"cv_print_normalized_heading","before_sha256":"5cbae3a80463a5a2142a2218dc100cecc8361efa4f7c485aeabd58073d7b8516","after_sha256":"5cbae3a80463a5a2142a2218dc100cecc8361efa4f7c485aeabd58073d7b8516","equal":true},
+    {"symbol":"cv_print_clean_line","before_sha256":"c624fae6af45724b59fab18dd553c973019ba181222f9e839769d83c2250a965","after_sha256":"c624fae6af45724b59fab18dd553c973019ba181222f9e839769d83c2250a965","equal":true},
+    {"symbol":"cv_print_clean_token","before_sha256":"394832d59cb3039d811d9d262c46f85e6112caae12160a9ec58d92026b34444d","after_sha256":"394832d59cb3039d811d9d262c46f85e6112caae12160a9ec58d92026b34444d","equal":true},
+    {"symbol":"cv_print_is_month_token","before_sha256":"50cfda71d24dadc6226610397ba08ae3ccc0a64da0e7ec2489aa7463417ba6a8","after_sha256":"50cfda71d24dadc6226610397ba08ae3ccc0a64da0e7ec2489aa7463417ba6a8","equal":true},
+    {"symbol":"cv_print_split_inline_title_org","before_sha256":"a49149fb3b319f0cc86d68bc8c85e2964fda0b19f71242e1f2cfc0c7daf85174","after_sha256":"a49149fb3b319f0cc86d68bc8c85e2964fda0b19f71242e1f2cfc0c7daf85174","equal":true},
+    {"symbol":"cv_print_line_is_entry_detail","before_sha256":"5c108c1a846bdef5daf6bfe4d496135d10958294a73b3d67d004e2a18d00fc8e","after_sha256":"5c108c1a846bdef5daf6bfe4d496135d10958294a73b3d67d004e2a18d00fc8e","equal":true},
+    {"symbol":"cv_print_line_is_detail_label","before_sha256":"f2a1d530bf927517cd347ee814e35a188a9292501b9ea21553c9b4d9c819464a","after_sha256":"f2a1d530bf927517cd347ee814e35a188a9292501b9ea21553c9b4d9c819464a","equal":true},
+    {"symbol":"cv_print_clean_detail_line","before_sha256":"1331d8cbcdab1fe46b856a5458c2718abbfecff5b204dd29b7e169bf73d66f7d","after_sha256":"1331d8cbcdab1fe46b856a5458c2718abbfecff5b204dd29b7e169bf73d66f7d","equal":true}
+  ]
+}

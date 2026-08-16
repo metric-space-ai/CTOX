@@ -1,0 +1,152 @@
+{
+  "schema": "ctox.rust_move_verification.v1",
+  "before_ref": "4c9cd8052",
+  "before_path": "src/core/service/service.rs",
+  "after_path": "src/core/service/service_business_os_app_authoring.rs",
+  "results": [
+    {
+      "symbol": "business_os_app_module_execution_prompt",
+      "before_sha256": "d8879533081aad95d7803cb1b9d52cb9bb21b55951bc6ec21895ccdae8c6cbab",
+      "after_sha256": "d8879533081aad95d7803cb1b9d52cb9bb21b55951bc6ec21895ccdae8c6cbab",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_module_target_from_metadata",
+      "before_sha256": "9387a08a15defb32791769fc366e932763d87918736dfe556bb7de47903ad033",
+      "after_sha256": "9387a08a15defb32791769fc366e932763d87918736dfe556bb7de47903ad033",
+      "equal": true
+    },
+    {
+      "symbol": "prompt_line_value",
+      "before_sha256": "3313bc67d852fd911db9b561538e917e12ec5c6743c598b02b85988cf25eb6e8",
+      "after_sha256": "3313bc67d852fd911db9b561538e917e12ec5c6743c598b02b85988cf25eb6e8",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_workspace_root",
+      "before_sha256": "70acf912a51bd4c3116df9cb0f724d965e679eef7ee45a99f050b7f68fde5a75",
+      "after_sha256": "70acf912a51bd4c3116df9cb0f724d965e679eef7ee45a99f050b7f68fde5a75",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_task_workspace_root",
+      "before_sha256": "48c53eff352ed25816cc2f8d239a890571ca9bed73a62e5ad0cbad829987e635",
+      "after_sha256": "48c53eff352ed25816cc2f8d239a890571ca9bed73a62e5ad0cbad829987e635",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_workspace_root_looks_valid",
+      "before_sha256": "1ae4f0cdf5588c133ebba64a8d767b32205e4858d0d8c87514645dab635c4d9d",
+      "after_sha256": "1ae4f0cdf5588c133ebba64a8d767b32205e4858d0d8c87514645dab635c4d9d",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_artifact_tree_stamp",
+      "before_sha256": "a0f240d6c1cacb3549b330852f515eba0e93e790bf9754cddc9ba1be7b88ca22",
+      "after_sha256": "a0f240d6c1cacb3549b330852f515eba0e93e790bf9754cddc9ba1be7b88ca22",
+      "equal": true
+    },
+    {
+      "symbol": "hash_business_os_app_artifact_path",
+      "before_sha256": "90a1b3b581e3ec140763cf31b4fd2439e40ce87d829d41f4dfb02039a7c1a736",
+      "after_sha256": "90a1b3b581e3ec140763cf31b4fd2439e40ce87d829d41f4dfb02039a7c1a736",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_artifact_dir_has_user_content",
+      "before_sha256": "67d5f7547d935f597ce8be526216d17c6563ce41c24e7f4d3f92fcb42f1ad62c",
+      "after_sha256": "67d5f7547d935f597ce8be526216d17c6563ce41c24e7f4d3f92fcb42f1ad62c",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_validation_repair_attempt_count",
+      "before_sha256": "a39637091aee3a14a4bbf4287fad2ded7402f84ecba3722be1355edd38d5cf7f",
+      "after_sha256": "a39637091aee3a14a4bbf4287fad2ded7402f84ecba3722be1355edd38d5cf7f",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_validation_repair_exhausted",
+      "before_sha256": "736701a253764ad61c034e24f90d60006cbf5e232d07e7ecae064be0c3df6974",
+      "after_sha256": "736701a253764ad61c034e24f90d60006cbf5e232d07e7ecae064be0c3df6974",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_validation_explicit_repair_attempt",
+      "before_sha256": "a6e2cb455f48ec3378b5fcae9b920712a75c8d5ff06c6adfbdefdd11a1a5301f",
+      "after_sha256": "a6e2cb455f48ec3378b5fcae9b920712a75c8d5ff06c6adfbdefdd11a1a5301f",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_validation_audit_key",
+      "before_sha256": "4cae2ad3fbc0aa30eecf94865f0b7b711e3877ff0fd3518f04339fe8c87dd8bc",
+      "after_sha256": "4cae2ad3fbc0aa30eecf94865f0b7b711e3877ff0fd3518f04339fe8c87dd8bc",
+      "equal": true
+    },
+    {
+      "symbol": "enforce_business_os_app_validation_feedback_transition",
+      "before_sha256": "b7bf99d9d85a51d6a7af5ef1c926b98b649f68f7531f3f79a2447c88c60c9cb1",
+      "after_sha256": "b7bf99d9d85a51d6a7af5ef1c926b98b649f68f7531f3f79a2447c88c60c9cb1",
+      "equal": true
+    },
+    {
+      "symbol": "apply_business_os_app_validation_rework_to_leased_queue",
+      "before_sha256": "04caf1af88539c91c5d3c6d3970017691ea1cd92e7d55a526eef44382488d62d",
+      "after_sha256": "04caf1af88539c91c5d3c6d3970017691ea1cd92e7d55a526eef44382488d62d",
+      "equal": true
+    },
+    {
+      "symbol": "complete_business_os_app_validation_success_to_leased_queue",
+      "before_sha256": "83f5c8dd13102421fc3225d92394240a134a4ebf79cab173a3aa6febccd4f37c",
+      "after_sha256": "83f5c8dd13102421fc3225d92394240a134a4ebf79cab173a3aa6febccd4f37c",
+      "equal": true
+    },
+    {
+      "symbol": "enforce_business_os_app_validation_requeue_transition",
+      "before_sha256": "bdeef3c5d0ba55b9c12a0be26f55746126eb5a37f67daebf09a6cae28f44a649",
+      "after_sha256": "bdeef3c5d0ba55b9c12a0be26f55746126eb5a37f67daebf09a6cae28f44a649",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_module_validation_feedback",
+      "before_sha256": "8bdbf8da9642df8f80d544b34f861db10f08a322c2688879d34002c7b2c15aa4",
+      "after_sha256": "8bdbf8da9642df8f80d544b34f861db10f08a322c2688879d34002c7b2c15aa4",
+      "equal": true
+    },
+    {
+      "symbol": "render_business_os_app_module_validation_feedback",
+      "before_sha256": "c0ff8173151c0c3b904c9705f5a811bb2e1caa7ed48c087c12e5a2a99f930033",
+      "after_sha256": "c0ff8173151c0c3b904c9705f5a811bb2e1caa7ed48c087c12e5a2a99f930033",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_original_request_summary",
+      "before_sha256": "fca3bececd6da7336ef5bcac5991ea0579f33971168693b0d1e31c451970bd38",
+      "after_sha256": "fca3bececd6da7336ef5bcac5991ea0579f33971168693b0d1e31c451970bd38",
+      "equal": true
+    },
+    {
+      "symbol": "prompt_section_after_marker",
+      "before_sha256": "755f9aeb3cc0016331dceb1bba89d00ae7086b3ccc0b2ce5610ec6f0bcd16371",
+      "after_sha256": "755f9aeb3cc0016331dceb1bba89d00ae7086b3ccc0b2ce5610ec6f0bcd16371",
+      "equal": true
+    },
+    {
+      "symbol": "redact_business_os_app_prompt_secrets",
+      "before_sha256": "14cb394484e94cf1c1906c44228a7092fce07ecdbb71d243e37ecd215c40892f",
+      "after_sha256": "14cb394484e94cf1c1906c44228a7092fce07ecdbb71d243e37ecd215c40892f",
+      "equal": true
+    },
+    {
+      "symbol": "clip_multiline_text",
+      "before_sha256": "cb1fdd71f64237d567c17c2a6688508ebc721456bce58138a83792448f32b69a",
+      "after_sha256": "cb1fdd71f64237d567c17c2a6688508ebc721456bce58138a83792448f32b69a",
+      "equal": true
+    },
+    {
+      "symbol": "is_business_os_chat_queue_job",
+      "before_sha256": "588445991d91d2a67377a733c7e599ec0b8cf93a34140299015b706274ae0ce6",
+      "after_sha256": "588445991d91d2a67377a733c7e599ec0b8cf93a34140299015b706274ae0ce6",
+      "equal": true
+    }
+  ]
+}

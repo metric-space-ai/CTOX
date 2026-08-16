@@ -1,0 +1,212 @@
+{
+  "schema": "ctox.rust_move_verification.v1",
+  "before_ref": "4c9cd8052",
+  "before_path": "src/core/service/service.rs",
+  "after_path": "src/core/service/service_business_os_app_recovery.rs",
+  "results": [
+    {
+      "symbol": "business_os_queue_task_is_app_module",
+      "before_sha256": "2f887c96c3271d9ae6982f9be8e83c239d8c89f6bb3f107e98cf15ca27c46d7f",
+      "after_sha256": "2f887c96c3271d9ae6982f9be8e83c239d8c89f6bb3f107e98cf15ca27c46d7f",
+      "equal": true
+    },
+    {
+      "symbol": "leased_business_os_app_queue_task_exists",
+      "before_sha256": "683c5e17874388aab947f6802a92c1686cb4b2381bf102dcf5f5248493be5d2b",
+      "after_sha256": "683c5e17874388aab947f6802a92c1686cb4b2381bf102dcf5f5248493be5d2b",
+      "equal": true
+    },
+    {
+      "symbol": "leased_business_os_app_queue_task_exists_for_stop_guard",
+      "before_sha256": "5d5d7ea75f4228bacf5df4ff0399d811d6ebd2f49d9e8b95fde719056af00d76",
+      "after_sha256": "5d5d7ea75f4228bacf5df4ff0399d811d6ebd2f49d9e8b95fde719056af00d76",
+      "equal": true
+    },
+    {
+      "symbol": "leased_business_os_rxdb_app_queue_task_exists",
+      "before_sha256": "1b9cb47d0db13a988c893608b09dad64d85fce329c6ac0e654cb9ed9cbcada0b",
+      "after_sha256": "1b9cb47d0db13a988c893608b09dad64d85fce329c6ac0e654cb9ed9cbcada0b",
+      "equal": true
+    },
+    {
+      "symbol": "maybe_lease_next_durable_queue_prompt",
+      "before_sha256": "dac033b95b2c483d8969023e6b1f6e9e14b8125c1b06f3736fb2fce3b4c95977",
+      "after_sha256": "dac033b95b2c483d8969023e6b1f6e9e14b8125c1b06f3736fb2fce3b4c95977",
+      "equal": true
+    },
+    {
+      "symbol": "mark_business_os_app_recovery_preflight_due",
+      "before_sha256": "ec092dcd1b9d01421dc9fa9f8c1b4cb640e28aa7b7ea40fb185e260982529b6d",
+      "after_sha256": "ec092dcd1b9d01421dc9fa9f8c1b4cb640e28aa7b7ea40fb185e260982529b6d",
+      "equal": true
+    },
+    {
+      "symbol": "should_skip_idle_business_os_app_recovery",
+      "before_sha256": "560ec19b8cf42912ee2067cd7a3065930c4cf33a60bc92d6d7f19e95db85d2e9",
+      "after_sha256": "560ec19b8cf42912ee2067cd7a3065930c4cf33a60bc92d6d7f19e95db85d2e9",
+      "equal": true
+    },
+    {
+      "symbol": "mark_business_os_app_recovery_ran",
+      "before_sha256": "7dc2f74d6175a6fd08af205c84fbc4dd3c8fbe0cc90997eb6eaf1031ec580cc7",
+      "after_sha256": "7dc2f74d6175a6fd08af205c84fbc4dd3c8fbe0cc90997eb6eaf1031ec580cc7",
+      "equal": true
+    },
+    {
+      "symbol": "clear_business_os_app_recovery_idle_gate_for_tests",
+      "before_sha256": "67a341c53fd108fe9b947d4c707644ea856c6fee9f20925c0847474ea8cf179e",
+      "after_sha256": "67a341c53fd108fe9b947d4c707644ea856c6fee9f20925c0847474ea8cf179e",
+      "equal": true
+    },
+    {
+      "symbol": "quarantine_synthetic_e2e_queue_tasks_before_dispatch",
+      "before_sha256": "b54b9dae1cb639d4cc29f700ad8fc4973cca3572694d238eed7a6e0384b5b814",
+      "after_sha256": "b54b9dae1cb639d4cc29f700ad8fc4973cca3572694d238eed7a6e0384b5b814",
+      "equal": true
+    },
+    {
+      "symbol": "queue_task_is_synthetic_e2e_bench_leftover",
+      "before_sha256": "428c16483ddf0c2d55912fab7f98c50f3761a5c132c2978211cbca7647ec2a88",
+      "after_sha256": "428c16483ddf0c2d55912fab7f98c50f3761a5c132c2978211cbca7647ec2a88",
+      "equal": true
+    },
+    {
+      "symbol": "queued_prompt_is_synthetic_e2e_bench_leftover",
+      "before_sha256": "7a070322406f87b83e26910ea06e1a4b05f7b8b3e37e41251535325c38e2c005",
+      "after_sha256": "7a070322406f87b83e26910ea06e1a4b05f7b8b3e37e41251535325c38e2c005",
+      "equal": true
+    },
+    {
+      "symbol": "queue_identity_is_synthetic_e2e_bench_leftover",
+      "before_sha256": "3bb8af86529f1e975f1fe5160fcfc2dec459ec1af4ee30e2887dffec421518ad",
+      "after_sha256": "3bb8af86529f1e975f1fe5160fcfc2dec459ec1af4ee30e2887dffec421518ad",
+      "equal": true
+    },
+    {
+      "symbol": "block_synthetic_e2e_queued_prompt_before_dispatch",
+      "before_sha256": "08353f74effb1d9e39749927cfa111d21cff5a801423219dc0745f7bb83aa8a3",
+      "after_sha256": "08353f74effb1d9e39749927cfa111d21cff5a801423219dc0745f7bb83aa8a3",
+      "equal": true
+    },
+    {
+      "symbol": "maybe_lease_next_durable_queue_prompt_for_idle_dispatch",
+      "before_sha256": "d49e82d569f982baadf2ed98a1a1408f2fbb1871dc1877f72b3074df4c03391b",
+      "after_sha256": "d49e82d569f982baadf2ed98a1a1408f2fbb1871dc1877f72b3074df4c03391b",
+      "equal": true
+    },
+    {
+      "symbol": "maybe_lease_next_durable_queue_prompt_for_worker_finalization",
+      "before_sha256": "787748dfa9bdbc4f58aeda014dd5d6826a6783a26dcb7b78c0b1bc79d5fc25b9",
+      "after_sha256": "787748dfa9bdbc4f58aeda014dd5d6826a6783a26dcb7b78c0b1bc79d5fc25b9",
+      "equal": true
+    },
+    {
+      "symbol": "maybe_lease_next_durable_queue_after_worker_idle",
+      "before_sha256": "82e680bc800aa115feb3192147077cf008ebab092b86be827b87e1af6a9d7dc3",
+      "after_sha256": "82e680bc800aa115feb3192147077cf008ebab092b86be827b87e1af6a9d7dc3",
+      "equal": true
+    },
+    {
+      "symbol": "maybe_enqueue_next_durable_queue_after_worker_idle",
+      "before_sha256": "dda42b60513978369fcaae858e45de5c59ec5b78d99cd9dd1157e428ac1b298c",
+      "after_sha256": "dda42b60513978369fcaae858e45de5c59ec5b78d99cd9dd1157e428ac1b298c",
+      "equal": true
+    },
+    {
+      "symbol": "spawn_delayed_worker_idle_queue_kick",
+      "before_sha256": "432c9603b4af5b250313f6a4f44ebc6b26462518d29e5a7e65ffd80dbfd8389c",
+      "after_sha256": "432c9603b4af5b250313f6a4f44ebc6b26462518d29e5a7e65ffd80dbfd8389c",
+      "equal": true
+    },
+    {
+      "symbol": "recover_stale_business_os_app_queue_tasks",
+      "before_sha256": "59110b19c7e99708012e8a5cf9e2e67fbf09b7cbcb3ff8ad7076006736166ce9",
+      "after_sha256": "59110b19c7e99708012e8a5cf9e2e67fbf09b7cbcb3ff8ad7076006736166ce9",
+      "equal": true
+    },
+    {
+      "symbol": "recover_abandoned_business_os_app_queue_tasks",
+      "before_sha256": "e2c24d03576a0eae71ca6119d115d1f1ad4000d1b664cf3cfbd4d26f12b1a00d",
+      "after_sha256": "e2c24d03576a0eae71ca6119d115d1f1ad4000d1b664cf3cfbd4d26f12b1a00d",
+      "equal": true
+    },
+    {
+      "symbol": "recover_stale_business_os_app_queue_task_summary",
+      "before_sha256": "604c95b181f926f4d7812359e79dd438a1c84022713de397bbb5ae2606f5e919",
+      "after_sha256": "604c95b181f926f4d7812359e79dd438a1c84022713de397bbb5ae2606f5e919",
+      "equal": true
+    },
+    {
+      "symbol": "clear_idle_pending_prompt_shadow_for_recovery",
+      "before_sha256": "162e6569424123bd71938f6e8de0ba64bcf3915f68b634280947a6be88f2bbbc",
+      "after_sha256": "162e6569424123bd71938f6e8de0ba64bcf3915f68b634280947a6be88f2bbbc",
+      "equal": true
+    },
+    {
+      "symbol": "queue_task_lease_is_stale_enough",
+      "before_sha256": "d17e61a024af2f8d337c15d4ca9b9fd9df6303f8f9e78ec491f537c0a680595a",
+      "after_sha256": "d17e61a024af2f8d337c15d4ca9b9fd9df6303f8f9e78ec491f537c0a680595a",
+      "equal": true
+    },
+    {
+      "symbol": "requeue_unstarted_business_os_app_queue_task",
+      "before_sha256": "b3d24c26c9cbb0fed36aacc5100ab4d6f77267f62700eb409378b40804bd06d5",
+      "after_sha256": "b3d24c26c9cbb0fed36aacc5100ab4d6f77267f62700eb409378b40804bd06d5",
+      "equal": true
+    },
+    {
+      "symbol": "block_repeated_unstarted_business_os_app_queue_task_before_dispatch",
+      "before_sha256": "7193d99e68fd104b0fbe84594a556f987b015beecab801f3941cefbf0f5da76a",
+      "after_sha256": "7193d99e68fd104b0fbe84594a556f987b015beecab801f3941cefbf0f5da76a",
+      "equal": true
+    },
+    {
+      "symbol": "block_unstarted_business_os_app_queue_task",
+      "before_sha256": "9640b53848baba357f7f61b60cfa7ff8e56b8898a6ae6c8af906a2adc031e337",
+      "after_sha256": "9640b53848baba357f7f61b60cfa7ff8e56b8898a6ae6c8af906a2adc031e337",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_app_unstarted_requeue_count",
+      "before_sha256": "5c66a14516d17a28572b4ab808ee83d91c59c967857c7f2b66d3ffed630a442a",
+      "after_sha256": "5c66a14516d17a28572b4ab808ee83d91c59c967857c7f2b66d3ffed630a442a",
+      "equal": true
+    },
+    {
+      "symbol": "recover_business_os_app_queue_task_after_worker_finalization",
+      "before_sha256": "1c0cb33c72286f8c24e81cbd4f0b5ab63a542650af78754039aa3236ac24ae59",
+      "after_sha256": "1c0cb33c72286f8c24e81cbd4f0b5ab63a542650af78754039aa3236ac24ae59",
+      "equal": true
+    },
+    {
+      "symbol": "complete_validated_business_os_app_queue_task",
+      "before_sha256": "c37b459af0c54d9ac944b3988aa0a37d407bef3aba1bb056ff8f1cb29d9b4712",
+      "after_sha256": "c37b459af0c54d9ac944b3988aa0a37d407bef3aba1bb056ff8f1cb29d9b4712",
+      "equal": true
+    },
+    {
+      "symbol": "recover_business_os_app_queue_task_from_validation",
+      "before_sha256": "e113b7398b745ba0c7d6634f3381bc153d4da9015c3208d8e00f2b2736115560",
+      "after_sha256": "e113b7398b745ba0c7d6634f3381bc153d4da9015c3208d8e00f2b2736115560",
+      "equal": true
+    },
+    {
+      "symbol": "maybe_lease_business_os_app_validation_rework",
+      "before_sha256": "4c4e0c73810aff99da09036e9a75ca9c2ef4644a043b67b918bcdcce92447e32",
+      "after_sha256": "4c4e0c73810aff99da09036e9a75ca9c2ef4644a043b67b918bcdcce92447e32",
+      "equal": true
+    },
+    {
+      "symbol": "release_business_os_app_validation_rework_to_pending",
+      "before_sha256": "a781af2cf9428695f667b3bd0e503bbe081a5206ff4feee7650d4bb0c873486e",
+      "after_sha256": "a781af2cf9428695f667b3bd0e503bbe081a5206ff4feee7650d4bb0c873486e",
+      "equal": true
+    },
+    {
+      "symbol": "queue_task_is_business_os_app_validation_rework",
+      "before_sha256": "6f1da4f92f4ef357d28307772f3608988cb57b6317ee6764d7c4ba9d69c0f977",
+      "after_sha256": "6f1da4f92f4ef357d28307772f3608988cb57b6317ee6764d7c4ba9d69c0f977",
+      "equal": true
+    }
+  ]
+}
