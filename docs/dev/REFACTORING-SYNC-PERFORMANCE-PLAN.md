@@ -125,6 +125,26 @@ Idle-CPU-Nachtrag vom 16.08.2026:
 - Quellcode-Fix und Diagnose sind lokal belegt; Ausrollen, Neustart und
   einstündige Nachhermessung bleiben offen.
 
+Rollout-Zwischenstand vom 16.08.2026:
+
+- Der exakte Stand `eccc24334` wurde aus einem isolierten `git archive` auf
+  `/Volumes/tmp` gebaut. Das Release-Binary hat SHA-256
+  `bedd8e3aafa4af50fa9baa836642913a3b84a869612f0bfa9f2043ce35707ee8`;
+  das bisher installierte Binary bleibt mit SHA-256
+  `7fb2350ba879eb0d100401e6f6638ffe393d5d3c2c1232bd885f24a5f2e593b0`
+  als Rollback-Referenz erhalten.
+- Vor dem Umschalten waren drei Statusabfragen konsistent: Dienst laufend,
+  keine aktive Arbeit, keine wartenden Tasks und keine Worker-Aktivität.
+- Die konsistente Sicherung
+  `backups/update-20260816T170608Z` wurde angelegt. Die Retention hat erst
+  danach die vorherige Update-Sicherung vom 07.08.2026 entfernt.
+- Der verwaltete Release-Slot `refactor-sync-eccc24334` wird aktuell gebaut.
+  Symlink-Switch, Neustart, Ziel-Prüfsumme und Ein-Stunden-Messung sind noch
+  nicht als erfolgreich abgenommen.
+- Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
+  misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
+  offene Intake-Fehler und den vollständigen Command-Revisionshash.
+
 Beweis:
 [`beweise/idle-channel-router-2026-08-16.md`](beweise/idle-channel-router-2026-08-16.md)
 
