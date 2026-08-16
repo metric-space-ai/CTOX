@@ -11,7 +11,7 @@ const repoRoot = path.resolve(businessOsDir, '../../..');
 // path is the other half of that repair.
 const storePath = path.join(businessOsDir, 'store.rs');
 const commandPlanePath = path.join(businessOsDir, 'command_plane.rs');
-const peerPath = path.join(businessOsDir, 'rxdb_peer.rs');
+const peerPath = path.join(businessOsDir, 'rxdb_peer_browser.rs');
 const browserRoot = path.join(repoRoot, 'src/apps/business-os');
 const outputPath = path.join(businessOsDir, 'business_command_inventory.json');
 const storeSource = fs.readFileSync(storePath, 'utf8');
@@ -71,10 +71,14 @@ const browserLiteralTypes = [...new Set(
           .map((match) => [match[1], match[2]]),
       );
       const propertyPattern = /\b(command_type|commandType|type)\s*:\s*(?:['"]([a-z][a-z0-9_-]*(?:\.[a-z0-9_:-]+)+)['"]|([A-Z][A-Z0-9_]*))/g;
-      return [...text.matchAll(propertyPattern)]
-        .filter((match) => match[1] !== 'type' || legacyTypeLooksLikeCommand(text, match.index))
-        .map((match) => match[2] || constants.get(match[3]) || '')
-        .filter(Boolean);
+      const dispatchLiteralPattern = /\bdispatchCommand\s*\(\s*['"][a-z][a-z0-9_-]*['"]\s*,\s*['"]([a-z][a-z0-9_-]*(?:\.[a-z0-9_:-]+)+)['"]/g;
+      return [
+        ...[...text.matchAll(propertyPattern)]
+          .filter((match) => match[1] !== 'type' || legacyTypeLooksLikeCommand(text, match.index))
+          .map((match) => match[2] || constants.get(match[3]) || '')
+          .filter(Boolean),
+        ...[...text.matchAll(dispatchLiteralPattern)].map((match) => match[1]),
+      ];
     }),
 )].sort();
 
