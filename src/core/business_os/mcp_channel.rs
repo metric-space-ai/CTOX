@@ -1091,7 +1091,7 @@ fn gateway_json_rpc_error(
 }
 
 pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
-    vec![
+    let mut tools = vec![
         read_tool(
             "business_os.status",
             "Use this when you need CTOX Business OS MCP channel and runtime status.",
@@ -1553,7 +1553,9 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
                 optional_string("state_dir"),
             ]),
         ),
-    ]
+    ];
+    tools.extend(web_stack_tool_descriptors());
+    tools
 }
 
 pub fn mcp_status(root: &Path, context: &McpChannelRequestContext) -> anyhow::Result<Value> {
@@ -2791,6 +2793,13 @@ fn call_tool_inner(
             let limit = optional_usize_arg(&arguments, "limit");
             serde_json::to_value(list_mcp_activity(root, &context, limit)?)?
         }
+        "web_search" | "web_read" | "web_deep_research" => {
+            execute_web_stack_mcp_tool(root, &context, tool_name, &arguments)?
+        }
+        "web_browser_prepare" | "web_browser_automate" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            execute_web_stack_mcp_tool(root, &context, tool_name, &arguments)?
+        }
         "appsec_assessment_create" => {
             serde_json::to_value(appsec_assessment_create(root, &context, &arguments)?)?
         }
@@ -2856,6 +2865,67 @@ fn call_tool_inner(
         argument_metadata_with_policy(root, &context, tool_name, &arguments),
     )?;
     Ok(result)
+}
+
+fn execute_web_stack_mcp_tool(
+    root: &Path,
+    context: &McpChannelRequestContext,
+    tool_name: &str,
+    arguments: &Value,
+) -> anyhow::Result<Value> {
+    let tool = ctox_web_stack::WebStackCapabilityTool::from_name(tool_name).ok_or_else(|| {
+        anyhow::Error::new(BusinessOsMcpError::not_found(
+            BusinessOsMcpErrorCode::ActionNotAllowed,
+            "Web Stack capability is not available",
+        ))
+    })?;
+    if tool == ctox_web_stack::WebStackCapabilityTool::BrowserAutomate
+        && context.confirmation_state != McpConfirmationState::Approved
+    {
+        return Err(anyhow::Error::new(BusinessOsMcpError {
+            code: BusinessOsMcpErrorCode::ConfirmationRequired,
+            message: "Web Stack browser automation requires explicit user approval".to_string(),
+            field: Some("_context.confirmation_state".to_string()),
+        }));
+    }
+    let mut capability_arguments = arguments.clone();
+    if let Some(object) = capability_arguments.as_object_mut() {
+        object.remove("_context");
+    }
+    let runtime_config = ctox_web_stack::CtoxRuntimeConfigStore::from_root(root);
+    ctox_web_stack::execute_web_stack_capability(
+        ctox_web_stack::WebStackContext::new(root, &runtime_config),
+        tool,
+        capability_arguments,
+        ctox_web_stack::WebStackCapabilityLimits {
+            max_response_bytes: MAX_MCP_RESPONSE_BYTES,
+        },
+    )
+    .map_err(map_web_stack_mcp_error)
+}
+
+fn map_web_stack_mcp_error(error: ctox_web_stack::WebStackCapabilityError) -> anyhow::Error {
+    use ctox_web_stack::WebStackCapabilityErrorKind;
+
+    let mapped = match error.kind() {
+        WebStackCapabilityErrorKind::InvalidArguments => BusinessOsMcpError::validation(
+            "arguments",
+            "Web Stack capability arguments failed validation",
+        ),
+        WebStackCapabilityErrorKind::ResponseTooLarge => BusinessOsMcpError {
+            code: BusinessOsMcpErrorCode::ResponseTooLarge,
+            message: "Web Stack capability response exceeds the MCP response limit".to_string(),
+            field: None,
+        },
+        WebStackCapabilityErrorKind::InvalidContract
+        | WebStackCapabilityErrorKind::ExecutionFailure
+        | WebStackCapabilityErrorKind::InvalidResponse => BusinessOsMcpError {
+            code: BusinessOsMcpErrorCode::RuntimeUnavailable,
+            message: "Web Stack capability execution failed".to_string(),
+            field: None,
+        },
+    };
+    anyhow::Error::new(mapped)
 }
 
 fn compact_appsec_durable_projection_for_mcp(result: &mut Value) {
@@ -5096,6 +5166,29 @@ fn business_os_mcp_policy_decision(
     arguments: &Value,
 ) -> anyhow::Result<Option<PolicyDecision>> {
     match tool_name {
+        "web_search" | "web_read" | "web_deep_research" => {
+            Ok(Some(trusted_mcp_actor_policy_decision(
+                root,
+                context,
+                BusinessOsPermission::DataRead,
+                BusinessOsScopeType::Workspace,
+                None,
+            )?))
+        }
+        "web_browser_prepare" => Ok(Some(trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::RuntimeManage,
+            BusinessOsScopeType::Workspace,
+            None,
+        )?)),
+        "web_browser_automate" => Ok(Some(trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::ExternalApprove,
+            BusinessOsScopeType::Workspace,
+            None,
+        )?)),
         "business_os.status" | "business_os.list_mcp_activity" => {
             Ok(Some(trusted_mcp_actor_policy_decision(
                 root,
@@ -5828,9 +5921,10 @@ enum McpToolPolicyClass {
 
 fn tool_policy_class(tool_name: &str) -> McpToolPolicyClass {
     match tool_name {
-        "business_os.approve" => McpToolPolicyClass::ExternalEffect,
+        "business_os.approve" | "web_browser_automate" => McpToolPolicyClass::ExternalEffect,
         "business_os.reject" | "business_os.request_changes" => McpToolPolicyClass::Approval,
-        "business_os.execute_action"
+        "web_browser_prepare"
+        | "business_os.execute_action"
         | "appsec_assessment_create"
         | "appsec_lab_create"
         | "appsec_lab_run"
@@ -5963,6 +6057,21 @@ fn argument_metadata_with_policy(
 fn argument_business_scope_metadata(tool_name: &str, arguments: &Value) -> Value {
     let mut scope = serde_json::Map::new();
     scope.insert("tool".to_string(), Value::String(tool_name.to_string()));
+    if let Some(tool) = ctox_web_stack::WebStackCapabilityTool::from_name(tool_name) {
+        if let Ok(contracts) = ctox_web_stack::web_stack_capability_contracts() {
+            if let Some(contract) = contracts.into_iter().find(|contract| contract.tool == tool) {
+                scope.insert(
+                    "capability".to_string(),
+                    Value::String(contract.capability_id),
+                );
+                scope.insert(
+                    "contract".to_string(),
+                    Value::String(contract.contract_version),
+                );
+            }
+        }
+        return Value::Object(scope);
+    }
     if let Some(object) = arguments.as_object() {
         for key in [
             "module_id",
@@ -6465,6 +6574,19 @@ fn record_contains_artifact(value: &Value) -> bool {
         }
     }
     false
+}
+
+fn web_stack_tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
+    ctox_web_stack::web_stack_capability_contracts()
+        .expect("pinned Web Stack capability contracts must be valid")
+        .into_iter()
+        .map(|contract| BusinessOsMcpToolDescriptor {
+            name: contract.name,
+            description: contract.description,
+            input_schema: contract.input_schema,
+            annotations: Some(contract.annotations),
+        })
+        .collect()
 }
 
 fn read_tool(name: &str, description: &str, input_schema: Value) -> BusinessOsMcpToolDescriptor {
@@ -7079,6 +7201,57 @@ mod tests {
         }
     }
 
+    fn web_stack_fixture() -> Value {
+        serde_json::from_str(ctox_web_stack::WEB_STACK_CAPABILITY_ADAPTER_FIXTURE_V1_JSON)
+            .expect("pinned Web Stack adapter fixture")
+    }
+
+    fn web_stack_fixture_arguments(fixture: &Value, tool_name: &str) -> Value {
+        fixture["validInputs"]
+            .as_array()
+            .expect("valid Web Stack fixture inputs")
+            .iter()
+            .find(|case| case["tool"] == tool_name)
+            .expect("fixture input for Web Stack tool")["arguments"]
+            .clone()
+    }
+
+    fn web_stack_arguments_with_context(mut arguments: Value, actor: &str) -> Value {
+        arguments
+            .as_object_mut()
+            .expect("Web Stack fixture arguments are objects")
+            .insert(
+                "_context".to_string(),
+                serde_json::json!({
+                    "actor": actor,
+                    "workspace": "test-workspace",
+                    "request_id": format!("req-{}", uuid::Uuid::new_v4())
+                }),
+            );
+        arguments
+    }
+
+    fn set_web_stack_runtime_config(root: &Path, key: &str, value: &str) -> anyhow::Result<()> {
+        let database = root.join("runtime/ctox-runtime.sqlite3");
+        if let Some(parent) = database.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let connection = rusqlite::Connection::open(database)?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS runtime_env_kv (
+                env_key TEXT PRIMARY KEY,
+                env_value TEXT NOT NULL
+            );",
+        )?;
+        connection.execute(
+            "INSERT INTO runtime_env_kv(env_key, env_value)
+             VALUES (?1, ?2)
+             ON CONFLICT(env_key) DO UPDATE SET env_value = excluded.env_value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     fn write_module(
         root: &Path,
         id: &str,
@@ -7525,6 +7698,420 @@ mod tests {
 
         assert_eq!(typed.code, BusinessOsMcpErrorCode::PermissionDenied);
         assert_eq!(typed.field.as_deref(), Some("business_os_policy"));
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_tool_descriptors_match_all_pinned_contracts() {
+        let fixture = web_stack_fixture();
+        let fixture_names = fixture["tools"]
+            .as_array()
+            .expect("fixture tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("fixture tool name"))
+            .collect::<BTreeSet<_>>();
+        let contracts =
+            ctox_web_stack::web_stack_capability_contracts().expect("pinned Web Stack contracts");
+        let descriptors = tool_descriptors()
+            .into_iter()
+            .filter(|descriptor| fixture_names.contains(descriptor.name.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(descriptors.len(), contracts.len());
+        for (descriptor, contract) in descriptors.iter().zip(&contracts) {
+            assert_eq!(descriptor.name, contract.name);
+            assert_eq!(descriptor.description, contract.description);
+            assert_eq!(descriptor.input_schema, contract.input_schema);
+            assert_eq!(descriptor.annotations.as_ref(), Some(&contract.annotations));
+        }
+    }
+
+    struct PanicWebStackRuntimeConfig;
+
+    impl ctox_web_stack::RuntimeConfigStore for PanicWebStackRuntimeConfig {
+        fn get(&self, _: &str) -> Option<String> {
+            panic!("invalid Web Stack arguments reached runtime configuration")
+        }
+    }
+
+    #[test]
+    fn web_stack_fixture_invalid_inputs_are_typed_before_external_access() -> anyhow::Result<()> {
+        let fixture = web_stack_fixture();
+        let panic_config = PanicWebStackRuntimeConfig;
+        for case in fixture["invalidInputs"]
+            .as_array()
+            .context("invalid inputs")?
+        {
+            let tool_name = case["tool"].as_str().context("invalid input tool")?;
+            let tool = ctox_web_stack::WebStackCapabilityTool::from_name(tool_name)
+                .context("known fixture tool")?;
+            let mut arguments = case["arguments"].clone();
+            if arguments.get("query").and_then(Value::as_str) == Some("__OVER_2000_CHARS__") {
+                arguments["query"] = Value::String("😀".repeat(2_001));
+            }
+            let direct_error = ctox_web_stack::execute_web_stack_capability(
+                ctox_web_stack::WebStackContext::new(
+                    Path::new("/root-that-must-not-be-read"),
+                    &panic_config,
+                ),
+                tool,
+                arguments.clone(),
+                ctox_web_stack::WebStackCapabilityLimits {
+                    max_response_bytes: MAX_MCP_RESPONSE_BYTES,
+                },
+            )
+            .expect_err("fixture input must fail strict package validation");
+            assert_eq!(
+                direct_error.kind(),
+                ctox_web_stack::WebStackCapabilityErrorKind::InvalidArguments
+            );
+        }
+
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_default_mcp_admin(root)?;
+        let mut policy = default_mcp_policy();
+        policy.allow_external_effects = true;
+        save_mcp_policy(root, &policy)?;
+        for case in fixture["invalidInputs"]
+            .as_array()
+            .context("invalid inputs")?
+        {
+            let tool_name = case["tool"].as_str().context("invalid input tool")?;
+            let mut arguments = case["arguments"].clone();
+            if arguments.get("query").and_then(Value::as_str) == Some("__OVER_2000_CHARS__") {
+                arguments["query"] = Value::String("😀".repeat(2_001));
+            }
+            let mut arguments = web_stack_arguments_with_context(arguments, "chatgpt:test-user");
+            if tool_name == "web_browser_automate" {
+                arguments["_context"]["confirmation_state"] = Value::String("approved".into());
+            }
+            let error = call_tool(root, tool_name, arguments)
+                .expect_err("fixture input must fail through MCP dispatch");
+            let typed = error
+                .downcast_ref::<BusinessOsMcpError>()
+                .context("typed Business OS MCP validation error")?;
+            assert_eq!(typed.code, BusinessOsMcpErrorCode::ValidationFailed);
+            assert_eq!(typed.field.as_deref(), Some("arguments"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_search_dispatch_uses_pinned_mock_projection() -> anyhow::Result<()> {
+        let fixture = web_stack_fixture();
+        let arguments = web_stack_fixture_arguments(&fixture, "web_search");
+        let direct_temp = tempdir()?;
+        let direct_store =
+            ctox_web_stack::WorkjetRuntimeConfigStore::new([("CTOX_WEB_SEARCH_PROVIDER", "mock")]);
+        let direct = ctox_web_stack::execute_web_stack_capability(
+            ctox_web_stack::WebStackContext::new(direct_temp.path(), &direct_store),
+            ctox_web_stack::WebStackCapabilityTool::Search,
+            arguments.clone(),
+            ctox_web_stack::WebStackCapabilityLimits {
+                max_response_bytes: MAX_MCP_RESPONSE_BYTES,
+            },
+        )?;
+
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_default_mcp_admin(root)?;
+        set_web_stack_runtime_config(root, "CTOX_WEB_SEARCH_PROVIDER", "mock")?;
+        let dispatched = call_tool(
+            root,
+            "web_search",
+            web_stack_arguments_with_context(arguments, "chatgpt:test-user"),
+        )?;
+
+        assert_eq!(dispatched, direct);
+        let results = dispatched["results"].as_array().context("search results")?;
+        assert_eq!(results.len(), 1);
+        let mut keys = results[0]
+            .as_object()
+            .context("normalized search result")?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, ["snippet", "title", "url"]);
+        assert!(!dispatched.to_string().contains("provider"));
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_tools_keep_channel_classes_and_workspace_permissions() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_default_mcp_admin(root)?;
+        let expected = [
+            ("web_search", McpToolPolicyClass::Read, "data.read"),
+            ("web_read", McpToolPolicyClass::Read, "data.read"),
+            ("web_deep_research", McpToolPolicyClass::Read, "data.read"),
+            (
+                "web_browser_prepare",
+                McpToolPolicyClass::Write,
+                "runtime.manage",
+            ),
+            (
+                "web_browser_automate",
+                McpToolPolicyClass::ExternalEffect,
+                "external.approve",
+            ),
+        ];
+        let fixture = web_stack_fixture();
+        for (tool_name, class, permission) in expected {
+            assert_eq!(tool_policy_class(tool_name), class);
+            let context = test_context(tool_name);
+            let arguments = web_stack_fixture_arguments(&fixture, tool_name);
+            let decision = business_os_mcp_policy_decision(root, &context, tool_name, &arguments)?
+                .context("Web Stack product policy decision")?;
+            assert_eq!(decision.permission, permission);
+            assert_eq!(decision.scope_type, "workspace");
+            assert_eq!(decision.scope_id, None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_channel_and_product_policies_fail_closed() -> anyhow::Result<()> {
+        let fixture = web_stack_fixture();
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_default_mcp_admin(root)?;
+
+        let mut policy = default_mcp_policy();
+        policy.allow_reads = false;
+        save_mcp_policy(root, &policy)?;
+        let read_error = call_tool(
+            root,
+            "web_search",
+            web_stack_arguments_with_context(
+                web_stack_fixture_arguments(&fixture, "web_search"),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("read channel flag must fail closed");
+        assert_eq!(
+            read_error
+                .downcast_ref::<BusinessOsMcpError>()
+                .context("typed read policy error")?
+                .field
+                .as_deref(),
+            Some("CTOX_BUSINESS_OS_MCP_ALLOW_READS")
+        );
+
+        let mut policy = default_mcp_policy();
+        policy.allow_writes = false;
+        save_mcp_policy(root, &policy)?;
+        let prepare_error = call_tool(
+            root,
+            "web_browser_prepare",
+            web_stack_arguments_with_context(
+                web_stack_fixture_arguments(&fixture, "web_browser_prepare"),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("prepare write flag must fail closed");
+        assert_eq!(
+            prepare_error
+                .downcast_ref::<BusinessOsMcpError>()
+                .context("typed prepare policy error")?
+                .field
+                .as_deref(),
+            Some("CTOX_BUSINESS_OS_MCP_ALLOW_WRITES")
+        );
+
+        save_mcp_policy(root, &default_mcp_policy())?;
+        let automate_error = call_tool(
+            root,
+            "web_browser_automate",
+            web_stack_arguments_with_context(
+                web_stack_fixture_arguments(&fixture, "web_browser_automate"),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("automate external-effect flag must fail closed");
+        assert_eq!(
+            automate_error
+                .downcast_ref::<BusinessOsMcpError>()
+                .context("typed automate policy error")?
+                .field
+                .as_deref(),
+            Some("CTOX_BUSINESS_OS_MCP_ALLOW_EXTERNAL_EFFECTS")
+        );
+
+        let mut policy = default_mcp_policy();
+        policy.allow_external_effects = true;
+        save_mcp_policy(root, &policy)?;
+        let confirmation_error = call_tool(
+            root,
+            "web_browser_automate",
+            web_stack_arguments_with_context(
+                web_stack_fixture_arguments(&fixture, "web_browser_automate"),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("browser automation must require explicit user approval");
+        let typed_confirmation = confirmation_error
+            .downcast_ref::<BusinessOsMcpError>()
+            .context("typed browser confirmation error")?;
+        assert_eq!(
+            typed_confirmation.code,
+            BusinessOsMcpErrorCode::ConfirmationRequired
+        );
+        assert_eq!(
+            typed_confirmation.field.as_deref(),
+            Some("_context.confirmation_state")
+        );
+
+        policy.denied_tools = vec!["web_browser_prepare".to_string()];
+        save_mcp_policy(root, &policy)?;
+        let denied_error = call_tool(
+            root,
+            "web_browser_prepare",
+            web_stack_arguments_with_context(
+                web_stack_fixture_arguments(&fixture, "web_browser_prepare"),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("deny-tool policy must fail closed");
+        assert_eq!(
+            denied_error
+                .downcast_ref::<BusinessOsMcpError>()
+                .context("typed deny-tool error")?
+                .field
+                .as_deref(),
+            Some("CTOX_BUSINESS_OS_MCP_DENY_TOOLS")
+        );
+
+        let mut policy = default_mcp_policy();
+        policy.allow_external_effects = true;
+        policy.allowed_actors = vec!["chatgpt:other".to_string()];
+        save_mcp_policy(root, &policy)?;
+        let actor_error = call_tool(
+            root,
+            "web_search",
+            web_stack_arguments_with_context(
+                web_stack_fixture_arguments(&fixture, "web_search"),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("actor allowlist must fail closed");
+        assert_eq!(
+            actor_error
+                .downcast_ref::<BusinessOsMcpError>()
+                .context("typed actor policy error")?
+                .field
+                .as_deref(),
+            Some("CTOX_BUSINESS_OS_MCP_ALLOWED_ACTORS")
+        );
+
+        let ungranted = "service:web-stack-ungranted";
+        seed_business_user(root, ungranted, "user")?;
+        let mut policy = default_mcp_policy();
+        policy.allow_external_effects = true;
+        save_mcp_policy(root, &policy)?;
+        for tool_name in ["web_search", "web_browser_prepare", "web_browser_automate"] {
+            let error = call_tool(
+                root,
+                tool_name,
+                web_stack_arguments_with_context(
+                    web_stack_fixture_arguments(&fixture, tool_name),
+                    ungranted,
+                ),
+            )
+            .expect_err("ungranted Business OS permission must fail closed");
+            assert_eq!(
+                error
+                    .downcast_ref::<BusinessOsMcpError>()
+                    .context("typed Business OS product policy error")?
+                    .field
+                    .as_deref(),
+                Some("business_os_policy"),
+                "{tool_name}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_audit_metadata_never_persists_raw_arguments() -> anyhow::Result<()> {
+        let fixture = web_stack_fixture();
+        let marker = fixture["outputCanaries"]["marker"]
+            .as_str()
+            .context("fixture canary")?;
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_default_mcp_admin(root)?;
+        set_web_stack_runtime_config(root, "CTOX_WEB_SEARCH_PROVIDER", "mock")?;
+        let mut policy = default_mcp_policy();
+        policy.allow_external_effects = true;
+        save_mcp_policy(root, &policy)?;
+
+        let success_query = format!("{marker}-query-text");
+        call_tool_audited(
+            root,
+            "web_search",
+            web_stack_arguments_with_context(
+                serde_json::json!({"query": success_query}),
+                "chatgpt:test-user",
+            ),
+        )?;
+
+        let raw_url = format!("https://example.test/{marker}");
+        let raw_find = format!("{marker}-find-string");
+        call_tool_audited(
+            root,
+            "web_read",
+            web_stack_arguments_with_context(
+                serde_json::json!({
+                    "url": raw_url,
+                    "find": [raw_find],
+                    "path": format!("/{marker}")
+                }),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("host-only read argument must fail validation");
+
+        let raw_browser_value = format!("{marker}-browser-value");
+        call_tool_audited(
+            root,
+            "web_browser_automate",
+            web_stack_arguments_with_context(
+                serde_json::json!({
+                    "actions": [
+                        {"action": "navigate", "url": format!("https://example.test/{marker}")},
+                        {"action": "fill", "target": {"label": marker}, "value": raw_browser_value},
+                        {"action": "press", "target": {"text": marker}, "key": marker}
+                    ],
+                    "source": marker
+                }),
+                "chatgpt:test-user",
+            ),
+        )
+        .expect_err("raw browser source must fail validation");
+
+        let events = list_mcp_activity(
+            root,
+            &test_context("business_os.list_mcp_activity"),
+            Some(10),
+        )?;
+        assert_eq!(events.count, 3);
+        for event in events.items {
+            let persisted = serde_json::to_string(&event)?;
+            assert!(!persisted.contains(marker));
+            assert!(!persisted.contains("query-text"));
+            assert!(!persisted.contains("find-string"));
+            assert!(!persisted.contains("browser-value"));
+            assert!(event.metadata.get("argument_keys").is_some());
+            assert!(event.metadata.pointer("/business_scope/tool").is_some());
+            assert!(event
+                .metadata
+                .pointer("/business_scope/capability")
+                .is_some());
+            assert!(event.metadata.pointer("/business_scope/contract").is_some());
+        }
         Ok(())
     }
 

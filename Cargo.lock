@@ -2109,7 +2109,7 @@ dependencies = [
  "ctox-doc-stack",
  "ctox-feedback",
  "ctox-mailserver",
- "ctox-pdf-parse",
+ "ctox-pdf-parse 0.1.0",
  "ctox-postgres-adapter",
  "ctox-protocol",
  "ctox-qwen3-embedding-0-6b",
@@ -2578,7 +2578,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "ctox-pdf-parse",
+ "ctox-pdf-parse 0.1.0",
  "libc",
  "mailparse",
  "regex",
@@ -2796,6 +2796,22 @@ dependencies = [
 [[package]]
 name = "ctox-pdf-parse"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "once_cell",
+ "pdfium-auto",
+ "pdfium-render",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ctox-pdf-parse"
+version = "0.1.0"
+source = "git+https://github.com/metric-space-ai/workjet?rev=8726b9bf2b6f0c05602b94e5ef7a6838415549eb#8726b9bf2b6f0c05602b94e5ef7a6838415549eb"
 dependencies = [
  "anyhow",
  "image",
@@ -3118,10 +3134,11 @@ dependencies = [
 [[package]]
 name = "ctox-web-stack"
 version = "0.1.0"
+source = "git+https://github.com/metric-space-ai/workjet?rev=8726b9bf2b6f0c05602b94e5ef7a6838415549eb#8726b9bf2b6f0c05602b94e5ef7a6838415549eb"
 dependencies = [
  "anyhow",
  "chrono",
- "ctox-pdf-parse",
+ "ctox-pdf-parse 0.1.0 (git+https://github.com/metric-space-ai/workjet?rev=8726b9bf2b6f0c05602b94e5ef7a6838415549eb)",
  "libc",
  "rand 0.8.5",
  "regex",
