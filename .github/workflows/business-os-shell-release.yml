@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR AGPL-3.0-only
 name: Business OS Shell Release
 
 on:
