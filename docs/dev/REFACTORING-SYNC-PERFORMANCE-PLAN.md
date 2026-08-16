@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | teilweise | erster Hotspot behoben | nein | zweiter Hotspot belegt |
+| Idle-CPU des Dienstes | ja | beide Hotspots gezielt getestet | nein | zweiter Rollout offen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -152,11 +152,22 @@ Rollout-Zwischenstand vom 16.08.2026:
   von 76,8 % ergibt 7,66 % Prozess-CPU über das kurze Messfenster. Ein
   Prozess-Sample ordnet ihn `external_sql_sync::run_due_sources` zu: Der
   Idle-Poll lädt lokale Modul-Manifeste und hasht rekursiv deren Assets, obwohl
-  keine externe SQL-Quelle fällig ist. Dieser zweite Hotspot wird vor der
-  Ein-Stunden-Messung behoben.
-- Ein historischer offener Intake-Failure-Datensatz ist ebenfalls belegt. Er
-  wird zunächst gegen den kanonischen Command-Zustand geprüft und nicht ohne
-  Lifecycle-Nachweis entfernt.
+  keine externe SQL-Quelle fällig ist.
+- Commit `0a4ab13b2` trennt für den External-SQL-Poll die schlanke
+  Deklarationsauflösung von der Katalog-Anreicherung. Der Katalog berechnet
+  seine Asset-Revisionen weiterhin unverändert; nur der Idle-Poll überspringt
+  die für ihn irrelevante rekursive Dateihash-Bildung. Der Regressionstest ist
+  1/1 grün, und `store.rs` bleibt exakt bei seinem unveränderten Budget von
+  21.970 Produktionszeilen.
+- Ein historischer offener Intake-Failure-Datensatz wurde gegen Aggregate,
+  Transition, beide zugestellten Outbox-Projektionen und das kanonische
+  RxDB-Dokument geprüft. Commit `07c2ef0ca` ergänzt eine konservative
+  Reconciliation: Nur nicht erschöpfte transiente SQLite-Sperrfehler mit
+  vollständig zugestellter kanonischer Projektion werden aufgelöst;
+  Idempotenzkonflikte ausdrücklich nicht. Neuer Test 1/1, angrenzende
+  Audit-Regressionen 2/2 und Cancel-Migration 1/1 sind grün.
+- Der zweite Code-Stand ist noch nicht ausgerollt. Neuer Release-Slot,
+  Neustart, erneuter Kurzprobe und Ein-Stunden-Messung bleiben offen.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
