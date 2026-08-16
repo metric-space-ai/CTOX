@@ -69,10 +69,10 @@ export function estimateNativeClockOffsetMs(marks) {
   // D = native_clock - browser_clock.
   // After subtracting D from native marks, the two cross-clock stages stay >= 0
   // when the feasible interval is non-empty.
-  const low = push - intake;
-  const high = observed - committed;
+  const low = committed - observed;
+  const high = intake - push;
   if (low <= high) return (low + high) / 2;
-  return low;
+  return high;
 }
 
 export function correctMarksToBrowserClock(marks, offsetMs = estimateNativeClockOffsetMs(marks)) {

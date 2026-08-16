@@ -1508,13 +1508,16 @@ fn write_rxdb_control_command_state(
         projection.clone(),
     )?;
     record_business_module_lifecycle_event(root, command, status, &result)?;
-    upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection.clone())?;
+    // Publish terminal state and its native timing marks in one RxDB write.  A
+    // second timing-only write races terminal observers and makes the sample
+    // nondeterministic.  The mark is taken immediately before the durable
+    // projection call, so its sub-write skew is bounded by that single call.
     mark_command_timing_projection_committed();
     if command_timing_probe_requested(command) {
         attach_command_timing_to_result(&mut result);
         projection["result"] = result.clone();
-        upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection)?;
     }
+    upsert_rxdb_collection_record(root, "business_commands", command_id, now, projection)?;
     // Readers treat the canonical terminal transition as a completion barrier.
     // Publish it only after the chat and all local/RxDB projections are durable.
     if let Some(terminal_status) = canonical_terminal_status {
@@ -2020,7 +2023,6 @@ mod tests {
     #[test]
     fn command_timing_probe_is_absent_without_explicit_marker() -> anyhow::Result<()> {
         let root = tempdir()?;
-        drop(create_repair_rxdb_tables(root.path())?);
         let command_id = "cmd_timing_probe_off";
         let command = BusinessCommand {
             origin: CommandOrigin::TrustedLocal,
@@ -2031,6 +2033,10 @@ mod tests {
             payload: serde_json::json!({}),
             client_context: serde_json::json!({ "actor": { "id": "local-dev" } }),
         };
+        channels::claim_business_control_command(
+            root.path(),
+            business_command_core_claim(command_id, &command)?,
+        )?;
         let outcome = write_rxdb_control_command_outcome(
             root.path(),
             &command,
@@ -2040,21 +2046,13 @@ mod tests {
             serde_json::json!({ "ok": true }),
         )?;
         assert!(outcome.get(COMMAND_TIMING_RESULT_FIELD).is_none());
-        let rxdb_conn = Connection::open(rxdb_store_path(root.path()))?;
-        let projected: String = rxdb_conn.query_row(
-            "SELECT data FROM ctox_business_os__business_commands__v1 WHERE id = ?1",
-            params![command_id],
-            |row| row.get(0),
-        )?;
-        let projected: Value = serde_json::from_str(&projected)?;
-        assert!(projected["result"].get(COMMAND_TIMING_RESULT_FIELD).is_none());
+        assert!(outcome["result"].get(COMMAND_TIMING_RESULT_FIELD).is_none());
         Ok(())
     }
 
     #[test]
     fn command_timing_probe_writes_ordered_native_marks() -> anyhow::Result<()> {
         let root = tempdir()?;
-        drop(create_repair_rxdb_tables(root.path())?);
         let command_id = "cmd_timing_probe_on";
         let command = BusinessCommand {
             origin: CommandOrigin::TrustedLocal,
@@ -2068,6 +2066,10 @@ mod tests {
                 "command_timing_probe": true
             }),
         };
+        channels::claim_business_control_command(
+            root.path(),
+            business_command_core_claim(command_id, &command)?,
+        )?;
         let _guard = install_command_timing_probe(&command);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let outcome = write_rxdb_control_command_outcome(

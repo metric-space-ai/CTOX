@@ -155,7 +155,9 @@ test('command bus pulls projections without restarting the shared room', () => {
   assert.match(source, /waitForCommandState\(\{[\s\S]*until/);
   assert.match(source, /refreshProjectionBridges\(syncPlan\?\.afterCommand\)/);
   assert.match(source, /pullFromRemotePeers/);
-  assert.match(source, /COMMAND_WAIT_REBIND_MS/);
+  assert.match(source, /COMMAND_TERMINAL_REVALIDATE_DELAYS_MS/);
+  assert.match(source, /Object\.freeze\(\[50, 75, 125, 250, 500\]\)/);
+  assert.match(source, /scheduleTerminalRevalidation\(index \+ 1\)/);
   assert.match(source, /evaluateCommandDataPlaneProgress/);
   assert.match(source, /repairCommandDataPlaneStall/);
   assert.doesNotMatch(source, /restartProjectionCollections/);

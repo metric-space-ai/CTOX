@@ -49,7 +49,7 @@ const COMMAND_LIFECYCLE_TIMING_MARKS = Object.freeze({
 });
 let activeCommandWatcherCount = 0;
 const commandTimingProbes = new Map();
-const COMMAND_WAIT_REBIND_MS = 1500;
+const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([50, 75, 125, 250, 500]);
 
 function commandProgressToken(command) {
   if (!command) return '';
@@ -1108,11 +1108,12 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
     return await new Promise((resolve, reject) => {
       let settled = false;
       let rebindInFlight = false;
+      let revalidationTimer = null;
       const settle = (handler, value) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        clearTimeout(rebindTimer);
+        clearTimeout(revalidationTimer);
         clearInterval(progressTimer);
         subscription?.unsubscribe?.();
         if (commandIsTerminal(lastCommand)) forgetActiveCommandId(commandId);
@@ -1194,14 +1195,21 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
           },
         ));
       }, timeoutMs);
-      // One scheduled projection refresh, then a local inspect. Repeating
-      // pull/rebind here was a repair storm that still left health green when
-      // the pull itself hung.
-      const rebindTimer = setTimeout(() => {
-        refreshProjectionBridges(syncPlan?.afterCommand)
-          .catch(() => {})
-          .finally(() => { bind(); });
-      }, COMMAND_WAIT_REBIND_MS);
+      // Demand-only command projections do not receive an unsolicited full
+      // collection pull. Revalidate this one command on a finite schedule and
+      // stop as soon as its terminal revision is visible. The five-attempt
+      // bound prevents the former unbounded repair/poll storms.
+      const scheduleTerminalRevalidation = (index = 0) => {
+        if (settled || index >= COMMAND_TERMINAL_REVALIDATE_DELAYS_MS.length) return;
+        revalidationTimer = setTimeout(() => {
+          if (settled) return;
+          refreshProjectionBridges(syncPlan?.afterCommand)
+            .catch(() => {})
+            .then(() => bind())
+            .finally(() => scheduleTerminalRevalidation(index + 1));
+        }, COMMAND_TERMINAL_REVALIDATE_DELAYS_MS[index]);
+      };
+      scheduleTerminalRevalidation();
       const progressTimer = setInterval(() => {
         if (settled) return;
         const evaluation = evaluateCommandDataPlaneProgress(sync);

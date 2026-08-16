@@ -17,6 +17,7 @@
  *   SMOKE_MODE=workspace-large-file-viewer-rust-to-browser node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=workspace-large-file-viewer-restart-rust-to-browser node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=command-browser-to-rust node src/core/rxdb/tools/browser_rust_smoke.js
+ *   SMOKE_MODE=command-roundtrip-timing-browser-to-rust SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=concurrent-writers-convergence-browser-to-rust SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=tickets-browser-to-rust SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
  *   SMOKE_MODE=tickets-clarification-browser-to-rust SMOKE_PAGE_PATH=/index.html node src/core/rxdb/tools/browser_rust_smoke.js
@@ -311,6 +312,7 @@ const supportedSmokeModes = [
   'workspace-large-file-viewer-rust-to-browser',
   'workspace-large-file-viewer-restart-rust-to-browser',
   'command-browser-to-rust',
+  'command-roundtrip-timing-browser-to-rust',
   'tickets-browser-to-rust',
   'tickets-clarification-browser-to-rust',
   'outbound-active-ui',
@@ -2169,7 +2171,7 @@ function parseLaunchSyncConfig(html) {
   const start = html.indexOf(marker);
   if (start === -1) return null;
   const bodyStart = start + marker.length;
-  const end = html.indexOf(';</script>', bodyStart);
+  const end = html.indexOf(';window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES=', bodyStart);
   if (end === -1) return null;
   return JSON.parse(html.slice(bodyStart, end));
 }
@@ -3989,7 +3991,7 @@ function ensureCtoxSmokeBinary() {
     await waitForCtoxServerListening(ctox, serverReadyTimeoutMs);
     outerPhaseTimings.ctoxServerWaitMs = Date.now() - ctoxServerWaitStartedAt;
     const configWaitStartedAt = Date.now();
-    const config = await waitForLaunchSyncConfig(syncConfigWaitMs);
+    const config = await waitForNativePeerSyncConfig(syncConfigWaitMs);
     outerPhaseTimings.syncConfigWaitMs = Date.now() - configWaitStartedAt;
     console.log(`ctox_sync_config_wait_ms=${outerPhaseTimings.syncConfigWaitMs}`);
     if (!config.native_rxdb_peer_available) {
@@ -7171,6 +7173,7 @@ function ensureCtoxSmokeBinary() {
       const businessOsThreadsRightClickUiSmokeMode = smokeMode === 'business-os-threads-rightclick-ui';
       const businessOsThreadsScaleUiSmokeMode = smokeMode === 'business-os-threads-scale-ui';
       const commandSmokeMode = smokeMode === 'command-browser-to-rust'
+        || smokeMode === 'command-roundtrip-timing-browser-to-rust'
         || smokeMode === 'migration-version-browser-to-rust'
         || smokeMode === 'command-burst-browser-to-rust'
         || smokeMode === 'command-reload-browser-to-rust'
@@ -7431,7 +7434,7 @@ function ensureCtoxSmokeBinary() {
               const start = html.indexOf(marker);
               if (start === -1) throw new Error('launch sync config missing from index.html');
               const bodyStart = start + marker.length;
-              const end = html.indexOf(';</script>', bodyStart);
+              const end = html.indexOf(';window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES=', bodyStart);
               if (end === -1) throw new Error('launch sync config script is malformed');
               return JSON.parse(html.slice(bodyStart, end));
             });
@@ -14866,6 +14869,60 @@ function ensureCtoxSmokeBinary() {
       }
 
       if (commandSmokeMode) {
+        if (smokeMode === 'command-roundtrip-timing-browser-to-rust') {
+          const commandBus = globalThis.ctoxBusinessOsSmoke?.state?.commandBus;
+          if (!commandBus?.dispatch) {
+            throw new Error('Business OS command bus is unavailable for command timing smoke');
+          }
+          const commandBusResource = performance.getEntriesByType('resource')
+            .map((entry) => entry.name)
+            .find((name) => /\/shared\/command-bus\.js\?v=/.test(name));
+          if (!commandBusResource) {
+            throw new Error('loaded command-bus module URL is unavailable for timing collection');
+          }
+          const commandBusModule = await import(commandBusResource);
+          if (typeof commandBusModule.consumeCommandRoundtripTiming !== 'function') {
+            throw new Error('command timing collector is unavailable');
+          }
+          const dispatchProbe = async (index, probe) => {
+            const id = `command_roundtrip_timing_${Date.now()}_${index}`;
+            const receipt = await commandBus.dispatch({
+              id,
+              module: 'ctox',
+              type: 'ctox.provider_subscription.status',
+              command_type: 'ctox.provider_subscription.status',
+              record_id: 'provider-subscriptions',
+              inbound_channel: 'command-roundtrip-timing-smoke',
+              payload: {},
+              client_context: smokeClientContext({
+                source: 'command-roundtrip-timing-smoke',
+                ...(probe ? { command_timing_probe: true } : {}),
+              }),
+            }, {
+              until: 'terminal',
+              timeoutMs: 60000,
+            });
+            if (!receipt || receipt.status !== 'completed') {
+              throw new Error(`timing command ${id} did not complete: ${JSON.stringify(receipt)}`);
+            }
+            return probe ? commandBusModule.consumeCommandRoundtripTiming(id) : null;
+          };
+          await dispatchProbe('warmup', false);
+          const samples = [];
+          for (let index = 1; index <= 30; index += 1) {
+            const sample = await dispatchProbe(index, true);
+            if (!sample || Object.keys(sample.marks || {}).length !== 7) {
+              throw new Error(`timing sample ${index} is incomplete: ${JSON.stringify(sample)}`);
+            }
+            samples.push(sample);
+          }
+          await Promise.all(replicationStates.map((state) => state.cancel?.()));
+          if (ownsDb) await db.close();
+          return {
+            mode: smokeMode,
+            samples,
+          };
+        }
         if (smokeMode === 'command-burst-browser-to-rust') {
           const now = Date.now();
           const commandCount = Math.max(2, Number(globalThis.__ctoxCommandBurstCount || 5));
@@ -16807,6 +16864,26 @@ function ensureCtoxSmokeBinary() {
       console.log(`business_os_client_lifecycle_tenant_scope=${result.tenantScope}`);
       if (result.advancedStatusVersion) console.log(`advanced_status=${result.advancedStatusVersion}`);
       if (result.advancedStatusRuntime) console.log(`rxdb_runtime=${JSON.stringify(result.advancedStatusRuntime)}`);
+    } else if (result.mode === 'command-roundtrip-timing-browser-to-rust') {
+      const marksOutput = process.env.SMOKE_COMMAND_TIMING_OUTPUT
+        || path.join(runtimeRoot, 'command-roundtrip-marks.json');
+      const reportOutput = process.env.SMOKE_COMMAND_TIMING_REPORT_OUTPUT
+        || path.join(runtimeRoot, 'command-roundtrip-stage-report.json');
+      fs.mkdirSync(path.dirname(marksOutput), { recursive: true });
+      fs.mkdirSync(path.dirname(reportOutput), { recursive: true });
+      fs.writeFileSync(marksOutput, `${JSON.stringify({ samples: result.samples }, null, 2)}\n`);
+      const reportRun = spawnSync(process.execPath, [
+        path.join(root, 'src/apps/business-os/rxdb/tests/command-roundtrip-stage-report.mjs'),
+        '--input', marksOutput,
+        '--output', reportOutput,
+      ], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+      if (reportRun.error || reportRun.status !== 0) {
+        throw new Error(`command timing report failed: ${reportRun.error?.message || reportRun.stderr || reportRun.status}`);
+      }
+      process.stdout.write(reportRun.stdout || '');
+      console.log(`command_timing_sample_count=${result.samples.length}`);
+      console.log(`command_timing_marks_output=${marksOutput}`);
+      console.log(`command_timing_report_output=${reportOutput}`);
     } else if (result.mode === 'command-burst-browser-to-rust') {
       console.log(`command_count=${result.commandCount}`);
       console.log(`task_count_for_commands=${result.taskCountForCommands}`);
