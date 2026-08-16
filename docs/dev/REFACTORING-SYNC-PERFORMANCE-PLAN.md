@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | ja | finaler Release aktiv; Korrektheitsgates grün, CPU-Kurzprobe noch rot | nein | periodischen Rest-Peak beheben; Kurz- und Ein-Stunden-Probe wiederholen |
+| Idle-CPU des Dienstes | ja | vierter Fix ausgerollt; Korrektheitsgates grün | nein | Startphase abwarten; Kurz- und Ein-Stunden-Probe wiederholen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -229,7 +229,27 @@ Rollout-Zwischenstand vom 16.08.2026:
 - Commit `b42c55efa` enthält beide Korrekturen. Die gezielten
   Regressionstests sind jeweils 1/1 grün; außerdem ist
   `cargo fmt --all -- --check` grün. Isolierter Rollout und erneute
-  CPU-Abnahme stehen als nächster Schritt an.
+  CPU-Abnahme standen als nächster Schritt an.
+- Der committed Stand `0bb80a8bd` wurde aus dem isolierten Snapshot
+  `/Volumes/tmp/ctox-idle-0bb80a8bd.6cQ1h6` gebaut. Das Git-Archiv hat
+  SHA-256
+  `2fa22ebf68fd2db65152f25595cb86766edd0944abf8dd681562eafd1b69b21d`.
+  Der verwaltete Build dauerte 69 Minuten 46 Sekunden, der vollständige
+  Rollout 74 Minuten 49 Sekunden und endete mit `phase=completed` ohne
+  Fehler.
+- Das aktive Release heißt `idle-cpu-b42c55efa`; die neue konsistente
+  Sicherung liegt unter `backups/update-20260816T220430Z`, und
+  `idle-cpu-60ff9c957` bleibt der unmittelbare Rollback-Slot. Die Retention
+  entfernte danach die ältere Sicherung `update-20260816T204848Z` und den
+  älteren Release `idle-cpu-c53a86588`.
+- Build-Ausgabe, Release-Binary und `current`-Binary sind bytegleich und haben
+  SHA-256
+  `12cafa772278a43dac11f96dee87466a74ca92b46b9d960034747bde478dd157`.
+  Der von `launchd` überwachte Dienst läuft unter PID `98157`, meldet
+  `busy=false`, keine wartenden Tasks und keine aktiven Worker. Der RxDB-Peer
+  hat einen frischen Heartbeat, keine Health-Fehler und meldet ohne Browser
+  erwartungsgemäß `replicationUp=false`. Kurz- und Ein-Stunden-Probe folgen
+  erst nach Abschluss der Startup-Arbeit.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
@@ -464,9 +484,8 @@ Kein Commit darf:
 
 ## Nächste Ausführungsreihenfolge
 
-1. Periodischen Idle-Rest-Peak des Releases `idle-cpu-60ff9c957` lokalisieren,
-   beheben und aus einem isolierten Snapshot ausrollen.
-2. Kurzprobe und einstündige Idle-Nachhermessung mit dem danach finalen
+1. Startup-Arbeit des Releases `idle-cpu-b42c55efa` abklingen lassen.
+2. Kurzprobe und einstündige Idle-Nachhermessung mit diesem finalen
    Release durchführen und als Rohdaten versionieren.
 3. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
 4. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
