@@ -2424,6 +2424,40 @@ fn cancelled_queue_command_rows(conn: &Connection) -> Result<Vec<(String, String
     Ok(rows)
 }
 
+fn resolvable_transient_intake_failures(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT failure.command_id
+         FROM business_command_intake_failures failure
+         JOIN business_command_aggregates aggregate_row
+           ON aggregate_row.command_id = failure.command_id
+         WHERE failure.resolved_at_ms IS NULL
+           AND failure.exhausted = 0
+           AND (
+                lower(failure.error_message) LIKE '%database is locked%'
+                OR lower(failure.error_message) LIKE '%database table is locked%'
+                OR lower(failure.error_message) LIKE '%sqlite_busy%'
+                OR lower(failure.error_message) LIKE '%cannot promote read transaction%'
+           )
+           AND EXISTS (
+                SELECT 1 FROM business_command_outbox delivered
+                WHERE delivered.command_id = failure.command_id
+                  AND delivered.destination = 'rxdb'
+                  AND delivered.status = 'delivered'
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM business_command_outbox incomplete
+                WHERE incomplete.command_id = failure.command_id
+                  AND incomplete.status != 'delivered'
+           )
+         ORDER BY failure.command_id",
+    )?;
+    let mut command_ids = Vec::new();
+    for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+        command_ids.push(row?);
+    }
+    Ok(command_ids)
+}
+
 /// Audits the two storage inconsistencies for which no repository writer could
 /// be identified (`missing_task_links` and `task_links_to_missing_tasks`). It
 /// deliberately does not guess repairs for either class. With `apply`, it also
@@ -2465,6 +2499,23 @@ pub(crate) fn audit_and_migrate_business_command_storage(
             let (command_id, task_id) = row?;
             missing_tasks.push(json!({"command_id": command_id, "execution_task_id": task_id}));
         }
+    }
+
+    let resolvable_intake_failures = resolvable_transient_intake_failures(&conn)?;
+    let mut resolved_intake_failures = 0_u64;
+    if apply && !resolvable_intake_failures.is_empty() {
+        let tx = conn.transaction()?;
+        let resolved_at_ms = epoch_millis();
+        for command_id in &resolvable_intake_failures {
+            resolved_intake_failures = resolved_intake_failures.saturating_add(tx.execute(
+                "UPDATE business_command_intake_failures
+                     SET resolved_at_ms = ?2
+                     WHERE command_id = ?1 AND resolved_at_ms IS NULL AND exhausted = 0",
+                params![command_id, resolved_at_ms],
+            )?
+                as u64);
+        }
+        tx.commit()?;
     }
 
     let mut migration_already_applied =
@@ -2528,6 +2579,8 @@ pub(crate) fn audit_and_migrate_business_command_storage(
         "apply": apply,
         "missing_task_links": missing_links,
         "task_links_to_missing_tasks": missing_tasks,
+        "resolvable_transient_intake_failures": resolvable_intake_failures,
+        "resolved_transient_intake_failures": resolved_intake_failures,
         "cancelled_queue_command_drift": cancelled_queue_command_drift.iter().map(
             |(command_id, task_id, execution_phase)| json!({
                 "command_id": command_id,

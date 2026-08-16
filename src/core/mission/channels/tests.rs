@@ -6094,6 +6094,88 @@ fn business_command_audit_does_not_recreate_retained_outbox_rows() {
 }
 
 #[test]
+fn business_command_audit_resolves_only_proven_transient_intake_failures() {
+    let root = business_command_test_root("ctox-business-command-transient-intake-reconcile");
+    let original = business_command_claim("command-transient-intake", "sha256:original");
+    claim_business_control_command(&root, original.clone()).expect("claim control command");
+    let db_path = resolve_db_path(&root, None);
+    let conn = open_channel_db(&db_path).expect("open core db");
+    conn.execute(
+        "UPDATE business_command_outbox
+         SET status = 'delivered', delivered_at_ms = 1
+         WHERE command_id = ?1",
+        params![original.command_id],
+    )
+    .expect("mark canonical projections delivered");
+    drop(conn);
+
+    record_business_command_intake_failure(
+        &root,
+        original.clone(),
+        "transient native store contention: database is locked",
+        3,
+    )
+    .expect("record transient failure after canonical acceptance");
+    let report =
+        audit_and_migrate_business_command_storage(&root, false).expect("audit transient failure");
+    assert_eq!(
+        report["resolvable_transient_intake_failures"],
+        json!([original.command_id.clone()])
+    );
+    assert_eq!(report["resolved_transient_intake_failures"], 0);
+
+    let applied = audit_and_migrate_business_command_storage(&root, true)
+        .expect("resolve proven transient failure");
+    assert_eq!(applied["resolved_transient_intake_failures"], 1);
+    let conn = open_channel_db(&db_path).expect("reopen core db");
+    let open_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM business_command_intake_failures
+             WHERE command_id = ?1 AND resolved_at_ms IS NULL",
+            params![original.command_id],
+            |row| row.get(0),
+        )
+        .expect("count open transient failures");
+    assert_eq!(open_count, 0);
+
+    let conflict_original =
+        business_command_claim("command-idempotency-conflict", "sha256:original");
+    claim_business_control_command(&root, conflict_original.clone())
+        .expect("claim conflict baseline command");
+    conn.execute(
+        "UPDATE business_command_outbox
+         SET status = 'delivered', delivered_at_ms = 1
+         WHERE command_id = ?1",
+        params![conflict_original.command_id],
+    )
+    .expect("mark conflict baseline projections delivered");
+    let conflict = business_command_claim("command-idempotency-conflict", "sha256:conflict");
+    record_business_command_intake_failure(
+        &root,
+        conflict,
+        "business command idempotency conflict",
+        3,
+    )
+    .expect("record conflicting replay");
+    let conflict_report =
+        audit_and_migrate_business_command_storage(&root, true).expect("audit conflicting replay");
+    assert_eq!(
+        conflict_report["resolvable_transient_intake_failures"],
+        json!([])
+    );
+    let conflict_open_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM business_command_intake_failures
+             WHERE command_id = ?1 AND resolved_at_ms IS NULL",
+            params![conflict_original.command_id],
+            |row| row.get(0),
+        )
+        .expect("count open conflict failures");
+    assert_eq!(conflict_open_count, 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn cancelling_linked_queue_task_terminalizes_business_command() {
     let root = business_command_test_root("ctox-business-command-cancel");
     let claimed = claim_business_command_with_queue(
