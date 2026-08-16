@@ -4381,7 +4381,7 @@ pub(super) fn load_module_manifests(
         }
         manifests.push(manifest);
     }
-    for manifest in load_local_module_manifests(installed_app_root)? {
+    for manifest in load_local_module_manifests(installed_app_root, true)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
@@ -4401,7 +4401,7 @@ pub(super) fn load_module_manifests(
 /// executable SQL mappings.
 pub(crate) fn local_external_data_source_declarations(root: &Path) -> anyhow::Result<Vec<Value>> {
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let manifests = load_local_module_manifests(&installed_app_root)?;
+    let manifests = load_local_module_manifests(&installed_app_root, false)?;
     let mut declarations = Vec::new();
     for manifest in manifests {
         let mut source_values = manifest.external_data_sources;
@@ -4448,13 +4448,11 @@ pub(crate) fn local_external_data_source_declarations(root: &Path) -> anyhow::Re
     Ok(declarations)
 }
 
-/// Local modules live in `<runtime app root>/local-modules/` — a git-ignored
-/// directory for hand-developed test and customer apps (e.g. per-customer
-/// modules that must never land in the public repo). Dropping a module
-/// directory there is the whole install; the operator owns the files, so the
-/// app-store install/uninstall lifecycle does not manage them
-/// (`deletable = false`).
-fn load_local_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleManifest>> {
+/// Loads operator-owned local modules; app-store lifecycle never manages them (`deletable=false`).
+fn load_local_module_manifests(
+    app_root: &Path,
+    enrich: bool,
+) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("local-modules");
     let mut manifests = Vec::new();
     if !modules_root.is_dir() {
@@ -4473,11 +4471,13 @@ fn load_local_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleMani
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
         let mut manifest: ModuleManifest = serde_json::from_str(&text)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-        manifest.manifest_sha256 = hex_sha256(text.as_bytes());
-        manifest.asset_revision = module_asset_revision(&entry.path())?;
         manifest.local_manifest_path = path.display().to_string();
-        augment_module_manifest_file_plane(&mut manifest, &entry.path());
-        backfill_local_module_icon(&mut manifest, &entry.path());
+        if enrich {
+            manifest.manifest_sha256 = hex_sha256(text.as_bytes());
+            manifest.asset_revision = module_asset_revision(&entry.path())?;
+            augment_module_manifest_file_plane(&mut manifest, &entry.path());
+            backfill_local_module_icon(&mut manifest, &entry.path());
+        }
         if manifest.install_scope.trim().eq_ignore_ascii_case("sample") {
             continue;
         }
@@ -24336,6 +24336,36 @@ pub(super) mod tests {
             "customers",
             BusinessOsPermission::DataRead
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn external_sql_declaration_loading_skips_catalog_asset_hashing() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let app_root = root.path().join("runtime/business-os");
+        let module_dir = app_root.join("local-modules/inventory");
+        fs::create_dir_all(module_dir.join("assets"))?;
+        fs::write(
+            module_dir.join("assets/large-bundle.js"),
+            vec![b'x'; 1024 * 1024],
+        )?;
+        fs::write(
+            module_dir.join("module.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": "inventory",
+                "title": "Inventory",
+                "external_data_sources": [{"id": "erp"}]
+            }))?,
+        )?;
+
+        let manifests = load_local_module_manifests(&app_root, false)?;
+        assert_eq!(manifests.len(), 1);
+        assert!(manifests[0].asset_revision.is_empty());
+        assert!(manifests[0].manifest_sha256.is_empty());
+
+        let declarations = local_external_data_source_declarations(root.path())?;
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0]["module_id"], "inventory");
         Ok(())
     }
 
