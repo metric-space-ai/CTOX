@@ -1,0 +1,419 @@
+/*
+ * CTOX Desktop host theme for the selected-instance Business OS guest.
+ * This layer is intentionally limited to shell tokens and production shell/kit
+ * primitives. The outer Electron client continues to own product mode and
+ * instance navigation.
+ */
+
+html[data-desktop-host="ctox"][data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f4f5;
+  --surface: #fafafa;
+  --surface-2: #eeeeef;
+  --surface-3: #ffffff;
+  --line: #d4d4d8;
+  --hairline: #e2e2e5;
+  --text: #27272a;
+  --text-strong: #111113;
+  --muted: #626268;
+  --accent: #287c72;
+  --accent-foreground: #ffffff;
+  --accent-soft: #dcece9;
+  --danger: #b3423c;
+  --shadow: 0 2px 8px rgb(24 24 27 / 0.08);
+  --shadow-sm: none;
+  --shadow-md: 0 2px 8px rgb(24 24 27 / 0.08);
+  --shadow-lg: 0 6px 18px rgb(24 24 27 / 0.12);
+  --panel-shadow: none;
+  --panel-radius: 4px;
+  --control-radius: 3px;
+  --shell-topbar-bg: #f7f7f8;
+  --shell-app-bg: #f4f4f5;
+  --shell-control-bg: #eeeeef;
+  --shell-topbar-shadow: none;
+  --shell-desktop-bg: #f4f4f5;
+}
+
+html[data-desktop-host="ctox"][data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d0d0f;
+  --surface: #121214;
+  --surface-2: #1a1a1d;
+  --surface-3: #202024;
+  --line: #2b2b30;
+  --hairline: #232328;
+  --text: #e8e8ea;
+  --text-strong: #fafafa;
+  --muted: #9a9aa2;
+  --accent: #70b9ad;
+  --accent-foreground: #07110f;
+  --accent-soft: #19332f;
+  --danger: #e06c65;
+  --shadow: 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-sm: none;
+  --shadow-md: 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 6px 18px rgb(0 0 0 / 0.42);
+  --panel-shadow: none;
+  --panel-radius: 4px;
+  --control-radius: 3px;
+  --shell-topbar-bg: #121214;
+  --shell-app-bg: #0d0d0f;
+  --shell-control-bg: #1a1a1d;
+  --shell-topbar-shadow: none;
+  --shell-desktop-bg: #0d0d0f;
+}
+
+html[data-desktop-host="ctox"] {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-synthesis: none;
+}
+
+html[data-desktop-host="ctox"] body {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+
+html[data-desktop-host="ctox"] .app-shell {
+  grid-template-rows: 44px minmax(0, 1fr);
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  background: var(--shell-app-bg) !important;
+  container-type: inline-size;
+  container-name: ctox-desktop-guest;
+}
+
+html[data-desktop-host="ctox"][data-shell-style][data-theme] .topbar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: 44px;
+  min-height: 44px !important;
+  margin: 0 !important;
+  padding: 0 10px !important;
+  gap: 10px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line) !important;
+  border-radius: 0 !important;
+  background: var(--shell-topbar-bg) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-desktop-host="ctox"] .topbar-left-group {
+  gap: 8px;
+}
+
+html[data-desktop-host="ctox"] .topbar-status-bar {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+html[data-desktop-host="ctox"] .topbar-status-bar .brand-status {
+  max-width: 150px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+html[data-desktop-host="ctox"] .module-nav {
+  width: min(100%, 680px);
+}
+
+html[data-desktop-host="ctox"] .module-tabs {
+  min-height: 30px;
+  gap: 2px;
+}
+
+html[data-desktop-host="ctox"] .module-tab {
+  min-height: 28px;
+  max-width: 132px;
+  padding: 0 8px !important;
+  border: 1px solid transparent !important;
+  border-radius: var(--control-radius) !important;
+  background: transparent !important;
+  color: var(--muted);
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+html[data-desktop-host="ctox"] .module-tab:hover {
+  border-color: transparent !important;
+  background: var(--surface-2) !important;
+  color: var(--text);
+}
+
+html[data-desktop-host="ctox"] .module-tab[aria-current="page"] {
+  border-color: transparent !important;
+  background: var(--accent-soft) !important;
+  color: var(--text-strong);
+  box-shadow: inset 0 -2px 0 var(--accent) !important;
+}
+
+html[data-desktop-host="ctox"] .module-tab-icon {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: currentColor;
+}
+
+html[data-desktop-host="ctox"] .topbar-actions {
+  gap: 4px;
+}
+
+html[data-desktop-host="ctox"] .workspace-frame {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  background: var(--bg);
+}
+
+html[data-desktop-host="ctox"] .workspace-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: none;
+}
+
+html[data-desktop-host="ctox"] .workspace-pane-center {
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: none;
+  container-type: inline-size;
+  container-name: business-app-window;
+}
+
+html[data-desktop-host="ctox"] .module-root,
+html[data-desktop-host="ctox"] .module-content {
+  min-width: 0;
+  min-height: 0;
+}
+
+html[data-desktop-host="ctox"] .ctox-workspace {
+  --ctox-left-width: clamp(220px, 23%, 280px);
+  --ctox-right-width: clamp(270px, 27%, 330px);
+  grid-template-columns:
+    var(--ctox-left-width)
+    8px
+    minmax(360px, 1fr)
+    8px
+    var(--ctox-right-width);
+  padding: 8px;
+  background: var(--bg);
+}
+
+html[data-desktop-host="ctox"] .ctox-pane {
+  border: 1px solid var(--hairline);
+  border-radius: var(--panel-radius);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+html[data-desktop-host="ctox"] .ctox-pane-band {
+  padding: 10px 12px 8px;
+}
+
+html[data-desktop-host="ctox"] .ctox-pane-kicker {
+  color: var(--muted);
+  letter-spacing: 0.07em;
+}
+
+html[data-desktop-host="ctox"] .ctox-pane-title {
+  margin-top: 1px;
+  font-size: 13px;
+  font-weight: 680;
+}
+
+html[data-desktop-host="ctox"] .ctox-pane-tools {
+  margin-top: 7px;
+}
+
+html[data-desktop-host="ctox"] .ctox-pane-search,
+html[data-desktop-host="ctox"] .ctox-input,
+html[data-desktop-host="ctox"] .ctox-select,
+html[data-desktop-host="ctox"] .ctox-textarea,
+html[data-desktop-host="ctox"] .ctox-pane-filter {
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+html[data-desktop-host="ctox"] .ctox-action-strip,
+html[data-desktop-host="ctox"] .ctox-toolbar {
+  min-height: 34px;
+  padding: 4px 8px;
+  background: var(--surface);
+}
+
+html[data-desktop-host="ctox"] .ctox-button,
+html[data-desktop-host="ctox"] .ctox-icon-button,
+html[data-desktop-host="ctox"] .ctox-pane-icon {
+  box-shadow: none;
+}
+
+html[data-desktop-host="ctox"] .ctox-button.is-primary,
+html[data-desktop-host="ctox"] .ctox-run-control {
+  color: var(--accent-foreground);
+}
+
+html[data-desktop-host="ctox"] .ctox-run-control {
+  min-height: 30px;
+  padding: 0 11px;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+html[data-desktop-host="ctox"] .ctox-list-item {
+  padding: 9px 12px;
+}
+
+html[data-desktop-host="ctox"] .ctox-list-item > strong,
+html[data-desktop-host="ctox"] .ctox-list-item > span,
+html[data-desktop-host="ctox"] .ctox-list-item > small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-desktop-host="ctox"] .ctox-list-item > strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+html[data-desktop-host="ctox"] .ctox-list-item > span,
+html[data-desktop-host="ctox"] .ctox-list-item > small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+html[data-desktop-host="ctox"] .ctox-table th,
+html[data-desktop-host="ctox"] .ctox-table td {
+  padding: 7px 9px;
+}
+
+html[data-desktop-host="ctox"] .ctox-table tbody tr.is-selected,
+html[data-desktop-host="ctox"] .ctox-table tbody tr[aria-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+html[data-desktop-host="ctox"] .ctox-card {
+  border-radius: 0;
+  background: transparent;
+}
+
+html[data-desktop-host="ctox"] .ctox-card + .ctox-card {
+  border-top: 1px solid var(--hairline);
+}
+
+html[data-desktop-host="ctox"] .ctox-card > header {
+  padding: 10px 12px 7px;
+}
+
+html[data-desktop-host="ctox"] .ctox-card-body {
+  padding: 0 12px 12px;
+}
+
+html[data-desktop-host="ctox"] .ctox-record-workbench__body {
+  gap: 0;
+  padding: 0;
+  background: var(--surface);
+}
+
+html[data-desktop-host="ctox"] [data-resizer] {
+  width: 8px;
+  min-width: 8px;
+  max-width: 8px;
+  flex-basis: 8px;
+}
+
+html[data-desktop-host="ctox"] [data-resizer]::before {
+  width: 1px;
+  height: 100%;
+  border-radius: 0;
+  background: var(--line);
+  opacity: 1;
+}
+
+html[data-desktop-host="ctox"] :where(button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+
+@container ctox-desktop-guest (max-width: 840px) {
+  html[data-desktop-host="ctox"] .topbar-status-bar {
+    display: none;
+  }
+
+  html[data-desktop-host="ctox"] .ctox-workspace {
+    grid-template-columns: minmax(210px, 34%) 8px minmax(0, 1fr);
+  }
+
+  html[data-desktop-host="ctox"] .ctox-workspace > [data-resizer="left"] {
+    display: block;
+  }
+
+  html[data-desktop-host="ctox"] .ctox-workspace > [data-resizer="right"],
+  html[data-desktop-host="ctox"] .ctox-workspace > .ctox-pane:last-child {
+    display: none;
+  }
+}
+
+@container ctox-desktop-guest (max-width: 620px) {
+  html[data-desktop-host="ctox"][data-shell-style][data-theme] .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  html[data-desktop-host="ctox"] .topbar-left-group {
+    display: none;
+  }
+
+  html[data-desktop-host="ctox"] .module-nav {
+    justify-self: start;
+  }
+
+  html[data-desktop-host="ctox"] .ctox-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 6px;
+  }
+
+  html[data-desktop-host="ctox"] .ctox-workspace > aside.ctox-pane:first-child,
+  html[data-desktop-host="ctox"] .ctox-workspace > [data-resizer] {
+    display: none;
+  }
+}
+
+@container ctox-desktop-guest (max-width: 440px) {
+  html[data-desktop-host="ctox"] .module-tab {
+    max-width: 104px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-desktop-host="ctox"] *,
+  html[data-desktop-host="ctox"] *::before,
+  html[data-desktop-host="ctox"] *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

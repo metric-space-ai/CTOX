@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-shell-style="ctox" data-desktop-host="ctox">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CTOX Desktop Business OS guest — visual QA</title>
+    <link rel="stylesheet" href="../app.css" />
+    <link rel="stylesheet" href="../shared/base.css" />
+    <link rel="stylesheet" href="../themes/ctox-desktop-shell.css" />
+  </head>
+  <body data-module-shell="full">
+    <div class="app-shell" data-shell data-qa-shell>
+      <header class="topbar">
+        <div class="topbar-left-group">
+          <div class="topbar-status-bar">
+            <span class="brand-status">Operations workspace</span>
+            <span class="ctox-badge is-success">Synced</span>
+          </div>
+        </div>
+
+        <div class="module-nav">
+          <nav class="module-tabs" aria-label="Business OS apps">
+            <button class="module-tab" type="button" aria-current="page">
+              <span class="module-tab-icon" aria-hidden="true">O</span>
+              <span class="module-tab-label">Operations</span>
+            </button>
+            <button class="module-tab" type="button">
+              <span class="module-tab-icon" aria-hidden="true">T</span>
+              <span class="module-tab-label">Tickets</span>
+            </button>
+            <button class="module-tab" type="button">
+              <span class="module-tab-icon" aria-hidden="true">K</span>
+              <span class="module-tab-label">Knowledge</span>
+            </button>
+            <button class="module-tab" type="button">
+              <span class="module-tab-icon" aria-hidden="true">R</span>
+              <span class="module-tab-label">Reports</span>
+            </button>
+          </nav>
+        </div>
+
+        <div class="topbar-actions" aria-label="Visual QA controls">
+          <button class="ctox-button ctox-button--sm ctox-button--ghost" type="button" data-qa-theme aria-pressed="false">Light</button>
+          <button class="ctox-button ctox-button--sm ctox-button--ghost" type="button" data-qa-width aria-pressed="false">Narrow</button>
+        </div>
+      </header>
+
+      <main class="workspace-frame">
+        <section class="workspace-pane workspace-pane-center">
+          <div class="module-root" data-module-root="operations">
+            <div class="module-content">
+              <main class="ctox-workspace" data-resize-frame aria-label="Operations workbench">
+                <aside class="ctox-pane" aria-label="Work queues">
+                  <header class="ctox-pane-header ctox-pane-band">
+                    <div class="ctox-pane-title-row">
+                      <div class="ctox-pane-titles">
+                        <span class="ctox-pane-kicker">Operations</span>
+                        <h1 class="ctox-pane-title">Work queues</h1>
+                      </div>
+                      <div class="ctox-pane-actions">
+                        <button class="ctox-pane-icon is-primary" type="button" aria-label="Create work item" title="Create work item">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="ctox-pane-tools">
+                      <input class="ctox-pane-search" type="search" value="" placeholder="Filter queues" aria-label="Filter work queues" />
+                    </div>
+                  </header>
+                  <div class="ctox-pane-body">
+                    <div class="ctox-list" role="listbox" aria-label="Operational queues">
+                      <button class="ctox-list-item is-selected" type="button" aria-selected="true">
+                        <strong>Vendor onboarding</strong>
+                        <span>6 active · 2 waiting</span>
+                        <small>Updated 14:22</small>
+                      </button>
+                      <button class="ctox-list-item" type="button" aria-selected="false">
+                        <strong>Customer renewals</strong>
+                        <span>11 active · 1 at risk</span>
+                        <small>Updated 14:18</small>
+                      </button>
+                      <button class="ctox-list-item" type="button" aria-selected="false">
+                        <strong>Security reviews</strong>
+                        <span>4 active · 3 blocked</span>
+                        <small>Updated 13:54</small>
+                      </button>
+                      <button class="ctox-list-item" type="button" aria-selected="false">
+                        <strong>Finance approvals</strong>
+                        <span>8 active · 2 due today</span>
+                        <small>Updated 13:41</small>
+                      </button>
+                    </div>
+                  </div>
+                </aside>
+
+                <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--ctox-left-width" aria-label="Resize queue pane"></button>
+
+                <section class="ctox-pane" aria-label="Selected queue workbench">
+                  <header class="ctox-pane-header ctox-pane-band">
+                    <div class="ctox-pane-title-row">
+                      <div class="ctox-pane-titles">
+                        <span class="ctox-pane-kicker">Vendor onboarding</span>
+                        <h2 class="ctox-pane-title">Northstar renewal</h2>
+                      </div>
+                      <div class="ctox-pane-actions">
+                        <button class="ctox-pane-icon" type="button" aria-label="More actions" title="More actions">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" /></svg>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="ctox-pane-tools">
+                      <div class="ctox-pane-tabs" role="tablist" aria-label="Queue views">
+                        <button class="ctox-pane-tab" type="button" role="tab" aria-selected="true">Open</button>
+                        <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false">All</button>
+                      </div>
+                      <select class="ctox-pane-filter" aria-label="Owner filter">
+                        <option>All owners</option>
+                        <option>Mine</option>
+                      </select>
+                    </div>
+                  </header>
+
+                  <div class="ctox-pane-body">
+                    <div class="ctox-record-workbench">
+                      <div class="ctox-action-strip" aria-label="Work item actions">
+                        <div class="ctox-action-strip__group">
+                          <button class="ctox-button ctox-button--sm" type="button">Assign</button>
+                          <button class="ctox-button ctox-button--sm" type="button">Add note</button>
+                        </div>
+                        <div class="ctox-action-strip__group">
+                          <span class="ctox-badge is-warning">2 checks waiting</span>
+                        </div>
+                        <div class="ctox-action-strip__group">
+                          <button class="ctox-run-control" type="button">Advance review</button>
+                        </div>
+                      </div>
+
+                      <div class="ctox-table-wrap">
+                        <table class="ctox-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">Task</th>
+                              <th scope="col">Owner</th>
+                              <th scope="col">State</th>
+                              <th scope="col">Due</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr aria-selected="false">
+                              <td>Verify legal entity</td>
+                              <td>M. Chen</td>
+                              <td><span class="ctox-badge is-success">Complete</span></td>
+                              <td>Aug 14</td>
+                            </tr>
+                            <tr class="is-selected" aria-selected="true">
+                              <td>Review data access</td>
+                              <td>A. Singh</td>
+                              <td><span class="ctox-badge is-warning">In review</span></td>
+                              <td>Today</td>
+                            </tr>
+                            <tr aria-selected="false">
+                              <td>Approve security terms</td>
+                              <td>Security</td>
+                              <td><span class="ctox-badge">Queued</span></td>
+                              <td>Aug 18</td>
+                            </tr>
+                            <tr aria-selected="false">
+                              <td>Confirm billing owner</td>
+                              <td>Finance</td>
+                              <td><span class="ctox-badge is-info">Ready</span></td>
+                              <td>Aug 19</td>
+                            </tr>
+                            <tr aria-selected="false">
+                              <td>Publish renewal packet</td>
+                              <td>Unassigned</td>
+                              <td><span class="ctox-badge">Not started</span></td>
+                              <td>Aug 21</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <button class="ctox-column-resizer" type="button" data-resizer="right" data-resizer-var="--ctox-right-width" aria-label="Resize inspector pane"></button>
+
+                <aside class="ctox-pane" aria-label="Inspector and activity">
+                  <header class="ctox-pane-header ctox-pane-band">
+                    <div class="ctox-pane-title-row">
+                      <div class="ctox-pane-titles">
+                        <span class="ctox-pane-kicker">Selected task</span>
+                        <h2 class="ctox-pane-title">Review data access</h2>
+                      </div>
+                      <div class="ctox-pane-actions">
+                        <button class="ctox-pane-icon" type="button" aria-label="Close inspector" title="Close inspector">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="ctox-pane-tools">
+                      <div class="ctox-pane-tabs" role="tablist" aria-label="Inspector sections">
+                        <button class="ctox-pane-tab" type="button" role="tab" aria-selected="true">Details</button>
+                        <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false">Activity</button>
+                      </div>
+                    </div>
+                  </header>
+
+                  <div class="ctox-pane-body">
+                    <div class="ctox-pane-scroll ctox-record-workbench__body">
+                      <section class="ctox-card">
+                        <header><span>Context</span><span class="ctox-badge is-warning">In review</span></header>
+                        <div class="ctox-card-body">
+                          <dl class="ctox-fields">
+                            <dt>Owner</dt><dd>A. Singh</dd>
+                            <dt>Priority</dt><dd>High</dd>
+                            <dt>Policy</dt><dd>Vendor access v3</dd>
+                            <dt>Evidence</dt><dd>4 of 5 attached</dd>
+                          </dl>
+                        </div>
+                      </section>
+
+                      <section class="ctox-card">
+                        <header><span>Activity</span><span>Today</span></header>
+                        <div class="ctox-card-body">
+                          <div class="ctox-list" aria-label="Task activity">
+                            <div class="ctox-list-item">
+                              <strong>Scope updated</strong>
+                              <span>M. Chen · 14:06</span>
+                            </div>
+                            <div class="ctox-list-item">
+                              <strong>Evidence attached</strong>
+                              <span>CTOX · 13:48</span>
+                            </div>
+                          </div>
+                        </div>
+                      </section>
+
+                      <section class="ctox-card">
+                        <header><span>Assistant task</span><span class="ctox-badge is-info">Draft</span></header>
+                        <div class="ctox-card-body">
+                          <div class="ctox-callout">Prepare a concise access-review summary using the attached policy evidence.</div>
+                          <label class="ctox-field-label" for="assistant-note">Instruction</label>
+                          <textarea class="ctox-textarea" id="assistant-note" rows="3">Flag missing retention evidence and draft the reviewer handoff.</textarea>
+                          <div class="ctox-toolbar">
+                            <button class="ctox-button ctox-button--sm ctox-button--ghost" type="button">Save draft</button>
+                            <button class="ctox-button ctox-button--sm is-primary" type="button">Queue task</button>
+                          </div>
+                        </div>
+                      </section>
+                    </div>
+                  </div>
+                </aside>
+              </main>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./ctox-desktop-shell.js"></script>
+  </body>
+</html>
