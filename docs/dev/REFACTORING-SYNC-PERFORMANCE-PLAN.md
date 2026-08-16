@@ -250,6 +250,47 @@ Rollout-Zwischenstand vom 16.08.2026:
   hat einen frischen Heartbeat, keine Health-Fehler und meldet ohne Browser
   erwartungsgemäß `replicationUp=false`. Kurz- und Ein-Stunden-Probe folgen
   erst nach Abschluss der Startup-Arbeit.
+- Die bisherigen Probeversuche nach dem Rollout wurden korrekt verworfen: Ein
+  paralleler Codex-Task startete nacheinander die Workjet-Debugprozesse PID
+  `1215` und `5134` gegen denselben produktiven State und Socket. Dabei wurde
+  der verwaltete LaunchAgent nicht nur verdrängt, sondern seine Plist auf
+  `/Volumes/tmp/workjet/ctox-cli-rc5-target/debug/ctox` umgeschrieben. Der
+  Besitzer wurde über den Task-Kanal koordiniert; beide Fremdprozesse sind
+  beendet. Die Plist ist wieder auf den installierten Wrapper
+  `~/.local/bin/ctox` gerichtet, mit `plutil` validiert und neu geladen. Der
+  Release `idle-cpu-b42c55efa` startet seitdem unter PID `7123`; die formale
+  Messung beginnt erst nach nachgewiesenem Startup-Idle. Keine Messung einer
+  fremden oder verdrängten PID wird als Release-Beweis verwendet.
+- Auch PID `7123` wurde am 17.08.2026 um `01:35:29 +0200` zusammen mit dem
+  vollständigen LaunchAgent von außen beendet, nachdem er zwei aufeinander
+  folgende Idle-Samples mit `0.0 %` erreicht hatte. Plist und Releasepfad
+  blieben dabei korrekt; das Service-Log enthält keinen Panic-/Fatal- oder
+  Shutdown-Hinweis. Der konkurrierende Task wurde erneut ausdrücklich auf
+  reine Remote-Arbeit und ein Verbot lokaler CTOX-/LaunchAgent-Eingriffe
+  festgelegt und hat diese Abgrenzung ausdrücklich bestätigt. Auch dieser
+  unvollständige Lauf zählt nicht als Abnahmebeweis.
+- Unter exklusiver Prozesshoheit blieb der anschließend automatisch gestartete
+  Release-Prozess PID `8418` stabil. Nach drei ruhigen Startup-Samples
+  (`0.0 %`, `0.4 %`, `0.3 %`) blieb die erste formale 30-Sekunden-Probe jedoch
+  rot: Prozess-CPU-Zeit `7.77 %`, p50 `0.2 %`, p95/Maximum `85.9 %`. Die
+  Korrektheitsgates blieben grün (`retry_candidates=0`, unveränderte
+  Command-Revisionen, keine offenen Intake-Fehler, steigende Idle-Ticks). Ein
+  anschließendes 12-Sekunden-Stack-Sample belegt als weiteren periodischen
+  Treiber `sync_configured_channels -> chat_native::service_sync ->
+  process_chat_outbox -> ensure_outbox_schema`: Der 60-Sekunden-Kanalpoll
+  öffnet die große SQLite-Datenbank erneut und kompiliert das Outbox-Schema,
+  obwohl keine Nachricht fällig ist. Vor der Ein-Stunden-Abnahme wird auch
+  dieser belegte Idle-Pfad beseitigt und die Kurzprobe wiederholt.
+- Der Outbox-Pfad ist nun quellseitig begrenzt: Alle Adapter desselben
+  30-Sekunden-Fensters teilen sich einen kanonisch nach Datenbankpfad
+  getrennten Poll-Gate. `persist_queued_message` erhöht nach erfolgreichem
+  Commit die Pfadgeneration und umgeht das Gate sofort, sodass neue oder
+  retryfähige Zustellungen nicht auf den TTL-Ablauf warten. Der erste
+  Regressionstest deckte den macOS-Alias `/var` gegenüber `/private/var` auf;
+  nach Kanonisierung ist
+  `duplicate_service_polls_are_suppressed_until_dirty_or_ttl` mit exakt `1/1`
+  Treffern grün. `cargo fmt --all -- --check` ist ebenfalls grün. Rollout und
+  erneute Kurzprobe stehen noch aus.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.

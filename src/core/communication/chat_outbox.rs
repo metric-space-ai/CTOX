@@ -4,13 +4,26 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::communication_store::{now_iso_string, open_channel_db, refresh_thread, UpsertMessage};
 
 const OUTBOX_MAX_ATTEMPTS: u32 = 5;
 const OUTBOX_BATCH_LIMIT: usize = 100;
 const OUTBOX_CLAIM_LEASE_MS: i64 = 60_000;
+const OUTBOX_DUPLICATE_POLL_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug)]
+struct OutboxPollGateEntry {
+    last_started: Option<Instant>,
+    generation: u64,
+    processed_generation: u64,
+}
+
+static OUTBOX_POLL_GATE: OnceLock<Mutex<BTreeMap<PathBuf, OutboxPollGateEntry>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub(crate) struct OutboxError {
@@ -224,6 +237,7 @@ pub(crate) fn persist_queued_message(
         ],
     )?;
     tx.commit()?;
+    mark_outbox_poll_dirty(conn);
 
     Ok(OutboxSchedule {
         attempt_count,
@@ -233,6 +247,9 @@ pub(crate) fn persist_queued_message(
 
 pub(crate) fn process_chat_outbox(root: &Path) -> Result<Value> {
     let db_path = root.join("runtime/ctox.sqlite3");
+    if !claim_outbox_poll(&db_path, Instant::now()) {
+        return Ok(OutboxProcessSummary::default().to_json());
+    }
     let summary = process_chat_outbox_for_channel_with_sender(
         &db_path,
         None,
@@ -246,6 +263,59 @@ pub(crate) fn process_chat_outbox(root: &Path) -> Result<Value> {
         },
     )?;
     Ok(summary.to_json())
+}
+
+fn claim_outbox_poll(db_path: &Path, now: Instant) -> bool {
+    let gate = OUTBOX_POLL_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut entries = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = entries
+        .entry(outbox_poll_key(db_path))
+        .or_insert(OutboxPollGateEntry {
+            last_started: None,
+            generation: 0,
+            processed_generation: 0,
+        });
+    let unchanged_since_last_poll = entry.generation == entry.processed_generation;
+    let inside_ttl = entry
+        .last_started
+        .map(|last_started| now.saturating_duration_since(last_started) < OUTBOX_DUPLICATE_POLL_TTL)
+        .unwrap_or(false);
+    if unchanged_since_last_poll && inside_ttl {
+        return false;
+    }
+    entry.last_started = Some(now);
+    entry.processed_generation = entry.generation;
+    true
+}
+
+fn mark_outbox_poll_dirty(conn: &Connection) {
+    let Some(path) = conn.path() else {
+        return;
+    };
+    let gate = OUTBOX_POLL_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut entries = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = entries
+        .entry(outbox_poll_key(Path::new(path)))
+        .or_insert(OutboxPollGateEntry {
+            last_started: None,
+            generation: 0,
+            processed_generation: 0,
+        });
+    entry.generation = entry.generation.wrapping_add(1);
+}
+
+fn outbox_poll_key(db_path: &Path) -> PathBuf {
+    if let Ok(path) = db_path.canonicalize() {
+        return path;
+    }
+    let Some(file_name) = db_path.file_name() else {
+        return db_path.to_path_buf();
+    };
+    db_path
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .map(|parent| parent.join(file_name))
+        .unwrap_or_else(|| db_path.to_path_buf())
 }
 
 pub(crate) fn process_chat_outbox_for_channel_with_sender<F>(
@@ -735,6 +805,36 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: UpsertMessage<'_>) -> Result
 mod tests {
     use super::*;
     use crate::communication_store::{open_channel_db, preview_text};
+
+    #[test]
+    fn duplicate_service_polls_are_suppressed_until_dirty_or_ttl() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let db_path = root.path().join("runtime/ctox.sqlite3");
+        std::fs::create_dir_all(db_path.parent().expect("database parent"))?;
+        let started_at = Instant::now();
+
+        assert!(claim_outbox_poll(&db_path, started_at));
+        assert!(!claim_outbox_poll(
+            &db_path,
+            started_at + OUTBOX_DUPLICATE_POLL_TTL - Duration::from_millis(1)
+        ));
+
+        let conn = Connection::open(&db_path)?;
+        mark_outbox_poll_dirty(&conn);
+        assert!(claim_outbox_poll(
+            &db_path,
+            started_at + Duration::from_secs(1)
+        ));
+        assert!(!claim_outbox_poll(
+            &db_path,
+            started_at + Duration::from_secs(2)
+        ));
+        assert!(claim_outbox_poll(
+            &db_path,
+            started_at + Duration::from_secs(1) + OUTBOX_DUPLICATE_POLL_TTL
+        ));
+        Ok(())
+    }
 
     fn queue_test_message(
         conn: &mut Connection,
