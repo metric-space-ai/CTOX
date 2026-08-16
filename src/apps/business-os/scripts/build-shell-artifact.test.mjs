@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: MIT OR AGPL-3.0-only
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, truncate, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +10,7 @@ import {
   ROOT_RUNTIME_FILES,
   RUNTIME_TREES,
   SHELL_SCHEMA,
+  MAX_RUNTIME_FILE_BYTES,
   buildShellArtifact,
   commitStagedOutputs,
   createDeterministicGzip,
@@ -263,7 +265,22 @@ test('symlinks in runtime trees are rejected and never archived', async () => {
   }
 });
 
-test('atomic publication rolls back renamed finals and removes all staged files', async () => {
+test('oversized runtime files fail before archive allocation', async () => {
+  const { fixtureRoot, sourceRoot } = await makeFixture();
+  try {
+    await truncate(join(sourceRoot, 'app.js'), MAX_RUNTIME_FILE_BYTES + 1);
+    const outputDir = join(fixtureRoot, 'oversized-output');
+    await assert.rejects(
+      buildShellArtifact({ sourceRoot, outputDir, version: '1.0.0', sourceCommit: SOURCE_COMMIT }),
+      /Runtime file exceeds the .* byte limit: app\.js/,
+    );
+    await assert.rejects(readdir(outputDir), { code: 'ENOENT' });
+  } finally {
+    await cleanup(fixtureRoot);
+  }
+});
+
+test('atomic no-clobber publication rolls back owned finals and preserves competing outputs', async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), 'ctox-shell-atomic-'));
   try {
     const outputs = ['archive', 'manifest', 'checksum'].map((name) => ({
@@ -271,16 +288,27 @@ test('atomic publication rolls back renamed finals and removes all staged files'
       finalPath: join(fixtureRoot, name),
     }));
     for (const output of outputs) await writeFile(output.stagedPath, output.finalPath);
-    let renameCount = 0;
+    let linkCount = 0;
     await assert.rejects(commitStagedOutputs(outputs, {
-      rename: async (from, to) => {
-        renameCount += 1;
-        if (renameCount === 2) throw new Error('injected rename failure');
-        const { rename: renameFile } = await import('node:fs/promises');
-        await renameFile(from, to);
+      link: async (from, to) => {
+        linkCount += 1;
+        if (linkCount === 2) throw new Error('injected link failure');
+        await link(from, to);
       },
-    }), /injected rename failure/);
+      unlink,
+    }), /injected link failure/);
     assert.deepEqual(await readdir(fixtureRoot), []);
+
+    const stagedPath = join(fixtureRoot, '.archive.tmp');
+    const finalPath = join(fixtureRoot, 'archive');
+    await writeFile(stagedPath, 'ours');
+    await writeFile(finalPath, 'competitor');
+    await assert.rejects(
+      commitStagedOutputs([{ stagedPath, finalPath }]),
+      { code: 'EEXIST' },
+    );
+    assert.equal(await readFile(finalPath, 'utf8'), 'competitor');
+    assert.deepEqual(await readdir(fixtureRoot), ['archive']);
   } finally {
     await cleanup(fixtureRoot);
   }

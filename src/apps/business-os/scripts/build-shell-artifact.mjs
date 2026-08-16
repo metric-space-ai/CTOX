@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: MIT OR AGPL-3.0-only
 import { constants as fsConstants } from 'node:fs';
 import {
+  link,
   lstat,
   mkdir,
   open,
   readdir,
-  rename,
   rm,
   stat,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
@@ -34,6 +36,10 @@ export const RUNTIME_TREES = Object.freeze([
   'template-store',
   'vendor',
 ]);
+export const MAX_RUNTIME_FILE_COUNT = 20_000;
+export const MAX_RUNTIME_FILE_BYTES = 512 * 1024 * 1024;
+export const MAX_RUNTIME_TOTAL_BYTES = 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_COUNT = MAX_RUNTIME_FILE_COUNT * 3;
 
 const STRICT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const SOURCE_COMMIT = /^[0-9a-f]{40}$/;
@@ -201,6 +207,9 @@ function createTarHeader(archivePath, type, size) {
 
 export function createTarArchive(entries) {
   if (!Array.isArray(entries)) throw new Error('USTAR entries must be an array');
+  if (entries.length > MAX_ARCHIVE_ENTRY_COUNT) {
+    throw new Error(`USTAR entry count exceeds the ${MAX_ARCHIVE_ENTRY_COUNT} entry limit`);
+  }
   const prepared = entries.map((entry) => {
     if (!entry || (entry.type !== 'file' && entry.type !== 'directory')) {
       throw new Error('USTAR entries must be regular files or directories');
@@ -209,6 +218,9 @@ export function createTarArchive(entries) {
     const data = entry.type === 'file'
       ? (Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data ?? ''))
       : Buffer.alloc(0);
+    if (data.length > MAX_RUNTIME_FILE_BYTES) {
+      throw new Error(`USTAR file exceeds the ${MAX_RUNTIME_FILE_BYTES} byte limit: ${path}`);
+    }
     const archivePath = entry.type === 'directory' ? `${path}/` : path;
     splitUstarPath(archivePath);
     return { ...entry, path, archivePath, data };
@@ -216,11 +228,16 @@ export function createTarArchive(entries) {
 
   const seen = new Set();
   const chunks = [];
+  let totalFileBytes = 0;
   for (const entry of prepared) {
     if (seen.has(entry.path)) throw new Error(`Duplicate USTAR entry: ${entry.path}`);
     seen.add(entry.path);
     chunks.push(createTarHeader(entry.archivePath, entry.type, entry.data.length));
     if (entry.type === 'file') {
+      totalFileBytes += entry.data.length;
+      if (totalFileBytes > MAX_RUNTIME_TOTAL_BYTES) {
+        throw new Error(`USTAR payload exceeds the ${MAX_RUNTIME_TOTAL_BYTES} byte limit`);
+      }
       chunks.push(entry.data);
       const padding = (512 - (entry.data.length % 512)) % 512;
       if (padding) chunks.push(Buffer.alloc(padding));
@@ -260,10 +277,13 @@ async function assertDirectoryNoSymlink(absolutePath, label) {
   if (!details.isDirectory()) throw new Error(`Required directory is missing: ${label}`);
 }
 
-async function readRegularFileNoFollow(absolutePath, relativePath) {
+async function readRegularFileNoFollow(absolutePath, relativePath, budget) {
   const before = await lstat(absolutePath);
   if (before.isSymbolicLink()) throw new Error(`Symlinks are forbidden: ${relativePath}`);
   if (!before.isFile()) throw new Error(`Only regular files and directories are allowed: ${relativePath}`);
+  if (before.size > MAX_RUNTIME_FILE_BYTES) {
+    throw new Error(`Runtime file exceeds the ${MAX_RUNTIME_FILE_BYTES} byte limit: ${relativePath}`);
+  }
 
   const noFollow = fsConstants.O_NOFOLLOW ?? 0;
   const handle = await open(absolutePath, fsConstants.O_RDONLY | noFollow);
@@ -277,13 +297,25 @@ async function readRegularFileNoFollow(absolutePath, relativePath) {
     if (after.isSymbolicLink() || after.dev !== opened.dev || after.ino !== opened.ino) {
       throw new Error(`Source file changed while reading: ${relativePath}`);
     }
+    if (budget !== undefined) {
+      const nextFileCount = budget.fileCount + 1;
+      const nextTotalBytes = budget.totalBytes + data.length;
+      if (nextFileCount > MAX_RUNTIME_FILE_COUNT) {
+        throw new Error(`Runtime file count exceeds the ${MAX_RUNTIME_FILE_COUNT} file limit`);
+      }
+      if (nextTotalBytes > MAX_RUNTIME_TOTAL_BYTES) {
+        throw new Error(`Runtime payload exceeds the ${MAX_RUNTIME_TOTAL_BYTES} byte limit`);
+      }
+      budget.fileCount = nextFileCount;
+      budget.totalBytes = nextTotalBytes;
+    }
     return data;
   } finally {
     await handle.close();
   }
 }
 
-async function collectTree(sourceRoot, relativeDirectory, directories, files) {
+async function collectTree(sourceRoot, relativeDirectory, directories, files, budget) {
   validateRelativePath(relativeDirectory);
   const absoluteDirectory = resolve(sourceRoot, ...relativeDirectory.split('/'));
   await assertDirectoryNoSymlink(absoluteDirectory, relativeDirectory);
@@ -302,9 +334,9 @@ async function collectTree(sourceRoot, relativeDirectory, directories, files) {
     }
     if (isExcludedRuntimePath(relativePath, { directory: details.isDirectory() })) continue;
     if (details.isDirectory()) {
-      await collectTree(sourceRoot, relativePath, directories, files);
+      await collectTree(sourceRoot, relativePath, directories, files, budget);
     } else {
-      files.push({ path: relativePath, data: await readRegularFileNoFollow(absolutePath, relativePath) });
+      files.push({ path: relativePath, data: await readRegularFileNoFollow(absolutePath, relativePath, budget) });
     }
   }
 }
@@ -314,11 +346,12 @@ export async function collectRuntimePayload(sourceRoot) {
   await assertDirectoryNoSymlink(absoluteSourceRoot, absoluteSourceRoot);
   const directories = [];
   const files = [];
+  const budget = { fileCount: 0, totalBytes: 0 };
 
   for (const relativePath of ROOT_RUNTIME_FILES) {
     const absolutePath = resolve(absoluteSourceRoot, relativePath);
     try {
-      files.push({ path: relativePath, data: await readRegularFileNoFollow(absolutePath, relativePath) });
+      files.push({ path: relativePath, data: await readRegularFileNoFollow(absolutePath, relativePath, budget) });
     } catch (error) {
       if (error?.code === 'ENOENT') throw new Error(`Required runtime file is missing: ${relativePath}`);
       throw error;
@@ -326,7 +359,7 @@ export async function collectRuntimePayload(sourceRoot) {
   }
   for (const relativeDirectory of RUNTIME_TREES) {
     try {
-      await collectTree(absoluteSourceRoot, relativeDirectory, directories, files);
+      await collectTree(absoluteSourceRoot, relativeDirectory, directories, files, budget);
     } catch (error) {
       if (error?.code === 'ENOENT') throw new Error(`Required runtime directory is missing: ${relativeDirectory}`);
       throw error;
@@ -368,13 +401,18 @@ async function pathExists(targetPath) {
 }
 
 export async function commitStagedOutputs(stagedOutputs, operations = {}) {
-  const renameFile = operations.rename ?? rename;
+  const linkFile = operations.link ?? link;
+  const unlinkFile = operations.unlink ?? unlink;
   const removePath = operations.rm ?? rm;
   const published = [];
   try {
     for (const { stagedPath, finalPath } of stagedOutputs) {
-      await renameFile(stagedPath, finalPath);
+      // link(2) fails with EEXIST instead of replacing another concurrent
+      // publisher's final output. Staged and final files live in one directory,
+      // so the hard-link publication is atomic on every supported filesystem.
+      await linkFile(stagedPath, finalPath);
       published.push(finalPath);
+      await unlinkFile(stagedPath);
     }
   } catch (error) {
     await Promise.allSettled(published.map((finalPath) => removePath(finalPath, { force: true })));
