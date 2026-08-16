@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | ja | beide Hotspots gezielt getestet | nein | zweiter Rollout offen |
+| Idle-CPU des Dienstes | ja | drei Hotspots gezielt getestet | nein | finaler Rollout und Ein-Stunden-Probe offen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -166,8 +166,30 @@ Rollout-Zwischenstand vom 16.08.2026:
   vollständig zugestellter kanonischer Projektion werden aufgelöst;
   Idempotenzkonflikte ausdrücklich nicht. Neuer Test 1/1, angrenzende
   Audit-Regressionen 2/2 und Cancel-Migration 1/1 sind grün.
-- Der zweite Code-Stand ist noch nicht ausgerollt. Neuer Release-Slot,
-  Neustart, erneuter Kurzprobe und Ein-Stunden-Messung bleiben offen.
+- Der zweite Code-Stand `c53a86588` wurde aus einem isolierten `git archive`
+  mit SHA-256
+  `0218071d33bc26c4f79f4d358b24e683cfa8303a66d042bd079c8ee2e470fd9f`
+  gebaut und als verwalteter Release `idle-cpu-c53a86588` ausgerollt. Die
+  Sicherung `backups/update-20260816T201808Z` ist vorhanden; der vorherige
+  Release `refactor-sync-eccc24334` bleibt als Rollback-Slot erhalten.
+- Build-Ausgabe, Release-Binary und `current`-Binary sind bytegleich und haben
+  SHA-256
+  `bcc58ec5553bfb83edff93c1bf4c7e2d1cb02995eadb66597d798902ca935110`.
+  Der Dienst läuft nach dem kontrollierten Neustart unter PID `5575`, meldet
+  `busy=false`, keine wartenden Tasks und keine aktiven Worker. Der native
+  Peer ist lebend und meldet ohne Browser erwartungsgemäß
+  `replicationUp=false`.
+- Direkt nach diesem Neustart zeigte sich kein weiterer Idle-Loop, aber ein
+  endlicher Startup-Engpass: Der Knowledge-Katalog öffnete für jedes Skill-,
+  Skillbook-, Runbook- und Resource-Dokument die 1,1-GB-CTOX-Datenbank erneut
+  und ließ SQLite das große Schema wiederholt parsen. Nach Abschluss dieses
+  Durchlaufs schlief der Prozess bei 0,5 %; die Initialisierung dauerte jedoch
+  rund fünf Minuten und verletzt damit das Boot-Ziel.
+- Commit `43889102a` verwendet für den gesamten Knowledge-Katalog genau eine
+  SQLite-Verbindung; Einzelabrufe bleiben unverändert. Der neue
+  Verbindungsanzahl-Regressionstest und `cargo fmt --all -- --check` sind
+  grün. Kontrollierter Rollout, formaler Kurzprobe und Ein-Stunden-Messung
+  dieses finalen Stands bleiben offen.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
@@ -379,6 +401,11 @@ Kein Commit darf:
 | `a789ac76b` | bounded Sellify Demand-Sync |
 | `c769a5119` | Multiplex-Handshake-Metriken |
 | `825ee651d` | konsolidierter Kampagnennachweis |
+| `f9017f579` | redundanten teuren Idle-Queue-Poll begrenzen |
+| `071fda4bc` | reproduzierbaren Dauer-Idle-Probe ergänzen |
+| `0a4ab13b2` | irrelevantes Modul-Asset-Hashing im External-SQL-Idle-Poll vermeiden |
+| `07c2ef0ca` | nachweislich transiente Intake-Failures konservativ auflösen |
+| `43889102a` | Knowledge-Katalog über eine SQLite-Verbindung aufbauen |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -396,8 +423,8 @@ Kein Commit darf:
 
 ## Nächste Ausführungsreihenfolge
 
-1. Idle-CPU-Fix in einen kontrollierten Build übernehmen und eine einstündige
-   Nachhermessung durchführen.
+1. Den Knowledge-Startup-Fix kontrolliert ausrollen, danach Kurzprobe und
+   einstündige Idle-Nachhermessung mit dem finalen Release durchführen.
 2. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
 3. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
 4. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
