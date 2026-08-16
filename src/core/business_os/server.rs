@@ -2693,7 +2693,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let skill_id: String = row.get(0)?;
-                let markdown = skill_markdown(root, &skill_id)?;
+                let markdown = skill_markdown_from_conn(&conn, &skill_id)?;
                 let title: String = row.get(1)?;
                 let class_name: String = row.get(2)?;
                 let state: String = row.get(3)?;
@@ -2728,7 +2728,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
-                let markdown = skillbook_markdown(root, &id)?;
+                let markdown = skillbook_markdown_from_conn(&conn, &id)?;
                 let title: String = row.get(1)?;
                 let status: String = row.get(2)?;
                 let summary: String = row.get(3)?;
@@ -2763,7 +2763,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
-                let markdown = runbook_markdown(root, &id)?;
+                let markdown = runbook_markdown_from_conn(&conn, &id)?;
                 let skillbook_id: String = row.get(1)?;
                 let title: String = row.get(2)?;
                 let status: String = row.get(3)?;
@@ -2811,7 +2811,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
-                let markdown = knowledge_resource_markdown(root, &id)?;
+                let markdown = knowledge_resource_markdown_from_conn(&conn, &id)?;
                 let skillbook_id: String = row.get(1)?;
                 let title: String = row.get(2)?;
                 let kind: String = row.get(3)?;
@@ -2999,6 +2999,10 @@ fn knowledge_document_payload(root: &Path, id: &str) -> anyhow::Result<Value> {
 
 fn skill_markdown(root: &Path, skill_id: &str) -> anyhow::Result<String> {
     let conn = open_ctox_sqlite(root)?;
+    skill_markdown_from_conn(&conn, skill_id)
+}
+
+fn skill_markdown_from_conn(conn: &Connection, skill_id: &str) -> anyhow::Result<String> {
     let mut bundle = conn.prepare(
         "SELECT skill_name, class, state, description, source_path, cluster, updated_at
            FROM ctox_skill_bundles WHERE skill_id = ?1",
@@ -3048,6 +3052,10 @@ fn skill_markdown(root: &Path, skill_id: &str) -> anyhow::Result<String> {
 
 fn skillbook_markdown(root: &Path, skillbook_id: &str) -> anyhow::Result<String> {
     let conn = open_ctox_sqlite(root)?;
+    skillbook_markdown_from_conn(&conn, skillbook_id)
+}
+
+fn skillbook_markdown_from_conn(conn: &Connection, skillbook_id: &str) -> anyhow::Result<String> {
     let mut stmt = conn.prepare(
         "SELECT title, version, status, summary, mission, runtime_policy, answer_contract,
                 workflow_backbone_json, routing_taxonomy_json, linked_runbooks_json,
@@ -3078,6 +3086,10 @@ fn skillbook_markdown(root: &Path, skillbook_id: &str) -> anyhow::Result<String>
 
 fn runbook_markdown(root: &Path, runbook_id: &str) -> anyhow::Result<String> {
     let conn = open_ctox_sqlite(root)?;
+    runbook_markdown_from_conn(&conn, runbook_id)
+}
+
+fn runbook_markdown_from_conn(conn: &Connection, runbook_id: &str) -> anyhow::Result<String> {
     let mut stmt = conn.prepare(
         "SELECT title, version, status, summary, problem_domain, item_labels_json, updated_at
            FROM knowledge_runbooks WHERE runbook_id = ?1",
@@ -3122,6 +3134,13 @@ fn runbook_markdown(root: &Path, runbook_id: &str) -> anyhow::Result<String> {
 
 fn knowledge_resource_markdown(root: &Path, resource_id: &str) -> anyhow::Result<String> {
     let conn = open_ctox_sqlite(root)?;
+    knowledge_resource_markdown_from_conn(&conn, resource_id)
+}
+
+fn knowledge_resource_markdown_from_conn(
+    conn: &Connection,
+    resource_id: &str,
+) -> anyhow::Result<String> {
     let mut stmt = conn.prepare(
         "SELECT title, kind, role, canonical_url, snapshot_hash, evidence_eligible,
                 linked_runbook_items_json, metadata_json, updated_at
@@ -3312,7 +3331,14 @@ fn scan_parquet(path: &Path) -> PolarsResult<LazyFrame> {
     LazyFrame::scan_parquet(pl_path, ScanArgsParquet::default())
 }
 
+#[cfg(test)]
+thread_local! {
+    static CTOX_SQLITE_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn open_ctox_sqlite(root: &Path) -> anyhow::Result<Connection> {
+    #[cfg(test)]
+    CTOX_SQLITE_OPEN_COUNT.with(|count| count.set(count.get() + 1));
     let path = ctox_sqlite_path(root);
     let conn =
         Connection::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -3868,6 +3894,51 @@ fn mime_for(path: &PathBuf) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knowledge_index_reuses_one_ctox_sqlite_connection() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("runtime"))?;
+        let conn = Connection::open(ctox_sqlite_path(root.path()))?;
+        conn.execute_batch(
+            "CREATE TABLE ctox_skill_bundles (
+                 skill_id TEXT PRIMARY KEY,
+                 skill_name TEXT NOT NULL,
+                 class TEXT NOT NULL,
+                 state TEXT NOT NULL,
+                 description TEXT NOT NULL,
+                 source_path TEXT,
+                 cluster TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE ctox_skill_files (
+                 skill_id TEXT NOT NULL,
+                 relative_path TEXT NOT NULL,
+                 content_blob BLOB NOT NULL
+             );
+             INSERT INTO ctox_skill_bundles VALUES
+                 ('alpha', 'Alpha', 'tool', 'active', 'First skill', NULL, 'test', '2026-08-16'),
+                 ('beta', 'Beta', 'tool', 'active', 'Second skill', NULL, 'test', '2026-08-16');
+             INSERT INTO ctox_skill_files VALUES
+                 ('alpha', 'SKILL.md', X'2320416C706861'),
+                 ('beta', 'SKILL.md', X'232042657461');",
+        )?;
+        drop(conn);
+
+        CTOX_SQLITE_OPEN_COUNT.with(|count| count.set(0));
+        let payload = knowledge_index_payload(root.path())?;
+
+        assert_eq!(
+            CTOX_SQLITE_OPEN_COUNT.with(std::cell::Cell::get),
+            1,
+            "the catalog must not reparse the SQLite schema once per item"
+        );
+        assert_eq!(payload["counts"]["items"], 3);
+        assert!(payload["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["markdown"] == "# Alpha\n\nFirst skill\n\n- Klasse: `tool`\n- Status: `active`\n- Cluster: `test`\n- Quelle: `unbekannt`\n- Aktualisiert: `2026-08-16`\n\n\n## SKILL.md\n\n# Alpha")));
+        Ok(())
+    }
 
     #[test]
     fn bootstrap_module_loader_uses_system_installed_and_local_sources_only() -> anyhow::Result<()>
