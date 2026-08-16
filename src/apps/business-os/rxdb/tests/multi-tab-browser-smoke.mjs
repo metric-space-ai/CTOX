@@ -61,7 +61,10 @@ try {
   await waitFor(first, () => globalThis.__dirty?.ids?.[0] === 'ticket-browser-1', 'dirty event at leader');
 
   await first.evaluate(() => globalThis.dispatchEvent(new Event('pagehide')));
-  await waitFor(second, () => globalThis.__coord?.isLeader?.() === true, 'follower leader handover');
+  // Stay below the 15 s lease TTL: this must still prove the explicit
+  // pagehide/release path, while allowing a loaded browser process more than
+  // the default 5 s used for ordinary in-page propagation.
+  await waitFor(second, () => globalThis.__coord?.isLeader?.() === true, 'follower leader handover', 10_000);
   await second.evaluate(() => globalThis.__coord.notifyReplicatedChange('tickets', ['ticket-browser-2']));
   await waitFor(first, () => globalThis.__replicated?.ids?.[0] === 'ticket-browser-2', 'replicated event at follower');
 

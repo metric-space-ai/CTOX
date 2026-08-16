@@ -49,18 +49,23 @@ await storage.bulkWrite([
 assert(storage.docs.size === 4, 'baseline: 4 docs present');
 
 let cancelCalled = 0;
+let signalFetchStarted;
+const fetchStarted = new Promise((resolve) => { signalFetchStarted = resolve; });
 const loader = createQueryDemandLoader({
   storageCollection: storage,
   sidecar,
   collectionName: 'business_records',
   schemaVersion: 1,
-  requestQueryFetch: () => new Promise(() => {}),
+  requestQueryFetch: () => {
+    signalFetchStarted();
+    return new Promise(() => {});
+  },
   requestCancel: async () => { cancelCalled += 1; },
 });
 
 // Inject a fake in-flight entry whose fingerprint matches the orphan window.
 loader.resolveQuery({ selector: { module: 'x' } }).catch(() => {});
-await new Promise((r) => setTimeout(r, 5));
+await withTimeout(fetchStarted, 1_000, 'remote fetch did not start');
 // Force the fingerprint to match by clearing and re-priming the in-flight
 // map via the same dedupKey scheme. For this test it's enough to call the
 // abort path directly; the loader holds the in-flight entry from above.
@@ -100,3 +105,17 @@ assert(cancelCalled >= 1, 'requestCancel invoked at least once');
 console.log('ctox-rxdb-js orphan cleanup smoke OK', { cancelCalls: cancelCalled });
 
 function assert(c, m) { if (!c) throw new Error(m); }
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

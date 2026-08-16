@@ -136,6 +136,7 @@ const SHARED_TOKEN_TIMEOUT_MS = 30000;
 const SHARED_PEER_OPEN_WAIT_MS = 60000;
 const SHARED_COLLECTION_CATCH_UP_QUEUE_SLICE_MS = 250;
 const SHARED_PROTOCOL_COLLECTION_CONCURRENCY = 8;
+const BROWSER_PEER_DEVICE_ID_STORAGE_KEY = 'ctox.rxdb.browser-peer-device-id.v1';
 const VOLATILE_SIGNALING_QUERY_PARAMS = new Set([
   'client',
   'role',
@@ -186,6 +187,10 @@ export const replicationWebRtcTestInternals = Object.freeze({
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
   readPermissionDigestMatches,
+  browserInitiatorPeerId,
+  browserInitiatorPeerIdForDevice,
+  resolveBrowserPeerDeviceId,
+  browserPeerDeviceIdStorageKey: BROWSER_PEER_DEVICE_ID_STORAGE_KEY,
   // Lazy accessors (classes are declared below): let smoke tests drive the
   // real state machines without opening a network connection.
   getSharedRoomPeerClass: () => SharedRoomPeer,
@@ -2383,7 +2388,7 @@ class CtoxWebRtcReplicationState {
   }
 }
 
-const BROWSER_PEER_SESSION_ID = createBrowserPeerSessionId();
+let browserPeerDeviceIdCache = '';
 
 // Native storage generation and collection head a checkpoint is valid against.
 // `storageGeneration` alone is insufficient because it intentionally survives
@@ -2460,8 +2465,37 @@ function clearPersistentCheckpoints(key) {
 
 function browserInitiatorPeerId(topic) {
   const origin = browserPeerOriginId();
-  const stableScope = `${String(topic || 'ctox')}|${origin}|${BROWSER_PEER_SESSION_ID}`;
+  return browserInitiatorPeerIdForDevice(topic, origin, browserPeerDeviceId());
+}
+
+function browserInitiatorPeerIdForDevice(topic, origin, deviceId) {
+  const stableScope = `${String(topic || 'ctox')}|${String(origin || 'local')}|${String(deviceId || '')}`;
   return `000-browser-${hashString(stableScope)}`;
+}
+
+function browserPeerDeviceId() {
+  if (browserPeerDeviceIdCache) return browserPeerDeviceIdCache;
+  let storage;
+  try { storage = globalThis.localStorage; } catch {}
+  browserPeerDeviceIdCache = resolveBrowserPeerDeviceId(storage);
+  return browserPeerDeviceIdCache;
+}
+
+function resolveBrowserPeerDeviceId(storage, createId = createBrowserPeerDeviceId) {
+  try {
+    const stored = String(storage?.getItem?.(BROWSER_PEER_DEVICE_ID_STORAGE_KEY) || '').trim();
+    if (isBrowserPeerDeviceId(stored)) return stored;
+  } catch {}
+
+  const created = createId();
+  try {
+    storage?.setItem?.(BROWSER_PEER_DEVICE_ID_STORAGE_KEY, created);
+  } catch {}
+  return created;
+}
+
+function isBrowserPeerDeviceId(value) {
+  return /^[0-9a-f]{16}$/.test(String(value || ''));
 }
 
 function browserPeerOriginId() {
@@ -2472,7 +2506,7 @@ function browserPeerOriginId() {
   }
 }
 
-function createBrowserPeerSessionId() {
+function createBrowserPeerDeviceId() {
   try {
     const bytes = new Uint8Array(8);
     globalThis.crypto?.getRandomValues?.(bytes);
@@ -2480,7 +2514,9 @@ function createBrowserPeerSessionId() {
       return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
     }
   } catch {}
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  const timestamp = (Date.now() >>> 0).toString(16).padStart(8, '0');
+  const random = Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
+  return `${timestamp}${random}`;
 }
 
 function hashString(value) {

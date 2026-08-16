@@ -71,7 +71,12 @@ function makeStorageCollection() {
   const sidecar = createSidecarWithMemoryBackend({ databaseName: 'reset-recon' });
   const storage = makeStorageCollection();
   let cancelled = [];
-  const slowFetch = () => new Promise(() => {}); // hangs forever
+  let signalFetchStarted;
+  const fetchStarted = new Promise((resolve) => { signalFetchStarted = resolve; });
+  const slowFetch = () => {
+    signalFetchStarted();
+    return new Promise(() => {}); // hangs forever
+  };
   const loader = createQueryDemandLoader({
     storageCollection: storage,
     sidecar,
@@ -82,7 +87,7 @@ function makeStorageCollection() {
   });
 
   loader.resolveQuery({ selector: { status: 'pending' } }).catch(() => {});
-  await new Promise((r) => setTimeout(r, 5));
+  await withTimeout(fetchStarted, 1_000, 'remote fetch did not start');
   assert(loader.inflightSize() === 1, 'expected one in-flight before abort');
   await loader.abortAllInFlight('reconnect');
   assert(loader.inflightSize() === 0, 'abort must drop all in-flight');
@@ -128,3 +133,17 @@ function makeStorageCollection() {
 console.log('ctox-rxdb-js correctness/reconnect/multi-tab smoke OK');
 
 function assert(c, m) { if (!c) throw new Error(m); }
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

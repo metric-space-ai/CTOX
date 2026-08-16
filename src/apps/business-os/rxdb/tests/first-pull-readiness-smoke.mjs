@@ -3,7 +3,9 @@
 // The marker is local retained-checkpoint metadata only: no wire fields or
 // capability negotiation participate.
 
-import { replicateWebRTC } from '../src/replication-webrtc.mjs';
+import { replicateWebRTC, replicationWebRtcTestInternals } from '../src/replication-webrtc.mjs';
+
+const { browserPeerDeviceIdStorageKey } = replicationWebRtcTestInternals;
 
 const storage = new Map();
 globalThis.localStorage = {
@@ -125,7 +127,11 @@ await invalidated.runPeerReady('peer-permission-change', protocol, false);
 assert(readinessAfterInvalidation !== 'live', 'permission digest change must invalidate the live marker');
 assert(invalidated.firstPullCompletedAtMs === 0, 'invalidated marker must be cleared in memory');
 assert(invalidated.retainedCheckpoints === null, 'invalidated retained checkpoint must be discarded');
-assert(storage.size === 0, 'invalidated retained checkpoint must be removed from persistence');
+assert(retainedCheckpointEntries().length === 0, 'invalidated retained checkpoint must be removed from persistence');
+assert(
+  storage.has(browserPeerDeviceIdStorageKey),
+  'checkpoint invalidation must preserve the independent browser device identity',
+);
 await invalidated.cancel();
 
 console.log('ctox-rxdb first-pull readiness smoke OK');
@@ -171,8 +177,13 @@ function mockCollection(name) {
 }
 
 function onlyRetainedRecord() {
-  assert(storage.size === 1, `expected one retained checkpoint record, got ${storage.size}`);
-  return JSON.parse(Array.from(storage.values())[0]);
+  const entries = retainedCheckpointEntries();
+  assert(entries.length === 1, `expected one retained checkpoint record, got ${entries.length}`);
+  return JSON.parse(entries[0][1]);
+}
+
+function retainedCheckpointEntries() {
+  return Array.from(storage.entries()).filter(([key]) => key.startsWith('ctox.rxdb.checkpoints.v1.'));
 }
 
 function mintToken({ uid, role, epoch }) {

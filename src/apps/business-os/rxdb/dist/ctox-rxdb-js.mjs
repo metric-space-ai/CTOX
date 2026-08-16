@@ -8884,6 +8884,7 @@ var SHARED_PEER_NEGOTIATION_RETRY_MAX_MS = 1e4;
 var SHARED_PEER_OPEN_WAIT_MS = 6e4;
 var SHARED_COLLECTION_CATCH_UP_QUEUE_SLICE_MS = 250;
 var SHARED_PROTOCOL_COLLECTION_CONCURRENCY = 8;
+var BROWSER_PEER_DEVICE_ID_STORAGE_KEY = "ctox.rxdb.browser-peer-device-id.v1";
 var VOLATILE_SIGNALING_QUERY_PARAMS = /* @__PURE__ */ new Set([
   "client",
   "role",
@@ -8931,6 +8932,10 @@ var replicationWebRtcTestInternals = Object.freeze({
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
   readPermissionDigestMatches,
+  browserInitiatorPeerId,
+  browserInitiatorPeerIdForDevice,
+  resolveBrowserPeerDeviceId,
+  browserPeerDeviceIdStorageKey: BROWSER_PEER_DEVICE_ID_STORAGE_KEY,
   // Lazy accessors (classes are declared below): let smoke tests drive the
   // real state machines without opening a network connection.
   getSharedRoomPeerClass: () => SharedRoomPeer,
@@ -10808,7 +10813,7 @@ var CtoxWebRtcReplicationState = class {
     return this.isPeerOpen(peerId) && this.isTransientMasterChangesSinceError(error);
   }
 };
-var BROWSER_PEER_SESSION_ID = createBrowserPeerSessionId();
+var browserPeerDeviceIdCache = "";
 function checkpointValidityKeyFromProtocol(remoteProtocol) {
   if (!remoteProtocol || typeof remoteProtocol !== "object") return "";
   const capabilities = Array.isArray(remoteProtocol.capabilities) ? remoteProtocol.capabilities : [];
@@ -10862,8 +10867,37 @@ function clearPersistentCheckpoints(key) {
 }
 function browserInitiatorPeerId(topic) {
   const origin = browserPeerOriginId();
-  const stableScope = `${String(topic || "ctox")}|${origin}|${BROWSER_PEER_SESSION_ID}`;
+  return browserInitiatorPeerIdForDevice(topic, origin, browserPeerDeviceId());
+}
+function browserInitiatorPeerIdForDevice(topic, origin, deviceId) {
+  const stableScope = `${String(topic || "ctox")}|${String(origin || "local")}|${String(deviceId || "")}`;
   return `000-browser-${hashString(stableScope)}`;
+}
+function browserPeerDeviceId() {
+  if (browserPeerDeviceIdCache) return browserPeerDeviceIdCache;
+  let storage;
+  try {
+    storage = globalThis.localStorage;
+  } catch {
+  }
+  browserPeerDeviceIdCache = resolveBrowserPeerDeviceId(storage);
+  return browserPeerDeviceIdCache;
+}
+function resolveBrowserPeerDeviceId(storage, createId = createBrowserPeerDeviceId) {
+  try {
+    const stored = String(storage?.getItem?.(BROWSER_PEER_DEVICE_ID_STORAGE_KEY) || "").trim();
+    if (isBrowserPeerDeviceId(stored)) return stored;
+  } catch {
+  }
+  const created = createId();
+  try {
+    storage?.setItem?.(BROWSER_PEER_DEVICE_ID_STORAGE_KEY, created);
+  } catch {
+  }
+  return created;
+}
+function isBrowserPeerDeviceId(value) {
+  return /^[0-9a-f]{16}$/.test(String(value || ""));
 }
 function browserPeerOriginId() {
   try {
@@ -10872,7 +10906,7 @@ function browserPeerOriginId() {
     return "local";
   }
 }
-function createBrowserPeerSessionId() {
+function createBrowserPeerDeviceId() {
   try {
     const bytes = new Uint8Array(8);
     globalThis.crypto?.getRandomValues?.(bytes);
@@ -10881,7 +10915,9 @@ function createBrowserPeerSessionId() {
     }
   } catch {
   }
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  const timestamp = (Date.now() >>> 0).toString(16).padStart(8, "0");
+  const random = Math.floor(Math.random() * 4294967296).toString(16).padStart(8, "0");
+  return `${timestamp}${random}`;
 }
 function hashString(value) {
   let hash = 2166136261;
