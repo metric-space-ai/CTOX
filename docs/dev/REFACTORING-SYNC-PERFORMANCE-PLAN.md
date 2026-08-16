@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | ja | drei Hotspots gezielt getestet | nein | finaler Rollout und Ein-Stunden-Probe offen |
+| Idle-CPU des Dienstes | ja | finaler Release aktiv; drei Hotspots gezielt getestet | nein | Kurz- und Ein-Stunden-Probe offen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -188,8 +188,22 @@ Rollout-Zwischenstand vom 16.08.2026:
 - Commit `43889102a` verwendet für den gesamten Knowledge-Katalog genau eine
   SQLite-Verbindung; Einzelabrufe bleiben unverändert. Der neue
   Verbindungsanzahl-Regressionstest und `cargo fmt --all -- --check` sind
-  grün. Kontrollierter Rollout, formaler Kurzprobe und Ein-Stunden-Messung
-  dieses finalen Stands bleiben offen.
+  grün.
+- Der committed Stand `60ff9c957` wurde aus dem isolierten Snapshot mit
+  SHA-256
+  `170a6a80881ed1a9e5b83aa85501820b532bc549d25e8d9e8d3d686b2215ab47`
+  als `idle-cpu-60ff9c957` ausgerollt. Die neue Sicherung liegt unter
+  `backups/update-20260816T204848Z`; `idle-cpu-c53a86588` ist der aktuelle
+  Rollback-Slot. Die Retention entfernte danach den älteren Release
+  `refactor-sync-eccc24334` und die vorherige Update-Sicherung.
+- Build-Ausgabe, Release-Binary und `current`-Binary sind bytegleich und haben
+  SHA-256
+  `cf86ea4b96f66c4751cbfc89415e013ab65863fa9ed48f32515ec1a77d05b733`.
+  Der neue Dienst läuft unter der von `launchd` überwachten PID `45237`, ist
+  nicht beschäftigt und hat weder wartende Tasks noch aktive Worker. Der
+  native Peer hat einen frischen Heartbeat, keine Health-Fehler und meldet
+  ohne Browser korrekt `replicationUp=false`. Formale Kurz- und
+  Ein-Stunden-Messung bleiben offen.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
@@ -423,8 +437,8 @@ Kein Commit darf:
 
 ## Nächste Ausführungsreihenfolge
 
-1. Den Knowledge-Startup-Fix kontrolliert ausrollen, danach Kurzprobe und
-   einstündige Idle-Nachhermessung mit dem finalen Release durchführen.
+1. Kurzprobe und einstündige Idle-Nachhermessung mit dem finalen Release
+   durchführen und als Rohdaten versionieren.
 2. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
 3. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
 4. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
