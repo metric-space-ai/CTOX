@@ -282,15 +282,10 @@ class SharedRoomPeer {
     if (isNewCollection) {
       this.handshakeMetrics.collectionRegistrations += 1;
       this.schemaMismatchCollections.delete(collection);
-      if (this.negotiated) {
-        // The room handshake carries a point-in-time collectionSchemas map.
-        // Runtime-installed app modules register their collections after the
-        // shell-critical room is already open, so a cached handshake cannot be
-        // reused for the new collection without producing a false schema hash
-        // mismatch. Drop it and let the catch-up path renegotiate this room
-        // with the complete collection set.
-        this.negotiated = null;
-      }
+      // The native room handshake advertises its complete collectionSchemas
+      // map, including modules not registered locally yet. Retain an
+      // authenticated live handshake; the catch-up path validates only this
+      // newly registered collection against that cached remote map.
     }
     this.scheduleCollectionCatchUp(collection, registration);
   }

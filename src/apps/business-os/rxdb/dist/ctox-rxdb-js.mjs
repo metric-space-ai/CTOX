@@ -9017,9 +9017,6 @@ var SharedRoomPeer = class {
     if (isNewCollection) {
       this.handshakeMetrics.collectionRegistrations += 1;
       this.schemaMismatchCollections.delete(collection);
-      if (this.negotiated) {
-        this.negotiated = null;
-      }
     }
     this.scheduleCollectionCatchUp(collection, registration);
   }
