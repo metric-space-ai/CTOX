@@ -90,6 +90,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: CTOX Business OS Shell ${{ steps.identity.outputs.version }}
+          prerelease: ${{ contains(steps.identity.outputs.version, '-') }}
           generate_release_notes: true
           files: |
             artifacts/business-os-shell/ctox-business-os-shell-${{ steps.identity.outputs.version }}.tar.gz
