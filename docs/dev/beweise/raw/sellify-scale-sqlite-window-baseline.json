@@ -1,0 +1,748 @@
+{
+  "schema": "ctox.business_os_sellify_scale.v1",
+  "generatedAt": "2026-08-16T06:57:37.136Z",
+  "synthetic": true,
+  "populations": {
+    "sellify_activities": 139804,
+    "sellify_campaigns": 86551,
+    "sellify_people": 60640,
+    "sellify_companies": 17520,
+    "business_commands": 5964,
+    "desktop_file_chunks": 3690
+  },
+  "sellifyServerDocuments": 304515,
+  "totalDocuments": 314169,
+  "runs": 30,
+  "seedMs": 9571.694,
+  "databaseBytes": 140996608,
+  "queryWindowLimit": 200,
+  "summary": {
+    "p50Ms": 27.998,
+    "p95Ms": 31.343,
+    "maxMs": 31.809,
+    "maxMaterializedDocuments": 800,
+    "maxQueryRpcEquivalent": 4
+  },
+  "measurements": [
+    {
+      "run": 1,
+      "elapsedMs": 31.343,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 8.056,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.183,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 9.144,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.96,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 2,
+      "elapsedMs": 27.998,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.757,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.07,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.949,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.222,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 3,
+      "elapsedMs": 28.752,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.439,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.895,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.938,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.48,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 4,
+      "elapsedMs": 27.433,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.277,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.025,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.351,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.78,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 5,
+      "elapsedMs": 28.055,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.442,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.423,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.396,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.794,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 6,
+      "elapsedMs": 27.947,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.751,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.413,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.566,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.217,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 7,
+      "elapsedMs": 27.322,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.332,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.838,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.38,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.772,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 8,
+      "elapsedMs": 28.232,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.205,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.318,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.324,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.385,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 9,
+      "elapsedMs": 27.926,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.731,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.294,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.951,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.95,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 10,
+      "elapsedMs": 26.091,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 5.982,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.784,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.912,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.413,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 11,
+      "elapsedMs": 30.006,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.976,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.641,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.85,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.539,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 12,
+      "elapsedMs": 27.373,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.47,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.188,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.828,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.887,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 13,
+      "elapsedMs": 26.312,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.267,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.539,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.66,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.846,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 14,
+      "elapsedMs": 28.338,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.555,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.446,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.147,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.19,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 15,
+      "elapsedMs": 27.286,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.325,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.835,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 5.901,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.225,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 16,
+      "elapsedMs": 29.348,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.056,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.69,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.174,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.428,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 17,
+      "elapsedMs": 30.41,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.793,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.783,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 8.388,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.446,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 18,
+      "elapsedMs": 29.974,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 8.797,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.214,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.619,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.344,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 19,
+      "elapsedMs": 30.044,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.277,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.781,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.581,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.405,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 20,
+      "elapsedMs": 31.809,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 8.496,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.459,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.316,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 8.538,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 21,
+      "elapsedMs": 28.684,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.113,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.796,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.79,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.985,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 22,
+      "elapsedMs": 28.734,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.792,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.61,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.981,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.351,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 23,
+      "elapsedMs": 25.425,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.239,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.577,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 5.979,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.63,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 24,
+      "elapsedMs": 26.636,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.576,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.822,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.59,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.648,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 25,
+      "elapsedMs": 26.418,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.081,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 5.87,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.177,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.29,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 26,
+      "elapsedMs": 26.784,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.672,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.34,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 5.918,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.854,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 27,
+      "elapsedMs": 27.167,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.928,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.481,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.895,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 5.863,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 28,
+      "elapsedMs": 28.827,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 7.228,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 7.162,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.523,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.914,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 29,
+      "elapsedMs": 26.036,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.634,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.53,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 6.544,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 6.328,
+          "documentCount": 200
+        }
+      }
+    },
+    {
+      "run": 30,
+      "elapsedMs": 28.06,
+      "materializedDocuments": 800,
+      "queryRpcEquivalent": 4,
+      "windows": {
+        "sellify_activities": {
+          "elapsedMs": 6.815,
+          "documentCount": 200
+        },
+        "sellify_campaigns": {
+          "elapsedMs": 6.177,
+          "documentCount": 200
+        },
+        "sellify_people": {
+          "elapsedMs": 7.289,
+          "documentCount": 200
+        },
+        "sellify_companies": {
+          "elapsedMs": 7.779,
+          "documentCount": 200
+        }
+      }
+    }
+  ]
+}
