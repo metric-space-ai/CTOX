@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Channel-Routers | ja | gezielte Tests ja | nein | Rolloutmessung offen |
+| Idle-CPU des Dienstes | teilweise | erster Hotspot behoben | nein | zweiter Hotspot belegt |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -138,9 +138,25 @@ Rollout-Zwischenstand vom 16.08.2026:
 - Die konsistente Sicherung
   `backups/update-20260816T170608Z` wurde angelegt. Die Retention hat erst
   danach die vorherige Update-Sicherung vom 07.08.2026 entfernt.
-- Der verwaltete Release-Slot `refactor-sync-eccc24334` wird aktuell gebaut.
-  Symlink-Switch, Neustart, Ziel-Prüfsumme und Ein-Stunden-Messung sind noch
-  nicht als erfolgreich abgenommen.
+- Der verwaltete Release-Slot `refactor-sync-eccc24334` ist aktiv. Update,
+  Symlink-Switch und Neustart endeten erfolgreich; `update status` meldet
+  `phase=completed` ohne Fehler und den vorherigen Release
+  `cliproxy-provider-contract-r6-20260807T1323Z` als Rollback-Slot.
+- Build-, Release- und `current`-Binary sind bytegleich und haben SHA-256
+  `29ff1da559cd13465cd6122cbfe7bbfecb439e28c8f54aca33ae44ac6edbb6c1`.
+  Der Dienst läuft unter PID `31541`, drei Statusabfragen meldeten konsistent
+  `busy=false`, keine wartenden Tasks und keine aktiven Worker. Ohne Browser
+  meldet der lebende native Peer erwartungsgemäß `replicationUp=false`.
+- Der erste 30-Sekunden-Probe bestätigt, dass der frühere Dauerlauf beseitigt
+  ist (CPU-p50 0,7 %), verfehlt das Dauertor aber noch: Ein periodischer Peak
+  von 76,8 % ergibt 7,66 % Prozess-CPU über das kurze Messfenster. Ein
+  Prozess-Sample ordnet ihn `external_sql_sync::run_due_sources` zu: Der
+  Idle-Poll lädt lokale Modul-Manifeste und hasht rekursiv deren Assets, obwohl
+  keine externe SQL-Quelle fällig ist. Dieser zweite Hotspot wird vor der
+  Ein-Stunden-Messung behoben.
+- Ein historischer offener Intake-Failure-Datensatz ist ebenfalls belegt. Er
+  wird zunächst gegen den kanonischen Command-Zustand geprüft und nicht ohne
+  Lifecycle-Nachweis entfernt.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
