@@ -403,6 +403,24 @@ function assertLoginDoesNotDefaultToAdmin() {
   if (!/globalThis\.CTOX_BUSINESS_OS_SESSION\s*=\s*config\.session/.test(appContent)) {
     offenders.push('src/apps/business-os/app.js: URL-packed desktop sessions must publish their native capability before the WebRTC handshake');
   }
+  const loadLaunchContextStart = appContent.indexOf('async function loadLaunchContext()');
+  const loadLaunchContextEnd = appContent.indexOf('\nasync function fetchBusinessOsControlJson', loadLaunchContextStart);
+  const loadLaunchContext = appContent.slice(loadLaunchContextStart, loadLaunchContextEnd);
+  const desktopPairingIndex = loadLaunchContext.indexOf('const desktopPairingConfig = await readBusinessOsLaunchConfig()');
+  const fallbackFetchIndex = loadLaunchContext.indexOf("fetchBusinessOsControlJson('/api/business-os/launch-context')");
+  if (
+    loadLaunchContextStart < 0
+    || loadLaunchContextEnd < 0
+    || desktopPairingIndex < 0
+    || fallbackFetchIndex < 0
+    || desktopPairingIndex > fallbackFetchIndex
+  ) {
+    offenders.push('src/apps/business-os/app.js: standalone desktop pairing must resolve before the HTTP launch-context fallback');
+  }
+  if (!loadLaunchContext.includes("desktopPairingConfig?.source === 'url'")
+    || !loadLaunchContext.includes('allowsPairingConfigSession(desktopPairingConfig)')) {
+    offenders.push('src/apps/business-os/app.js: standalone desktop launch-context must require an allowed URL pairing source');
+  }
   const loadSessionStart = appContent.indexOf('async function loadSession()');
   const loadSessionEnd = appContent.indexOf('\nfunction allowsPairingConfigSession', loadSessionStart);
   if (loadSessionStart < 0 || loadSessionEnd < 0) {

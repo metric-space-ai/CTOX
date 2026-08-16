@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260816-browser-peer-status-v100';
+const APP_BUILD = '20260816-desktop-launch-context-v101';
 
 ensureShellStylesheets();
 
@@ -9242,6 +9242,20 @@ async function loadLaunchContext() {
   // load the shell without it.
   if (window.CTOX_BUSINESS_OS_SESSION && typeof window.CTOX_BUSINESS_OS_SESSION === 'object') {
     if (window.CTOX_BUSINESS_OS_CONFIG === undefined) window.CTOX_BUSINESS_OS_CONFIG = null;
+    if (!Array.isArray(window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES)) {
+      window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES = [];
+    }
+    return;
+  }
+  // The standalone desktop shell is intentionally static and has no HTTP
+  // control-plane. Its short-lived pairing payload is the launch context and
+  // must be consumed before attempting the server-only fallback endpoint.
+  const desktopPairingConfig = await readBusinessOsLaunchConfig();
+  if (desktopPairingConfig?.source === 'url' && allowsPairingConfigSession(desktopPairingConfig)) {
+    window.CTOX_BUSINESS_OS_CONFIG = desktopPairingConfig;
+    if (desktopPairingConfig.session && typeof desktopPairingConfig.session === 'object') {
+      window.CTOX_BUSINESS_OS_SESSION = desktopPairingConfig.session;
+    }
     if (!Array.isArray(window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES)) {
       window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES = [];
     }
