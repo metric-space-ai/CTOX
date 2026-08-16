@@ -434,7 +434,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-handshake-metrics-rxdb-v121');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-browser-peer-status-rxdb-v122');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -597,6 +597,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           const remaining = releaseCollectionLease(normalized);
           if (remaining <= 0 && !pinnedCollections.has(normalized)) {
             await syncRuntime.stopCollection(normalized, { preservePin: true }).catch(() => null);
+            if (isModuleDemandOnlyCollection(normalized)) {
+              recordCollection(normalized, {
+                status: 'skipped',
+                connectionStatus: 'demand-only',
+                reason: 'demand-only-lease-released',
+                active: false,
+                frameTransport: null,
+                lastError: null,
+                reconnectingSince: null,
+              });
+            }
           }
           return true;
         },
@@ -665,42 +676,27 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       if (bridges.has(collection)) {
         const current = diagnostics.collections[collection] || {};
         const currentBridgePromise = bridges.get(collection);
-        const currentBridge = await withTimeout(currentBridgePromise, 1000);
-        const currentStatus = current.connectionStatus || current.status || '';
-        const restartNeeded = ['reconnecting', 'failed', 'error', 'stopped'].includes(currentStatus);
-        if (currentBridge?.mode === 'pending') {
-          // A 'pending' stub means the collection was not registered when
-          // the bridge was created (schema/startup race). Reusing the cached
-          // stub disabled that collection's sync until a page reload — drop
-          // it and fall through to a fresh start instead.
+        // startCollection is an idempotent acquisition API. A transient
+        // diagnostic such as active$=false must never make a caller cancel the
+        // shared bridge: command tracking can call this while another command
+        // is awaiting acknowledgement, and cancelling here aborts that live
+        // command. The background repair loop owns reconnect/restart policy.
+        // Only a replication state that is actually cancelled is replaced.
+        const currentBridge = await withTimeout(currentBridgePromise, 3000);
+        if (
+          shouldReplaceCachedBridgeForStart(currentBridge, options)
+          || currentBridge?.state?.cancelled === true
+        ) {
+          // Followers cannot serve a forced-direct start, pending stubs need a
+          // real collection after schema registration, and cancelled states
+          // must be rebuilt. Transient diagnostics alone never enter here.
           bridges.delete(collection);
         } else {
-        const healthyReuse = Boolean(
-          currentBridge
-          && current.initialReplicationAt
-          && current.remoteCheckpoint?.epoch,
-        );
-        if (healthyReuse) {
           recordCollection(collection, {
             status: 'reused',
-            connectionStatus: 'connected',
-            reconnectingSince: null,
-            lastError: null,
-            lastLifecycleEvent: null,
+            connectionStatus: current.connectionStatus || current.status || 'connecting',
           });
           return bridges.get(collection);
-        }
-        if (!restartNeeded) {
-          recordCollection(collection, {
-            status: current.status || 'starting',
-            connectionStatus: current.connectionStatus || 'connecting',
-            reconnectingSince: null,
-            lastError: null,
-            lastLifecycleEvent: null,
-          });
-          return currentBridgePromise;
-        }
-        await this.stopCollection(collection, { preserveLeases: true, preservePin: true });
         }
       }
       recordCollection(collection, { status: 'starting' });
@@ -1331,7 +1327,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-handshake-metrics-rxdb-v121');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-browser-peer-status-rxdb-v122');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -2389,6 +2385,7 @@ function sanitizeReplicationTransportStatus(status) {
     protocol: stringField('protocol', 'ctox-rxdb-frame-v1', 80),
     collection: stringField('collection', null, 120),
     topic: stringField('topic', null, 180),
+    localSignalingPeerId: sanitizeSignalingPeerId(status.localSignalingPeerId),
     maxInlineFrameBytes: numberField('maxInlineFrameBytes'),
     maxChunkChars: numberField('maxChunkChars'),
     maxTransferBytes: numberField('maxTransferBytes'),
@@ -2431,6 +2428,12 @@ function sanitizeReplicationTransportStatus(status) {
     updatedAtMs: numberField('updatedAtMs'),
     observedAt: new Date().toISOString(),
   };
+}
+
+function sanitizeSignalingPeerId(value) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 256) return null;
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return null;
+  return value;
 }
 
 function sanitizeDemandLoadingStatus(value) {
@@ -2859,6 +2862,7 @@ export const __ctoxSyncTestHooks = {
   isDemandOnlyPullCollection,
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
+  shouldReplaceCachedBridgeForStart,
   DEMAND_ONLY_COLLECTION_START_ERROR,
   createFollowerBridge,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
@@ -3196,4 +3200,9 @@ function moduleSyncCollections(collections = []) {
   return (Array.isArray(collections) ? collections : [])
     .filter((collection) => typeof collection === 'string' && collection.trim())
     .filter((collection) => !isModuleDemandOnlyCollection(collection));
+}
+
+function shouldReplaceCachedBridgeForStart(bridge, options = {}) {
+  if (options.forceDirect === true && bridge?.mode === 'follower') return true;
+  return bridge?.mode === 'pending';
 }

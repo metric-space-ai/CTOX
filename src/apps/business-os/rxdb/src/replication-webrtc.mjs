@@ -70,6 +70,7 @@ export const GLOBAL_QUERY_META_BUDGET_BYTES = 512 * 1024 * 1024;
 export const DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
 export const KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
+const DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 
 const BROWSER_CAPABILITIES = [
   'ctox-rxdb-browser-v1',
@@ -175,8 +176,10 @@ export const replicationWebRtcTestInternals = Object.freeze({
   terminalPushRejection,
   sharedRoomPeerKey,
   stableSignalingUrlKey,
+  attachFileDemandLoaderBeforeCollectionHandshake,
   shouldAttachQueryDemandLoader,
   shouldAttachFileDemandLoader,
+  shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
@@ -926,11 +929,12 @@ class SharedRoomPeer {
   }
 
   async awaitRemoteMasterReady(peerId) {
-    try {
-      await this.peer.waitForRequest?.(peerId, 'token', 2000);
-    } catch {
-      // Older or non-CTOX peers might not run the symmetric token request.
-    }
+    // The native peer authorizes this browser only after its symmetric token
+    // request. A busy tenant can legitimately need several seconds while
+    // registering the shared room; proceeding after a short timeout creates a
+    // half-authorized connection whose collection calls churn indefinitely.
+    // Missing authorization therefore fails closed instead of being ignored.
+    await this.peer.waitForRequest?.(peerId, 'token', 15_000);
     await delay(100);
   }
 
@@ -1051,6 +1055,7 @@ class CtoxWebRtcReplicationState {
       refreshIceServers: connectionHandlerCreator?.config?.refreshIceServers || null,
       expectedNativePeerId: this.ctox?.expectedNativePeerId || '',
     });
+    await attachFileDemandLoaderBeforeCollectionHandshake(this);
     this.shared.register(this.collection.name, {
       collection: this.collection.name,
       state: this,
@@ -1450,7 +1455,9 @@ class CtoxWebRtcReplicationState {
       const id = primaryValue(document, this.collection.schema.primaryPath);
       Promise.resolve(this.demandSidecar?.markDirty?.(this.collection.name, id, true)).catch(() => {});
     }
-    await this.writeDocumentsToPeer(peerId, pending);
+    for (const batch of boundedDirectPushBatches(pending)) {
+      await this.writeDocumentsToPeer(peerId, batch);
+    }
     for (const document of pending) {
       const id = primaryValue(document, this.collection.schema.primaryPath);
       Promise.resolve(this.demandSidecar?.markDirty?.(this.collection.name, id, false)).catch(() => {});
@@ -1512,6 +1519,13 @@ class CtoxWebRtcReplicationState {
         if (terminalRejection) {
           rows = [];
           break;
+        }
+        if (replicationErrorResult(masterWriteResult)) {
+          if (attempt < 2) {
+            await delay(100);
+            continue;
+          }
+          throw replicationErrorResultError(masterWriteResult, this.collection.name);
         }
         const conflicts = masterWriteResult;
         const conflictMap = documentsByPrimaryPath(conflicts, this.collection.schema.primaryPath);
@@ -1582,6 +1596,13 @@ class CtoxWebRtcReplicationState {
       const terminalRejection = terminalPushRejection(conflicts);
       if (terminalRejection) {
         throw terminalPushRejectionError(terminalRejection, this.collection.name);
+      }
+      if (replicationErrorResult(conflicts)) {
+        if (attempt < 2) {
+          await delay(100);
+          continue;
+        }
+        throw replicationErrorResultError(conflicts, this.collection.name);
       }
       const conflictMap = documentsByPrimaryPath(conflicts, this.collection.schema.primaryPath);
       if (!conflictMap.size) {
@@ -2480,6 +2501,24 @@ function documentsByPrimaryPath(documents = [], primaryPath = 'id') {
   return map;
 }
 
+function boundedDirectPushBatches(documents = []) {
+  const batches = [];
+  let batch = [];
+  let batchBytes = 0;
+  for (const document of documents) {
+    const documentBytes = new TextEncoder().encode(JSON.stringify(document)).byteLength;
+    if (batch.length && batchBytes + documentBytes > DIRECT_PUSH_BATCH_MAX_BYTES) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(document);
+    batchBytes += documentBytes;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
 // SYNC-40: classify a `masterWrite` RESULT as a TERMINAL authz/schema rejection.
 // The native side returns these as a replication-scope `ctoxError` VALUE (the
 // response frame's `error` is null, so `peer.request` RESOLVES with this object
@@ -2506,6 +2545,26 @@ function terminalPushRejection(result) {
     collection: String(result.collection || ''),
     message: message || code || 'terminal replication rejection',
   };
+}
+
+function replicationErrorResult(result) {
+  return Boolean(
+    result
+    && typeof result === 'object'
+    && !Array.isArray(result)
+    && result.type === 'ctoxError'
+    && result.scope === 'replication',
+  );
+}
+
+function replicationErrorResultError(result, collection) {
+  const message = String(result?.message || result?.code || 'replication request failed');
+  const error = new Error(`masterWrite failed for ${collection}: ${message}`);
+  error.code = String(result?.code || 'RC_WEBRTC_PEER');
+  error.phase = 'replication-io';
+  error.direction = 'push';
+  error.collection = collection;
+  return error;
 }
 
 function terminalPushRejectionError(rejection, collection) {
@@ -2681,11 +2740,24 @@ function shouldPersistFetchedFileChunks(collectionName = '') {
 }
 
 function shouldAttachQueryDemandLoader(collectionName = '') {
-  return !String(collectionName || '').endsWith('_chunks');
+  const name = String(collectionName || '');
+  if (name === 'document_blob_chunks' || name === 'spreadsheet_blob_chunks') return true;
+  return !name.endsWith('_chunks');
 }
 
 function shouldAttachFileDemandLoader(collectionName = '') {
   return String(collectionName || '') !== 'desktop_file_chunks';
+}
+
+function shouldAttachFileDemandLoaderBeforeCollectionHandshake(collectionName = '') {
+  const name = String(collectionName || '');
+  return name === 'document_blob_chunks' || name === 'spreadsheet_blob_chunks';
+}
+
+async function attachFileDemandLoaderBeforeCollectionHandshake(state) {
+  if (!shouldAttachFileDemandLoaderBeforeCollectionHandshake(state?.collection?.name)) return false;
+  await state.enableDemandLoading();
+  return Boolean(state.demandFileLoader);
 }
 
 function queryMetaBudgetBytesForCollection(collectionName = '') {

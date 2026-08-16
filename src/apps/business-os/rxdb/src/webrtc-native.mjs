@@ -170,6 +170,10 @@ export class CtoxWebRtcNativePeer {
       protocolPayload,
       requestHandlers,
     };
+    // The deterministic client id remains stable for URLs, request ids, and
+    // peer-session identity. Signaling assigns a separate, socket-scoped id in
+    // init.yourPeerId; it is never persisted and is cleared with that socket.
+    this.localSignalingPeerId = null;
     // SYNC-30: TURN-credential refresh bookkeeping. `lastIceServersRefreshAtMs`
     // advances on every attempt (success OR failure) so a deferred connect
     // re-drives exactly once and never loops on a failing refresh.
@@ -249,6 +253,18 @@ export class CtoxWebRtcNativePeer {
     return this.events.on(type, listener);
   }
 
+  effectiveLocalPeerId() {
+    return this.localSignalingPeerId || this.options.clientId;
+  }
+
+  setLocalSignalingPeerId(value) {
+    const next = normalizeSignalingPeerId(value);
+    if (next === this.localSignalingPeerId) return false;
+    this.localSignalingPeerId = next;
+    this.emitTransportStatus({ immediate: true, allowClosed: next === null });
+    return true;
+  }
+
   connect() {
     this.closed = false;
     const url = buildSignalingUrl(this.options);
@@ -263,6 +279,7 @@ export class CtoxWebRtcNativePeer {
     socket.onmessage = (event) => this.handleSignalingMessage(event.data);
     socket.onerror = () => this.events.emit('error', this.lastControlPlaneError || { code: 'ctox_signaling_socket_error' });
     socket.onclose = () => {
+      if (this.socket === socket) this.setLocalSignalingPeerId(null);
       this.events.emit('signaling-close', {});
       if (!this.closed) this.scheduleSignalingReconnect();
     };
@@ -284,6 +301,7 @@ export class CtoxWebRtcNativePeer {
   }
 
   close() {
+    this.setLocalSignalingPeerId(null);
     this.closed = true;
     if (this.signalingReconnectTimer) {
       clearTimeout(this.signalingReconnectTimer);
@@ -684,12 +702,12 @@ export class CtoxWebRtcNativePeer {
       return;
     }
     if (message.type === 'init' || message.type === 'joined' || message.type === 'ctoxPresence') {
-      // Only `yourPeerId` may rename us. `message.peerId` on joined/presence
-      // frames plausibly names the REMOTE peer that triggered the broadcast —
-      // adopting it corrupted senderPeerId on all subsequent signals and made
-      // the initiator/target checks reject the native peer.
-      if (message.yourPeerId && message.yourPeerId !== this.options.clientId) {
-        this.options.clientId = String(message.yourPeerId);
+      // Only init.yourPeerId can assign the socket-scoped signaling identity.
+      // joined/presence peerId fields name remote peers and must never affect it.
+      // Invalid init values clear the transient identity and safely restore the
+      // deterministic client-id fallback.
+      if (message.type === 'init') {
+        this.setLocalSignalingPeerId(message.yourPeerId);
       }
       if (message.type === 'joined') {
         // A joined broadcast proves the server ACCEPTED our join — only now
@@ -719,7 +737,7 @@ export class CtoxWebRtcNativePeer {
         }
         const previousDescriptor = previousMetadata.get(remotePeerId);
         const nativePeerRejoined = message.type === 'joined'
-          && remotePeerId !== this.options.clientId
+          && remotePeerId !== this.effectiveLocalPeerId()
           && this.connections.has(remotePeerId)
           && peerJoinedAtChanged(previousDescriptor, descriptor);
         if (nativePeerRejoined) {
@@ -851,7 +869,7 @@ export class CtoxWebRtcNativePeer {
   }
 
   ensureConnection(remotePeerId) {
-    if (remotePeerId === this.options.clientId) {
+    if (remotePeerId === this.effectiveLocalPeerId()) {
       return this.connections.get(remotePeerId);
     }
     if (!this.shouldConnectToRemotePeer(remotePeerId)) {
@@ -994,7 +1012,7 @@ export class CtoxWebRtcNativePeer {
     const remoteRole = this.peerMetadata.get(String(remotePeerId || ''))?.role || '';
     if (this.options.role === 'browser' && remoteRole === 'ctox_instance') return true;
     if (this.options.role === 'ctox_instance' && remoteRole === 'browser') return false;
-    return String(this.options.clientId) < String(remotePeerId);
+    return String(this.effectiveLocalPeerId()) < String(remotePeerId);
   }
 
   async createOffer(remotePeerId, peer) {
@@ -1583,7 +1601,7 @@ export class CtoxWebRtcNativePeer {
     this.socket.send(JSON.stringify({
       type: 'signal',
       room: this.options.room,
-      senderPeerId: this.options.clientId,
+      senderPeerId: this.effectiveLocalPeerId(),
       receiverPeerId: remotePeerId,
       receiver: remotePeerId,
       target: remotePeerId,
@@ -1707,7 +1725,7 @@ export class CtoxWebRtcNativePeer {
 
   rememberPeerMetadata(peerId, metadata = {}) {
     const normalized = normalizePeerMetadata({ ...metadata, peerId });
-    if (!normalized.peerId || normalized.peerId === this.options.clientId) return;
+    if (!normalized.peerId || normalized.peerId === this.effectiveLocalPeerId()) return;
     this.peerMetadata.set(normalized.peerId, {
       ...(this.peerMetadata.get(normalized.peerId) || {}),
       ...normalized,
@@ -1736,7 +1754,7 @@ export class CtoxWebRtcNativePeer {
 
   shouldConnectToRemotePeer(remotePeerId) {
     const peerId = String(remotePeerId || '');
-    if (!peerId || peerId === this.options.clientId) return false;
+    if (!peerId || peerId === this.effectiveLocalPeerId()) return false;
     const metadata = this.peerMetadata.get(peerId);
     if (this.peerMatchesExpectedNativePeerId(peerId, metadata)) return true;
     if (this.nativeCandidateConnectionCount(peerId) > 0) return false;
@@ -1862,6 +1880,7 @@ export class CtoxWebRtcNativePeer {
       ...this.transportStats,
       collection: collectionNameFromTopic(this.options.room),
       topic: this.options.room,
+      localSignalingPeerId: this.localSignalingPeerId,
       activePeerCount: this.connections.size,
       pendingAcks: this.pendingFrameAcks.size,
       pendingRequests: this.pending.size,
@@ -1956,8 +1975,8 @@ export class CtoxWebRtcNativePeer {
     this.emitTransportStatus();
   }
 
-  emitTransportStatus({ immediate = false } = {}) {
-    if (this.closed) return;
+  emitTransportStatus({ immediate = false, allowClosed = false } = {}) {
+    if (this.closed && !allowClosed) return;
     const now = Date.now();
     const elapsed = now - this.lastTransportStatusEmitAtMs;
     if (immediate || elapsed >= TRANSPORT_STATUS_EMIT_MIN_INTERVAL_MS) {
@@ -2358,6 +2377,12 @@ function masterChangeStreamCollection(payload) {
   const prefix = `${MASTER_CHANGE_STREAM_ID}:`;
   if (id.startsWith(prefix)) return id.slice(prefix.length);
   return null;
+}
+
+function normalizeSignalingPeerId(value) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 256) return null;
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return null;
+  return value;
 }
 
 function buildSignalingUrl(options) {

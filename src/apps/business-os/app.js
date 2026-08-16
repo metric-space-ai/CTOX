@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260812-schema-once-v99';
+const APP_BUILD = '20260816-browser-peer-status-v100';
 
 ensureShellStylesheets();
 
@@ -3128,6 +3128,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
   const optionalReconnectingCollections = reconnectingCollections
     .filter((collection) => !requiredCollectionSet.has(collection));
   const frameTransport = buildAdvancedStatusFrameTransport(collectionValues, requiredCollections);
+  const browserPeerId = uniqueAdvancedStatusBrowserPeerId(collectionValues);
   const peerSessions = collectionValues
     .filter((item) => item?.remotePeerSession)
     .map((item) => ({
@@ -3200,6 +3201,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
       mode: state.sync?.mode || null,
       phase: diagnostics?.phase || null,
       syncRoom: diagnostics?.syncRoom || null,
+      browserPeerId,
       signalingUrls: diagnostics?.signalingUrls || [],
       iceServersConfigured: diagnostics?.iceServersConfigured || 0,
       iceServersHaveTurn: diagnostics?.iceServersHaveTurn === true,
@@ -3483,6 +3485,18 @@ function sanitizeAdvancedStatusCountMap(value) {
     result[normalized] = advancedStatusNumber(count);
   }
   return result;
+}
+
+function uniqueAdvancedStatusBrowserPeerId(collectionValues = []) {
+  const peerIds = new Set();
+  for (const entry of collectionValues) {
+    const value = entry?.frameTransport?.localSignalingPeerId;
+    if (typeof value !== 'string' || value.length < 1 || value.length > 256) continue;
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) continue;
+    peerIds.add(value);
+    if (peerIds.size > 1) return null;
+  }
+  return peerIds.values().next().value || null;
 }
 
 function advancedStatusString(value, maxLength = 120) {
