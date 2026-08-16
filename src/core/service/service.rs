@@ -13975,11 +13975,6 @@ fn should_skip_idle_harness_audit_tick(root: &Path) -> bool {
         return true;
     };
     let elapsed = now.duration_since(previous.last_run);
-    if harness_audit_source_has_detected_findings(&source_stamp)
-        && elapsed >= Duration::from_secs(HARNESS_AUDIT_TICK_SECS)
-    {
-        return false;
-    }
     previous.root == root_path
         && previous.source_stamp == source_stamp
         && elapsed < Duration::from_secs(HARNESS_AUDIT_IDLE_SAFETY_SECS)
@@ -24331,6 +24326,19 @@ mod tests {
         assert!(
             !should_skip_idle_harness_audit_tick(&root),
             "detected harness findings must run even when the idle gate is first seeded"
+        );
+        mark_harness_audit_tick_ran(&root);
+        {
+            let gate = HARNESS_AUDIT_IDLE_GATE.get().expect("harness audit gate");
+            gate.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_mut()
+                .expect("seeded harness audit gate")
+                .last_run = Instant::now() - Duration::from_secs(HARNESS_AUDIT_TICK_SECS + 1);
+        }
+        assert!(
+            should_skip_idle_harness_audit_tick(&root),
+            "unchanged detected findings must wait for the idle safety audit"
         );
         {
             let conn = Connection::open(&db_path).unwrap();

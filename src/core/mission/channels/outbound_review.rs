@@ -33,6 +33,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use qrcode::QrCode;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -48,6 +49,17 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+
+thread_local! {
+    static CHANNEL_DB_READ_ONLY: RefCell<Option<CachedChannelReadOnlyConnection>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static CHANNEL_DB_READ_ONLY_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct CachedChannelReadOnlyConnection {
+    key: ChannelSchemaCacheKey,
+    conn: Connection,
+}
 
 pub(super) fn is_review_required_outbound_channel(channel: &str) -> bool {
     matches!(
@@ -3348,51 +3360,93 @@ pub(super) fn queue_task_list_cache_stamp(path: &Path) -> QueueTaskListCacheStam
 }
 
 pub(super) fn queue_task_projection_clock_stamp(path: &Path) -> Result<QueueTaskListCacheStamp> {
-    let Some(conn) = open_channel_db_read_only(path)? else {
-        return Ok(QueueTaskListCacheStamp::ProjectionClock {
-            database_exists: false,
-            clock_exists: false,
-            version: 0,
-            message_count: 0,
-            routing_count: 0,
-            updated_at: String::new(),
-        });
-    };
-    let clock_exists = channel_projection_tables_exist(&conn, &["communication_projection_clock"])?;
-    if !clock_exists {
-        return Ok(QueueTaskListCacheStamp::ProjectionClock {
+    with_cached_channel_db_read_only(path, |conn| {
+        let Some(conn) = conn else {
+            return Ok(QueueTaskListCacheStamp::ProjectionClock {
+                database_exists: false,
+                clock_exists: false,
+                version: 0,
+                message_count: 0,
+                routing_count: 0,
+                updated_at: String::new(),
+            });
+        };
+        let clock_exists =
+            channel_projection_tables_exist(conn, &["communication_projection_clock"])?;
+        if !clock_exists {
+            return Ok(QueueTaskListCacheStamp::ProjectionClock {
+                database_exists: true,
+                clock_exists: false,
+                version: 0,
+                message_count: 0,
+                routing_count: 0,
+                updated_at: String::new(),
+            });
+        }
+        let (version, message_count, routing_count, updated_at) = conn.query_row(
+            r#"
+            SELECT version, message_count, routing_count, updated_at
+            FROM communication_projection_clock
+            WHERE id = 1
+            "#,
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        Ok(QueueTaskListCacheStamp::ProjectionClock {
             database_exists: true,
-            clock_exists: false,
-            version: 0,
-            message_count: 0,
-            routing_count: 0,
-            updated_at: String::new(),
-        });
-    }
-    let (version, message_count, routing_count, updated_at) = conn.query_row(
-        r#"
-        SELECT version, message_count, routing_count, updated_at
-        FROM communication_projection_clock
-        WHERE id = 1
-        "#,
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
-    )?;
-    Ok(QueueTaskListCacheStamp::ProjectionClock {
-        database_exists: true,
-        clock_exists: true,
-        version,
-        message_count: non_negative_i64_to_usize(message_count),
-        routing_count: non_negative_i64_to_usize(routing_count),
-        updated_at,
+            clock_exists: true,
+            version,
+            message_count: non_negative_i64_to_usize(message_count),
+            routing_count: non_negative_i64_to_usize(routing_count),
+            updated_at,
+        })
     })
+}
+
+fn with_cached_channel_db_read_only<T>(
+    path: &Path,
+    f: impl FnOnce(Option<&Connection>) -> Result<T>,
+) -> Result<T> {
+    CHANNEL_DB_READ_ONLY.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if !path.exists() {
+            *cached = None;
+            return f(None);
+        }
+        let key = channel_schema_cache_key(path);
+        if cached.as_ref().is_none_or(|entry| entry.key != key) {
+            let Some(conn) = open_channel_db_read_only(path)? else {
+                *cached = None;
+                return f(None);
+            };
+            #[cfg(test)]
+            CHANNEL_DB_READ_ONLY_OPEN_COUNT.with(|count| count.set(count.get() + 1));
+            *cached = Some(CachedChannelReadOnlyConnection { key, conn });
+        }
+        let result = f(cached.as_ref().map(|entry| &entry.conn));
+        if result.is_err() {
+            *cached = None;
+        }
+        result
+    })
+}
+
+#[cfg(test)]
+pub(super) fn reset_channel_db_read_only_cache_for_tests() {
+    CHANNEL_DB_READ_ONLY.with(|cell| *cell.borrow_mut() = None);
+    CHANNEL_DB_READ_ONLY_OPEN_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn channel_db_read_only_open_count_for_tests() -> usize {
+    CHANNEL_DB_READ_ONLY_OPEN_COUNT.with(std::cell::Cell::get)
 }
 
 pub(super) fn channel_file_size_stamp(path: &Path) -> u64 {
@@ -4028,4 +4082,63 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
     ensure_terminal_no_send_column(conn)?;
     ensure_routing_state_hardening_columns(conn)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod queue_task_projection_clock_tests {
+    use super::*;
+
+    #[test]
+    fn projection_clock_reuses_read_only_connection_and_observes_commits() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-channel-clock-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("ctox.sqlite3");
+        {
+            let conn = Connection::open(&path).expect("open writable channel db");
+            conn.execute_batch(
+                r#"
+                PRAGMA journal_mode = WAL;
+                CREATE TABLE communication_projection_clock (
+                    id INTEGER PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    message_count INTEGER NOT NULL,
+                    routing_count INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO communication_projection_clock
+                    (id, version, message_count, routing_count, updated_at)
+                VALUES (1, 1, 2, 3, '2026-08-16T00:00:00Z');
+                "#,
+            )
+            .expect("seed projection clock");
+        }
+
+        reset_channel_db_read_only_cache_for_tests();
+        let first = queue_task_projection_clock_stamp(&path).expect("first clock stamp");
+        let second = queue_task_projection_clock_stamp(&path).expect("second clock stamp");
+        assert_eq!(first, second);
+        assert_eq!(channel_db_read_only_open_count_for_tests(), 1);
+
+        {
+            let conn = Connection::open(&path).expect("reopen writable channel db");
+            conn.execute(
+                "UPDATE communication_projection_clock SET version = 2, updated_at = ?1 WHERE id = 1",
+                params!["2026-08-16T00:01:00Z"],
+            )
+            .expect("advance projection clock");
+        }
+        let advanced = queue_task_projection_clock_stamp(&path).expect("advanced clock stamp");
+        assert_ne!(advanced, first);
+        assert_eq!(channel_db_read_only_open_count_for_tests(), 1);
+
+        reset_channel_db_read_only_cache_for_tests();
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
 }
