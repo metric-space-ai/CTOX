@@ -5074,6 +5074,9 @@ function ensureCtoxSmokeBinary() {
       }
       if (smokeMode === 'business-os-sellify-scale-ui') {
         await page.evaluate(async (collectionNames) => {
+          const startupMarks = {
+            collectionSetupStartedAtMs: Math.round(performance.now()),
+          };
           const state = globalThis.ctoxBusinessOsSmoke?.state;
           const rawDb = state?.db?.raw;
           if (!rawDb?.addCollections || !state?.sync?.leaseCollection) {
@@ -5102,11 +5105,15 @@ function ensureCtoxSmokeBinary() {
             };
           }
           if (Object.keys(missing).length) await rawDb.addCollections(missing);
+          startupMarks.collectionsReadyAtMs = Math.round(performance.now());
           const leases = [];
           for (const name of collectionNames.slice(0, 1)) {
+            startupMarks.primaryLeaseStartedAtMs = Math.round(performance.now());
             leases.push(await state.sync.leaseCollection(name, 'sellify-scale-browser-smoke'));
+            startupMarks.primaryLeaseReturnedAtMs = Math.round(performance.now());
           }
           globalThis.__ctoxSellifyScaleLeases = leases;
+          globalThis.__ctoxSellifyScaleStartupMarks = startupMarks;
         }, SELLIFY_SCALE_COLLECTIONS);
       }
       const startupRequiredCollections = deferredFileCollectionStartupMode
@@ -10417,6 +10424,10 @@ function ensureCtoxSmokeBinary() {
         const state = globalThis.ctoxBusinessOsSmoke?.state;
         const rawDb = state?.db?.raw;
         const leases = globalThis.__ctoxSellifyScaleLeases || [];
+        const startupMarks = {
+          ...(globalThis.__ctoxSellifyScaleStartupMarks || {}),
+          smokeEvaluationStartedAtMs: Math.round(performance.now()),
+        };
         if (!rawDb || leases.length !== 1 || leases[0]?.collection !== 'sellify_activities') {
           throw new Error('Sellify scale collections or scoped leases are unavailable');
         }
@@ -10443,6 +10454,7 @@ function ensureCtoxSmokeBinary() {
           throw new Error(`Sellify query-fetch readiness timed out: ${JSON.stringify(last)}`);
         };
         await waitForQueryReady(['sellify_activities']);
+        startupMarks.primaryQueryReadyAtMs = Math.round(performance.now());
         const storageEstimateBefore = await navigator.storage?.estimate?.().catch(() => null) || null;
         const localDocumentCounts = async () => Object.fromEntries(await Promise.all(
           collections.map(async (name) => {
@@ -10463,6 +10475,7 @@ function ensureCtoxSmokeBinary() {
           }];
         }));
         const queryStartedAt = performance.now();
+        startupMarks.primaryQueryStartedAtMs = Math.round(queryStartedAt);
         const queryWindow = async (name, limit = 200) => {
           const docs = await rawDb[name].find({
             selector: { status: 'active' },
@@ -10517,6 +10530,7 @@ function ensureCtoxSmokeBinary() {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const queryWindowRenderMs = Math.round(performance.now() - queryStartedAt);
         const usableMs = Math.round(performance.now());
+        startupMarks.usableAtMs = usableMs;
         const interactionReady = root.dataset.interactionReady === 'true' && !interaction.disabled;
         const remainingCollections = collections.filter((name) => name !== 'sellify_activities');
         for (const name of remainingCollections) {
@@ -10606,6 +10620,7 @@ function ensureCtoxSmokeBinary() {
           beforeCounts,
           afterCounts,
           cachedDocumentsBeforeQuery,
+          startupMarks,
           readiness,
           indexedDbUsageBefore: Number(storageEstimateBefore?.usage || 0),
           indexedDbUsageAfter: Number(storageEstimateAfter?.usage || 0),
@@ -17298,6 +17313,7 @@ function ensureCtoxSmokeBinary() {
       console.log(`business_os_sellify_scale_native_database_bytes=${result.nativeDatabaseBytes || 0}`);
       console.log(`business_os_sellify_scale_budget_passed=${result.budgetPassed ? 1 : 0}`);
       console.log(`business_os_sellify_scale_collection_readiness=${JSON.stringify(result.readiness || {})}`);
+      console.log(`business_os_sellify_scale_startup_marks=${JSON.stringify(result.startupMarks || {})}`);
       if (result.advancedStatusVersion) console.log(`advanced_status=${result.advancedStatusVersion}`);
       if (result.advancedStatusRuntime) console.log(`rxdb_runtime=${JSON.stringify(result.advancedStatusRuntime)}`);
     } else if (result.mode === 'business-os-restore-resync-ui') {

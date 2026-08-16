@@ -179,6 +179,7 @@ function measurementFromOutput(output, phase, run) {
     collectionReadiness: JSON.parse(
       evidence.business_os_sellify_scale_collection_readiness || '{}',
     ),
+    startupMarks: JSON.parse(evidence.business_os_sellify_scale_startup_marks || '{}'),
     outerPhaseTimings: JSON.parse(evidence.outer_phase_timings || '{}'),
   };
   return measurement;
@@ -206,6 +207,7 @@ function runSelfTest() {
     'business_os_sellify_scale_latency_target_passed=1',
     'business_os_sellify_scale_fixture_reused=1',
     'business_os_sellify_scale_collection_readiness={}',
+    'business_os_sellify_scale_startup_marks={"usableAtMs":600}',
     'outer_phase_timings={"shellReadyWaitMs":400}',
   ].join('\n');
   const measurement = measurementFromOutput(fixture, 'self-test', 1);
