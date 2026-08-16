@@ -1,0 +1,16 @@
+{
+  "schema": "ctox.test_baseline_failures.v1",
+  "baselineCommit": "4c9cd805259c722985fdb023a7090e3cd2136fcb",
+  "capturedAt": "2026-08-16",
+  "source": "isolated git archive",
+  "tests": [
+    {"name": "chunk-query-demand-disabled-smoke.mjs", "exitCode": 1},
+    {"name": "command-consumer-inventory-smoke.mjs", "exitCode": 1},
+    {"name": "command-type-inventory-smoke.mjs", "exitCode": 1},
+    {"name": "module-demand-only-collections-smoke.mjs", "exitCode": 1},
+    {"name": "replication-recovery-smoke.mjs", "exitCode": 1},
+    {"name": "symmetric-capability-handshake-smoke.mjs", "exitCode": 1},
+    {"name": "task-id-inventory-smoke.mjs", "exitCode": 1}
+  ],
+  "conclusion": "All seven failures observed in the campaign worktree reproduce at the campaign baseline."
+}
