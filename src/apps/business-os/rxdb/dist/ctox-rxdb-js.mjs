@@ -2207,6 +2207,52 @@ var CtoxIndexedDbStorage = class {
   async unsyncedWriteSummary() {
     return countUnsyncedWrites(this.db);
   }
+  async clearCachedCollections(collectionNames = []) {
+    const names = [...new Set((collectionNames || []).map((name) => String(name || "").trim()).filter(Boolean))];
+    if (!names.length) return { cleared: {}, total: 0 };
+    const safetyTx = this.db.transaction(DOCUMENT_STORE, "readonly");
+    const safetyDone = idbTransactionDone(safetyTx);
+    const pushable = safetyTx.objectStore(DOCUMENT_STORE).index(PUSHABLE_LWT_INDEX);
+    const pendingEntries = await Promise.all(names.map(async (name) => {
+      const range = IDBKeyRange.bound(
+        [name, 1, 0, ""],
+        [name, 1, Number.MAX_SAFE_INTEGER, INDEX_HIGH_KEY]
+      );
+      return [name, Number(await idbRequest(pushable.count(range)) || 0)];
+    }));
+    await safetyDone;
+    const pending = Object.fromEntries(pendingEntries.filter(([, count]) => count > 0));
+    if (Object.keys(pending).length) {
+      const error = new Error(`Demand cache contains unsynced local writes: ${Object.keys(pending).join(", ")}`);
+      error.code = "CTOX_DEMAND_CACHE_UNSYNCED_WRITES";
+      error.byCollection = pending;
+      throw error;
+    }
+    const countTx = this.db.transaction(DOCUMENT_STORE, "readonly");
+    const countDone = idbTransactionDone(countTx);
+    const collectionIndex = countTx.objectStore(DOCUMENT_STORE).index("collection");
+    const counts = await Promise.all(names.map(async (name) => {
+      const count = Number(await idbRequest(collectionIndex.count(IDBKeyRange.only(name))) || 0);
+      return [name, count];
+    }));
+    await countDone;
+    const tx = this.db.transaction([DOCUMENT_STORE, COLLECTION_SCHEMA_MARKER_STORE], "readwrite");
+    const done = idbTransactionDone(tx);
+    const documents = tx.objectStore(DOCUMENT_STORE);
+    const markers = tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE);
+    for (const name of names) {
+      documents.delete(IDBKeyRange.bound([name, ""], [name, INDEX_HIGH_KEY]));
+      markers.delete(name);
+    }
+    await done;
+    for (const name of names) {
+      globalThis.dispatchEvent?.(new CustomEvent("ctox-rxdb-external-change", {
+        detail: { databaseName: this.db.name, collection: name, ids: [], cleared: true }
+      }));
+    }
+    const cleared = Object.fromEntries(counts);
+    return { cleared, total: Object.values(cleared).reduce((sum, count) => sum + count, 0) };
+  }
   close() {
     this.recoveryJournal?.close?.();
     this.db.close();
@@ -7004,6 +7050,7 @@ function canonicalizeWindow(window2) {
 
 // src/apps/business-os/rxdb/src/query-demand-loader.mjs
 var DEFAULT_WINDOW_LIMIT = 200;
+var DEFAULT_QUERY_WINDOW_REVALIDATE_MS = 3e4;
 var CONTROL_PLANE_QUERY_REVALIDATE_MS = 1e3;
 var TRACKED_CONTROL_PLANE_QUERY_REVALIDATE_MS = 250;
 var ACTIVE_COMMAND_STORAGE_KEY = "ctox.businessOs.activeCommandIds.v1";
@@ -7019,6 +7066,7 @@ function createQueryDemandLoader({
   multiTabBroker = null,
   status = null,
   clock = Date.now,
+  queryWindowRevalidateMs = DEFAULT_QUERY_WINDOW_REVALIDATE_MS,
   // Origin stamp (object or provider fn) for every document this loader
   // writes into the primary store. Demand-fetched documents ARE master
   // state: without the stamp they counted as unsynced LOCAL writes, so the
@@ -7033,6 +7081,10 @@ function createQueryDemandLoader({
     throw new TypeError("demand loader requires requestQueryFetch");
   }
   const resolveReplicationOrigin = () => (typeof replicationOrigin === "function" ? replicationOrigin() : replicationOrigin) || null;
+  const boundedQueryWindowRevalidateMs = Math.max(
+    250,
+    Number(queryWindowRevalidateMs) || DEFAULT_QUERY_WINDOW_REVALIDATE_MS
+  );
   const inflightByFingerprint = /* @__PURE__ */ new Map();
   const coordinatedByFingerprint = /* @__PURE__ */ new Map();
   const resolvingByInput = /* @__PURE__ */ new Map();
@@ -7048,7 +7100,10 @@ function createQueryDemandLoader({
         skip: query?.skip,
         window: normalizedWindow
       };
-      const inputKey = JSON.stringify(fingerprintInput);
+      const inputKey = JSON.stringify({
+        ...fingerprintInput,
+        requireRevision: query?.requireRevision ?? null
+      });
       const existingInvocation = resolvingByInput.get(inputKey);
       if (existingInvocation) {
         bumpStatus(status, "queryFetchDedupHitCount");
@@ -7071,11 +7126,17 @@ function createQueryDemandLoader({
         const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName) && cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= controlPlaneRevalidateMs;
         const emptyWindowStale = cached && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0) && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
         const mutableMembershipWindowStale = isMutableMembershipCollection(collectionName) && cached && Array.isArray(cached.documentIds) && cached.documentIds.length > 0 && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS;
-        if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale && !mutableMembershipWindowStale) {
+        const queryWindowStale = cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= boundedQueryWindowRevalidateMs;
+        if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale && !mutableMembershipWindowStale && !queryWindowStale) {
           if (query?.requireRevision && cached.satisfiedRevision !== query.requireRevision) {
           } else if (!controlPlaneWindowStale) {
             await touchSidecarAccess(sidecar, collectionName, cached.documentIds);
-            return readLocalDocuments(storageCollection, query, normalizedWindow);
+            return readLocalDocuments(
+              storageCollection,
+              query,
+              normalizedWindow,
+              cached.documentIds
+            );
           }
         }
         const dedupKey = `${collectionName}|${fingerprint}|${normalizedWindow.offset}|${normalizedWindow.limit}`;
@@ -7126,12 +7187,17 @@ function createQueryDemandLoader({
               bumpStatus(status, "queryFetchSuccessCount");
               if (status) status.lastQueryFetchMs = clock() - startedAt;
               v15Log("fetch:ok", { fingerprint, docs: documentIds.length, ms: clock() - startedAt });
-              return readLocalDocuments(storageCollection, query, normalizedWindow);
+              return authoritativeFetchedDocuments(result.documents || [], documentIds);
             } catch (error) {
               if (isQueryCancelledError(error)) {
                 bumpStatus(status, "queryFetchCancelCount");
                 v15Log("fetch:cancel", { fingerprint, error: String(error?.message ?? error) });
-                return readLocalDocuments(storageCollection, query, normalizedWindow);
+                return readLocalDocuments(
+                  storageCollection,
+                  query,
+                  normalizedWindow,
+                  cached?.documentIds
+                );
               }
               bumpStatus(status, "queryFetchErrorCount");
               v15Log("fetch:error", { fingerprint, error: String(error?.message ?? error) });
@@ -7146,7 +7212,14 @@ function createQueryDemandLoader({
         };
         const runCoordinatedFetchJob = async () => {
           if (!multiTabBroker?.claim) return startFetchJob();
-          if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
+          if (multiTabBroker.closed) {
+            return readLocalDocuments(
+              storageCollection,
+              query,
+              normalizedWindow,
+              cached?.documentIds
+            );
+          }
           const leader = await multiTabBroker.claim(dedupKey);
           if (leader) {
             try {
@@ -7156,16 +7229,35 @@ function createQueryDemandLoader({
             }
           }
           await multiTabBroker.waitForRemote?.(dedupKey, 5e3);
-          if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
+          if (multiTabBroker.closed) {
+            return readLocalDocuments(
+              storageCollection,
+              query,
+              normalizedWindow,
+              cached?.documentIds
+            );
+          }
           const materialized = await sidecar.getQueryWindow(sidecarKey);
           if (materialized?.complete && await queryWindowDocumentsAvailable(storageCollection, materialized.documentIds)) {
             bumpStatus(status, "queryFetchDedupHitCount");
-            return readLocalDocuments(storageCollection, query, normalizedWindow);
+            return readLocalDocuments(
+              storageCollection,
+              query,
+              normalizedWindow,
+              materialized.documentIds
+            );
           }
           const takeover = await multiTabBroker.claim(dedupKey);
           if (!takeover) {
-            if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
-            throw new Error(`Timed out waiting for multi-tab query owner ${dedupKey}`);
+            if (multiTabBroker.closed) {
+              return readLocalDocuments(
+                storageCollection,
+                query,
+                normalizedWindow,
+                cached?.documentIds
+              );
+            }
+            return startFetchJob();
           }
           try {
             return await startFetchJob();
@@ -7196,7 +7288,12 @@ function createQueryDemandLoader({
           bumpStatus(status, "queryFetchStaleServedCount");
           v15Log("fetch:stale-served", { collection: collectionName, fingerprint, offset: normalizedWindow.offset, limit: normalizedWindow.limit });
           await touchSidecarAccess(sidecar, collectionName, cached.documentIds || []);
-          return readLocalDocuments(storageCollection, query, normalizedWindow);
+          return readLocalDocuments(
+            storageCollection,
+            query,
+            normalizedWindow,
+            cached.documentIds || []
+          );
         }
         return coordinatedFetchJob();
       })();
@@ -7350,12 +7447,18 @@ function normalizeWindow(window2, query) {
   if (window2 && typeof window2 === "object") {
     return {
       offset: Math.max(0, Math.floor(Number(window2.offset) || 0)),
-      limit: Math.max(1, Math.floor(Number(window2.limit) || DEFAULT_WINDOW_LIMIT))
+      limit: Math.min(
+        DEFAULT_WINDOW_LIMIT,
+        Math.max(1, Math.floor(Number(window2.limit) || DEFAULT_WINDOW_LIMIT))
+      )
     };
   }
   return {
     offset: Math.max(0, Math.floor(Number(query?.skip) || 0)),
-    limit: Math.max(1, Math.floor(Number(query?.limit) || DEFAULT_WINDOW_LIMIT))
+    limit: Math.min(
+      DEFAULT_WINDOW_LIMIT,
+      Math.max(1, Math.floor(Number(query?.limit) || DEFAULT_WINDOW_LIMIT))
+    )
   };
 }
 function normalizeSort(sort) {
@@ -7369,7 +7472,23 @@ function normalizeSort(sort) {
     return { [key]: direction === -1 || direction === "desc" || direction === "DESC" ? "desc" : "asc" };
   });
 }
-async function readLocalDocuments(storageCollection, query, window2) {
+async function readLocalDocuments(storageCollection, query, window2, documentIds = null) {
+  if (Array.isArray(documentIds)) {
+    if (documentIds.length === 0) return [];
+    if (typeof storageCollection.findDocumentsById === "function") {
+      const documents2 = await storageCollection.findDocumentsById(documentIds);
+      return documentIds.map((id) => documents2?.[String(id)]).filter((document2) => document2 && document2._deleted !== true);
+    }
+    const memberIds = new Set(documentIds.map(String));
+    const documents = typeof storageCollection.allDocuments === "function" ? await storageCollection.allDocuments() : await storageCollection.queryDocuments(
+      { selector: {}, skip: 0, limit: documentIds.length },
+      { matchesSelector: defaultMatcher, sortDocuments: defaultSorter }
+    );
+    const byId = new Map(
+      documents.filter((document2) => memberIds.has(String(extractId(document2)))).map((document2) => [String(extractId(document2)), document2])
+    );
+    return documentIds.map((id) => byId.get(String(id))).filter(Boolean);
+  }
   if (typeof storageCollection.queryDocuments === "function") {
     return storageCollection.queryDocuments(
       { ...query, skip: window2.offset, limit: window2.limit },
@@ -7381,6 +7500,12 @@ async function readLocalDocuments(storageCollection, query, window2) {
   }
   const docs = await storageCollection.allDocuments();
   return applyQueryToDocs(docs, query, window2);
+}
+function authoritativeFetchedDocuments(documents, documentIds) {
+  const byId = new Map(
+    documents.filter((document2) => document2 && document2._deleted !== true).map((document2) => [String(extractId(document2)), document2])
+  );
+  return documentIds.map((id) => byId.get(String(id))).filter(Boolean);
 }
 async function queryWindowDocumentsAvailable(storageCollection, documentIds) {
   if (!Array.isArray(documentIds) || documentIds.length === 0) return true;
@@ -11338,6 +11463,9 @@ var CtoxRxDatabase = class {
       resolve: (id, resolution) => journal?.resolveConflict?.(id, resolution)
     };
   }
+  clearCachedCollections(collectionNames) {
+    return this.storage.clearCachedCollections(collectionNames);
+  }
   async addCollections(collections) {
     for (const [name, definition] of Object.entries(collections || {})) {
       if (this.collections[name]) continue;
@@ -12310,6 +12438,7 @@ export {
   CtoxSubject,
   CtoxWebRtcNativePeer,
   DEFAULT_QUERY_META_BUDGET_BYTES,
+  DEFAULT_QUERY_WINDOW_REVALIDATE_MS,
   DEFAULT_WINDOW_LIMIT,
   FILE_CHUNK_PRESENCE_KEY,
   KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES,

@@ -14,6 +14,7 @@
 import { queryFingerprint } from './query-fingerprint.mjs';
 
 export const DEFAULT_WINDOW_LIMIT = 200;
+export const DEFAULT_QUERY_WINDOW_REVALIDATE_MS = 30_000;
 const CONTROL_PLANE_QUERY_REVALIDATE_MS = 1000;
 const TRACKED_CONTROL_PLANE_QUERY_REVALIDATE_MS = 250;
 const ACTIVE_COMMAND_STORAGE_KEY = 'ctox.businessOs.activeCommandIds.v1';
@@ -30,6 +31,7 @@ export function createQueryDemandLoader({
   multiTabBroker = null,
   status = null,
   clock = Date.now,
+  queryWindowRevalidateMs = DEFAULT_QUERY_WINDOW_REVALIDATE_MS,
   // Origin stamp (object or provider fn) for every document this loader
   // writes into the primary store. Demand-fetched documents ARE master
   // state: without the stamp they counted as unsynced LOCAL writes, so the
@@ -45,6 +47,10 @@ export function createQueryDemandLoader({
   }
   const resolveReplicationOrigin = () => (
     (typeof replicationOrigin === 'function' ? replicationOrigin() : replicationOrigin) || null
+  );
+  const boundedQueryWindowRevalidateMs = Math.max(
+    250,
+    Number(queryWindowRevalidateMs) || DEFAULT_QUERY_WINDOW_REVALIDATE_MS,
   );
 
   const inflightByFingerprint = new Map();
@@ -67,7 +73,10 @@ export function createQueryDemandLoader({
         skip: query?.skip,
         window: normalizedWindow,
       };
-      const inputKey = JSON.stringify(fingerprintInput);
+      const inputKey = JSON.stringify({
+        ...fingerprintInput,
+        requireRevision: query?.requireRevision ?? null,
+      });
       const existingInvocation = resolvingByInput.get(inputKey);
       if (existingInvocation) {
         bumpStatus(status, 'queryFetchDedupHitCount');
@@ -109,12 +118,16 @@ export function createQueryDemandLoader({
         && cached.documentIds.length > 0
         && clock() - Number(cached.updatedAt || cached.createdAt || 0)
           >= MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS;
+      const queryWindowStale = cached
+        && clock() - Number(cached.updatedAt || cached.createdAt || 0)
+          >= boundedQueryWindowRevalidateMs;
       if (
         cached
         && cached.complete
         && cachedDocumentsAvailable
         && !emptyWindowStale
         && !mutableMembershipWindowStale
+        && !queryWindowStale
       ) {
         // `requireRevision` is an opaque caller token, not a server revision.
         // Re-fetch once when that token changes; the successful fetch records
@@ -126,7 +139,12 @@ export function createQueryDemandLoader({
           // fall through to remote fetch
         } else if (!controlPlaneWindowStale) {
           await touchSidecarAccess(sidecar, collectionName, cached.documentIds);
-          return readLocalDocuments(storageCollection, query, normalizedWindow);
+          return readLocalDocuments(
+            storageCollection,
+            query,
+            normalizedWindow,
+            cached.documentIds,
+          );
         }
       }
 
@@ -178,12 +196,17 @@ export function createQueryDemandLoader({
           bumpStatus(status, 'queryFetchSuccessCount');
           if (status) status.lastQueryFetchMs = clock() - startedAt;
           v15Log('fetch:ok', { fingerprint, docs: documentIds.length, ms: clock() - startedAt });
-          return readLocalDocuments(storageCollection, query, normalizedWindow);
+          return authoritativeFetchedDocuments(result.documents || [], documentIds);
         } catch (error) {
           if (isQueryCancelledError(error)) {
             bumpStatus(status, 'queryFetchCancelCount');
             v15Log('fetch:cancel', { fingerprint, error: String(error?.message ?? error) });
-            return readLocalDocuments(storageCollection, query, normalizedWindow);
+            return readLocalDocuments(
+              storageCollection,
+              query,
+              normalizedWindow,
+              cached?.documentIds,
+            );
           }
           bumpStatus(status, 'queryFetchErrorCount');
           v15Log('fetch:error', { fingerprint, error: String(error?.message ?? error) });
@@ -199,7 +222,14 @@ export function createQueryDemandLoader({
 
       const runCoordinatedFetchJob = async () => {
         if (!multiTabBroker?.claim) return startFetchJob();
-        if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
+        if (multiTabBroker.closed) {
+          return readLocalDocuments(
+            storageCollection,
+            query,
+            normalizedWindow,
+            cached?.documentIds,
+          );
+        }
         const leader = await multiTabBroker.claim(dedupKey);
         if (leader) {
           try {
@@ -209,21 +239,46 @@ export function createQueryDemandLoader({
           }
         }
         await multiTabBroker.waitForRemote?.(dedupKey, 5_000);
-        if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
+        if (multiTabBroker.closed) {
+          return readLocalDocuments(
+            storageCollection,
+            query,
+            normalizedWindow,
+            cached?.documentIds,
+          );
+        }
         const materialized = await sidecar.getQueryWindow(sidecarKey);
         if (
           materialized?.complete
           && await queryWindowDocumentsAvailable(storageCollection, materialized.documentIds)
         ) {
           bumpStatus(status, 'queryFetchDedupHitCount');
-          return readLocalDocuments(storageCollection, query, normalizedWindow);
+          return readLocalDocuments(
+            storageCollection,
+            query,
+            normalizedWindow,
+            materialized.documentIds,
+          );
         }
         // The owner may have crashed. Bounded wait plus TTL-aware re-claim
         // lets this tab take over without leaving the query hung forever.
         const takeover = await multiTabBroker.claim(dedupKey);
         if (!takeover) {
-          if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
-          throw new Error(`Timed out waiting for multi-tab query owner ${dedupKey}`);
+          if (multiTabBroker.closed) {
+            return readLocalDocuments(
+              storageCollection,
+              query,
+              normalizedWindow,
+              cached?.documentIds,
+            );
+          }
+          // A dead/replaced collection state can leave a 30 s broker claim
+          // behind. We already waited the full bounded follower window; a
+          // duplicate idempotent query fetch is safer than freezing every
+          // module until that stale claim expires. The materialization write
+          // remains conflict-safe and the live owner, if any, can complete in
+          // parallel.
+          return startFetchJob();
         }
         try {
           return await startFetchJob();
@@ -281,7 +336,12 @@ export function createQueryDemandLoader({
         bumpStatus(status, 'queryFetchStaleServedCount');
         v15Log('fetch:stale-served', { collection: collectionName, fingerprint, offset: normalizedWindow.offset, limit: normalizedWindow.limit });
         await touchSidecarAccess(sidecar, collectionName, cached.documentIds || []);
-        return readLocalDocuments(storageCollection, query, normalizedWindow);
+        return readLocalDocuments(
+          storageCollection,
+          query,
+          normalizedWindow,
+          cached.documentIds || [],
+        );
       }
 
       return coordinatedFetchJob();
@@ -457,12 +517,18 @@ function normalizeWindow(window, query) {
   if (window && typeof window === 'object') {
     return {
       offset: Math.max(0, Math.floor(Number(window.offset) || 0)),
-      limit: Math.max(1, Math.floor(Number(window.limit) || DEFAULT_WINDOW_LIMIT)),
+      limit: Math.min(
+        DEFAULT_WINDOW_LIMIT,
+        Math.max(1, Math.floor(Number(window.limit) || DEFAULT_WINDOW_LIMIT)),
+      ),
     };
   }
   return {
     offset: Math.max(0, Math.floor(Number(query?.skip) || 0)),
-    limit: Math.max(1, Math.floor(Number(query?.limit) || DEFAULT_WINDOW_LIMIT)),
+    limit: Math.min(
+      DEFAULT_WINDOW_LIMIT,
+      Math.max(1, Math.floor(Number(query?.limit) || DEFAULT_WINDOW_LIMIT)),
+    ),
   };
 }
 
@@ -478,7 +544,29 @@ function normalizeSort(sort) {
   });
 }
 
-async function readLocalDocuments(storageCollection, query, window) {
+async function readLocalDocuments(storageCollection, query, window, documentIds = null) {
+  if (Array.isArray(documentIds)) {
+    if (documentIds.length === 0) return [];
+    if (typeof storageCollection.findDocumentsById === 'function') {
+      const documents = await storageCollection.findDocumentsById(documentIds);
+      return documentIds
+        .map((id) => documents?.[String(id)])
+        .filter((document) => document && document._deleted !== true);
+    }
+    const memberIds = new Set(documentIds.map(String));
+    const documents = typeof storageCollection.allDocuments === 'function'
+      ? await storageCollection.allDocuments()
+      : await storageCollection.queryDocuments(
+        { selector: {}, skip: 0, limit: documentIds.length },
+        { matchesSelector: defaultMatcher, sortDocuments: defaultSorter },
+      );
+    const byId = new Map(
+      documents
+        .filter((document) => memberIds.has(String(extractId(document))))
+        .map((document) => [String(extractId(document)), document]),
+    );
+    return documentIds.map((id) => byId.get(String(id))).filter(Boolean);
+  }
   if (typeof storageCollection.queryDocuments === 'function') {
     return storageCollection.queryDocuments(
       { ...query, skip: window.offset, limit: window.limit },
@@ -490,6 +578,15 @@ async function readLocalDocuments(storageCollection, query, window) {
   }
   const docs = await storageCollection.allDocuments();
   return applyQueryToDocs(docs, query, window);
+}
+
+function authoritativeFetchedDocuments(documents, documentIds) {
+  const byId = new Map(
+    documents
+      .filter((document) => document && document._deleted !== true)
+      .map((document) => [String(extractId(document)), document]),
+  );
+  return documentIds.map((id) => byId.get(String(id))).filter(Boolean);
 }
 
 async function queryWindowDocumentsAvailable(storageCollection, documentIds) {

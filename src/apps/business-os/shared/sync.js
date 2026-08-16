@@ -229,10 +229,14 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   const recordCollection = (collection, update) => {
     const current = diagnostics.collections[collection] || {};
     const updatedAt = new Date().toISOString();
+    const declaredSyncProfile = declaredCollectionSyncProfile(collection);
+    const demandOnly = isDemandOnlyPullCollection(collection);
     const next = {
       ...current,
       collection,
       updatedAt,
+      syncProfile: declaredSyncProfile || (demandOnly ? 'demand-only' : 'eager'),
+      localCoverage: demandOnly ? 'windowed' : 'full',
       ...update,
     };
     const nextStatus = update.connectionStatus || update.status || current.connectionStatus || current.status || '';
@@ -430,7 +434,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260813-ap3-dataplane-v97');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-demand-sync-rxdb-v120');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1327,7 +1331,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260813-ap3-dataplane-v97');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-demand-sync-rxdb-v120');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -1433,6 +1437,31 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
           nativePeerOpenWatchdog = null;
         }
         if (checkpointError) onFatalPeerError?.(checkpointError);
+      },
+      onPeerCapabilityNegotiated(info) {
+        const demandOnly = isDemandOnlyPullCollection(collection);
+        const queryReady = info?.queryFetchCapable === true
+          && info?.demandLoaderActive === true;
+        if (demandOnly && !queryReady) {
+          recordCollection?.(collection, {
+            status: 'error',
+            connectionStatus: 'error',
+            reason: 'query-fetch-capability-required',
+            queryReady: false,
+            lastError: {
+              code: 'ctox_query_fetch_capability_required',
+              message: `${collection} requires the negotiated query-fetch capability.`,
+              phase: 'query-capability',
+              severity: 'error',
+              retryable: false,
+            },
+          });
+          return;
+        }
+        recordCollection?.(collection, {
+          queryReady: demandOnly ? queryReady : true,
+          reason: null,
+        });
       },
     },
   });
@@ -3129,6 +3158,17 @@ function isDemandOnlyPullCollection(collection) {
     // Knowledge hydrate bounded domain/table chunks through query demand
     // loading, so an eager full pull only starves those foreground reads.
     || collection === 'knowledge_tables'
+    // Sellify's operational store is hundreds of thousands of rows. Its UI
+    // already uses bounded selectors/pages; eagerly mirroring the entire CRM
+    // into every browser caused ~15,000 WebRTC request/response cycles and
+    // blocked all foreground apps for minutes. Keep only the small sync-status
+    // metadata eager and hydrate business rows through query demand loading.
+    || collection === 'sellify_activities'
+    || collection === 'sellify_campaigns'
+    || collection === 'sellify_companies'
+    || collection === 'sellify_people'
+    || collection === 'sellify_records'
+    || collection === 'sellify_sql_rows'
   ) {
     return true;
   }

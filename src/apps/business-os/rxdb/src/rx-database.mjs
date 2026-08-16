@@ -121,6 +121,10 @@ class CtoxRxDatabase {
     };
   }
 
+  clearCachedCollections(collectionNames) {
+    return this.storage.clearCachedCollections(collectionNames);
+  }
+
   async addCollections(collections) {
     for (const [name, definition] of Object.entries(collections || {})) {
       if (this.collections[name]) continue;

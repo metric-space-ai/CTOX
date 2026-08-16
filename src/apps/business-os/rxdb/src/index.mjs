@@ -147,6 +147,7 @@ export { createMemoryMetaBackend } from './query-meta-backend-memory.mjs';
 export { createIndexedDbMetaBackend } from './query-meta-backend-indexeddb.mjs';
 
 export {
+  DEFAULT_QUERY_WINDOW_REVALIDATE_MS,
   DEFAULT_WINDOW_LIMIT,
   createQueryDemandLoader,
   setV15LogSink,

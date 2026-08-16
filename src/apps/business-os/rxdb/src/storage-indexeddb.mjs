@@ -68,6 +68,62 @@ export class CtoxIndexedDbStorage {
     return countUnsyncedWrites(this.db);
   }
 
+  async clearCachedCollections(collectionNames = []) {
+    const names = [...new Set((collectionNames || [])
+      .map((name) => String(name || '').trim())
+      .filter(Boolean))];
+    if (!names.length) return { cleared: {}, total: 0 };
+
+    // A demand cache is disposable only when it contains no local writes that
+    // still need to reach the native master. Use the compound pushable index
+    // so this safety check remains O(collection) instead of scanning a mature
+    // 300k-document browser profile.
+    const safetyTx = this.db.transaction(DOCUMENT_STORE, 'readonly');
+    const safetyDone = idbTransactionDone(safetyTx);
+    const pushable = safetyTx.objectStore(DOCUMENT_STORE).index(PUSHABLE_LWT_INDEX);
+    const pendingEntries = await Promise.all(names.map(async (name) => {
+      const range = IDBKeyRange.bound(
+        [name, 1, 0, ''],
+        [name, 1, Number.MAX_SAFE_INTEGER, INDEX_HIGH_KEY],
+      );
+      return [name, Number(await idbRequest(pushable.count(range)) || 0)];
+    }));
+    await safetyDone;
+    const pending = Object.fromEntries(pendingEntries.filter(([, count]) => count > 0));
+    if (Object.keys(pending).length) {
+      const error = new Error(`Demand cache contains unsynced local writes: ${Object.keys(pending).join(', ')}`);
+      error.code = 'CTOX_DEMAND_CACHE_UNSYNCED_WRITES';
+      error.byCollection = pending;
+      throw error;
+    }
+
+    const countTx = this.db.transaction(DOCUMENT_STORE, 'readonly');
+    const countDone = idbTransactionDone(countTx);
+    const collectionIndex = countTx.objectStore(DOCUMENT_STORE).index('collection');
+    const counts = await Promise.all(names.map(async (name) => {
+      const count = Number(await idbRequest(collectionIndex.count(IDBKeyRange.only(name))) || 0);
+      return [name, count];
+    }));
+    await countDone;
+
+    const tx = this.db.transaction([DOCUMENT_STORE, COLLECTION_SCHEMA_MARKER_STORE], 'readwrite');
+    const done = idbTransactionDone(tx);
+    const documents = tx.objectStore(DOCUMENT_STORE);
+    const markers = tx.objectStore(COLLECTION_SCHEMA_MARKER_STORE);
+    for (const name of names) {
+      documents.delete(IDBKeyRange.bound([name, ''], [name, INDEX_HIGH_KEY]));
+      markers.delete(name);
+    }
+    await done;
+    for (const name of names) {
+      globalThis.dispatchEvent?.(new CustomEvent('ctox-rxdb-external-change', {
+        detail: { databaseName: this.db.name, collection: name, ids: [], cleared: true },
+      }));
+    }
+    const cleared = Object.fromEntries(counts);
+    return { cleared, total: Object.values(cleared).reduce((sum, count) => sum + count, 0) };
+  }
+
   close() {
     this.recoveryJournal?.close?.();
     this.db.close();

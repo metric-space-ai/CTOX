@@ -68,6 +68,21 @@ assert.equal(isModuleDemandOnlyCollection('desktop_file_chunks'), true, 'built-i
 assert.equal(isDemandOnlyPullCollection('user_threads'), true, 'built-in demand-only thread collection stays demand-only');
 assert.equal(isModuleDemandOnlyCollection('user_threads'), false, 'built-in thread collection stays module-startable');
 assert.equal(isDemandOnlyPullCollection('desktop_files'), false, 'built-in eager collection stays eager');
+for (const collection of [
+  'sellify_activities',
+  'sellify_campaigns',
+  'sellify_companies',
+  'sellify_people',
+  'sellify_records',
+  'sellify_sql_rows',
+]) {
+  assert.equal(
+    isDemandOnlyPullCollection(collection),
+    true,
+    `${collection} hydrates bounded query windows instead of the full CRM`,
+  );
+}
+assert.equal(isDemandOnlyPullCollection('sellify_sync_status'), false, 'small Sellify sync metadata stays eager');
 // The built-in list is authoritative: a conflicting registry entry can never
 // demote a built-in demand collection back to eager pull (nothing regresses).
 registerCollectionSyncProfile('desktop_file_chunks', 'eager');

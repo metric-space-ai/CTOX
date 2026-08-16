@@ -262,6 +262,33 @@ assert(status.queryFetchDedupHitCount === 2, `dedup hits = 2 (got ${status.query
   assert(brokerFetches === 1, `same-tab duplicate performs one remote fetch (got ${brokerFetches})`);
 }
 
+// A stale remote claim must degrade to one idempotent fetch after the bounded
+// follower wait. It must not freeze module startup until the broker's 30 s TTL.
+{
+  const staleSidecar = createSidecarWithMemoryBackend({ databaseName: 'stale-owner-sidecar' });
+  const staleStorage = makeFakeStorageCollection();
+  let staleFetches = 0;
+  const staleLoader = createQueryDemandLoader({
+    storageCollection: staleStorage,
+    sidecar: staleSidecar,
+    collectionName: 'outbound_campaigns',
+    schemaVersion: 1,
+    requestQueryFetch: async () => {
+      staleFetches += 1;
+      return { documents: [{ id: 'campaign-1', title: 'Campaign' }] };
+    },
+    multiTabBroker: {
+      closed: false,
+      async claim() { return false; },
+      async release() {},
+      async waitForRemote() { return null; },
+    },
+  });
+  const documents = await staleLoader.resolveQuery({ selector: {}, limit: 20 });
+  assert(documents.length === 1, 'stale owner fallback returns the fetched query window');
+  assert(staleFetches === 1, `stale owner fallback performs one fetch (got ${staleFetches})`);
+}
+
 // Error path: failing fetch increments error counter.
 status.queryFetchErrorCount = 0;
 await sidecar.clear();

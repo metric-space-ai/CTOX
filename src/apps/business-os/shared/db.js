@@ -16,7 +16,14 @@ const RXDB_RESET_TIMEOUT_MS = 5000;
 const INDEXEDDB_PREFLIGHT_TIMEOUT_MS = 8000;
 const RXDB_MODULE_IMPORT_TIMEOUT_MS = 8000;
 const RXDB_CREATE_DATABASE_TIMEOUT_MS = 8000;
-const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260813-ap3-dataplane-v97';
+const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-demand-sync-rxdb-v120';
+const DEMAND_CACHE_MIGRATION = 'sellify-demand-cache-v1';
+const SELLIFY_DEMAND_CACHE_COLLECTIONS = Object.freeze([
+  'sellify_activities',
+  'sellify_campaigns',
+  'sellify_people',
+  'sellify_companies',
+]);
 
 export async function createBusinessDb({ name }) {
   const storageHealth = await inspectBrowserStorageDurability(name);
@@ -103,6 +110,7 @@ async function createRxBusinessDb({ name }) {
     }),
     timeoutAfter(RXDB_CREATE_DATABASE_TIMEOUT_MS, `RxDB createRxDatabase timed out after ${RXDB_CREATE_DATABASE_TIMEOUT_MS}ms (possible IndexedDB lock)`),
   ]);
+  await migrateSellifyDemandCache(db, name);
   return {
     mode: 'rxdb',
     name,
@@ -126,10 +134,28 @@ async function createRxBusinessDb({ name }) {
     },
     collection: (name) => db[name],
     getUnsyncedWriteSummary: () => db.getUnsyncedWriteSummary?.() || Promise.resolve({ total: 0, byCollection: {} }),
+    clearCachedCollections: (collectionNames) => db.clearCachedCollections?.(collectionNames),
     recovery: db.recovery,
     conflicts: db.conflicts,
     close: () => db.close(),
   };
+}
+
+async function migrateSellifyDemandCache(db, name) {
+  const markerKey = `ctox.businessOs.cacheMigration.${name}`;
+  try {
+    if (globalThis.localStorage?.getItem?.(markerKey) === DEMAND_CACHE_MIGRATION) return;
+    if (typeof db.clearCachedCollections !== 'function') {
+      throw new Error('Installed RxDB bundle does not support targeted cache migration');
+    }
+    const result = await db.clearCachedCollections(SELLIFY_DEMAND_CACHE_COLLECTIONS);
+    globalThis.localStorage?.setItem?.(markerKey, DEMAND_CACHE_MIGRATION);
+    console.info('[business-os] Sellify demand cache migration completed', result || {});
+  } catch (error) {
+    // Never trade recoverability for startup speed. A collection with a local
+    // pushable row stays intact and the migration retries on a future start.
+    console.warn('[business-os] Sellify demand cache migration skipped', error);
+  }
 }
 
 function clearRecoveryDatabaseName(name) {
