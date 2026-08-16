@@ -49,6 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
+| Idle-CPU des Channel-Routers | ja | gezielte Tests ja | nein | Rolloutmessung offen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -108,6 +109,24 @@ Noch offen:
 - Auf der Kundeninstanz mindestens eine Stunde messen: CPU-Dauerlast unter
   5 %, `idle_ticks > 0`, Kandidatenmenge dauerhaft null und kein weiterer
   Revisionszuwachs.
+
+Idle-CPU-Nachtrag vom 16.08.2026:
+
+- Die zunächst beobachteten 104,4 % gehörten zum laufenden synthetischen
+  Sellify-Benchmark und waren keine Idle-Messung.
+- Ein separater Sample des installierten Dienstes belegte dennoch einen
+  periodischen teuren Pfad: Der Channel-Router öffnete alle 30 Sekunden die
+  1,1-GB-Kerndatenbank für einen redundanten Queue-Safety-Poll und ließ SQLite
+  dabei das Schema neu parsen.
+- Der günstige Acht-Sekunden-Quellstempel bleibt unverändert reaktiv. Nur der
+  redundante Vollzugriff folgt nun dem einstündigen Safety-Fenster.
+- Drei gezielte Routertests sind grün; darunter ein neuer Nachweis, dass nach
+  dem früheren 30-Sekunden-Intervall keine SQLite-Verbindung geöffnet wird.
+- Quellcode-Fix und Diagnose sind lokal belegt; Ausrollen, Neustart und
+  einstündige Nachhermessung bleiben offen.
+
+Beweis:
+[`beweise/idle-channel-router-2026-08-16.md`](beweise/idle-channel-router-2026-08-16.md)
 
 ## Etappe 3: OA-2 und OA-1 — Scale-Test und bounded Demand-Sync
 
@@ -321,7 +340,8 @@ Kein Commit darf:
   isolierten Baseline-Archiv reproduziert und sind keine Regression dieser
   Kampagne.
 - Der globale Größenwächter bleibt wegen sieben bereits anderweitig
-  veränderter Dateien rot. Die Budgets wurden nicht angehoben.
+  veränderter Dateien rot. Bei der Idle-CPU-Prüfung waren es acht. Die Budgets
+  wurden nicht angehoben.
 - Im gemeinsamen Arbeitsbaum liegen weiterhin zahlreiche nicht zu dieser
   Kampagne gehörende Änderungen, darunter `app.js`, Browsermodule und weitere
   Runtime-Dateien. Sie bleiben uncommitted, bis ihre jeweilige Arbeit separat
@@ -329,14 +349,16 @@ Kein Commit darf:
 
 ## Nächste Ausführungsreihenfolge
 
-1. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
-2. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
-3. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
-4. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
-5. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
+1. Idle-CPU-Fix in einen kontrollierten Build übernehmen und eine einstündige
+   Nachhermessung durchführen.
+2. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
+3. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
+4. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
+5. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
+6. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
    bereinigen, ohne Budgets anzuheben.
-6. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
-7. OA-7-Kompaktierung im exklusiven Wartungsfenster.
+7. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
+8. OA-7-Kompaktierung im exklusiven Wartungsfenster.
 
 ## Definition of Done
 
@@ -356,5 +378,7 @@ Die Kampagne ist erst vollständig abgeschlossen, wenn:
 - `docs/dev/OFFENE-ARBEITEN.md` — ursprüngliche Übergabe und Antworten.
 - `docs/dev/beweise/refactoring-kampagne-baseline.md` — aktueller
   Implementierungs- und Messnachweis.
+- `docs/dev/beweise/idle-channel-router-2026-08-16.md` — Diagnose und lokaler
+  Nachweis des periodischen Idle-CPU-Pfads.
 - `docs/dev/beweise/raw/` — maschinenlesbare Rohmessungen und Move-Beweise.
 - `docs/ctox-rxdb.md` — kanonische Architektur des RxDB-/WebRTC-Datenpfads.

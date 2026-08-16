@@ -121,7 +121,7 @@ const LAUNCHD_USER_MARKER_RELATIVE_PATH: &str = "runtime/ctox_launchd_user.insta
 const CHANNEL_ROUTER_POLL_SECS: u64 = 8;
 const TICKET_RECONCILE_IDLE_SAFETY_SECS: u64 = 3600;
 const CHANNEL_ROUTER_IDLE_SAFETY_SECS: u64 = 3600;
-const CHANNEL_ROUTER_DURABLE_QUEUE_SAFETY_POLL_SECS: u64 = 30;
+const CHANNEL_ROUTER_DURABLE_QUEUE_SAFETY_POLL_SECS: u64 = 3600;
 const CHANNEL_SYNC_POLL_SECS: u64 = 60;
 const CHANNEL_SYNC_BACKOFF_MAX_SECS: u64 = 900;
 const TICKET_SYNC_POLL_SECS: u64 = 60;
@@ -24194,6 +24194,41 @@ mod tests {
         );
 
         clear_channel_router_preflight_idle_gate_for_tests();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn channel_router_preflight_does_not_reopen_sqlite_after_legacy_idle_interval() {
+        let _gate_lock = channel_router_preflight_gate_test_lock();
+        clear_channel_router_preflight_idle_gate_for_tests();
+        clear_channel_router_source_stamp_cache_for_tests();
+        let root = temp_root("channel-router-preflight-no-legacy-idle-poll");
+        std::fs::create_dir_all(root.join("runtime")).expect("create runtime directory");
+        let db_path = crate::paths::core_db(&root);
+        channels::open_channel_db(&db_path).expect("create core database");
+        mark_channel_router_preflight_idle(&root);
+        {
+            let gate = CHANNEL_ROUTER_PREFLIGHT_IDLE_GATE.get_or_init(|| Mutex::new(None));
+            let mut guard = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .as_mut()
+                .expect("preflight idle gate")
+                .last_durable_queue_poll = Instant::now() - Duration::from_secs(31);
+        }
+        channels::reset_channel_db_open_count_for_tests(&db_path);
+
+        assert!(
+            should_skip_idle_channel_router_preflight(&root),
+            "unchanged idle state must remain asleep after the legacy 30-second interval"
+        );
+        assert_eq!(
+            channels::channel_db_open_count_for_tests(&db_path),
+            0,
+            "the legacy idle interval must not reopen and reparse the SQLite schema"
+        );
+
+        clear_channel_router_preflight_idle_gate_for_tests();
+        clear_channel_router_source_stamp_cache_for_tests();
         let _ = std::fs::remove_dir_all(root);
     }
 

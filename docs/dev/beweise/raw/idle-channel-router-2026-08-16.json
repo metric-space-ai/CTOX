@@ -1,0 +1,48 @@
+{
+  "schema": "ctox.performance.idle_channel_router.v1",
+  "observed_at": "2026-08-16T17:53:26+02:00",
+  "host_timezone": "Europe/Berlin",
+  "installed_release": "cliproxy-provider-contract-r6-20260807T1323Z",
+  "installed_binary_modified_at": "2026-08-07T16:32:55+02:00",
+  "process": {
+    "pid": 1248,
+    "command": "/Users/michaelwelsch/.local/lib/ctox/current/bin/ctox-real service --foreground",
+    "physical_footprint_gib": 1.1,
+    "core_database_bytes": 1149874176,
+    "business_os_rxdb_bytes": 2218463232
+  },
+  "benchmark_processes_after_stop": [],
+  "benchmark_ports_after_stop": {
+    "8877": "closed",
+    "18876": "closed"
+  },
+  "idle_cpu_samples_percent": [48.1, 0.6, 28.1, 0.1, 0.5],
+  "idle_cpu_sample_interval_seconds": 2,
+  "stack_sample": {
+    "duration_seconds": 5,
+    "samples_per_thread": 3259,
+    "channel_router_active_samples": 298,
+    "pending_queue_probe_samples": 297,
+    "pending_queue_probe_share_of_wall_samples_percent": 9.11,
+    "dominant_path": "route_external_messages -> pending_queue_task_count_uncached -> channel_projection_tables_exist -> sqlite schema parse"
+  },
+  "source_change": {
+    "file": "src/core/service/service.rs",
+    "durable_queue_safety_poll_seconds_before": 30,
+    "durable_queue_safety_poll_seconds_after": 3600,
+    "event_source_poll_seconds_unchanged": 8,
+    "idle_safety_seconds_unchanged": 3600
+  },
+  "verification": {
+    "rustfmt_service_rs": "passed",
+    "targeted_test_filter": "channel_router_preflight_",
+    "targeted_tests_passed": 3,
+    "targeted_tests_failed": 0,
+    "filtered_out": 2841,
+    "module_size_service_rs_production_lines": 21820,
+    "module_size_service_rs_budget": 21820,
+    "global_module_size_guard": "failed_only_on_foreign_worktree_changes"
+  },
+  "deployment": "not_performed",
+  "post_deployment_idle_measurement": "pending"
+}
