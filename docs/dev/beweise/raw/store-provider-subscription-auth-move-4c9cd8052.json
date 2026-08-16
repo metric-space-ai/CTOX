@@ -1,0 +1,308 @@
+{
+  "schema": "ctox.rust_move_verification.v1",
+  "before_ref": "4c9cd8052",
+  "before_path": "src/core/business_os/store.rs",
+  "after_path": "src/core/business_os/store_provider_subscription_auth.rs",
+  "results": [
+    {
+      "symbol": "save_runtime_settings_command",
+      "before_sha256": "663e993a91af74608f2d51edd068b4b5db44414dbe9b08a6f8c17c07b4895f48",
+      "after_sha256": "663e993a91af74608f2d51edd068b4b5db44414dbe9b08a6f8c17c07b4895f48",
+      "equal": true
+    },
+    {
+      "symbol": "start_subscription_auth_command",
+      "before_sha256": "6b6c1e2dc09e751594e462f963e778810cccde01c397d1d61d9b02ac6868d998",
+      "after_sha256": "6b6c1e2dc09e751594e462f963e778810cccde01c397d1d61d9b02ac6868d998",
+      "equal": true
+    },
+    {
+      "symbol": "validate_public_selectors",
+      "before_sha256": "8a33dba753531055bf23325a12636cdcfbef5aaa05e109ed8a0e3acaddcd9618",
+      "after_sha256": "8a33dba753531055bf23325a12636cdcfbef5aaa05e109ed8a0e3acaddcd9618",
+      "equal": true
+    },
+    {
+      "symbol": "use_device_code",
+      "before_sha256": "9b0f3017243ff9d203c11e37692a7f67e700938624e411a4fd48bd69c8399331",
+      "after_sha256": "9b0f3017243ff9d203c11e37692a7f67e700938624e411a4fd48bd69c8399331",
+      "equal": true
+    },
+    {
+      "symbol": "normalized_provider",
+      "before_sha256": "47443c8237151aa1045a71460fc2eac3591ef8c45267ab233fd68a0245853359",
+      "after_sha256": "47443c8237151aa1045a71460fc2eac3591ef8c45267ab233fd68a0245853359",
+      "equal": true
+    },
+    {
+      "symbol": "required_account_id",
+      "before_sha256": "42c744145c126317792d6f01e1963746d08effa6d25fae3f225548b1e7a0ee0d",
+      "after_sha256": "42c744145c126317792d6f01e1963746d08effa6d25fae3f225548b1e7a0ee0d",
+      "equal": true
+    },
+    {
+      "symbol": "provider_subscription_selector_payload",
+      "before_sha256": "36ad47201c8a6449656f07fd8bc23b92920475803087b744899bcf4651e9f7c0",
+      "after_sha256": "36ad47201c8a6449656f07fd8bc23b92920475803087b744899bcf4651e9f7c0",
+      "equal": true
+    },
+    {
+      "symbol": "provider_subscription_account_is_projected",
+      "before_sha256": "941b1b2014fc133dee6556d83325277d08e6fbaca5729f3016f0d27d8cebf94f",
+      "after_sha256": "941b1b2014fc133dee6556d83325277d08e6fbaca5729f3016f0d27d8cebf94f",
+      "equal": true
+    },
+    {
+      "symbol": "provider_subscription_status_projection",
+      "before_sha256": "3d67c65df5dfd7e72aa5b4189cb95661fdbc2697b6e6ca95fa203a3c5e799433",
+      "after_sha256": "3d67c65df5dfd7e72aa5b4189cb95661fdbc2697b6e6ca95fa203a3c5e799433",
+      "equal": true
+    },
+    {
+      "symbol": "start_kimi_coding_plan",
+      "before_sha256": "e9dc5db8d707d843b333a899644cbc177586f067cfdfd52b7cc44e5b0f894b79",
+      "after_sha256": "e9dc5db8d707d843b333a899644cbc177586f067cfdfd52b7cc44e5b0f894b79",
+      "equal": true
+    },
+    {
+      "symbol": "start_minimax_coding_plan",
+      "before_sha256": "e51504a71c7146116942c966b688a67ece3fa80866c01973640b5d8b7f4faa00",
+      "after_sha256": "e51504a71c7146116942c966b688a67ece3fa80866c01973640b5d8b7f4faa00",
+      "equal": true
+    },
+    {
+      "symbol": "coding_plan_rotation_payload",
+      "before_sha256": "99cd57736f2ccbed170fc66a67b087a58cb46fc0ece58ea9b6c5045dc76d93a1",
+      "after_sha256": "99cd57736f2ccbed170fc66a67b087a58cb46fc0ece58ea9b6c5045dc76d93a1",
+      "equal": true
+    },
+    {
+      "symbol": "disconnect_instance_chatgpt_subscription_at",
+      "before_sha256": "51bc5d0adc8bf27b618460627a77cc66e1fbd8983eddd4d12781b2bd8b2cbdfe",
+      "after_sha256": "51bc5d0adc8bf27b618460627a77cc66e1fbd8983eddd4d12781b2bd8b2cbdfe",
+      "equal": true
+    },
+    {
+      "symbol": "disconnect_instance_chatgpt_subscription",
+      "before_sha256": "fc517de1ccf4c34e26a7eae3ad2b907fc93d4d5f910582e96744f54f30f52645",
+      "after_sha256": "fc517de1ccf4c34e26a7eae3ad2b907fc93d4d5f910582e96744f54f30f52645",
+      "equal": true
+    },
+    {
+      "symbol": "run_channel_command",
+      "before_sha256": "6ebd80e724e32c502e23b65f622d629a4081ca5487918f3c12eded0cd0532668",
+      "after_sha256": "6ebd80e724e32c502e23b65f622d629a4081ca5487918f3c12eded0cd0532668",
+      "equal": true
+    },
+    {
+      "symbol": "save_runtime_settings",
+      "before_sha256": "ed3e1a6e643bd490efd3536a8c062b2952500c59657cab3c165078d03fcb7944",
+      "after_sha256": "ed3e1a6e643bd490efd3536a8c062b2952500c59657cab3c165078d03fcb7944",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_preset",
+      "before_sha256": "9c1ba3edbc508e1942dc3ba11d93c42a6aaf2020d55cf68c01da205b8fbd2a32",
+      "after_sha256": "9c1ba3edbc508e1942dc3ba11d93c42a6aaf2020d55cf68c01da205b8fbd2a32",
+      "equal": true
+    },
+    {
+      "symbol": "normalize_runtime_preset",
+      "before_sha256": "5225e687944ede1eddb637475cdd892ad39d51ce68651b377373aab846b4fbd5",
+      "after_sha256": "5225e687944ede1eddb637475cdd892ad39d51ce68651b377373aab846b4fbd5",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_api_upstream_base_url",
+      "before_sha256": "285bbf1608bc1e32c14b79691f8b95996f80b7068d9b171bf1a72f4b4c2e6d54",
+      "after_sha256": "285bbf1608bc1e32c14b79691f8b95996f80b7068d9b171bf1a72f4b4c2e6d54",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_context",
+      "before_sha256": "4ca8c833a9dec4f2ad51bdffc6813148087488fe017dcc16cdb324623a996915",
+      "after_sha256": "4ca8c833a9dec4f2ad51bdffc6813148087488fe017dcc16cdb324623a996915",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_auth_mode_is_subscription",
+      "before_sha256": "91286dc8a8aa3f69f19aaf1c2ec09007fa5167bad2452bf4118492141aea6619",
+      "after_sha256": "91286dc8a8aa3f69f19aaf1c2ec09007fa5167bad2452bf4118492141aea6619",
+      "equal": true
+    },
+    {
+      "symbol": "chatgpt_subscription_auth_status",
+      "before_sha256": "448fc77ea8467ecf5e34492ead2282e9d45511ec7930f3abd8f8e6652e97a1ae",
+      "after_sha256": "448fc77ea8467ecf5e34492ead2282e9d45511ec7930f3abd8f8e6652e97a1ae",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_auth_message",
+      "before_sha256": "aa18d7ed705c59d87adb6f32ce8db96c5e38aba995f82f522f1039d40d8bd0bd",
+      "after_sha256": "aa18d7ed705c59d87adb6f32ce8db96c5e38aba995f82f522f1039d40d8bd0bd",
+      "equal": true
+    },
+    {
+      "symbol": "subscription_auth_start_payload",
+      "before_sha256": "441a10d9698755662564e4d497f8f489e185d78c27a55161245664425241d082",
+      "after_sha256": "441a10d9698755662564e4d497f8f489e185d78c27a55161245664425241d082",
+      "equal": true
+    },
+    {
+      "symbol": "provider_subscription_auth_start_payload",
+      "before_sha256": "0278335252cfead880802b20b513003d8aa1551d24e0959f3d63f183ecafd552",
+      "after_sha256": "0278335252cfead880802b20b513003d8aa1551d24e0959f3d63f183ecafd552",
+      "equal": true
+    },
+    {
+      "symbol": "start_kimi_subscription_login",
+      "before_sha256": "821b3d89e371471d051262467e104c5c51ee8140cae20f42bbb5044ef83d55c5",
+      "after_sha256": "821b3d89e371471d051262467e104c5c51ee8140cae20f42bbb5044ef83d55c5",
+      "equal": true
+    },
+    {
+      "symbol": "provider_callback_values",
+      "before_sha256": "2e47f9cf92968fe2affe98ed00164476e7d99dcf30ee9fba5636b3a973ab0cb0",
+      "after_sha256": "2e47f9cf92968fe2affe98ed00164476e7d99dcf30ee9fba5636b3a973ab0cb0",
+      "equal": true
+    },
+    {
+      "symbol": "start_claude_subscription_login",
+      "before_sha256": "30da133f380f745349a7826dc69203be982586744aca089cba430f19107dcc10",
+      "after_sha256": "30da133f380f745349a7826dc69203be982586744aca089cba430f19107dcc10",
+      "equal": true
+    },
+    {
+      "symbol": "start_antigravity_subscription_login",
+      "before_sha256": "ff95c2ffdcf3cfb0a67eb5d8c2cdd3655d0d94ad3170c8c7523ae4fd0d25f079",
+      "after_sha256": "ff95c2ffdcf3cfb0a67eb5d8c2cdd3655d0d94ad3170c8c7523ae4fd0d25f079",
+      "equal": true
+    },
+    {
+      "symbol": "start_chatgpt_subscription_login",
+      "before_sha256": "b635274f69173f726a9c2df4102b8bf6dca72c1f40216126c7f0e8f75e9fe8d6",
+      "after_sha256": "b635274f69173f726a9c2df4102b8bf6dca72c1f40216126c7f0e8f75e9fe8d6",
+      "equal": true
+    },
+    {
+      "symbol": "chatgpt_login_pkce",
+      "before_sha256": "6e2c81f426e7e4492b0dac2920f992dc257eb895888d3cbcfb8fd3a90deca690",
+      "after_sha256": "6e2c81f426e7e4492b0dac2920f992dc257eb895888d3cbcfb8fd3a90deca690",
+      "equal": true
+    },
+    {
+      "symbol": "chatgpt_login_state",
+      "before_sha256": "fd9f17460beb89c6f31ec74cb61d91fe9691878ea48ffa16df4f0f3e8164abd8",
+      "after_sha256": "fd9f17460beb89c6f31ec74cb61d91fe9691878ea48ffa16df4f0f3e8164abd8",
+      "equal": true
+    },
+    {
+      "symbol": "bind_chatgpt_login_server",
+      "before_sha256": "6412372b71d78226c6a51ebfca9a1a1430b6fe3b841a5f58e043dc0bbda2b59d",
+      "after_sha256": "6412372b71d78226c6a51ebfca9a1a1430b6fe3b841a5f58e043dc0bbda2b59d",
+      "equal": true
+    },
+    {
+      "symbol": "build_chatgpt_authorize_url",
+      "before_sha256": "ee26915f3eb0c0d93bdfe8d4c01a90b591750daf71477d3d8673cd5a71a3ed78",
+      "after_sha256": "ee26915f3eb0c0d93bdfe8d4c01a90b591750daf71477d3d8673cd5a71a3ed78",
+      "equal": true
+    },
+    {
+      "symbol": "run_chatgpt_login_callback_server",
+      "before_sha256": "8a8e89ea04376f1fa61ba688131c4dc7f2d29a9d6c733cae0fb036b80002a284",
+      "after_sha256": "8a8e89ea04376f1fa61ba688131c4dc7f2d29a9d6c733cae0fb036b80002a284",
+      "equal": true
+    },
+    {
+      "symbol": "handle_chatgpt_login_callback_request",
+      "before_sha256": "d20ab30899248f7ece82b726a3d86d8e4dd72ef92da8d1efc43689e8ec696877",
+      "after_sha256": "d20ab30899248f7ece82b726a3d86d8e4dd72ef92da8d1efc43689e8ec696877",
+      "equal": true
+    },
+    {
+      "symbol": "respond_html",
+      "before_sha256": "ea71814b0570867f1ed7192e59b996250f6f18148e8be53993225fe4ab6804cf",
+      "after_sha256": "ea71814b0570867f1ed7192e59b996250f6f18148e8be53993225fe4ab6804cf",
+      "equal": true
+    },
+    {
+      "symbol": "request_chatgpt_device_code",
+      "before_sha256": "e5d87f6a334eea835098caef832614a33d1ecd40de65d2488481651528a30614",
+      "after_sha256": "e5d87f6a334eea835098caef832614a33d1ecd40de65d2488481651528a30614",
+      "equal": true
+    },
+    {
+      "symbol": "complete_chatgpt_device_code_login",
+      "before_sha256": "059658523028ffab96ee5187510e10e7b57a37b7b607faedcef5aee5cc0129df",
+      "after_sha256": "059658523028ffab96ee5187510e10e7b57a37b7b607faedcef5aee5cc0129df",
+      "equal": true
+    },
+    {
+      "symbol": "poll_chatgpt_device_token",
+      "before_sha256": "26a09c9724828f8ef85dd27f0f0bef41e33e426f9a590a023f7c5f76590d1105",
+      "after_sha256": "26a09c9724828f8ef85dd27f0f0bef41e33e426f9a590a023f7c5f76590d1105",
+      "equal": true
+    },
+    {
+      "symbol": "exchange_chatgpt_authorization_code",
+      "before_sha256": "2ed6eee42e7a3c5d83939cd208127ea590c521758e8238dc990245b00fa14bad",
+      "after_sha256": "2ed6eee42e7a3c5d83939cd208127ea590c521758e8238dc990245b00fa14bad",
+      "equal": true
+    },
+    {
+      "symbol": "persist_chatgpt_subscription_auth",
+      "before_sha256": "372d17abc265571fecdf882a23afdc781cb95169a20191ae0ff619d31203f2c5",
+      "after_sha256": "372d17abc265571fecdf882a23afdc781cb95169a20191ae0ff619d31203f2c5",
+      "equal": true
+    },
+    {
+      "symbol": "restore_chatgpt_subscription_auth_from_instance",
+      "before_sha256": "5e081add7fdedc50fdf1e14d7ab496141a98da161fbe7c407668a35769001694",
+      "after_sha256": "5e081add7fdedc50fdf1e14d7ab496141a98da161fbe7c407668a35769001694",
+      "equal": true
+    },
+    {
+      "symbol": "chatgpt_account_id_from_jwt",
+      "before_sha256": "7a34a4af4836f457d197984c1995babece22d602a4c8caa71b702b34b5077ae7",
+      "after_sha256": "7a34a4af4836f457d197984c1995babece22d602a4c8caa71b702b34b5077ae7",
+      "equal": true
+    },
+    {
+      "symbol": "urlencoding_encode",
+      "before_sha256": "09c50c1020479e3d6725674698b247c36a8587c91cdf844bd9335abf37518e34",
+      "after_sha256": "09c50c1020479e3d6725674698b247c36a8587c91cdf844bd9335abf37518e34",
+      "equal": true
+    },
+    {
+      "symbol": "module_has_active_responsibility",
+      "before_sha256": "5e269f3a3640fcee7d7f15310324e81668be26d115d45ad443458712bacf0ecb",
+      "after_sha256": "5e269f3a3640fcee7d7f15310324e81668be26d115d45ad443458712bacf0ecb",
+      "equal": true
+    },
+    {
+      "symbol": "orphan_private_module_ids",
+      "before_sha256": "d70d56f3b10c4d6f3430ecbdfc055fe08521d2e71e1a5ccf1fab152df65a357e",
+      "after_sha256": "d70d56f3b10c4d6f3430ecbdfc055fe08521d2e71e1a5ccf1fab152df65a357e",
+      "equal": true
+    },
+    {
+      "symbol": "repair_orphan_private_app_responsibility",
+      "before_sha256": "f8c5dde569a88d8586741fa317ada75add8dbdb695500efeaf11adc85de7b246",
+      "after_sha256": "f8c5dde569a88d8586741fa317ada75add8dbdb695500efeaf11adc85de7b246",
+      "equal": true
+    },
+    {
+      "symbol": "current_business_os_module_ids",
+      "before_sha256": "97452d04da8765398afe846163dd667a45b507b0d01ae787d46f37f7152c912e",
+      "after_sha256": "97452d04da8765398afe846163dd667a45b507b0d01ae787d46f37f7152c912e",
+      "equal": true
+    },
+    {
+      "symbol": "repair_stale_module_permission_grants",
+      "before_sha256": "a00d375ca85e533655320a664ca3244ed58d64e6dc1c917e07404c80e9537fb8",
+      "after_sha256": "a00d375ca85e533655320a664ca3244ed58d64e6dc1c917e07404c80e9537fb8",
+      "equal": true
+    }
+  ]
+}

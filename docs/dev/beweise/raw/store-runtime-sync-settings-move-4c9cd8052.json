@@ -1,0 +1,116 @@
+{
+  "schema": "ctox.rust_move_verification.v1",
+  "before_ref": "4c9cd8052",
+  "before_path": "src/core/business_os/store.rs",
+  "after_path": "src/core/business_os/store_runtime_sync_settings.rs",
+  "results": [
+    {
+      "symbol": "runtime_settings_for_rxdb",
+      "before_sha256": "1d4976c325c1fb7f8acf9cd93dca2d3834488394c093977ef52f635045f5e22a",
+      "after_sha256": "1d4976c325c1fb7f8acf9cd93dca2d3834488394c093977ef52f635045f5e22a",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_projection_stamp",
+      "before_sha256": "764086c6c5b5125cc1ba2b6b1717142d70a010f0f9ea1e0eea3aed3b103edbd6",
+      "after_sha256": "764086c6c5b5125cc1ba2b6b1717142d70a010f0f9ea1e0eea3aed3b103edbd6",
+      "equal": true
+    },
+    {
+      "symbol": "stabilize_runtime_settings_timestamp",
+      "before_sha256": "d47238c159e4bee6d07a2d74547ba8bf7d26568d4ccd7ab50b542983fcd58624",
+      "after_sha256": "d47238c159e4bee6d07a2d74547ba8bf7d26568d4ccd7ab50b542983fcd58624",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_without_timestamp",
+      "before_sha256": "704ef95644cdb7dec690d5d59cd334eaef0d5cf44defee3043e92bb62bc53aa2",
+      "after_sha256": "704ef95644cdb7dec690d5d59cd334eaef0d5cf44defee3043e92bb62bc53aa2",
+      "equal": true
+    },
+    {
+      "symbol": "remove_runtime_settings_volatile_metadata",
+      "before_sha256": "57d2418409b04726d86775756e923c1c951ba2d3728427a7ca0de88a378d0d84",
+      "after_sha256": "57d2418409b04726d86775756e923c1c951ba2d3728427a7ca0de88a378d0d84",
+      "equal": true
+    },
+    {
+      "symbol": "build_runtime_settings_for_rxdb",
+      "before_sha256": "b06ae2a0332511a134a4a7a59be124430608a1600570cae0845c9dc8ace0e86c",
+      "after_sha256": "b06ae2a0332511a134a4a7a59be124430608a1600570cae0845c9dc8ace0e86c",
+      "equal": true
+    },
+    {
+      "symbol": "ctox_proxy_models_url",
+      "before_sha256": "b84c38b43f86efe9c0aeb6876109099e96deeec5686418e6a8c66e0f31e0e543",
+      "after_sha256": "b84c38b43f86efe9c0aeb6876109099e96deeec5686418e6a8c66e0f31e0e543",
+      "equal": true
+    },
+    {
+      "symbol": "parse_ctox_proxy_model_catalog",
+      "before_sha256": "815c497f04e8622ea8d94eb7d592b361bb7bf474b1f0810092a2b535cda1cfaf",
+      "after_sha256": "815c497f04e8622ea8d94eb7d592b361bb7bf474b1f0810092a2b535cda1cfaf",
+      "equal": true
+    },
+    {
+      "symbol": "discover_ctox_proxy_models",
+      "before_sha256": "f2504c99907b3d5e91a1dd235655f523bef179b00e2cdcd8509d818141313b83",
+      "after_sha256": "f2504c99907b3d5e91a1dd235655f523bef179b00e2cdcd8509d818141313b83",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_root_cache_key",
+      "before_sha256": "69e6bc7fb153e3870ed101783962c73657761ab0030d1531e0a26ebd9bc44a97",
+      "after_sha256": "69e6bc7fb153e3870ed101783962c73657761ab0030d1531e0a26ebd9bc44a97",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_cache_stamp",
+      "before_sha256": "5b8811bcd8370c407c35e673761ec1adab6712b7a8624d3d774ec8f8ae56fb56",
+      "after_sha256": "5b8811bcd8370c407c35e673761ec1adab6712b7a8624d3d774ec8f8ae56fb56",
+      "equal": true
+    },
+    {
+      "symbol": "office_runtime_settings_path",
+      "before_sha256": "95783348098871f4d1a8719a5503085a7fc2ef83d66ac77c725994c58e7b6c54",
+      "after_sha256": "95783348098871f4d1a8719a5503085a7fc2ef83d66ac77c725994c58e7b6c54",
+      "equal": true
+    },
+    {
+      "symbol": "normalize_office_engine",
+      "before_sha256": "7a5e0366bf69a26b4d010bc963f50a6e0b08bcbe3f6bf1d55e7fc6195834246d",
+      "after_sha256": "7a5e0366bf69a26b4d010bc963f50a6e0b08bcbe3f6bf1d55e7fc6195834246d",
+      "equal": true
+    },
+    {
+      "symbol": "open_office_runtime_settings",
+      "before_sha256": "1873055eae7a612d32b57253a6157862ff2ff1bf88942dbe8f61aced524939a8",
+      "after_sha256": "1873055eae7a612d32b57253a6157862ff2ff1bf88942dbe8f61aced524939a8",
+      "equal": true
+    },
+    {
+      "symbol": "load_office_runtime_settings",
+      "before_sha256": "e79dd234c4ba4825efef870c9f278828e7c2898308c9129e0d39db0d47c5ed0a",
+      "after_sha256": "e79dd234c4ba4825efef870c9f278828e7c2898308c9129e0d39db0d47c5ed0a",
+      "equal": true
+    },
+    {
+      "symbol": "save_office_runtime_settings",
+      "before_sha256": "5b330a58818e8ff54f25f68dfdb0098b444f351ac6ba4e1963fe20e8ff40fe35",
+      "after_sha256": "5b330a58818e8ff54f25f68dfdb0098b444f351ac6ba4e1963fe20e8ff40fe35",
+      "equal": true
+    },
+    {
+      "symbol": "business_os_sqlite_store_stamp",
+      "before_sha256": "cfa21fe41a0e680139e47f3a5e884071d5b7012eadfd2f451a337013d39b8922",
+      "after_sha256": "cfa21fe41a0e680139e47f3a5e884071d5b7012eadfd2f451a337013d39b8922",
+      "equal": true
+    },
+    {
+      "symbol": "runtime_settings_service_stamp",
+      "before_sha256": "0b13e92565030b123470aa64fdcf89cfbe2a99e5e44f03185b6fa5bdf9c530ec",
+      "after_sha256": "0b13e92565030b123470aa64fdcf89cfbe2a99e5e44f03185b6fa5bdf9c530ec",
+      "equal": true
+    }
+  ]
+}
