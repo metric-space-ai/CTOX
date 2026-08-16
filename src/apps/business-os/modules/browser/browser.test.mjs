@@ -903,3 +903,34 @@ function pointerEvent(overrides = {}) {
     'lebende Sitzung mit abgelaufener Pacht wird weiterhin zurueckgeholt',
   );
 }
+
+// --- Mehrfachstart: zwei Klicks duerfen nicht zwei Browser starten ---
+// Am 16.08.2026 auf der Kundeninstanz gemessen: sieben Startbefehle in zwei
+// Minuten, jeder mit eigener Sitzungskennung, 21 Chrome-Prozesse, 34 Eintraege
+// in der Sitzungsliste. Mitverursacht durch die Reparatur vom 15.08., seit der
+// "Los" bei einer toten Sitzung richtigerweise in den Start-Zweig fuehrt.
+{
+  const h = __browserTestHooks;
+  assert.equal(h.startSperrgrund({}, 1_000_000), '', 'ohne laufenden Start ist Starten erlaubt');
+  assert.match(
+    h.startSperrgrund({ startPendingSince: 1_000_000 }, 1_002_000),
+    /bereits gestartet/,
+    'waehrend ein Start laeuft wird kein zweiter ausgeloest',
+  );
+  // Die Sperre muss ablaufen — sonst sperrt ein haengender Start den Nutzer aus.
+  assert.equal(
+    h.startSperrgrund({ startPendingSince: 1_000_000 }, 1_008_001),
+    '',
+    'nach Ablauf der Sperre darf wieder gestartet werden',
+  );
+  assert.match(
+    h.startSperrgrund({ requestedSessionId: 's1', latestSession: { id: 's1', runtime_status: 'active' } }, 1_000_000),
+    /läuft bereits/,
+  );
+  // Eine TOTE angeforderte Sitzung bleibt startbar — sonst wieder eine Falle ohne Ausgang.
+  assert.equal(
+    h.startSperrgrund({ requestedSessionId: 's1', latestSession: { id: 's1', runtime_status: 'disconnected' } }, 1_000_000),
+    '',
+    'tote angeforderte Sitzung bleibt startbar',
+  );
+}

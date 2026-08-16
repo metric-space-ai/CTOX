@@ -213,6 +213,20 @@ export async function mount(ctx) {
   });
   const startNewBrowserSession = (url = refs.address?.value || 'https://example.com') => {
     const now = Date.now();
+    // Jeder Aufruf vergibt eine NEUE Sitzungskennung und startet einen eigenen
+    // Chrome. Ohne Sperre wird aus zwei Klicks zweimal alles.
+    // Am 16.08.2026 auf der Kundeninstanz gemessen: sieben Startbefehle in zwei
+    // Minuten, sieben Sitzungen, 21 Chrome-Prozesse, 34 Eintraege in der Liste.
+    // Mitverursacht durch die Reparatur vom 15.08.: seitdem fuehrt "Los" bei
+    // einer toten Sitzung in den Start-Zweig — richtig, aber eben oefter.
+    const grund = startSperrgrund(state, now);
+    if (grund) {
+      console.info('[browser] Start uebersprungen:', grund);
+      state.notice = grund;
+      safeLoadAndRender();
+      return;
+    }
+    state.startPendingSince = now;
     const sessionId = `${userSessionPrefix(ctx.session)}_${now}`;
     const tabId = `browser_tab_${now}`;
     const viewport = selectedViewport(refs.viewport);
@@ -233,7 +247,9 @@ export async function mount(ctx) {
       lease_id: state.controllerLeaseId,
       new_session: true,
     });
-    runBrowserCommand(command());
+    // Sperre loesen, sobald das Ergebnis da ist — Erfolg wie Fehlschlag.
+    // Bleibt sie stehen, wartet der Nutzer bis START_SPERRE_MS ablaeuft.
+    runBrowserCommand(command().finally(() => { state.startPendingSince = 0; }));
   };
   refs.start?.addEventListener('click', () => startNewBrowserSession());
   refs.stop?.addEventListener('click', () => dispatchBrowserCommand(ctx, state, 'browser.session.stop').then(safeLoadAndRender));
@@ -861,6 +877,31 @@ function browserSessionError(session) {
 function browserSessionIsLive(session) {
   const status = String(session?.runtime_status || session?.status || '').toLowerCase();
   return status === 'active';
+}
+
+// Warum ein Start uebersprungen wird — im Klartext, nicht als Schweigen.
+// Leerer Rueckgabewert heisst: starten ist erlaubt.
+//
+// Ein Start ist teuer: neue Sitzungskennung, neuer Chrome, neuer Eintrag in der
+// Liste. Zwei Klicks duerfen daraus nicht zwei Browser machen.
+// Die Sperre laeuft nach START_SPERRE_MS ab, damit ein haengengebliebener Start
+// den Nutzer nicht dauerhaft aussperrt — genau der Fehler, den die
+// Startmerkliste am 14.08.2026 hatte.
+const START_SPERRE_MS = 8000;
+
+function startSperrgrund(state, jetzt = Date.now()) {
+  const seit = Number(state?.startPendingSince || 0);
+  if (Number.isFinite(seit) && seit > 0 && jetzt - seit < START_SPERRE_MS) {
+    return 'Eine Sitzung wird bereits gestartet …';
+  }
+  // Laeuft die angeforderte Sitzung schon oder faehrt sie gerade hoch, ist ein
+  // zweiter Start reine Verschwendung.
+  const angefordert = String(state?.requestedSessionId || '');
+  const sitzung = state?.latestSession;
+  if (angefordert && sitzung?.id === angefordert && !browserSessionNeedsStart(sitzung)) {
+    return 'Diese Sitzung läuft bereits.';
+  }
+  return '';
 }
 
 // Was die Adressleiste tun muss: navigieren oder eine neue Sitzung starten.
@@ -2508,6 +2549,7 @@ export const __browserTestHooks = {
   browserSessionError,
   browserSessionIsLive,
   browserAddressAction,
+  startSperrgrund,
   browserSessionNeedsStart,
   browserStartErrorIsRetryable,
   newBrowserControllerLeaseId,
