@@ -606,6 +606,30 @@ Messstand:
 | aktueller Stand | 1.255 ms | 1.763,9 ms | 9.449 ms |
 | Ziel | < 300 ms | sinkend, keine neue Tail-Latenz | keine Ausreißerklasse |
 
+Nachmessung vom 17.08.2026:
+
+- Der erste Lauf in einem vollständig leeren isolierten Root erreichte die
+  Command-Messung nicht: Der native Erstaufbau registrierte 180 Tabellen,
+  1.263 Indizes und 537 Trigger und blieb während des 60-Sekunden-Fensters in
+  `lifecyclePhase="bring_up"`. Dieser Cold-Schema-Befund gehört zum
+  Handshake-/Boot-Gate, nicht zur warmen Command-Latenz.
+- Derselbe bereits initialisierte Root brachte den multiplexen Peer beim
+  zweiten Start nach 3.335 ms hoch. Der Warmup und die ersten fünf gewerteten
+  Commands liefen, der sechste Command wurde nativ bereits nach 31 ms
+  verarbeitet, blieb im Browser aber bis zum Timeout `pending_sync`.
+- Die sieben Zeitmarken und die native SQLite-Zeile belegen ein Race: Der
+  native Handler schrieb die terminale Projektion, danach gewann der
+  verspätete Browser-Push mit einem neueren `pending_sync`-Dokument. Der
+  Consumer übernahm anschließend diesen offenen Zustand in seinen
+  Quellstempel und schlief, statt ihn kanonisch erneut zu projizieren.
+- Commit `d9d2a040c` hält deshalb den tatsächlich vor Intake gelesenen
+  Quellstempel fest und schließt zusätzlich das Lost-Wakeup-Fenster zwischen
+  Stempelprüfung und dem Scharfschalten des SQLite-Notifiers. Drei gezielte
+  Idle-Gate-/Notifier-Regressionstests sind mit `3/3` Treffern grün. Der
+  saubere Archiv-Release-Build und die erneute 30-Command-Messung laufen; ein
+  Performancegewinn ist bis zum fertigen Report ausdrücklich noch nicht
+  abgenommen.
+
 Noch offen:
 
 - Commit→Browser-/Query-Fetch-Ausreißer weiter instrumentieren.
@@ -666,6 +690,17 @@ Noch offen:
 - Reconnect, Peerwechsel und Mixed-Version-Verhalten.
 - Kein zweiter DataChannel und kein Full-Resync.
 - Multi-Tab, Berechtigungs- und Schemawechsel gemeinsam mit der Browsermatrix.
+
+Aktueller Boot-Befund:
+
+- Ein vollständig leerer Test-Root verfehlt das 60-Sekunden-Gate bereits beim
+  einmaligen Aufbau der 178 nativen Collection-Schemas. Der Peer hatte noch
+  keinen Pool erzeugt; dies ist kein serieller Signaling-Roundtrip, sondern
+  lokaler SQLite-Schemaaufbau vor der Room-Verhandlung.
+- Auf demselben initialisierten Root lag der native Peer-Start anschließend
+  bei 3.335 ms und nutzte genau die bestehende multiplexe Verbindung. Damit
+  ist der Warm-Start einzeln unter fünf Sekunden, die geforderte 30-Lauf-p95-
+  Abnahme sowie der Cold-Setup-Fix bleiben offen.
 
 ## Etappe 7: Betriebliche Kundenabnahme
 
@@ -753,6 +788,7 @@ Kein Commit darf:
 | `e3db706fc` | Idle-Probe auf den exakten CPU-Samplezeitraum korrigieren |
 | `39dcbb031` | nach gemessenem 5,36-%-Rest das Recovery-Ruhefenster auf 120 Sekunden vergrößern |
 | `500f416c6` | nach weiterem warmen 5,97-%-Trend das Recovery-Ruhefenster auf 300 Sekunden vergrößern |
+| `d9d2a040c` | verspätete Browser-Command-Pushes erneut erkennen und kanonisch projizieren |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -772,16 +808,19 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Mit dem entlasteten Native-Peer Sellify-Einzel-Smoke und Command-p50 erneut
-   messen; nur den danach noch dominierenden Abschnitt weiter optimieren.
-3. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
+2. Den sauberen Archiv-Build von `d9d2a040c` abschließen und den warmen
+   30-Command-Smoke im bereits initialisierten Root wiederholen; nur den danach
+   noch dominierenden Abschnitt weiter optimieren.
+3. Danach den Sellify-Einzel-Smoke auf demselben Code-Stand erneut messen.
+4. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
    Browsermatrix auf dem synthetischen Scale-Store ausführen.
-4. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
-5. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
-6. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
+5. Den Cold-Schemaaufbau getrennt vom warmen Handshake optimieren und danach
+   Reconnect-, Peerwechsel- und Multi-Tab-Abnahme ausführen.
+6. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
+7. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
    bereinigen, ohne Budgets anzuheben.
-7. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
-8. OA-7-Kompaktierung im exklusiven Wartungsfenster.
+8. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
+9. OA-7-Kompaktierung im exklusiven Wartungsfenster.
 
 ## Definition of Done
 
