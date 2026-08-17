@@ -298,6 +298,17 @@ Rollout-Zwischenstand vom 16.08.2026:
   `de7bcbb0390550fb7d87b89efcde9562b9710df0bebaf87b49e3dc115d08e3da`;
   die extrahierte Quelle enthält das geprüfte Outbox-Gate. Fremde
   Arbeitsbaumänderungen sind damit weiterhin vom Release ausgeschlossen.
+- Der Rollout `idle-cpu-b41cc74ca` wurde am 17.08.2026 nach einem erfolgreichen
+  Release-Build (`90m36s`, gesamter Rollout `95m46s`) abgeschlossen. Build-,
+  Release- und Current-Binary haben identisch SHA-256
+  `4b8b596a739c0597ea81b610090be2b31b7e1bdaf90a15d56e03075ea41ab10f`.
+  Der verwaltete LaunchAgent zeigt auf `~/.local/bin/ctox` und läuft mit dem
+  neuen Current-Slot unter PID `12735`; der Status ist `busy=false`, ohne
+  Pending Work oder Last Error. Der frische Backup-Slot ist
+  `update-20260816T235952Z`, der unmittelbare Release-Rollback bleibt
+  `idle-cpu-b42c55efa`. Retention entfernte den älteren Backup-Slot
+  `update-20260816T220430Z` und den älteren Release `idle-cpu-60ff9c957`.
+  Startup-Idle, erneute Kurzprobe und Ein-Stunden-Probe stehen noch aus.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
