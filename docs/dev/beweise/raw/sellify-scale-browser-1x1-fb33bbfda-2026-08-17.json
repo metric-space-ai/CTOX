@@ -1,0 +1,194 @@
+{
+  "schema": "ctox.business_os_sellify_scale_browser_matrix.v1",
+  "generatedAt": "2026-08-17T18:11:01.879Z",
+  "startedAt": "2026-08-17T18:10:20.615Z",
+  "synthetic": true,
+  "gitRevision": null,
+  "source": {
+    "smokeRunner": "/Volumes/tmp/ctox-command-281290b6b.lQkq1x/src/core/rxdb/tools/browser_rust_smoke.js",
+    "smokeRunnerSha256": "13af7f1ca466a5ca40faf591841a22ea9b23536277d2e0008646b7bbc7a91801",
+    "ctoxBinary": "/Users/michaelwelsch/Documents/ctox/runtime/build/cargo-target/release/ctox",
+    "ctoxBinarySha256": "d6eaac9b0effe0f9b0aad34e62e150a4f307408727d02330a5c61649eaf63f6d"
+  },
+  "configuration": {
+    "runsPerState": 1,
+    "businessPort": 8877,
+    "signalingPort": 18876,
+    "runtimeRoot": "/Volumes/tmp/ctox-sellify-a592ef702.NNjDA8/runtime-root",
+    "warmProfile": "/Volumes/tmp/ctox-sellify-a592ef702.NNjDA8/profiles-ready/warm"
+  },
+  "profileDiskBytes": 9115484,
+  "summary": {
+    "cold": {
+      "runs": 1,
+      "p50UsableMs": 2935,
+      "p95UsableMs": 2935,
+      "maxUsableMs": 2935,
+      "maxQueryRpcs": 4,
+      "maxMaterializedDocuments": 650,
+      "maxIndexedDbUsageBytes": 5882999
+    },
+    "warm": {
+      "runs": 1,
+      "p50UsableMs": 1488,
+      "p95UsableMs": 1488,
+      "maxUsableMs": 1488,
+      "maxQueryRpcs": 0,
+      "maxMaterializedDocuments": 650,
+      "maxIndexedDbUsageBytes": 5233594
+    }
+  },
+  "acceptance": {
+    "coldP95UnderFiveSeconds": true,
+    "warmP95UnderOneSecond": false,
+    "queryRpcBudget": true,
+    "materializationBudget": true
+  },
+  "ok": false,
+  "measurements": {
+    "cold": [
+      {
+        "phase": "cold",
+        "run": 1,
+        "serverDocuments": 304515,
+        "totalDocuments": 314169,
+        "queryRpcs": 4,
+        "queryResponses": 4,
+        "materializedDocuments": 650,
+        "visibleRows": 50,
+        "firstVisibleDataMs": 2920,
+        "usableMs": 2935,
+        "queryWindowRenderMs": 839,
+        "cachedDocumentsBeforeQuery": 0,
+        "indexedDbUsageBefore": 858646,
+        "indexedDbUsageAfter": 5882999,
+        "nativeDatabaseBytes": 234893312,
+        "interactionReady": true,
+        "fullPullBeforeRender": false,
+        "windowedCoverage": true,
+        "budgetPassed": true,
+        "latencyTargetPassed": true,
+        "fixtureReused": true,
+        "collectionReadiness": {
+          "sellify_activities": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          },
+          "sellify_campaigns": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          },
+          "sellify_people": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          },
+          "sellify_companies": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          }
+        },
+        "startupMarks": {
+          "collectionSetupStartedAtMs": 1006,
+          "collectionsReadyAtMs": 1007,
+          "primaryLeaseStartedAtMs": 1007,
+          "primaryLeaseReturnedAtMs": 1308,
+          "smokeEvaluationStartedAtMs": 1522,
+          "primaryQueryReadyAtMs": 2094,
+          "primaryQueryStartedAtMs": 2096,
+          "usableAtMs": 2935
+        },
+        "outerPhaseTimings": {
+          "ctoxServerWaitMs": 9,
+          "syncConfigWaitMs": 468,
+          "sellifyScaleSeedMs": 523,
+          "browserLaunchMs": 4177,
+          "pageGotoMs": 109,
+          "smokeHookWaitMs": 49,
+          "shellReadyWaitMs": 822,
+          "startupAdvancedStatusMs": 166,
+          "pageEvaluateMs": 2429
+        }
+      }
+    ],
+    "warm": [
+      {
+        "phase": "warm",
+        "run": 1,
+        "serverDocuments": 304515,
+        "totalDocuments": 314169,
+        "queryRpcs": 0,
+        "queryResponses": 0,
+        "materializedDocuments": 650,
+        "visibleRows": 50,
+        "firstVisibleDataMs": 1475,
+        "usableMs": 1488,
+        "queryWindowRenderMs": 61,
+        "cachedDocumentsBeforeQuery": 650,
+        "indexedDbUsageBefore": 3831862,
+        "indexedDbUsageAfter": 5233594,
+        "nativeDatabaseBytes": 234893312,
+        "interactionReady": true,
+        "fullPullBeforeRender": false,
+        "windowedCoverage": true,
+        "budgetPassed": true,
+        "latencyTargetPassed": true,
+        "fixtureReused": true,
+        "collectionReadiness": {
+          "sellify_activities": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          },
+          "sellify_campaigns": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          },
+          "sellify_people": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          },
+          "sellify_companies": {
+            "syncProfile": "demand-only",
+            "localCoverage": "windowed",
+            "queryReady": true,
+            "connectionStatus": "connected"
+          }
+        },
+        "startupMarks": {
+          "collectionSetupStartedAtMs": 887,
+          "collectionsReadyAtMs": 888,
+          "primaryLeaseStartedAtMs": 888,
+          "primaryLeaseReturnedAtMs": 1029,
+          "smokeEvaluationStartedAtMs": 1098,
+          "primaryQueryReadyAtMs": 1363,
+          "primaryQueryStartedAtMs": 1428,
+          "usableAtMs": 1488
+        },
+        "outerPhaseTimings": {
+          "ctoxServerWaitMs": 7,
+          "syncConfigWaitMs": 461,
+          "sellifyScaleSeedMs": 471,
+          "browserLaunchMs": 4711,
+          "pageGotoMs": 164,
+          "smokeHookWaitMs": 45,
+          "shellReadyWaitMs": 654,
+          "startupAdvancedStatusMs": 18,
+          "pageEvaluateMs": 818
+        }
+      }
+    ]
+  }
+}

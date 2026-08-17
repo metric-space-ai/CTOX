@@ -50,8 +50,8 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | inklusive isolierter Stunde ja | nein | Kundenmessung offen |
 | Idle-CPU des Dienstes | ja | 4,02 % über eine isolierte Stunde | nein | Kundenmessung offen |
-| OA-2 synthetische 300k-Baseline | teilweise | 304.515-Dokumente-Einzel-Smoke strukturell grün | entfällt | 30×30-Matrix und Latenzziel offen |
-| OA-1 bounded Demand-Sync | ja | 4 RPCs, 650 materialisierte Dokumente, kein Vollpull | nein | Latenz- und Löschungsabnahme offen |
+| OA-2 synthetische 300k-Baseline | teilweise | kalt 2.935 ms, warm 1.488 ms im 1×1-Lauf | entfällt | Warmziel und 30×30-Matrix offen |
+| OA-1 bounded Demand-Sync | ja | 4/0 RPCs, 650 Dokumente, kein Vollpull | nein | 30×30- und Löschungsabnahme offen |
 | OA-4 Command-Roundtrip | ja | 30/30, p50 238 ms, p95 445,15 ms | nein | lokales Latenztor bestanden |
 | `store.rs`-Refactoring | ja | ja | entfällt | erledigt |
 | `app.js`-Refactoring | nein | nein | entfällt | wartet auf saubere Arbeitsregion |
@@ -569,6 +569,27 @@ Browser-Nachmessung vom 17.08.2026:
 - Die vollständige RxDB-JavaScript-Suite ist auf diesem Stand mit 101 grünen,
   null roten und zwei mangels gebautem Wire-Daemon ausdrücklich übersprungenen
   Cross-Process-Smokes abgeschlossen.
+- Die Nachmessung auf dem aktuellen Stand deckte zunächst eine Race im
+  Messwerkzeug auf: `leaseCollection()` darf nach drei Sekunden einen
+  `pending`-Handle liefern, und die generische Collection-Diagnose konnte
+  `queryReady=true` melden, bevor der Demand-Loader tatsächlich am
+  Collection-Handle hing. Dadurch wurde gelegentlich ein leeres
+  Activities-Fenster ohne Query-RPC gecacht.
+- Commit `fb33bbfda` macht die Benchmark-Readiness konkret: Der primäre
+  Lease-Handle wird bis zu seinem echten Replication-State aufgelöst, und die
+  Abfrage startet erst, wenn sowohl die Diagnose als auch der installierte
+  Demand-Loader bereit sind. Produktcode, Sync-Profil und Transportpfad werden
+  dadurch nicht verändert. JavaScript-Syntax und Matrix-Selbsttest sind grün.
+- Der danach ausgeführte 1×1-Matrixlauf ist strukturell grün. Kalt wurden
+  2.935 ms bis benutzbar, vier Query-RPCs und 650 materialisierte Dokumente
+  gemessen; warm 1.488 ms, null Query-RPCs und weiterhin 650 Dokumente. In
+  beiden Zuständen gab es keinen Vollpull, 50 sichtbare Zeilen,
+  `localCoverage="windowed"` und `queryReady=true` für alle vier Collections.
+- Damit ist das Kalt-Einzeltor unter fünf Sekunden erstmals bestanden. Das
+  Warm-Einzeltor unter einer Sekunde bleibt mit 1.488 ms rot; eine 30×30-
+  Abnahme wäre vor dessen Optimierung noch keine bestandene Release-Matrix.
+  Rohdaten:
+  `beweise/raw/sellify-scale-browser-1x1-fb33bbfda-2026-08-17.json`.
 
 Noch offene Browserabnahme, jeweils 30 Läufe kalt und warm:
 
@@ -894,6 +915,8 @@ Kein Commit darf:
 | `692996f6f` | Live-Change-Relay vom Demand-Vollpull-Gate trennen |
 | `4728042e1` | autorisierte Live-Command-Änderungen für inaktive Demand-Collections relayn |
 | `5947d102a` | terminale Command-IDs ohne collectionweiten Vorab-Pull revalidieren |
+| `a592ef702` | bestandenes OA-4-Latenztor samt 30er-Rohdaten dokumentieren |
+| `fb33bbfda` | Sellify-Benchmark bis zum tatsächlich installierten Demand-Loader warten lassen |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
