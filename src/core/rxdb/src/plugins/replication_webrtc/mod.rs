@@ -40,8 +40,9 @@ pub mod webrtc_helper;
 pub mod webrtc_types;
 
 pub use connection_handler_rs::{
-    CollectionAuthzHook, CollectionEagerPullHook, DocumentReadAuthzHook, DocumentReadFilter,
-    DocumentWriteAuthzHook, WebRTCRsConfig, WebRTCRsConnectionHandler, WebRTCRsPeer,
+    CollectionAuthzHook, CollectionEagerPullHook, CollectionLiveChangeHook, DocumentReadAuthzHook,
+    DocumentReadFilter, DocumentWriteAuthzHook, WebRTCRsConfig, WebRTCRsConnectionHandler,
+    WebRTCRsPeer,
 };
 pub use index_mod::{
     master_change_stream_id, replicate_web_rtc, replicate_web_rtc_multi,

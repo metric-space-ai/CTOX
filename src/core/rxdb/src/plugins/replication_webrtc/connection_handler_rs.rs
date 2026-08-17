@@ -109,6 +109,7 @@ pub type WebRTCRsPeer = PeerId;
 
 pub type CollectionAuthzHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type CollectionEagerPullHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+pub type CollectionLiveChangeHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type DocumentReadFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 pub type DocumentReadAuthzHook = Arc<dyn Fn(&str, &str) -> DocumentReadFilter + Send + Sync>;
 pub type DocumentWriteAuthzHook = Arc<dyn Fn(&str, &str, &Value) -> bool + Send + Sync>;
@@ -651,6 +652,7 @@ pub struct WebRTCRsConnectionHandler {
     /// `None` => no enforcement (default), so replication behavior is unchanged.
     collection_authz: Arc<Mutex<Option<CollectionAuthzHook>>>,
     collection_eager_pull: Arc<Mutex<Option<CollectionEagerPullHook>>>,
+    collection_live_change: Arc<Mutex<Option<CollectionLiveChangeHook>>>,
     collection_write_authz: Arc<Mutex<Option<CollectionAuthzHook>>>,
     document_read_authz: Arc<Mutex<Option<DocumentReadAuthzHook>>>,
     document_write_authz: Arc<Mutex<Option<DocumentWriteAuthzHook>>>,
@@ -712,6 +714,7 @@ impl WebRTCRsConnectionHandler {
             backpressure: Arc::new(Mutex::new(HashMap::new())),
             collection_authz: Arc::new(Mutex::new(None)),
             collection_eager_pull: Arc::new(Mutex::new(None)),
+            collection_live_change: Arc::new(Mutex::new(None)),
             collection_write_authz: Arc::new(Mutex::new(None)),
             document_read_authz: Arc::new(Mutex::new(None)),
             document_write_authz: Arc::new(Mutex::new(None)),
@@ -730,6 +733,14 @@ impl WebRTCRsConnectionHandler {
     /// collection scans. Bounded query/file demand methods remain available.
     pub fn set_collection_eager_pull(&self, hook: Option<CollectionEagerPullHook>) {
         *self.collection_eager_pull.lock() = hook;
+    }
+
+    /// Install a separate server-authoritative gate for bounded live master
+    /// changes. This is deliberately independent from historical full pulls:
+    /// an active command watcher may consume one permission-filtered terminal
+    /// document while the command ledger remains demand-only.
+    pub fn set_collection_live_change(&self, hook: Option<CollectionLiveChangeHook>) {
+        *self.collection_live_change.lock() = hook;
     }
 
     /// Optional per-collection write gate. Native-owned collections can keep
@@ -1630,7 +1641,19 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
         collection: &str,
         change: crate::types::RxReplicationMasterChange,
     ) -> Option<crate::types::RxReplicationMasterChange> {
-        if !self.is_eager_collection_pull_authorized_for_peer(peer, collection) {
+        let live_change_allowed = self.collection_live_change.lock().clone().map_or_else(
+            || self.is_eager_collection_pull_authorized_for_peer(peer, collection),
+            |check| {
+                let token = self
+                    .peer_capability_tokens
+                    .lock()
+                    .get(peer)
+                    .cloned()
+                    .unwrap_or_default();
+                check(&token, collection)
+            },
+        );
+        if !live_change_allowed {
             return None;
         }
         let Some(filter) = self.document_filter_for_peer(peer, collection) else {
@@ -3597,6 +3620,31 @@ mod tests {
             )
             .is_none());
         assert!(handler.is_eager_collection_pull_authorized_for_peer(&peer, "business_commands"));
+
+        handler.set_collection_eager_pull(Some(Arc::new(|_token: &str, _collection: &str| false)));
+        handler.set_collection_live_change(Some(Arc::new(|_token: &str, collection: &str| {
+            collection == "business_commands"
+        })));
+        assert!(!handler.is_eager_collection_pull_authorized_for_peer(&peer, "business_commands"));
+        assert!(handler
+            .filter_master_change_for_peer(
+                &peer,
+                "business_commands",
+                crate::types::RxReplicationMasterChange::Documents(
+                    crate::types::DocumentsWithCheckpoint {
+                        documents: vec![serde_json::json!({"id": "command-1"})],
+                        checkpoint: serde_json::json!({"id": "command-1", "lwt": 1}),
+                    },
+                ),
+            )
+            .is_some());
+        assert!(handler
+            .filter_master_change_for_peer(
+                &peer,
+                "sellify_activities",
+                crate::types::RxReplicationMasterChange::Resync,
+            )
+            .is_none());
     }
 
     #[test]

@@ -95,8 +95,8 @@ use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtensio
 use rxdb::plugins::replication_webrtc::index_mod::auxiliary_request_metrics_snapshot;
 use rxdb::plugins::replication_webrtc::{
     file_fetch_handler::FileRange, CollectionAuthzHook, CollectionEagerPullHook,
-    DocumentReadAuthzHook, DocumentWriteAuthzHook, RTCIceServer, RxWebRTCReplicationPool,
-    WebRTCRsConnectionHandler,
+    CollectionLiveChangeHook, DocumentReadAuthzHook, DocumentWriteAuthzHook, RTCIceServer,
+    RxWebRTCReplicationPool, WebRTCRsConnectionHandler,
 };
 use rxdb::rx_collection::RxCollection;
 use rxdb::rx_collection_helper::fill_object_data_before_insert;
@@ -2558,6 +2558,11 @@ async fn run_native_peer(
         let collection_eager_pull: Option<CollectionEagerPullHook> = Some(std::sync::Arc::new(
             move |_token: &str, collection: &str| !is_server_demand_only_collection(collection),
         ));
+        let collection_live_change: Option<CollectionLiveChangeHook> = Some(std::sync::Arc::new(
+            move |_token: &str, collection: &str| {
+                !is_server_demand_only_collection(collection) || collection == "business_commands"
+            },
+        ));
         let document_read_authz: Option<DocumentReadAuthzHook> = {
             let doc_authz_root = root.clone();
             Some(std::sync::Arc::new(move |token: &str, collection: &str| {
@@ -2588,6 +2593,7 @@ async fn run_native_peer(
                 Some(is_peer_session_valid),
                 collection_authz,
                 collection_eager_pull,
+                collection_live_change,
                 collection_write_authz,
                 document_read_authz,
                 document_write_authz,

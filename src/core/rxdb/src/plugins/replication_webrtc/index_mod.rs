@@ -42,8 +42,8 @@ use crate::plugins::replication::{
 };
 use crate::plugins::replication_webrtc::connection_handler_rs::{
     publish_best_effort_send_error, CollectionAuthzHook, CollectionEagerPullHook,
-    DocumentReadAuthzHook, DocumentWriteAuthzHook, WebRTCRsConfig, WebRTCRsConnectionHandler,
-    WebRTCRsPeer,
+    CollectionLiveChangeHook, DocumentReadAuthzHook, DocumentWriteAuthzHook, WebRTCRsConfig,
+    WebRTCRsConnectionHandler, WebRTCRsPeer,
 };
 use crate::plugins::replication_webrtc::signaling_client::SignalingClient;
 use crate::plugins::replication_webrtc::webrtc_helper::{
@@ -771,6 +771,7 @@ pub async fn replicate_web_rtc_rs_multi(
         None,
         None,
         None,
+        None,
         pull_batch_size,
         push_batch_size,
         retry_time,
@@ -793,6 +794,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_provider(
     is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     collection_authz: Option<CollectionAuthzHook>,
     collection_eager_pull: Option<CollectionEagerPullHook>,
+    collection_live_change: Option<CollectionLiveChangeHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
     document_write_authz: Option<DocumentWriteAuthzHook>,
@@ -810,6 +812,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_provider(
         is_peer_valid,
         collection_authz,
         collection_eager_pull,
+        collection_live_change,
         collection_write_authz,
         document_read_authz,
         document_write_authz,
@@ -837,6 +840,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
     is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     collection_authz: Option<CollectionAuthzHook>,
     collection_eager_pull: Option<CollectionEagerPullHook>,
+    collection_live_change: Option<CollectionLiveChangeHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
     document_write_authz: Option<DocumentWriteAuthzHook>,
@@ -854,6 +858,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
         None,
         collection_authz,
         collection_eager_pull,
+        collection_live_change,
         collection_write_authz,
         document_read_authz,
         document_write_authz,
@@ -877,6 +882,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
     is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
     collection_authz: Option<CollectionAuthzHook>,
     collection_eager_pull: Option<CollectionEagerPullHook>,
+    collection_live_change: Option<CollectionLiveChangeHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
     document_write_authz: Option<DocumentWriteAuthzHook>,
@@ -894,6 +900,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
     // #12c: install the per-collection authz hook before peers connect.
     handler.set_collection_authz(collection_authz);
     handler.set_collection_eager_pull(collection_eager_pull);
+    handler.set_collection_live_change(collection_live_change);
     handler.set_collection_write_authz(collection_write_authz);
     handler.set_document_read_authz(document_read_authz);
     handler.set_document_write_authz(document_write_authz);
