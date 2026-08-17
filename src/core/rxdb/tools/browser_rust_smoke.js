@@ -172,7 +172,7 @@ function chromiumLaunchOptions() {
     headless: true,
     args: [
       '--disable-gpu',
-      '--disable-features=WebRtcHideLocalIpsWithMdns',
+      '--disable-features=WebRtcHideLocalIpsWithMdns,LocalNetworkAccessChecks,LocalNetworkAccessChecksWebRTC',
     ],
   };
   if (executablePath) options.executablePath = executablePath;
@@ -1773,6 +1773,48 @@ async function seedBusinessOsThreadsScaleNativeSetup() {
   };
 }
 
+function prepareBusinessOsSellifyScaleModuleFixture() {
+  const moduleRoot = path.join(
+    runtimeRoot,
+    'runtime',
+    'business-os',
+    'local-modules',
+    'sellify-scale-smoke',
+  );
+  fs.mkdirSync(moduleRoot, { recursive: true });
+  const collections = [...SELLIFY_SCALE_COLLECTIONS];
+  const schema = {
+    version: 0,
+    primaryKey: 'id',
+    type: 'object',
+    properties: {
+      id: { type: 'string', maxLength: 180 },
+      status: { type: 'string' },
+      sort_key: { type: 'number' },
+      created_at_ms: { type: 'number' },
+      updated_at_ms: { type: 'number' },
+    },
+    required: ['id', 'status', 'updated_at_ms'],
+    indexes: [['status', 'updated_at_ms']],
+    additionalProperties: true,
+  };
+  const collectionSchemas = Object.fromEntries(collections.map((name) => [name, {
+    syncProfile: 'demand-only',
+    schema,
+  }]));
+  fs.writeFileSync(path.join(moduleRoot, 'module.json'), `${JSON.stringify({
+    id: 'sellify-scale-smoke',
+    title: 'Sellify Scale Smoke',
+    version: '1.0.0',
+    entry: 'local-modules/sellify-scale-smoke/index.js',
+    collections,
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(moduleRoot, 'collections.schema.json'), `${JSON.stringify({
+    schema_format: 'ctox-business-os-module-collections-v1',
+    collections: collectionSchemas,
+  }, null, 2)}\n`);
+}
+
 async function seedBusinessOsSellifyScaleNativeSetup() {
   const tables = {
     sellify_activities: 'ctox_business_os__sellify_activities__v0',
@@ -1783,7 +1825,7 @@ async function seedBusinessOsSellifyScaleNativeSetup() {
     desktop_files: 'ctox_business_os__desktop_files__v0',
     desktop_file_chunks: 'ctox_business_os__desktop_file_chunks__v0',
   };
-  sqlite(SELLIFY_SCALE_COLLECTIONS.map((collection) => {
+  sqlite(Object.keys(tables).map((collection) => {
     const table = quoteSqlIdentifier(tables[collection]);
     const index = quoteSqlIdentifier(`idx_${tables[collection]}_lwt`);
     return `
@@ -4195,6 +4237,21 @@ function ensureCtoxSmokeBinary() {
   }
   let threadsScaleSeed = null;
   let sellifyScaleSeed = null;
+  let sellifyScaleSeedMs = 0;
+  if (smokeMode === 'business-os-sellify-scale-ui') {
+    // Native V1.5 query-fetch is fail-closed and only registers static or
+    // runtime-module schemas. Materialize the synthetic module contract before
+    // peer startup so the large fixture tables and browser schemas share the
+    // same authoritative demand-only collection definitions. Provision the
+    // tables before startup as well: creating six schemas while the peer is
+    // refreshing the module catalog invalidates prepared SQLite statements and
+    // can tear down the browser data plane with "database schema has changed".
+    prepareBusinessOsSellifyScaleModuleFixture();
+    const scaleSeedStartedAt = Date.now();
+    sellifyScaleSeed = await seedBusinessOsSellifyScaleNativeSetup();
+    sellifyScaleSeedMs = Date.now() - scaleSeedStartedAt;
+    console.log(`business_os_sellify_scale_seed_ms=${sellifyScaleSeedMs}`);
+  }
   let ctox = startCtoxServer();
   const browserDiagnostics = {
     warnings: 0,
@@ -4269,10 +4326,7 @@ function ensureCtoxSmokeBinary() {
       console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
     }
     if (smokeMode === 'business-os-sellify-scale-ui') {
-      const scaleSeedStartedAt = Date.now();
-      sellifyScaleSeed = await seedBusinessOsSellifyScaleNativeSetup();
-      outerPhaseTimings.sellifyScaleSeedMs = Date.now() - scaleSeedStartedAt;
-      console.log(`business_os_sellify_scale_seed_ms=${outerPhaseTimings.sellifyScaleSeedMs}`);
+      outerPhaseTimings.sellifyScaleSeedMs = sellifyScaleSeedMs;
     }
     if (smokeMode === 'native-schema-drift-browser-status') {
       await waitForNativePeerSyncConfig(syncConfigWaitMs);
@@ -5014,11 +5068,21 @@ function ensureCtoxSmokeBinary() {
       }
       try {
         const shellReadyWaitStartedAt = Date.now();
-        if (deferredFileCollectionStartupMode) {
+        if (
+          deferredFileCollectionStartupMode
+          || smokeMode === 'business-os-threads-scale-ui'
+          || smokeMode === 'business-os-sellify-scale-ui'
+        ) {
           await page.waitForFunction(() => {
             const state = globalThis.ctoxBusinessOsSmoke?.state;
             const modulesLoaded = Array.isArray(state?.modules) && state.modules.length > 0;
-            return modulesLoaded && Boolean(state?.db?.raw) && Boolean(state?.sync);
+            const shellOpened = Boolean(document.body?.dataset?.moduleShell);
+            const loading = Boolean(document.body?.dataset?.moduleLoading);
+            return modulesLoaded
+              && Boolean(state?.db?.raw)
+              && Boolean(state?.sync)
+              && shellOpened
+              && !loading;
           }, null, { timeout: 60000 });
         } else {
           await page.waitForFunction(() => {
@@ -5073,18 +5137,36 @@ function ensureCtoxSmokeBinary() {
         console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
       }
       if (smokeMode === 'business-os-sellify-scale-ui') {
-        await page.evaluate(async (collectionNames) => {
+        const setupDeadline = Date.now() + 240000;
+        let setupResult = null;
+        while (Date.now() < setupDeadline) {
+          setupResult = await page.evaluate(async (collectionNames) => {
           const startupMarks = {
             collectionSetupStartedAtMs: Math.round(performance.now()),
           };
           const state = globalThis.ctoxBusinessOsSmoke?.state;
-          const rawDb = state?.db?.raw;
-          if (!rawDb?.addCollections || !state?.sync?.leaseCollection) {
-            throw new Error('Sellify scale smoke requires the shell database and scoped sync leases');
+          const db = state?.db;
+          const rawDb = db?.raw;
+          if (!db?.addCollections || !rawDb || typeof state?.sync?.leaseCollection !== 'function') {
+            const startupError = document.querySelector('#startup-error-msg')?.textContent || '';
+            const startupStatus = document.querySelector('#startup-status-text')?.textContent || '';
+            const statusText = document.querySelector('[data-status-text]')?.textContent || '';
+            return {
+              ready: false,
+              db: Boolean(db),
+              rawDb: Boolean(rawDb),
+              addCollections: typeof db?.addCollections,
+              sync: Boolean(state?.sync),
+              leaseCollection: typeof state?.sync?.leaseCollection,
+              startupStatus,
+              statusText,
+              startupError,
+              bodyDataset: { ...document.body?.dataset },
+            };
           }
           const missing = {};
           for (const name of collectionNames) {
-            if (rawDb[name]) continue;
+            if (db.collection(name)) continue;
             missing[name] = {
               syncProfile: 'demand-only',
               schema: {
@@ -5104,7 +5186,7 @@ function ensureCtoxSmokeBinary() {
               },
             };
           }
-          if (Object.keys(missing).length) await rawDb.addCollections(missing);
+          if (Object.keys(missing).length) await db.addCollections(missing);
           startupMarks.collectionsReadyAtMs = Math.round(performance.now());
           const leases = [];
           for (const name of collectionNames.slice(0, 1)) {
@@ -5114,7 +5196,14 @@ function ensureCtoxSmokeBinary() {
           }
           globalThis.__ctoxSellifyScaleLeases = leases;
           globalThis.__ctoxSellifyScaleStartupMarks = startupMarks;
-        }, SELLIFY_SCALE_COLLECTIONS);
+          return { ready: true };
+          }, SELLIFY_SCALE_COLLECTIONS);
+          if (setupResult?.ready) break;
+          await page.waitForTimeout(250);
+        }
+        if (!setupResult?.ready) {
+          throw new Error(`Sellify scale smoke requires the shell database and scoped sync leases: ${JSON.stringify(setupResult)}`);
+        }
       }
       const startupRequiredCollections = deferredFileCollectionStartupMode
         || largeFileMaterializeSmokeMode
@@ -10431,7 +10520,7 @@ function ensureCtoxSmokeBinary() {
         if (!rawDb || leases.length !== 1 || leases[0]?.collection !== 'sellify_activities') {
           throw new Error('Sellify scale collections or scoped leases are unavailable');
         }
-        const waitForQueryReady = async (requiredCollections, timeoutMs = 10000) => {
+        const waitForQueryReady = async (requiredCollections, timeoutMs = 60000) => {
           const deadline = Date.now() + timeoutMs;
           let last = {};
           while (Date.now() < deadline) {

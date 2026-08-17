@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -31,4 +32,25 @@ assert.ok(result.measurements.every((measurement) => measurement.queryRpcEquival
 assert.ok(result.measurements.every((measurement) => measurement.materializedDocuments <= 800));
 assert.ok(result.summary.maxMaterializedDocuments <= 800);
 assert.ok(result.summary.maxQueryRpcEquivalent <= 5);
+
+const browserSmoke = readFileSync(
+  resolve(here, '../../../../core/rxdb/tools/browser_rust_smoke.js'),
+  'utf8',
+);
+const scaleSetupStart = browserSmoke.indexOf('let sellifyScaleSeed = null;');
+const nativePeerStart = browserSmoke.indexOf('let ctox = startCtoxServer();', scaleSetupStart);
+const scaleSetupBlock = browserSmoke.slice(scaleSetupStart, nativePeerStart);
+assert.ok(scaleSetupStart >= 0 && nativePeerStart > scaleSetupStart);
+assert.match(scaleSetupBlock, /prepareBusinessOsSellifyScaleModuleFixture\(\);/);
+assert.match(scaleSetupBlock, /sellifyScaleSeed = await seedBusinessOsSellifyScaleNativeSetup\(\);/);
+const fixtureStart = browserSmoke.indexOf('function prepareBusinessOsSellifyScaleModuleFixture()');
+const seedStart = browserSmoke.indexOf('async function seedBusinessOsSellifyScaleNativeSetup()', fixtureStart);
+const fixtureBlock = browserSmoke.slice(fixtureStart, seedStart);
+assert.ok(fixtureStart >= 0 && seedStart > fixtureStart);
+assert.match(fixtureBlock, /'runtime',\s*'business-os',\s*'local-modules',\s*'sellify-scale-smoke'/);
+assert.match(fixtureBlock, /syncProfile: 'demand-only'/);
+assert.match(fixtureBlock, /schema_format: 'ctox-business-os-module-collections-v1'/);
+const seedEnd = browserSmoke.indexOf('function computeBusinessOsReleaseModuleBundle', seedStart);
+const seedBlock = browserSmoke.slice(seedStart, seedEnd);
+assert.match(seedBlock, /sqlite\(Object\.keys\(tables\)\.map/);
 console.log('sellify scale benchmark smoke passed');
