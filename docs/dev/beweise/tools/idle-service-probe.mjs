@@ -210,6 +210,15 @@ const finishedAt = new Date();
 const cpuValues = samples.map((sample) => sample.cpu_percent);
 const cpuTimeDelta = samples.at(-1).cpu_time_seconds - samples[0].cpu_time_seconds;
 const elapsedSeconds = (finishedAt.getTime() - startedAt.getTime()) / 1000;
+// The database and runtime snapshots can block behind SQLite work for much
+// longer than the requested sampling window. CPU time is measured from the
+// first through the last process sample, so its denominator must use exactly
+// those same endpoints instead of diluting the result with snapshot time.
+const sampleElapsedSeconds = Math.max(
+  0.001,
+  (new Date(samples.at(-1).captured_at).getTime()
+    - new Date(samples[0].captured_at).getTime()) / 1000,
+);
 const result = {
   schema: "ctox.idle_service_probe.v1",
   started_at: startedAt.toISOString(),
@@ -228,8 +237,9 @@ const result = {
     sampled_cpu_p50_percent: percentile(cpuValues, 0.5),
     sampled_cpu_p95_percent: percentile(cpuValues, 0.95),
     sampled_cpu_max_percent: Math.max(...cpuValues),
+    sample_elapsed_seconds: sampleElapsedSeconds,
     process_cpu_time_delta_seconds: cpuTimeDelta,
-    process_cpu_duration_percent: (cpuTimeDelta / elapsedSeconds) * 100,
+    process_cpu_duration_percent: (cpuTimeDelta / sampleElapsedSeconds) * 100,
     retry_candidates_stable_zero:
       databaseBefore.retry_candidate_count === 0 && databaseAfter.retry_candidate_count === 0,
     command_revisions_unchanged:
