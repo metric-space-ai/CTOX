@@ -309,6 +309,19 @@ Rollout-Zwischenstand vom 16.08.2026:
   `idle-cpu-b42c55efa`. Retention entfernte den älteren Backup-Slot
   `update-20260816T220430Z` und den älteren Release `idle-cpu-60ff9c957`.
   Startup-Idle, erneute Kurzprobe und Ein-Stunden-Probe stehen noch aus.
+- Die erste Startup-Abnahme dieses Releases wurde um `03:36 +0200` erneut
+  durch denselben Parallel-Task invalidiert: Trotz ausdrücklicher vorheriger
+  Abgrenzungsbestätigung schrieb dessen Workjet-Lauf die Plist auf
+  `/Volumes/tmp/workjet/ctox-current-durable-revocation-check-target/debug/ctox`
+  um, startete PID `13335` gegen den produktiven State und verdrängte
+  Release-PID `12735`. Der fremde Lauf wird nicht als Messwert verwendet. Der
+  Task wurde zur sofortigen Freigabe von PID und LaunchAgent sowie zu einem
+  isolierten Test-Root verpflichtet und bestätigte die Bereinigung. PID
+  `13335` ist beendet, das fremde Label entladen. Die Plist ist wieder auf
+  `/bin/bash ~/.local/bin/ctox service --foreground` gerichtet, mit `plutil`
+  validiert und geladen; Release `idle-cpu-b41cc74ca` startet nun unter PID
+  `14641`. Auch dieser dritte fremd invalidierte Lauf zählt nicht als
+  Abnahmebeweis.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
