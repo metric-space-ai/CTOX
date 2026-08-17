@@ -88,8 +88,22 @@
     "estimated_recovery_documents_per_day": 18000,
     "targeted_headroom_test": "passed_1_of_1",
     "rustfmt": "passed",
-    "isolated_release_build": "in_progress",
-    "corrected_short_after_probe": "pending",
-    "one_hour_after_probe": "pending"
+    "isolated_snapshot": "/Volumes/tmp/ctox-idle-39dcbb031.f2rKWt",
+    "isolated_release_build": "passed_in_32m22s",
+    "binary_sha256": "9d4ef4ef628ef79aef30d5a7626a96f9196dfa97d87da875bddc9d2d14389bc2",
+    "service_pid": 7757,
+    "corrected_short_after_probe": {
+      "requested_duration_seconds": 300,
+      "sample_elapsed_seconds": 300.034,
+      "process_cpu_seconds": 16.89,
+      "process_cpu_duration_percent": 5.629362006,
+      "sampled_cpu_p50_percent": 0.4,
+      "sampled_cpu_p95_percent": 29.5,
+      "sampled_cpu_max_percent": 142.0,
+      "correctness_gates": "passed",
+      "cpu_gate_under_five_percent": "failed",
+      "interpretation": "the five-minute window still contains warm-up and memory-trim work; the required one-hour warm measurement decides whether another throttle is justified"
+    },
+    "one_hour_after_probe": "in_progress"
   }
 }

@@ -439,8 +439,16 @@ Rollout-Zwischenstand vom 16.08.2026:
 - Commit `39dcbb031` vergrößert deshalb ausschließlich das Ruhefenster zwischen
   den weiter auf 25 Dokumente begrenzten Recovery-Slices auf 120 Sekunden.
   Das lässt weiterhin etwa 18.000 historische Dokumente pro Tag aufholen. Der
-  aktualisierte Headroom-Test ist `1/1` grün, Rustfmt ist grün und der reine
-  Archiv-Build für die korrigierte Kurz- und Ein-Stunden-Messung läuft.
+  aktualisierte Headroom-Test ist `1/1` grün und Rustfmt ist grün. Der reine
+  Archiv-Build `/Volumes/tmp/ctox-idle-39dcbb031.f2rKWt` endete nach 32:22
+  Minuten erfolgreich; das Binary hat SHA-256
+  `9d4ef4ef628ef79aef30d5a7626a96f9196dfa97d87da875bddc9d2d14389bc2`.
+- Die korrigierte 300-Sekunden-Kurzprobe blieb mit 5,63 % knapp rot, p50 lag
+  bei 0,4 %. Kandidaten, Revisionen und Intake-Fehler blieben null/stabil und
+  die Idle-Ticks stiegen. Das Fenster enthielt neben zwei Recovery-Slices noch
+  einmalige Warm-up-/Memory-Trim-Arbeit. Deshalb wird nicht erneut auf Basis
+  eines kurzen Fensters gedrosselt: Die verbindliche warme Ein-Stunden-Probe
+  läuft auf demselben Binary und entscheidet über einen weiteren Eingriff.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
