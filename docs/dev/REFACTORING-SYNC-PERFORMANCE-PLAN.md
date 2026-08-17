@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | ja | vierter Fix ausgerollt; Korrektheitsgates grün | nein | Startphase abwarten; Kurz- und Ein-Stunden-Probe wiederholen |
+| Idle-CPU des Dienstes | ja | fünfter Fix ausgerollt; Korrektheitsgates grün | nein | Kurz- und Ein-Stunden-Probe in isolierter/remote Umgebung wiederholen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -322,6 +322,20 @@ Rollout-Zwischenstand vom 16.08.2026:
   validiert und geladen; Release `idle-cpu-b41cc74ca` startet nun unter PID
   `14641`. Auch dieser dritte fremd invalidierte Lauf zählt nicht als
   Abnahmebeweis.
+- Auch PID `14641` verschwand anschließend um `03:38:58 +0200` zusammen mit
+  dem geladenen LaunchAgent-Label. Die Plist blieb dabei korrekt und das
+  Service-Log enthält keinen Panic-, Fatal- oder geordneten Shutdown-Hinweis.
+  Damit ist auch dieser Lauf kein gültiger Idle-Nachweis. Der verantwortliche
+  Parallel-Task bestätigte danach den erfolgreichen `bootout` des zuvor
+  fremd gestarteten Dienstes, dass PID `13335` und das Label nicht mehr
+  existieren, sowie den dauerhaften Verzicht auf weitere lokale CTOX-Start-,
+  Stop-, Update-, `launchctl`- oder Foreground-Service-Aktionen. Die Plist
+  wurde bei dieser abschließenden Bereinigung nicht verändert.
+- Bis zur belastbaren Trennung konkurrierender lokaler Service-Aktionen wird
+  der produktive LaunchAgent in dieser Kampagne nicht erneut manipuliert.
+  Weitere Implementierung und Performanceprüfungen erfolgen remote oder mit
+  isoliertem Test-Root. Die formale 30-Sekunden- und Ein-Stunden-Abnahme des
+  Releases `idle-cpu-b41cc74ca` bleibt deshalb ausdrücklich offen.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
@@ -556,9 +570,10 @@ Kein Commit darf:
 
 ## Nächste Ausführungsreihenfolge
 
-1. Startup-Arbeit des Releases `idle-cpu-b42c55efa` abklingen lassen.
-2. Kurzprobe und einstündige Idle-Nachhermessung mit diesem finalen
-   Release durchführen und als Rohdaten versionieren.
+1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
+   produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
+2. Kurzprobe und einstündige Idle-Nachhermessung mit Release
+   `idle-cpu-b41cc74ca` durchführen und als Rohdaten versionieren.
 3. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
 4. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
 5. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
