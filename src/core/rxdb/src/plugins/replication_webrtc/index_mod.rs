@@ -1644,7 +1644,12 @@ where
                                     if !handler_for_stream.is_collection_active_for_peer(
                                         &peer_for_stream,
                                         &collection_name,
-                                    ) {
+                                    ) && !handler_for_stream
+                                        .is_inactive_live_change_authorized_for_peer(
+                                            &peer_for_stream,
+                                            &collection_name,
+                                        )
+                                    {
                                         continue;
                                     }
                                     // #12c: do not push live changes of a collection

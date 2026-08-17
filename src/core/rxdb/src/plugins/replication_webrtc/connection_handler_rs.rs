@@ -1529,6 +1529,26 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
             .unwrap_or(true)
     }
 
+    fn is_inactive_live_change_authorized_for_peer(
+        &self,
+        peer: &Self::Peer,
+        collection: &str,
+    ) -> bool {
+        let hook = self.collection_live_change.lock().clone();
+        match hook {
+            None => false,
+            Some(check) => {
+                let token = self
+                    .peer_capability_tokens
+                    .lock()
+                    .get(peer)
+                    .cloned()
+                    .unwrap_or_default();
+                check(&token, collection)
+            }
+        }
+    }
+
     fn set_peer_capability_token(&self, peer: &Self::Peer, token: String) {
         self.peer_capability_tokens
             .lock()
@@ -1641,18 +1661,9 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
         collection: &str,
         change: crate::types::RxReplicationMasterChange,
     ) -> Option<crate::types::RxReplicationMasterChange> {
-        let live_change_allowed = self.collection_live_change.lock().clone().map_or_else(
-            || self.is_eager_collection_pull_authorized_for_peer(peer, collection),
-            |check| {
-                let token = self
-                    .peer_capability_tokens
-                    .lock()
-                    .get(peer)
-                    .cloned()
-                    .unwrap_or_default();
-                check(&token, collection)
-            },
-        );
+        let live_change_allowed = self
+            .is_eager_collection_pull_authorized_for_peer(peer, collection)
+            || self.is_inactive_live_change_authorized_for_peer(peer, collection);
         if !live_change_allowed {
             return None;
         }
@@ -3626,6 +3637,8 @@ mod tests {
             collection == "business_commands"
         })));
         assert!(!handler.is_eager_collection_pull_authorized_for_peer(&peer, "business_commands"));
+        assert!(handler.is_inactive_live_change_authorized_for_peer(&peer, "business_commands"));
+        assert!(!handler.is_inactive_live_change_authorized_for_peer(&peer, "sellify_activities"));
         assert!(handler
             .filter_master_change_for_peer(
                 &peer,

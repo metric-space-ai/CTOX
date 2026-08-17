@@ -168,6 +168,17 @@ pub trait WebRTCConnectionHandler: Send + Sync {
         true
     }
 
+    /// Whether a small, server-authorized live stream may continue while the
+    /// browser has not marked the collection foreground. Generic handlers do
+    /// not opt into background live changes.
+    fn is_inactive_live_change_authorized_for_peer(
+        &self,
+        _peer: &Self::Peer,
+        _collection: &str,
+    ) -> bool {
+        false
+    }
+
     /// #12c: record the capability token a peer presented in its handshake
     /// `peerSession`. Generic handlers no-op; the CTOX handler stores it for the
     /// per-collection authz gate below.

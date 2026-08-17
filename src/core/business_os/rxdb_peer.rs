@@ -2559,9 +2559,7 @@ async fn run_native_peer(
             move |_token: &str, collection: &str| !is_server_demand_only_collection(collection),
         ));
         let collection_live_change: Option<CollectionLiveChangeHook> = Some(std::sync::Arc::new(
-            move |_token: &str, collection: &str| {
-                !is_server_demand_only_collection(collection) || collection == "business_commands"
-            },
+            move |_token: &str, collection: &str| collection == "business_commands",
         ));
         let document_read_authz: Option<DocumentReadAuthzHook> = {
             let doc_authz_root = root.clone();
