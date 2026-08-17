@@ -746,10 +746,12 @@ const BUSINESS_RECORD_PROJECTION_ERROR_BACKOFF_BASE_SECS: u64 = 30;
 const BUSINESS_RECORD_PROJECTION_ERROR_BACKOFF_MAX_SECS: u64 = 5 * 60;
 // A legacy/recovery catch-up is best-effort reconciliation over projections
 // the browser can already read from durable RxDB. Keep each slice to one small
-// page and leave a full quiet minute between incomplete slices: on the
+// page and leave two quiet minutes between incomplete slices: on the
 // representative 2.1-GB store, the old 2,000-document slice occupied a core
-// for 201-224 seconds and made the nominally idle daemon continuously hot.
-const BUSINESS_RECORD_PROJECTION_PARTIAL_SYNC_INTERVAL_SECS: u64 = 60;
+// for 201-224 seconds and made the nominally idle daemon continuously hot. A
+// measured 25-document slice still consumed enough CPU to miss the 5% gate at
+// a 60-second interval (5.36% over the exact process-sampling window).
+const BUSINESS_RECORD_PROJECTION_PARTIAL_SYNC_INTERVAL_SECS: u64 = 120;
 const BUSINESS_RECORD_PROJECTION_SYNC_LIMIT: usize = 25;
 const BUSINESS_RECORD_PROJECTION_PAGE_SIZE: usize = 25;
 pub(super) const BUSINESS_RECORD_PROJECTION_WRITE_BATCH_SIZE: usize = 250;
@@ -9424,8 +9426,8 @@ pub(in crate::business_os) mod tests {
             "an incomplete catch-up tick must process at most one bounded page"
         );
         assert!(
-            BUSINESS_RECORD_PROJECTION_PARTIAL_SYNC_INTERVAL_SECS >= 60,
-            "legacy catch-up must leave a full quiet minute between slices"
+            BUSINESS_RECORD_PROJECTION_PARTIAL_SYNC_INTERVAL_SECS >= 120,
+            "legacy catch-up must leave two quiet minutes between slices"
         );
         assert_eq!(
             business_record_projection_loop_sleep_secs(0, 0, true),
