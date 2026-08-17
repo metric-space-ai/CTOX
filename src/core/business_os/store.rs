@@ -10309,6 +10309,7 @@ impl BusinessProjectionWriter {
 
 struct RxdbCollectionWriter {
     conn: Connection,
+    database_path: PathBuf,
     table: String,
     columns: HashSet<String>,
     last_replication_lwt: i64,
@@ -10345,6 +10346,7 @@ impl RxdbCollectionWriter {
         )? as i64;
         Ok(Some(Self {
             conn,
+            database_path: path,
             table,
             columns,
             last_replication_lwt,
@@ -10366,7 +10368,9 @@ impl RxdbCollectionWriter {
             updated_at_ms,
             payload,
             false,
-        )
+        )?;
+        self.notify_committed_change();
+        Ok(())
     }
 
     fn upsert_source_projection(
@@ -10387,7 +10391,9 @@ impl RxdbCollectionWriter {
             replication_lwt,
             payload,
             false,
-        )
+        )?;
+        self.notify_committed_change();
+        Ok(())
     }
 
     fn tombstone_source_projection(
@@ -10411,7 +10417,20 @@ impl RxdbCollectionWriter {
                 "_deleted": true,
             }),
             true,
-        )
+        )?;
+        self.notify_committed_change();
+        Ok(())
+    }
+
+    fn notify_committed_change(&self) {
+        // This writer uses its own SQLite connection, so the RxDB storage
+        // connection's update hook cannot observe the commit. Wake the
+        // in-process table feed directly instead of waiting for the
+        // filesystem watcher and its coalescing window.
+        rxdb::storage::sqlite::instance::notify_table_change_for_path(
+            &self.database_path,
+            &self.table,
+        );
     }
 }
 

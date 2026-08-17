@@ -269,6 +269,17 @@ pub fn notify_table_change(database_key: &str, table_name: &str) -> bool {
     false
 }
 
+/// Wakes a live storage instance after another connection in this process
+/// committed a write to its physical collection table.
+///
+/// Direct projection writers know the database path rather than the storage
+/// registry's normalized key. Keeping that conversion here avoids coupling
+/// callers to the registry-key representation and lets the local-hook
+/// generation suppress the later filesystem-watcher echo.
+pub fn notify_table_change_for_path(database_path: &Path, table_name: &str) -> bool {
+    notify_table_change(&database_key_for_path(database_path), table_name)
+}
+
 pub(crate) fn notify_external_table_change(database_key: &str, table_name: &str) -> bool {
     if let Some(registry) = UPDATE_REGISTRY.get() {
         let map = registry.lock().unwrap();
@@ -4051,7 +4062,7 @@ mod tests {
 
         let shared_conn = storage.connection().unwrap();
         let _writer_guard = shared_conn.lock();
-        notify_table_change(&database_key_for_path(&database_path), &instance.table_name);
+        notify_table_change_for_path(&database_path, &instance.table_name);
 
         let bulk = timeout(Duration::from_millis(750), stream.next())
             .await
