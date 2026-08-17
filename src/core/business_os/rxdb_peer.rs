@@ -60,9 +60,9 @@ pub(super) use super::rxdb_peer_intake::{
     business_commands_source_change, business_commands_source_stamp, business_commands_table_stamp,
     consume_pending_business_commands, enrich_native_command_lifecycle,
     pending_business_command_documents, pending_business_command_documents_sync,
-    refresh_business_commands_source_stamp, transient_business_command_retry_document,
-    wait_for_business_command_wake, BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET,
-    BUSINESS_COMMAND_RETRY_CANDIDATE_SQL,
+    refresh_business_commands_source_stamp, schedule_business_command_intake_retry,
+    transient_business_command_retry_document, wait_for_business_command_wake,
+    BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET, BUSINESS_COMMAND_RETRY_CANDIDATE_SQL,
 };
 pub(super) use super::rxdb_peer_projections::{
     bulk_upsert_business_record_projection_documents, find_projection_documents_by_id,
@@ -9038,6 +9038,9 @@ fn sqlite_table_latest_updated_at_ms(
 #[cfg(test)]
 pub(in crate::business_os) mod tests {
     use super::*;
+    use crate::business_os::rxdb_peer_intake::{
+        BusinessCommandsSourceStamp, BusinessCommandsTableStamp,
+    };
     use rusqlite::params;
     use rusqlite::Connection;
     use rusqlite::OptionalExtension;
@@ -9931,6 +9934,33 @@ pub(in crate::business_os) mod tests {
             BUSINESS_COMMAND_IDLE_POLL_SECS
         );
         assert!(BUSINESS_COMMAND_IDLE_POLL_SECS > BUSINESS_COMMAND_ACTIVE_POLL_SECS);
+    }
+
+    #[test]
+    fn business_command_intake_failure_forces_a_paced_rescan_without_a_source_change() {
+        let mut stamp = Some(BusinessCommandsSourceStamp {
+            table: BusinessCommandsTableStamp {
+                table_name: Some("business_commands_v1".to_string()),
+                pending_count: 1,
+                latest_pending_lwt_bits: 42,
+            },
+        });
+        let mut failures = HashMap::new();
+        failures.insert("cmd-locked".to_string(), 1);
+
+        assert!(schedule_business_command_intake_retry(
+            &mut stamp, &failures
+        ));
+        assert!(
+            stamp.is_none(),
+            "the next loop must rescan the unchanged row"
+        );
+
+        let mut idle_stamp = None;
+        assert!(!schedule_business_command_intake_retry(
+            &mut idle_stamp,
+            &HashMap::new()
+        ));
     }
 
     #[test]

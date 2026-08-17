@@ -228,6 +228,16 @@ pub(super) async fn consume_business_commands_loop(root: PathBuf, database: Arc<
         }
         .await;
         record_native_peer_loop_result(&BUSINESS_COMMANDS_LOOP_METRICS, &result, started.elapsed());
+        if schedule_business_command_intake_retry(&mut last_source_stamp, &accept_failures) {
+            // A fully contended SQLite write can reject both acceptance and
+            // the durable failure record. In that case the RxDB source row is
+            // unchanged, so no notifier or source-stamp delta can wake us.
+            // Keep the retry finite and paced instead of sleeping for the
+            // 30-second idle safety poll or spinning at full CPU.
+            consecutive_idle_rounds = 0;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
         match result {
             Ok(0) => {
                 consecutive_idle_rounds = consecutive_idle_rounds.saturating_add(1);
@@ -250,6 +260,19 @@ pub(super) async fn consume_business_commands_loop(root: PathBuf, database: Arc<
         wait_for_business_command_wake(&root, last_source_stamp.as_ref(), consecutive_idle_rounds)
             .await;
     }
+}
+
+pub(super) fn schedule_business_command_intake_retry(
+    last_source_stamp: &mut Option<BusinessCommandsSourceStamp>,
+    accept_failures: &HashMap<String, u32>,
+) -> bool {
+    if accept_failures.is_empty() {
+        return false;
+    }
+    // Force the next loop iteration to rescan even when neither the failed
+    // intake nor its failure audit could acquire the SQLite write lock.
+    *last_source_stamp = None;
+    true
 }
 
 pub(super) fn business_command_poll_sleep_secs(consecutive_idle_rounds: u32) -> u64 {
@@ -336,6 +359,12 @@ pub(super) async fn consume_pending_business_commands(
         .await
         .context("load pending business_commands from RxDB SQLite")?;
     let pending_count = rows.len();
+    if pending_count == 0 {
+        // A command can disappear while its in-memory fallback counter is
+        // waiting for a lock retry. Do not let that stale counter keep the
+        // consumer on the paced active path forever.
+        accept_failures.clear();
+    }
     for document in rows {
         COMMAND_PLANE_METRICS.record_attempt();
         // Isolate failures per command: one broken document must not stall
