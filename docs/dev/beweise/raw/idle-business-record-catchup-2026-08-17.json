@@ -22,14 +22,16 @@
   },
   "baseline_probe": {
     "requested_duration_seconds": 30,
-    "actual_elapsed_seconds": 82.814,
+    "overall_elapsed_seconds_including_snapshots": 82.814,
+    "sample_elapsed_seconds": 30.03,
     "sample_count": 31,
     "sampled_cpu_average_percent": 77.28,
     "sampled_cpu_p50_percent": 77.4,
     "sampled_cpu_p95_percent": 95.2,
     "sampled_cpu_max_percent": 96.0,
     "process_cpu_seconds": 22.98,
-    "process_cpu_duration_percent": 27.7489
+    "process_cpu_duration_percent_legacy_diluted": 27.7489,
+    "process_cpu_duration_percent_corrected": 76.523476523
   },
   "dominant_work": {
     "stack": "sync_business_record_projections_slice_with_database -> sqlite3_step",
@@ -50,8 +52,44 @@
     "page_size": 25,
     "targeted_headroom_test": "passed_1_of_1",
     "rustfmt": "passed",
+    "isolated_snapshot": "/Volumes/tmp/ctox-idle-b1a605dac-full.nuMWDF",
+    "isolated_release_build": "passed_in_25m12s",
+    "binary_sha256": "e9acaeaef498b04c1abf845ff38a9e2f4e027531359256ca7e4c19460e5ed764",
+    "service_pid": 61047,
+    "short_after_probe": {
+      "requested_duration_seconds": 140,
+      "overall_elapsed_seconds_including_snapshots": 252.437,
+      "sample_elapsed_seconds": 140.015,
+      "process_cpu_seconds": 7.51,
+      "process_cpu_duration_percent_legacy_diluted": 2.974999703,
+      "process_cpu_duration_percent_corrected": 5.363711031,
+      "sampled_cpu_p50_percent": 0.4,
+      "sampled_cpu_p95_percent": 30.0,
+      "sampled_cpu_max_percent": 61.1,
+      "rows_after_four_ticks": 100,
+      "last_slice_duration_ms": 21341,
+      "max_slice_duration_ms": 24651,
+      "correctness_gates": "passed",
+      "cpu_gate_under_five_percent": "failed"
+    }
+  },
+  "probe_correction": {
+    "commit": "e3db706fc",
+    "description": "divide process CPU delta by the exact first-to-last sample interval, not by the longer interval that includes blocking database snapshots",
+    "syntax_check": "passed",
+    "ten_second_runtime_smoke": "passed"
+  },
+  "follow_up_change": {
+    "commit": "39dcbb031",
+    "partial_sync_interval_seconds_before": 60,
+    "partial_sync_interval_seconds_after": 120,
+    "sync_limit": 25,
+    "page_size": 25,
+    "estimated_recovery_documents_per_day": 18000,
+    "targeted_headroom_test": "passed_1_of_1",
+    "rustfmt": "passed",
     "isolated_release_build": "in_progress",
-    "short_after_probe": "pending",
+    "corrected_short_after_probe": "pending",
     "one_hour_after_probe": "pending"
   }
 }

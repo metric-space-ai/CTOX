@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | in Arbeit | Command-Stamp grün; begrenzte Business-Records-Aufholung committed | nein | isolierten Neubau, Kurz- und Ein-Stunden-Probe abschließen |
+| Idle-CPU des Dienstes | in Arbeit | Command-Stamp grün; 60-s-Catch-up knapp rot, 120-s-Folgefix committed | nein | isolierten Neubau, korrigierte Kurz- und Ein-Stunden-Probe abschließen |
 | OA-2 synthetische 300k-Baseline | teilweise | 304.515-Dokumente-Einzel-Smoke strukturell grün | entfällt | 30×30-Matrix und Latenzziel offen |
 | OA-1 bounded Demand-Sync | ja | 4 RPCs, 650 materialisierte Dokumente, kein Vollpull | nein | Latenz- und Löschungsabnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -420,11 +420,27 @@ Rollout-Zwischenstand vom 16.08.2026:
   Slices halten SQLite nahezu kontinuierlich besetzt und erklären auch den
   langsamen Query-Fetch-Start.
 - Commit `b1a605dac` begrenzt deshalb jeden unvollständigen Recovery-Tick auf
-  genau eine 25-Dokumente-Seite und lässt zwischen solchen Slices mindestens
-  60 Sekunden Ruhe. Der normale Command-/Browserpfad und die sofortige
-  Projektion bleiben unverändert. Der neue Headroom-Guard ist `1/1` grün und
-  `cargo fmt --all -- --check` ist grün. Der reine Archiv-Release-Build und die
-  Nachhermessung laufen; erst deren Messwert entscheidet über das CPU-Tor.
+  genau eine 25-Dokumente-Seite und ließ zunächst 60 Sekunden Ruhe. Der
+  normale Command-/Browserpfad und die sofortige Projektion bleiben
+  unverändert. Der neue Headroom-Guard ist `1/1` grün und
+  `cargo fmt --all -- --check` ist grün. Der reine Archiv-Release-Build
+  `/Volumes/tmp/ctox-idle-b1a605dac-full.nuMWDF` endete nach 25:12 Minuten
+  erfolgreich; sein Binary hat SHA-256
+  `e9acaeaef498b04c1abf845ff38a9e2f4e027531359256ca7e4c19460e5ed764`.
+- Die erste 140-Sekunden-Nachherprobe deckte anschließend einen Messfehler im
+  vorhandenen Dauer-Probe-Werkzeug auf: Dessen CPU-Zähler lief korrekt vom
+  ersten bis letzten Prozesssample, der Nenner enthielt jedoch zusätzlich die
+  unter Last 112 Sekunden dauernden SQLite-Snapshots davor und danach. Commit
+  `e3db706fc` verwendet nun für Zähler und Nenner exakt dasselbe Samplefenster.
+  Dadurch korrigiert sich die alte 30-Sekunden-Baseline von verwässerten
+  27,75 % auf 76,52 % und die 60-Sekunden-Nachhermessung von verwässerten
+  2,97 % auf 5,36 %. Die Korrektheitsgates blieben vollständig grün, das
+  CPU-Tor war aber ehrlich noch knapp rot.
+- Commit `39dcbb031` vergrößert deshalb ausschließlich das Ruhefenster zwischen
+  den weiter auf 25 Dokumente begrenzten Recovery-Slices auf 120 Sekunden.
+  Das lässt weiterhin etwa 18.000 historische Dokumente pro Tag aufholen. Der
+  aktualisierte Headroom-Test ist `1/1` grün, Rustfmt ist grün und der reine
+  Archiv-Build für die korrigierte Kurz- und Ein-Stunden-Messung läuft.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
@@ -699,6 +715,8 @@ Kein Commit darf:
 | `e42e3386f` | Command-Stamp über vier indexgerechte Lifecycle-Zweige aggregieren |
 | `dfccf3ede` | isolierte Sellify-Scale-Schemas vor dem nativen Peer registrieren und den echten Browser-Smoke härten |
 | `b1a605dac` | historische Business-Records-Aufholung auf eine kleine Seite pro Ruhefenster begrenzen |
+| `e3db706fc` | Idle-Probe auf den exakten CPU-Samplezeitraum korrigieren |
+| `39dcbb031` | nach gemessenem 5,36-%-Rest das Recovery-Ruhefenster auf 120 Sekunden vergrößern |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -718,7 +736,7 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den begrenzten Business-Records-Catch-up `b1a605dac` aus dem sauberen Archiv
+2. Den begrenzten Business-Records-Catch-up `39dcbb031` aus dem sauberen Archiv
    als Release bauen und ausschließlich im isolierten Test-Root gegen die
    repräsentativen Datenbanken kurz nachmessen.
 3. Bei bestandenem Kurztest die einstündige Idle-Nachhermessung im isolierten
