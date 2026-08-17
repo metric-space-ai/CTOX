@@ -139,6 +139,22 @@
       "correctness_gates": "passed",
       "cpu_gate_under_five_percent": "passed"
     },
-    "one_hour_after_probe": "in_progress"
+    "one_hour_after_probe": {
+      "status": "passed",
+      "requested_duration_seconds": 3600,
+      "sample_elapsed_seconds": 3600.004,
+      "sample_count": 720,
+      "process_cpu_seconds": 144.87,
+      "process_cpu_duration_percent": 4.024162195,
+      "sampled_cpu_average_percent": 3.261666667,
+      "sampled_cpu_p50_percent": 0.1,
+      "sampled_cpu_p95_percent": 16.2,
+      "sampled_cpu_max_percent": 468.0,
+      "retry_candidates_stable_zero": true,
+      "command_revisions_unchanged": true,
+      "intake_failures_stable_zero": true,
+      "idle_ticks_advanced": true,
+      "compact_raw_evidence": "docs/dev/beweise/raw/idle-service-1h-500f416c6-2026-08-17.json"
+    }
   }
 }

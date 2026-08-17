@@ -48,8 +48,8 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 |---|---:|---:|---:|---|
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
-| OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | in Arbeit | 60 s und 120 s messbar rot; 300-s-Folgefix committed | nein | isolierten Neubau, korrigierte Kurz- und Ein-Stunden-Probe abschließen |
+| OA-6 endlicher Command-Intake | ja | inklusive isolierter Stunde ja | nein | Kundenmessung offen |
+| Idle-CPU des Dienstes | ja | 4,02 % über eine isolierte Stunde | nein | Kundenmessung offen |
 | OA-2 synthetische 300k-Baseline | teilweise | 304.515-Dokumente-Einzel-Smoke strukturell grün | entfällt | 30×30-Matrix und Latenzziel offen |
 | OA-1 bounded Demand-Sync | ja | 4 RPCs, 650 materialisierte Dokumente, kein Vollpull | nein | Latenz- und Löschungsabnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -465,8 +465,17 @@ Rollout-Zwischenstand vom 16.08.2026:
 - Der korrigierte 600-Sekunden-Vorfilter ist klar grün: 2,13 % tatsächliche
   Prozess-CPU, p50 0,1 %, p95 12,7 %. Kandidaten, Command-Revisionen und
   Intake-Fehler blieben null beziehungsweise unverändert, die Idle-Ticks
-  stiegen. Die verbindliche warme Ein-Stunden-Probe läuft deshalb nun auf
-  demselben Binary.
+  stiegen.
+- Die verbindliche warme Ein-Stunden-Probe ist ebenfalls grün: 144,87
+  CPU-Sekunden in exakt 3.600,004 Sample-Sekunden entsprechen 4,02 %
+  Dauerlast; p50 liegt bei 0,1 %, p95 bei 16,2 %. Kurze periodische Peaks bis
+  468 % bleiben sichtbar, bilden aber keinen Hotloop. Retry-Kandidaten und
+  offene Intake-Fehler blieben null, der Command-Revisionshash und die
+  Changed-Table-Revision unverändert, während die Business-Command-Idle-Ticks
+  von 23 auf 143 stiegen. Ohne Browser blieb `replicationUp=false`, der
+  Heartbeat war vor und nach der Stunde frisch. Der isolierte Dienst wurde
+  danach sauber beendet; produktiver lokaler Dienst und `launchctl` blieben
+  unangetastet.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
@@ -763,21 +772,16 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den begrenzten Business-Records-Catch-up `500f416c6` aus dem sauberen Archiv
-   als Release bauen und ausschließlich im isolierten Test-Root gegen die
-   repräsentativen Datenbanken kurz nachmessen.
-3. Bei bestandenem Kurztest die einstündige Idle-Nachhermessung im isolierten
-   Test-Root durchführen und als Rohdaten versionieren.
-4. Mit dem entlasteten Native-Peer Sellify-Einzel-Smoke und Command-p50 erneut
+2. Mit dem entlasteten Native-Peer Sellify-Einzel-Smoke und Command-p50 erneut
    messen; nur den danach noch dominierenden Abschnitt weiter optimieren.
-5. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
+3. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
    Browsermatrix auf dem synthetischen Scale-Store ausführen.
-6. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
-7. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
-8. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
+4. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
+5. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
+6. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
    bereinigen, ohne Budgets anzuheben.
-9. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
-10. OA-7-Kompaktierung im exklusiven Wartungsfenster.
+7. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
+8. OA-7-Kompaktierung im exklusiven Wartungsfenster.
 
 ## Definition of Done
 

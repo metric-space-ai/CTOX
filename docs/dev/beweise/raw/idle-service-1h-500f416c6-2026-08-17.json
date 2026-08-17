@@ -1,0 +1,72 @@
+{
+  "schema": "ctox.idle_service_probe.v1.compact",
+  "started_at": "2026-08-17T12:22:01.436Z",
+  "finished_at": "2026-08-17T13:23:11.529Z",
+  "requested_duration_seconds": 3600,
+  "overall_elapsed_seconds_including_snapshots": 3670.093,
+  "sample_elapsed_seconds": 3600.004,
+  "interval_seconds": 5,
+  "sample_count": 720,
+  "source_commit": "500f416c6",
+  "source_snapshot": "/Volumes/tmp/ctox-idle-500f416c6.vpuE5M",
+  "binary_sha256": "b3e70d38aefcdb3b61f11a2aee1c0ddc154bbb5fa276a2ee60daf3dcc8b36cc1",
+  "service_root": "/Volumes/tmp/ctox-idle-b41cc74ca-isolated.voTfBX/root",
+  "service_pid": 52235,
+  "service_stopped_after_probe": true,
+  "productive_local_service_modified": false,
+  "productive_launchctl_modified": false,
+  "runtime_before": {
+    "busy": false,
+    "pending_count": 0,
+    "worker_active_count": 0,
+    "replication_up_without_browser": false,
+    "heartbeat_fresh": true,
+    "business_command_ticks": 23,
+    "business_command_idle_ticks": 23,
+    "business_command_active_ticks": 0,
+    "business_command_rows": 0
+  },
+  "runtime_after": {
+    "busy": false,
+    "pending_count": 0,
+    "worker_active_count": 0,
+    "replication_up_without_browser": false,
+    "heartbeat_fresh": true,
+    "business_command_ticks": 143,
+    "business_command_idle_ticks": 143,
+    "business_command_active_ticks": 0,
+    "business_command_rows": 0
+  },
+  "database_before": {
+    "retry_candidate_count": 0,
+    "command_document_count": 12309,
+    "command_revision_sha256": "64211096dace0a33f6e16d4df16aa6077fb0fa9aa7eb36b6a63ca8e0209b3936",
+    "command_changed_table_revision": 4976393,
+    "core_open_intake_failures": 0,
+    "compatibility_open_intake_failures": 0,
+    "pending_command_outbox": 0
+  },
+  "database_after": {
+    "retry_candidate_count": 0,
+    "command_document_count": 12309,
+    "command_revision_sha256": "64211096dace0a33f6e16d4df16aa6077fb0fa9aa7eb36b6a63ca8e0209b3936",
+    "command_changed_table_revision": 4976393,
+    "core_open_intake_failures": 0,
+    "compatibility_open_intake_failures": 0,
+    "pending_command_outbox": 0
+  },
+  "summary": {
+    "sampled_cpu_average_percent": 3.261666667,
+    "sampled_cpu_p50_percent": 0.1,
+    "sampled_cpu_p95_percent": 16.2,
+    "sampled_cpu_max_percent": 468.0,
+    "process_cpu_time_delta_seconds": 144.87,
+    "process_cpu_duration_percent": 4.024162195,
+    "cpu_duration_gate_under_five_percent": "passed",
+    "retry_candidates_stable_zero": true,
+    "command_revisions_unchanged": true,
+    "intake_failures_stable_zero": true,
+    "idle_ticks_advanced": true
+  },
+  "full_sample_artifact": "/Volumes/tmp/ctox-idle-b41cc74ca-isolated.voTfBX/idle-1h-500f416c6.json"
+}
