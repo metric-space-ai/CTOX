@@ -123,8 +123,22 @@
     "estimated_recovery_documents_per_day": 7200,
     "targeted_headroom_test": "passed_1_of_1",
     "rustfmt": "passed",
-    "isolated_release_build": "pending",
-    "corrected_short_after_probe": "pending",
-    "one_hour_after_probe": "pending"
+    "isolated_snapshot": "/Volumes/tmp/ctox-idle-500f416c6.vpuE5M",
+    "isolated_release_build": "passed_in_18m28s",
+    "binary_sha256": "b3e70d38aefcdb3b61f11a2aee1c0ddc154bbb5fa276a2ee60daf3dcc8b36cc1",
+    "service_pid": 52235,
+    "corrected_short_after_probe": {
+      "requested_duration_seconds": 600,
+      "sample_elapsed_seconds": 600.007,
+      "process_cpu_seconds": 12.76,
+      "process_cpu_duration_percent": 2.126641856,
+      "sampled_cpu_average_percent": 1.722,
+      "sampled_cpu_p50_percent": 0.1,
+      "sampled_cpu_p95_percent": 12.7,
+      "sampled_cpu_max_percent": 58.7,
+      "correctness_gates": "passed",
+      "cpu_gate_under_five_percent": "passed"
+    },
+    "one_hour_after_probe": "in_progress"
   }
 }

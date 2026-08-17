@@ -458,7 +458,15 @@ Rollout-Zwischenstand vom 16.08.2026:
   25er-Slices. Damit bleiben etwa 7.200 historische Dokumente pro Tag als
   endlicher Safety-Catch-up möglich und es entsteht rechnerisch wie gemessen
   genügend Reserve für andere periodische Sicherheitsarbeit. Headroom-Test
-  `1/1` und Rustfmt sind grün; sauberer Archiv-Build und Messung folgen.
+  `1/1` und Rustfmt sind grün. Der saubere Archiv-Build
+  `/Volumes/tmp/ctox-idle-500f416c6.vpuE5M` endete nach 18:28 Minuten; das
+  Binary hat SHA-256
+  `b3e70d38aefcdb3b61f11a2aee1c0ddc154bbb5fa276a2ee60daf3dcc8b36cc1`.
+- Der korrigierte 600-Sekunden-Vorfilter ist klar grün: 2,13 % tatsächliche
+  Prozess-CPU, p50 0,1 %, p95 12,7 %. Kandidaten, Command-Revisionen und
+  Intake-Fehler blieben null beziehungsweise unverändert, die Idle-Ticks
+  stiegen. Die verbindliche warme Ein-Stunden-Probe läuft deshalb nun auf
+  demselben Binary.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
