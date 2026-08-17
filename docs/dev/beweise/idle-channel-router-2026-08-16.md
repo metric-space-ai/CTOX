@@ -68,9 +68,12 @@ Commit `8b14ee057` ersetzt die Einzelverbindungen durch kleine, pro Thread auf
 acht Einträge begrenzte Multi-DB-Caches. Pfad, Gerät und Inode bleiben Teil der
 Identität; WAL-Commits bleiben sichtbar, während Dateiaustausch oder
 Abfragefehler gezielt neu öffnen. Vier betroffene Regressionstests sind jeweils
-exakt `1/1` grün, und der globale Formatcheck ist grün. Der isolierte
-Nachherlauf wartet noch auf einen getrennten Commit für eine vorbestehende
-RxDB-/Peer-Signaturinkonsistenz.
+exakt `1/1` grün, und der globale Formatcheck ist grün. Die vorbestehende
+RxDB-/Peer-Signaturinkonsistenz und die dabei sichtbar gewordene fehlende
+Command-Completion-Kante sind mit `3ada24cc7` und `fa100e322` getrennt
+committed. Ein vollständiges `cargo check --bin ctox` aus einem echten
+`git archive fa100e322` ist nach 15:09 Minuten mit Exitcode 0 abgeschlossen.
+Release-Build sowie 30-Sekunden- und Ein-Stunden-Nachherlauf bleiben offen.
 
 Maschinenlesbare Rohdaten:
 [`raw/idle-multi-reader-diagnosis-2026-08-17.json`](raw/idle-multi-reader-diagnosis-2026-08-17.json)

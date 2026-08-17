@@ -63,6 +63,9 @@
     "service_status_sources_production_lines": 987,
     "service_status_sources_budget": 987,
     "global_module_size_guard": "failed_only_on_11_foreign_worktree_files",
-    "isolated_service_measurement": "pending_committed_rxdb_peer_consistency"
+    "integrated_source_commit": "fa100e322",
+    "integrated_archive_cargo_check_bin_ctox": "passed_exit_0_in_15m09s",
+    "integrated_archive_sha256": "3be22e429b3b56fbc7ae0085f9e293b8d295601949825384339ab9dc9a8c58dd",
+    "isolated_service_measurement": "pending_release_build_and_30s_plus_1h_probes"
   }
 }

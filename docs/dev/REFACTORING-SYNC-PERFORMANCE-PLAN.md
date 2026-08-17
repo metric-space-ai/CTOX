@@ -366,12 +366,20 @@ Rollout-Zwischenstand vom 16.08.2026:
   reproduzierbar mit `npm ci && npm run build` erzeugt (SHA-256
   `a487654e3953c898e675b49ae705a7e7a6ff9024f7cd3f5748fddca90278a4ee`).
   Der isolierte Check deckte zusätzlich eine vorbestehende committed
-  RxDB-Inkonsistenz auf: `rxdb_peer.rs` liefert 13 Argumente an eine bereits
-  14-argumentige Replikationsfunktion. Der gemeinsame Arbeitsbaum enthält
-  hierzu eine noch uncommittete, zeitgleich bearbeitete RxDB-/Peer-Welle; sie
-  wird nicht in diesen Performancecommit gezogen. Isolierter Build und
-  Nachhermessung warten auf deren zusammengehörigen geprüften Commit; der Fix
-  ist nicht ausgerollt.
+  RxDB-Inkonsistenz auf: `rxdb_peer.rs` lieferte 13 Argumente an eine bereits
+  14-argumentige Replikationsfunktion. Die zusammengehörige Browser-/RxDB-/
+  Peer-Welle ist inzwischen als `3ada24cc7` separat committed; der unmittelbar
+  danach isoliert sichtbar gewordene fehlende Command-Completion-Helfer wurde
+  mit `fa100e322` ergänzt. `cargo check --bin ctox` aus einem reinen
+  `git archive fa100e322` ist nach 15:09 Minuten mit Exitcode 0 abgeschlossen;
+  der frühere Symbol- und Signaturfehler ist nicht mehr aufgetreten. Für die
+  Nachhermessung liegt zusätzlich der unveränderte Snapshot
+  `/Volumes/tmp/ctox-idle-fa100e322.puL5n3` vor. Sein Git-Archiv hat SHA-256
+  `3be22e429b3b56fbc7ae0085f9e293b8d295601949825384339ab9dc9a8c58dd`;
+  das daraus reproduzierbar gebaute Pi-Sidecar hat erneut SHA-256
+  `a487654e3953c898e675b49ae705a7e7a6ff9024f7cd3f5748fddca90278a4ee`.
+  Release-Build und Nachhermessung sind weiterhin offen; der Reader-Fix ist
+  nicht in den produktiven lokalen Dienst ausgerollt.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
@@ -607,6 +615,10 @@ Kein Commit darf:
 | `07c2ef0ca` | nachweislich transiente Intake-Failures konservativ auflösen |
 | `43889102a` | Knowledge-Katalog über eine SQLite-Verbindung aufbauen |
 | `8b14ee057` | Status- und Kommunikationsstempel über mehrere SQLite-Reader wiederverwenden |
+| `24f81bdf7` | Multi-Reader-Idle-Diagnose im Kampagnenplan festhalten |
+| `d27a46d12` | isolierten Stack-/Reader-Befund als Rohbeweis versionieren |
+| `3ada24cc7` | Browser-Streaming, RxDB/Peer und Research-Recovery zusammengehörig integrieren |
+| `fa100e322` | Command-Completion der Recovery dauerhaft persistieren und projizieren |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -626,9 +638,9 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den Multi-DB-Reader-Fix gezielt testen, aus einem isolierten Commit-Snapshot
-   bauen und zunächst im isolierten Test-Root gegen die repräsentativen
-   Datenbanken nachmessen.
+2. Den bereits gezielt getesteten Multi-DB-Reader-Fix aus dem vorbereiteten
+   isolierten `fa100e322`-Snapshot als Release bauen und zunächst im isolierten
+   Test-Root gegen die repräsentativen Datenbanken nachmessen.
 3. Danach Kurzprobe und einstündige Idle-Nachhermessung remote oder im
    isolierten Test-Root durchführen und als Rohdaten versionieren.
 4. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
