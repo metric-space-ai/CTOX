@@ -1521,7 +1521,7 @@ fn write_rxdb_control_command_state(
     // Readers treat the canonical terminal transition as a completion barrier.
     // Publish it only after the chat and all local/RxDB projections are durable.
     if let Some(terminal_status) = canonical_terminal_status {
-        channels::complete_business_control_command(
+        complete_and_project_business_control_command(
             root,
             command_id,
             terminal_status,
@@ -1552,6 +1552,54 @@ fn write_rxdb_control_command_state(
         "chat_id": chat_id,
         "result": result
     }))
+}
+
+pub(super) fn complete_and_project_business_control_command(
+    root: &Path,
+    command_id: &str,
+    terminal_status: &str,
+    result: &Value,
+    error_message: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut delay_ms = 10_u64;
+    for attempt in 0..6 {
+        match channels::complete_business_control_command(
+            root,
+            command_id,
+            terminal_status,
+            result,
+            error_message,
+        ) {
+            Ok(()) => break,
+            Err(error)
+                if attempt < 5
+                    && super::rxdb_peer_intake_state::is_transient_business_command_store_error(
+                        &error,
+                    ) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = delay_ms.saturating_mul(2);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    // The core transition is the completion barrier. Mirror its canonical
+    // lifecycle document synchronously afterwards so a transient outbox lag
+    // cannot leave readers with status=completed but terminal_status=none.
+    let canonical = channels::business_command_projection(root, command_id)?;
+    persist_business_command_lifecycle_projection(root, &canonical)?;
+    let updated_at_ms = canonical
+        .get("updated_at_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| now_ms() as i64);
+    upsert_rxdb_collection_record(
+        root,
+        "business_commands",
+        command_id,
+        updated_at_ms,
+        canonical,
+    )
 }
 
 #[cfg(test)]
