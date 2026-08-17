@@ -243,6 +243,10 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     request_semaphore: Arc<Semaphore>,
     /// Per-peer sub-tasks (the master-change relay tasks, one per collection).
     peer_states: Mutex<HashMap<H::Peer, PeerState>>,
+    /// Durable CTOX peer-session id (`peerSession.sessionId`) recorded at
+    /// handshake time, keyed by transport peer. The revocation sweep uses it
+    /// to sever peers whose *session* identity is revoked after connecting.
+    peer_sessions: Mutex<HashMap<H::Peer, String>>,
     /// Fork replication states keyed by (collection, peer). One entry per
     /// collection per peer for which CTOX was elected fork.
     fork_states: Mutex<ForkStateMap<H::Peer>>,
@@ -326,6 +330,7 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
             master_pull_semaphore: Semaphore::new(MAX_CONCURRENT_MASTER_PULLS),
             request_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUEST_TASKS)),
             peer_states: Mutex::new(HashMap::new()),
+            peer_sessions: Mutex::new(HashMap::new()),
             fork_states: Mutex::new(HashMap::new()),
             fork_state_lifecycle: AsyncMutex::new(()),
             tasks: Mutex::new(Vec::new()),
@@ -470,7 +475,17 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
         self.fork_states.lock().insert(key, fork_state);
     }
 
+    /// Record the durable CTOX peer-session id negotiated with `peer` so the
+    /// revocation sweep can re-validate established sessions.
+    pub fn record_peer_session(&self, peer: &H::Peer, session_id: String) {
+        if self.canceled.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.peer_sessions.lock().insert(peer.clone(), session_id);
+    }
+
     pub async fn remove_peer(&self, peer: &H::Peer) {
+        self.peer_sessions.lock().remove(peer);
         let sub_tasks = self
             .peer_states
             .lock()
@@ -963,7 +978,9 @@ where
     // established session until it happened to reconnect. Re-check every
     // connected peer periodically and sever any peer the validator now
     // rejects; its reconnect attempt is then denied by the connect-time gate.
-    if let Some(validator) = is_peer_valid.clone() {
+    let sweep_peer_validator = is_peer_valid.clone();
+    let sweep_session_validator = tuning.is_peer_session_valid.clone();
+    if sweep_peer_validator.is_some() || sweep_session_validator.is_some() {
         let pool_clone = Arc::clone(&pool);
         let handler = Arc::clone(&connection_handler);
         let sweep_interval =
@@ -979,7 +996,21 @@ where
                 }
                 let peers: Vec<H::Peer> = pool_clone.peer_states.lock().keys().cloned().collect();
                 for peer in peers {
-                    if !validator(&peer) {
+                    let peer_rejected = sweep_peer_validator
+                        .as_ref()
+                        .is_some_and(|validator| !validator(&peer));
+                    // The durable session identity is what operators revoke;
+                    // re-check it for sessions that already passed the
+                    // handshake-time gate.
+                    let session_rejected = !peer_rejected
+                        && sweep_session_validator.as_ref().is_some_and(|validator| {
+                            pool_clone
+                                .peer_sessions
+                                .lock()
+                                .get(&peer)
+                                .is_some_and(|session_id| !validator(session_id))
+                        });
+                    if peer_rejected || session_rejected {
                         handler.close_peer(&peer).await;
                         pool_clone.remove_peer(&peer).await;
                     }
@@ -1111,6 +1142,11 @@ where
                                 .map(str::trim)
                                 .filter(|session_id| !session_id.is_empty());
                             let accepted = remote_session_id.is_some_and(|session_id| check(session_id));
+                            if accepted {
+                                if let Some(session_id) = remote_session_id {
+                                    pool_task.record_peer_session(&item.peer, session_id.to_string());
+                                }
+                            }
                             if !accepted {
                                 let response = WebRTCResponse {
                                     id: item.message.id,
@@ -1400,6 +1436,11 @@ where
                             .filter(|session_id| !session_id.is_empty());
                         let accepted =
                             remote_session_id.is_some_and(|session_id| check(session_id));
+                        if accepted {
+                            if let Some(session_id) = remote_session_id {
+                                pool_clone.record_peer_session(&peer, session_id.to_string());
+                            }
+                        }
                         if !accepted {
                             pool_clone.error_subject.next(new_rx_error(
                                 "RC_WEBRTC_PEER",
@@ -3425,6 +3466,69 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        pool.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn revocation_sweep_severs_peer_with_revoked_session_identity() {
+        let collection = crate::rx_collection::test_support::test_collection_named(
+            "revocation_sweep_session",
+        )
+        .await;
+        let handler = MockHandler::new();
+        let session_revoked = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+        let session_revoked_for_validator = StdArc::clone(&session_revoked);
+        let mut options = SyncOptionsWebRTC::new(collection, StdArc::clone(&handler));
+        // The transport-level peer validator accepts everyone; only the durable
+        // session identity is revoked mid-session.
+        options.is_peer_valid = Some(StdArc::new(|_peer: &MockPeer| true));
+        options.is_peer_session_valid = Some(StdArc::new(move |session_id: &str| {
+            !(session_id == "device-1"
+                && session_revoked_for_validator.load(std::sync::atomic::Ordering::SeqCst))
+        }));
+        let pool = replicate_web_rtc_with_options(options)
+            .await
+            .expect("replication pool");
+
+        handler.connect.next(MockPeer("browser-session".to_string()));
+        let tracked_deadline = Instant::now() + Duration::from_secs(5);
+        while pool.peer_states.lock().is_empty() {
+            assert!(
+                Instant::now() < tracked_deadline,
+                "peer must be tracked after connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        pool.record_peer_session(&MockPeer("browser-session".to_string()), "device-1".to_string());
+
+        // While the session identity is valid the sweep must leave it alone.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(
+            handler.closed_peers.lock().is_empty(),
+            "sweep must not sever a peer whose session identity is valid"
+        );
+
+        session_revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        let severed_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let closed = handler
+                .closed_peers
+                .lock()
+                .contains(&"browser-session".to_string());
+            let removed = pool.peer_states.lock().is_empty();
+            if closed && removed {
+                break;
+            }
+            assert!(
+                Instant::now() < severed_deadline,
+                "peer with revoked session identity must be closed and removed"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            pool.peer_sessions.lock().is_empty(),
+            "severed peer must not leave a stale session record"
+        );
         pool.cancel().await;
     }
 
