@@ -51,3 +51,26 @@ Build bleibt deshalb ausdrücklich offen.
 
 Maschinenlesbare Rohdaten:
 [`raw/idle-channel-router-2026-08-16.json`](raw/idle-channel-router-2026-08-16.json)
+
+## Isolierter Multi-Reader-Nachbefund vom 17.08.2026
+
+Nach dem fünften Fix blieb in einem vollständig isolierten Test-Root ein
+periodischer Anteil übrig. Ein Zehn-Sekunden-Sample ordnete 582 von 6.184
+Stacks dem Statuspfad
+
+`route_external_messages -> channel_router_source_stamp -> sqlite3Close -> sqlite3SchemaClear`
+
+zu. Der Statusstempel wechselte zwischen Kern- und Business-OS-Datenbank. Der
+bisherige Einzelcache schloss dabei jeweils den anderen Reader und zwang SQLite
+zum erneuten Freigeben und Parsen der großen Schemata.
+
+Commit `8b14ee057` ersetzt die Einzelverbindungen durch kleine, pro Thread auf
+acht Einträge begrenzte Multi-DB-Caches. Pfad, Gerät und Inode bleiben Teil der
+Identität; WAL-Commits bleiben sichtbar, während Dateiaustausch oder
+Abfragefehler gezielt neu öffnen. Vier betroffene Regressionstests sind jeweils
+exakt `1/1` grün, und der globale Formatcheck ist grün. Der isolierte
+Nachherlauf wartet noch auf einen getrennten Commit für eine vorbestehende
+RxDB-/Peer-Signaturinkonsistenz.
+
+Maschinenlesbare Rohdaten:
+[`raw/idle-multi-reader-diagnosis-2026-08-17.json`](raw/idle-multi-reader-diagnosis-2026-08-17.json)

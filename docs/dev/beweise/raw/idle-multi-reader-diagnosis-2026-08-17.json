@@ -1,0 +1,68 @@
+{
+  "schema": "ctox.performance.idle_multi_reader_diagnosis.v1",
+  "observed_date": "2026-08-17",
+  "host_timezone": "Europe/Berlin",
+  "isolation": {
+    "root": "/Volumes/tmp/ctox-idle-b41cc74ca-isolated.voTfBX",
+    "source_commit": "b41cc74ca",
+    "source_archive_sha256": "de7bcbb0390550fb7d87b89efcde9562b9710df0bebaf87b49e3dc115d08e3da",
+    "binary_sha256": "4b8b596a739c0597ea81b610090be2b31b7e1bdaf90a15d56e03075ea41ab10f",
+    "service_pid": 29096,
+    "productive_local_service_modified": false,
+    "typed_runtime_config": {
+      "CTOX_BUSINESS_OS_WEB_AUTOSTART": "off",
+      "CTOX_BUSINESS_OS_MCP_AUTOSTART": "off",
+      "CTOX_SERVICE_BOOTSTRAP_SYSTEM_SKILLS": "off",
+      "CTOX_SERVICE_PREWARM_BACKENDS": "off"
+    }
+  },
+  "databases": [
+    {
+      "role": "core",
+      "path": "state/ctox.sqlite3",
+      "bytes": 1030017024,
+      "quick_check": "ok"
+    },
+    {
+      "role": "business_os",
+      "path": "root/runtime/business-os.sqlite3",
+      "bytes": 1929338880,
+      "quick_check": "ok"
+    },
+    {
+      "role": "business_os_rxdb",
+      "path": "root/runtime/business-os-rxdb.sqlite3",
+      "bytes": 2119155712,
+      "quick_check": "ok"
+    }
+  ],
+  "stack_sample": {
+    "duration_seconds": 10,
+    "total_samples": 6184,
+    "dominant_path_samples": 582,
+    "dominant_path_share_percent": 9.41,
+    "dominant_path": "route_external_messages -> channel_router_source_stamp -> rusqlite::Connection drop -> sqlite3Close -> sqlite3SchemaClear",
+    "interpretation": "the eight-second status stamp alternated between core and Business OS databases, replacing the single cached reader and reparsing large SQLite schemas",
+    "raw_sample_text_retained": false
+  },
+  "source_change": {
+    "commit": "8b14ee057",
+    "description": "retain small path-and-file-identity-bound read-only connection maps for service and communication status stamps",
+    "max_cached_readers_per_thread": 8,
+    "wal_commit_visibility_preserved": true,
+    "database_replacement_reopens_reader": true,
+    "query_error_reopens_reader": true,
+    "deployed": false
+  },
+  "verification": {
+    "new_service_cache_test": "passed_1_of_1",
+    "new_communication_cache_test": "passed_1_of_1",
+    "existing_projection_clock_test": "passed_1_of_1",
+    "existing_router_source_stamp_test": "passed_1_of_1",
+    "cargo_fmt_all_check": "passed",
+    "service_status_sources_production_lines": 987,
+    "service_status_sources_budget": 987,
+    "global_module_size_guard": "failed_only_on_11_foreign_worktree_files",
+    "isolated_service_measurement": "pending_committed_rxdb_peer_consistency"
+  }
+}
