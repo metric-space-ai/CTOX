@@ -1,33 +1,33 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260812-schema-once-v99';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260812-schema-once-v99';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260812-schema-once-v99';
-import { createAppActions } from './shared/app-actions.js?v=20260812-schema-once-v99';
+import { CtoxResizer } from './shared/resizer.js?v=20260816-browser-sync-guards-v141';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260816-browser-sync-guards-v141';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260816-browser-sync-guards-v141';
+import { createAppActions } from './shared/app-actions.js?v=20260816-browser-sync-guards-v141';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260812-schema-once-v99';
+} from './shared/app-lifecycle.js?v=20260816-browser-sync-guards-v141';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260812-schema-once-v99';
+} from './shared/permissions.js?v=20260816-browser-sync-guards-v141';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260812-schema-once-v99';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260812-schema-once-v99';
+} from './shared/branding.js?v=20260816-browser-sync-guards-v141';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260816-browser-sync-guards-v141';
 import {
   launchesInWindow,
   resolvePresentation,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260812-schema-once-v99';
+} from './shared/presentation.js?v=20260816-browser-sync-guards-v141';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -38,9 +38,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260812-schema-once-v99';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260812-schema-once-v99';
-import { createDocumentsFacade } from './shared/documents.js?v=20260812-schema-once-v99';
+} from './shared/shell-permissions-ui.js?v=20260816-browser-sync-guards-v141';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260816-browser-sync-guards-v141';
+import { createDocumentsFacade } from './shared/documents.js?v=20260816-browser-sync-guards-v141';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -48,16 +48,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260812-schema-once-v99';
+} from './shared/maintenance-state.js?v=20260816-browser-sync-guards-v141';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260812-schema-once-v99';
+} from './shared/workspace-session.js?v=20260816-browser-sync-guards-v141';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260812-schema-once-v99';
+} from './shared/taskbar-pins.js?v=20260816-browser-sync-guards-v141';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260812-schema-once-v99';
+const APP_BUILD = '20260817-demand-sync-startup-v205';
 
 ensureShellStylesheets();
 
@@ -83,7 +83,7 @@ const BUSINESS_DB_NAME = 'ctox_business_os_v11';
 // Browser-local persistence generation. Advancing this creates a fresh local
 // replica without deleting the previous cache; authoritative Business OS data
 // is repopulated through the existing WebRTC/RxDB replication path.
-const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v3-browser-contract';
+const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v4-demand-sync';
 const RXDB_BOOTSTRAP_VERSION = `${BUSINESS_DB_NAME}:storage-v1`;
 const CTOX_HEALTH_POLL_MS = 10000;
 const CTOX_MAINTENANCE_POLL_MS = 2000;
@@ -1011,15 +1011,15 @@ async function bootstrap() {
     modules = await loadModules();
   } catch (error) {
     if (!isModuleCatalogSyncError(error)) throw error;
-    console.warn('[business-os] module catalog sync stalled; extending WebRTC wait before local cache repair', error);
+    console.warn('[business-os] module catalog sync stalled; extending its WebRTC wait', error);
     setStartupProgress(82, shellText('bootCatalog'));
     try {
       modules = await loadModules({ timeoutMs: 180000, allowShellSeed: false });
     } catch (retryError) {
       if (!isModuleCatalogSyncError(retryError)) throw retryError;
-      console.warn('[business-os] module catalog still unavailable; resetting local RxDB cache and retrying WebRTC sync', retryError);
-      setStartupProgress(80, shellText('bootOptimize'));
-      await repairBusinessDataPlane(syncConfig);
+      console.warn('[business-os] module catalog still unavailable; restarting only its WebRTC bridge', retryError);
+      setStartupProgress(80, shellText('bootCatalog'));
+      await state.sync?.restartCollection?.('business_module_catalog');
       modules = await loadModules({ timeoutMs: 180000, allowShellSeed: false });
     }
   }
@@ -1233,6 +1233,13 @@ async function openBusinessDataPlane(syncConfig) {
       session: () => state.session,
       config: syncConfig,
     });
+    // Register the mutation plane before restored app windows enqueue their
+    // module collections. This gives foreground actions a ready shared-room
+    // registration instead of placing their one-row command behind the whole
+    // restored workspace bootstrap.
+    await state.sync.startCollection('business_commands').catch((error) => {
+      console.warn('[business-os] command transport warmup deferred', error);
+    });
     startShellCtoxHealthMonitor();
     startWorkspaceBrandingMonitor();
 
@@ -1268,11 +1275,19 @@ async function openBusinessDbAndRegisterCoreCollections(dbName) {
 
     try {
       setStartupProgress(58, shellText('bootDbStructures'));
-      await registerCoreCollections({ timeoutMs: 12000 });
+      // addCollections() is not cancellable. A Promise.race timeout used to
+      // reject after 12 seconds while RxDB was still writing IndexedDB schema
+      // metadata. The retry path then closed that live database and started a
+      // second registration against the same store. On large workspaces this
+      // caused the startup/reload loop that left the shell without db/sync.
+      // Await the single registration operation to completion instead.
+      await registerCoreCollections();
       return;
     } catch (error) {
-      const retryable = (isIndexedDbConnectionClosingError(error) || isCoreCollectionRegistrationTimeout(error))
-        && attempt < maxAttempts;
+      // A settled InvalidStateError means the connection really was closed by
+      // a page lifecycle race, so reopening is safe. Never retry a merely slow
+      // in-flight schema operation by closing its database underneath it.
+      const retryable = isIndexedDbConnectionClosingError(error) && attempt < maxAttempts;
       try { await state.db?.close?.(); } catch (closeError) {
         console.debug('[business-os] stale IndexedDB close failed during startup retry', closeError);
       }
@@ -1288,10 +1303,6 @@ function isIndexedDbConnectionClosingError(error) {
   const message = String(error?.message || error || '');
   return error?.name === 'InvalidStateError'
     && /IDBDatabase.*closing|database connection is closing/i.test(message);
-}
-
-function isCoreCollectionRegistrationTimeout(error) {
-  return error?.name === 'CtoxCoreCollectionRegistrationTimeout';
 }
 
 function scheduleCatalogRefresh(reason = 'database-sync') {
@@ -1332,45 +1343,6 @@ async function runQueuedCatalogRefresh() {
   }
 }
 
-async function repairBusinessDataPlane(syncConfig) {
-  state.dataPlaneGeneration += 1;
-  resetDataPlaneReady('repair-business-data-plane');
-  clearSyncRecoveryRepairTimer();
-  if (state.catalogRefreshTimer) {
-    window.clearTimeout(state.catalogRefreshTimer);
-    state.catalogRefreshTimer = null;
-  }
-  state.catalogRefreshRunning = false;
-  state.catalogRefreshQueued = false;
-  state.moduleCatalogFingerprint = '';
-  state.initialModuleOpened = false;
-  if (state.ctoxHealthTimer) {
-    window.clearInterval(state.ctoxHealthTimer);
-    state.ctoxHealthTimer = null;
-  }
-  if (state.catalogSubscription) {
-    try { state.catalogSubscription.unsubscribe(); } catch (e) {}
-    state.catalogSubscription = null;
-  }
-  if (state.workspaceBrandingSubscription) {
-    try { state.workspaceBrandingSubscription.unsubscribe(); } catch (e) {}
-    state.workspaceBrandingSubscription = null;
-  }
-  state.workspaceBranding = applyWorkspaceBranding(null);
-  try { await state.sync?.stop?.(); } catch (error) { console.warn('[business-os] sync stop before cache reset failed', error); }
-  try { await state.db?.close?.(); } catch (error) { console.warn('[business-os] db close before cache reset failed', error); }
-  state.db = null;
-  state.sync = null;
-  updateSyncDiagnostics(null);
-  state.commandBus = null;
-  state.activeModuleSyncLease = null;
-  state.schemaRegistrations.clear();
-  state.schemaRegistrationQueue = Promise.resolve();
-  const { resetBusinessDb } = await loadBusinessDbModule();
-  await resetBusinessDb({ name: businessDbName(syncConfig) });
-  await openBusinessDataPlane(syncConfig);
-}
-
 function isModuleCatalogSyncError(error) {
   const message = String(error?.message || error || '');
   return message.includes('Modulkatalog wurde noch nicht synchronisiert')
@@ -1378,7 +1350,7 @@ function isModuleCatalogSyncError(error) {
     || message.includes('module catalog');
 }
 
-async function registerCoreCollections({ timeoutMs = 12000 } = {}) {
+async function registerCoreCollections() {
   const t0 = performance.now();
   setStartupProgress(58, shellText('bootSchemas'));
 
@@ -1392,30 +1364,12 @@ async function registerCoreCollections({ timeoutMs = 12000 } = {}) {
   };
 
   setStartupProgress(59, shellText('bootSchemasRegister'));
-  await withCoreCollectionRegistrationTimeout(
-    state.db.addCollections(consolidated),
-    timeoutMs
-  );
+  await state.db.addCollections(consolidated);
 
   setStartupProgress(61, shellText('bootSchemasDone'));
   const t1 = performance.now();
   console.log(`[business-os] registerCoreCollections took ${(t1 - t0).toFixed(2)}ms`);
   await primeWindowGeometryCache();
-}
-
-function withCoreCollectionRegistrationTimeout(promise, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
-  let timer = null;
-  const timeout = new Promise((_, reject) => {
-    timer = window.setTimeout(() => {
-      const error = new Error(`Core collection registration did not finish within ${timeoutMs}ms.`);
-      error.name = 'CtoxCoreCollectionRegistrationTimeout';
-      reject(error);
-    }, timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) window.clearTimeout(timer);
-  });
 }
 
 async function primeWindowGeometryCache() {
@@ -3046,8 +3000,12 @@ async function repairRecoveringDataPlane() {
         || collection?.status === 'reconnecting'
       ))
       .map(([collection]) => collection);
-    const activeCollections = state.sync.resourceSnapshot?.().activeCollections || [];
-    const collections = [...new Set([...affectedCollections, ...activeCollections])];
+    // Restart only bridges that actually failed.  Adding every active
+    // collection here turned one slow pull into a data-plane-wide cancellation:
+    // in-flight Business commands were aborted, healthy Browser sessions lost
+    // their native channel, and the resulting errors scheduled the next global
+    // restart.  Each affected bridge already owns its bounded reconnect path.
+    const collections = [...new Set(affectedCollections)];
     if (!collections.length) return;
     console.warn('[business-os] restarting stalled RxDB/WebRTC collections');
     setStatus('RxDB/WebRTC wird neu verbunden');
@@ -3197,6 +3155,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
     },
     rxdbRuntime: sanitizeRxdbRuntime(state.db?.runtime || state.db?.rxdb?.__ctoxRuntime || null),
     sync: {
+      browserPeerId: advancedStatusBrowserPeerId(frameTransport),
       mode: state.sync?.mode || null,
       phase: diagnostics?.phase || null,
       syncRoom: diagnostics?.syncRoom || null,
@@ -3344,6 +3303,15 @@ function buildAdvancedStatusFrameTransport(collectionValues, requiredCollections
   };
 }
 
+function advancedStatusBrowserPeerId(frameTransport) {
+  const peerIds = new Set();
+  for (const entry of Array.isArray(frameTransport?.entries) ? frameTransport.entries : []) {
+    const peerId = advancedStatusString(entry?.localSignalingPeerId, 256);
+    if (peerId) peerIds.add(peerId);
+  }
+  return peerIds.size === 1 ? [...peerIds][0] : null;
+}
+
 function sanitizeAdvancedStatusFrameTransportEntry(collection, value) {
   if (!value || typeof value !== 'object') return null;
   const numberField = (key) => Number.isFinite(Number(value[key])) ? Number(value[key]) : 0;
@@ -3355,6 +3323,7 @@ function sanitizeAdvancedStatusFrameTransportEntry(collection, value) {
     collection: stringField('collection', collection || null, 120),
     topic: stringField('topic', null, 180),
     protocol: stringField('protocol', 'ctox-rxdb-frame-v1', 80),
+    localSignalingPeerId: stringField('localSignalingPeerId', null, 256),
     maxInlineFrameBytes: numberField('maxInlineFrameBytes'),
     maxChunkChars: numberField('maxChunkChars'),
     maxTransferBytes: numberField('maxTransferBytes'),
@@ -5393,8 +5362,7 @@ async function recoverFromLocalRxDbSchemaDrift(error) {
     if (sessionStorage.getItem(RXDB_SCHEMA_REPAIR_KEY) === repairToken) return false;
     sessionStorage.setItem(RXDB_SCHEMA_REPAIR_KEY, repairToken);
   } catch {}
-  const log = isRxDbOpenTimeoutError(error) ? console.info : console.warn;
-  log('[business-os] local RxDB cache repair triggered; rebuilding browser cache', error);
+  console.warn('[business-os] local RxDB schema repair triggered; rebuilding browser cache', error);
   setStatus('Lokale RxDB wird neu aufgebaut');
   try { await state.sync?.stop?.(); } catch (stopError) { console.warn('[business-os] sync stop before schema repair failed', stopError); }
   try { await state.db?.close?.(); } catch (closeError) { console.warn('[business-os] db close before schema repair failed', closeError); }
@@ -5410,18 +5378,7 @@ function isRxDbSchemaDriftError(error) {
   const message = String(error?.message || error || '');
   return message.includes('RxDB Error-Code: DB6')
     || message.includes('previousSchemaHash')
-    || message.includes('schemaHash')
-    || message.includes('timed out')
-    || message.includes('IndexedDB lock');
-}
-
-function isRxDbOpenTimeoutError(error) {
-  const message = String(error?.message || error || '');
-  return message.includes('RxDB database creation timed out')
-    || message.includes('RxDB database retry timed out')
-    || message.includes('IndexedDB lock')
-    || message.includes('IndexedDB open timed out')
-    || message.includes('IndexedDB open blocked');
+    || message.includes('schemaHash');
 }
 
 function hasLiveModulePreloadDataPlane(snapshot = state.syncDiagnostics) {
@@ -6439,6 +6396,10 @@ function createLiveSyncFacade({ host = null } = {}) {
     get mode() { return state.sync?.mode; },
     get config() { return state.sync?.config; },
     get diagnostics() { return state.sync?.diagnostics; },
+    requestNative: (...args) => {
+      assertActive();
+      return state.sync?.requestNative?.(...args);
+    },
     collectionReadiness: (collection) => currentCollectionReadiness(collection),
     subscribeCollectionReadiness: (collection, listener) => {
       assertActive();

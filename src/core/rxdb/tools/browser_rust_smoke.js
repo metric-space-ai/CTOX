@@ -4390,6 +4390,9 @@ function ensureCtoxSmokeBinary() {
     }
     const page = await browser.newPage();
     outerPhaseTimings.browserLaunchMs = Date.now() - browserLaunchStartedAt;
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) console.log(`[browser:navigation] ${frame.url()}`);
+    });
     page.on('console', (msg) => {
       const type = msg.type();
       const text = msg.text();
@@ -4552,6 +4555,7 @@ function ensureCtoxSmokeBinary() {
     const deferredFileCollectionStartupMode = backgroundIndexerSmokeMode
       || smokeMode === 'file-chunk-tombstone-error-browser-status'
       || smokeMode === 'business-os-app-release-ui';
+    let sellifyScaleStateHandle = null;
     if (useAppDb) {
       let startupState = null;
       const smokeHookWaitStartedAt = Date.now();
@@ -5068,10 +5072,27 @@ function ensureCtoxSmokeBinary() {
       }
       try {
         const shellReadyWaitStartedAt = Date.now();
-        if (
+        if (smokeMode === 'business-os-sellify-scale-ui') {
+          // Keep the state object in the exact execution world where the app
+          // publishes it. Patchright can evaluate later page callbacks in an
+          // isolated world whose DOM is shared but whose window expandos are
+          // not, which made a healthy shell look as if db/sync disappeared.
+          sellifyScaleStateHandle = await page.waitForFunction(() => {
+            const state = globalThis.ctoxBusinessOsSmoke?.state || globalThis.CTOX_BUSINESS_OS_APP;
+            const modulesLoaded = Array.isArray(state?.modules) && state.modules.length > 0;
+            const shellOpened = Boolean(document.body?.dataset?.moduleShell);
+            const loading = Boolean(document.body?.dataset?.moduleLoading);
+            return modulesLoaded
+              && Boolean(state?.db?.raw)
+              && Boolean(state?.sync)
+              && shellOpened
+              && !loading
+              ? state
+              : null;
+          }, null, { timeout: 60000 });
+        } else if (
           deferredFileCollectionStartupMode
           || smokeMode === 'business-os-threads-scale-ui'
-          || smokeMode === 'business-os-sellify-scale-ui'
         ) {
           await page.waitForFunction(() => {
             const state = globalThis.ctoxBusinessOsSmoke?.state;
@@ -5094,6 +5115,14 @@ function ensureCtoxSmokeBinary() {
           }, null, { timeout: 60000 });
         }
         outerPhaseTimings.shellReadyWaitMs = Date.now() - shellReadyWaitStartedAt;
+        if (smokeMode === 'business-os-sellify-scale-ui') {
+          const scaleShellSnapshot = await sellifyScaleStateHandle.evaluate((state) => ({
+            hasDb: Boolean(state?.db?.raw),
+            hasSync: Boolean(state?.sync),
+            moduleCount: state?.modules?.length ?? null,
+          }));
+          console.log(`business_os_sellify_scale_shell_snapshot=${JSON.stringify(scaleShellSnapshot)}`);
+        }
       } catch (error) {
         const waitError = String(error?.message || error);
         const startupState = await page.evaluate(async (waitErrorMessage) => {
@@ -5137,14 +5166,13 @@ function ensureCtoxSmokeBinary() {
         console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
       }
       if (smokeMode === 'business-os-sellify-scale-ui') {
-        const setupDeadline = Date.now() + 240000;
+        const setupDeadline = Date.now() + Number(process.env.SELLIFY_SCALE_SETUP_TIMEOUT_MS || 240000);
         let setupResult = null;
         while (Date.now() < setupDeadline) {
-          setupResult = await page.evaluate(async (collectionNames) => {
+          setupResult = await sellifyScaleStateHandle.evaluate(async (state, collectionNames) => {
           const startupMarks = {
             collectionSetupStartedAtMs: Math.round(performance.now()),
           };
-          const state = globalThis.ctoxBusinessOsSmoke?.state;
           const db = state?.db;
           const rawDb = db?.raw;
           if (!db?.addCollections || !rawDb || typeof state?.sync?.leaseCollection !== 'function') {
@@ -5161,6 +5189,19 @@ function ensureCtoxSmokeBinary() {
               startupStatus,
               statusText,
               startupError,
+              url: location.href,
+              readyState: document.readyState,
+              navigationType: performance.getEntriesByType('navigation')?.[0]?.type || '',
+              sessionStorage: Object.fromEntries(
+                Object.keys(sessionStorage).map((key) => [key, sessionStorage.getItem(key)]),
+              ),
+              dataPlaneReadyStatus: state?.dataPlaneReadyStatus || '',
+              dataPlaneReadyReason: state?.dataPlaneReadyReason || '',
+              dataPlaneGeneration: state?.dataPlaneGeneration || 0,
+              moduleCount: Array.isArray(state?.modules) ? state.modules.length : null,
+              hasSmokeHook: Boolean(globalThis.ctoxBusinessOsSmoke),
+              hasAppState: Boolean(globalThis.CTOX_BUSINESS_OS_APP),
+              bootTimings: state?.bootTimings || null,
               bodyDataset: { ...document.body?.dataset },
             };
           }
@@ -5225,7 +5266,7 @@ function ensureCtoxSmokeBinary() {
         startupAdvancedStatusTimeoutMs = 120000;
       }
       const advancedStatus = smokeMode === 'business-os-sellify-scale-ui'
-        ? await page.evaluate(async (requiredCollections) => (
+        ? await sellifyScaleStateHandle.evaluate(async (_state, requiredCollections) => (
             globalThis.CTOX_BUSINESS_OS_STATUS?.snapshot?.({
               includeCounts: false,
               requiredCollections,
@@ -7465,11 +7506,16 @@ function ensureCtoxSmokeBinary() {
       : null;
     // Backlog OS-C3/SYNC-02: the two-browser modes drive a second isolated
     // peer from the node side instead of the single-page evaluate below.
+    const browserEvaluationTarget = smokeMode === 'business-os-sellify-scale-ui'
+      ? sellifyScaleStateHandle
+      : page;
     const result = smokeMode === 'presence-merge-two-browsers'
       ? await runPresenceMergeTwoBrowsersMode(page)
       : smokeMode === 'concurrent-writers-convergence-browser-to-rust'
       ? await runConcurrentWritersConvergenceMode(page)
-      : await page.evaluate(async ({ signalingUrl, smokeMode, rustSeed, useAppDb, browserPayload, backgroundQueueTask, advancedStatusEvidenceVersion, advancedStatusEvidenceRuntime, codingAgentSmoke, rolesPermissionsReloadVerified, dynamicAppsReloadVerified, appReleaseReloadVerified, appAudienceReloadVerified, threadsScaleSeed, sellifyScaleSeed, sellifyScaleProvisionOnly, threadsRightClickCapabilities, officeRestartFixtureBytes }) => {
+      : await browserEvaluationTarget.evaluate(async (stateOrArgs, maybeArgs) => {
+      const sellifyScaleAppState = maybeArgs ? stateOrArgs : null;
+      const { signalingUrl, smokeMode, rustSeed, useAppDb, browserPayload, backgroundQueueTask, advancedStatusEvidenceVersion, advancedStatusEvidenceRuntime, codingAgentSmoke, rolesPermissionsReloadVerified, dynamicAppsReloadVerified, appReleaseReloadVerified, appAudienceReloadVerified, threadsScaleSeed, sellifyScaleSeed, sellifyScaleProvisionOnly, threadsRightClickCapabilities, officeRestartFixtureBytes } = maybeArgs || stateOrArgs;
       if (!globalThis.process) globalThis.process = {};
       if (typeof globalThis.process.nextTick !== 'function') {
         globalThis.process.nextTick = (callback, ...args) => Promise.resolve().then(() => callback(...args));
@@ -10510,7 +10556,7 @@ function ensureCtoxSmokeBinary() {
           'sellify_people',
           'sellify_companies',
         ];
-        const state = globalThis.ctoxBusinessOsSmoke?.state;
+        const state = sellifyScaleAppState || globalThis.ctoxBusinessOsSmoke?.state;
         const rawDb = state?.db?.raw;
         const leases = globalThis.__ctoxSellifyScaleLeases || [];
         const startupMarks = {

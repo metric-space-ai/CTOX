@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { __ctoxSyncTestHooks } from './sync.js';
@@ -6,8 +7,49 @@ import { __ctoxSyncTestHooks } from './sync.js';
 const {
   applyRoomRepairCycleOutcome,
   boundedCollectionStartQueueStep,
+  moduleSyncCollections,
   repairRestartBatch,
 } = __ctoxSyncTestHooks;
+
+test('browser live compatibility collections start only after direct-live fallback', () => {
+  assert.deepEqual(
+    moduleSyncCollections([
+      'business_commands',
+      'browser_sessions',
+      'browser_tabs',
+      'browser_frames',
+      'browser_input_events',
+      'ctox_queue_tasks',
+    ]),
+    ['business_commands', 'browser_sessions', 'browser_tabs', 'ctox_queue_tasks'],
+  );
+});
+
+test('startCollection is guarded as idempotent and does not cancel a transiently reconnecting bridge', () => {
+  const source = readFileSync(new URL('./sync.js', import.meta.url), 'utf8');
+  const startCollectionBody = source.slice(
+    source.indexOf('async startCollection(collection, options = {})'),
+    source.indexOf('async stopCollection(collection, options = {})'),
+  );
+  assert.match(startCollectionBody, /currentBridge\?\.state\?\.cancelled === true/);
+  assert.doesNotMatch(startCollectionBody, /await this\.stopCollection/);
+});
+
+test('shared-room collection registration is serialized', () => {
+  const source = readFileSync(new URL('./sync.js', import.meta.url), 'utf8');
+  assert.match(source, /const COLLECTION_START_LANES = 1;/);
+});
+
+test('a slow module catalog never tears down the complete browser data plane', () => {
+  const appSource = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const bootstrapStart = appSource.indexOf('async function bootstrap()');
+  const moduleCatalogStart = appSource.indexOf('  let modules;', bootstrapStart);
+  const moduleCatalogEnd = appSource.indexOf('  modules = await waitForRequestedHashModule', moduleCatalogStart);
+  const moduleCatalogBlock = appSource.slice(moduleCatalogStart, moduleCatalogEnd);
+  assert.match(moduleCatalogBlock, /restartCollection\?\.\('business_module_catalog'\)/);
+  assert.doesNotMatch(moduleCatalogBlock, /resetBusinessDb|state\.db = null|state\.sync = null/);
+  assert.doesNotMatch(appSource, /async function repairBusinessDataPlane/);
+});
 
 function roomCircuit(overrides = {}) {
   return {

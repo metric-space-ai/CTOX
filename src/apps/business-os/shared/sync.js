@@ -22,8 +22,8 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260812-dedup-import-v109';
-import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260812-dedup-import-v109';
+} from './sync-contract.js?v=20260816-browser-sync-guards-v141';
+import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260816-browser-sync-guards-v141';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
@@ -68,10 +68,24 @@ const ROOM_RETRY_MAX_MS = 30_000;
 // ever grows far beyond this, measure the queue depth before raising this again
 // — the guard rail is the queue budget, not this constant.
 const COLLECTION_START_GAP_MS = 60;
-// How many collection bridges may be built at the same time. One meant the boot
-// was as slow as the sum of all bridges; unbounded would hand a slow peer
-// fifteen simultaneous negotiations and push the send queue toward its budget.
-const COLLECTION_START_LANES = 4;
+// How many collection registrations may mutate the shared room handshake at
+// the same time. Four lanes looked faster in an isolated bootstrap benchmark,
+// but a restored workspace starts several module leases concurrently. On the
+// managed THESEN instance that invalidated the multiplexed handshake while
+// other lanes were still running: masterChangesSince timed out, the shared
+// peer dropped, and even a one-row command insert waited 16.5 seconds behind
+// recovery work. Serialize registration on the one shared transport. This is
+// deliberately one lane, not one WebRTC peer per collection.
+const COLLECTION_START_LANES = 1;
+// These high-frequency Browser collections are a compatibility transport.
+// The Browser module establishes them explicitly only if the authenticated
+// browser_sessions direct-live capability is unavailable. Keeping them in the
+// manifest is necessary for schema registration and scoped data access, but a
+// module-window lease must not start them eagerly.
+const MODULE_EXPLICIT_START_COLLECTIONS = new Set([
+  'browser_frames',
+  'browser_input_events',
+]);
 // Erster Durchgang kurz nach dem Start (die meisten Rennen sind bis dahin
 // entschieden), danach traeger, damit ein dauerhaft fehlendes Schema nicht
 // zum Dauerlauf wird.
@@ -246,6 +260,11 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       && isTransientSignalingSocketError(current.lastError)
     ) {
       next.lastError = null;
+    }
+    if (update.queryReady === undefined) {
+      next.queryReady = demandOnly
+        ? isHealthyCollectionStatus(nextStatus) && !next.lastError
+        : true;
     }
     const nextPeerSession = peerSessionKey(update.remotePeerSession);
     if (nextPeerSession) {
@@ -434,7 +453,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-handshake-metrics-rxdb-v121');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-browser-surface-binding-rxdb-v176');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -513,6 +532,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       if (dedupeKey) commandMetricSeen.add(dedupeKey);
       recordCommandPlaneMetric(diagnostics.commandPlane, name, metric.durationMs);
       emitDiagnostic({ phase: diagnostics.phase || 'ready' });
+    },
+    async requestNative(method, params = {}, options = {}) {
+      if (stopped) throw new Error('Business OS sync runtime has been stopped');
+      const collection = normalizeCollectionName(options.collection || 'business_commands');
+      if (!collection) throw new Error('A collection is required for native WebRTC requests.');
+      let bridge = await this.startCollection(collection, { pin: false, forceDirect: true });
+      if (!bridge?.state && bridge?.ready) bridge = await bridge.ready;
+      if (typeof bridge?.state?.requestNative !== 'function') {
+        throw new Error(`Native WebRTC requests are unavailable for ${collection}.`);
+      }
+      return bridge.state.requestNative(method, params, options);
     },
     async startModule(moduleManifest) {
       const collections = moduleManifest?.collections || [];
@@ -597,6 +627,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           const remaining = releaseCollectionLease(normalized);
           if (remaining <= 0 && !pinnedCollections.has(normalized)) {
             await syncRuntime.stopCollection(normalized, { preservePin: true }).catch(() => null);
+            if (isModuleDemandOnlyCollection(normalized)) {
+              recordCollection(normalized, {
+                status: 'skipped',
+                connectionStatus: 'demand-only',
+                reason: 'demand-only-lease-released',
+                active: false,
+                frameTransport: null,
+                lastError: null,
+                reconnectingSince: null,
+              });
+            }
           }
           return true;
         },
@@ -665,48 +706,34 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       if (bridges.has(collection)) {
         const current = diagnostics.collections[collection] || {};
         const currentBridgePromise = bridges.get(collection);
-        const currentBridge = await withTimeout(currentBridgePromise, 1000);
-        const currentStatus = current.connectionStatus || current.status || '';
-        const restartNeeded = ['reconnecting', 'failed', 'error', 'stopped'].includes(currentStatus);
-        if (currentBridge?.mode === 'pending') {
-          // A 'pending' stub means the collection was not registered when
-          // the bridge was created (schema/startup race). Reusing the cached
-          // stub disabled that collection's sync until a page reload — drop
-          // it and fall through to a fresh start instead.
+        // startCollection is an idempotent acquisition API. A transient
+        // diagnostic such as active$=false must never make a caller cancel the
+        // shared bridge: command tracking can call this while another command
+        // is awaiting acknowledgement, and cancelling here aborts that live
+        // command. The background repair loop owns reconnect/restart policy.
+        // Only a replication state that is actually cancelled is replaced.
+        const currentBridge = await withTimeout(currentBridgePromise, 3000);
+        if (
+          shouldReplaceCachedBridgeForStart(currentBridge, options)
+          || currentBridge?.state?.cancelled === true
+        ) {
+          // Followers cannot serve requestNative(), pending stubs need a real
+          // collection after schema registration, and actually-cancelled
+          // states must be rebuilt. Transient diagnostics alone never enter
+          // this branch.
           bridges.delete(collection);
         } else {
-        const healthyReuse = Boolean(
-          currentBridge
-          && current.initialReplicationAt
-          && current.remoteCheckpoint?.epoch,
-        );
-        if (healthyReuse) {
           recordCollection(collection, {
             status: 'reused',
-            connectionStatus: 'connected',
-            reconnectingSince: null,
-            lastError: null,
-            lastLifecycleEvent: null,
+            connectionStatus: current.connectionStatus || current.status || 'connecting',
           });
           return bridges.get(collection);
-        }
-        if (!restartNeeded) {
-          recordCollection(collection, {
-            status: current.status || 'starting',
-            connectionStatus: current.connectionStatus || 'connecting',
-            reconnectingSince: null,
-            lastError: null,
-            lastLifecycleEvent: null,
-          });
-          return currentBridgePromise;
-        }
-        await this.stopCollection(collection, { preserveLeases: true, preservePin: true });
         }
       }
       recordCollection(collection, { status: 'starting' });
       const startLane = collectionStartLaneCursor % collectionStartLanes.length;
       collectionStartLaneCursor += 1;
-      const bridgePromise = collectionStartLanes[startLane].then(() => {
+      const startBridge = () => {
         if (stopped) throw new Error('Business OS sync runtime has been stopped');
         return startWebRtcReplication({
           db,
@@ -721,7 +748,8 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           // never ran.
           scheduleRestart: scheduleRestartOfUnhealthyCollections,
         });
-      });
+      };
+      const bridgePromise = collectionStartLanes[startLane].then(startBridge);
       // Every collection shares one bounded room send queue. Pacing initial
       // catch-up keeps a legitimate multi-collection bootstrap below the
       // wedged-peer recycle threshold while preserving deterministic order.
@@ -1331,7 +1359,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-handshake-metrics-rxdb-v121');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260816-browser-surface-binding-rxdb-v176');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -2389,6 +2417,7 @@ function sanitizeReplicationTransportStatus(status) {
     protocol: stringField('protocol', 'ctox-rxdb-frame-v1', 80),
     collection: stringField('collection', null, 120),
     topic: stringField('topic', null, 180),
+    localSignalingPeerId: stringField('localSignalingPeerId', null, 256),
     maxInlineFrameBytes: numberField('maxInlineFrameBytes'),
     maxChunkChars: numberField('maxChunkChars'),
     maxTransferBytes: numberField('maxTransferBytes'),
@@ -2859,6 +2888,7 @@ export const __ctoxSyncTestHooks = {
   isDemandOnlyPullCollection,
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
+  shouldReplaceCachedBridgeForStart,
   DEMAND_ONLY_COLLECTION_START_ERROR,
   createFollowerBridge,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
@@ -3153,6 +3183,12 @@ function isDemandOnlyPullCollection(collection) {
     // delay a new command behind thousands of old records.
     || collection === 'business_commands'
     || collection === 'ctox_queue_tasks'
+    // Browser history must never gate the interactive browser surface. A
+    // user needs only a bounded, owner-scoped session window plus the tabs of
+    // the selected session; replaying every historical session/tab delayed a
+    // cold open by more than 90 seconds on the managed THESEN instance.
+    || collection === 'browser_sessions'
+    || collection === 'browser_tabs'
     // Knowledge table documents embed dataframe rows and can grow far beyond
     // the WebRTC transfer ceiling as research accumulates. Research and
     // Knowledge hydrate bounded domain/table chunks through query demand
@@ -3195,5 +3231,11 @@ function isModuleDemandOnlyCollection(collection) {
 function moduleSyncCollections(collections = []) {
   return (Array.isArray(collections) ? collections : [])
     .filter((collection) => typeof collection === 'string' && collection.trim())
+    .filter((collection) => !MODULE_EXPLICIT_START_COLLECTIONS.has(collection))
     .filter((collection) => !isModuleDemandOnlyCollection(collection));
+}
+
+function shouldReplaceCachedBridgeForStart(bridge, options = {}) {
+  if (options.forceDirect === true && bridge?.mode === 'follower') return true;
+  return bridge?.mode === 'pending';
 }

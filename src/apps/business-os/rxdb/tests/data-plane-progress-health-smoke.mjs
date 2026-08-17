@@ -39,6 +39,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await delay(10);
+  }
+  return predicate();
+}
+
 // ---------------------------------------------------------------------------
 // 1. Pure progress observer: green flags, no movement → typed stall < 10s
 // ---------------------------------------------------------------------------
@@ -191,7 +200,7 @@ function delay(ms) {
     wait_timeout_ms: 12_000,
   });
 
-  await delay(40);
+  await waitFor(() => stored?.id === 'cmd-customer-stall');
   assert(stored?.id === 'cmd-customer-stall', 'command was pushed locally');
   assert(stored.status === 'pending_sync', 'command still waiting for native ack');
 
