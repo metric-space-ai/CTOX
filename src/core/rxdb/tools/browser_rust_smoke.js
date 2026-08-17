@@ -5232,7 +5232,16 @@ function ensureCtoxSmokeBinary() {
           const leases = [];
           for (const name of collectionNames.slice(0, 1)) {
             startupMarks.primaryLeaseStartedAtMs = Math.round(performance.now());
-            leases.push(await state.sync.leaseCollection(name, 'sellify-scale-browser-smoke'));
+            const lease = await state.sync.leaseCollection(name, 'sellify-scale-browser-smoke');
+            const pendingBridge = lease?.bridge?.bridge || lease?.bridge;
+            if (!pendingBridge?.state && pendingBridge?.ready) {
+              const readyBridge = await pendingBridge.ready;
+              if (!readyBridge?.state) {
+                throw new Error(`Sellify scale lease for ${name} resolved without a replication state`);
+              }
+              lease.bridge = readyBridge;
+            }
+            leases.push(lease);
             startupMarks.primaryLeaseReturnedAtMs = Math.round(performance.now());
           }
           globalThis.__ctoxSellifyScaleLeases = leases;
@@ -10581,7 +10590,13 @@ function ensureCtoxSmokeBinary() {
             if (incompatible) {
               throw new Error(`Sellify query-fetch peer is incompatible: ${JSON.stringify(incompatible)}`);
             }
-            if (Object.values(last).every((diagnostic) => diagnostic?.queryReady === true)) {
+            const loadersReady = requiredCollections.every((name) => (
+              Boolean(rawDb[name]?.demandLoader)
+            ));
+            if (
+              loadersReady
+              && Object.values(last).every((diagnostic) => diagnostic?.queryReady === true)
+            ) {
               return last;
             }
             await delay(50);
