@@ -1,0 +1,394 @@
+{
+  "samples": [
+    {
+      "command_id": "command_roundtrip_timing_1786987380929_1",
+      "started_at_ms": 1786987380929,
+      "marks": {
+        "browser_dispatch_started": 1786987380929,
+        "browser_local_inserted": 1786987380942,
+        "browser_push_confirmed": 1786987380998,
+        "native_dispatch_entered": 1786987381181,
+        "native_handler_completed": 1786987381238,
+        "native_rxdb_projection_committed": 1786987381240,
+        "browser_terminal_observed": 1786987381797
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987381797_2",
+      "started_at_ms": 1786987381797,
+      "marks": {
+        "browser_dispatch_started": 1786987381797,
+        "browser_local_inserted": 1786987381810,
+        "browser_push_confirmed": 1786987381851,
+        "native_dispatch_entered": 1786987381979,
+        "native_handler_completed": 1786987382049,
+        "native_rxdb_projection_committed": 1786987382051,
+        "browser_terminal_observed": 1786987382483
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987382483_3",
+      "started_at_ms": 1786987382483,
+      "marks": {
+        "browser_dispatch_started": 1786987382483,
+        "browser_local_inserted": 1786987382505,
+        "browser_push_confirmed": 1786987382615,
+        "native_dispatch_entered": 1786987382694,
+        "native_handler_completed": 1786987382739,
+        "native_rxdb_projection_committed": 1786987382741,
+        "browser_terminal_observed": 1786987383251
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987383251_4",
+      "started_at_ms": 1786987383251,
+      "marks": {
+        "browser_dispatch_started": 1786987383251,
+        "browser_local_inserted": 1786987383260,
+        "browser_push_confirmed": 1786987383333,
+        "native_dispatch_entered": 1786987383413,
+        "native_handler_completed": 1786987383431,
+        "native_rxdb_projection_committed": 1786987383432,
+        "browser_terminal_observed": 1786987383946
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987383946_5",
+      "started_at_ms": 1786987383946,
+      "marks": {
+        "browser_dispatch_started": 1786987383946,
+        "browser_local_inserted": 1786987383954,
+        "browser_push_confirmed": 1786987383975,
+        "native_dispatch_entered": 1786987384001,
+        "native_handler_completed": 1786987384039,
+        "native_rxdb_projection_committed": 1786987384041,
+        "browser_terminal_observed": 1786987384766
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987384766_6",
+      "started_at_ms": 1786987384766,
+      "marks": {
+        "browser_dispatch_started": 1786987384766,
+        "browser_local_inserted": 1786987384774,
+        "browser_push_confirmed": 1786987384904,
+        "native_dispatch_entered": 1786987384966,
+        "native_handler_completed": 1786987385100,
+        "native_rxdb_projection_committed": 1786987385101,
+        "browser_terminal_observed": 1786987385482
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987385483_7",
+      "started_at_ms": 1786987385483,
+      "marks": {
+        "browser_dispatch_started": 1786987385483,
+        "browser_local_inserted": 1786987385493,
+        "browser_push_confirmed": 1786987385526,
+        "native_dispatch_entered": 1786987385622,
+        "native_handler_completed": 1786987385658,
+        "native_rxdb_projection_committed": 1786987385661,
+        "browser_terminal_observed": 1786987386100
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987386100_8",
+      "started_at_ms": 1786987386100,
+      "marks": {
+        "browser_dispatch_started": 1786987386100,
+        "browser_local_inserted": 1786987386114,
+        "browser_push_confirmed": 1786987386142,
+        "native_dispatch_entered": 1786987386296,
+        "native_handler_completed": 1786987386330,
+        "native_rxdb_projection_committed": 1786987386332,
+        "browser_terminal_observed": 1786987386724
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987386724_9",
+      "started_at_ms": 1786987386724,
+      "marks": {
+        "browser_dispatch_started": 1786987386724,
+        "browser_local_inserted": 1786987386732,
+        "browser_push_confirmed": 1786987386754,
+        "native_dispatch_entered": 1786987386872,
+        "native_handler_completed": 1786987386906,
+        "native_rxdb_projection_committed": 1786987386908,
+        "browser_terminal_observed": 1786987387411
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987387412_10",
+      "started_at_ms": 1786987387412,
+      "marks": {
+        "browser_dispatch_started": 1786987387412,
+        "browser_local_inserted": 1786987387424,
+        "browser_push_confirmed": 1786987387457,
+        "native_dispatch_entered": 1786987387540,
+        "native_handler_completed": 1786987387559,
+        "native_rxdb_projection_committed": 1786987387560,
+        "browser_terminal_observed": 1786987388020
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987388020_11",
+      "started_at_ms": 1786987388020,
+      "marks": {
+        "browser_dispatch_started": 1786987388020,
+        "browser_local_inserted": 1786987388026,
+        "browser_push_confirmed": 1786987388042,
+        "native_dispatch_entered": 1786987388095,
+        "native_handler_completed": 1786987388145,
+        "native_rxdb_projection_committed": 1786987388146,
+        "browser_terminal_observed": 1786987388614
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987388615_12",
+      "started_at_ms": 1786987388615,
+      "marks": {
+        "browser_dispatch_started": 1786987388615,
+        "browser_local_inserted": 1786987388621,
+        "browser_push_confirmed": 1786987388637,
+        "native_dispatch_entered": 1786987388672,
+        "native_handler_completed": 1786987388715,
+        "native_rxdb_projection_committed": 1786987388718,
+        "browser_terminal_observed": 1786987388896
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987388896_13",
+      "started_at_ms": 1786987388896,
+      "marks": {
+        "browser_dispatch_started": 1786987388896,
+        "browser_local_inserted": 1786987388910,
+        "browser_push_confirmed": 1786987388938,
+        "native_dispatch_entered": 1786987389017,
+        "native_handler_completed": 1786987389159,
+        "native_rxdb_projection_committed": 1786987389164,
+        "browser_terminal_observed": 1786987389500
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987389500_14",
+      "started_at_ms": 1786987389500,
+      "marks": {
+        "browser_dispatch_started": 1786987389500,
+        "browser_local_inserted": 1786987389507,
+        "browser_push_confirmed": 1786987389523,
+        "native_dispatch_entered": 1786987389556,
+        "native_handler_completed": 1786987389622,
+        "native_rxdb_projection_committed": 1786987389625,
+        "browser_terminal_observed": 1786987390089
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987390089_15",
+      "started_at_ms": 1786987390089,
+      "marks": {
+        "browser_dispatch_started": 1786987390089,
+        "browser_local_inserted": 1786987390096,
+        "browser_push_confirmed": 1786987390104,
+        "native_dispatch_entered": 1786987390152,
+        "native_handler_completed": 1786987390183,
+        "native_rxdb_projection_committed": 1786987390184,
+        "browser_terminal_observed": 1786987390663
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987390663_16",
+      "started_at_ms": 1786987390663,
+      "marks": {
+        "browser_dispatch_started": 1786987390663,
+        "browser_local_inserted": 1786987390669,
+        "browser_push_confirmed": 1786987390688,
+        "native_dispatch_entered": 1786987390722,
+        "native_handler_completed": 1786987390780,
+        "native_rxdb_projection_committed": 1786987390785,
+        "browser_terminal_observed": 1786987391298
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987391298_17",
+      "started_at_ms": 1786987391298,
+      "marks": {
+        "browser_dispatch_started": 1786987391298,
+        "browser_local_inserted": 1786987391313,
+        "browser_push_confirmed": 1786987391330,
+        "native_dispatch_entered": 1786987391385,
+        "native_handler_completed": 1786987391415,
+        "native_rxdb_projection_committed": 1786987391416,
+        "browser_terminal_observed": 1786987391952
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987391952_18",
+      "started_at_ms": 1786987391952,
+      "marks": {
+        "browser_dispatch_started": 1786987391952,
+        "browser_local_inserted": 1786987391961,
+        "browser_push_confirmed": 1786987391981,
+        "native_dispatch_entered": 1786987392032,
+        "native_handler_completed": 1786987392099,
+        "native_rxdb_projection_committed": 1786987392101,
+        "browser_terminal_observed": 1786987393068
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987393068_19",
+      "started_at_ms": 1786987393069,
+      "marks": {
+        "browser_dispatch_started": 1786987393069,
+        "browser_local_inserted": 1786987393084,
+        "browser_push_confirmed": 1786987394070,
+        "native_dispatch_entered": 1786987394191,
+        "native_handler_completed": 1786987394213,
+        "native_rxdb_projection_committed": 1786987394215,
+        "browser_terminal_observed": 1786987394644
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987394644_20",
+      "started_at_ms": 1786987394644,
+      "marks": {
+        "browser_dispatch_started": 1786987394644,
+        "browser_local_inserted": 1786987394656,
+        "browser_push_confirmed": 1786987394674,
+        "native_dispatch_entered": 1786987394725,
+        "native_handler_completed": 1786987394839,
+        "native_rxdb_projection_committed": 1786987394840,
+        "browser_terminal_observed": 1786987395251
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987395251_21",
+      "started_at_ms": 1786987395251,
+      "marks": {
+        "browser_dispatch_started": 1786987395251,
+        "browser_local_inserted": 1786987395259,
+        "browser_push_confirmed": 1786987395274,
+        "native_dispatch_entered": 1786987395299,
+        "native_handler_completed": 1786987395337,
+        "native_rxdb_projection_committed": 1786987395340,
+        "browser_terminal_observed": 1786987395835
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987395835_22",
+      "started_at_ms": 1786987395835,
+      "marks": {
+        "browser_dispatch_started": 1786987395835,
+        "browser_local_inserted": 1786987395843,
+        "browser_push_confirmed": 1786987395857,
+        "native_dispatch_entered": 1786987395885,
+        "native_handler_completed": 1786987395928,
+        "native_rxdb_projection_committed": 1786987395930,
+        "browser_terminal_observed": 1786987396465
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987396465_23",
+      "started_at_ms": 1786987396465,
+      "marks": {
+        "browser_dispatch_started": 1786987396465,
+        "browser_local_inserted": 1786987396474,
+        "browser_push_confirmed": 1786987396526,
+        "native_dispatch_entered": 1786987396587,
+        "native_handler_completed": 1786987396610,
+        "native_rxdb_projection_committed": 1786987396612,
+        "browser_terminal_observed": 1786987397132
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987397132_24",
+      "started_at_ms": 1786987397132,
+      "marks": {
+        "browser_dispatch_started": 1786987397132,
+        "browser_local_inserted": 1786987397140,
+        "browser_push_confirmed": 1786987397155,
+        "native_dispatch_entered": 1786987397192,
+        "native_handler_completed": 1786987397232,
+        "native_rxdb_projection_committed": 1786987397236,
+        "browser_terminal_observed": 1786987397766
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987397766_25",
+      "started_at_ms": 1786987397766,
+      "marks": {
+        "browser_dispatch_started": 1786987397766,
+        "browser_local_inserted": 1786987397781,
+        "browser_push_confirmed": 1786987397799,
+        "native_dispatch_entered": 1786987397955,
+        "native_handler_completed": 1786987398009,
+        "native_rxdb_projection_committed": 1786987398014,
+        "browser_terminal_observed": 1786987398376
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987398376_26",
+      "started_at_ms": 1786987398376,
+      "marks": {
+        "browser_dispatch_started": 1786987398376,
+        "browser_local_inserted": 1786987398384,
+        "browser_push_confirmed": 1786987398403,
+        "native_dispatch_entered": 1786987398447,
+        "native_handler_completed": 1786987398531,
+        "native_rxdb_projection_committed": 1786987398533,
+        "browser_terminal_observed": 1786987398976
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987398976_27",
+      "started_at_ms": 1786987398976,
+      "marks": {
+        "browser_dispatch_started": 1786987398976,
+        "browser_local_inserted": 1786987398989,
+        "browser_push_confirmed": 1786987399006,
+        "native_dispatch_entered": 1786987399092,
+        "native_handler_completed": 1786987399113,
+        "native_rxdb_projection_committed": 1786987399116,
+        "browser_terminal_observed": 1786987399588
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987399588_28",
+      "started_at_ms": 1786987399588,
+      "marks": {
+        "browser_dispatch_started": 1786987399588,
+        "browser_local_inserted": 1786987399597,
+        "browser_push_confirmed": 1786987399615,
+        "native_dispatch_entered": 1786987399732,
+        "native_handler_completed": 1786987399995,
+        "native_rxdb_projection_committed": 1786987399997,
+        "browser_terminal_observed": 1786987400207
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987400207_29",
+      "started_at_ms": 1786987400207,
+      "marks": {
+        "browser_dispatch_started": 1786987400207,
+        "browser_local_inserted": 1786987400216,
+        "browser_push_confirmed": 1786987400237,
+        "native_dispatch_entered": 1786987400282,
+        "native_handler_completed": 1786987400391,
+        "native_rxdb_projection_committed": 1786987400393,
+        "browser_terminal_observed": 1786987400836
+      }
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786987400836_30",
+      "started_at_ms": 1786987400836,
+      "marks": {
+        "browser_dispatch_started": 1786987400836,
+        "browser_local_inserted": 1786987400846,
+        "browser_push_confirmed": 1786987400865,
+        "native_dispatch_entered": 1786987400915,
+        "native_handler_completed": 1786987400951,
+        "native_rxdb_projection_committed": 1786987400952,
+        "browser_terminal_observed": 1786987401444
+      }
+    }
+  ]
+}

@@ -52,7 +52,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Idle-CPU des Dienstes | ja | 4,02 % über eine isolierte Stunde | nein | Kundenmessung offen |
 | OA-2 synthetische 300k-Baseline | teilweise | 304.515-Dokumente-Einzel-Smoke strukturell grün | entfällt | 30×30-Matrix und Latenzziel offen |
 | OA-1 bounded Demand-Sync | ja | 4 RPCs, 650 materialisierte Dokumente, kein Vollpull | nein | Latenz- und Löschungsabnahme offen |
-| OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
+| OA-4 Command-Roundtrip | ja | 30/30, p50 238 ms, p95 445,15 ms | nein | lokales Latenztor bestanden |
 | `store.rs`-Refactoring | ja | ja | entfällt | erledigt |
 | `app.js`-Refactoring | nein | nein | entfällt | wartet auf saubere Arbeitsregion |
 | OA-5 Handshake-Optimierung | teilweise | Instrumentierung ja | nein | reale Bootmessung offen |
@@ -584,7 +584,7 @@ Noch offene Browserabnahme, jeweils 30 Läufe kalt und warm:
 
 ## Etappe 4: OA-4 — Command-Roundtrip
 
-Status: **instrumentiert und teilweise optimiert; Zielwert nicht erreicht**
+Status: **lokal erledigt; 30-Lauf-Latenztor bestanden**
 
 Implementiert:
 
@@ -603,9 +603,14 @@ Messstand:
 | Stand | p50 | p95 | Maximum |
 |---|---:|---:|---:|
 | Baseline | 1.790,5 ms | 2.107,5 ms | siehe Rohdaten |
-| aktueller Stand | 1.255 ms | 1.763,9 ms | 9.449 ms |
 | `d9d2a040c` | 732,5 ms | 1.319,45 ms | 10.128 ms |
 | `71d615bf3` | 813,5 ms | 2.725,95 ms | 4.905 ms |
+| `281290b6b` | 685 ms | 1.443,25 ms | 4.254 ms |
+| `3f1faf32c` | 627 ms | 733,65 ms | 10.424 ms |
+| `7522d8988` | 626,5 ms | 1.004,4 ms | 1.575 ms |
+| `692996f6f` | 615,5 ms | 1.081,15 ms | 1.677 ms |
+| `4728042e1` | 587,5 ms | 661,15 ms | 2.126 ms |
+| `5947d102a` | **238 ms** | **445,15 ms** | **667 ms** |
 | Ziel | < 300 ms | sinkend, keine neue Tail-Latenz | keine Ausreißerklasse |
 
 Nachmessung vom 17.08.2026:
@@ -685,13 +690,49 @@ Nachmessung vom 17.08.2026:
   `beweise/raw/command-roundtrip-warm-71d615bf3-2026-08-17-report.json`
   versioniert (SHA-256 `6ed5a3ef...e7ab28` beziehungsweise
   `f97878d4...3cea6`).
+- Die Folgeserie trennte die Benachrichtigungs- und Relay-Invarianten in
+  einzelne Commits: `281290b6b` weckt Replikation nach nativen Projektionen,
+  `3f1faf32c` kann vollständige terminale Payloads direkt konsumieren,
+  `7522d8988` benachrichtigt alle gleichzeitig geöffneten SQLite-Instanzen,
+  `692996f6f` trennt Live-Changes vom Vollpull-Gate und `4728042e1` erlaubt
+  ausschließlich autorisierte `business_commands`-Live-Relays auch für
+  inaktive Demand-Collections. Die jeweiligen 30er-Messungen sind oben
+  aufgeführt und als Rohdaten versioniert; keine davon erfüllte bereits das
+  Performanceziel.
+- Direkte Browser-Instrumentierung zeigte anschließend, dass kein nativer
+  Master-Change-Callback im wartenden Command ankam. Gleichzeitig benötigten
+  die tatsächlichen exakten Query-RPCs typischerweise nur 15–100 ms. Der
+  reproduzierbare Restengpass lag im Command-Bus selbst: Vor jeder exakten
+  ID-Abfrage wartete er redundant auf collectionweite Pulls von Command- und
+  Queue-Bridge.
+- Commit `5947d102a` entfernt diese Pulls ausschließlich aus der normalen,
+  endlichen Terminal-Revalidierung. Die AP3-Stallreparatur behält den breiten
+  Pull. Vier exakte ID-Abfragen bleiben mit 25/50/100/200 ms endlich und
+  erzeugen weder Vollpull noch neuen Transportpfad. Der Command-Bus-Test ist
+  26/26 grün und weist zusätzlich nach, dass der normale Terminalpfad keinen
+  collectionweiten Pull mehr ausführt.
+- Die Abnahmemessung lief mit dem sauberen Archiv-Release des unmittelbar
+  vorherigen Rust-Stands `4728042e1` (Binary-SHA-256
+  `d6eaac9b0effe0f9b0aad34e62e150a4f307408727d02330a5c61649eaf63f6d`)
+  und der bytegleich in den isolierten Smoke-Root übernommenen Browserdatei
+  aus `5947d102a`. Das ist zulässig, weil `5947d102a` ausschließlich
+  `command-bus.js` und dessen Test ändert.
+- Ergebnis: 30/30 vollständige Samples, p50 238 ms, p95 445,15 ms und Maximum
+  667 ms. Gegen `4728042e1` sanken p50 von 587,5 ms, p95 von 661,15 ms und das
+  Maximum von 2.126 ms. Commit→Browser liegt roh bei p50 94 ms und p95
+  150,55 ms; das lokale OA-4-Tor ist damit ohne neue Tail-Ausreißerklasse
+  bestanden.
+- Finale Rohdaten:
+  `beweise/raw/command-roundtrip-warm-5947d102a-2026-08-17-marks.json` und
+  `beweise/raw/command-roundtrip-warm-5947d102a-2026-08-17-report.json`.
 
 Noch offen:
 
-- Commit→Browser-/Query-Fetch-Ausreißer weiter instrumentieren.
-- Den dort belegten Engpass optimieren.
-- Erneut 30 warme Läufe ausführen und Zielwert nachweisen.
-- Erst nach bestandenem Zielwert als Performancegewinn abnehmen.
+- Kunden-/Remote-Nachweis erst im kontrollierten Rollout gemeinsam mit den
+  übrigen betrieblichen Toren; lokal ist OA-4 abgeschlossen.
+
+Beweis:
+[`beweise/command-roundtrip-2026-08-17.md`](beweise/command-roundtrip-2026-08-17.md)
 
 ## Etappe 5: OA-3 — Großmodule zerlegen
 
@@ -847,6 +888,12 @@ Kein Commit darf:
 | `d9d2a040c` | verspätete Browser-Command-Pushes erneut erkennen und kanonisch projizieren |
 | `f20a7476f` | terminale Command-ID unmittelbar auf native Master-Change-Hinweise revalidieren |
 | `71d615bf3` | vollständig gesperrten Command-Intake nach 250 ms erneut versuchen |
+| `281290b6b` | Replikation nach nativen Business-OS-Projektionen ereignisbasiert wecken |
+| `3f1faf32c` | terminale Command-Payloads aus Master-Change-Hinweisen direkt konsumieren |
+| `7522d8988` | alle gleichzeitig geöffneten SQLite-Tabelleninstanzen benachrichtigen |
+| `692996f6f` | Live-Change-Relay vom Demand-Vollpull-Gate trennen |
+| `4728042e1` | autorisierte Live-Command-Änderungen für inaktive Demand-Collections relayn |
+| `5947d102a` | terminale Command-IDs ohne collectionweiten Vorab-Pull revalidieren |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -866,20 +913,16 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den nun belegten Command-Pfad getrennt untersuchen: zuerst die nativen
-   Verarbeitungs-Ausreißer bis 4.023 ms und anschließend die rohe
-   Commit→Browser-Latenz mit p50 552,5 ms. Danach erneut 30 warme Commands
-   messen; `71d615bf3` ist Zuverlässigkeits-, nicht Performance-Baseline.
-3. Danach den Sellify-Einzel-Smoke auf demselben Code-Stand erneut messen.
-4. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
+2. Den Sellify-Einzel-Smoke auf dem aktuellen Code-Stand erneut messen.
+3. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
    Browsermatrix auf dem synthetischen Scale-Store ausführen.
-5. Den Cold-Schemaaufbau getrennt vom warmen Handshake optimieren und danach
+4. Den Cold-Schemaaufbau getrennt vom warmen Handshake optimieren und danach
    Reconnect-, Peerwechsel- und Multi-Tab-Abnahme ausführen.
-6. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
-7. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
+5. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
+6. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
    bereinigen, ohne Budgets anzuheben.
-8. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
-9. OA-7-Kompaktierung im exklusiven Wartungsfenster.
+7. Kundenrollout und OA-4/OA-6/OA-8/OA-9-Livenachweise.
+8. OA-7-Kompaktierung im exklusiven Wartungsfenster.
 
 ## Definition of Done
 

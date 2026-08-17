@@ -1,0 +1,1352 @@
+{
+  "schema": "ctox.command_roundtrip.stage_report.v1",
+  "sample_count": 30,
+  "complete_count": 30,
+  "issues": [],
+  "summary": {
+    "browser_insert": {
+      "raw": {
+        "count": 30,
+        "min": 5,
+        "max": 34,
+        "p50": 8,
+        "p95": 23.149999999999963
+      },
+      "corrected": {
+        "count": 30,
+        "min": 5,
+        "max": 34,
+        "p50": 8,
+        "p95": 23.149999999999963
+      }
+    },
+    "push": {
+      "raw": {
+        "count": 30,
+        "min": 11,
+        "max": 166,
+        "p50": 23,
+        "p95": 89.84999999999992
+      },
+      "corrected": {
+        "count": 30,
+        "min": 11,
+        "max": 166,
+        "p50": 23,
+        "p95": 89.84999999999992
+      }
+    },
+    "push_to_native_intake": {
+      "raw": {
+        "count": 30,
+        "min": 18,
+        "max": 181,
+        "p50": 45,
+        "p95": 124.64999999999999
+      },
+      "corrected": {
+        "count": 30,
+        "min": 46,
+        "max": 149,
+        "p50": 72.75,
+        "p95": 123.44999999999997
+      }
+    },
+    "native_processing": {
+      "raw": {
+        "count": 30,
+        "min": 15,
+        "max": 473,
+        "p50": 49,
+        "p95": 157.8499999999999
+      },
+      "corrected": {
+        "count": 30,
+        "min": 15,
+        "max": 473,
+        "p50": 49,
+        "p95": 157.8499999999999
+      }
+    },
+    "projection_commit": {
+      "raw": {
+        "count": 30,
+        "min": 0,
+        "max": 6,
+        "p50": 2,
+        "p95": 6
+      },
+      "corrected": {
+        "count": 30,
+        "min": 0,
+        "max": 6,
+        "p50": 2,
+        "p95": 6
+      }
+    },
+    "commit_to_browser_observed": {
+      "raw": {
+        "count": 30,
+        "min": 51,
+        "max": 153,
+        "p50": 94,
+        "p95": 150.55
+      },
+      "corrected": {
+        "count": 30,
+        "min": 46,
+        "max": 149,
+        "p50": 72.75,
+        "p95": 123.44999999999997
+      }
+    },
+    "total": {
+      "raw": {
+        "count": 30,
+        "min": 171,
+        "max": 667,
+        "p50": 238,
+        "p95": 445.14999999999986
+      },
+      "corrected": {
+        "count": 30,
+        "min": 171,
+        "max": 667,
+        "p50": 238,
+        "p95": 445.14999999999986
+      }
+    }
+  },
+  "samples": [
+    {
+      "command_id": "command_roundtrip_timing_1786989669059_1",
+      "clock_offset_ms": 7,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989669059,
+        "browser_local_inserted": 1786989669068,
+        "browser_push_confirmed": 1786989669091,
+        "native_dispatch_entered": 1786989669202,
+        "native_handler_completed": 1786989669312,
+        "native_rxdb_projection_committed": 1786989669314,
+        "browser_terminal_observed": 1786989669411
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989669059,
+        "browser_local_inserted": 1786989669068,
+        "browser_push_confirmed": 1786989669091,
+        "native_dispatch_entered": 1786989669195,
+        "native_handler_completed": 1786989669305,
+        "native_rxdb_projection_committed": 1786989669307,
+        "browser_terminal_observed": 1786989669411
+      },
+      "stages_raw": {
+        "browser_insert": 9,
+        "push": 23,
+        "push_to_native_intake": 111,
+        "native_processing": 110,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 97,
+        "total": 352
+      },
+      "stages_corrected": {
+        "browser_insert": 9,
+        "push": 23,
+        "push_to_native_intake": 104,
+        "native_processing": 110,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 104,
+        "total": 352
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989669411_2",
+      "clock_offset_ms": -17,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989669411,
+        "browser_local_inserted": 1786989669420,
+        "browser_push_confirmed": 1786989669453,
+        "native_dispatch_entered": 1786989669491,
+        "native_handler_completed": 1786989669528,
+        "native_rxdb_projection_committed": 1786989669530,
+        "browser_terminal_observed": 1786989669602
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989669411,
+        "browser_local_inserted": 1786989669420,
+        "browser_push_confirmed": 1786989669453,
+        "native_dispatch_entered": 1786989669508,
+        "native_handler_completed": 1786989669545,
+        "native_rxdb_projection_committed": 1786989669547,
+        "browser_terminal_observed": 1786989669602
+      },
+      "stages_raw": {
+        "browser_insert": 9,
+        "push": 33,
+        "push_to_native_intake": 38,
+        "native_processing": 37,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 72,
+        "total": 191
+      },
+      "stages_corrected": {
+        "browser_insert": 9,
+        "push": 33,
+        "push_to_native_intake": 55,
+        "native_processing": 37,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 55,
+        "total": 191
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989669602_3",
+      "clock_offset_ms": -33,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989669602,
+        "browser_local_inserted": 1786989669618,
+        "browser_push_confirmed": 1786989669640,
+        "native_dispatch_entered": 1786989669725,
+        "native_handler_completed": 1786989669796,
+        "native_rxdb_projection_committed": 1786989669800,
+        "browser_terminal_observed": 1786989669951
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989669602,
+        "browser_local_inserted": 1786989669618,
+        "browser_push_confirmed": 1786989669640,
+        "native_dispatch_entered": 1786989669758,
+        "native_handler_completed": 1786989669829,
+        "native_rxdb_projection_committed": 1786989669833,
+        "browser_terminal_observed": 1786989669951
+      },
+      "stages_raw": {
+        "browser_insert": 16,
+        "push": 22,
+        "push_to_native_intake": 85,
+        "native_processing": 71,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 151,
+        "total": 349
+      },
+      "stages_corrected": {
+        "browser_insert": 16,
+        "push": 22,
+        "push_to_native_intake": 118,
+        "native_processing": 71,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 118,
+        "total": 349
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989669951_4",
+      "clock_offset_ms": -53,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989669951,
+        "browser_local_inserted": 1786989669960,
+        "browser_push_confirmed": 1786989669983,
+        "native_dispatch_entered": 1786989670024,
+        "native_handler_completed": 1786989670070,
+        "native_rxdb_projection_committed": 1786989670076,
+        "browser_terminal_observed": 1786989670223
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989669951,
+        "browser_local_inserted": 1786989669960,
+        "browser_push_confirmed": 1786989669983,
+        "native_dispatch_entered": 1786989670077,
+        "native_handler_completed": 1786989670123,
+        "native_rxdb_projection_committed": 1786989670129,
+        "browser_terminal_observed": 1786989670223
+      },
+      "stages_raw": {
+        "browser_insert": 9,
+        "push": 23,
+        "push_to_native_intake": 41,
+        "native_processing": 46,
+        "projection_commit": 6,
+        "commit_to_browser_observed": 147,
+        "total": 272
+      },
+      "stages_corrected": {
+        "browser_insert": 9,
+        "push": 23,
+        "push_to_native_intake": 94,
+        "native_processing": 46,
+        "projection_commit": 6,
+        "commit_to_browser_observed": 94,
+        "total": 272
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989670223_5",
+      "clock_offset_ms": -8.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989670223,
+        "browser_local_inserted": 1786989670252,
+        "browser_push_confirmed": 1786989670280,
+        "native_dispatch_entered": 1786989670334,
+        "native_handler_completed": 1786989670393,
+        "native_rxdb_projection_committed": 1786989670395,
+        "browser_terminal_observed": 1786989670466
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989670223,
+        "browser_local_inserted": 1786989670252,
+        "browser_push_confirmed": 1786989670280,
+        "native_dispatch_entered": 1786989670342.5,
+        "native_handler_completed": 1786989670401.5,
+        "native_rxdb_projection_committed": 1786989670403.5,
+        "browser_terminal_observed": 1786989670466
+      },
+      "stages_raw": {
+        "browser_insert": 29,
+        "push": 28,
+        "push_to_native_intake": 54,
+        "native_processing": 59,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 71,
+        "total": 243
+      },
+      "stages_corrected": {
+        "browser_insert": 29,
+        "push": 28,
+        "push_to_native_intake": 62.5,
+        "native_processing": 59,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 62.5,
+        "total": 243
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989670466_6",
+      "clock_offset_ms": 2,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989670466,
+        "browser_local_inserted": 1786989670474,
+        "browser_push_confirmed": 1786989670485,
+        "native_dispatch_entered": 1786989670562,
+        "native_handler_completed": 1786989670582,
+        "native_rxdb_projection_committed": 1786989670583,
+        "browser_terminal_observed": 1786989670656
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989670466,
+        "browser_local_inserted": 1786989670474,
+        "browser_push_confirmed": 1786989670485,
+        "native_dispatch_entered": 1786989670560,
+        "native_handler_completed": 1786989670580,
+        "native_rxdb_projection_committed": 1786989670581,
+        "browser_terminal_observed": 1786989670656
+      },
+      "stages_raw": {
+        "browser_insert": 8,
+        "push": 11,
+        "push_to_native_intake": 77,
+        "native_processing": 20,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 73,
+        "total": 190
+      },
+      "stages_corrected": {
+        "browser_insert": 8,
+        "push": 11,
+        "push_to_native_intake": 75,
+        "native_processing": 20,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 75,
+        "total": 190
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989670656_7",
+      "clock_offset_ms": 9.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989670656,
+        "browser_local_inserted": 1786989670661,
+        "browser_push_confirmed": 1786989670679,
+        "native_dispatch_entered": 1786989670802,
+        "native_handler_completed": 1786989670827,
+        "native_rxdb_projection_committed": 1786989670832,
+        "browser_terminal_observed": 1786989670936
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989670656,
+        "browser_local_inserted": 1786989670661,
+        "browser_push_confirmed": 1786989670679,
+        "native_dispatch_entered": 1786989670792.5,
+        "native_handler_completed": 1786989670817.5,
+        "native_rxdb_projection_committed": 1786989670822.5,
+        "browser_terminal_observed": 1786989670936
+      },
+      "stages_raw": {
+        "browser_insert": 5,
+        "push": 18,
+        "push_to_native_intake": 123,
+        "native_processing": 25,
+        "projection_commit": 5,
+        "commit_to_browser_observed": 104,
+        "total": 280
+      },
+      "stages_corrected": {
+        "browser_insert": 5,
+        "push": 18,
+        "push_to_native_intake": 113.5,
+        "native_processing": 25,
+        "projection_commit": 5,
+        "commit_to_browser_observed": 113.5,
+        "total": 280
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989670936_8",
+      "clock_offset_ms": -41,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989670936,
+        "browser_local_inserted": 1786989670944,
+        "browser_push_confirmed": 1786989670967,
+        "native_dispatch_entered": 1786989670986,
+        "native_handler_completed": 1786989671024,
+        "native_rxdb_projection_committed": 1786989671026,
+        "browser_terminal_observed": 1786989671127
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989670936,
+        "browser_local_inserted": 1786989670944,
+        "browser_push_confirmed": 1786989670967,
+        "native_dispatch_entered": 1786989671027,
+        "native_handler_completed": 1786989671065,
+        "native_rxdb_projection_committed": 1786989671067,
+        "browser_terminal_observed": 1786989671127
+      },
+      "stages_raw": {
+        "browser_insert": 8,
+        "push": 23,
+        "push_to_native_intake": 19,
+        "native_processing": 38,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 101,
+        "total": 191
+      },
+      "stages_corrected": {
+        "browser_insert": 8,
+        "push": 23,
+        "push_to_native_intake": 60,
+        "native_processing": 38,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 60,
+        "total": 191
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989671127_9",
+      "clock_offset_ms": -27,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989671127,
+        "browser_local_inserted": 1786989671134,
+        "browser_push_confirmed": 1786989671200,
+        "native_dispatch_entered": 1786989671242,
+        "native_handler_completed": 1786989671385,
+        "native_rxdb_projection_committed": 1786989671387,
+        "browser_terminal_observed": 1786989671483
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989671127,
+        "browser_local_inserted": 1786989671134,
+        "browser_push_confirmed": 1786989671200,
+        "native_dispatch_entered": 1786989671269,
+        "native_handler_completed": 1786989671412,
+        "native_rxdb_projection_committed": 1786989671414,
+        "browser_terminal_observed": 1786989671483
+      },
+      "stages_raw": {
+        "browser_insert": 7,
+        "push": 66,
+        "push_to_native_intake": 42,
+        "native_processing": 143,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 96,
+        "total": 356
+      },
+      "stages_corrected": {
+        "browser_insert": 7,
+        "push": 66,
+        "push_to_native_intake": 69,
+        "native_processing": 143,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 69,
+        "total": 356
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989671483_10",
+      "clock_offset_ms": -28,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989671483,
+        "browser_local_inserted": 1786989671491,
+        "browser_push_confirmed": 1786989671512,
+        "native_dispatch_entered": 1786989671530,
+        "native_handler_completed": 1786989671608,
+        "native_rxdb_projection_committed": 1786989671609,
+        "browser_terminal_observed": 1786989671683
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989671483,
+        "browser_local_inserted": 1786989671491,
+        "browser_push_confirmed": 1786989671512,
+        "native_dispatch_entered": 1786989671558,
+        "native_handler_completed": 1786989671636,
+        "native_rxdb_projection_committed": 1786989671637,
+        "browser_terminal_observed": 1786989671683
+      },
+      "stages_raw": {
+        "browser_insert": 8,
+        "push": 21,
+        "push_to_native_intake": 18,
+        "native_processing": 78,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 74,
+        "total": 200
+      },
+      "stages_corrected": {
+        "browser_insert": 8,
+        "push": 21,
+        "push_to_native_intake": 46,
+        "native_processing": 78,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 46,
+        "total": 200
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989671683_11",
+      "clock_offset_ms": -37.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989671683,
+        "browser_local_inserted": 1786989671691,
+        "browser_push_confirmed": 1786989671705,
+        "native_dispatch_entered": 1786989671779,
+        "native_handler_completed": 1786989671949,
+        "native_rxdb_projection_committed": 1786989671950,
+        "browser_terminal_observed": 1786989672099
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989671683,
+        "browser_local_inserted": 1786989671691,
+        "browser_push_confirmed": 1786989671705,
+        "native_dispatch_entered": 1786989671816.5,
+        "native_handler_completed": 1786989671986.5,
+        "native_rxdb_projection_committed": 1786989671987.5,
+        "browser_terminal_observed": 1786989672099
+      },
+      "stages_raw": {
+        "browser_insert": 8,
+        "push": 14,
+        "push_to_native_intake": 74,
+        "native_processing": 170,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 149,
+        "total": 416
+      },
+      "stages_corrected": {
+        "browser_insert": 8,
+        "push": 14,
+        "push_to_native_intake": 111.5,
+        "native_processing": 170,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 111.5,
+        "total": 416
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989672099_12",
+      "clock_offset_ms": 11,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989672099,
+        "browser_local_inserted": 1786989672108,
+        "browser_push_confirmed": 1786989672125,
+        "native_dispatch_entered": 1786989672203,
+        "native_handler_completed": 1786989672218,
+        "native_rxdb_projection_committed": 1786989672218,
+        "browser_terminal_observed": 1786989672274
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989672099,
+        "browser_local_inserted": 1786989672108,
+        "browser_push_confirmed": 1786989672125,
+        "native_dispatch_entered": 1786989672192,
+        "native_handler_completed": 1786989672207,
+        "native_rxdb_projection_committed": 1786989672207,
+        "browser_terminal_observed": 1786989672274
+      },
+      "stages_raw": {
+        "browser_insert": 9,
+        "push": 17,
+        "push_to_native_intake": 78,
+        "native_processing": 15,
+        "projection_commit": 0,
+        "commit_to_browser_observed": 56,
+        "total": 175
+      },
+      "stages_corrected": {
+        "browser_insert": 9,
+        "push": 17,
+        "push_to_native_intake": 67,
+        "native_processing": 15,
+        "projection_commit": 0,
+        "commit_to_browser_observed": 67,
+        "total": 175
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989672274_13",
+      "clock_offset_ms": -2,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989672274,
+        "browser_local_inserted": 1786989672280,
+        "browser_push_confirmed": 1786989672355,
+        "native_dispatch_entered": 1786989672402,
+        "native_handler_completed": 1786989672424,
+        "native_rxdb_projection_committed": 1786989672425,
+        "browser_terminal_observed": 1786989672476
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989672274,
+        "browser_local_inserted": 1786989672280,
+        "browser_push_confirmed": 1786989672355,
+        "native_dispatch_entered": 1786989672404,
+        "native_handler_completed": 1786989672426,
+        "native_rxdb_projection_committed": 1786989672427,
+        "browser_terminal_observed": 1786989672476
+      },
+      "stages_raw": {
+        "browser_insert": 6,
+        "push": 75,
+        "push_to_native_intake": 47,
+        "native_processing": 22,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 51,
+        "total": 202
+      },
+      "stages_corrected": {
+        "browser_insert": 6,
+        "push": 75,
+        "push_to_native_intake": 49,
+        "native_processing": 22,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 49,
+        "total": 202
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989672476_14",
+      "clock_offset_ms": -46,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989672476,
+        "browser_local_inserted": 1786989672483,
+        "browser_push_confirmed": 1786989672499,
+        "native_dispatch_entered": 1786989672530,
+        "native_handler_completed": 1786989672568,
+        "native_rxdb_projection_committed": 1786989672569,
+        "browser_terminal_observed": 1786989672692
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989672476,
+        "browser_local_inserted": 1786989672483,
+        "browser_push_confirmed": 1786989672499,
+        "native_dispatch_entered": 1786989672576,
+        "native_handler_completed": 1786989672614,
+        "native_rxdb_projection_committed": 1786989672615,
+        "browser_terminal_observed": 1786989672692
+      },
+      "stages_raw": {
+        "browser_insert": 7,
+        "push": 16,
+        "push_to_native_intake": 31,
+        "native_processing": 38,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 123,
+        "total": 216
+      },
+      "stages_corrected": {
+        "browser_insert": 7,
+        "push": 16,
+        "push_to_native_intake": 77,
+        "native_processing": 38,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 77,
+        "total": 216
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989672692_15",
+      "clock_offset_ms": -38.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989672692,
+        "browser_local_inserted": 1786989672697,
+        "browser_push_confirmed": 1786989672799,
+        "native_dispatch_entered": 1786989672826,
+        "native_handler_completed": 1786989672859,
+        "native_rxdb_projection_committed": 1786989672861,
+        "browser_terminal_observed": 1786989672965
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989672692,
+        "browser_local_inserted": 1786989672697,
+        "browser_push_confirmed": 1786989672799,
+        "native_dispatch_entered": 1786989672864.5,
+        "native_handler_completed": 1786989672897.5,
+        "native_rxdb_projection_committed": 1786989672899.5,
+        "browser_terminal_observed": 1786989672965
+      },
+      "stages_raw": {
+        "browser_insert": 5,
+        "push": 102,
+        "push_to_native_intake": 27,
+        "native_processing": 33,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 104,
+        "total": 273
+      },
+      "stages_corrected": {
+        "browser_insert": 5,
+        "push": 102,
+        "push_to_native_intake": 65.5,
+        "native_processing": 33,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 65.5,
+        "total": 273
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989672965_16",
+      "clock_offset_ms": -28,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989672965,
+        "browser_local_inserted": 1786989672972,
+        "browser_push_confirmed": 1786989672997,
+        "native_dispatch_entered": 1786989673020,
+        "native_handler_completed": 1786989673053,
+        "native_rxdb_projection_committed": 1786989673057,
+        "browser_terminal_observed": 1786989673136
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989672965,
+        "browser_local_inserted": 1786989672972,
+        "browser_push_confirmed": 1786989672997,
+        "native_dispatch_entered": 1786989673048,
+        "native_handler_completed": 1786989673081,
+        "native_rxdb_projection_committed": 1786989673085,
+        "browser_terminal_observed": 1786989673136
+      },
+      "stages_raw": {
+        "browser_insert": 7,
+        "push": 25,
+        "push_to_native_intake": 23,
+        "native_processing": 33,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 79,
+        "total": 171
+      },
+      "stages_corrected": {
+        "browser_insert": 7,
+        "push": 25,
+        "push_to_native_intake": 51,
+        "native_processing": 33,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 51,
+        "total": 171
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989673136_17",
+      "clock_offset_ms": -31.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989673136,
+        "browser_local_inserted": 1786989673143,
+        "browser_push_confirmed": 1786989673164,
+        "native_dispatch_entered": 1786989673189,
+        "native_handler_completed": 1786989673269,
+        "native_rxdb_projection_committed": 1786989673272,
+        "browser_terminal_observed": 1786989673360
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989673136,
+        "browser_local_inserted": 1786989673143,
+        "browser_push_confirmed": 1786989673164,
+        "native_dispatch_entered": 1786989673220.5,
+        "native_handler_completed": 1786989673300.5,
+        "native_rxdb_projection_committed": 1786989673303.5,
+        "browser_terminal_observed": 1786989673360
+      },
+      "stages_raw": {
+        "browser_insert": 7,
+        "push": 21,
+        "push_to_native_intake": 25,
+        "native_processing": 80,
+        "projection_commit": 3,
+        "commit_to_browser_observed": 88,
+        "total": 224
+      },
+      "stages_corrected": {
+        "browser_insert": 7,
+        "push": 21,
+        "push_to_native_intake": 56.5,
+        "native_processing": 80,
+        "projection_commit": 3,
+        "commit_to_browser_observed": 56.5,
+        "total": 224
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989673360_18",
+      "clock_offset_ms": -59,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989673360,
+        "browser_local_inserted": 1786989673367,
+        "browser_push_confirmed": 1786989673390,
+        "native_dispatch_entered": 1786989673408,
+        "native_handler_completed": 1786989673435,
+        "native_rxdb_projection_committed": 1786989673441,
+        "browser_terminal_observed": 1786989673577
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989673360,
+        "browser_local_inserted": 1786989673367,
+        "browser_push_confirmed": 1786989673390,
+        "native_dispatch_entered": 1786989673467,
+        "native_handler_completed": 1786989673494,
+        "native_rxdb_projection_committed": 1786989673500,
+        "browser_terminal_observed": 1786989673577
+      },
+      "stages_raw": {
+        "browser_insert": 7,
+        "push": 23,
+        "push_to_native_intake": 18,
+        "native_processing": 27,
+        "projection_commit": 6,
+        "commit_to_browser_observed": 136,
+        "total": 217
+      },
+      "stages_corrected": {
+        "browser_insert": 7,
+        "push": 23,
+        "push_to_native_intake": 77,
+        "native_processing": 27,
+        "projection_commit": 6,
+        "commit_to_browser_observed": 77,
+        "total": 217
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989673577_19",
+      "clock_offset_ms": -17.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989673577,
+        "browser_local_inserted": 1786989673583,
+        "browser_push_confirmed": 1786989673602,
+        "native_dispatch_entered": 1786989673645,
+        "native_handler_completed": 1786989673733,
+        "native_rxdb_projection_committed": 1786989673735,
+        "browser_terminal_observed": 1786989673813
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989673577,
+        "browser_local_inserted": 1786989673583,
+        "browser_push_confirmed": 1786989673602,
+        "native_dispatch_entered": 1786989673662.5,
+        "native_handler_completed": 1786989673750.5,
+        "native_rxdb_projection_committed": 1786989673752.5,
+        "browser_terminal_observed": 1786989673813
+      },
+      "stages_raw": {
+        "browser_insert": 6,
+        "push": 19,
+        "push_to_native_intake": 43,
+        "native_processing": 88,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 78,
+        "total": 236
+      },
+      "stages_corrected": {
+        "browser_insert": 6,
+        "push": 19,
+        "push_to_native_intake": 60.5,
+        "native_processing": 88,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 60.5,
+        "total": 236
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989673813_20",
+      "clock_offset_ms": -6,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989673813,
+        "browser_local_inserted": 1786989673823,
+        "browser_push_confirmed": 1786989673841,
+        "native_dispatch_entered": 1786989673921,
+        "native_handler_completed": 1786989674004,
+        "native_rxdb_projection_committed": 1786989674008,
+        "browser_terminal_observed": 1786989674100
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989673813,
+        "browser_local_inserted": 1786989673823,
+        "browser_push_confirmed": 1786989673841,
+        "native_dispatch_entered": 1786989673927,
+        "native_handler_completed": 1786989674010,
+        "native_rxdb_projection_committed": 1786989674014,
+        "browser_terminal_observed": 1786989674100
+      },
+      "stages_raw": {
+        "browser_insert": 10,
+        "push": 18,
+        "push_to_native_intake": 80,
+        "native_processing": 83,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 92,
+        "total": 287
+      },
+      "stages_corrected": {
+        "browser_insert": 10,
+        "push": 18,
+        "push_to_native_intake": 86,
+        "native_processing": 83,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 86,
+        "total": 287
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989674100_21",
+      "clock_offset_ms": -47.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989674100,
+        "browser_local_inserted": 1786989674109,
+        "browser_push_confirmed": 1786989674134,
+        "native_dispatch_entered": 1786989674157,
+        "native_handler_completed": 1786989674191,
+        "native_rxdb_projection_committed": 1786989674194,
+        "browser_terminal_observed": 1786989674312
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989674100,
+        "browser_local_inserted": 1786989674109,
+        "browser_push_confirmed": 1786989674134,
+        "native_dispatch_entered": 1786989674204.5,
+        "native_handler_completed": 1786989674238.5,
+        "native_rxdb_projection_committed": 1786989674241.5,
+        "browser_terminal_observed": 1786989674312
+      },
+      "stages_raw": {
+        "browser_insert": 9,
+        "push": 25,
+        "push_to_native_intake": 23,
+        "native_processing": 34,
+        "projection_commit": 3,
+        "commit_to_browser_observed": 118,
+        "total": 212
+      },
+      "stages_corrected": {
+        "browser_insert": 9,
+        "push": 25,
+        "push_to_native_intake": 70.5,
+        "native_processing": 34,
+        "projection_commit": 3,
+        "commit_to_browser_observed": 70.5,
+        "total": 212
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989674312_22",
+      "clock_offset_ms": -25,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989674312,
+        "browser_local_inserted": 1786989674320,
+        "browser_push_confirmed": 1786989674347,
+        "native_dispatch_entered": 1786989674374,
+        "native_handler_completed": 1786989674457,
+        "native_rxdb_projection_committed": 1786989674459,
+        "browser_terminal_observed": 1786989674536
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989674312,
+        "browser_local_inserted": 1786989674320,
+        "browser_push_confirmed": 1786989674347,
+        "native_dispatch_entered": 1786989674399,
+        "native_handler_completed": 1786989674482,
+        "native_rxdb_projection_committed": 1786989674484,
+        "browser_terminal_observed": 1786989674536
+      },
+      "stages_raw": {
+        "browser_insert": 8,
+        "push": 27,
+        "push_to_native_intake": 27,
+        "native_processing": 83,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 77,
+        "total": 224
+      },
+      "stages_corrected": {
+        "browser_insert": 8,
+        "push": 27,
+        "push_to_native_intake": 52,
+        "native_processing": 83,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 52,
+        "total": 224
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989674536_23",
+      "clock_offset_ms": -58,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989674536,
+        "browser_local_inserted": 1786989674542,
+        "browser_push_confirmed": 1786989674561,
+        "native_dispatch_entered": 1786989674598,
+        "native_handler_completed": 1786989674622,
+        "native_rxdb_projection_committed": 1786989674623,
+        "browser_terminal_observed": 1786989674776
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989674536,
+        "browser_local_inserted": 1786989674542,
+        "browser_push_confirmed": 1786989674561,
+        "native_dispatch_entered": 1786989674656,
+        "native_handler_completed": 1786989674680,
+        "native_rxdb_projection_committed": 1786989674681,
+        "browser_terminal_observed": 1786989674776
+      },
+      "stages_raw": {
+        "browser_insert": 6,
+        "push": 19,
+        "push_to_native_intake": 37,
+        "native_processing": 24,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 153,
+        "total": 240
+      },
+      "stages_corrected": {
+        "browser_insert": 6,
+        "push": 19,
+        "push_to_native_intake": 95,
+        "native_processing": 24,
+        "projection_commit": 1,
+        "commit_to_browser_observed": 95,
+        "total": 240
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989674776_24",
+      "clock_offset_ms": -23.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989674776,
+        "browser_local_inserted": 1786989674783,
+        "browser_push_confirmed": 1786989674800,
+        "native_dispatch_entered": 1786989674836,
+        "native_handler_completed": 1786989674913,
+        "native_rxdb_projection_committed": 1786989674915,
+        "browser_terminal_observed": 1786989674998
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989674776,
+        "browser_local_inserted": 1786989674783,
+        "browser_push_confirmed": 1786989674800,
+        "native_dispatch_entered": 1786989674859.5,
+        "native_handler_completed": 1786989674936.5,
+        "native_rxdb_projection_committed": 1786989674938.5,
+        "browser_terminal_observed": 1786989674998
+      },
+      "stages_raw": {
+        "browser_insert": 7,
+        "push": 17,
+        "push_to_native_intake": 36,
+        "native_processing": 77,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 83,
+        "total": 222
+      },
+      "stages_corrected": {
+        "browser_insert": 7,
+        "push": 17,
+        "push_to_native_intake": 59.5,
+        "native_processing": 77,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 59.5,
+        "total": 222
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989674998_25",
+      "clock_offset_ms": -10.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989674998,
+        "browser_local_inserted": 1786989675004,
+        "browser_push_confirmed": 1786989675028,
+        "native_dispatch_entered": 1786989675078,
+        "native_handler_completed": 1786989675120,
+        "native_rxdb_projection_committed": 1786989675123,
+        "browser_terminal_observed": 1786989675194
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989674998,
+        "browser_local_inserted": 1786989675004,
+        "browser_push_confirmed": 1786989675028,
+        "native_dispatch_entered": 1786989675088.5,
+        "native_handler_completed": 1786989675130.5,
+        "native_rxdb_projection_committed": 1786989675133.5,
+        "browser_terminal_observed": 1786989675194
+      },
+      "stages_raw": {
+        "browser_insert": 6,
+        "push": 24,
+        "push_to_native_intake": 50,
+        "native_processing": 42,
+        "projection_commit": 3,
+        "commit_to_browser_observed": 71,
+        "total": 196
+      },
+      "stages_corrected": {
+        "browser_insert": 6,
+        "push": 24,
+        "push_to_native_intake": 60.5,
+        "native_processing": 42,
+        "projection_commit": 3,
+        "commit_to_browser_observed": 60.5,
+        "total": 196
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989675194_26",
+      "clock_offset_ms": 32,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989675194,
+        "browser_local_inserted": 1786989675206,
+        "browser_push_confirmed": 1786989675229,
+        "native_dispatch_entered": 1786989675410,
+        "native_handler_completed": 1786989675477,
+        "native_rxdb_projection_committed": 1786989675479,
+        "browser_terminal_observed": 1786989675596
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989675194,
+        "browser_local_inserted": 1786989675206,
+        "browser_push_confirmed": 1786989675229,
+        "native_dispatch_entered": 1786989675378,
+        "native_handler_completed": 1786989675445,
+        "native_rxdb_projection_committed": 1786989675447,
+        "browser_terminal_observed": 1786989675596
+      },
+      "stages_raw": {
+        "browser_insert": 12,
+        "push": 23,
+        "push_to_native_intake": 181,
+        "native_processing": 67,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 117,
+        "total": 402
+      },
+      "stages_corrected": {
+        "browser_insert": 12,
+        "push": 23,
+        "push_to_native_intake": 149,
+        "native_processing": 67,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 149,
+        "total": 402
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989675597_27",
+      "clock_offset_ms": -22.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989675597,
+        "browser_local_inserted": 1786989675610,
+        "browser_push_confirmed": 1786989675645,
+        "native_dispatch_entered": 1786989675750,
+        "native_handler_completed": 1786989675802,
+        "native_rxdb_projection_committed": 1786989675808,
+        "browser_terminal_observed": 1786989675958
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989675597,
+        "browser_local_inserted": 1786989675610,
+        "browser_push_confirmed": 1786989675645,
+        "native_dispatch_entered": 1786989675772.5,
+        "native_handler_completed": 1786989675824.5,
+        "native_rxdb_projection_committed": 1786989675830.5,
+        "browser_terminal_observed": 1786989675958
+      },
+      "stages_raw": {
+        "browser_insert": 13,
+        "push": 35,
+        "push_to_native_intake": 105,
+        "native_processing": 52,
+        "projection_commit": 6,
+        "commit_to_browser_observed": 150,
+        "total": 361
+      },
+      "stages_corrected": {
+        "browser_insert": 13,
+        "push": 35,
+        "push_to_native_intake": 127.5,
+        "native_processing": 52,
+        "projection_commit": 6,
+        "commit_to_browser_observed": 127.5,
+        "total": 361
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989675958_28",
+      "clock_offset_ms": -16.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989675958,
+        "browser_local_inserted": 1786989675992,
+        "browser_push_confirmed": 1786989676158,
+        "native_dispatch_entered": 1786989676260,
+        "native_handler_completed": 1786989676288,
+        "native_rxdb_projection_committed": 1786989676292,
+        "browser_terminal_observed": 1786989676427
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989675958,
+        "browser_local_inserted": 1786989675992,
+        "browser_push_confirmed": 1786989676158,
+        "native_dispatch_entered": 1786989676276.5,
+        "native_handler_completed": 1786989676304.5,
+        "native_rxdb_projection_committed": 1786989676308.5,
+        "browser_terminal_observed": 1786989676427
+      },
+      "stages_raw": {
+        "browser_insert": 34,
+        "push": 166,
+        "push_to_native_intake": 102,
+        "native_processing": 28,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 135,
+        "total": 469
+      },
+      "stages_corrected": {
+        "browser_insert": 34,
+        "push": 166,
+        "push_to_native_intake": 118.5,
+        "native_processing": 28,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 118.5,
+        "total": 469
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989676427_29",
+      "clock_offset_ms": 2.5,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989676427,
+        "browser_local_inserted": 1786989676443,
+        "browser_push_confirmed": 1786989676468,
+        "native_dispatch_entered": 1786989676546,
+        "native_handler_completed": 1786989677019,
+        "native_rxdb_projection_committed": 1786989677021,
+        "browser_terminal_observed": 1786989677094
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989676427,
+        "browser_local_inserted": 1786989676443,
+        "browser_push_confirmed": 1786989676468,
+        "native_dispatch_entered": 1786989676543.5,
+        "native_handler_completed": 1786989677016.5,
+        "native_rxdb_projection_committed": 1786989677018.5,
+        "browser_terminal_observed": 1786989677094
+      },
+      "stages_raw": {
+        "browser_insert": 16,
+        "push": 25,
+        "push_to_native_intake": 78,
+        "native_processing": 473,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 73,
+        "total": 667
+      },
+      "stages_corrected": {
+        "browser_insert": 16,
+        "push": 25,
+        "push_to_native_intake": 75.5,
+        "native_processing": 473,
+        "projection_commit": 2,
+        "commit_to_browser_observed": 75.5,
+        "total": 667
+      },
+      "stage_sum_delta_ms": 0
+    },
+    {
+      "command_id": "command_roundtrip_timing_1786989677094_30",
+      "clock_offset_ms": 23,
+      "marks_raw": {
+        "browser_dispatch_started": 1786989677094,
+        "browser_local_inserted": 1786989677108,
+        "browser_push_confirmed": 1786989677135,
+        "native_dispatch_entered": 1786989677261,
+        "native_handler_completed": 1786989677353,
+        "native_rxdb_projection_committed": 1786989677357,
+        "browser_terminal_observed": 1786989677437
+      },
+      "marks_corrected": {
+        "browser_dispatch_started": 1786989677094,
+        "browser_local_inserted": 1786989677108,
+        "browser_push_confirmed": 1786989677135,
+        "native_dispatch_entered": 1786989677238,
+        "native_handler_completed": 1786989677330,
+        "native_rxdb_projection_committed": 1786989677334,
+        "browser_terminal_observed": 1786989677437
+      },
+      "stages_raw": {
+        "browser_insert": 14,
+        "push": 27,
+        "push_to_native_intake": 126,
+        "native_processing": 92,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 80,
+        "total": 343
+      },
+      "stages_corrected": {
+        "browser_insert": 14,
+        "push": 27,
+        "push_to_native_intake": 103,
+        "native_processing": 92,
+        "projection_commit": 4,
+        "commit_to_browser_observed": 103,
+        "total": 343
+      },
+      "stage_sum_delta_ms": 0
+    }
+  ]
+}
