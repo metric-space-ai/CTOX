@@ -233,7 +233,13 @@ impl TableNotifier {
     }
 }
 
-static UPDATE_REGISTRY: OnceLock<StdMutex<HashMap<String, Arc<TableNotifier>>>> = OnceLock::new();
+struct TableNotifierRegistryEntry {
+    notifier: Arc<TableNotifier>,
+    references: usize,
+}
+
+static UPDATE_REGISTRY: OnceLock<StdMutex<HashMap<String, TableNotifierRegistryEntry>>> =
+    OnceLock::new();
 
 pub(crate) fn database_key_for_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
@@ -243,26 +249,40 @@ fn registry_key(database_key: &str, table_name: &str) -> String {
     format!("{database_key}\0{table_name}")
 }
 
-fn register_table_notifier(database_key: &str, table_name: &str, notifier: Arc<TableNotifier>) {
+fn register_table_notifier(database_key: &str, table_name: &str) -> Arc<TableNotifier> {
     let mut map = UPDATE_REGISTRY
         .get_or_init(|| StdMutex::new(HashMap::new()))
         .lock()
         .unwrap();
-    map.insert(registry_key(database_key, table_name), notifier);
+    let entry = map
+        .entry(registry_key(database_key, table_name))
+        .or_insert_with(|| TableNotifierRegistryEntry {
+            notifier: Arc::new(TableNotifier::new()),
+            references: 0,
+        });
+    entry.references = entry.references.saturating_add(1);
+    Arc::clone(&entry.notifier)
 }
 
 fn unregister_table_notifier(database_key: &str, table_name: &str) {
     if let Some(registry) = UPDATE_REGISTRY.get() {
         let mut map = registry.lock().unwrap();
-        map.remove(&registry_key(database_key, table_name));
+        let key = registry_key(database_key, table_name);
+        let remove = map.get_mut(&key).is_some_and(|entry| {
+            entry.references = entry.references.saturating_sub(1);
+            entry.references == 0
+        });
+        if remove {
+            map.remove(&key);
+        }
     }
 }
 
 pub fn notify_table_change(database_key: &str, table_name: &str) -> bool {
     if let Some(registry) = UPDATE_REGISTRY.get() {
         let map = registry.lock().unwrap();
-        if let Some(notifier) = map.get(&registry_key(database_key, table_name)) {
-            notifier.signal_local_hook();
+        if let Some(entry) = map.get(&registry_key(database_key, table_name)) {
+            entry.notifier.signal_local_hook();
             return true;
         }
     }
@@ -283,8 +303,8 @@ pub fn notify_table_change_for_path(database_path: &Path, table_name: &str) -> b
 pub(crate) fn notify_external_table_change(database_key: &str, table_name: &str) -> bool {
     if let Some(registry) = UPDATE_REGISTRY.get() {
         let map = registry.lock().unwrap();
-        if let Some(notifier) = map.get(&registry_key(database_key, table_name)) {
-            notifier.signal();
+        if let Some(entry) = map.get(&registry_key(database_key, table_name)) {
+            entry.notifier.signal();
             return true;
         }
     }
@@ -295,14 +315,14 @@ pub fn table_change_generation(database_key: &str, table_name: &str) -> Option<u
     let registry = UPDATE_REGISTRY.get()?;
     let map = registry.lock().unwrap();
     map.get(&registry_key(database_key, table_name))
-        .map(|notifier| notifier.generation())
+        .map(|entry| entry.notifier.generation())
 }
 
 pub(crate) fn table_local_hook_generation(database_key: &str, table_name: &str) -> Option<u64> {
     let registry = UPDATE_REGISTRY.get()?;
     let map = registry.lock().unwrap();
     map.get(&registry_key(database_key, table_name))
-        .map(|notifier| notifier.local_hook_generation())
+        .map(|entry| entry.notifier.local_hook_generation())
 }
 
 pub fn table_change_generation_for_path(database_path: &Path, table_name: &str) -> Option<u64> {
@@ -318,7 +338,8 @@ pub async fn wait_for_table_change_for_path(
     let database_key = database_key_for_path(database_path);
     let notifier = UPDATE_REGISTRY.get().and_then(|registry| {
         let map = registry.lock().unwrap();
-        map.get(&registry_key(&database_key, table_name)).cloned()
+        map.get(&registry_key(&database_key, table_name))
+            .map(|entry| Arc::clone(&entry.notifier))
     });
     let Some(notifier) = notifier else {
         tokio::time::sleep(timeout_duration).await;
@@ -349,9 +370,9 @@ pub fn notify_database_change(database_key: &str) {
     if let Some(registry) = UPDATE_REGISTRY.get() {
         let map = registry.lock().unwrap();
         let prefix = format!("{database_key}\0");
-        for (key, notifier) in map.iter() {
+        for (key, entry) in map.iter() {
             if key.starts_with(&prefix) {
-                notifier.signal();
+                entry.notifier.signal();
             }
         }
     }
@@ -385,6 +406,7 @@ pub struct RxStorageInstanceSqlite {
     closed: Arc<AtomicBool>,
     external_checkpoint: Arc<Mutex<Value>>,
     external_notifier: Arc<TableNotifier>,
+    notifier_registered: AtomicBool,
     read_connection: Arc<Mutex<Option<SharedSqliteConnection>>>,
     instance_id: u64,
     #[cfg(test)]
@@ -410,8 +432,7 @@ impl RxStorageInstanceSqlite {
         }));
         let read_connection = Arc::new(Mutex::new(None));
 
-        let notifier = Arc::new(TableNotifier::new());
-        register_table_notifier(&database_key, &table_name, Arc::clone(&notifier));
+        let notifier = register_table_notifier(&database_key, &table_name);
         // One startup reconciliation closes the gap between the initial
         // checkpoint read and the database-wide data_version watcher baseline.
         notifier.signal();
@@ -441,6 +462,7 @@ impl RxStorageInstanceSqlite {
             closed,
             external_checkpoint,
             external_notifier,
+            notifier_registered: AtomicBool::new(true),
             read_connection,
             instance_id: INSTANCE_ID.fetch_add(1, Ordering::SeqCst),
             #[cfg(test)]
@@ -461,6 +483,12 @@ impl RxStorageInstanceSqlite {
             ));
         }
         Ok(())
+    }
+
+    fn unregister_table_notifier_once(&self) {
+        if self.notifier_registered.swap(false, Ordering::SeqCst) {
+            unregister_table_notifier(&self.database_key, &self.table_name);
+        }
     }
 
     async fn with_read_connection<T, F>(&self, operation: ReadOperation, read: F) -> RxResult<T>
@@ -1520,14 +1548,14 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
         .map_err(join_error)??;
         self.closed.store(true, Ordering::SeqCst);
         self.external_notifier.signal();
-        unregister_table_notifier(&self.database_key, &self.table_name);
+        self.unregister_table_notifier_once();
         Ok(())
     }
 
     async fn close(&self) -> Result<(), RxError> {
         self.closed.store(true, Ordering::SeqCst);
         self.external_notifier.signal();
-        unregister_table_notifier(&self.database_key, &self.table_name);
+        self.unregister_table_notifier_once();
         Ok(())
     }
 
@@ -1570,7 +1598,7 @@ impl Drop for RxStorageInstanceSqlite {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::SeqCst);
         self.external_notifier.signal();
-        unregister_table_notifier(&self.database_key, &self.table_name);
+        self.unregister_table_notifier_once();
     }
 }
 
@@ -4071,6 +4099,71 @@ mod tests {
         assert_eq!(bulk.context.as_deref(), Some("sqlite-external-poll"));
         assert_eq!(bulk.events.len(), 1);
         assert_eq!(bulk.events[0].document_id, "external-readonly");
+    }
+
+    #[tokio::test]
+    async fn same_table_instances_share_notifications_until_the_last_instance_closes() {
+        use tokio::time::timeout;
+        use tokio_stream::StreamExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("ctox.sqlite3");
+        let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
+            database_path: database_path.clone(),
+        });
+        let first = create_storage_instance(&storage, params(test_schema()))
+            .await
+            .unwrap();
+        let second = create_storage_instance(&storage, params(test_schema()))
+            .await
+            .unwrap();
+        assert_eq!(first.table_name, second.table_name);
+        let mut first_stream = first.change_stream();
+        let mut second_stream = second.change_stream();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        {
+            let conn = rusqlite::Connection::open(&database_path).unwrap();
+            insert_document(
+                &conn,
+                &first.table_name,
+                &first.primary_path,
+                &doc("shared-wake", "1-external", 7, false, 10.0),
+            )
+            .unwrap();
+        }
+        assert!(notify_table_change_for_path(
+            &database_path,
+            &first.table_name
+        ));
+        for stream in [&mut first_stream, &mut second_stream] {
+            let bulk = timeout(Duration::from_millis(750), stream.next())
+                .await
+                .expect("every live instance must receive the shared table wake")
+                .expect("change stream should stay open");
+            assert_eq!(bulk.events[0].document_id, "shared-wake");
+        }
+
+        first.close().await.unwrap();
+        {
+            let conn = rusqlite::Connection::open(&database_path).unwrap();
+            insert_document(
+                &conn,
+                &second.table_name,
+                &second.primary_path,
+                &doc("after-first-close", "1-external", 8, false, 20.0),
+            )
+            .unwrap();
+        }
+        assert!(notify_table_change_for_path(
+            &database_path,
+            &second.table_name
+        ));
+        let bulk = timeout(Duration::from_millis(750), second_stream.next())
+            .await
+            .expect("closing one instance must retain the shared table wake")
+            .expect("remaining change stream should stay open");
+        assert_eq!(bulk.events[0].document_id, "after-first-close");
     }
 
     // Backlog OS-A1: the idle-budget guard for the external write poll lives
