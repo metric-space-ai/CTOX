@@ -604,6 +604,8 @@ Messstand:
 |---|---:|---:|---:|
 | Baseline | 1.790,5 ms | 2.107,5 ms | siehe Rohdaten |
 | aktueller Stand | 1.255 ms | 1.763,9 ms | 9.449 ms |
+| `d9d2a040c` | 732,5 ms | 1.319,45 ms | 10.128 ms |
+| `71d615bf3` | 813,5 ms | 2.725,95 ms | 4.905 ms |
 | Ziel | < 300 ms | sinkend, keine neue Tail-Latenz | keine Ausreißerklasse |
 
 Nachmessung vom 17.08.2026:
@@ -625,10 +627,64 @@ Nachmessung vom 17.08.2026:
 - Commit `d9d2a040c` hält deshalb den tatsächlich vor Intake gelesenen
   Quellstempel fest und schließt zusätzlich das Lost-Wakeup-Fenster zwischen
   Stempelprüfung und dem Scharfschalten des SQLite-Notifiers. Drei gezielte
-  Idle-Gate-/Notifier-Regressionstests sind mit `3/3` Treffern grün. Der
-  saubere Archiv-Release-Build und die erneute 30-Command-Messung laufen; ein
-  Performancegewinn ist bis zum fertigen Report ausdrücklich noch nicht
-  abgenommen.
+  Idle-Gate-/Notifier-Regressionstests sind mit `3/3` Treffern grün.
+- Der saubere Archiv-Release-Build von `d9d2a040c` ist abgeschlossen. Das
+  Binary hat SHA-256
+  `0de6672465999551adb7669aa4c0b5ad8156789123d91f5c4a29105fb991f429`.
+- Die anschließende warme Messung im bereits initialisierten isolierten Root
+  ist mit 30/30 vollständigen Samples und null Reportproblemen grün. Der zuvor
+  reproduzierte Verlust des sechsten Commands trat nicht mehr auf.
+- Die Latenz sank gegenüber dem vorherigen Stand von p50 1.255 ms auf
+  732,5 ms und von p95 1.763,9 ms auf 1.319,45 ms. Das Ziel ist damit noch
+  nicht erreicht. Der korrigierte p50 liegt für Push→Intake bei 293 ms, für
+  Native Processing bei 60 ms, für Projection Commit bei 4 ms und für
+  Commit→Browser ebenfalls bei 293 ms; Browser Insert und Push benötigen
+  zusammen weitere 54,5 ms. Ein einzelnes Sample dauerte 10.128 ms, davon
+  1.750 ms native Verarbeitung und korrigiert je 4.160,5 ms auf den beiden
+  WebRTC-Grenzen. Dieser Tail-Ausreißer verhindert weiterhin die Abnahme.
+- Zeitmarken und Stage-Report dieser Messung sind als
+  `beweise/raw/command-roundtrip-warm-d9d2a040c-2026-08-17-marks.json` und
+  `beweise/raw/command-roundtrip-warm-d9d2a040c-2026-08-17-report.json`
+  versioniert.
+- Commit `f20a7476f` reicht das collection-spezifische native
+  `master-change`-Signal an wartende Commands weiter. Ein Command fragt darauf
+  sofort genau seine autoritative ID mit einem neuen Revisions-Token ab; vier
+  endliche Revalidierungen bleiben nur als Verlustsicherung. Es entsteht weder
+  ein Vollpull noch ein neuer Datenpfad. Der gezielte Command-Bus-Test ist
+  26/26 grün, der Replication-Recovery-Smoke sowie der Bundle-Wächter sind
+  grün, und die vollständige RxDB-JS-Suite meldet 101 grüne, null rote und zwei
+  mangels Wire-Daemon ausdrücklich übersprungene Cross-Process-Smokes.
+- Der saubere Archiv-Release-Build von `f20a7476f` hat SHA-256
+  `adc299a6e2c74a2f5ada89cdf89b7bec1df42521eae16b756995082e5c8d1ad5`.
+  Der folgende Lauf bestätigte die unmittelbare ID-Revalidierung bis zum 23.
+  gewerteten Command, ist aber kein gültiger 30er-Report: Ein nativer
+  SQLite-Write-Lock blockierte sowohl die Command-Annahme als auch das
+  Persistieren ihres Intake-Fehlers. Da die replizierte Zeile unverändert
+  blieb, schlief der Consumer anschließend bis zum Idle-Safety-Poll und der
+  Browser lief in den Command-Timeout. Der Lauf wurde mit 23/30 verworfen.
+- Commit `71d615bf3` setzt bei einem solchen vollständig gesperrten Intake den
+  bereits beobachteten Quellstempel zurück und wiederholt den Versuch nach
+  250 ms. Das ist endlich durch das vorhandene Intake-Budget und zugleich
+  CPU-begrenzt; ohne offene Fehler bleibt der 30-Sekunden-Idlepfad unverändert.
+  Der gezielte Regressionstest ist 1/1 grün bei 2.870 gefilterten Tests. Der
+  saubere Archiv-Release-Build hat SHA-256
+  `3ac098a3d080e8a0a14a6179db26ffd987958e0dd2a524ed4eac60d69b7b1867`.
+- Der anschließende isolierte Lauf ist mit 30/30 vollständigen Samples, null
+  Reportproblemen und null Browserfehlern grün. Der zuvor zum Timeout führende
+  vollständig gesperrte Intake trat nicht erneut als Verlust auf; der
+  Zuverlässigkeitsfix ist damit lokal belegt.
+- Das Performanceziel bleibt rot: p50 813,5 ms, p95 2.725,95 ms und Maximum
+  4.905 ms. Native Processing hat p50 89 ms, p95 1.245,55 ms und Maximum
+  4.023 ms; Commit→Browser hat roh p50 552,5 ms und p95 858,8 ms. Der größte
+  Ausreißer besteht aus 4.023 ms nativer Verarbeitung, nicht aus der
+  terminalen Projektion, deren p95 10,65 ms beträgt. Gegenüber `d9d2a040c`
+  ist die Tail-Latenz nicht gesunken, daher wird kein Performancegewinn
+  behauptet.
+- Zeitmarken und Stage-Report dieser Messung sind als
+  `beweise/raw/command-roundtrip-warm-71d615bf3-2026-08-17-marks.json` und
+  `beweise/raw/command-roundtrip-warm-71d615bf3-2026-08-17-report.json`
+  versioniert (SHA-256 `6ed5a3ef...e7ab28` beziehungsweise
+  `f97878d4...3cea6`).
 
 Noch offen:
 
@@ -789,6 +845,8 @@ Kein Commit darf:
 | `39dcbb031` | nach gemessenem 5,36-%-Rest das Recovery-Ruhefenster auf 120 Sekunden vergrößern |
 | `500f416c6` | nach weiterem warmen 5,97-%-Trend das Recovery-Ruhefenster auf 300 Sekunden vergrößern |
 | `d9d2a040c` | verspätete Browser-Command-Pushes erneut erkennen und kanonisch projizieren |
+| `f20a7476f` | terminale Command-ID unmittelbar auf native Master-Change-Hinweise revalidieren |
+| `71d615bf3` | vollständig gesperrten Command-Intake nach 250 ms erneut versuchen |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -808,9 +866,10 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den sauberen Archiv-Build von `d9d2a040c` abschließen und den warmen
-   30-Command-Smoke im bereits initialisierten Root wiederholen; nur den danach
-   noch dominierenden Abschnitt weiter optimieren.
+2. Den nun belegten Command-Pfad getrennt untersuchen: zuerst die nativen
+   Verarbeitungs-Ausreißer bis 4.023 ms und anschließend die rohe
+   Commit→Browser-Latenz mit p50 552,5 ms. Danach erneut 30 warme Commands
+   messen; `71d615bf3` ist Zuverlässigkeits-, nicht Performance-Baseline.
 3. Danach den Sellify-Einzel-Smoke auf demselben Code-Stand erneut messen.
 4. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
    Browsermatrix auf dem synthetischen Scale-Store ausführen.
