@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | ja | fünfter Fix ausgerollt; Korrektheitsgates grün | nein | Kurz- und Ein-Stunden-Probe in isolierter/remote Umgebung wiederholen |
+| Idle-CPU des Dienstes | in Arbeit | fünfter Fix ausgerollt; sechster belegter SQLite-Reader-Fix in isolierter Prüfung | nein | Kurz- und Ein-Stunden-Probe in isolierter/remote Umgebung wiederholen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -336,6 +336,59 @@ Rollout-Zwischenstand vom 16.08.2026:
   Weitere Implementierung und Performanceprüfungen erfolgen remote oder mit
   isoliertem Test-Root. Die formale 30-Sekunden- und Ein-Stunden-Abnahme des
   Releases `idle-cpu-b41cc74ca` bleibt deshalb ausdrücklich offen.
+- Eine vollständig lokale Reproduktion läuft seitdem ausschließlich unter dem
+  isolierten Root `/Volumes/tmp/ctox-idle-b41cc74ca-isolated.voTfBX`. Quelle
+  ist das bereits geprüfte Archiv von `b41cc74ca`; die drei Datenbanken stammen
+  konsistent aus `backups/update-20260816T235952Z` und bestanden jeweils
+  `PRAGMA quick_check`. Business-OS-Webserver, MCP-Autostart, Skill-Bootstrap
+  und Backend-Prewarm sind über die typisierte Laufzeitkonfiguration dieses
+  Test-Roots deaktiviert. Der produktive lokale Dienst und sein LaunchAgent
+  wurden für diese Reproduktion weder gestartet, gestoppt noch verändert.
+- Ein Zehn-Sekunden-Stack-Sample des isolierten Dienstes PID `29096` löst den
+  verbliebenen periodischen Anteil auf den Acht-Sekunden-Statusstempel auf:
+  `route_external_messages -> channel_router_source_stamp` wechselte zwischen
+  Kern- und Business-OS-Datenbank, schloss dabei jedes Mal die vorherige
+  Read-only-Verbindung und ließ SQLite das jeweils große Schema erneut
+  freigeben und parsen. 582 von 6.184 Stack-Samples lagen in diesem Pfad.
+- Der sechste Fix ersetzt deshalb die jeweiligen Einzelverbindungen durch
+  kleine, pfad- und Dateiidentitätsgebundene Multi-DB-Reader-Caches. WAL-Commits
+  bleiben sichtbar; Datenbankaustausch und Abfragefehler erzwingen weiterhin
+  ein gezieltes Wiederöffnen. Commit `8b14ee057` enthält ausschließlich diese
+  vier Quellfiles. Die beiden neuen Cache-Regressionen sowie die bestehenden
+  Projection-Clock- und Router-Quellstempeltests sind jeweils exakt `1/1`
+  grün; `cargo fmt --all -- --check` ist ebenfalls grün. Der globale
+  Größenwächter bleibt ausschließlich wegen elf fremd veränderter Dateien rot;
+  `service_status_sources.rs` liegt exakt auf seinem unveränderten Budget von
+  987 Produktionszeilen. Der isolierte Snapshot liegt unter
+  `/Volumes/tmp/ctox-idle-8b14ee057.9iXtWW`; sein 404-MB-Git-Archiv hat SHA-256
+  `4a017993d53dc10953f02b827ecf5e9dcc06fbd400725b53070d9bd29399d84c`.
+  Das im Archiv absichtlich nicht versionierte Pi-Sidecar-Bundle wurde dort
+  reproduzierbar mit `npm ci && npm run build` erzeugt (SHA-256
+  `a487654e3953c898e675b49ae705a7e7a6ff9024f7cd3f5748fddca90278a4ee`).
+  Der isolierte Check deckte zusätzlich eine vorbestehende committed
+  RxDB-Inkonsistenz auf: `rxdb_peer.rs` liefert 13 Argumente an eine bereits
+  14-argumentige Replikationsfunktion. Der gemeinsame Arbeitsbaum enthält
+  hierzu eine noch uncommittete, zeitgleich bearbeitete RxDB-/Peer-Welle; sie
+  wird nicht in diesen Performancecommit gezogen. Isolierter Build und
+  Nachhermessung warten auf deren zusammengehörigen geprüften Commit; der Fix
+  ist nicht ausgerollt.
+- Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
+  `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
+  Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
+  fehlende Stackwerkzeuge gesperrt; `/proc`-TID-Deltas trennten die Phasen aber
+  eindeutig. Remote wurden stattdessen drei eigene Ursachen behoben:
+  Person-Research-Recovery filtert nun SQL-seitig nur nichtterminale oder
+  fehlende Projektionen (`recovery_candidates=0`), Business-Records verwendet
+  einen per-Collection-Clock-Cursor (195/196 generische Scans vermeidbar), und
+  konkurrierende Startup-Projektionsloops sind gestaffelt. Im identischen
+  8–24-Sekunden-Fenster sank die CPU-Zeit von rund 34 auf 8,1 Sekunden
+  (`-76 %`), `replicationUp` kam bei 8 statt rund 37 Sekunden; bei 105–120
+  Sekunden gab es keinen heißen CTOX-Thread und keine Loop-Fehler. Das aktive
+  Remote-Binary hat SHA-256
+  `d6fb277953ab72b535bc91726046fe9e89a02472dda8e1a96a29a72e9c67f576`;
+  sieben gezielte Guards sind grün. Die vier Dateien dieses lokalen Reader-Fix
+  sowie `mission/channels/mod.rs` waren ausdrücklich nicht Teil des
+  Remote-Releases.
 - Der reproduzierbare Dauer-Probe ist mit Commit `071fda4bc` versioniert. Er
   misst Prozess-CPU-Zeit, CPU-p95/-Maximum, RxDB-Idle-Ticks, Kandidatenmenge,
   offene Intake-Fehler und den vollständigen Command-Revisionshash.
@@ -553,6 +606,7 @@ Kein Commit darf:
 | `b42c55efa` | Projection-Clock-Verbindung wiederverwenden und unveränderte Harness-Findings bis zum Safety-Audit schlafen lassen |
 | `07c2ef0ca` | nachweislich transiente Intake-Failures konservativ auflösen |
 | `43889102a` | Knowledge-Katalog über eine SQLite-Verbindung aufbauen |
+| `8b14ee057` | Status- und Kommunikationsstempel über mehrere SQLite-Reader wiederverwenden |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -560,9 +614,9 @@ Kein Commit darf:
   übersprungene Cross-Process-Tests. Alle sieben roten Tests wurden im
   isolierten Baseline-Archiv reproduziert und sind keine Regression dieser
   Kampagne.
-- Der globale Größenwächter bleibt wegen sieben bereits anderweitig
-  veränderter Dateien rot. Bei der Idle-CPU-Prüfung waren es acht. Die Budgets
-  wurden nicht angehoben.
+- Der globale Größenwächter bleibt wegen derzeit elf bereits anderweitig
+  veränderter Dateien rot. `service_status_sources.rs` ist mit exakt 987
+  Produktionszeilen budgetkonform; die Budgets wurden nicht angehoben.
 - Im gemeinsamen Arbeitsbaum liegen weiterhin zahlreiche nicht zu dieser
   Kampagne gehörende Änderungen, darunter `app.js`, Browsermodule und weitere
   Runtime-Dateien. Sie bleiben uncommitted, bis ihre jeweilige Arbeit separat
@@ -572,16 +626,19 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Kurzprobe und einstündige Idle-Nachhermessung mit Release
-   `idle-cpu-b41cc74ca` durchführen und als Rohdaten versionieren.
-3. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
-4. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
-5. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
-6. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
-7. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
+2. Den Multi-DB-Reader-Fix gezielt testen, aus einem isolierten Commit-Snapshot
+   bauen und zunächst im isolierten Test-Root gegen die repräsentativen
+   Datenbanken nachmessen.
+3. Danach Kurzprobe und einstündige Idle-Nachhermessung remote oder im
+   isolierten Test-Root durchführen und als Rohdaten versionieren.
+4. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
+5. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
+6. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
+7. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
+8. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur
    bereinigen, ohne Budgets anzuheben.
-8. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
-9. OA-7-Kompaktierung im exklusiven Wartungsfenster.
+9. Kundenrollout und OA-6/OA-8/OA-9-Livenachweise.
+10. OA-7-Kompaktierung im exklusiven Wartungsfenster.
 
 ## Definition of Done
 
