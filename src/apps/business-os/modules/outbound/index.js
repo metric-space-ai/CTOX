@@ -6,7 +6,7 @@ import {
   openUniversalImporter,
   parseDelimitedText,
 } from '../../shared/universal-importer.js';
-import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import {
   configureActiveOutreach,
@@ -14,7 +14,7 @@ import {
   renderActiveOutreachShell,
   handleActiveOutreachAction,
   handleActiveOutreachInput,
-} from './active-outreach.js?v=20260811-fremde-collection-mitladen-v106';
+} from './active-outreach.js?v=20260816-browser-sync-guards-v141';
 
 const BUILD = '20260721-outbound-ia-karte';
 let loadedOutboundLang = '';
@@ -5296,6 +5296,9 @@ async function requestResearchSourceAdapterCommand(row, commandType, statusPatch
   }));
   const completed = result?.status === 'completed' || result?.result?.ok === true || result?.ok === true;
   const resultAdapter = researchAdapterFromCommandResult(result);
+  const authAssist = commandType === 'outbound.research_source.auth_assist'
+    ? authAssistFromCommandResult(result)
+    : null;
   const nextAdapterPatch = resultAdapter
     ? {
         ...researchAdapterPatchFromServer(resultAdapter),
@@ -5325,6 +5328,14 @@ async function requestResearchSourceAdapterCommand(row, commandType, statusPatch
   await loadAll({ hydrateKnowledge: false, skipImportRecovery: true });
   const next = state.ctx?.host?.querySelector('.outbound-research-drawer');
   if (next) next.innerHTML = renderResearchSettingsDrawer(campaign);
+  const browserArgs = browserAuthAssistLaunchArgs(authAssist);
+  if (browserArgs) {
+    await state.ctx?.openDesktopApp?.('browser', {
+      title: t('browser', 'Browser'),
+      mode: 'maximized',
+      args: browserArgs,
+    });
+  }
 }
 
 function buildResearchAdapterCommand(commandType, campaign, adapter) {
@@ -5368,6 +5379,39 @@ function researchAdapterFromCommandResult(result) {
     result?.payload?.adapter,
   ];
   return candidates.find((item) => item && typeof item === 'object') || null;
+}
+
+function authAssistFromCommandResult(result) {
+  const candidates = [
+    result?.result?.auth_assist,
+    result?.result?.outcome?.auth_assist,
+    result?.payload?.outcome?.auth_assist,
+    result?.payload?.auth_assist,
+    result?.auth_assist,
+  ];
+  return candidates.find((item) => item && typeof item === 'object') || null;
+}
+
+function browserAuthAssistLaunchArgs(authAssist) {
+  if (!authAssist || typeof authAssist !== 'object') return null;
+  const sessionId = String(authAssist.session_id || '').trim();
+  const targetUrl = String(authAssist.target_url || '').trim();
+  if (!sessionId || !targetUrl) return null;
+  return {
+    purpose: 'web_stack_auth',
+    session_id: sessionId,
+    tab_id: String(authAssist.tab_id || `browser_tab_${sessionId}`).trim(),
+    source_id: String(authAssist.source_id || '').trim(),
+    target_url: targetUrl,
+    allowed_domains: Array.isArray(authAssist.allowed_domains)
+      ? authAssist.allowed_domains.map((entry) => String(entry || '').trim()).filter(Boolean)
+      : [],
+    capture_script: String(authAssist.capture_script || '').trim(),
+    secret_name: String(authAssist.required_secret_name || '').trim(),
+    auth_assist_status: 'pending',
+    profile_mode: 'persistent',
+    secret_value_in_rxdb: false,
+  };
 }
 
 function researchAdapterPatchFromServer(adapter) {
@@ -8884,6 +8928,8 @@ export const __outboundTestHooks = {
   extractRowsFromPayload,
   normalizeResearchSourceId,
   normalizeResearchSources,
+  authAssistFromCommandResult,
+  browserAuthAssistLaunchArgs,
   researchAdapterFromCommandResult,
   researchAdapterPatchFromServer,
   researchSourcePolicyForPrompt,

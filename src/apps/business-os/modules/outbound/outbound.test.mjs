@@ -300,6 +300,36 @@ test('research source adapter command result preserves server status', () => {
   assert.equal(patch.payload.secret_value_in_payload, false);
 });
 
+test('research auth assist opens the exact protected-source browser session without credentials', () => {
+  const authAssist = hooks.authAssistFromCommandResult({
+    status: 'completed',
+    result: {
+      ok: true,
+      auth_assist: {
+        session_id: 'browser_session_web_stack_auth_dnbhoovers_com_cmd_1',
+        tab_id: 'browser_tab_web_stack_auth_dnbhoovers_com_cmd_1',
+        source_id: 'dnbhoovers.com',
+        target_url: 'https://app.dnbhoovers.com/login',
+        allowed_domains: ['dnbhoovers.com', 'app.dnbhoovers.com'],
+        capture_script: 'dnb-hoovers-company-v1',
+        required_secret_name: 'DNB_HOOVERS_BROWSER_LOGIN',
+        secret_value_in_payload: false,
+      },
+    },
+  });
+  const args = hooks.browserAuthAssistLaunchArgs(authAssist);
+
+  assert.equal(args.purpose, 'web_stack_auth');
+  assert.equal(args.session_id, 'browser_session_web_stack_auth_dnbhoovers_com_cmd_1');
+  assert.equal(args.target_url, 'https://app.dnbhoovers.com/login');
+  assert.equal(args.secret_name, 'DNB_HOOVERS_BROWSER_LOGIN');
+  assert.deepEqual(args.allowed_domains, ['dnbhoovers.com', 'app.dnbhoovers.com']);
+  assert.equal(args.secret_value_in_rxdb, false);
+  assert.equal(JSON.stringify(args).includes('credential_ref'), false);
+  assert.equal(JSON.stringify(args).includes('password'), false);
+  assert.match(bundledSource, /openDesktopApp\?\.\("browser"/);
+});
+
 test('outbound import extracts company rows from uploaded Excel workbooks', async (t) => {
   const workbookPath = process.env.OUTBOUND_XLSX_FIXTURE;
   if (!workbookPath) {
