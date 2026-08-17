@@ -170,6 +170,10 @@ struct WebRTCReplicationTuning {
     pull_batch_size: u64,
     push_batch_size: u64,
     retry_time: u64,
+    /// How often connected peers are re-checked against `is_peer_valid`.
+    /// Revocation is server-authoritative: the connect-time gate alone would
+    /// let a peer revoked *after* connecting keep its established session.
+    revocation_sweep_interval_ms: u64,
 }
 
 impl Default for WebRTCReplicationTuning {
@@ -181,6 +185,7 @@ impl Default for WebRTCReplicationTuning {
             pull_batch_size: 20,
             push_batch_size: 20,
             retry_time: 5_000,
+            revocation_sweep_interval_ms: 2_000,
         }
     }
 }
@@ -626,6 +631,7 @@ where
             pull_batch_size: options.pull_batch_size,
             push_batch_size: options.push_batch_size,
             retry_time: options.retry_time,
+            ..WebRTCReplicationTuning::default()
         },
     )
     .await
@@ -652,6 +658,7 @@ pub async fn replicate_web_rtc_rs(
             pull_batch_size: options.pull_batch_size,
             push_batch_size: options.push_batch_size,
             retry_time: options.retry_time,
+            ..WebRTCReplicationTuning::default()
         },
     )
     .await
@@ -886,6 +893,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
             pull_batch_size,
             push_batch_size,
             retry_time,
+            ..WebRTCReplicationTuning::default()
         },
     )
     .await
@@ -946,6 +954,36 @@ where
         let t = tokio::spawn(async move {
             while let Some(peer) = disc_stream.next().await {
                 pool_clone.remove_peer(&peer).await;
+            }
+        });
+        pool.tasks.lock().push(t);
+    }
+    // Server-authoritative active-session revocation: `is_peer_valid` gates
+    // the connect stream, but a peer revoked *after* connecting would keep its
+    // established session until it happened to reconnect. Re-check every
+    // connected peer periodically and sever any peer the validator now
+    // rejects; its reconnect attempt is then denied by the connect-time gate.
+    if let Some(validator) = is_peer_valid.clone() {
+        let pool_clone = Arc::clone(&pool);
+        let handler = Arc::clone(&connection_handler);
+        let sweep_interval =
+            std::time::Duration::from_millis(tuning.revocation_sweep_interval_ms.max(1));
+        let t = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(sweep_interval).await;
+                if pool_clone
+                    .canceled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    break;
+                }
+                let peers: Vec<H::Peer> = pool_clone.peer_states.lock().keys().cloned().collect();
+                for peer in peers {
+                    if !validator(&peer) {
+                        handler.close_peer(&peer).await;
+                        pool_clone.remove_peer(&peer).await;
+                    }
+                }
             }
         });
         pool.tasks.lock().push(t);
@@ -3337,6 +3375,57 @@ mod tests {
         async fn close_peer(&self, peer: &MockPeer) {
             self.closed_peers.lock().push(peer.0.clone());
         }
+    }
+
+    #[tokio::test]
+    async fn revocation_sweep_severs_established_peer() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("revocation_sweep").await;
+        let handler = MockHandler::new();
+        let revoked = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+        let revoked_for_validator = StdArc::clone(&revoked);
+        let mut options = SyncOptionsWebRTC::new(collection, StdArc::clone(&handler));
+        options.is_peer_valid = Some(StdArc::new(move |_peer: &MockPeer| {
+            !revoked_for_validator.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let pool = replicate_web_rtc_with_options(options)
+            .await
+            .expect("replication pool");
+
+        handler.connect.next(MockPeer("browser-1".to_string()));
+        let tracked_deadline = Instant::now() + Duration::from_secs(5);
+        while pool.peer_states.lock().is_empty() {
+            assert!(
+                Instant::now() < tracked_deadline,
+                "peer must be tracked after connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // A valid peer must survive at least one full sweep interval untouched.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(
+            handler.closed_peers.lock().is_empty(),
+            "sweep must not sever a peer the validator accepts"
+        );
+        assert!(!pool.peer_states.lock().is_empty());
+
+        // Revoke while the session is established: the sweep must sever it.
+        revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        let severed_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let closed = handler.closed_peers.lock().contains(&"browser-1".to_string());
+            let removed = pool.peer_states.lock().is_empty();
+            if closed && removed {
+                break;
+            }
+            assert!(
+                Instant::now() < severed_deadline,
+                "revoked peer must be closed and removed by the sweep"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        pool.cancel().await;
     }
 
     #[tokio::test]
