@@ -3154,6 +3154,24 @@ async function buildAdvancedStatusSnapshot(options = {}) {
   }));
   const requiredCollectionsStreamingReady = initialSync.missingInitialReplication.length === 0
     || initialSync.missingStreamingReady.length === 0;
+  // Latch a terminal peer revocation across reconnect cycles. After the
+  // native peer severs a revoked session it denies the revoked device at
+  // connect time WITHOUT a handshake, so later snapshots would only show
+  // no-active-peer and lose the reason. Keep the revocation visible until
+  // the required collections stream again (revocation lifted or re-paired).
+  const revocationError = [...collectionErrors, ...serviceErrors, diagnostics?.lastError || null]
+    .find((error) => error && (error.code === 'peer_revoked' || error.upstreamCode === 'peer_revoked'));
+  if (revocationError) {
+    state.peerRevocationLatch = {
+      code: 'peer_revoked',
+      collection: revocationError.collection || null,
+      observedAt: new Date().toISOString(),
+    };
+  } else if (state.peerRevocationLatch
+    && missingRequiredCollections.length === 0
+    && frameTransport.healthy) {
+    state.peerRevocationLatch = null;
+  }
   const checks = {
     authenticated: Boolean(state.session?.authenticated),
     shellLoaded: state.modules.length > 0,
@@ -3176,6 +3194,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
     noStalledReconnect: requiredReconnectingCollections.length === 0,
     frameTransportRealtimeHealthy: frameTransport.healthy,
     noAutomaticRepairRunning: !syncRecoveryRepairRunning,
+    noPeerRevocation: !state.peerRevocationLatch,
   };
   const ok = Object.values(checks).every(Boolean);
   if (ok) markBootTiming('firstAdvancedStatusHealthyMs');
@@ -3233,6 +3252,7 @@ async function buildAdvancedStatusSnapshot(options = {}) {
       initialSync,
       lastError: diagnostics?.lastError || null,
       lastLifecycleEvent: diagnostics?.lastLifecycleEvent || null,
+      peerRevocation: state.peerRevocationLatch || null,
     },
     health: {
       errorTotal: collectionErrors.length + fileIntegrityErrors.length + serviceErrors.length,
