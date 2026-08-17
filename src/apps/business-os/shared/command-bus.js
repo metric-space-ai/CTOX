@@ -49,7 +49,9 @@ const COMMAND_LIFECYCLE_TIMING_MARKS = Object.freeze({
 });
 let activeCommandWatcherCount = 0;
 const commandTimingProbes = new Map();
-const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([50, 100, 200, 400]);
+// Four finite exact-id retries. Their cumulative 375 ms window covers normal
+// native processing without adding collection pulls or an unbounded poller.
+const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([25, 50, 100, 200]);
 
 function commandProgressToken(command) {
   if (!command) return '';
@@ -1221,9 +1223,11 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
         if (settled || index >= COMMAND_TERMINAL_REVALIDATE_DELAYS_MS.length) return;
         revalidationTimer = setTimeout(() => {
           if (settled) return;
-          refreshProjectionBridges(syncPlan?.afterCommand)
-            .catch(() => {})
-            .then(() => bind({ authoritative: true }))
+          // Demand-only collections revalidate this exact id inside bind(). A
+          // collection-wide pull first is both redundant and expensive: it
+          // serializes the command query behind every bridge's pull cycle.
+          // The broader pull remains part of the AP3 stall-repair path below.
+          bind({ authoritative: true })
             .finally(() => scheduleTerminalRevalidation(index + 1));
         }, COMMAND_TERMINAL_REVALIDATE_DELAYS_MS[index]);
       };

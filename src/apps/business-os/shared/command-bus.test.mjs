@@ -151,14 +151,19 @@ test('command bus reports missing queue projection as transient tracking state',
   assert.doesNotMatch(source, /noch keinen echten Queue-Task/);
 });
 
-test('command bus pulls projections without restarting the shared room', () => {
+test('command bus revalidates exact command ids without restarting the shared room', () => {
   assert.match(source, /waitForCommandState\(\{[\s\S]*until/);
   assert.match(source, /refreshProjectionBridges\(syncPlan\?\.afterCommand\)/);
   assert.match(source, /pullFromRemotePeers/);
   assert.match(source, /COMMAND_TERMINAL_REVALIDATE_DELAYS_MS/);
-  assert.match(source, /Object\.freeze\(\[50, 100, 200, 400\]\)/);
+  assert.match(source, /Object\.freeze\(\[25, 50, 100, 200\]\)/);
   assert.match(source, /masterChange\$\?\.subscribe/);
   assert.match(source, /requireRevision/);
+  assert.match(source, /bind\(\{ authoritative: true \}\)[\s\S]*scheduleTerminalRevalidation\(index \+ 1\)/);
+  assert.doesNotMatch(
+    source,
+    /refreshProjectionBridges\(syncPlan\?\.afterCommand\)[\s\S]{0,160}bind\(\{ authoritative: true \}\)[\s\S]{0,160}scheduleTerminalRevalidation\(index \+ 1\)/,
+  );
   assert.match(source, /scheduleTerminalRevalidation\(index \+ 1\)/);
   assert.match(source, /evaluateCommandDataPlaneProgress/);
   assert.match(source, /repairCommandDataPlaneStall/);
@@ -297,7 +302,7 @@ test('command bus rejects an unsynchronizable command before inserting it', asyn
   assert.equal(inserted, false);
 });
 
-test('command bus returns direct control-command result after projection pull', async () => {
+test('command bus returns direct control-command result after exact-id revalidation', async () => {
   let stored = null;
   const collection = {
     async insert(doc) {
@@ -307,10 +312,23 @@ test('command bus returns direct control-command result after projection pull', 
       const id = typeof idOrQuery === 'string'
         ? idOrQuery
         : idOrQuery?.selector?.id;
+      const requireRevision = idOrQuery?.requireRevision || '';
       return {
         $: { subscribe() { return { unsubscribe() {} }; } },
         async exec() {
           if (!stored || stored.id !== id) return null;
+          if (requireRevision) {
+            stored = {
+              ...stored,
+              status: 'completed',
+              task_id: '',
+              result: {
+                status: 'device_code',
+                user_code: 'T123-ABCDE',
+                verification_url: 'https://auth.openai.com/codex/device',
+              },
+            };
+          }
           return { toJSON: () => ({ ...stored }) };
         },
       };
@@ -328,18 +346,6 @@ test('command bus returns direct control-command result after projection pull', 
               async pushToRemotePeers() {},
               async pullFromRemotePeers() {
                 pullCount += 1;
-                if (collectionName === 'business_commands' && stored) {
-                  stored = {
-                    ...stored,
-                    status: 'completed',
-                    task_id: '',
-                    result: {
-                      status: 'device_code',
-                      user_code: 'T123-ABCDE',
-                      verification_url: 'https://auth.openai.com/codex/device',
-                    },
-                  };
-                }
               },
             },
           },
@@ -357,7 +363,7 @@ test('command bus returns direct control-command result after projection pull', 
   assert.equal(result.status, 'completed');
   assert.equal(result.task_id, '');
   assert.equal(result.result.user_code, 'T123-ABCDE');
-  assert.ok(pullCount > 0);
+  assert.equal(pullCount, 0);
 });
 
 test('submit writes an immutable lifecycle-v2 shadow envelope and returns locally', async () => {
