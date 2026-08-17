@@ -316,6 +316,12 @@ fn thesen_outbound_research_outcome_patch(
         .filter(|value| value.is_object())
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    let person_records = outcome
+        .get("person_records")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let has_person_records = !person_records.is_empty();
     let mut evidence = existing
         .get("evidence")
         .and_then(Value::as_array)
@@ -336,9 +342,9 @@ fn thesen_outbound_research_outcome_patch(
             continue;
         };
         researched_field_keys.push(field_key.clone());
-        if field_key.starts_with("person_") {
+        if field_key.starts_with("person_") && !has_person_records {
             contact[field_key] = value.clone();
-        } else {
+        } else if !field_key.starts_with("person_") {
             data[field_key] = value.clone();
         }
         for candidate in field
@@ -372,7 +378,13 @@ fn thesen_outbound_research_outcome_patch(
     }
 
     evidence = deduplicate_research_evidence(evidence);
-    if let Some(normalized) = normalize_researched_contact(contact) {
+    if has_person_records {
+        merge_researched_person_records(
+            existing.get("id").and_then(Value::as_str).unwrap_or("lead"),
+            &mut contacts,
+            person_records,
+        );
+    } else if let Some(normalized) = normalize_researched_contact(contact) {
         let normalized = with_stable_contact_id(
             existing.get("id").and_then(Value::as_str).unwrap_or("lead"),
             normalized,
@@ -426,6 +438,37 @@ fn thesen_outbound_research_outcome_patch(
             "authenticated_source_capture_runs": outcome.get("authenticated_source_capture_runs").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         }
     })
+}
+
+fn merge_researched_person_records(
+    lead_id: &str,
+    contacts: &mut Vec<Value>,
+    person_records: Vec<Value>,
+) {
+    for (index, record) in person_records.into_iter().enumerate() {
+        let Some(mut normalized) = normalize_researched_contact(record) else {
+            continue;
+        };
+        normalized = with_stable_contact_id(lead_id, normalized, index);
+        let id = normalized.get("id").and_then(Value::as_str);
+        let profile = contact_string(
+            &normalized,
+            &["person_linkedin", "person_xing", "linkedin", "xing"],
+        );
+        let existing_index = contacts.iter().position(|existing| {
+            existing.get("id").and_then(Value::as_str) == id
+                || (!profile.is_empty()
+                    && contact_string(
+                        existing,
+                        &["person_linkedin", "person_xing", "linkedin", "xing"],
+                    ) == profile)
+        });
+        if let Some(existing_index) = existing_index {
+            merge_json_object_values(&mut contacts[existing_index], &normalized);
+        } else {
+            contacts.push(normalized);
+        }
+    }
 }
 
 fn research_scalar_is_populated(value: &Value) -> bool {
@@ -1142,6 +1185,55 @@ mod tests {
         assert_eq!(
             patch["payload"]["verified_field_keys"],
             serde_json::json!(["firma_domain"])
+        );
+    }
+
+    #[test]
+    fn terminal_research_outcome_projects_every_profile_bound_person_record() {
+        let existing = serde_json::json!({
+            "id": "lead-multi",
+            "data": {},
+            "contacts": [{"id": "manual-contact", "name": "Manual Contact", "email": "manual@example.test"}],
+            "selected_contact_ids": ["manual-contact"],
+            "evidence": []
+        });
+        let outcome = serde_json::json!({
+            "tool": "ctox_person_research",
+            "fields": {
+                "person_vorname": {"value": "Ada", "candidates": []},
+                "person_nachname": {"value": "Lovelace", "candidates": []},
+                "person_xing": {"value": "https://www.xing.com/profile/Ada_Lovelace", "candidates": []}
+            },
+            "person_records": [
+                {
+                    "person_vorname": "Ada",
+                    "person_nachname": "Lovelace",
+                    "person_funktion": "Geschäftsführung",
+                    "person_xing": "https://www.xing.com/profile/Ada_Lovelace",
+                    "source_id": "xing.com",
+                    "source_url": "https://www.xing.com/profile/Ada_Lovelace"
+                },
+                {
+                    "person_vorname": "Grace",
+                    "person_nachname": "Hopper",
+                    "person_funktion": "Leitung Vertrieb",
+                    "person_xing": "https://www.xing.com/profile/Grace_Hopper",
+                    "source_id": "xing.com",
+                    "source_url": "https://www.xing.com/profile/Grace_Hopper"
+                }
+            ]
+        });
+
+        let patch = thesen_outbound_research_outcome_patch(&existing, &outcome, 3_000);
+
+        assert_eq!(patch["contacts"].as_array().map(Vec::len), Some(3));
+        assert_eq!(patch["contacts"][0]["id"], "manual-contact");
+        assert_eq!(patch["contacts"][1]["name"], "Ada Lovelace");
+        assert_eq!(patch["contacts"][2]["name"], "Grace Hopper");
+        assert_eq!(patch["contacts"][2]["role"], "Leitung Vertrieb");
+        assert_eq!(
+            patch["selected_contact_ids"],
+            serde_json::json!(["manual-contact"])
         );
     }
 }

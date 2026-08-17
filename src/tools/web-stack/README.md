@@ -164,6 +164,13 @@ cookie-bootstrap profile flow — Playwright owns the entire Google path.
 These keys are read from CTOX's local SQLite runtime config store, not from
 global process environment variables.
 
+Authenticated people-source captures expose both the ordinary per-field
+ranking under `fields` and profile-bound entries under `person_records`.
+Each `person_records` item keeps one person's name, function, provider profile
+URL, and provenance together. Consumers that create CRM contacts must prefer
+this array when present; the top-ranked `person_*` fields remain a compatible
+single-value summary and must not be combined across different profiles.
+
 ## Egress (SSRF) guard
 
 Every fetch of an untrusted URL — the model-facing `ctox_web_read` tool,

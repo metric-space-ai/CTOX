@@ -741,7 +741,13 @@ fn aggregate_fields(
     };
 
     for field in universe {
-        let candidates = raw.get(&field).cloned().unwrap_or_default();
+        let candidates = raw
+            .get(&field)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|candidate| aggregate_candidate_eligible(field, candidate))
+            .collect::<Vec<_>>();
         if candidates.is_empty() {
             out.insert(
                 field.as_str().to_string(),
@@ -774,6 +780,41 @@ fn aggregate_fields(
         );
     }
     Value::Object(out)
+}
+
+fn aggregate_candidate_eligible(field: FieldKey, candidate: &Value) -> bool {
+    let Some(value) = candidate.get("value").and_then(Value::as_str) else {
+        return true;
+    };
+    match field {
+        FieldKey::PersonVorname | FieldKey::PersonNachname => {
+            let normalized = value
+                .trim()
+                .trim_matches(|ch: char| !ch.is_alphabetic())
+                .to_lowercase();
+            !normalized.is_empty()
+                && !matches!(
+                    normalized.as_str(),
+                    "der"
+                        | "die"
+                        | "das"
+                        | "den"
+                        | "dem"
+                        | "ein"
+                        | "eine"
+                        | "einer"
+                        | "eines"
+                        | "geschäftsführer"
+                        | "geschäftsführerin"
+                        | "geschäftsführung"
+                        | "vorstand"
+                        | "inhaber"
+                        | "inhaberin"
+                        | "vertretungsberechtigt"
+                )
+        }
+        _ => true,
+    }
 }
 
 /// Merges redacted, structured records returned by an authenticated source
@@ -812,6 +853,8 @@ pub fn merge_person_research_source_records(
         .and_then(Value::as_str)
         .unwrap_or_else(|| tier_label(module.tier()))
         .to_string();
+    let person_records = authenticated_person_records(module, &allowed_fields, &tier, records);
+    merge_authenticated_person_records(payload, person_records)?;
     let fields = payload
         .get_mut("fields")
         .and_then(Value::as_object_mut)
@@ -909,6 +952,124 @@ pub fn merge_person_research_source_records(
         added += 1;
     }
     Ok(added)
+}
+
+fn authenticated_person_records(
+    module: &'static dyn SourceModule,
+    allowed_fields: &BTreeSet<FieldKey>,
+    tier: &str,
+    records: &[Value],
+) -> Vec<Value> {
+    let mut grouped = BTreeMap::<String, serde_json::Map<String, Value>>::new();
+    for record in records {
+        let Some(field_name) = record.get("field").and_then(Value::as_str) else {
+            continue;
+        };
+        if forbidden_browser_extract_key(field_name) || !field_name.starts_with("person_") {
+            continue;
+        }
+        let Some(field) = FieldKey::from_str(field_name) else {
+            continue;
+        };
+        if !allowed_fields.contains(&field) {
+            continue;
+        }
+        let Some(value) = record.get("value").and_then(browser_extract_scalar) else {
+            continue;
+        };
+        let Some(source_url) = record
+            .get("source_url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if !valid_http_url(source_url)
+            || !url_belongs_to_source(
+                source_url,
+                module.id(),
+                module.aliases(),
+                module.host_suffixes(),
+            )
+        {
+            continue;
+        }
+        let entry = grouped.entry(source_url.to_string()).or_insert_with(|| {
+            serde_json::Map::from_iter([
+                (
+                    "source_id".to_string(),
+                    Value::String(module.id().to_string()),
+                ),
+                (
+                    "source_url".to_string(),
+                    Value::String(source_url.to_string()),
+                ),
+                ("tier".to_string(), Value::String(tier.to_string())),
+                (
+                    "via".to_string(),
+                    Value::String("authenticated_source_capture".to_string()),
+                ),
+            ])
+        });
+        entry.insert(field.as_str().to_string(), Value::String(value));
+    }
+
+    grouped
+        .into_values()
+        .filter(|record| {
+            record
+                .get("person_vorname")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+                && record
+                    .get("person_nachname")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                && ["person_xing", "person_linkedin"].iter().any(|field| {
+                    record
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+        })
+        .map(Value::Object)
+        .collect()
+}
+
+fn merge_authenticated_person_records(payload: &mut Value, incoming: Vec<Value>) -> Result<()> {
+    if incoming.is_empty() {
+        return Ok(());
+    }
+    let records = payload
+        .as_object_mut()
+        .context("person-research result must be an object")?
+        .entry("person_records")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("person-research person_records must be an array")?;
+    for candidate in incoming {
+        let source_id = candidate.get("source_id").and_then(Value::as_str);
+        let source_url = candidate.get("source_url").and_then(Value::as_str);
+        if let Some(existing) = records.iter_mut().find(|existing| {
+            existing.get("source_id").and_then(Value::as_str) == source_id
+                && existing.get("source_url").and_then(Value::as_str) == source_url
+        }) {
+            if let (Some(existing), Some(candidate)) =
+                (existing.as_object_mut(), candidate.as_object())
+            {
+                existing.extend(candidate.clone());
+            }
+        } else {
+            records.push(candidate);
+        }
+    }
+    records.sort_by(|left, right| {
+        left.get("source_url")
+            .and_then(Value::as_str)
+            .cmp(&right.get("source_url").and_then(Value::as_str))
+    });
+    Ok(())
 }
 
 fn confidence_rank(raw: Option<&str>) -> u8 {
@@ -2071,6 +2232,34 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_rejects_grammatical_placeholders_as_person_names() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            FieldKey::PersonVorname,
+            vec![
+                json!({"value": "den", "confidence": "high", "source_id": "impressum"}),
+                json!({"value": "Frank", "confidence": "medium", "source_id": "impressum"}),
+            ],
+        );
+        raw.insert(
+            FieldKey::PersonNachname,
+            vec![
+                json!({"value": "Geschäftsführer", "confidence": "high", "source_id": "impressum"}),
+                json!({"value": "Eberspächer", "confidence": "medium", "source_id": "impressum"}),
+            ],
+        );
+
+        let aggregated = aggregate_fields(
+            &[FieldKey::PersonVorname, FieldKey::PersonNachname],
+            &[],
+            raw,
+        );
+
+        assert_eq!(aggregated["person_vorname"]["value"], "Frank");
+        assert_eq!(aggregated["person_nachname"]["value"], "Eberspächer");
+    }
+
+    #[test]
     fn url_belongs_to_source_handles_subdomains_and_prefixes() {
         assert!(url_belongs_to_source(
             "https://www.northdata.de/Foo+SE,Berlin",
@@ -2548,6 +2737,59 @@ mod tests {
         let serialized = serde_json::to_string(&payload).unwrap();
         assert!(!serialized.contains("evil.example"));
         assert!(!serialized.contains("must-not-pass"));
+    }
+
+    #[test]
+    fn authenticated_person_records_stay_grouped_by_profile() {
+        let mut payload = json!({
+            "plan": [{
+                "source_id": "xing.com",
+                "tier": "C",
+                "target_fields": [
+                    "person_vorname",
+                    "person_nachname",
+                    "person_funktion",
+                    "person_xing"
+                ]
+            }],
+            "fields": {
+                "person_vorname": {"value": null, "confidence": "missing", "candidates": []},
+                "person_nachname": {"value": null, "confidence": "missing", "candidates": []},
+                "person_funktion": {"value": null, "confidence": "missing", "candidates": []},
+                "person_xing": {"value": null, "confidence": "missing", "candidates": []}
+            }
+        });
+        let records = [
+            ("Ada", "Lovelace", "Geschäftsführung", "Ada_Lovelace"),
+            ("Grace", "Hopper", "Leitung Vertrieb", "Grace_Hopper"),
+        ]
+        .into_iter()
+        .flat_map(|(first, last, role, slug)| {
+            let url = format!("https://www.xing.com/profile/{slug}");
+            [
+                json!({"field": "person_vorname", "value": first, "confidence": "medium", "source_url": url}),
+                json!({"field": "person_nachname", "value": last, "confidence": "medium", "source_url": url}),
+                json!({"field": "person_funktion", "value": role, "confidence": "medium", "source_url": url}),
+                json!({"field": "person_xing", "value": url, "confidence": "high", "source_url": url}),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+        let added =
+            merge_person_research_source_records(&mut payload, "xing.com", &records).unwrap();
+
+        assert_eq!(added, 8);
+        assert_eq!(payload["person_records"].as_array().map(Vec::len), Some(2));
+        assert_eq!(payload["person_records"][0]["person_vorname"], "Ada");
+        assert_eq!(
+            payload["person_records"][0]["person_funktion"],
+            "Geschäftsführung"
+        );
+        assert_eq!(payload["person_records"][1]["person_vorname"], "Grace");
+        assert_ne!(
+            payload["person_records"][0]["source_url"],
+            payload["person_records"][1]["source_url"]
+        );
     }
 
     #[test]

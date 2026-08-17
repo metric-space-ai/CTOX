@@ -6262,7 +6262,7 @@ mod tests {
             .get("session_id")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|session_id| {
-                session_id.contains("leadfeeder-com_user-a") && !session_id.contains("request-one")
+                session_id.contains("leadfeeder_com_user_a") && !session_id.contains("request_one")
             }));
         assert_eq!(
             second

@@ -177,6 +177,7 @@ const XING_BROWSER_RECORD_PARSER: &str = r#"const parseXingRecords = (companyNam
     return contactTerm.test(text) && /\d/.test(text);
   };
   const labelOnlyLine = (value) => /^[^:]{2,80}:\s*$/.test(clean(value));
+  const roleSignal = /\b(?:geschäftsführ(?:er|erin|ung)|managing\s+director|chief\s+(?:executive|operating|financial|technology|commercial)\s+officer|ceo|coo|cfo|cto|cmo|vorstand|inhaber(?:in)?|eigentümer(?:in)?|gründer(?:in)?|founder|prokurist(?:in)?|leiter(?:in)?|leitung|head\s+of|director|manager|vertrieb|sales|einkauf|procurement|marketing|produktion|operations|business\s+development|partner)\b/i;
   const personNameKey = (value) => normalize(value)
     .replace(/ae/g, "a")
     .replace(/oe/g, "o")
@@ -185,6 +186,7 @@ const XING_BROWSER_RECORD_PARSER: &str = r#"const parseXingRecords = (companyNam
     const text = clean(value);
     return text.length >= 2 && text.length <= 160
       && /\p{L}/u.test(text)
+      && roleSignal.test(text)
       && personNameKey(text) !== personNameKey(personName)
       && !relevantCompanyText(text)
       && !formerEmployment.test(text)
@@ -1001,6 +1003,38 @@ mod tests {
             values_for_field(&records, "person_funktion"),
             ["Leiterin Einkauf"]
         );
+    }
+
+    #[test]
+    fn browser_capture_rejects_person_names_locations_and_articles_as_functions() {
+        let records = parse_browser_records(serde_json::json!([
+            {
+                "url": "https://www.xing.com/profile/Thorsten_Bruns",
+                "text": "Thorsten Bruns",
+                "contextLines": [
+                    "Thorsten Bruns",
+                    "Dr. Sandra Junghänel",
+                    "Example Industrial GmbH",
+                    "Larnarca, Zypern"
+                ]
+            },
+            {
+                "url": "https://www.xing.com/profile/Gunther_Weiss",
+                "text": "Gunther Weiß",
+                "contextLines": [
+                    "Gunther Weiß",
+                    "Artikel zur Arbeit von Dr. Gunther K. Weiß",
+                    "Example Industrial GmbH",
+                    "Nikosia, Zypern"
+                ]
+            }
+        ]));
+
+        assert!(
+            values_for_field(&records, "person_funktion").is_empty(),
+            "non-role context was emitted as a function: {records}"
+        );
+        assert_eq!(values_for_field(&records, "person_xing").len(), 2);
     }
 
     #[test]
