@@ -1003,6 +1003,11 @@ class CtoxWebRtcReplicationState {
     this.canceled$ = new CtoxSubject(false);
     this.peerStates$ = new CtoxSubject(new Map());
     this.transportStatus$ = new CtoxSubject({});
+    // Demand-only collections have no checkpoint pull to run when the native
+    // peer announces a master change. Expose that hint so bounded consumers
+    // can immediately issue their exact authoritative query instead of
+    // waiting for a cache-freshness timer.
+    this.masterChange$ = new CtoxSubject();
     this.shared = null;
     this.initialReplicationDeferred = createDeferred();
     this.initialReplication = this.initialReplicationDeferred.promise;
@@ -1160,6 +1165,7 @@ class CtoxWebRtcReplicationState {
 
   onMasterChange() {
     if (this.cancelled) return;
+    this.masterChange$.next(Date.now());
     this.pullFromRemotePeers().catch((error) => {
       this.error$.next(error);
       this.schedulePullRetry();

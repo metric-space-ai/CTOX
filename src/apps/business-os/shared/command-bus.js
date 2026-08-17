@@ -49,7 +49,7 @@ const COMMAND_LIFECYCLE_TIMING_MARKS = Object.freeze({
 });
 let activeCommandWatcherCount = 0;
 const commandTimingProbes = new Map();
-const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([50, 75, 125, 250, 500]);
+const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([50, 100, 200, 400]);
 
 function commandProgressToken(command) {
   if (!command) return '';
@@ -1101,6 +1101,7 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
   let subscription = null;
   let boundRawDb = null;
   let progressWatchHeld = false;
+  const masterChangeSubscriptions = [];
   rememberActiveCommandId(commandId);
   try {
     currentDb = await resolveCommandDb(db);
@@ -1108,6 +1109,8 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
     return await new Promise((resolve, reject) => {
       let settled = false;
       let rebindInFlight = false;
+      let authoritativeRebindPending = false;
+      let authoritativeRevision = 0;
       let revalidationTimer = null;
       const settle = (handler, value) => {
         if (settled) return;
@@ -1116,6 +1119,7 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
         clearTimeout(revalidationTimer);
         clearInterval(progressTimer);
         subscription?.unsubscribe?.();
+        masterChangeSubscriptions.splice(0).forEach((entry) => entry?.unsubscribe?.());
         if (commandIsTerminal(lastCommand)) forgetActiveCommandId(commandId);
         handler(value);
       };
@@ -1148,8 +1152,12 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
         recordObservedCommandMetrics(sync, commandId, lastCommand);
         settle(resolve, commandReceipt(lastCommand, commandId));
       };
-      const bind = async () => {
-        if (settled || rebindInFlight) return;
+      const bind = async ({ authoritative = false } = {}) => {
+        if (settled) return;
+        if (rebindInFlight) {
+          authoritativeRebindPending ||= authoritative;
+          return;
+        }
         rebindInFlight = true;
         try {
           currentDb = await resolveCommandDb(db);
@@ -1168,7 +1176,13 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
             recordCommandMetric(sync, 'watcher_started', commandId);
           }
           // Close the subscribe/read race and every data-plane rebind window.
-          inspect(await findDoc(commands, commandId, { swallowErrors: false }));
+          const requireRevision = authoritative
+            ? `command-terminal:${commandId}:${++authoritativeRevision}`
+            : '';
+          inspect(await findDoc(commands, commandId, {
+            swallowErrors: false,
+            requireRevision,
+          }));
         } catch (error) {
           if (isUnsupportedCommandTrackingQueryError(error)) {
             try {
@@ -1179,6 +1193,10 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
           settle(reject, error);
         } finally {
           rebindInFlight = false;
+          if (!settled && authoritativeRebindPending) {
+            authoritativeRebindPending = false;
+            void bind({ authoritative: true });
+          }
         }
       };
       const timeout = setTimeout(() => {
@@ -1196,19 +1214,27 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
         ));
       }, timeoutMs);
       // Demand-only command projections do not receive an unsolicited full
-      // collection pull. Revalidate this one command on a finite schedule and
-      // stop as soon as its terminal revision is visible. The five-attempt
-      // bound prevents the former unbounded repair/poll storms.
+      // collection pull. A native master-change hint immediately revalidates
+      // this exact command id. Four scheduled retries are only a finite safety
+      // net for a lost hint; they never restart the room or full-pull history.
       const scheduleTerminalRevalidation = (index = 0) => {
         if (settled || index >= COMMAND_TERMINAL_REVALIDATE_DELAYS_MS.length) return;
         revalidationTimer = setTimeout(() => {
           if (settled) return;
           refreshProjectionBridges(syncPlan?.afterCommand)
             .catch(() => {})
-            .then(() => bind())
+            .then(() => bind({ authoritative: true }))
             .finally(() => scheduleTerminalRevalidation(index + 1));
         }, COMMAND_TERMINAL_REVALIDATE_DELAYS_MS[index]);
       };
+      for (const bridge of syncPlan?.afterCommand || []) {
+        const state = syncBridgeFromHandle(bridge)?.state;
+        if (cleanContextText(state?.collection?.name) !== 'business_commands') continue;
+        const masterChangeSubscription = state?.masterChange$?.subscribe?.(() => {
+          void bind({ authoritative: true });
+        });
+        if (masterChangeSubscription) masterChangeSubscriptions.push(masterChangeSubscription);
+      }
       scheduleTerminalRevalidation();
       const progressTimer = setInterval(() => {
         if (settled) return;
@@ -1353,11 +1379,13 @@ function commandReceiptStatus(command) {
   return legacyStatus || 'accepted';
 }
 
-async function findDoc(collection, id, { swallowErrors = true } = {}) {
+async function findDoc(collection, id, { swallowErrors = true, requireRevision = '' } = {}) {
   if (!collection?.findOne || !id) return null;
   let doc;
   try {
-    doc = await collection.findOne(id).exec();
+    doc = await collection.findOne(requireRevision
+      ? { selector: { id }, requireRevision }
+      : id).exec();
   } catch (error) {
     if (swallowErrors) return null;
     throw error;

@@ -9766,6 +9766,7 @@ var CtoxWebRtcReplicationState = class {
     this.canceled$ = new CtoxSubject(false);
     this.peerStates$ = new CtoxSubject(/* @__PURE__ */ new Map());
     this.transportStatus$ = new CtoxSubject({});
+    this.masterChange$ = new CtoxSubject();
     this.shared = null;
     this.initialReplicationDeferred = createDeferred();
     this.initialReplication = this.initialReplicationDeferred.promise;
@@ -9891,6 +9892,7 @@ var CtoxWebRtcReplicationState = class {
   }
   onMasterChange() {
     if (this.cancelled) return;
+    this.masterChange$.next(Date.now());
     this.pullFromRemotePeers().catch((error) => {
       this.error$.next(error);
       this.schedulePullRetry();

@@ -53,6 +53,13 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // --- 0a. critical command collections have checkpoint catch-up timers -----
 {
   const commands = await makeState('business_commands');
+  let masterChanges = 0;
+  const masterChangeSubscription = commands.masterChange$.subscribe(() => {
+    masterChanges += 1;
+  });
+  commands.onMasterChange();
+  assert(masterChanges === 1, 'business_commands must expose native master-change hints');
+  masterChangeSubscription.unsubscribe();
   assert(commands.periodicPullTimer, 'business_commands must periodically catch up missed master-change frames');
   await commands.cancel();
   assert(!commands.periodicPullTimer, 'cancel must clear the command catch-up timer');

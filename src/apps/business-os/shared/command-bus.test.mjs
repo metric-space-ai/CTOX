@@ -156,7 +156,9 @@ test('command bus pulls projections without restarting the shared room', () => {
   assert.match(source, /refreshProjectionBridges\(syncPlan\?\.afterCommand\)/);
   assert.match(source, /pullFromRemotePeers/);
   assert.match(source, /COMMAND_TERMINAL_REVALIDATE_DELAYS_MS/);
-  assert.match(source, /Object\.freeze\(\[50, 75, 125, 250, 500\]\)/);
+  assert.match(source, /Object\.freeze\(\[50, 100, 200, 400\]\)/);
+  assert.match(source, /masterChange\$\?\.subscribe/);
+  assert.match(source, /requireRevision/);
   assert.match(source, /scheduleTerminalRevalidation\(index \+ 1\)/);
   assert.match(source, /evaluateCommandDataPlaneProgress/);
   assert.match(source, /repairCommandDataPlaneStall/);
@@ -166,6 +168,66 @@ test('command bus pulls projections without restarting the shared room', () => {
   assert.match(source, /async waitForAccepted\(commandId/);
   assert.match(source, /async waitForTerminal\(commandId/);
   assert.match(source, /subscribe\(commandId, observer\)/);
+});
+
+test('native master-change immediately revalidates the tracked command id', async () => {
+  const commandId = 'cmd-master-change-revalidate';
+  let stored = {
+    id: commandId,
+    command_id: commandId,
+    status: 'pending_sync',
+  };
+  const masterChangeListeners = new Set();
+  const authoritativeQueries = [];
+  const commands = {
+    findOne(idOrQuery) {
+      const requireRevision = idOrQuery?.requireRevision || '';
+      const id = typeof idOrQuery === 'string'
+        ? idOrQuery
+        : idOrQuery?.selector?.id;
+      if (requireRevision) authoritativeQueries.push(requireRevision);
+      return {
+        $: { subscribe() { return { unsubscribe() {} }; } },
+        async exec() {
+          return stored?.id === id ? { toJSON: () => ({ ...stored }) } : null;
+        },
+      };
+    },
+  };
+  const state = {
+    collection: { name: 'business_commands' },
+    demandStatus: { peerConnected: true },
+    masterChange$: {
+      subscribe(listener) {
+        masterChangeListeners.add(listener);
+        return { unsubscribe: () => masterChangeListeners.delete(listener) };
+      },
+    },
+    async pullFromRemotePeers() {},
+  };
+  const bus = createCommandBus({
+    db: { raw: { business_commands: commands } },
+    sync: { async startCollection() { return { state }; } },
+  });
+
+  const waiting = bus.waitForTerminal(commandId, {
+    timeoutMs: 1000,
+    sync_queue_tasks: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  stored = {
+    ...stored,
+    status: 'completed',
+    execution_phase: 'terminal',
+    terminal_status: 'completed',
+  };
+  masterChangeListeners.forEach((listener) => listener(Date.now()));
+
+  const receipt = await waiting;
+  assert.equal(receipt.status, 'completed');
+  assert.equal(authoritativeQueries.length, 1);
+  assert.match(authoritativeQueries[0], new RegExp(`^command-terminal:${commandId}:1$`));
+  assert.equal(masterChangeListeners.size, 0);
 });
 
 test('command bus rejects conflicting legacy and canonical command types', async () => {
@@ -213,7 +275,10 @@ test('command bus returns direct control-command result after projection pull', 
     async insert(doc) {
       stored = { ...doc };
     },
-    findOne(id) {
+    findOne(idOrQuery) {
+      const id = typeof idOrQuery === 'string'
+        ? idOrQuery
+        : idOrQuery?.selector?.id;
       return {
         $: { subscribe() { return { unsubscribe() {} }; } },
         async exec() {
