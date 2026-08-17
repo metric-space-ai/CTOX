@@ -62,8 +62,14 @@ pub(super) async fn business_commands_source_change(
     if last_source_stamp.as_ref() == Some(&source_stamp) {
         return Ok(None);
     }
+    // Commit the stamp that was actually inspected before intake starts. A
+    // browser push can race the native terminal projection and write the same
+    // command back to `pending_sync`. Committing a post-intake refresh would
+    // bless that late overwrite as already observed and put the consumer to
+    // sleep until the fallback poll. Keeping the pre-intake stamp makes the
+    // next immediate round observe and canonically replay the command.
+    *last_source_stamp = Some(source_stamp.clone());
     if source_stamp.table.pending_count == 0 {
-        *last_source_stamp = Some(source_stamp);
         return Ok(None);
     }
     Ok(Some(source_stamp))
@@ -215,7 +221,6 @@ pub(super) async fn consume_business_commands_loop(root: PathBuf, database: Arc<
                 let consumed =
                     consume_pending_business_commands(&root, &database, &mut accept_failures)
                         .await?;
-                refresh_business_commands_source_stamp(&root, &mut last_source_stamp).await?;
                 return Ok(consumed);
             }
 
@@ -279,6 +284,16 @@ pub(super) async fn wait_for_business_command_wake(
         table_name,
     )
     .unwrap_or(0);
+    // Close the lost-wakeup window between the source-stamp check in the
+    // consumer loop and arming the table notifier. If a late browser push was
+    // already reflected in the generation we just sampled, compare the
+    // durable source stamp once more and return immediately when it differs.
+    if business_commands_source_stamp(root)
+        .await
+        .is_ok_and(|current| Some(&current) != last_source_stamp)
+    {
+        return;
+    }
     rxdb::storage::sqlite::instance::wait_for_table_change_for_path(
         &database_path,
         table_name,

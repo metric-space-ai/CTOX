@@ -9992,6 +9992,13 @@ pub(in crate::business_os) mod tests {
                     .expect("changed command source stamp")
                     .is_some()
             );
+            assert_eq!(
+                last_source_stamp
+                    .as_ref()
+                    .map(|stamp| stamp.table.pending_count),
+                Some(1),
+                "the pre-intake pending stamp must be committed before command handling"
+            );
             refresh_business_commands_source_stamp(root.path(), &mut last_source_stamp)
                 .await
                 .expect("refresh changed command source stamp");
@@ -10090,6 +10097,58 @@ pub(in crate::business_os) mod tests {
                 .await
                 .expect("business command idle wait should wake on table notify")
                 .expect("waiter task should not panic");
+        });
+    }
+
+    #[test]
+    fn business_command_idle_wait_rechecks_a_change_seen_before_notifier_arm() {
+        let root = tempfile::tempdir().expect("temp root");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let database = open_test_database(store::rxdb_store_path(root.path()))
+                .await
+                .expect("open rxdb sqlite");
+            database
+                .add_collections(collection_creators())
+                .await
+                .expect("register collections");
+
+            let before = business_commands_source_stamp(root.path())
+                .await
+                .expect("initial command source stamp");
+            let commands = database
+                .collection("business_commands")
+                .expect("business_commands collection");
+            commands
+                .insert(json!({
+                    "id": "cmd_idle_wait_prearmed",
+                    "command_id": "cmd_idle_wait_prearmed",
+                    "module": "ctox",
+                    "command_type": "ctox.provider_subscription.status",
+                    "record_id": "provider-subscriptions",
+                    "status": "pending_sync",
+                    "inbound_channel": "ctox",
+                    "payload": {},
+                    "client_context": {},
+                    "updated_at_ms": now_ms() as u64
+                }))
+                .await
+                .expect("insert command before notifier arm");
+
+            tokio::time::timeout(
+                Duration::from_millis(750),
+                wait_for_business_command_wake(
+                    root.path(),
+                    Some(&before),
+                    BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS,
+                ),
+            )
+            .await
+            .expect("durable source recheck should avoid the full idle timeout");
         });
     }
 
