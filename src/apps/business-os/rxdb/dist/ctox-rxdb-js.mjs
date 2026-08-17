@@ -9395,7 +9395,7 @@ var SharedRoomPeer = class {
     this.peer.on("peer-state", (event) => this.fanout("peer-state", event.detail));
     this.peer.on("master-change", (event) => {
       const collection = event.detail?.collection || event.collection || null;
-      this.fanoutMasterChange(collection);
+      this.fanoutMasterChange(collection, event.detail || null);
     });
     this.peer.on("presence", (event) => {
       const entries = event.detail?.entries ?? event.entries ?? [];
@@ -9478,15 +9478,15 @@ var SharedRoomPeer = class {
       }
     }
   }
-  fanoutMasterChange(collection) {
+  fanoutMasterChange(collection, detail = null) {
     if (collection) {
       const registration = this.collections.get(collection);
-      registration?.state?.onMasterChange?.();
+      registration?.state?.onMasterChange?.(detail);
       return;
     }
     for (const registration of this.collections.values()) {
       try {
-        registration.state?.onMasterChange?.();
+        registration.state?.onMasterChange?.(detail);
       } catch {
       }
     }
@@ -9890,9 +9890,9 @@ var CtoxWebRtcReplicationState = class {
       }
     }
   }
-  onMasterChange() {
+  onMasterChange(detail = null) {
     if (this.cancelled) return;
-    this.masterChange$.next(Date.now());
+    this.masterChange$.next(detail);
     this.pullFromRemotePeers().catch((error) => {
       this.error$.next(error);
       this.schedulePullRetry();

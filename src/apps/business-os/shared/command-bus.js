@@ -1230,7 +1230,12 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
       for (const bridge of syncPlan?.afterCommand || []) {
         const state = syncBridgeFromHandle(bridge)?.state;
         if (cleanContextText(state?.collection?.name) !== 'business_commands') continue;
-        const masterChangeSubscription = state?.masterChange$?.subscribe?.(() => {
+        const masterChangeSubscription = state?.masterChange$?.subscribe?.((hint) => {
+          const hinted = commandFromMasterChangeHint(hint, commandId);
+          if (hinted.detailed) {
+            if (hinted.command) inspect(hinted.command);
+            return;
+          }
           void bind({ authoritative: true });
         });
         if (masterChangeSubscription) masterChangeSubscriptions.push(masterChangeSubscription);
@@ -1407,6 +1412,17 @@ function isUnsupportedCommandTrackingQueryError(error) {
   const message = String(error?.message || error || '');
   return ['SQLITE_QUERY_STREAM_UNSUPPORTED', 'QUERY_FETCH_STREAM_UNSUPPORTED', 'QUERY_NOT_SUPPORTED']
     .some((code) => codes.includes(code) || message.includes(code));
+}
+
+function commandFromMasterChangeHint(hint, commandId) {
+  const payload = hint?.result ?? hint;
+  const documents = Array.isArray(payload?.documents) ? payload.documents : null;
+  if (!documents) return { detailed: false, command: null };
+  const expectedId = String(commandId || '');
+  const command = documents.find((document) => (
+    String(document?.id || document?.command_id || '') === expectedId
+  )) || null;
+  return { detailed: true, command };
 }
 
 async function waitForSyncBridgeReady(bridge, timeoutMs) {

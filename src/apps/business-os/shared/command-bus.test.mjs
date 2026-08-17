@@ -170,7 +170,7 @@ test('command bus pulls projections without restarting the shared room', () => {
   assert.match(source, /subscribe\(commandId, observer\)/);
 });
 
-test('native master-change immediately revalidates the tracked command id', async () => {
+test('native master-change consumes an authoritative command payload and retains legacy fallback', async () => {
   const commandId = 'cmd-master-change-revalidate';
   let stored = {
     id: commandId,
@@ -221,12 +221,40 @@ test('native master-change immediately revalidates the tracked command id', asyn
     execution_phase: 'terminal',
     terminal_status: 'completed',
   };
-  masterChangeListeners.forEach((listener) => listener(Date.now()));
+  masterChangeListeners.forEach((listener) => listener({
+    result: { documents: [{ ...stored }] },
+  }));
 
   const receipt = await waiting;
   assert.equal(receipt.status, 'completed');
+  assert.equal(authoritativeQueries.length, 0);
+  assert.equal(masterChangeListeners.size, 0);
+
+  const legacyCommandId = 'cmd-master-change-legacy';
+  stored = {
+    id: legacyCommandId,
+    command_id: legacyCommandId,
+    status: 'pending_sync',
+  };
+  const legacyWaiting = bus.waitForTerminal(legacyCommandId, {
+    timeoutMs: 1000,
+    sync_queue_tasks: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  stored = {
+    ...stored,
+    status: 'completed',
+    execution_phase: 'terminal',
+    terminal_status: 'completed',
+  };
+  masterChangeListeners.forEach((listener) => listener(Date.now()));
+  const legacyReceipt = await legacyWaiting;
+  assert.equal(legacyReceipt.status, 'completed');
   assert.equal(authoritativeQueries.length, 1);
-  assert.match(authoritativeQueries[0], new RegExp(`^command-terminal:${commandId}:1$`));
+  assert.match(
+    authoritativeQueries[0],
+    new RegExp(`^command-terminal:${legacyCommandId}:1$`),
+  );
   assert.equal(masterChangeListeners.size, 0);
 });
 

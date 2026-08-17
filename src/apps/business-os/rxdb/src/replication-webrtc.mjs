@@ -577,7 +577,7 @@ class SharedRoomPeer {
       // Fan a master-change to ONLY the collection it belongs to (when the
       // push is collection-qualified); otherwise to every collection (V1).
       const collection = event.detail?.collection || event.collection || null;
-      this.fanoutMasterChange(collection);
+      this.fanoutMasterChange(collection, event.detail || null);
     });
     // Presence push from the native hub: the aggregate of every OTHER peer's
     // entries. Replace the registry's remote state wholesale.
@@ -676,14 +676,14 @@ class SharedRoomPeer {
     }
   }
 
-  fanoutMasterChange(collection) {
+  fanoutMasterChange(collection, detail = null) {
     if (collection) {
       const registration = this.collections.get(collection);
-      registration?.state?.onMasterChange?.();
+      registration?.state?.onMasterChange?.(detail);
       return;
     }
     for (const registration of this.collections.values()) {
-      try { registration.state?.onMasterChange?.(); } catch {}
+      try { registration.state?.onMasterChange?.(detail); } catch {}
     }
   }
 
@@ -1163,9 +1163,11 @@ class CtoxWebRtcReplicationState {
     }
   }
 
-  onMasterChange() {
+  onMasterChange(detail = null) {
     if (this.cancelled) return;
-    this.masterChange$.next(Date.now());
+    // Preserve the permission-filtered master payload for bounded consumers.
+    // Legacy/resync callers pass null and retain the exact-query fallback.
+    this.masterChange$.next(detail);
     this.pullFromRemotePeers().catch((error) => {
       this.error$.next(error);
       this.schedulePullRetry();
