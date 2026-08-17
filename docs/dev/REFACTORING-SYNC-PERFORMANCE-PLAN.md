@@ -590,6 +590,17 @@ Browser-Nachmessung vom 17.08.2026:
   Abnahme wäre vor dessen Optimierung noch keine bestandene Release-Matrix.
   Rohdaten:
   `beweise/raw/sellify-scale-browser-1x1-fb33bbfda-2026-08-17.json`.
+- Im warmen Lauf vergehen 888 ms bis zum Beginn des Scale-Collection-Setups;
+  die eigentliche gecachte Activities-Abfrage und der Render benötigen danach
+  nur 61 ms. Der nächste zu prüfende Kandidat ist deshalb die seriell gepacete
+  Browser-Collection-Registrierung (`COLLECTION_START_GAP_MS=60` bei rund 15
+  Shell-Collections), nicht Query-Fetch oder Materialisierung. Das ist noch
+  eine Messhypothese, kein behaupteter Fix.
+- Eine Änderung von `shared/sync.js` benötigt gemäß Browser-Releasevertrag
+  denselben `APP_BUILD`-Cache-Buster in `app.js`. Diese Datei enthält derzeit
+  fremde uncommittierte Änderungen; die Optimierung wird daher erst nach
+  sauberer Übergabe dieser Arbeitsregion umgesetzt und nicht in einen fremden
+  Commit hineingemischt.
 
 Noch offene Browserabnahme, jeweils 30 Läufe kalt und warm:
 
@@ -936,9 +947,11 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den Sellify-Einzel-Smoke auf dem aktuellen Code-Stand erneut messen.
-3. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
-   Browsermatrix auf dem synthetischen Scale-Store ausführen.
+2. Nach Freigabe von `app.js` die warmen 888 ms vor dem Scale-Setup gegen die
+   Collection-Start-Pacing-Hypothese messen und nur den belegten Anteil
+   optimieren.
+3. Danach den Sellify-Einzel-Smoke erneut messen und erst bei bestandenem
+   Warm-Einzeltor eine echte 30-Lauf-Cold-/Warm-Browsermatrix ausführen.
 4. Den Cold-Schemaaufbau getrennt vom warmen Handshake optimieren und danach
    Reconnect-, Peerwechsel- und Multi-Tab-Abnahme ausführen.
 5. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
