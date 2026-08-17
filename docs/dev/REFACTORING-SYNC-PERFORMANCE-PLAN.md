@@ -397,8 +397,13 @@ Rollout-Zwischenstand vom 16.08.2026:
   35 ms. Es gibt weder einen neuen Index noch eine Schemamigration. Ein
   Query-Plan-Test verbietet Tabellenscans, und ein Semantiktest vergleicht die
   neue Aggregation über alle sechs recoverbaren Command-Typen mit dem
-  kanonischen Altprädikat. Rust-Tests, neuer isolierter Build sowie Kurz- und
-  Ein-Stunden-Probe sind noch offen.
+  kanonischen Altprädikat. Commit `e42e3386f` enthält ausschließlich diese
+  Änderung und Tests. Beide neuen Tests sind `2/2` grün; der bestehende
+  vollständige Command-Lifecycle-Test ist zusätzlich `1/1` grün. Der
+  isolierte Snapshot-Neuaufbau wurde während der Abhängigkeitskompilierung
+  kontrolliert beendet, um den gemeinsam genutzten Cargo-Lock freizugeben.
+  Reiner Archiv-/Release-Build sowie Kurz- und Ein-Stunden-Probe sind noch
+  offen.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
@@ -638,6 +643,8 @@ Kein Commit darf:
 | `d27a46d12` | isolierten Stack-/Reader-Befund als Rohbeweis versionieren |
 | `3ada24cc7` | Browser-Streaming, RxDB/Peer und Research-Recovery zusammengehörig integrieren |
 | `fa100e322` | Command-Completion der Recovery dauerhaft persistieren und projizieren |
+| `8f43dcc58` | indexuntauglichen Command-Stamp-Hotpath und Vorhermessung dokumentieren |
+| `e42e3386f` | Command-Stamp über vier indexgerechte Lifecycle-Zweige aggregieren |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 

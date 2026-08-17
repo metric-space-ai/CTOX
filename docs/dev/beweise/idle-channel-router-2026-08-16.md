@@ -102,6 +102,13 @@ RxDB-Kopie verwendet jeder Zweig einen vorhandenen Expression-Index; ein neuer
 Index oder eine Schemamigration ist nicht nötig. Die direkte Nachherabfrage
 lieferte weiterhin null Kandidaten in 35 ms. Das ist gegenüber dem letzten
 Loop mindestens Faktor 1.061 und gegenüber seinem Maximum Faktor 3.037.
+Commit `e42e3386f` enthält ausschließlich die Abfrage und ihre beiden neuen
+Regressionstests. Query-Plan und Semantik sind `2/2` grün; der bestehende
+vollständige Command-Lifecycle-Test ist zusätzlich `1/1` grün. Der
+isolierte Snapshot-Neuaufbau wurde während der Abhängigkeitskompilierung
+kontrolliert beendet, um den gemeinsam genutzten Cargo-Lock freizugeben. Ein
+reiner Archiv-/Release-Build sowie die isolierte Kurz- und Ein-Stunden-Probe
+bleiben deshalb offen.
 
 Maschinenlesbare Rohdaten:
 [`raw/idle-business-commands-stamp-2026-08-17.json`](raw/idle-business-commands-stamp-2026-08-17.json)

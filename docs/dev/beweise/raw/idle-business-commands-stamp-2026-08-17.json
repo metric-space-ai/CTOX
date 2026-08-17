@@ -29,6 +29,7 @@
     "query_plan": "single deleted index range followed by JSON OR filtering over all live rows"
   },
   "candidate_change": {
+    "commit": "e42e3386f",
     "description": "replace the disjunctive retry-candidate stamp with four mutually exclusive UNION ALL lifecycle branches",
     "schema_change": false,
     "new_index": false,
@@ -52,7 +53,12 @@
   },
   "verification": {
     "rustfmt_single_file_check": "passed",
-    "cargo_tests": "pending_shared_artifact_lock",
+    "query_plan_and_semantic_tests": "passed_2_of_2_in_0.18s",
+    "existing_command_lifecycle_test": "passed_1_of_1_in_115.05s",
+    "test_binary": "/Users/michaelwelsch/Documents/ctox/runtime/build/cargo-target/debug/deps/ctox-5ea3dd44c5276d3f",
+    "isolated_snapshot": "/Volumes/tmp/ctox-command-stamp.CqUlLDZg",
+    "isolated_snapshot_rebuild": "interrupted_while_compiling_dependencies_to_release_shared_artifact_lock",
+    "isolated_archive_or_release_build": "pending",
     "isolated_service_30s_probe": "pending_rebuild",
     "isolated_service_1h_probe": "pending_rebuild"
   }
