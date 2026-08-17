@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | in Arbeit | fünfter Fix ausgerollt; sechster belegter SQLite-Reader-Fix in isolierter Prüfung | nein | Kurz- und Ein-Stunden-Probe in isolierter/remote Umgebung wiederholen |
+| Idle-CPU des Dienstes | in Arbeit | sechster Reader-Fix gebaut; siebter indexgerechter Command-Stamp-Fix in Prüfung | nein | Kurz- und Ein-Stunden-Probe in isolierter/remote Umgebung wiederholen |
 | OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
 | OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -378,8 +378,27 @@ Rollout-Zwischenstand vom 16.08.2026:
   `3be22e429b3b56fbc7ae0085f9e293b8d295601949825384339ab9dc9a8c58dd`;
   das daraus reproduzierbar gebaute Pi-Sidecar hat erneut SHA-256
   `a487654e3953c898e675b49ae705a7e7a6ff9024f7cd3f5748fddca90278a4ee`.
-  Release-Build und Nachhermessung sind weiterhin offen; der Reader-Fix ist
-  nicht in den produktiven lokalen Dienst ausgerollt.
+  Der Release-Build ist inzwischen nach 65:57 Minuten abgeschlossen. Das
+  isoliert erzeugte arm64-Binary hat SHA-256
+  `1496ce5f5b31a0b2b35e07cf19e862eb16a5be578c72c589f457ef0eb6bcc1fc`.
+  Es wurde ausschließlich als PID `30871` gegen den isolierten Test-Root
+  gestartet und nach dem Profiling sauber beendet; produktiver lokaler Dienst
+  und `launchctl` blieben unverändert. Die Nachhermessung zeigte nicht mehr den
+  Multi-Reader-/Schema-Reparse-Pfad, aber einen neuen dominanten Startup-
+  Engpass im `business_commands`-Quellstempel.
+- Der siebte Idle-Fix adressiert diesen gemessenen Restpfad. Der bisherige
+  disjunktive JSON-Filter prüfte trotz null Kandidaten alle 12.309 lebenden
+  Command-Dokumente; Loop-Metriken meldeten zuletzt 37.157 ms und maximal
+  106.317 ms, und 3.208 Stack-Samples lagen in
+  `business_commands_table_stamp -> sqlite3_step`. Die semantisch identische
+  Abfrage ist deshalb in vier disjunkte `UNION ALL`-Zweige zerlegt. Auf
+  derselben read-only geöffneten 2,1-GB-RxDB-Kopie verwendet jeder Zweig einen
+  vorhandenen Expression-Index und liefert weiterhin null Kandidaten in
+  35 ms. Es gibt weder einen neuen Index noch eine Schemamigration. Ein
+  Query-Plan-Test verbietet Tabellenscans, und ein Semantiktest vergleicht die
+  neue Aggregation über alle sechs recoverbaren Command-Typen mit dem
+  kanonischen Altprädikat. Rust-Tests, neuer isolierter Build sowie Kurz- und
+  Ein-Stunden-Probe sind noch offen.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und

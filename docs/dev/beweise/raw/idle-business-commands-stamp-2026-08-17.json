@@ -1,0 +1,59 @@
+{
+  "schema": "ctox.performance.idle_business_commands_stamp.v1",
+  "observed_date": "2026-08-17",
+  "host_timezone": "Europe/Berlin",
+  "isolation": {
+    "source_commit": "fa100e322",
+    "source_snapshot": "/Volumes/tmp/ctox-idle-fa100e322.puL5n3",
+    "source_archive_sha256": "3be22e429b3b56fbc7ae0085f9e293b8d295601949825384339ab9dc9a8c58dd",
+    "binary_path": "/Users/michaelwelsch/Documents/ctox/runtime/build/cargo-target/release/ctox",
+    "binary_sha256": "1496ce5f5b31a0b2b35e07cf19e862eb16a5be578c72c589f457ef0eb6bcc1fc",
+    "service_pid": 30871,
+    "service_stopped_after_profile": true,
+    "productive_local_service_modified": false,
+    "productive_launchctl_modified": false,
+    "database_quick_checks": {
+      "core": "ok",
+      "business_os": "ok",
+      "business_os_rxdb": "ok"
+    }
+  },
+  "baseline": {
+    "business_commands_live_rows": 12309,
+    "candidate_rows": 0,
+    "loop_last_duration_ms": 37157,
+    "loop_max_duration_ms": 106317,
+    "loop_idle_ticks": 5,
+    "stack_sample_path": "ctox::business_os::rxdb_peer_intake::business_commands_table_stamp -> sqlite3_step",
+    "stack_sample_active_task_samples": 3208,
+    "query_plan": "single deleted index range followed by JSON OR filtering over all live rows"
+  },
+  "candidate_change": {
+    "description": "replace the disjunctive retry-candidate stamp with four mutually exclusive UNION ALL lifecycle branches",
+    "schema_change": false,
+    "new_index": false,
+    "semantic_guard": "compare the UNION result with BUSINESS_COMMAND_RETRY_CANDIDATE_SQL across every recoverable command type",
+    "query_plan_guard": "require four indexed searches and no business_commands table scan"
+  },
+  "direct_read_only_measurement": {
+    "database_path": "/Volumes/tmp/ctox-idle-b41cc74ca-isolated.voTfBX/root/runtime/business-os-rxdb.sqlite3",
+    "database_bytes": 2119155712,
+    "candidate_rows": 0,
+    "elapsed_ms": 35,
+    "query_plan_branches": [
+      "pending_sync: deleted/status/updated_at/id expression index",
+      "waiting_dependencies: deleted/status/updated_at/id expression index",
+      "accepted: deleted/command_type/id expression index",
+      "failed nonterminal: deleted/command_type/id expression index"
+    ],
+    "table_scan": false,
+    "minimum_speedup_vs_last_loop": 1061.6,
+    "minimum_speedup_vs_max_loop": 3037.6
+  },
+  "verification": {
+    "rustfmt_single_file_check": "passed",
+    "cargo_tests": "pending_shared_artifact_lock",
+    "isolated_service_30s_probe": "pending_rebuild",
+    "isolated_service_1h_probe": "pending_rebuild"
+  }
+}

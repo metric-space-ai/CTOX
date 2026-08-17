@@ -77,3 +77,31 @@ Release-Build sowie 30-Sekunden- und Ein-Stunden-Nachherlauf bleiben offen.
 
 Maschinenlesbare Rohdaten:
 [`raw/idle-multi-reader-diagnosis-2026-08-17.json`](raw/idle-multi-reader-diagnosis-2026-08-17.json)
+
+## Isolierter Command-Stamp-Nachbefund vom 17.08.2026
+
+Der integrierte Snapshot `fa100e322` wurde inzwischen als Release gebaut. Das
+Binary hat SHA-256
+`1496ce5f5b31a0b2b35e07cf19e862eb16a5be578c72c589f457ef0eb6bcc1fc`.
+Der ausschließlich gegen den isolierten Test-Root gestartete PID `30871` wurde
+nach dem Profiling sauber beendet; der produktive lokale Dienst und
+`launchctl` blieben unangetastet.
+
+Die Multi-Reader-Korrektur entfernte den zuvor belegten Schema-Reparse-Pfad.
+Der Dienst erreichte dennoch noch nicht den Idle-Zustand: Der
+`business_commands`-Quellstempel benötigte trotz null Kandidaten zuletzt
+37.157 ms und maximal 106.317 ms. Ein Stack-Sample lag mit 3.208 Samples
+vollständig in `business_commands_table_stamp -> sqlite3_step`. Ursache war
+ein disjunktiver JSON-Prädikatsausdruck, für den SQLite nur `deleted = 0`
+indexieren konnte und deshalb alle 12.309 lebenden Commands prüfte.
+
+Die logisch identische Kandidatenabfrage ist nun in vier disjunkte
+`UNION ALL`-Zweige für `pending_sync`, `waiting_dependencies`, `accepted` und
+nichtterminales `failed` geteilt. Auf derselben read-only geöffneten 2,1-GB-
+RxDB-Kopie verwendet jeder Zweig einen vorhandenen Expression-Index; ein neuer
+Index oder eine Schemamigration ist nicht nötig. Die direkte Nachherabfrage
+lieferte weiterhin null Kandidaten in 35 ms. Das ist gegenüber dem letzten
+Loop mindestens Faktor 1.061 und gegenüber seinem Maximum Faktor 3.037.
+
+Maschinenlesbare Rohdaten:
+[`raw/idle-business-commands-stamp-2026-08-17.json`](raw/idle-business-commands-stamp-2026-08-17.json)
