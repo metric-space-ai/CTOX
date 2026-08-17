@@ -123,23 +123,66 @@ pub(super) fn business_commands_table_stamp(
     } else {
         "CAST(COALESCE(json_extract(data, '$._meta.lwt'), json_extract(data, '$.updated_at_ms'), 0) AS REAL)"
     };
+    let stamp_sql = business_commands_table_stamp_sql(&quoted, deleted_expr, lwt_expr);
     let (pending_count, latest_pending_lwt): (i64, f64) = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*), COALESCE(MAX({lwt_expr}), 0)
-                 FROM {quoted}
-                 WHERE {deleted_expr} = 0
-                   AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}"
-            ),
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row(&stamp_sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
         .with_context(|| format!("stamp pending business_commands rows in {table}"))?;
     Ok(BusinessCommandsTableStamp {
         table_name: Some(table),
         pending_count,
         latest_pending_lwt_bits: latest_pending_lwt.to_bits(),
     })
+}
+
+fn business_commands_table_stamp_sql(
+    quoted_table: &str,
+    deleted_expr: &str,
+    lwt_expr: &str,
+) -> String {
+    // Keep the mutually exclusive lifecycle states in separate branches. A
+    // single OR expression made SQLite scan every live command even though
+    // the RxDB table already has a (deleted, status) expression index.
+    format!(
+        "SELECT COUNT(*), COALESCE(MAX(candidate_lwt), 0)
+         FROM (
+           SELECT {lwt_expr} AS candidate_lwt
+           FROM {quoted_table}
+           WHERE {deleted_expr} = 0
+             AND json_extract(data, '$.status') = 'pending_sync'
+           UNION ALL
+           SELECT {lwt_expr} AS candidate_lwt
+           FROM {quoted_table}
+           WHERE {deleted_expr} = 0
+             AND json_extract(data, '$.status') = 'waiting_dependencies'
+           UNION ALL
+           SELECT {lwt_expr} AS candidate_lwt
+           FROM {quoted_table}
+           WHERE {deleted_expr} = 0
+             AND json_extract(data, '$.status') = 'accepted'
+             AND json_extract(data, '$.command_type') IN (
+               'external_sql.sync.refresh',
+               'external_sql.write',
+               'outbound.research_source.generate_adapter',
+               'outbound.research_source.test',
+               'outbound.research_source.auth_assist',
+               'web_stack.person_research'
+             )
+           UNION ALL
+           SELECT {lwt_expr} AS candidate_lwt
+           FROM {quoted_table}
+           WHERE {deleted_expr} = 0
+             AND json_extract(data, '$.status') = 'failed'
+             AND COALESCE(json_extract(data, '$.terminal_status'), 'none') = 'none'
+             AND json_extract(data, '$.command_type') IN (
+               'external_sql.sync.refresh',
+               'external_sql.write',
+               'outbound.research_source.generate_adapter',
+               'outbound.research_source.test',
+               'outbound.research_source.auth_assist',
+               'web_stack.person_research'
+             )
+         )"
+    )
 }
 
 pub(super) fn empty_business_commands_table_stamp(
@@ -1043,4 +1086,129 @@ pub(super) fn enrich_native_command_lifecycle(
         object.insert("retryable".to_string(), Value::Bool(false));
     }
     crate::command_lifecycle::validate_document(document).map_err(|error| anyhow::anyhow!(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{business_commands_table_stamp_sql, BUSINESS_COMMAND_RETRY_CANDIDATE_SQL};
+    use rusqlite::{params, Connection};
+    use serde_json::json;
+
+    #[test]
+    fn business_commands_stamp_uses_an_index_for_every_lifecycle_branch() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE business_commands (
+                id TEXT PRIMARY KEY,
+                deleted INTEGER NOT NULL,
+                lastWriteTime REAL NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE INDEX business_commands_json__deleted__status
+            ON business_commands (
+                deleted,
+                json_extract(data, '$.status')
+            );
+            CREATE INDEX business_commands_json__deleted__command_type
+            ON business_commands (
+                deleted,
+                json_extract(data, '$.command_type')
+            );
+            "#,
+        )
+        .expect("create command stamp test schema");
+
+        let sql = business_commands_table_stamp_sql(
+            "business_commands",
+            "deleted",
+            "COALESCE(lastWriteTime, 0)",
+        );
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare command stamp query plan");
+        let plan = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query command stamp plan")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect command stamp plan");
+        let indexed_branches = plan
+            .iter()
+            .filter(|detail| detail.contains("SEARCH business_commands USING INDEX"))
+            .count();
+
+        assert_eq!(indexed_branches, 4, "query plan: {plan:#?}");
+        assert!(
+            !plan.iter().any(|detail| detail == "SCAN business_commands"),
+            "query plan: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn business_commands_stamp_union_matches_retry_candidate_semantics() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE business_commands (
+                id TEXT PRIMARY KEY,
+                deleted INTEGER NOT NULL,
+                lastWriteTime REAL NOT NULL,
+                data TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("create command stamp test table");
+        let recoverable_types = [
+            "external_sql.sync.refresh",
+            "external_sql.write",
+            "outbound.research_source.generate_adapter",
+            "outbound.research_source.test",
+            "outbound.research_source.auth_assist",
+            "web_stack.person_research",
+        ];
+        let mut documents = vec![
+            json!({"status": "pending_sync", "command_type": "any.command"}),
+            json!({"status": "waiting_dependencies", "command_type": "any.command"}),
+            json!({"status": "completed", "command_type": "external_sql.write"}),
+            json!({"status": "accepted", "command_type": "office.document.create"}),
+            json!({"status": "failed", "terminal_status": "failed", "command_type": "external_sql.write"}),
+        ];
+        for command_type in recoverable_types {
+            documents.push(json!({"status": "accepted", "command_type": command_type}));
+            documents.push(json!({
+                "status": "failed",
+                "terminal_status": "none",
+                "command_type": command_type
+            }));
+        }
+        for (index, document) in documents.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO business_commands (id, deleted, lastWriteTime, data) VALUES (?1, 0, ?2, ?3)",
+                params![format!("cmd-{index}"), index as f64 + 1.0, document.to_string()],
+            )
+            .expect("insert command stamp test document");
+        }
+
+        let legacy: (i64, f64) = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*), COALESCE(MAX(lastWriteTime), 0)
+                     FROM business_commands
+                     WHERE deleted = 0 AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query legacy command stamp predicate");
+        let union: (i64, f64) = conn
+            .query_row(
+                &business_commands_table_stamp_sql("business_commands", "deleted", "lastWriteTime"),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query indexable command stamp union");
+
+        assert_eq!(union, legacy);
+        assert_eq!(union.0, 14);
+    }
 }
