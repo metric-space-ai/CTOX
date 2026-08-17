@@ -21,9 +21,10 @@ use super::browser_runtime::browser_runtime_manager;
 use super::desktop_files::*;
 use super::iot_supervision::spawn_iot_agent_supervisors;
 use super::rxdb_peer_browser::{
-    apply_browser_runtime_command, browser_runtime_maintenance_loop, is_browser_runtime_command,
+    apply_browser_runtime_command, browser_live_metrics_snapshot, browser_runtime_maintenance_loop,
+    handle_browser_live_webrtc_request, is_browser_runtime_command,
     mark_browser_runtime_command_failed, recover_stale_browser_sessions,
-    BROWSER_RUNTIME_LOOP_METRICS,
+    BROWSER_LIVE_WEBRTC_METHOD, BROWSER_RUNTIME_LOOP_METRICS,
 };
 pub(super) use super::rxdb_peer_browser::{
     browser_frame_hash, find_browser_document, upsert_browser_frame, upsert_browser_session,
@@ -91,9 +92,11 @@ use notify::event::{AccessKind, AccessMode, EventKind, MetadataKind, ModifyKind}
 use notify::Watcher;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
+use rxdb::plugins::replication_webrtc::index_mod::auxiliary_request_metrics_snapshot;
 use rxdb::plugins::replication_webrtc::{
-    file_fetch_handler::FileRange, CollectionAuthzHook, DocumentReadAuthzHook,
-    DocumentWriteAuthzHook, RTCIceServer, RxWebRTCReplicationPool, WebRTCRsConnectionHandler,
+    file_fetch_handler::FileRange, CollectionAuthzHook, CollectionEagerPullHook,
+    DocumentReadAuthzHook, DocumentWriteAuthzHook, RTCIceServer, RxWebRTCReplicationPool,
+    WebRTCRsConnectionHandler,
 };
 use rxdb::rx_collection::RxCollection;
 use rxdb::rx_collection_helper::fill_object_data_before_insert;
@@ -745,9 +748,24 @@ const BUSINESS_RECORD_PROJECTION_PARTIAL_SYNC_INTERVAL_SECS: u64 = 30;
 const BUSINESS_RECORD_PROJECTION_SYNC_LIMIT: usize = 2_000;
 const BUSINESS_RECORD_PROJECTION_PAGE_SIZE: usize = 25;
 pub(super) const BUSINESS_RECORD_PROJECTION_WRITE_BATCH_SIZE: usize = 250;
+// The RxDB store is durable, so the browser can immediately read the previous
+// projections after reconnect. Starting every reconciliation loop at once
+// instead made them contend for the same SQLite/write lock during WebRTC
+// bring-up and rendered browser streaming unresponsive. Keep command handling
+// immediate and spread refresh-only work across the first quiet seconds.
+const NOTES_STARTUP_DELAY_SECS: u64 = 4;
+const RUNTIME_SETTINGS_STARTUP_DELAY_SECS: u64 = 2;
+const BUSINESS_USERS_STARTUP_DELAY_SECS: u64 = 6;
+const WORKSPACE_BRANDING_STARTUP_DELAY_SECS: u64 = 10;
+const MODULE_CATALOG_STARTUP_DELAY_SECS: u64 = 14;
+const CHANNEL_STATE_STARTUP_DELAY_SECS: u64 = 18;
+const TICKET_STATE_STARTUP_DELAY_SECS: u64 = 22;
+const KNOWLEDGE_TABLES_STARTUP_DELAY_SECS: u64 = 28;
+const BUSINESS_RECORDS_STARTUP_DELAY_SECS: u64 = 34;
+const DESKTOP_FILE_INDEX_STARTUP_DELAY_SECS: u64 = 42;
 // Version 2 performs one bounded replay so legacy rows with pre-RxDB revision
 // envelopes are normalized and derived AppSec evidence fields are refreshed.
-const BUSINESS_RECORD_PROJECTION_CURSOR_VERSION: u32 = 2;
+const BUSINESS_RECORD_PROJECTION_CURSOR_VERSION: u32 = 3;
 const QUEUE_CHAT_REPAIR_ORPHAN_EPOCH_MS: i64 = 10 * 60 * 1_000;
 pub(super) const BUSINESS_COMMAND_ACTIVE_POLL_SECS: u64 = 1;
 // Browser-originated commands are user-visible control-plane work. Same-process
@@ -837,6 +855,18 @@ fn native_peer_worker_threads() -> usize {
 }
 
 pub(super) type WebRtcPool = Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>;
+
+fn is_server_demand_only_collection(collection: &str) -> bool {
+    matches!(
+        collection,
+        "sellify_activities"
+            | "sellify_campaigns"
+            | "sellify_companies"
+            | "sellify_people"
+            | "sellify_records"
+            | "sellify_sql_rows"
+    )
+}
 
 pub(super) struct NativePeerLoopMetrics {
     name: &'static str,
@@ -1120,6 +1150,8 @@ fn native_peer_performance_snapshot() -> Value {
             "browser_runtime": BROWSER_RUNTIME_LOOP_METRICS.snapshot(),
         },
         "file_fetch": DEMAND_FILE_FETCH_METRICS.snapshot(),
+        "browser_live": browser_live_metrics_snapshot(),
+        "auxiliary_requests": auxiliary_request_metrics_snapshot(),
         "command_plane": COMMAND_PLANE_METRICS.snapshot(),
         "rxdb_sqlite": rxdb::storage::sqlite::instance::sqlite_runtime_counters_snapshot(),
         "rxdb_subjects": {
@@ -2296,33 +2328,6 @@ pub(crate) fn sync_business_record_projections(root: &Path) -> anyhow::Result<us
     )
 }
 
-#[cfg(test)]
-fn sync_business_record_projections_if_changed(
-    root: &Path,
-    since_by_collection: &mut HashMap<String, i64>,
-    chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
-    last_source_stamp: &mut Option<BusinessRecordProjectionSourceStamp>,
-) -> anyhow::Result<usize> {
-    with_business_os_database(
-        root,
-        "failed to create Business OS business record projection sync runtime",
-        true,
-        TemporaryDatabaseLockScope::EntireOperation,
-        |_peer, database| async move {
-            let database_write_lock = Arc::new(AsyncMutex::new(()));
-            sync_business_record_projections_with_database_if_changed(
-                root,
-                &database,
-                &database_write_lock,
-                since_by_collection,
-                chat_tracking_repair_stamp,
-                last_source_stamp,
-            )
-            .await
-        },
-    )
-}
-
 pub fn enqueue_business_command_document(root: &Path, document: Value) -> anyhow::Result<Value> {
     with_business_os_database(
         root,
@@ -2337,6 +2342,18 @@ pub fn enqueue_business_command_document(root: &Path, document: Value) -> anyhow
 
 pub(super) fn current_peer() -> Option<Arc<NativePeer>> {
     with_native_peer_lifecycle(|lifecycle| lifecycle.peer.clone())
+}
+
+fn spawn_delayed_background_loop<F>(delay_secs: u64, future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if delay_secs > 0 {
+            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+        }
+        future.await;
+    })
 }
 
 async fn run_native_peer(
@@ -2492,13 +2509,19 @@ async fn run_native_peer(
         let multi_signaling_url_provider = std::sync::Arc::clone(&signaling_url_provider);
         let multi_peer_session_id = peer_session_id.clone();
         let multi_ice_servers = ice_servers.clone();
-        // Server-authoritative per-device revocation: deny any signaling peer id
-        // present in the revocation registry at connect time. The browser cannot
-        // override this — the gate runs on the native (master-authoritative) peer.
-        let revocation_root = root.clone();
+        // Server-authoritative revocation checks both identities against the
+        // same store. The signaling id gate remains for existing revocations
+        // and diagnostics; the peerSession session id is the durable browser
+        // device identity that survives socket reconnects.
+        let signaling_revocation_root = root.clone();
         let is_peer_valid: std::sync::Arc<dyn Fn(&String) -> bool + Send + Sync> =
             std::sync::Arc::new(move |peer_id: &String| {
-                !store::is_business_peer_revoked(&revocation_root, peer_id)
+                !store::is_business_peer_revoked(&signaling_revocation_root, peer_id)
+            });
+        let session_revocation_root = root.clone();
+        let is_peer_session_valid: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> =
+            std::sync::Arc::new(move |session_id: &str| {
+                !store::is_business_peer_revoked(&session_revocation_root, session_id)
             });
         // Server-authoritative exact per-collection read authz. Missing,
         // expired, revoked, or stale-epoch capabilities fail closed.
@@ -2522,6 +2545,9 @@ async fn run_native_peer(
                 super::threads::may_accept_peer_write(&write_authz_root, token, collection)
             }))
         };
+        let collection_eager_pull: Option<CollectionEagerPullHook> = Some(std::sync::Arc::new(
+            move |_token: &str, collection: &str| !is_server_demand_only_collection(collection),
+        ));
         let document_read_authz: Option<DocumentReadAuthzHook> = {
             let doc_authz_root = root.clone();
             Some(std::sync::Arc::new(move |token: &str, collection: &str| {
@@ -2542,14 +2568,16 @@ async fn run_native_peer(
             ))
         };
         let mut bringup = tokio::spawn(async move {
-            rxdb::plugins::replication_webrtc::replicate_web_rtc_rs_multi_with_url_list_provider(
+            rxdb::plugins::replication_webrtc::replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
                 collection_list,
                 multi_signaling_url_provider,
                 topic,
                 multi_peer_session_id,
                 multi_ice_servers,
                 Some(is_peer_valid),
+                Some(is_peer_session_valid),
                 collection_authz,
+                collection_eager_pull,
                 collection_write_authz,
                 document_read_authz,
                 document_write_authz,
@@ -2585,6 +2613,24 @@ async fn run_native_peer(
                 // already auto-registers every multiplexed collection inside
                 // `RxWebRTCReplicationPool::new_multi`.
                 register_demand_file_sources(&pool, &database, &root);
+                let browser_live_root = root.clone();
+                let browser_live_database = Arc::clone(&database);
+                pool.set_auxiliary_request_handler(
+                    BROWSER_LIVE_WEBRTC_METHOD,
+                    Arc::new(move |_peer_identity, capability_token, params| {
+                        let root = browser_live_root.clone();
+                        let database = Arc::clone(&browser_live_database);
+                        Box::pin(async move {
+                            handle_browser_live_webrtc_request(
+                                &root,
+                                &database,
+                                &capability_token,
+                                params,
+                            )
+                            .await
+                        })
+                    }),
+                );
                 pools.push(pool);
             }
             Ok(Ok(Err(err))) => {
@@ -2619,58 +2665,87 @@ async fn run_native_peer(
         root.clone(),
     ));
 
-    let notes_sync = tokio::spawn(sync_notes_background_loop(root.clone()));
+    let notes_sync = spawn_delayed_background_loop(
+        NOTES_STARTUP_DELAY_SECS,
+        sync_notes_background_loop(root.clone()),
+    );
     let file_index_sync =
         if std::env::var_os("CTOX_BUSINESS_OS_DISABLE_BACKGROUND_FILE_INDEX").is_some() {
             tokio::spawn(std::future::pending())
         } else {
-            tokio::spawn(sync_desktop_file_index_background_loop(
-                root.clone(),
-                Arc::clone(&database),
-                Arc::clone(&database_write_lock),
-            ))
+            spawn_delayed_background_loop(
+                DESKTOP_FILE_INDEX_STARTUP_DELAY_SECS,
+                sync_desktop_file_index_background_loop(
+                    root.clone(),
+                    Arc::clone(&database),
+                    Arc::clone(&database_write_lock),
+                ),
+            )
         };
-    let channel_state_sync = tokio::spawn(sync_channel_state_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let business_users_sync = tokio::spawn(sync_business_users_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let runtime_settings_sync = tokio::spawn(sync_runtime_settings_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let workspace_branding_sync = tokio::spawn(sync_workspace_branding_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let module_catalog_sync = tokio::spawn(sync_module_catalog_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let ticket_state_sync = tokio::spawn(sync_ticket_state_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let knowledge_tables_sync = tokio::spawn(sync_knowledge_tables_background_loop(
-        root.clone(),
-        Arc::clone(&database),
-        Arc::clone(&database_write_lock),
-    ));
-    let business_record_projection_sync =
-        tokio::spawn(sync_business_record_projections_background_loop(
+    let channel_state_sync = spawn_delayed_background_loop(
+        CHANNEL_STATE_STARTUP_DELAY_SECS,
+        sync_channel_state_background_loop(
             root.clone(),
             Arc::clone(&database),
             Arc::clone(&database_write_lock),
-        ));
+        ),
+    );
+    let business_users_sync = spawn_delayed_background_loop(
+        BUSINESS_USERS_STARTUP_DELAY_SECS,
+        sync_business_users_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
+    let runtime_settings_sync = spawn_delayed_background_loop(
+        RUNTIME_SETTINGS_STARTUP_DELAY_SECS,
+        sync_runtime_settings_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
+    let workspace_branding_sync = spawn_delayed_background_loop(
+        WORKSPACE_BRANDING_STARTUP_DELAY_SECS,
+        sync_workspace_branding_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
+    let module_catalog_sync = spawn_delayed_background_loop(
+        MODULE_CATALOG_STARTUP_DELAY_SECS,
+        sync_module_catalog_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
+    let ticket_state_sync = spawn_delayed_background_loop(
+        TICKET_STATE_STARTUP_DELAY_SECS,
+        sync_ticket_state_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
+    let knowledge_tables_sync = spawn_delayed_background_loop(
+        KNOWLEDGE_TABLES_STARTUP_DELAY_SECS,
+        sync_knowledge_tables_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
+    let business_record_projection_sync = spawn_delayed_background_loop(
+        BUSINESS_RECORDS_STARTUP_DELAY_SECS,
+        sync_business_record_projections_background_loop(
+            root.clone(),
+            Arc::clone(&database),
+            Arc::clone(&database_write_lock),
+        ),
+    );
     let iot_agent_supervisors = spawn_iot_agent_supervisors(root.clone());
     // Any session left active by a previous run has no live process; reconcile.
     {
@@ -3836,6 +3911,7 @@ async fn sync_business_record_projections_background_loop(
     let persisted_progress = load_business_record_projection_progress(&root);
     let mut since_by_collection = persisted_progress.since_by_collection;
     let mut after_record_id_by_collection = persisted_progress.after_record_id_by_collection;
+    let mut clock_version_by_collection = persisted_progress.clock_version_by_collection;
     let mut next_collection_index = persisted_progress.next_collection_index;
     let mut chat_tracking_repair_stamp = None;
     let mut last_source_stamp = None;
@@ -3856,6 +3932,7 @@ async fn sync_business_record_projections_background_loop(
                 &database_write_lock,
                 &mut since_by_collection,
                 &mut after_record_id_by_collection,
+                &mut clock_version_by_collection,
                 &mut next_collection_index,
                 &mut chat_tracking_repair_stamp,
                 Some(BUSINESS_RECORD_PROJECTION_SYNC_LIMIT),
@@ -3872,6 +3949,7 @@ async fn sync_business_record_projections_background_loop(
                     version: BUSINESS_RECORD_PROJECTION_CURSOR_VERSION,
                     since_by_collection: since_by_collection.clone(),
                     after_record_id_by_collection: after_record_id_by_collection.clone(),
+                    clock_version_by_collection: clock_version_by_collection.clone(),
                     next_collection_index,
                 },
             )?;
@@ -3909,6 +3987,8 @@ struct BusinessRecordProjectionProgress {
     #[serde(default)]
     after_record_id_by_collection: HashMap<String, String>,
     #[serde(default)]
+    clock_version_by_collection: HashMap<String, i64>,
+    #[serde(default)]
     next_collection_index: usize,
 }
 
@@ -3926,7 +4006,13 @@ fn load_business_record_projection_progress(root: &Path) -> BusinessRecordProjec
         };
     };
     match serde_json::from_slice::<BusinessRecordProjectionProgress>(&bytes) {
-        Ok(progress) if progress.version == BUSINESS_RECORD_PROJECTION_CURSOR_VERSION => progress,
+        Ok(mut progress)
+            if progress.version == BUSINESS_RECORD_PROJECTION_CURSOR_VERSION
+                || progress.version == 2 =>
+        {
+            progress.version = BUSINESS_RECORD_PROJECTION_CURSOR_VERSION;
+            progress
+        }
         Ok(_) => BusinessRecordProjectionProgress {
             version: BUSINESS_RECORD_PROJECTION_CURSOR_VERSION,
             ..Default::default()
@@ -4709,6 +4795,7 @@ async fn sync_business_record_projections_with_database(
     chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
 ) -> anyhow::Result<usize> {
     let mut after_record_id_by_collection = HashMap::<String, String>::new();
+    let mut clock_version_by_collection = HashMap::<String, i64>::new();
     let mut next_collection_index = 0usize;
     let mut count = 0usize;
     loop {
@@ -4718,6 +4805,7 @@ async fn sync_business_record_projections_with_database(
             database_write_lock,
             since_by_collection,
             &mut after_record_id_by_collection,
+            &mut clock_version_by_collection,
             &mut next_collection_index,
             chat_tracking_repair_stamp,
             None,
@@ -4736,6 +4824,7 @@ async fn sync_business_record_projections_slice_with_database(
     database_write_lock: &Arc<AsyncMutex<()>>,
     since_by_collection: &mut HashMap<String, i64>,
     after_record_id_by_collection: &mut HashMap<String, String>,
+    clock_version_by_collection: &mut HashMap<String, i64>,
     next_collection_index: &mut usize,
     chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
     document_budget: Option<usize>,
@@ -4761,6 +4850,16 @@ async fn sync_business_record_projections_slice_with_database(
         );
     }
     let collections = business_record_projection_collections_for_root(root);
+    let projection_clock_root = root.to_path_buf();
+    let projection_clock_collections = collections.clone();
+    let projection_clocks = tokio::task::spawn_blocking(move || {
+        store::business_records_projection_clocks(
+            &projection_clock_root,
+            &projection_clock_collections,
+        )
+    })
+    .await
+    .context("join native business record projection clocks")??;
     let root = root.to_path_buf();
     let threads_relevance_commands_since_ms = *since_by_collection
         .get(THREADS_CTOX_RELEVANCE_COMMANDS_SINCE_KEY)
@@ -4843,6 +4942,27 @@ async fn sync_business_record_projections_slice_with_database(
             .get(&collection_name)
             .cloned()
             .unwrap_or_default();
+        let current_clock = projection_clocks
+            .as_ref()
+            .and_then(|clocks| clocks.get(&collection_name).copied());
+        let stored_clock_version = clock_version_by_collection.get(&collection_name).copied();
+        let clock_proves_collection_unchanged = projection_clocks.is_some()
+            && after_record_id.is_empty()
+            && match current_clock {
+                None => true,
+                Some((version, latest_updated_at_ms)) => {
+                    stored_clock_version == Some(version)
+                        || (stored_clock_version.is_none() && since_ms > latest_updated_at_ms)
+                }
+            };
+        if clock_proves_collection_unchanged {
+            clock_version_by_collection.insert(
+                collection_name,
+                current_clock.map(|(version, _)| version).unwrap_or(0),
+            );
+            *next_collection_index = next_collection_index.saturating_add(1);
+            continue;
+        }
         loop {
             // Keep the cross-loop lock bounded to one small page. Holding it
             // while comparing every Business OS record blocked command
@@ -4877,6 +4997,11 @@ async fn sync_business_record_projections_slice_with_database(
                     },
                 );
                 after_record_id_by_collection.remove(&collection_name);
+                if let Some((version, _)) = current_clock {
+                    clock_version_by_collection.insert(collection_name.clone(), version);
+                } else if projection_clocks.is_some() {
+                    clock_version_by_collection.insert(collection_name.clone(), 0);
+                }
                 *next_collection_index = next_collection_index.saturating_add(1);
                 break;
             }
@@ -4917,6 +5042,11 @@ async fn sync_business_record_projections_slice_with_database(
             if !page_is_full {
                 since_by_collection.insert(collection_name.clone(), since_ms.saturating_add(1));
                 after_record_id_by_collection.remove(&collection_name);
+                if let Some((version, _)) = current_clock {
+                    clock_version_by_collection.insert(collection_name.clone(), version);
+                } else if projection_clocks.is_some() {
+                    clock_version_by_collection.insert(collection_name.clone(), 0);
+                }
                 *next_collection_index = next_collection_index.saturating_add(1);
                 break;
             }
@@ -8904,6 +9034,46 @@ pub(in crate::business_os) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn reconciliation_startup_delays_are_staggered_after_control_plane() {
+        let delays = [
+            RUNTIME_SETTINGS_STARTUP_DELAY_SECS,
+            NOTES_STARTUP_DELAY_SECS,
+            BUSINESS_USERS_STARTUP_DELAY_SECS,
+            WORKSPACE_BRANDING_STARTUP_DELAY_SECS,
+            MODULE_CATALOG_STARTUP_DELAY_SECS,
+            CHANNEL_STATE_STARTUP_DELAY_SECS,
+            TICKET_STATE_STARTUP_DELAY_SECS,
+            KNOWLEDGE_TABLES_STARTUP_DELAY_SECS,
+            BUSINESS_RECORDS_STARTUP_DELAY_SECS,
+            DESKTOP_FILE_INDEX_STARTUP_DELAY_SECS,
+        ];
+        assert!(
+            delays[0] > 0,
+            "control-plane setup gets the first CPU window"
+        );
+        assert!(
+            delays.windows(2).all(|pair| pair[0] < pair[1]),
+            "refresh-only loops must not stampede the shared write lock"
+        );
+    }
+
+    #[test]
+    fn sellify_operational_collections_are_server_demand_only() {
+        for collection in [
+            "sellify_activities",
+            "sellify_campaigns",
+            "sellify_companies",
+            "sellify_people",
+            "sellify_records",
+            "sellify_sql_rows",
+        ] {
+            assert!(is_server_demand_only_collection(collection), "{collection}");
+        }
+        assert!(!is_server_demand_only_collection("sellify_sync_status"));
+        assert!(!is_server_demand_only_collection("business_commands"));
+    }
 
     fn assert_running_projections_agree(
         lifecycle: &NativePeerLifecycle,
@@ -13641,6 +13811,35 @@ pub(in crate::business_os) mod tests {
     }
 
     #[test]
+    fn business_record_projection_progress_migrates_v2_cursors() {
+        let root = tempfile::tempdir().expect("temp root");
+        let path = business_record_projection_progress_path(root.path());
+        std::fs::create_dir_all(path.parent().expect("progress parent"))
+            .expect("create progress parent");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version": 2,
+                "since_by_collection": { "documents": 1234 },
+                "after_record_id_by_collection": { "documents": "doc-9" },
+                "next_collection_index": 7
+            }))
+            .expect("serialize v2 progress"),
+        )
+        .expect("write v2 progress");
+
+        let migrated = load_business_record_projection_progress(root.path());
+        assert_eq!(migrated.version, BUSINESS_RECORD_PROJECTION_CURSOR_VERSION);
+        assert_eq!(migrated.since_by_collection.get("documents"), Some(&1234));
+        assert_eq!(
+            migrated.after_record_id_by_collection.get("documents"),
+            Some(&"doc-9".to_string())
+        );
+        assert_eq!(migrated.next_collection_index, 7);
+        assert!(migrated.clock_version_by_collection.is_empty());
+    }
+
+    #[test]
     fn sync_business_record_projections_materializes_generic_collections() {
         let root = tempfile::tempdir().expect("temp root");
         let conn = store::open_store(root.path()).expect("open business store");
@@ -14131,68 +14330,87 @@ pub(in crate::business_os) mod tests {
         .expect("insert document business record");
         drop(conn);
 
-        let mut since_by_collection = HashMap::new();
-        let mut chat_tracking_repair_stamp = None;
-        let mut last_source_stamp = None;
-        let first = sync_business_record_projections_if_changed(
+        let projection_root = root.path().to_path_buf();
+        with_business_os_database(
             root.path(),
-            &mut since_by_collection,
-            &mut chat_tracking_repair_stamp,
-            &mut last_source_stamp,
-        )
-        .expect("first business record projection sync");
-        assert!(first >= 1);
+            "failed to create Business OS idle-gate test runtime",
+            true,
+            TemporaryDatabaseLockScope::EntireOperation,
+            move |_peer, database| async move {
+                let database_write_lock = Arc::new(AsyncMutex::new(()));
+                let mut since_by_collection = HashMap::new();
+                let mut chat_tracking_repair_stamp = None;
+                let mut last_source_stamp = None;
+                let first = sync_business_record_projections_with_database_if_changed(
+                    &projection_root,
+                    &database,
+                    &database_write_lock,
+                    &mut since_by_collection,
+                    &mut chat_tracking_repair_stamp,
+                    &mut last_source_stamp,
+                )
+                .await?;
+                assert!(first >= 1);
 
-        let unchanged_stamp = last_source_stamp.clone();
-        let second = sync_business_record_projections_if_changed(
-            root.path(),
-            &mut since_by_collection,
-            &mut chat_tracking_repair_stamp,
-            &mut last_source_stamp,
-        )
-        .expect("unchanged business record projection sync");
-        assert_eq!(second, 0);
-        assert_eq!(last_source_stamp, unchanged_stamp);
+                let unchanged_stamp = last_source_stamp.clone();
+                let second = sync_business_record_projections_with_database_if_changed(
+                    &projection_root,
+                    &database,
+                    &database_write_lock,
+                    &mut since_by_collection,
+                    &mut chat_tracking_repair_stamp,
+                    &mut last_source_stamp,
+                )
+                .await?;
+                assert_eq!(second, 0);
+                assert_eq!(last_source_stamp, unchanged_stamp);
 
-        let conn = store::open_store(root.path()).expect("reopen business store");
-        store::upsert_business_record(
-            &conn,
-            "documents",
-            "doc_projection_idle_gate",
-            2_000,
-            json!({
-                "id": "doc_projection_idle_gate",
-                "title": "Projected idle gate document updated",
-                "filename": "idle-gate.docx",
-                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "status": "imported",
-                "current_version_id": "doc_projection_idle_gate_v1",
-                "index_text": "Projected idle gate document body",
-                "is_deleted": false,
-                "created_at_ms": 900,
-                "updated_at_ms": 2_000
-            }),
-        )
-        .expect("update document business record");
-        drop(conn);
+                let conn = store::open_store(&projection_root)?;
+                store::upsert_business_record(
+                    &conn,
+                    "documents",
+                    "doc_projection_idle_gate",
+                    2_000,
+                    json!({
+                        "id": "doc_projection_idle_gate",
+                        "title": "Projected idle gate document updated",
+                        "filename": "idle-gate.docx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "status": "imported",
+                        "current_version_id": "doc_projection_idle_gate_v1",
+                        "index_text": "Projected idle gate document body",
+                        "is_deleted": false,
+                        "created_at_ms": 900,
+                        "updated_at_ms": 2_000
+                    }),
+                )?;
+                drop(conn);
 
-        let third = sync_business_record_projections_if_changed(
-            root.path(),
-            &mut since_by_collection,
-            &mut chat_tracking_repair_stamp,
-            &mut last_source_stamp,
-        )
-        .expect("changed business record projection sync");
-        assert!(third >= 1);
+                let third = sync_business_record_projections_with_database_if_changed(
+                    &projection_root,
+                    &database,
+                    &database_write_lock,
+                    &mut since_by_collection,
+                    &mut chat_tracking_repair_stamp,
+                    &mut last_source_stamp,
+                )
+                .await?;
+                assert!(third >= 1);
 
-        let fourth = sync_business_record_projections_if_changed(
-            root.path(),
-            &mut since_by_collection,
-            &mut chat_tracking_repair_stamp,
-            &mut last_source_stamp,
+                let fourth = sync_business_record_projections_with_database_if_changed(
+                    &projection_root,
+                    &database,
+                    &database_write_lock,
+                    &mut since_by_collection,
+                    &mut chat_tracking_repair_stamp,
+                    &mut last_source_stamp,
+                )
+                .await?;
+                assert_eq!(fourth, 0);
+                Ok(())
+            },
         )
-        .expect("unchanged business record projection resync");
-        assert_eq!(fourth, 0);
+        .expect("exercise business record projection idle gate");
 
         let conn = Connection::open(store::rxdb_store_path(root.path())).expect("open rxdb sqlite");
         let document_json: String = conn

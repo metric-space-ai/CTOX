@@ -35,9 +35,16 @@ import { CTOX_PRESENCE_RPC } from './protocol-contract.generated.mjs';
 const SEND_BUFFER_HIGH_WATER = 512 * 1024;
 const SEND_BUFFER_LOW_WATER = 128 * 1024;
 const SEND_BUFFER_STALL_TIMEOUT_MS = 30_000;
-// The replication channel. Every other label is an auxiliary channel and is
-// handed to its consumer untouched — see attachChannel / openAuxChannel.
+// The browser creates `ctox-rxdb`; the native peer's long-standing default is
+// `rxdb`. Either side can win offer creation after a cold start, so both labels
+// identify the one primary replication channel. Every other label is an
+// auxiliary channel and is handed to its consumer untouched — see
+// attachChannel / openAuxChannel.
 const CTOX_REPLICATION_CHANNEL_LABEL = 'ctox-rxdb';
+const CTOX_REPLICATION_CHANNEL_LABELS = new Set([
+  CTOX_REPLICATION_CHANNEL_LABEL,
+  'rxdb',
+]);
 const MAX_PEER_SEND_QUEUE_FRAMES = 1024;
 const MAX_PEER_SEND_QUEUE_BYTES = 16 * 1024 * 1024;
 const FAIR_SEND_SCHEDULE = ['high', 'high', 'high', 'high', 'normal', 'normal', 'low'];
@@ -106,6 +113,10 @@ const SIGNALING_RECONNECT_MAX_MS = 30_000;
 const ICE_SERVERS_REFRESH_SKEW_MS = 120_000;
 const ICE_SERVERS_REFRESH_MIN_INTERVAL_MS = 60_000;
 const TRANSPORT_STATUS_EMIT_MIN_INTERVAL_MS = 250;
+// Server-assigned signaling ids are ephemeral revocation handles. Keep the
+// exact accepted value, but reject unbounded input rather than truncating it
+// into a different (and therefore non-revocable) peer id.
+const MAX_LOCAL_SIGNALING_PEER_ID_LENGTH = 256;
 // Single source of truth for the shell-critical collection set. app.js derives
 // its CRITICAL_SYNC_COLLECTIONS from this exported list so the two lists cannot
 // silently drift. This is shell-priority data only; RTC connections are never
@@ -177,6 +188,10 @@ export class CtoxWebRtcNativePeer {
     this.lastIceServersRefreshAtMs = 0;
     this.events = new CtoxEventEmitter();
     this.socket = null;
+    // `options.clientId` remains the deterministic pre-handshake identity used
+    // in the signaling URL and local request/session ids. The signaling server
+    // assigns a separate ephemeral peer id in init.yourPeerId.
+    this.localSignalingPeerId = '';
     this.connections = new Map();
     // label -> { label, options }. A standing subscription, not a one-shot:
     // survives reconnects and is replayed onto every new PeerConnection.
@@ -185,6 +200,17 @@ export class CtoxWebRtcNativePeer {
     this.pending = new Map();
     this.pendingFrameAcks = new Map();
     this.incomingFrames = new Map();
+    this.auxIncomingFrames = new Map();
+    this.auxMessageStats = {
+      messagesReceived: 0,
+      chunkMessagesReceived: 0,
+      responsesResolved: 0,
+      responsesWithoutPendingRequest: 0,
+      parseErrors: 0,
+      incompleteTransfers: 0,
+      lastMessageAtMs: 0,
+      lastResponseAtMs: 0,
+    };
     this.completedFrameAcks = new Map();
     this.observedRequests = new Map();
     this.requestWaiters = new Map();
@@ -249,8 +275,25 @@ export class CtoxWebRtcNativePeer {
     return this.events.on(type, listener);
   }
 
+  currentSignalingPeerId() {
+    return this.localSignalingPeerId || String(this.options.clientId || '');
+  }
+
+  setLocalSignalingPeerId(value) {
+    const next = boundedLocalSignalingPeerId(value);
+    if (next === this.localSignalingPeerId) return false;
+    this.localSignalingPeerId = next;
+    // Identity assignment/clear is low-volume lifecycle state. Bypass the
+    // metric throttle so status subscribers can revoke the exact live browser
+    // peer promptly and never retain a closed socket's stale id.
+    this.transportStats.updatedAtMs = Date.now();
+    this.events.emit('transport-status', this.getTransportStatus());
+    return true;
+  }
+
   connect() {
     this.closed = false;
+    this.setLocalSignalingPeerId('');
     const url = buildSignalingUrl(this.options);
     const socket = new WebSocket(url);
     this.socket = socket;
@@ -263,6 +306,10 @@ export class CtoxWebRtcNativePeer {
     socket.onmessage = (event) => this.handleSignalingMessage(event.data);
     socket.onerror = () => this.events.emit('error', this.lastControlPlaneError || { code: 'ctox_signaling_socket_error' });
     socket.onclose = () => {
+      if (this.socket === socket) {
+        this.socket = null;
+        this.setLocalSignalingPeerId('');
+      }
       this.events.emit('signaling-close', {});
       if (!this.closed) this.scheduleSignalingReconnect();
     };
@@ -284,6 +331,7 @@ export class CtoxWebRtcNativePeer {
   }
 
   close() {
+    this.setLocalSignalingPeerId('');
     this.closed = true;
     if (this.signalingReconnectTimer) {
       clearTimeout(this.signalingReconnectTimer);
@@ -651,14 +699,88 @@ export class CtoxWebRtcNativePeer {
       this.pending.set(id, { resolve, reject, timer, method, peerId: remotePeerId });
       const frame = { id, method, params };
       if (collection) frame.collection = collection;
-      const sent = this.send(remotePeerId, frame);
-      if (!sent) {
+      const sendPromise = method === 'ctox.browser.live.v1'
+        ? this.sendImmediateControlFrame(remotePeerId, frame)
+        : Promise.resolve(this.send(remotePeerId, frame));
+      sendPromise.then((sent) => {
+        if (sent) return;
         this.pending.delete(id);
         clearTimeout(timer);
         this.scheduleReconnect(remotePeerId, `send-not-open-${method}`);
         reject(new Error(`WebRTC peer ${remotePeerId} is not open`));
+      }).catch((error) => {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+  }
+
+  async requestAuxiliary(remotePeerId, label, method, params = [], timeoutMs = 15000) {
+    const peerId = String(remotePeerId || '');
+    let channel = null;
+    const deadline = Date.now() + Math.min(5_000, timeoutMs);
+    while (!channel && Date.now() < deadline) {
+      channel = this.connections.get(peerId)?.auxChannels?.get(String(label || '')) || null;
+      if (channel?.readyState === 'open') break;
+      channel = null;
+      await delay(50);
+    }
+    if (!channel || channel.readyState !== 'open') {
+      // The Browser live stream is an auxiliary channel. Failure to open it
+      // must never poison or renegotiate the primary RxDB connection; callers
+      // can fall back to the bounded command/query path while the auxiliary
+      // registration is re-opened on the next genuine peer reconnect.
+      if (!this.connections.has(peerId)) {
+        this.scheduleReconnect(peerId, `aux-channel-not-open-${method}`);
+      }
+      throw new Error(`WebRTC auxiliary channel ${label} is not open`);
+    }
+    const id = `${this.options.clientId}|aux|${Date.now()}|${this.requestCounter++}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        // Isolate auxiliary request failure. A slow screenshot/navigation must
+        // not tear down collection replication or the command bus.
+        reject(new Error(`Timed out waiting for WebRTC auxiliary response ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer, method, peerId });
+      try {
+        channel.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
       }
     });
+  }
+
+  // Browser input/frame exchanges are control traffic, not replication work.
+  // Returning `true` from the ordinary send() only means "queued"; a wedged
+  // framed transfer can therefore keep the RPC in that queue until its caller
+  // times out without the native peer ever seeing it. Send this small frame on
+  // the open DataChannel itself after the same bounded buffer guard. SCTP keeps
+  // message boundaries and ordering while this avoids the bulk queue's head of
+  // line blocking.
+  async sendImmediateControlFrame(remotePeerId, payload) {
+    const connection = this.connections.get(String(remotePeerId || ''));
+    const channel = connection?.channel;
+    if (!connection || !channel || channel.readyState !== 'open') return false;
+    const text = JSON.stringify(payload);
+    if (encodedSize(text) > MAX_INLINE_FRAME_BYTES) {
+      throw new Error('WebRTC control frame exceeds the inline frame budget');
+    }
+    await this.waitForSendBuffer(channel, connection);
+    if (this.connections.get(connection.remotePeerId) !== connection || channel.readyState !== 'open') {
+      return false;
+    }
+    channel.send(text);
+    this.recordSentInlineFrame(payload, channel);
+    this.recordTransportStatus({
+      sentScheduledFrames: this.transportStats.sentScheduledFrames + 1,
+      lastSendPriority: 'high',
+    });
+    return true;
   }
 
   scheduleReconnect(remotePeerId, reason = 'peer-reconnect') {
@@ -684,12 +806,12 @@ export class CtoxWebRtcNativePeer {
       return;
     }
     if (message.type === 'init' || message.type === 'joined' || message.type === 'ctoxPresence') {
-      // Only `yourPeerId` may rename us. `message.peerId` on joined/presence
-      // frames plausibly names the REMOTE peer that triggered the broadcast —
-      // adopting it corrupted senderPeerId on all subsequent signals and made
-      // the initiator/target checks reject the native peer.
-      if (message.yourPeerId && message.yourPeerId !== this.options.clientId) {
-        this.options.clientId = String(message.yourPeerId);
+      // Only the server's bounded init.yourPeerId assigns our ephemeral
+      // signaling identity. `message.peerId` on joined/presence frames names a
+      // REMOTE peer and must never overwrite either identity.
+      if (message.type === 'init') {
+        const assignedPeerId = boundedLocalSignalingPeerId(message.yourPeerId);
+        if (assignedPeerId) this.setLocalSignalingPeerId(assignedPeerId);
       }
       if (message.type === 'joined') {
         // A joined broadcast proves the server ACCEPTED our join — only now
@@ -719,7 +841,7 @@ export class CtoxWebRtcNativePeer {
         }
         const previousDescriptor = previousMetadata.get(remotePeerId);
         const nativePeerRejoined = message.type === 'joined'
-          && remotePeerId !== this.options.clientId
+          && remotePeerId !== this.currentSignalingPeerId()
           && this.connections.has(remotePeerId)
           && peerJoinedAtChanged(previousDescriptor, descriptor);
         if (nativePeerRejoined) {
@@ -851,7 +973,7 @@ export class CtoxWebRtcNativePeer {
   }
 
   ensureConnection(remotePeerId) {
-    if (remotePeerId === this.options.clientId) {
+    if (remotePeerId === this.currentSignalingPeerId()) {
       return this.connections.get(remotePeerId);
     }
     if (!this.shouldConnectToRemotePeer(remotePeerId)) {
@@ -994,7 +1116,7 @@ export class CtoxWebRtcNativePeer {
     const remoteRole = this.peerMetadata.get(String(remotePeerId || ''))?.role || '';
     if (this.options.role === 'browser' && remoteRole === 'ctox_instance') return true;
     if (this.options.role === 'ctox_instance' && remoteRole === 'browser') return false;
-    return String(this.options.clientId) < String(remotePeerId);
+    return this.currentSignalingPeerId() < String(remotePeerId);
   }
 
   async createOffer(remotePeerId, peer) {
@@ -1102,7 +1224,7 @@ export class CtoxWebRtcNativePeer {
   // reading the slot as if it were still theirs. Opening an auxiliary channel
   // was therefore not "unsupported", it was destructive.
   attachChannel(connection, channel) {
-    if (channel?.label && channel.label !== CTOX_REPLICATION_CHANNEL_LABEL) {
+    if (channel?.label && !CTOX_REPLICATION_CHANNEL_LABELS.has(channel.label)) {
       this.attachAuxChannel(connection, channel);
       return;
     }
@@ -1583,7 +1705,7 @@ export class CtoxWebRtcNativePeer {
     this.socket.send(JSON.stringify({
       type: 'signal',
       room: this.options.room,
-      senderPeerId: this.options.clientId,
+      senderPeerId: this.currentSignalingPeerId(),
       receiverPeerId: remotePeerId,
       receiver: remotePeerId,
       target: remotePeerId,
@@ -1598,7 +1720,7 @@ export class CtoxWebRtcNativePeer {
   // not the return value, if they want to survive a reconnect.
   openAuxChannel(peerId, label, options = {}) {
     const key = String(label || '').trim();
-    if (!key || key === CTOX_REPLICATION_CHANNEL_LABEL) {
+    if (!key || CTOX_REPLICATION_CHANNEL_LABELS.has(key)) {
       throw new Error(`openAuxChannel: invalid label "${label}"`);
     }
     this.auxChannelRegistrations.set(key, { label: key, options: { ...options } });
@@ -1641,12 +1763,55 @@ export class CtoxWebRtcNativePeer {
       try { previous.close(); } catch {}
     }
     connection.auxChannels.set(label, channel);
+    channel.onmessage = (event) => this.handleAuxiliaryChannelMessage(connection, label, event.data);
     channel.onclose = () => {
       if (connection.auxChannels?.get(label) === channel) {
         connection.auxChannels.delete(label);
       }
     };
     this.events.emit('aux-channel', { peerId: connection.remotePeerId, label, channel });
+  }
+
+  handleAuxiliaryChannelMessage(connection, label, raw) {
+    this.auxMessageStats.messagesReceived += 1;
+    this.auxMessageStats.lastMessageAtMs = Date.now();
+    let payload;
+    try { payload = JSON.parse(String(raw || '')); } catch {
+      this.auxMessageStats.parseErrors += 1;
+      return;
+    }
+    if (payload?.ctoxAuxFrame === 'ctox-aux-frame-v1') {
+      this.auxMessageStats.chunkMessagesReceived += 1;
+      const key = `${connection.remotePeerId}|${label}|${payload.transferId || ''}`;
+      let entry = this.auxIncomingFrames.get(key);
+      if (!entry) {
+        entry = { total: Number(payload.total || 0), chunks: new Map() };
+        this.auxIncomingFrames.set(key, entry);
+      }
+      entry.chunks.set(Number(payload.seq), String(payload.data || ''));
+      this.auxMessageStats.incompleteTransfers = this.auxIncomingFrames.size;
+      if (entry.total <= 0 || entry.chunks.size < entry.total) return;
+      this.auxIncomingFrames.delete(key);
+      this.auxMessageStats.incompleteTransfers = this.auxIncomingFrames.size;
+      let text = '';
+      for (let index = 0; index < entry.total; index += 1) text += entry.chunks.get(index) || '';
+      try { payload = JSON.parse(text); } catch {
+        this.auxMessageStats.parseErrors += 1;
+        return;
+      }
+    }
+    if (!payload?.id || (!Object.prototype.hasOwnProperty.call(payload, 'result') && !Object.prototype.hasOwnProperty.call(payload, 'error'))) return;
+    const pending = this.pending.get(payload.id);
+    if (!pending) {
+      this.auxMessageStats.responsesWithoutPendingRequest += 1;
+      return;
+    }
+    this.pending.delete(payload.id);
+    clearTimeout(pending.timer);
+    this.auxMessageStats.responsesResolved += 1;
+    this.auxMessageStats.lastResponseAtMs = Date.now();
+    if (payload.error) pending.reject(payload.error);
+    else pending.resolve(payload.result);
   }
 
   reopenAuxChannels(connection, peer) {
@@ -1686,6 +1851,7 @@ export class CtoxWebRtcNativePeer {
     this.rejectPendingForPeer(peerId, pendingError || createPeerClosedError(peerId, reason));
     this.events.emit('peer-close', { peerId, reason });
     if (reconnect && reason !== 'peer-close') {
+      if (this.auxChannelRegistrations.size > 0) this.forceInitiatorPeers.add(peerId);
       this.scheduleReconnect(peerId, reason);
     }
   }
@@ -1707,7 +1873,7 @@ export class CtoxWebRtcNativePeer {
 
   rememberPeerMetadata(peerId, metadata = {}) {
     const normalized = normalizePeerMetadata({ ...metadata, peerId });
-    if (!normalized.peerId || normalized.peerId === this.options.clientId) return;
+    if (!normalized.peerId || normalized.peerId === this.currentSignalingPeerId()) return;
     this.peerMetadata.set(normalized.peerId, {
       ...(this.peerMetadata.get(normalized.peerId) || {}),
       ...normalized,
@@ -1736,7 +1902,7 @@ export class CtoxWebRtcNativePeer {
 
   shouldConnectToRemotePeer(remotePeerId) {
     const peerId = String(remotePeerId || '');
-    if (!peerId || peerId === this.options.clientId) return false;
+    if (!peerId || peerId === this.currentSignalingPeerId()) return false;
     const metadata = this.peerMetadata.get(peerId);
     if (this.peerMatchesExpectedNativePeerId(peerId, metadata)) return true;
     if (this.nativeCandidateConnectionCount(peerId) > 0) return false;
@@ -1858,10 +2024,26 @@ export class CtoxWebRtcNativePeer {
   }
 
   getTransportStatus({ includeDiagnostics = false } = {}) {
+    const auxiliary = {
+      ...this.auxMessageStats,
+      registrations: [...this.auxChannelRegistrations.keys()],
+      channels: [...this.connections.values()].flatMap((connection) =>
+        [...(connection.auxChannels?.entries?.() || [])].map(([label, channel]) => ({
+          peerId: connection.remotePeerId,
+          label,
+          readyState: channel?.readyState || '',
+          bufferedAmount: Number(channel?.bufferedAmount || 0),
+        }))),
+    };
+    // Read-only, secret-free field evidence for production smoke tests. The
+    // advanced-status projection intentionally flattens transport fields, so
+    // keep the auxiliary lane's own counters directly observable as well.
+    globalThis.CTOX_RXDB_AUX_STATUS = auxiliary;
     const base = {
       ...this.transportStats,
       collection: collectionNameFromTopic(this.options.room),
       topic: this.options.room,
+      localSignalingPeerId: this.localSignalingPeerId || null,
       activePeerCount: this.connections.size,
       pendingAcks: this.pendingFrameAcks.size,
       pendingRequests: this.pending.size,
@@ -1870,6 +2052,7 @@ export class CtoxWebRtcNativePeer {
       incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size,
       connectionCount: this.connections.size,
+      auxiliary,
     };
     if (!includeDiagnostics) return base;
     return {
@@ -2360,6 +2543,13 @@ function masterChangeStreamCollection(payload) {
   return null;
 }
 
+function boundedLocalSignalingPeerId(value) {
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim();
+  if (!normalized || normalized.length > MAX_LOCAL_SIGNALING_PEER_ID_LENGTH) return '';
+  return normalized;
+}
+
 function buildSignalingUrl(options) {
   const url = new URL(options.signalingUrl);
   url.searchParams.set('room', options.room);
@@ -2488,6 +2678,7 @@ export const webrtcNativeTestInternals = Object.freeze({
   encodedSize,
   utf8ByteLength,
   recordReceivedFrame,
+  classifySendPriority,
   MAX_SERIALIZED_FRAME_BYTES,
   MAX_INCOMING_FRAME_TRANSFERS,
   MAX_INCOMING_FRAME_BUFFERED_BYTES,
@@ -2579,6 +2770,7 @@ function classifySendPriority(payload = {}, text = '') {
     'rxdb.query.cancel',
     'rxdb.file.fetch',
     'rxdb.file.cancel',
+    'ctox.browser.live.v1',
   ].includes(method)) return 'high';
   if (method === 'masterWrite' && encodedSize(text) > MAX_INLINE_FRAME_BYTES) return 'low';
   if (method === 'masterWrite') return 'high';

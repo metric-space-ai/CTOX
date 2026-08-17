@@ -6287,7 +6287,8 @@ mod tests {
     }
 
     #[test]
-    fn web_stack_auth_assist_does_not_reuse_expired_task() -> anyhow::Result<()> {
+    fn web_stack_auth_assist_reuses_queued_task_after_handoff_window_expires() -> anyhow::Result<()>
+    {
         let root = tempfile::tempdir()?;
         let first = enqueue_web_stack_auth_assist_request(
             root.path(),
@@ -6340,13 +6341,13 @@ mod tests {
             true,
         )?;
 
-        assert_ne!(first.get("command_id"), second.get("command_id"));
-        assert_ne!(first.get("task_id"), second.get("task_id"));
-        assert_ne!(
+        assert_eq!(first.get("command_id"), second.get("command_id"));
+        assert_eq!(first.get("task_id"), second.get("task_id"));
+        assert_eq!(
             second
                 .get("deduped_by_active_auth_assist")
                 .and_then(serde_json::Value::as_bool),
-            Some(true)
+            Some(true),
         );
         Ok(())
     }

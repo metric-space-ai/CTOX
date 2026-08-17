@@ -7,5 +7,10 @@ const match = app.match(/async function repairRecoveringDataPlane\(\) \{([\s\S]*
 assert.ok(match, 'repairRecoveringDataPlane must exist');
 assert.match(match[1], /state\.sync\.restartCollections\(collections\)/);
 assert.doesNotMatch(match[1], /repairBusinessDataPlane|resetBusinessDb/);
+assert.doesNotMatch(
+  match[1],
+  /resourceSnapshot\?\.\(\)\.activeCollections|\.\.\.activeCollections/,
+  'a failed bridge must not cancel every healthy active collection',
+);
 
 console.log('Non-destructive reconnect repair smoke OK');

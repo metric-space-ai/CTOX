@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use notify::event::{AccessKind, AccessMode, EventKind, MetadataKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -36,6 +37,8 @@ const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 const SQLITE_EXTERNAL_DATABASE_POLL_ACTIVE_INTERVAL: Duration = Duration::from_secs(1);
 const SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const SQLITE_EXTERNAL_DATABASE_POLL_BACKOFF_AFTER_IDLE_READS: u32 = 3;
+const SQLITE_FILE_EVENT_COALESCE_QUIET_PERIOD: Duration = Duration::from_millis(25);
+const SQLITE_FILE_EVENT_COALESCE_MAX_PERIOD: Duration = Duration::from_millis(250);
 const SQLITE_CHANGED_TABLES_TABLE: &str = "__rxdb_changed_tables";
 
 #[derive(Debug, Clone)]
@@ -332,10 +335,11 @@ fn sqlite_file_watcher(
         let should_wake = event
             .as_ref()
             .map(|event| {
-                event
-                    .paths
-                    .iter()
-                    .any(|path| is_sqlite_database_file(path, &watched_database))
+                is_sqlite_database_change_event(event)
+                    && event
+                        .paths
+                        .iter()
+                        .any(|path| is_sqlite_database_file(path, &watched_database))
             })
             .unwrap_or(true);
         if should_wake {
@@ -355,17 +359,57 @@ fn wait_for_sqlite_file_change(
     stop: &AtomicBool,
     duration: Duration,
     file_events: &Receiver<notify::Result<notify::Event>>,
-) {
+) -> usize {
     let mut remaining = duration;
     let chunk = Duration::from_secs(1);
     while !stop.load(Ordering::SeqCst) && remaining > Duration::ZERO {
         let wait_for = remaining.min(chunk);
         match file_events.recv_timeout(wait_for) {
-            Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(_) => {
+                // A single WAL commit commonly produces a burst of inotify
+                // events. Reading PRAGMA data_version once per queued event
+                // turns that burst into a hot loop even though every event
+                // describes the same commit. Wait for a short quiet period and
+                // consume the burst before performing the one rescue read.
+                let started = std::time::Instant::now();
+                let mut received = 1usize;
+                while !stop.load(Ordering::SeqCst)
+                    && started.elapsed() < SQLITE_FILE_EVENT_COALESCE_MAX_PERIOD
+                {
+                    let max_remaining =
+                        SQLITE_FILE_EVENT_COALESCE_MAX_PERIOD.saturating_sub(started.elapsed());
+                    let debounce = SQLITE_FILE_EVENT_COALESCE_QUIET_PERIOD.min(max_remaining);
+                    if debounce.is_zero() {
+                        break;
+                    }
+                    match file_events.recv_timeout(debounce) {
+                        Ok(_) => received = received.saturating_add(1),
+                        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                return received;
+            }
+            Err(RecvTimeoutError::Disconnected) => return 0,
             Err(RecvTimeoutError::Timeout) => {
                 remaining = remaining.saturating_sub(wait_for);
             }
         }
+    }
+    0
+}
+
+fn is_sqlite_database_change_event(event: &notify::Event) -> bool {
+    match event.kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Data(_))
+        | EventKind::Modify(ModifyKind::Name(_))
+        | EventKind::Modify(ModifyKind::Any)
+        | EventKind::Modify(ModifyKind::Other) => true,
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        EventKind::Modify(ModifyKind::Metadata(_)) => true,
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        EventKind::Any | EventKind::Other => true,
     }
 }
 
@@ -381,9 +425,12 @@ fn is_sqlite_database_file(path: &Path, database_path: &Path) -> bool {
     };
     let database_name = database_name.to_string_lossy();
     let path_name = path_name.to_string_lossy();
-    path_name == database_name
-        || path_name == format!("{database_name}-wal")
-        || path_name == format!("{database_name}-shm")
+    // A committed WAL-mode write always changes the WAL (and a checkpoint
+    // changes the database file).  The shared-memory file is different: SQLite
+    // readers update its lock/index state as well. Watching `-shm` therefore
+    // lets the poller's own PRAGMA data_version read enqueue the next wakeup,
+    // turning the intended 30-minute standby into a permanent hot loop.
+    path_name == database_name || path_name == format!("{database_name}-wal")
 }
 
 fn current_local_hook_generations<'a>(
@@ -676,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_database_file_matching_includes_wal_and_shm() {
+    fn sqlite_database_file_matching_includes_wal_but_excludes_reader_shm() {
         let dir = tempfile::tempdir().unwrap();
         let database_path = dir.path().join("ctox.sqlite3");
         assert!(is_sqlite_database_file(&database_path, &database_path));
@@ -684,13 +731,51 @@ mod tests {
             &dir.path().join("ctox.sqlite3-wal"),
             &database_path
         ));
-        assert!(is_sqlite_database_file(
-            &dir.path().join("ctox.sqlite3-shm"),
-            &database_path
-        ));
+        assert!(
+            !is_sqlite_database_file(&dir.path().join("ctox.sqlite3-shm"), &database_path),
+            "reader-side shared-memory activity must not wake the poller"
+        );
         assert!(!is_sqlite_database_file(
             &dir.path().join("other.sqlite3"),
             &database_path
         ));
+    }
+
+    #[test]
+    fn sqlite_database_change_event_ignores_reader_access() {
+        let read_event = notify::Event::new(EventKind::Access(AccessKind::Read));
+        let open_read_event =
+            notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read)));
+        let close_read_event =
+            notify::Event::new(EventKind::Access(AccessKind::Close(AccessMode::Read)));
+        let close_write_event =
+            notify::Event::new(EventKind::Access(AccessKind::Close(AccessMode::Write)));
+        let data_event = notify::Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )));
+
+        assert!(!is_sqlite_database_change_event(&read_event));
+        assert!(!is_sqlite_database_change_event(&open_read_event));
+        assert!(!is_sqlite_database_change_event(&close_read_event));
+        assert!(is_sqlite_database_change_event(&close_write_event));
+        assert!(is_sqlite_database_change_event(&data_event));
+    }
+
+    #[test]
+    fn sqlite_file_change_wait_coalesces_a_queued_event_burst() {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..4 {
+            sender
+                .send(Ok(notify::Event::new(EventKind::Modify(ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )))))
+                .unwrap();
+        }
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            wait_for_sqlite_file_change(&stop, Duration::from_secs(1), &receiver),
+            4,
+            "one WAL commit burst must trigger one rescue read, not one read per event"
+        );
     }
 }

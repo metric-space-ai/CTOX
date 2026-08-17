@@ -107,6 +107,7 @@
 
       <div class="ctox-callout" data-browser-notice hidden></div>
       <header class="browser-toolbar ctox-toolbar">
+        <button type="button" class="ctox-icon-button browser-sessions-toggle" data-browser-sessions-toggle aria-label="Sitzungen anzeigen" title="Sitzungen anzeigen" aria-expanded="false">☰</button>
         <div class="browser-nav-actions" aria-label="Navigation">
           <button type="button" class="ctox-icon-button" data-browser-back aria-label="Zurueck" data-t-aria="navBack">‹</button>
           <button type="button" class="ctox-icon-button" data-browser-forward aria-label="Vor" data-t-aria="navForward">›</button>
@@ -114,13 +115,13 @@
         </div>
         <form class="browser-address-form" data-browser-address-form>
           <input class="ctox-input" data-browser-address type="url" placeholder="https://example.com" autocomplete="off">
-          <button type="submit" class="ctox-button is-primary" data-browser-go data-t="go">Los</button>
+          <button type="submit" class="ctox-icon-button is-primary" data-browser-go aria-label="Adresse öffnen" title="Adresse öffnen">→</button>
         </form>
+        <div class="browser-status-strip" aria-label="Browser Status" aria-live="polite">
+          <span class="ctox-badge" data-browser-status-chip data-t="statusDisconnected">Nicht verbunden</span>
+          <span data-browser-status-title data-t="noWindowOpen">Kein Browser-Fenster geoeffnet</span>
+        </div>
       </header>
-      <div class="browser-status-strip" aria-label="Browser Status">
-        <span class="ctox-badge" data-browser-status-chip data-t="statusDisconnected">Nicht verbunden</span>
-        <span data-browser-status-title data-t="noWindowOpen">Kein Browser-Fenster geoeffnet</span>
-      </div>
       <div class="browser-download-strip" data-browser-downloads hidden></div>
     </div>
 
@@ -128,6 +129,18 @@
       <div class="browser-frame-shell" data-browser-frame-shell>
         <canvas data-browser-canvas width="1280" height="720" tabindex="0" aria-label="Remote browser frame"></canvas>
         <div class="browser-empty ctox-empty" data-browser-empty data-t="framePreparing">Browser-Fenster wird vorbereitet</div>
+        <aside class="browser-automation-overlay" data-browser-automation-overlay hidden aria-live="polite">
+          <div class="browser-automation-heading">
+            <span class="browser-automation-dot" aria-hidden="true"></span>
+            <strong data-browser-automation-title>Playwright</strong>
+            <span data-browser-automation-status>Bereit</span>
+          </div>
+          <small data-browser-automation-source></small>
+          <details data-browser-automation-details>
+            <summary>Was der Scraper ausführt</summary>
+            <pre><code data-browser-automation-code></code></pre>
+          </details>
+        </aside>
       </div>
     </div>
   </section>

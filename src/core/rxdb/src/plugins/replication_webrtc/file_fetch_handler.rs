@@ -144,6 +144,10 @@ impl FileFetchRegistry {
         self.inflight_count.cancel(peer_identity, request_id)
     }
 
+    pub fn cancel_peer(&self, peer_identity: &str) -> usize {
+        self.inflight_count.cancel_peer(peer_identity)
+    }
+
     fn try_acquire(&self, peer_identity: &str, request_id: &str) -> Option<Arc<AtomicBool>> {
         self.inflight_count.try_acquire(peer_identity, request_id)
     }

@@ -1,8 +1,8 @@
 // REGRESSION: runtime-installed Business OS apps register module collections
-// after the shell-critical shared WebRTC room is already open. The shared peer
-// must not reuse the old room handshake for a newly registered collection,
-// because that handshake's collectionSchemas map did not include the module
-// schema and produced a false schema-hash mismatch.
+// after the shell-critical shared WebRTC room is already open. The native
+// handshake already advertises its complete schema map, so a late browser
+// registration must reuse it. Renegotiating once per collection can recycle
+// the single multiplexed DataChannel while foreground Browser traffic is live.
 
 import { replicationWebRtcTestInternals } from '../src/replication-webrtc.mjs';
 
@@ -30,7 +30,7 @@ shared.negotiatePeer = async (peerId) => {
   renegotiations += 1;
   const negotiated = {
     peerId,
-    remoteProtocol: { marker: 'renegotiated-with-late-collection' },
+    remoteProtocol: { marker: 'unexpected-renegotiation' },
     queryFetchCapable: true,
   };
   shared.negotiated = negotiated;
@@ -50,13 +50,13 @@ const catchUp = shared.collectionCatchUps.get('runtime_app_items');
 if (!catchUp) throw new Error('late collection catch-up was not scheduled');
 await catchUp;
 
-assert(renegotiations === 1, `late collection must renegotiate once, got ${renegotiations}`);
+assert(renegotiations === 0, `late collection must reuse the live handshake, got ${renegotiations} renegotiations`);
 assert(
-  shared.negotiated?.remoteProtocol?.marker === 'renegotiated-with-late-collection',
-  'late collection did not replace the stale room handshake',
+  shared.negotiated?.remoteProtocol?.marker === 'old-handshake',
+  'late collection replaced the authenticated room handshake',
 );
 
-console.log('ctox-rxdb late-collection renegotiation smoke OK');
+console.log('ctox-rxdb late-collection handshake reuse smoke OK');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);

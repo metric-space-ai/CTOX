@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
@@ -37,6 +38,736 @@ use tokio::sync::Mutex as AsyncMutex;
 pub(super) static BROWSER_RUNTIME_LOOP_METRICS: NativePeerLoopMetrics =
     NativePeerLoopMetrics::new("browser_runtime");
 static BROWSER_FRAME_CAPTURE_SLOTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+static BROWSER_DIRECT_LIVE_SESSIONS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+pub(super) const BROWSER_LIVE_WEBRTC_METHOD: &str = "ctox.browser.live.v1";
+
+struct BrowserLiveMetrics {
+    received: AtomicU64,
+    completed: AtomicU64,
+    failed: AtomicU64,
+    active: AtomicU64,
+    total_duration_ms: AtomicU64,
+    max_duration_ms: AtomicU64,
+    last_duration_ms: AtomicU64,
+}
+
+static BROWSER_LIVE_METRICS: BrowserLiveMetrics = BrowserLiveMetrics {
+    received: AtomicU64::new(0),
+    completed: AtomicU64::new(0),
+    failed: AtomicU64::new(0),
+    active: AtomicU64::new(0),
+    total_duration_ms: AtomicU64::new(0),
+    max_duration_ms: AtomicU64::new(0),
+    last_duration_ms: AtomicU64::new(0),
+};
+static BROWSER_LIVE_LAST_FAILURE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+
+pub(super) fn browser_live_metrics_snapshot() -> Value {
+    json!({
+        "schema": "ctox.browser_live.runtime_counters.v1",
+        "received": BROWSER_LIVE_METRICS.received.load(Ordering::Relaxed),
+        "completed": BROWSER_LIVE_METRICS.completed.load(Ordering::Relaxed),
+        "failed": BROWSER_LIVE_METRICS.failed.load(Ordering::Relaxed),
+        "active": BROWSER_LIVE_METRICS.active.load(Ordering::Relaxed),
+        "total_duration_ms": BROWSER_LIVE_METRICS.total_duration_ms.load(Ordering::Relaxed),
+        "max_duration_ms": BROWSER_LIVE_METRICS.max_duration_ms.load(Ordering::Relaxed),
+        "last_duration_ms": BROWSER_LIVE_METRICS.last_duration_ms.load(Ordering::Relaxed),
+        "last_failed_operation": BROWSER_LIVE_LAST_FAILURE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|failure| failure.as_ref().map(|(operation, _)| operation.clone())),
+        "last_failure_kind": BROWSER_LIVE_LAST_FAILURE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|failure| failure.as_ref().map(|(_, kind)| kind.clone())),
+    })
+}
+
+fn browser_live_failure_kind(error: &str) -> &'static str {
+    if error.contains("capability is invalid") {
+        "capability_invalid"
+    } else if error.contains("may not read") {
+        "read_not_allowed"
+    } else if error.contains("may not control") {
+        "control_not_allowed"
+    } else if error.contains("session_id is required") {
+        "session_id_missing"
+    } else if error.contains("controller lease is required") {
+        "lease_missing"
+    } else if error.contains("session was not found") {
+        "session_not_found"
+    } else if error.contains("session belongs to another user") {
+        "session_owner_mismatch"
+    } else if error.contains("lease is missing or expired") {
+        "lease_mismatch_or_expired"
+    } else if error.contains("runtime is not running") {
+        "runtime_not_running"
+    } else if error.contains("runtime belongs to another user") {
+        "runtime_owner_mismatch"
+    } else if error.contains("navigation") {
+        "runtime_navigation_failed"
+    } else if error.contains("input request") {
+        "runtime_input_failed"
+    } else if error.contains("unsupported browser live operation") {
+        "operation_unsupported"
+    } else {
+        "other"
+    }
+}
+
+fn record_browser_live_duration(duration_ms: u64) {
+    BROWSER_LIVE_METRICS
+        .last_duration_ms
+        .store(duration_ms, Ordering::Relaxed);
+    BROWSER_LIVE_METRICS
+        .total_duration_ms
+        .fetch_add(duration_ms, Ordering::Relaxed);
+    let mut current = BROWSER_LIVE_METRICS.max_duration_ms.load(Ordering::Relaxed);
+    while duration_ms > current {
+        match BROWSER_LIVE_METRICS.max_duration_ms.compare_exchange_weak(
+            current,
+            duration_ms,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn mark_browser_direct_live_session(session_id: &str) {
+    if let Ok(mut sessions) = BROWSER_DIRECT_LIVE_SESSIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        sessions.insert(
+            session_id.to_string(),
+            Instant::now() + Duration::from_secs(2),
+        );
+    }
+}
+
+fn reserve_browser_direct_live_session(session_id: &str) {
+    if let Ok(mut sessions) = BROWSER_DIRECT_LIVE_SESSIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        // A cold browser command plus its session projection has a measured
+        // tail near one minute on the tenant. Keep the legacy RxDB frame loop
+        // quiet long enough for the direct client to attach; old clients fall
+        // back automatically when this reservation expires.
+        sessions.insert(
+            session_id.to_string(),
+            Instant::now() + Duration::from_secs(90),
+        );
+    }
+}
+
+fn browser_direct_live_session_active(session_id: &str) -> bool {
+    let Ok(mut sessions) = BROWSER_DIRECT_LIVE_SESSIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    else {
+        return false;
+    };
+    let now = Instant::now();
+    sessions.retain(|_, expires_at| *expires_at > now);
+    sessions.contains_key(session_id)
+}
+
+/// Serve one latency-sensitive Browser input/frame exchange directly over the
+/// authenticated WebRTC DataChannel. Durable session/navigation projections
+/// remain in RxDB, but pointer, keyboard and JPEG payloads no longer wait for
+/// two collection replications plus IndexedDB writes on every frame.
+pub(super) async fn handle_browser_live_webrtc_request(
+    root: &Path,
+    database: &Arc<RxDatabase>,
+    capability_token: &str,
+    params: Vec<Value>,
+) -> Result<Value, String> {
+    let started = Instant::now();
+    let operation = params
+        .first()
+        .and_then(|request| request.get("op"))
+        .and_then(Value::as_str)
+        .unwrap_or("live")
+        .to_string();
+    BROWSER_LIVE_METRICS
+        .received
+        .fetch_add(1, Ordering::Relaxed);
+    BROWSER_LIVE_METRICS.active.fetch_add(1, Ordering::Relaxed);
+    let result =
+        handle_browser_live_webrtc_request_inner(root, database, capability_token, params).await;
+    BROWSER_LIVE_METRICS.active.fetch_sub(1, Ordering::Relaxed);
+    record_browser_live_duration(started.elapsed().as_millis() as u64);
+    if result.is_ok() {
+        BROWSER_LIVE_METRICS
+            .completed
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        BROWSER_LIVE_METRICS.failed.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = result.as_ref().err() {
+            if let Ok(mut last_failure) = BROWSER_LIVE_LAST_FAILURE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+            {
+                *last_failure = Some((operation, browser_live_failure_kind(error).to_string()));
+            }
+        }
+    }
+    result
+}
+
+async fn handle_browser_live_webrtc_request_inner(
+    root: &Path,
+    database: &Arc<RxDatabase>,
+    capability_token: &str,
+    params: Vec<Value>,
+) -> Result<Value, String> {
+    let request = params.first().cloned().unwrap_or(Value::Null);
+    let operation = request.get("op").and_then(Value::as_str).unwrap_or("live");
+    let (profile_owner, _) = store::verify_capability_actor(root, capability_token)
+        .ok_or_else(|| "browser live capability is invalid".to_string())?;
+    if !store::capability_allows_collection_permission(
+        root,
+        capability_token,
+        "browser_sessions",
+        BusinessOsPermission::DataRead,
+    ) {
+        return Err("browser live capability may not read browser sessions".to_string());
+    }
+    if operation == "session.list" {
+        let sessions = database
+            .collection("browser_sessions")
+            .ok_or_else(|| "browser_sessions collection is not registered".to_string())?
+            .find(Some(MangoQuery {
+                selector: Some(json!({ "owner_user_id": { "$eq": profile_owner } })),
+                sort: Some(vec![[("updated_at_ms".to_string(), "desc".to_string())]
+                    .into_iter()
+                    .collect()]),
+                limit: Some(12),
+                ..Default::default()
+            }))
+            .map_err(|error| format!("browser session list query failed: {error}"))?
+            .exec(false)
+            .await
+            .map_err(|error| format!("browser session list failed: {error}"))?;
+        let sessions = sessions
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|session| {
+                json!({
+                    "id": session.get("id").cloned().unwrap_or(Value::Null),
+                    "title": session.get("title").cloned().unwrap_or(Value::Null),
+                    "current_url": session.get("current_url").cloned().unwrap_or(Value::Null),
+                    "status": session.get("status").cloned().unwrap_or(Value::Null),
+                    "runtime_status": session.get("runtime_status").cloned().unwrap_or(Value::Null),
+                    "profile_mode": session.get("profile_mode").cloned().unwrap_or(Value::Null),
+                    "owner_user_id": session.get("owner_user_id").cloned().unwrap_or(Value::Null),
+                    "controller_user_id": session.get("controller_user_id").cloned().unwrap_or(Value::Null),
+                    "controller_lease_id": session.get("controller_lease_id").cloned().unwrap_or(Value::Null),
+                    "controller_lease_expires_at_ms": session.get("controller_lease_expires_at_ms").cloned().unwrap_or(Value::Null),
+                    "current_tab_id": session.get("current_tab_id").cloned().unwrap_or(Value::Null),
+                    "viewport_w": session.get("viewport_w").cloned().unwrap_or(Value::Null),
+                    "viewport_h": session.get("viewport_h").cloned().unwrap_or(Value::Null),
+                    "error": session.get("error").cloned().unwrap_or(Value::Null),
+                    "updated_at_ms": session.get("updated_at_ms").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!({
+            "ok": true,
+            "sessions": sessions,
+        }));
+    }
+    let session_id = request
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "browser live session_id is required".to_string())?;
+    let lease_id = request
+        .get("lease_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "browser live controller lease is required".to_string())?;
+    // `requestNative()` travels on the authenticated `browser_sessions`
+    // replication channel, so its capability is intentionally scoped to that
+    // collection. Requiring an additional `browser_input_events` capability
+    // here made the direct path impossible: collection-scoped tokens cannot
+    // authorize two collections at once, and every client silently fell back
+    // to the slow persisted-input/frame loop. Session write permission plus
+    // the owner/controller/lease checks below is the authority to operate this
+    // user's ephemeral live session; no input-event document is persisted on
+    // this path.
+    if !store::capability_allows_collection_permission(
+        root,
+        capability_token,
+        "browser_sessions",
+        BusinessOsPermission::DataWrite,
+    ) {
+        return Err("browser live capability may not control browser sessions".to_string());
+    }
+    if operation == "session.start" {
+        return start_browser_live_webrtc_session(
+            root,
+            database,
+            &request,
+            session_id,
+            lease_id,
+            &profile_owner,
+        )
+        .await;
+    }
+    let session_doc = find_browser_document(database, "browser_sessions", session_id)
+        .await
+        .map_err(|error| format!("browser live session lookup failed: {error:#}"))?;
+    if !session_doc.is_object() {
+        return Err("browser live session was not found".to_string());
+    }
+    let owner = session_doc
+        .get("owner_user_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let controller = session_doc
+        .get("controller_user_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let current_lease = session_doc
+        .get("controller_lease_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let lease_expires_at = session_doc
+        .get("controller_lease_expires_at_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if owner != profile_owner {
+        return Err("browser live session belongs to another user".to_string());
+    }
+    if matches!(
+        operation,
+        "controller.acquire" | "controller.renew" | "controller.release"
+    ) {
+        let now = now_ms() as u64;
+        match operation {
+            "controller.acquire" => {
+                if !controller.is_empty() && controller != profile_owner && lease_expires_at > now {
+                    return Err("browser session is controlled by another user".to_string());
+                }
+            }
+            "controller.renew" | "controller.release" => {
+                if controller != profile_owner || current_lease != lease_id {
+                    return Err("browser controller lease does not match".to_string());
+                }
+            }
+            _ => unreachable!(),
+        }
+        let released = operation == "controller.release";
+        let access = BrowserSessionAccess {
+            tenant_id: None,
+            owner_user_id: Some(profile_owner.clone()),
+            controller_user_id: Some(if released {
+                String::new()
+            } else {
+                profile_owner.clone()
+            }),
+            controller_lease_id: Some(if released {
+                String::new()
+            } else {
+                lease_id.to_string()
+            }),
+            controller_lease_expires_at_ms: Some(if released { 0 } else { now + 120_000 }),
+        };
+        let tab_id = session_doc
+            .get("current_tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or("browser_tab_default");
+        let status = session_doc
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("active");
+        let runtime_status = session_doc
+            .get("runtime_status")
+            .and_then(Value::as_str)
+            .unwrap_or(status);
+        let url = session_doc
+            .get("current_url")
+            .and_then(Value::as_str)
+            .unwrap_or("https://example.com");
+        let title = session_doc
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Remote Browser");
+        let viewport_w = session_doc
+            .get("viewport_w")
+            .and_then(Value::as_u64)
+            .unwrap_or(1280);
+        let viewport_h = session_doc
+            .get("viewport_h")
+            .and_then(Value::as_u64)
+            .unwrap_or(720);
+        let frame_id = session_doc
+            .get("active_frame_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let frame_seq = session_doc
+            .get("last_frame_seq")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        upsert_browser_session(
+            database,
+            session_id,
+            tab_id,
+            status,
+            runtime_status,
+            url,
+            title,
+            viewport_w,
+            viewport_h,
+            frame_id,
+            frame_seq,
+            operation,
+            now,
+            None,
+            Some(&access),
+            None,
+        )
+        .await
+        .map_err(|error| format!("browser controller lease update failed: {error:#}"))?;
+        return Ok(json!({
+            "ok": true,
+            "operation": operation,
+            "lease_id": if released { "" } else { lease_id },
+            "lease_expires_at_ms": if released { 0 } else { now + 120_000 },
+        }));
+    }
+    if controller != profile_owner
+        || current_lease != lease_id
+        || lease_expires_at <= now_ms() as u64
+    {
+        return Err("browser live controller lease is missing or expired".to_string());
+    }
+    let manager = browser_runtime_manager();
+    let session = manager
+        .get(session_id)
+        .ok_or_else(|| "browser live runtime is not running".to_string())?;
+    if session.owner_user_id != profile_owner {
+        return Err("browser live runtime belongs to another user".to_string());
+    }
+    mark_browser_direct_live_session(session_id);
+    if matches!(operation, "navigate" | "reload" | "back" | "forward") {
+        let target_url = if operation == "navigate" {
+            request
+                .get("url")
+                .and_then(Value::as_str)
+                .map(normalize_browser_runtime_url)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "browser live navigation URL is required".to_string())?
+        } else {
+            session_doc
+                .get("current_url")
+                .and_then(Value::as_str)
+                .unwrap_or("https://example.com")
+                .to_string()
+        };
+        let op_params = if operation == "navigate" {
+            json!({ "url": target_url, "timeoutMs": 30_000 })
+        } else {
+            json!({ "timeoutMs": 30_000 })
+        };
+        let result = manager
+            .request(&session, operation, op_params)
+            .await
+            .map_err(|error| format!("browser live navigation failed: {error:#}"))?;
+        let nav = result.get("nav").cloned().unwrap_or(Value::Null);
+        let final_url = nav
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&target_url);
+        let title = nav
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Remote Browser");
+        let tab_id = session_doc
+            .get("current_tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or("browser_tab_default");
+        let viewport_w = session_doc
+            .get("viewport_w")
+            .and_then(Value::as_u64)
+            .unwrap_or(1280);
+        let viewport_h = session_doc
+            .get("viewport_h")
+            .and_then(Value::as_u64)
+            .unwrap_or(720);
+        let access = BrowserSessionAccess {
+            tenant_id: session_doc
+                .get("tenant_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            owner_user_id: Some(profile_owner.clone()),
+            controller_user_id: Some(profile_owner.clone()),
+            controller_lease_id: Some(lease_id.to_string()),
+            controller_lease_expires_at_ms: Some(lease_expires_at),
+        };
+        upsert_browser_tab(
+            database,
+            tab_id,
+            session_id,
+            title,
+            final_url,
+            "active",
+            false,
+            nav.get("can_go_back")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            nav.get("can_go_forward")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            None,
+            0,
+            Some(&access),
+        )
+        .await
+        .map_err(|error| format!("browser live tab projection failed: {error:#}"))?;
+        upsert_browser_session(
+            database,
+            session_id,
+            tab_id,
+            "active",
+            "active",
+            final_url,
+            title,
+            viewport_w,
+            viewport_h,
+            None,
+            session_doc
+                .get("last_frame_seq")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            operation,
+            now_ms() as u64,
+            result.get("error").and_then(Value::as_str),
+            Some(&access),
+            None,
+        )
+        .await
+        .map_err(|error| format!("browser live session projection failed: {error:#}"))?;
+        return Ok(result);
+    }
+    let events = request
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|events| {
+            events
+                .iter()
+                .take(64)
+                .map(browser_runtime_input_event)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let max_seq = request
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|event| event.get("seq").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    if operation == "input" {
+        let response = manager
+            .request(&session, "input", json!({ "events": events }))
+            .await
+            .map_err(|error| format!("browser live input request failed: {error:#}"))?;
+        if max_seq > 0 {
+            session.record_input_seq(max_seq);
+        }
+        return Ok(response);
+    }
+    if operation != "live" {
+        return Err(format!("unsupported browser live operation: {operation}"));
+    }
+    let response = manager
+        .request(
+            &session,
+            "live",
+            json!({
+                "events": events,
+                "format": "jpeg",
+                "quality": BROWSER_FRAME_JPEG_QUALITY,
+                "frameAfterMs": request
+                    .get("frame_after_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            }),
+        )
+        .await
+        .map_err(|error| format!("browser live runtime request failed: {error:#}"))?;
+    if max_seq > 0 {
+        session.record_input_seq(max_seq);
+    }
+    Ok(response)
+}
+
+async fn start_browser_live_webrtc_session(
+    root: &Path,
+    database: &Arc<RxDatabase>,
+    request: &Value,
+    session_id: &str,
+    lease_id: &str,
+    profile_owner: &str,
+) -> Result<Value, String> {
+    let _guard = BROWSER_RUNTIME_COMMAND_LOCK.lock().await;
+    let tab_id = request
+        .get("tab_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("browser_tab_default");
+    let viewport_w = request
+        .get("viewport_w")
+        .and_then(Value::as_u64)
+        .unwrap_or(1280)
+        .clamp(320, 3840);
+    let viewport_h = request
+        .get("viewport_h")
+        .and_then(Value::as_u64)
+        .unwrap_or(720)
+        .clamp(240, 2160);
+    let target_url = request
+        .get("url")
+        .and_then(Value::as_str)
+        .map(normalize_browser_runtime_url)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://example.com".to_string());
+    let private_profile = request
+        .get("profile_mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode == "private");
+    let existing = find_browser_document(database, "browser_sessions", session_id)
+        .await
+        .map_err(|error| format!("browser direct start session lookup failed: {error:#}"))?;
+    if let Some(owner) = existing
+        .get("owner_user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "ctox")
+    {
+        if owner != profile_owner {
+            return Err("browser session belongs to another user".to_string());
+        }
+    }
+    let tenant_id = store::sync_config(root)
+        .map_err(|error| format!("browser command tenant configuration is unavailable: {error:#}"))?
+        .instance_id;
+    let access = BrowserSessionAccess {
+        tenant_id: Some(tenant_id),
+        owner_user_id: Some(profile_owner.to_string()),
+        controller_user_id: Some(profile_owner.to_string()),
+        controller_lease_id: Some(lease_id.to_string()),
+        controller_lease_expires_at_ms: Some(now_ms() as u64 + 120_000),
+    };
+    let manager = browser_runtime_manager();
+    let session = manager
+        .ensure_session(
+            root.to_path_buf(),
+            browser_runtime_reference_dir(root),
+            session_id,
+            viewport_w,
+            viewport_h,
+            profile_owner,
+            private_profile,
+            true,
+        )
+        .await
+        .map_err(|error| format!("browser direct runtime start failed: {error:#}"))?;
+    let navigation = manager
+        .request(
+            &session,
+            "navigate",
+            json!({ "url": target_url, "timeoutMs": 30_000 }),
+        )
+        .await
+        .map_err(|error| format!("browser direct navigation failed: {error:#}"))?;
+    let nav = navigation.get("nav").cloned().unwrap_or(Value::Null);
+    let final_url = nav
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&target_url);
+    let title = nav
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Remote Browser");
+    let can_go_back = nav
+        .get("can_go_back")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let can_go_forward = nav
+        .get("can_go_forward")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let now = now_ms() as u64;
+    upsert_browser_tab(
+        database,
+        tab_id,
+        session_id,
+        title,
+        final_url,
+        "active",
+        false,
+        can_go_back,
+        can_go_forward,
+        None,
+        0,
+        Some(&access),
+    )
+    .await
+    .map_err(|error| format!("browser direct tab projection failed: {error:#}"))?;
+    upsert_browser_session(
+        database,
+        session_id,
+        tab_id,
+        "active",
+        "active",
+        final_url,
+        title,
+        viewport_w,
+        viewport_h,
+        None,
+        0,
+        "browser.session.start",
+        now,
+        navigation.get("error").and_then(Value::as_str),
+        Some(&access),
+        Some(request),
+    )
+    .await
+    .map_err(|error| format!("browser direct session projection failed: {error:#}"))?;
+    mark_browser_direct_live_session(session_id);
+    Ok(json!({
+        "ok": true,
+        "operation": "session.start",
+        "session_id": session_id,
+        "tab_id": tab_id,
+        "lease_id": lease_id,
+        "lease_expires_at_ms": now + 120_000,
+        "nav": {
+            "url": final_url,
+            "title": title,
+            "can_go_back": can_go_back,
+            "can_go_forward": can_go_forward
+        }
+    }))
+}
 
 pub(super) fn is_browser_runtime_command(command_type: &str) -> bool {
     matches!(
@@ -565,6 +1296,68 @@ pub(super) async fn apply_browser_runtime_command(
         return Ok(());
     }
 
+    if command_type == "browser.session.start" {
+        // Session/tab metadata is durable; the initial JPEG is not. Persisting
+        // it here revived the same SQLite -> WebRTC -> IndexedDB transport the
+        // direct live channel replaces and delayed the first interactive
+        // frame. The client asks ctox.browser.live.v1 for the JPEG immediately
+        // after this projection appears.
+        upsert_browser_tab(
+            database,
+            &tab_id,
+            &session_id,
+            &title,
+            &final_url,
+            "active",
+            false,
+            can_go_back,
+            can_go_forward,
+            None,
+            0,
+            Some(&access),
+        )
+        .await?;
+        upsert_browser_session(
+            database,
+            &session_id,
+            &tab_id,
+            "active",
+            "active",
+            &final_url,
+            &title,
+            viewport_w,
+            viewport_h,
+            None,
+            0,
+            command_type,
+            command_created_at_ms,
+            navigation_error.as_deref(),
+            Some(&access),
+            Some(&payload),
+        )
+        .await?;
+        reserve_browser_direct_live_session(&session_id);
+        mark_browser_runtime_command_completed(
+            database,
+            document,
+            accepted,
+            json!({
+                "ok": true,
+                "browser_stream": "webrtc-direct",
+                "session_id": session_id,
+                "tab_id": tab_id,
+                "url": final_url,
+                "title": title,
+                "can_go_back": can_go_back,
+                "can_go_forward": can_go_forward,
+                "navigation_error": navigation_error,
+                "secret_value_in_rxdb": false
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+
     wait_for_browser_frame_capture_slot(database, &session_id).await?;
     let screenshot = match manager
         .request(
@@ -690,6 +1483,9 @@ pub(super) async fn apply_browser_runtime_command(
         session_metadata_patch.as_ref(),
     )
     .await?;
+    if command_type == "browser.session.start" {
+        reserve_browser_direct_live_session(&session_id);
+    }
     mark_browser_runtime_command_completed(
         database,
         document,
@@ -986,28 +1782,14 @@ async fn wait_for_browser_runtime_maintenance_wake(root: &Path, consecutive_idle
 }
 
 async fn run_browser_runtime_maintenance(database: &Arc<RxDatabase>) -> anyhow::Result<usize> {
-    let manager = browser_runtime_manager();
     let mut rows_touched = 0usize;
-    for session_id in manager.active_session_ids() {
-        match drain_browser_session_inputs(database, &session_id).await {
-            Ok(session_rows) => {
-                rows_touched = rows_touched.saturating_add(session_rows);
-            }
-            Err(err) => {
-                eprintln!("[business-os] browser input drain failed for {session_id}: {err:#}");
-            }
-        }
-    }
-    for session_id in manager.active_session_ids() {
-        match refresh_browser_session_frame(database, &session_id).await {
-            Ok(session_rows) => {
-                rows_touched = rows_touched.saturating_add(session_rows);
-            }
-            Err(err) => {
-                eprintln!("[business-os] browser frame refresh failed for {session_id}: {err:#}");
-            }
-        }
-    }
+    // Interactive video and input use ctox.browser.live.v1 directly on the
+    // authenticated DataChannel. Never revive the former persisted transport
+    // merely because a client is slow to attach: with three abandoned active
+    // sessions that loop wrote hundreds of JPEG rows in under a minute and
+    // held SQLite/IndexedDB busy enough to stall the whole Business OS.
+    // Retain only bounded garbage collection for documents made by an older
+    // client; current clients reconnect the direct channel instead.
     rows_touched = rows_touched.saturating_add(gc_expired_browser_frames(database).await?);
     rows_touched = rows_touched.saturating_add(gc_consumed_browser_input_events(database).await?);
     Ok(rows_touched)
@@ -1209,10 +1991,8 @@ async fn drain_browser_session_inputs(
     let touched_rows = rows.len();
 
     let mut events = Vec::with_capacity(rows.len());
-    let mut max_seq = 0u64;
     for row in rows {
         let seq = row.get("seq").and_then(Value::as_u64).unwrap_or(0);
-        max_seq = max_seq.max(seq);
         let event = browser_runtime_input_event(row);
         eprintln!(
             "{}",
@@ -1269,22 +2049,35 @@ async fn drain_browser_session_inputs(
     };
 
     let ok = response.get("ok").and_then(Value::as_bool) == Some(true);
+    let results = response.get("results").and_then(Value::as_array);
     let now = now_ms() as u64;
-    for row in rows {
+    let mut applied_max_seq = 0u64;
+    let mut applied_count = 0usize;
+    for (index, row) in rows.iter().enumerate() {
+        let result = results.and_then(|items| items.get(index));
+        let row_ok = ok
+            && result
+                .and_then(|item| item.get("ok"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         let mut next = row.clone();
         if let Some(obj) = next.as_object_mut() {
-            if ok {
+            if row_ok {
                 obj.insert("status".to_string(), Value::String("consumed".to_string()));
                 obj.insert("consumed_at_ms".to_string(), Value::from(now));
+                applied_count = applied_count.saturating_add(1);
+                applied_max_seq =
+                    applied_max_seq.max(row.get("seq").and_then(Value::as_u64).unwrap_or(0));
             } else {
                 obj.insert("status".to_string(), Value::String("failed".to_string()));
                 obj.insert(
                     "error".to_string(),
                     Value::String(
-                        response
-                            .get("error")
+                        result
+                            .and_then(|item| item.get("error"))
+                            .or_else(|| response.get("error"))
                             .and_then(Value::as_str)
-                            .unwrap_or("input replay failed")
+                            .unwrap_or("browser runtime did not acknowledge this input event")
                             .to_string(),
                     ),
                 );
@@ -1297,18 +2090,18 @@ async fn drain_browser_session_inputs(
             .map_err(|err| anyhow::anyhow!("mark input event consumed: {err}"))?;
     }
 
-    if ok {
+    if applied_count > 0 {
         let nav = response.get("nav").cloned().unwrap_or(Value::Null);
         eprintln!(
             "[business-os] browser input phase=applied session_id={} events={} applied={} url={}",
             session_id,
             rows.len(),
-            response.get("applied").and_then(Value::as_u64).unwrap_or(0),
+            applied_count,
             nav.get("url").and_then(Value::as_str).unwrap_or_default(),
         );
         wait_for_browser_frame_capture_slot(database, session_id).await?;
         capture_and_store_browser_frame(database, &session, session_id, Some(&nav)).await?;
-        update_browser_session_input_state(database, session_id, max_seq).await?;
+        update_browser_session_input_state(database, session_id, applied_max_seq).await?;
     }
     Ok(touched_rows)
 }
@@ -2412,6 +3205,14 @@ mod tests {
                 "everyNthFrame": 1,
             })
         );
+    }
+
+    #[test]
+    fn direct_browser_live_session_suppresses_duplicate_rxdb_streaming() {
+        let session_id = format!("browser_direct_live_test_{}", std::process::id());
+        assert!(!browser_direct_live_session_active(&session_id));
+        mark_browser_direct_live_session(&session_id);
+        assert!(browser_direct_live_session_active(&session_id));
     }
 
     #[test]

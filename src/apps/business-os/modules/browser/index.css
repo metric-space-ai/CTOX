@@ -20,6 +20,7 @@
    .ctox-workspace--two-pane; MAIN ist die einzige flexible Spur und behält so
    den Vorrang. */
 .browser-module {
+  position: relative;
   background: var(--bg);
   color: var(--text);
 }
@@ -250,8 +251,8 @@
 
 .browser-address-form {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) auto;
-  gap: 6px;
+  grid-template-columns: minmax(120px, 1fr) 30px 34px;
+  gap: 4px;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -263,10 +264,9 @@
   grid-template-columns: auto minmax(0, 1fr);
   gap: 8px;
   align-items: center;
-  min-height: 28px;
-  border-bottom: 1px solid var(--hairline);
-  background: var(--surface-2);
-  padding: 2px 8px;
+  min-width: 0;
+  max-width: min(30%, 260px);
+  padding-inline-start: 6px;
   color: var(--muted);
   font-size: 12px;
 }
@@ -282,7 +282,7 @@
    session selected the LEFT empty state and the canvas overlay carry the state,
    so the strip stays hidden until a session is active (progressive disclosure).
    The address bar above remains the always-available recovery path. */
-.browser-module:not(.is-session-active) .browser-status-strip {
+.browser-sessions-toggle {
   display: none;
 }
 
@@ -323,6 +323,92 @@
   display: none;
 }
 
+/* Live explanation for Web-Stack/Playwright work. It floats over the streamed
+   page and stays compact until the user opens the actual injected capture
+   code, so observability does not permanently consume browser real estate. */
+.browser-automation-overlay {
+  position: absolute;
+  z-index: 4;
+  top: 10px;
+  right: 10px;
+  width: min(420px, calc(100% - 20px));
+  max-height: min(46%, 340px);
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.browser-automation-overlay[hidden] {
+  display: none;
+}
+
+.browser-automation-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.browser-automation-heading strong,
+.browser-automation-overlay small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-automation-heading > span:last-child,
+.browser-automation-overlay small {
+  color: var(--muted);
+}
+
+.browser-automation-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.browser-automation-overlay small {
+  display: block;
+  margin: 3px 0 0 14px;
+}
+
+.browser-automation-overlay details {
+  margin-top: 6px;
+}
+
+.browser-automation-overlay summary {
+  cursor: pointer;
+  color: var(--text-strong);
+}
+
+.browser-automation-overlay pre {
+  max-height: 220px;
+  margin: 7px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@container business-app-window (max-width: 640px) {
+  .browser-automation-overlay {
+    top: 6px;
+    right: 6px;
+    width: calc(100% - 12px);
+    max-height: 40%;
+  }
+}
+
 /* custom: versteckte Diagnose-Ansicht im Erweiterungsbereich (Command-/
    Handoff-Verlauf; bleibt aria-hidden und ist UI-unsichtbar, hält aber
    die JS-Vertragsoberfläche stabil). */
@@ -352,28 +438,23 @@
 }
 
 @container business-app-window (max-width: 980px) {
-  .browser-tabbar {
-    flex-wrap: wrap;
-  }
-
-  .browser-advanced-actions {
-    flex-wrap: wrap;
-  }
-}
-
-/* custom: Schmales Fenster / Mobil-Sheet — der Remote-Canvas ist die Priorität,
-   also stapeln Sitzungs-Spalte (kurz) über der Arbeitsfläche und der Resizer
-   entfällt. Die Sitzungsspalte bleibt als kurze, scrollbare Leiste erreichbar
-   (Rückweg gewahrt), statt still verworfen zu werden. */
-@container business-app-window (max-width: 640px) {
   .browser-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 40vh) minmax(0, 1fr);
   }
 
   .browser-sessions {
-    grid-column: 1;
-    grid-row: 1;
+    position: absolute;
+    z-index: 20;
+    inset: 0 auto 0 0;
+    width: min(300px, calc(100% - 48px));
+    max-width: 100%;
+    transform: translateX(-102%);
+    border-right: 1px solid var(--line);
+    transition: transform 140ms ease-out;
+  }
+
+  .browser-module.is-sessions-open .browser-sessions {
+    transform: translateX(0);
   }
 
   .browser-module > .ctox-column-resizer {
@@ -382,18 +463,46 @@
 
   .browser-canvas {
     grid-column: 1;
-    grid-row: 2;
   }
 
-  .browser-tabbar,
+  .browser-sessions-toggle {
+    display: inline-flex;
+  }
+
+  /* The drawer overlays the toolbar from the left. Keep its close control just
+     outside the drawer while open, otherwise the drawer covers the only way
+     to reclaim the streamed browser area on narrow windows. */
+  .browser-module.is-sessions-open .browser-sessions-toggle {
+    position: absolute;
+    z-index: 21;
+    top: 4px;
+    left: calc(min(300px, calc(100% - 48px)) + 4px);
+  }
+
+  .browser-tabbar {
+    min-height: 32px;
+    padding-block: 2px;
+  }
+
+  .browser-advanced-actions {
+    flex-wrap: wrap;
+  }
+}
+
+/* custom: Schmales Fenster / Mobil-Sheet — der Remote-Canvas bleibt die
+   Arbeitsfläche; Sitzungen sind über den Drawer erreichbar. */
+@container business-app-window (max-width: 640px) {
   .browser-toolbar {
-    align-items: stretch;
+    gap: 3px;
+    padding-inline: 4px;
   }
 
   .browser-status-strip {
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
-    padding-block: 5px;
+    display: none;
+  }
+
+  .browser-address-form {
+    grid-template-columns: minmax(90px, 1fr) 30px 34px;
   }
 
   .browser-advanced-actions .ctox-button,

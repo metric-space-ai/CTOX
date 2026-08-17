@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::store::{self, BusinessCommand};
 
@@ -54,20 +55,63 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
             }
         }
         Err(error) => {
-            return store::write_rxdb_failed_control_command_outcome(
+            let message = error.to_string();
+            let failed = store::write_rxdb_failed_control_command_outcome(
                 root,
                 &command,
                 "person_research_start",
                 error,
             );
+            if failed.is_ok() {
+                log_lead_projection_error(
+                    command.id.as_deref().unwrap_or_default(),
+                    project_thesen_outbound_lead_state(
+                        root,
+                        &command,
+                        "failed",
+                        Some(message.as_str()),
+                    ),
+                );
+            }
+            return failed;
         }
     }
+    log_lead_projection_error(
+        command.id.as_deref().unwrap_or_default(),
+        project_thesen_outbound_lead_state(root, &command, "running", None),
+    );
     Ok(running)
 }
 
 pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
+    let terminal_candidates = store::terminal_person_research_projection_candidates(root)?;
+    let mut recovered = 0;
+    for candidate in terminal_candidates {
+        let command_id = candidate
+            .command
+            .id
+            .as_deref()
+            .context("terminal person-research candidate is missing command id")?;
+        super::command_plane::complete_and_project_business_control_command(
+            root,
+            command_id,
+            &candidate.terminal_status,
+            &candidate.result,
+            candidate.error_message.as_deref(),
+        )?;
+        let (lead_status, lead_error) = if candidate.terminal_status == "completed" {
+            ("needs_review", None)
+        } else {
+            ("failed", candidate.error_message.as_deref())
+        };
+        log_lead_projection_error(
+            command_id,
+            project_thesen_outbound_lead_state(root, &candidate.command, lead_status, lead_error),
+        );
+        recovered += 1;
+    }
     let commands = store::recoverable_person_research_commands(root)?;
-    let mut started = 0;
+    let mut started = recovered;
     for recoverable in commands {
         let worker_started = if recoverable.status == "accepted" {
             match store::authorize_recoverable_person_research_command(root, &recoverable.command) {
@@ -118,31 +162,59 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
             let _active_guard = active_guard;
             let result =
                 panic::catch_unwind(AssertUnwindSafe(|| execute(&root, &worker_command.payload)));
-            let persisted = match result {
-                Ok(Ok(outcome)) => store::write_rxdb_control_command_outcome(
-                    &root,
-                    &worker_command,
-                    "completed",
+            let (persisted, lead_status, lead_error) = match result {
+                Ok(Ok(outcome)) => (
+                    store::write_rxdb_control_command_outcome(
+                        &root,
+                        &worker_command,
+                        "completed",
+                        None,
+                        Some("completed"),
+                        outcome,
+                    ),
+                    "needs_review",
                     None,
-                    Some("completed"),
-                    outcome,
                 ),
-                Ok(Err(error)) => store::write_rxdb_failed_control_command_outcome(
-                    &root,
-                    &worker_command,
-                    "person_research",
-                    error,
-                ),
-                Err(_) => store::write_rxdb_failed_control_command_outcome(
-                    &root,
-                    &worker_command,
-                    "person_research",
-                    anyhow::anyhow!("person-research worker panicked"),
-                ),
+                Ok(Err(error)) => {
+                    let message = error.to_string();
+                    (
+                        store::write_rxdb_failed_control_command_outcome(
+                            &root,
+                            &worker_command,
+                            "person_research",
+                            error,
+                        ),
+                        "failed",
+                        Some(message),
+                    )
+                }
+                Err(_) => {
+                    let message = "person-research worker panicked".to_string();
+                    (
+                        store::write_rxdb_failed_control_command_outcome(
+                            &root,
+                            &worker_command,
+                            "person_research",
+                            anyhow::anyhow!(message.clone()),
+                        ),
+                        "failed",
+                        Some(message),
+                    )
+                }
             };
-            if let Err(error) = persisted {
+            if let Err(error) = &persisted {
                 eprintln!(
                     "[business-os] person research `{worker_command_id}` outcome failed: {error:#}"
+                );
+            } else {
+                log_lead_projection_error(
+                    &worker_command_id,
+                    project_thesen_outbound_lead_state(
+                        &root,
+                        &worker_command,
+                        lead_status,
+                        lead_error.as_deref(),
+                    ),
                 );
             }
         });
@@ -150,6 +222,111 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
         return Err(error.into());
     }
     Ok(true)
+}
+
+fn project_thesen_outbound_lead_state(
+    root: &Path,
+    command: &BusinessCommand,
+    research_status: &str,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(record_id) = thesen_outbound_writeback_record_id(command) else {
+        return Ok(());
+    };
+    let now = now_ms();
+    let command_id = command.id.as_deref().unwrap_or_default();
+    let lead_payload = thesen_outbound_lead_state_patch(command_id, research_status, error, now);
+    store::upsert_rxdb_collection_record(
+        root,
+        "thesen_outbound_leads",
+        record_id,
+        now,
+        serde_json::json!({
+            "id": record_id,
+            "research_status": research_status,
+            "command_id": command_id,
+            "task_id": "",
+            "payload": lead_payload,
+        }),
+    )
+}
+
+fn thesen_outbound_lead_state_patch(
+    command_id: &str,
+    research_status: &str,
+    error: Option<&str>,
+    now: i64,
+) -> Value {
+    let mut lead_payload = serde_json::json!({
+        "last_research_command_id": command_id,
+        "native_research_terminal_status": if research_status == "running" { Value::Null } else { Value::String(research_status.to_string()) },
+    });
+    if research_status == "running" {
+        lead_payload["research_started_at_ms"] = Value::Number(now.into());
+    } else {
+        lead_payload["research_finished_at_ms"] = Value::Number(now.into());
+    }
+    if let Some(error) = error.filter(|value| !value.trim().is_empty()) {
+        lead_payload["research_error"] = Value::String(error.to_string());
+    } else if research_status != "running" {
+        // Lifecycle patches are merged into the durable lead. A successful
+        // retry must explicitly clear an error left by an older failed or
+        // abandoned attempt instead of displaying both success and failure.
+        lead_payload["research_error"] = Value::Null;
+    }
+    lead_payload
+}
+
+fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str> {
+    if command.module.trim() != "thesen-outbound" {
+        return None;
+    }
+    let record_id = command.record_id.as_deref()?.trim();
+    if record_id.is_empty() {
+        return None;
+    }
+    let contract = command.payload.get("writeback_contract")?;
+    let collection_allowed = contract
+        .get("collection")
+        .and_then(Value::as_str)
+        .is_some_and(|collection| collection == "thesen_outbound_leads")
+        || contract
+            .get("allowed_collections")
+            .and_then(Value::as_array)
+            .is_some_and(|collections| {
+                collections
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|collection| collection == "thesen_outbound_leads")
+            });
+    if !collection_allowed {
+        return None;
+    }
+    contract
+        .get("record_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|record_ids| {
+            record_ids
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|candidate| candidate == record_id)
+        })
+        .then_some(record_id)
+}
+
+fn log_lead_projection_error(command_id: &str, result: anyhow::Result<()>) {
+    if let Err(error) = result {
+        eprintln!(
+            "[business-os] person research `{command_id}` lead lifecycle projection failed: {error:#}"
+        );
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 struct ActiveResearchCommandGuard {
@@ -454,5 +631,60 @@ mod tests {
         assert!(segment
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')));
+    }
+
+    #[test]
+    fn thesen_outbound_lifecycle_projection_requires_bounded_writeback_contract() {
+        let command = BusinessCommand {
+            id: Some("cmd-research".to_string()),
+            module: "thesen-outbound".to_string(),
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some("lead-1".to_string()),
+            payload: serde_json::json!({
+                "writeback_contract": {
+                    "collection": "thesen_outbound_leads",
+                    "allowed_collections": ["thesen_outbound_leads"],
+                    "record_ids": ["lead-1"]
+                }
+            }),
+            client_context: Value::Null,
+            origin: store::CommandOrigin::TrustedLocal,
+        };
+        assert_eq!(
+            thesen_outbound_writeback_record_id(&command),
+            Some("lead-1")
+        );
+
+        let mut wrong_module = command.clone();
+        wrong_module.module = "research".to_string();
+        assert_eq!(thesen_outbound_writeback_record_id(&wrong_module), None);
+
+        let mut wrong_record = command.clone();
+        wrong_record.record_id = Some("lead-2".to_string());
+        assert_eq!(thesen_outbound_writeback_record_id(&wrong_record), None);
+
+        let mut wrong_collection = command;
+        wrong_collection.payload["writeback_contract"]["collection"] =
+            Value::String("sellify_companies".to_string());
+        wrong_collection.payload["writeback_contract"]["allowed_collections"] =
+            serde_json::json!(["sellify_companies"]);
+        assert_eq!(thesen_outbound_writeback_record_id(&wrong_collection), None);
+    }
+
+    #[test]
+    fn successful_thesen_outbound_retry_clears_stale_research_error() {
+        let failed = thesen_outbound_lead_state_patch(
+            "cmd-failed",
+            "failed",
+            Some("prior attempt failed"),
+            1_000,
+        );
+        assert_eq!(failed["research_error"], "prior attempt failed");
+
+        let completed =
+            thesen_outbound_lead_state_patch("cmd-completed", "needs_review", None, 2_000);
+        assert_eq!(completed["research_error"], Value::Null);
+        assert_eq!(completed["native_research_terminal_status"], "needs_review");
+        assert_eq!(completed["research_finished_at_ms"], 2_000);
     }
 }

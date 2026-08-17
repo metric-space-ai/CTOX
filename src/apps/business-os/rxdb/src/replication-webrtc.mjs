@@ -70,6 +70,9 @@ export const GLOBAL_QUERY_META_BUDGET_BYTES = 512 * 1024 * 1024;
 export const DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
 export const KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
+const DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
+export const CTOX_BROWSER_LIVE_CAPABILITY = 'ctox-browser-live-v1';
+const CTOX_BROWSER_LIVE_CHANNEL = 'ctox-browser-live-v1';
 
 const BROWSER_CAPABILITIES = [
   'ctox-rxdb-browser-v1',
@@ -82,6 +85,7 @@ const BROWSER_CAPABILITIES = [
   CTOX_QUERY_FETCH_CAPABILITY,
   CTOX_PRESENCE_CAPABILITY,
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
+  CTOX_BROWSER_LIVE_CAPABILITY,
 ];
 
 // Presence is optional on the wire: a native peer that predates
@@ -175,8 +179,10 @@ export const replicationWebRtcTestInternals = Object.freeze({
   terminalPushRejection,
   sharedRoomPeerKey,
   stableSignalingUrlKey,
+  attachFileDemandLoaderBeforeCollectionHandshake,
   shouldAttachQueryDemandLoader,
   shouldAttachFileDemandLoader,
+  shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
@@ -270,15 +276,15 @@ class SharedRoomPeer {
     if (isNewCollection) {
       this.handshakeMetrics.collectionRegistrations += 1;
       this.schemaMismatchCollections.delete(collection);
-      if (this.negotiated) {
-        // The room handshake carries a point-in-time collectionSchemas map.
-        // Runtime-installed app modules register their collections after the
-        // shell-critical room is already open, so a cached handshake cannot be
-        // reused for the new collection without producing a false schema hash
-        // mismatch. Drop it and let the catch-up path renegotiate this room
-        // with the complete collection set.
-        this.negotiated = null;
-      }
+      // Keep an already authenticated room handshake alive. The native peer's
+      // protocol payload advertises its complete collectionSchemas map, and
+      // catchUpRegisteredCollection validates this newly registered browser
+      // collection against that cached remote map below. Re-running the whole
+      // room handshake for every late module collection used to interleave
+      // dozens of ctoxProtocol requests with foreground Browser traffic. One
+      // timed-out refresh then recycled the single multiplexed DataChannel and
+      // stranded Browser live, query fetch and masterChangesSince together.
+      // A peer reconnect still clears `negotiated` in the peer-close handler.
     }
     this.scheduleCollectionCatchUp(collection, registration);
   }
@@ -510,6 +516,10 @@ class SharedRoomPeer {
         ...this.demandTransport.requestHandlers,
       },
     });
+    // Register before connect(): the Browser is the offerer and includes this
+    // dedicated SCTP stream in the initial SDP. Live input/JPEG traffic then
+    // cannot be stranded behind collection replication on the rxdb channel.
+    this.peer.openAuxChannel('', CTOX_BROWSER_LIVE_CHANNEL, { ordered: true });
     this.demandTransport.attach(this.peer);
     this.peer.on('error', (event) => this.fanout('error', event.detail || event));
     this.peer.on('transport-status', (event) => this.fanout('transport-status', event.detail || event));
@@ -926,11 +936,12 @@ class SharedRoomPeer {
   }
 
   async awaitRemoteMasterReady(peerId) {
-    try {
-      await this.peer.waitForRequest?.(peerId, 'token', 2000);
-    } catch {
-      // Older or non-CTOX peers might not run the symmetric token request.
-    }
+    // The native peer authorizes this browser only after its symmetric token
+    // request. A busy tenant can legitimately need several seconds while
+    // registering the shared room; proceeding after a short timeout creates a
+    // half-authorized connection whose collection calls churn indefinitely.
+    // Missing authorization therefore fails closed instead of being ignored.
+    await this.peer.waitForRequest?.(peerId, 'token', 15_000);
     await delay(100);
   }
 
@@ -1039,6 +1050,36 @@ class CtoxWebRtcReplicationState {
     return this.shared?.peer || null;
   }
 
+  async requestNative(method, params = {}, options = {}) {
+    if (this.cancelled) throw new Error('WebRTC replication state is cancelled');
+    const negotiated = await this.shared?.ensureNegotiatedPeer?.();
+    if (!negotiated?.peerId || !this.peer) {
+      throw new Error('Native WebRTC peer is not connected');
+    }
+    const requiredCapability = String(options.requiredCapability || '').trim();
+    if (requiredCapability) {
+      const capabilities = Array.isArray(negotiated.remoteProtocol?.capabilities)
+        ? negotiated.remoteProtocol.capabilities
+        : [];
+      if (!capabilities.includes(requiredCapability)) {
+        const error = new Error(`Native WebRTC peer lacks ${requiredCapability}`);
+        error.code = 'CTOX_WEBRTC_CAPABILITY_MISSING';
+        throw error;
+      }
+    }
+    const timeoutMs = Math.max(250, Math.min(30_000, Number(options.timeoutMs || 5_000)));
+    if (String(method || '') === 'ctox.browser.live.v1') {
+      return this.peer.requestAuxiliary(
+        negotiated.peerId,
+        CTOX_BROWSER_LIVE_CHANNEL,
+        String(method || ''),
+        [params],
+        timeoutMs,
+      );
+    }
+    return this.peer.request(negotiated.peerId, String(method || ''), [params], timeoutMs, this.collection);
+  }
+
   async start(connectionHandlerCreator) {
     this.schemaHashValue = await this.collection.schema.hash();
     const signalingUrl = connectionHandlerCreator?.signalingServerUrl;
@@ -1051,6 +1092,7 @@ class CtoxWebRtcReplicationState {
       refreshIceServers: connectionHandlerCreator?.config?.refreshIceServers || null,
       expectedNativePeerId: this.ctox?.expectedNativePeerId || '',
     });
+    await attachFileDemandLoaderBeforeCollectionHandshake(this);
     this.shared.register(this.collection.name, {
       collection: this.collection.name,
       state: this,
@@ -1450,7 +1492,9 @@ class CtoxWebRtcReplicationState {
       const id = primaryValue(document, this.collection.schema.primaryPath);
       Promise.resolve(this.demandSidecar?.markDirty?.(this.collection.name, id, true)).catch(() => {});
     }
-    await this.writeDocumentsToPeer(peerId, pending);
+    for (const batch of boundedDirectPushBatches(pending)) {
+      await this.writeDocumentsToPeer(peerId, batch);
+    }
     for (const document of pending) {
       const id = primaryValue(document, this.collection.schema.primaryPath);
       Promise.resolve(this.demandSidecar?.markDirty?.(this.collection.name, id, false)).catch(() => {});
@@ -1512,6 +1556,13 @@ class CtoxWebRtcReplicationState {
         if (terminalRejection) {
           rows = [];
           break;
+        }
+        if (replicationErrorResult(masterWriteResult)) {
+          if (attempt < 2) {
+            await delay(100);
+            continue;
+          }
+          throw replicationErrorResultError(masterWriteResult, this.collection.name);
         }
         const conflicts = masterWriteResult;
         const conflictMap = documentsByPrimaryPath(conflicts, this.collection.schema.primaryPath);
@@ -1582,6 +1633,13 @@ class CtoxWebRtcReplicationState {
       const terminalRejection = terminalPushRejection(conflicts);
       if (terminalRejection) {
         throw terminalPushRejectionError(terminalRejection, this.collection.name);
+      }
+      if (replicationErrorResult(conflicts)) {
+        if (attempt < 2) {
+          await delay(100);
+          continue;
+        }
+        throw replicationErrorResultError(conflicts, this.collection.name);
       }
       const conflictMap = documentsByPrimaryPath(conflicts, this.collection.schema.primaryPath);
       if (!conflictMap.size) {
@@ -2480,6 +2538,24 @@ function documentsByPrimaryPath(documents = [], primaryPath = 'id') {
   return map;
 }
 
+function boundedDirectPushBatches(documents = []) {
+  const batches = [];
+  let batch = [];
+  let batchBytes = 0;
+  for (const document of documents) {
+    const documentBytes = new TextEncoder().encode(JSON.stringify(document)).byteLength;
+    if (batch.length && batchBytes + documentBytes > DIRECT_PUSH_BATCH_MAX_BYTES) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(document);
+    batchBytes += documentBytes;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
 // SYNC-40: classify a `masterWrite` RESULT as a TERMINAL authz/schema rejection.
 // The native side returns these as a replication-scope `ctoxError` VALUE (the
 // response frame's `error` is null, so `peer.request` RESOLVES with this object
@@ -2506,6 +2582,26 @@ function terminalPushRejection(result) {
     collection: String(result.collection || ''),
     message: message || code || 'terminal replication rejection',
   };
+}
+
+function replicationErrorResult(result) {
+  return Boolean(
+    result
+    && typeof result === 'object'
+    && !Array.isArray(result)
+    && result.type === 'ctoxError'
+    && result.scope === 'replication',
+  );
+}
+
+function replicationErrorResultError(result, collection) {
+  const message = String(result?.message || result?.code || 'replication request failed');
+  const error = new Error(`masterWrite failed for ${collection}: ${message}`);
+  error.code = String(result?.code || 'RC_WEBRTC_PEER');
+  error.phase = 'replication-io';
+  error.direction = 'push';
+  error.collection = collection;
+  return error;
 }
 
 function terminalPushRejectionError(rejection, collection) {
@@ -2681,11 +2777,24 @@ function shouldPersistFetchedFileChunks(collectionName = '') {
 }
 
 function shouldAttachQueryDemandLoader(collectionName = '') {
-  return !String(collectionName || '').endsWith('_chunks');
+  const name = String(collectionName || '');
+  if (name === 'document_blob_chunks' || name === 'spreadsheet_blob_chunks') return true;
+  return !name.endsWith('_chunks');
 }
 
 function shouldAttachFileDemandLoader(collectionName = '') {
   return String(collectionName || '') !== 'desktop_file_chunks';
+}
+
+function shouldAttachFileDemandLoaderBeforeCollectionHandshake(collectionName = '') {
+  const name = String(collectionName || '');
+  return name === 'document_blob_chunks' || name === 'spreadsheet_blob_chunks';
+}
+
+async function attachFileDemandLoaderBeforeCollectionHandshake(state) {
+  if (!shouldAttachFileDemandLoaderBeforeCollectionHandshake(state?.collection?.name)) return false;
+  await state.enableDemandLoading();
+  return Boolean(state.demandFileLoader);
 }
 
 function queryMetaBudgetBytesForCollection(collectionName = '') {

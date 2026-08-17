@@ -125,15 +125,19 @@ const QUERY_FETCH_STREAM_UNSUPPORTED_DISPATCH_CODE: &str = "QUERY_FETCH_STREAM_U
 pub(super) struct FetchInflight {
     entries: Mutex<HashMap<String, Arc<AtomicBool>>>,
     count: AtomicU64,
-    max: u64,
+    max_per_peer: u64,
+    max_global: u64,
 }
+
+const FETCH_INFLIGHT_GLOBAL_PEER_BUDGET: u64 = 8;
 
 impl FetchInflight {
     pub(super) fn new(max: u64) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             count: AtomicU64::new(0),
-            max,
+            max_per_peer: max,
+            max_global: max.saturating_mul(FETCH_INFLIGHT_GLOBAL_PEER_BUDGET),
         }
     }
 
@@ -147,14 +151,39 @@ impl FetchInflight {
         }
     }
 
+    pub(super) fn cancel_peer(&self, peer_identity: &str) -> usize {
+        let prefix = format!("{peer_identity}\u{1f}");
+        let mut entries = self.entries.lock();
+        let keys = entries
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in &keys {
+            if let Some(flag) = entries.remove(key) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        self.count.store(entries.len() as u64, Ordering::SeqCst);
+        keys.len()
+    }
+
     pub(super) fn try_acquire(
         &self,
         peer_identity: &str,
         request_id: &str,
     ) -> Option<Arc<AtomicBool>> {
         let key = fetch_inflight_key(peer_identity, request_id);
+        let peer_prefix = format!("{peer_identity}\u{1f}");
         let mut entries = self.entries.lock();
-        if entries.len() as u64 >= self.max || entries.contains_key(&key) {
+        let peer_count = entries
+            .keys()
+            .filter(|entry| entry.starts_with(&peer_prefix))
+            .count() as u64;
+        if entries.len() as u64 >= self.max_global
+            || peer_count >= self.max_per_peer
+            || entries.contains_key(&key)
+        {
             return None;
         }
         let flag = Arc::new(AtomicBool::new(false));
@@ -175,7 +204,7 @@ impl FetchInflight {
     }
 
     pub(super) fn max(&self) -> u64 {
-        self.max
+        self.max_per_peer
     }
 }
 
@@ -453,6 +482,11 @@ impl QueryFetchRegistry {
 
     pub fn cancel(&self, peer_identity: &str, request_id: &str) -> bool {
         self.inflight.cancel(peer_identity, request_id)
+    }
+
+    pub fn cancel_peer(&self, peer_identity: &str) -> usize {
+        self.peer_rate_buckets.lock().remove(peer_identity);
+        self.inflight.cancel_peer(peer_identity)
     }
 
     pub fn count_inflight(&self) -> u64 {
@@ -2150,12 +2184,32 @@ mod tests {
         registry.release("p2", "same-request");
     }
 
+    #[test]
+    fn peer_disconnect_cancels_and_releases_all_owned_streams() {
+        let registry = QueryFetchRegistry::new(3);
+        let first = registry.try_acquire("departed-peer", "one").unwrap();
+        let second = registry.try_acquire("departed-peer", "two").unwrap();
+        let survivor = registry.try_acquire("active-peer", "three").unwrap();
+        assert_eq!(registry.count_inflight(), 3);
+
+        assert_eq!(registry.cancel_peer("departed-peer"), 2);
+        assert!(first.load(Ordering::SeqCst));
+        assert!(second.load(Ordering::SeqCst));
+        assert!(!survivor.load(Ordering::SeqCst));
+        assert_eq!(registry.count_inflight(), 1);
+        assert!(registry.try_acquire("new-peer", "replacement").is_some());
+    }
+
     #[tokio::test]
     async fn max_inflight_returns_stream_limit_error() {
         let registry = authorized_query_registry(1);
         let collection = seeded_collection(10).await;
         registry.register(Arc::clone(&collection));
-        let _hold = registry.try_acquire("p0", "hold").unwrap();
+        let _hold = registry.try_acquire("p1", "hold").unwrap();
+        assert!(
+            registry.try_acquire("p2", "independent").is_some(),
+            "one peer's query budget must not block another peer"
+        );
         let handler = Arc::new(MockHandler::new());
         let message = make_request("r5", "business_records", 0);
         run_query_fetch(

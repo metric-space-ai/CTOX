@@ -4,9 +4,9 @@
 //    attempt, preserving the TTL length. They used to be baked into the URL
 //    once at page load — a tab older than the TTL (24h) then reconnect-looped
 //    forever against "control plane token expired" rejections.
-// 2. Identity: only `yourPeerId` may rename this client. Adopting
-//    `message.peerId` from joined/presence frames corrupted senderPeerId on
-//    all subsequent signals (it names the REMOTE peer).
+// 2. Identity: init.yourPeerId is tracked as a bounded ephemeral signaling
+//    identity, separately from the deterministic client id. Unrelated peerId
+//    fields cannot overwrite it, and close transitions clear it promptly.
 // 3. Backoff: the reconnect backoff resets on the `joined` broadcast (proof
 //    the server ACCEPTED the join), not on socket-open — an open-then-rejected
 //    socket must keep backing off instead of hammering at 1s.
@@ -22,6 +22,8 @@ const peer = createCtoxWebRtcNativePeer({
   clientId: 'browser-test-client',
   role: 'browser',
 });
+const transportStatuses = [];
+peer.on('transport-status', (event) => transportStatuses.push(event.detail || event));
 
 try {
   // --- 1. token re-stamp on connect ---------------------------------------
@@ -34,11 +36,37 @@ try {
   assert(exp - iat === TTL_SECONDS, `TTL length preserved (got ${exp - iat})`);
   assert(url.searchParams.get('token') === 'secret-token', 'token value itself unchanged');
 
-  // --- 2. only yourPeerId renames the client ------------------------------
+  // --- 2. server signaling id is separate, bounded, and live --------------
+  assert(
+    peer.getTransportStatus().localSignalingPeerId == null,
+    'transport status is empty before init.yourPeerId',
+  );
   peer.handleSignalingMessage(JSON.stringify({ type: 'ctoxPresence', peerId: 'remote-native-peer' }));
   assert(peer.options.clientId === 'browser-test-client', 'message.peerId must NOT rename this client');
+  assert(
+    peer.getTransportStatus().localSignalingPeerId == null,
+    'unrelated peerId must not assign the local signaling id',
+  );
   peer.handleSignalingMessage(JSON.stringify({ type: 'init', yourPeerId: 'server-assigned-id' }));
-  assert(peer.options.clientId === 'server-assigned-id', 'init.yourPeerId renames this client');
+  assert(peer.options.clientId === 'browser-test-client', 'deterministic client id remains unchanged after init');
+  assert(
+    peer.getTransportStatus().localSignalingPeerId === 'server-assigned-id',
+    'init.yourPeerId is visible in ordinary transport status',
+  );
+  assert(
+    transportStatuses.at(-1)?.localSignalingPeerId === 'server-assigned-id',
+    'init.yourPeerId assignment emits promptly to transport subscribers',
+  );
+  peer.handleSignalingMessage(JSON.stringify({ type: 'joined', peerId: 'unrelated-peer', otherPeerIds: [] }));
+  assert(
+    peer.getTransportStatus().localSignalingPeerId === 'server-assigned-id',
+    'joined.peerId cannot change the assigned local signaling id',
+  );
+  peer.handleSignalingMessage(JSON.stringify({ type: 'init', yourPeerId: 'x'.repeat(257) }));
+  assert(
+    peer.getTransportStatus().localSignalingPeerId === 'server-assigned-id',
+    'unbounded init.yourPeerId is rejected rather than truncated',
+  );
 
   // --- 3. backoff resets on joined, not on open ----------------------------
   peer.signalingReconnectDelayMs = 30_000; // pretend we backed off heavily
@@ -47,6 +75,19 @@ try {
     peer.signalingReconnectDelayMs < 30_000,
     `joined broadcast resets the reconnect backoff (still ${peer.signalingReconnectDelayMs})`,
   );
+
+  // --- 4. socket and peer close clear the ephemeral status -----------------
+  peer.socket.onclose();
+  assert(peer.getTransportStatus().localSignalingPeerId == null, 'signaling socket close clears the local signaling id');
+  assert(
+    transportStatuses.at(-1)?.localSignalingPeerId == null,
+    'signaling socket close emits the clear promptly',
+  );
+  peer.handleSignalingMessage(JSON.stringify({ type: 'init', yourPeerId: 'peer-close-id' }));
+  assert(peer.getTransportStatus().localSignalingPeerId === 'peer-close-id', 'peer-close fixture is assigned');
+  peer.close();
+  assert(peer.getTransportStatus().localSignalingPeerId == null, 'peer close clears the local signaling id');
+  assert(transportStatuses.at(-1)?.localSignalingPeerId == null, 'peer close emits the clear promptly');
 } finally {
   peer.close();
 }

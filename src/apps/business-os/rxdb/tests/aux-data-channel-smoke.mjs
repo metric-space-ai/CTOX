@@ -86,6 +86,24 @@ const replicationChannel = connection.channel;
 assert(replicationChannel, 'the replication channel must be created by the initiator');
 assertEqual(replicationChannel.label, 'ctox-rxdb', 'the replication channel keeps its label');
 
+// On a cold start the native peer can win offer creation. Its established
+// primary-channel label is `rxdb`; this must populate the replication slot,
+// not be mistaken for an auxiliary consumer channel.
+const nativeInitiatedConnection = {
+  remotePeerId: 'ctox-core-native-initiator',
+  channel: null,
+  inboundFrameGeneration: 0,
+  inboundFrameChain: Promise.resolve(),
+};
+const nativeReplicationChannel = new FakeDataChannel('rxdb');
+peer.attachChannel(nativeInitiatedConnection, nativeReplicationChannel);
+assertEqual(
+  nativeInitiatedConnection.channel,
+  nativeReplicationChannel,
+  'the native `rxdb` label must occupy the primary replication slot',
+);
+assertEqual(auxEvents.length, 0, 'the native replication channel must not emit an auxiliary event');
+
 // 1. An INCOMING auxiliary channel must not take the replication slot.
 peer.attachChannel(connection, new FakeDataChannel('ctox-frames-inbound'));
 assertEqual(
@@ -108,6 +126,27 @@ assertEqual(
 );
 assertEqual(auxEvents.length, 2, 'an outgoing auxiliary channel is announced too');
 
+// A timed-out auxiliary request is local to that stream. It must not mark the
+// peer as a forced initiator or remove the primary replication connection.
+opened.readyState = 'open';
+let auxiliaryTimeout = false;
+try {
+  await peer.requestAuxiliary(REMOTE, 'ctox-frames', 'ctox.browser.live.v1', [], 5);
+} catch {
+  auxiliaryTimeout = true;
+}
+assert(auxiliaryTimeout, 'the unanswered auxiliary request must time out');
+assertEqual(connection.channel, replicationChannel, 'auxiliary timeout must preserve the primary channel');
+assertEqual(peer.connections.get(REMOTE), connection, 'auxiliary timeout must preserve the peer connection');
+assert(!peer.forceInitiatorPeers.has(REMOTE), 'auxiliary timeout must not force primary renegotiation');
+const auxiliaryDiagnostics = peer.getTransportStatus().auxiliary;
+assertEqual(auxiliaryDiagnostics.registrations.length, 1, 'auxiliary registration is observable');
+assertEqual(
+  auxiliaryDiagnostics.channels.find((item) => item.label === 'ctox-frames')?.readyState,
+  'open',
+  'auxiliary channel readiness is observable',
+);
+
 // The replication label is reserved — taking it would be the original defect.
 let rejected = false;
 try {
@@ -116,6 +155,14 @@ try {
   rejected = true;
 }
 assert(rejected, 'the replication label must be rejected as an auxiliary label');
+
+rejected = false;
+try {
+  peer.openAuxChannel(REMOTE, 'rxdb');
+} catch {
+  rejected = true;
+}
+assert(rejected, 'the native replication label must also be rejected as an auxiliary label');
 
 // 2. A reconnect must re-establish the registered auxiliary channel.
 peer.removeConnection(REMOTE, 'test-reconnect', null, { reconnect: false });

@@ -38,7 +38,7 @@ use crate::plugins::replication_webrtc::signaling_client::SignalingClient;
 use crate::plugins::replication_webrtc::signaling_protocol::{PeerId, RoomId, ServerToClient};
 use crate::plugins::replication_webrtc::webrtc_types::{
     PeerWithMessage, PeerWithResponse, WebRTCConnectionHandler, WebRTCMessage, WebRTCResponse,
-    WebRTCWireFrame,
+    WebRTCWireFrame, CTOX_BROWSER_INPUT_RESPONSE_COLLECTION, CTOX_BROWSER_LIVE_RESPONSE_COLLECTION,
 };
 use crate::rx_error::{new_rx_error, RxError, RxResult};
 use crate::rxjs_compat::{RxStream, RxSubject};
@@ -50,6 +50,7 @@ use frame_contract_generated::{
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAME_RESUME_TIMEOUT: Duration = Duration::from_secs(1);
 const SEND_FRAME_PAUSE: Duration = Duration::from_millis(1);
+static AUXILIARY_TRANSFER_COUNTER: AtomicU64 = AtomicU64::new(1);
 // Phase 1 (constant real-time stream): native -> browser SCTP send-buffer
 // watermarks. webrtc-rs exposes no buffered-amount *getter*, only threshold
 // *events* (OnBufferedAmountHigh / OnBufferedAmountLow), so flow control is
@@ -107,6 +108,7 @@ pub const ACTIVE_COLLECTIONS_METHOD: &str = "rxdb.activeCollections";
 pub type WebRTCRsPeer = PeerId;
 
 pub type CollectionAuthzHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+pub type CollectionEagerPullHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type DocumentReadFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 pub type DocumentReadAuthzHook = Arc<dyn Fn(&str, &str) -> DocumentReadFilter + Send + Sync>;
 pub type DocumentWriteAuthzHook = Arc<dyn Fn(&str, &str, &Value) -> bool + Send + Sync>;
@@ -151,6 +153,7 @@ struct PeerEntry {
     peer_connection: Arc<dyn PeerConnection>,
     data_channel: Option<Arc<dyn DataChannel>>,
     data_channel_open: bool,
+    auxiliary_data_channels: HashMap<String, Arc<dyn DataChannel>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -311,12 +314,26 @@ struct PeerSendQueue {
     draining: bool,
     queued_bytes: usize,
     schedule_cursor: usize,
+    consecutive_browser_live: usize,
 }
 
 impl PeerSendQueue {
     fn push(&mut self, item: QueuedSend) {
         self.queued_bytes = self.queued_bytes.saturating_add(item.text.len());
         match item.priority {
+            SendPriority::High
+                if matches!(
+                    item.collection.as_deref(),
+                    Some(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION)
+                        | Some(CTOX_BROWSER_INPUT_RESPONSE_COLLECTION)
+                ) =>
+            {
+                // Interactive Browser responses must not wait behind a cold
+                // start's backlog of ordinary High-priority master responses.
+                // They still use the single ACK-safe drainer, so an in-flight
+                // framed transfer is never interleaved or corrupted.
+                self.high.push_front(item)
+            }
             SendPriority::High => self.high.push_back(item),
             SendPriority::Normal => self.normal.push_back(item),
             SendPriority::Low => self.low.push_back(item),
@@ -328,9 +345,21 @@ impl PeerSendQueue {
             let priority = FAIR_SEND_SCHEDULE[self.schedule_cursor % FAIR_SEND_SCHEDULE.len()];
             self.schedule_cursor = (self.schedule_cursor + 1) % FAIR_SEND_SCHEDULE.len();
             let item = match priority {
-                SendPriority::High => self.high.pop_front(),
-                SendPriority::Normal => self.normal.pop_front(),
-                SendPriority::Low => self.low.pop_front(),
+                SendPriority::High => self.pop_high_fair(),
+                SendPriority::Normal => {
+                    let item = self.normal.pop_front();
+                    if item.is_some() {
+                        self.consecutive_browser_live = 0;
+                    }
+                    item
+                }
+                SendPriority::Low => {
+                    let item = self.low.pop_front();
+                    if item.is_some() {
+                        self.consecutive_browser_live = 0;
+                    }
+                    item
+                }
             };
             if let Some(item) = item {
                 self.queued_bytes = self.queued_bytes.saturating_sub(item.text.len());
@@ -338,6 +367,40 @@ impl PeerSendQueue {
             }
         }
         None
+    }
+
+    fn pop_high_fair(&mut self) -> Option<QueuedSend> {
+        // Human input is sparse and bounded, and must not inherit the fairness
+        // delay deliberately imposed on the continuous JPEG stream. It may
+        // overtake both a queued frame and one ordinary sync response. Keep the
+        // live streak unchanged so the next frame still yields to sync work.
+        if let Some(index) = self.high.iter().position(|item| {
+            item.collection.as_deref() == Some(CTOX_BROWSER_INPUT_RESPONSE_COLLECTION)
+        }) {
+            return self.high.remove(index);
+        }
+        let front_is_browser_live = self.high.front().is_some_and(|item| {
+            item.collection.as_deref() == Some(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION)
+        });
+        let item = if front_is_browser_live && self.consecutive_browser_live > 0 {
+            self.high
+                .iter()
+                .position(|item| {
+                    item.collection.as_deref() != Some(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION)
+                })
+                .and_then(|index| self.high.remove(index))
+                .or_else(|| self.high.pop_front())
+        } else {
+            self.high.pop_front()
+        };
+        if item.as_ref().is_some_and(|item| {
+            item.collection.as_deref() == Some(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION)
+        }) {
+            self.consecutive_browser_live = self.consecutive_browser_live.saturating_add(1);
+        } else if item.is_some() {
+            self.consecutive_browser_live = 0;
+        }
+        item
     }
 
     /// Phase 2: re-bucket every still-queued frame against a new
@@ -587,6 +650,7 @@ pub struct WebRTCRsConnectionHandler {
     /// the peer presented at handshake (captured into `peer_capability_tokens`).
     /// `None` => no enforcement (default), so replication behavior is unchanged.
     collection_authz: Arc<Mutex<Option<CollectionAuthzHook>>>,
+    collection_eager_pull: Arc<Mutex<Option<CollectionEagerPullHook>>>,
     collection_write_authz: Arc<Mutex<Option<CollectionAuthzHook>>>,
     document_read_authz: Arc<Mutex<Option<DocumentReadAuthzHook>>>,
     document_write_authz: Arc<Mutex<Option<DocumentWriteAuthzHook>>>,
@@ -647,6 +711,7 @@ impl WebRTCRsConnectionHandler {
             peer_generation_counter: AtomicU64::new(0),
             backpressure: Arc::new(Mutex::new(HashMap::new())),
             collection_authz: Arc::new(Mutex::new(None)),
+            collection_eager_pull: Arc::new(Mutex::new(None)),
             collection_write_authz: Arc::new(Mutex::new(None)),
             document_read_authz: Arc::new(Mutex::new(None)),
             document_write_authz: Arc::new(Mutex::new(None)),
@@ -659,6 +724,12 @@ impl WebRTCRsConnectionHandler {
     /// construction, before any peer connects. `None` disables enforcement.
     pub fn set_collection_authz(&self, hook: Option<CollectionAuthzHook>) {
         *self.collection_authz.lock() = hook;
+    }
+
+    /// Install a server-authoritative gate for ordinary masterChangesSince
+    /// collection scans. Bounded query/file demand methods remain available.
+    pub fn set_collection_eager_pull(&self, hook: Option<CollectionEagerPullHook>) {
+        *self.collection_eager_pull.lock() = hook;
     }
 
     /// Optional per-collection write gate. Native-owned collections can keep
@@ -1181,6 +1252,7 @@ impl WebRTCRsConnectionHandler {
                     peer_connection: Arc::clone(&pc),
                     data_channel: None,
                     data_channel_open: false,
+                    auxiliary_data_channels: HashMap::new(),
                     tasks: Vec::new(),
                 },
             );
@@ -1350,6 +1422,31 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
         self.send_queued_text(peer, data_channel, class).await
     }
 
+    async fn send_auxiliary(
+        &self,
+        peer: &Self::Peer,
+        label: &str,
+        frame: WebRTCWireFrame,
+    ) -> Result<(), RxError> {
+        let data_channel = self
+            .peers
+            .lock()
+            .get(peer)
+            .and_then(|entry| entry.auxiliary_data_channels.get(label).cloned())
+            .ok_or_else(|| {
+                new_rx_error(
+                    "RC_WEBRTC_PEER",
+                    Some(serde_json::json!({
+                        "message": "unknown or unopened auxiliary data channel",
+                        "peer": peer,
+                        "label": label,
+                        EXPECTED_PEER_TEARDOWN_PARAM: true,
+                    })),
+                )
+            })?;
+        send_auxiliary_wire_frame(&data_channel, frame).await
+    }
+
     async fn close(&self) -> Result<(), RxError> {
         self.closed.store(true, Ordering::SeqCst);
         self.presence_sweep_armed.store(false, Ordering::SeqCst);
@@ -1427,11 +1524,35 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
             .insert(peer.clone(), token);
     }
 
+    fn peer_capability_token(&self, peer: &Self::Peer) -> Option<String> {
+        self.peer_capability_tokens.lock().get(peer).cloned()
+    }
+
     /// #12c: fail-open when no authz hook is installed (the default — behavior
     /// unchanged). When installed, an unknown peer maps to an empty token so the
     /// hook still decides (it treats an empty/invalid token as least privilege).
     fn is_collection_authorized_for_peer(&self, peer: &Self::Peer, collection: &str) -> bool {
         let hook = self.collection_authz.lock().clone();
+        match hook {
+            None => true,
+            Some(check) => {
+                let token = self
+                    .peer_capability_tokens
+                    .lock()
+                    .get(peer)
+                    .cloned()
+                    .unwrap_or_default();
+                check(&token, collection)
+            }
+        }
+    }
+
+    fn is_eager_collection_pull_authorized_for_peer(
+        &self,
+        peer: &Self::Peer,
+        collection: &str,
+    ) -> bool {
+        let hook = self.collection_eager_pull.lock().clone();
         match hook {
             None => true,
             Some(check) => {
@@ -1509,6 +1630,9 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
         collection: &str,
         change: crate::types::RxReplicationMasterChange,
     ) -> Option<crate::types::RxReplicationMasterChange> {
+        if !self.is_eager_collection_pull_authorized_for_peer(peer, collection) {
+            return None;
+        }
         let Some(filter) = self.document_filter_for_peer(peer, collection) else {
             return Some(change);
         };
@@ -2585,6 +2709,17 @@ impl PeerConnectionEventHandler for RsPeerConnectionEvents {
     }
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
+        let label = data_channel.label().await.unwrap_or_default();
+        if label == "ctox-browser-live-v1" {
+            install_auxiliary_data_channel(
+                Arc::clone(&self.handler),
+                self.remote_peer_id.clone(),
+                self.generation,
+                label,
+                data_channel,
+            );
+            return;
+        }
         install_data_channel(
             Arc::clone(&self.handler),
             self.remote_peer_id.clone(),
@@ -2592,6 +2727,77 @@ impl PeerConnectionEventHandler for RsPeerConnectionEvents {
             data_channel,
         );
     }
+}
+
+fn install_auxiliary_data_channel(
+    handler: Arc<WebRTCRsConnectionHandler>,
+    remote_peer_id: PeerId,
+    generation: u64,
+    label: String,
+    data_channel: Arc<dyn DataChannel>,
+) {
+    {
+        let mut peers = handler.peers.lock();
+        let Some(entry) = peers.get_mut(&remote_peer_id) else {
+            return;
+        };
+        if entry.generation != generation {
+            return;
+        }
+        entry
+            .auxiliary_data_channels
+            .insert(label.clone(), Arc::clone(&data_channel));
+    }
+    let message_subject = handler.message_subject.clone();
+    let error_subject = handler.error_subject.clone();
+    let handler_task = Arc::clone(&handler);
+    let peer_task = remote_peer_id.clone();
+    let label_task = label.clone();
+    let task = tokio::spawn(async move {
+        while let Some(event) = data_channel.poll().await {
+            if !is_current_peer_generation(&handler_task, &peer_task, generation) {
+                break;
+            }
+            match event {
+                DataChannelEvent::OnMessage(message) => {
+                    let text = String::from_utf8_lossy(&message.data).to_string();
+                    match serde_json::from_str::<WebRTCMessage>(&text) {
+                        Ok(message) => message_subject.next(PeerWithMessage {
+                            peer: peer_task.clone(),
+                            message,
+                        }),
+                        Err(error) => {
+                            error_subject.next(decode_error("auxiliary message", error, &text))
+                        }
+                    }
+                }
+                DataChannelEvent::OnClose | DataChannelEvent::OnClosing => break,
+                DataChannelEvent::OnError => error_subject.next(new_rx_error(
+                    "RC_WEBRTC_PEER",
+                    Some(serde_json::json!({
+                        "message": "auxiliary data channel error",
+                        "peer": peer_task,
+                        "label": label_task,
+                    })),
+                )),
+                DataChannelEvent::OnOpen
+                | DataChannelEvent::OnBufferedAmountHigh
+                | DataChannelEvent::OnBufferedAmountLow => {}
+            }
+        }
+        if let Some(entry) = handler_task.peers.lock().get_mut(&peer_task) {
+            if entry.generation == generation {
+                entry.auxiliary_data_channels.remove(&label_task);
+            }
+        }
+    });
+    if let Some(entry) = handler.peers.lock().get_mut(&remote_peer_id) {
+        if entry.generation == generation {
+            entry.tasks.push(task);
+            return;
+        }
+    }
+    task.abort();
 }
 
 async fn build_peer_connection(
@@ -3181,6 +3387,71 @@ async fn send_json_text(data_channel: &Arc<dyn DataChannel>, value: &Value) -> R
         .map_err(|e| webrtc_error("send WebRTC transport frame", e))
 }
 
+async fn send_auxiliary_wire_frame(
+    data_channel: &Arc<dyn DataChannel>,
+    frame: WebRTCWireFrame,
+) -> RxResult<()> {
+    let text = serde_json::to_string(&frame).map_err(|error| {
+        new_rx_error(
+            "RC_WEBRTC_PEER",
+            Some(serde_json::json!({
+                "message": format!("serialize auxiliary WebRTC frame failed: {error}"),
+            })),
+        )
+    })?;
+    if text.len() <= 12_000 {
+        return data_channel
+            .send_text(&text)
+            .await
+            .map_err(|error| webrtc_error("send auxiliary WebRTC frame", error));
+    }
+    let mut chunks = Vec::<String>::new();
+    let mut chunk = String::new();
+    let mut bytes = 0usize;
+    for character in text.chars() {
+        let width = character.len_utf8();
+        if bytes + width > 8_000 && !chunk.is_empty() {
+            chunks.push(std::mem::take(&mut chunk));
+            bytes = 0;
+        }
+        chunk.push(character);
+        bytes += width;
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    // Multiple Browser renders can issue the same large request in the same
+    // millisecond. `timestamp + chunk count` then collided and the browser
+    // merged chunks from two different responses under one key: native
+    // counters said "completed", while both callers timed out. The monotonic
+    // suffix is process-unique and keeps every reassembly stream disjoint.
+    let transfer_id = next_auxiliary_transfer_id();
+    let total = chunks.len();
+    for (seq, data) in chunks.into_iter().enumerate() {
+        send_json_text(
+            data_channel,
+            &serde_json::json!({
+                "ctoxAuxFrame": "ctox-aux-frame-v1",
+                "transferId": transfer_id,
+                "seq": seq,
+                "total": total,
+                "data": data,
+            }),
+        )
+        .await?;
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+fn next_auxiliary_transfer_id() -> String {
+    format!(
+        "browser-live-{}-{}",
+        now_ms(),
+        AUXILIARY_TRANSFER_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Byte length of `ch` as it appears inside a serde_json string value (excluding
 /// the surrounding quotes). Mirrors serde_json's default escaping: the two-char
 /// short escapes (`\" \\ \b \f \n \r \t`), `\u00XX` for the remaining C0 controls,
@@ -3310,6 +3581,25 @@ mod tests {
     }
 
     #[test]
+    fn eager_pull_gate_is_fail_open_and_drops_live_master_changes() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer = "peer-1".to_string();
+        assert!(handler.is_eager_collection_pull_authorized_for_peer(&peer, "sellify_activities"));
+        handler.set_collection_eager_pull(Some(Arc::new(|_token: &str, collection: &str| {
+            collection != "sellify_activities"
+        })));
+        assert!(!handler.is_eager_collection_pull_authorized_for_peer(&peer, "sellify_activities"));
+        assert!(handler
+            .filter_master_change_for_peer(
+                &peer,
+                "sellify_activities",
+                crate::types::RxReplicationMasterChange::Resync,
+            )
+            .is_none());
+        assert!(handler.is_eager_collection_pull_authorized_for_peer(&peer, "business_commands"));
+    }
+
+    #[test]
     fn write_and_document_authz_hooks_are_fail_open_then_enforced() {
         let handler = WebRTCRsConnectionHandler::new();
         let peer = "peer-1".to_string();
@@ -3415,6 +3705,15 @@ mod tests {
 
         assert!(response.get("result").is_some() || response.get("error").is_some());
         assert!(message.get("result").is_none() && message.get("error").is_none());
+    }
+
+    #[test]
+    fn auxiliary_chunk_transfer_ids_are_unique_for_parallel_responses() {
+        let first = next_auxiliary_transfer_id();
+        let second = next_auxiliary_transfer_id();
+        assert_ne!(first, second);
+        assert!(first.starts_with("browser-live-"));
+        assert!(second.starts_with("browser-live-"));
     }
 
     #[test]
@@ -3931,6 +4230,41 @@ mod tests {
         let next = queue.pop_next().expect("a frame");
         assert_eq!(next.collection.as_deref(), Some("documents"));
         assert_eq!(next.priority, SendPriority::High);
+    }
+
+    #[test]
+    fn browser_live_response_jumps_ahead_once_without_starving_sync_work() {
+        let mut queue = PeerSendQueue::default();
+        let make = |collection: &str| {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            QueuedSend {
+                text: "{}".to_string(),
+                priority: SendPriority::High,
+                collection: Some(collection.to_string()),
+                intrinsic_high: true,
+                oversized_write: false,
+                queued_at_ms: now_ms(),
+                result: tx,
+            }
+        };
+        queue.push(make("business_commands"));
+        queue.push(make("browser_sessions"));
+        queue.push(make(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION));
+        queue.push(make(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION));
+
+        let next = queue.pop_next().expect("browser live response");
+        assert_eq!(
+            next.collection.as_deref(),
+            Some(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION)
+        );
+        queue.push(make(CTOX_BROWSER_INPUT_RESPONSE_COLLECTION));
+        let next = queue.pop_next().expect("interactive input response");
+        assert_eq!(
+            next.collection.as_deref(),
+            Some(CTOX_BROWSER_INPUT_RESPONSE_COLLECTION)
+        );
+        let next = queue.pop_next().expect("waiting sync response");
+        assert_eq!(next.collection.as_deref(), Some("business_commands"));
     }
 
     #[test]

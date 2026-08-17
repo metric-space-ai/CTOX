@@ -1482,16 +1482,16 @@ pub(crate) fn reusable_web_stack_auth_assist_request(
     for (command_id, status, payload_json) in candidates {
         let payload: Value =
             serde_json::from_str(&payload_json).context("invalid web-stack auth-assist payload")?;
-        let Some(expires_at_ms) = payload.get("expires_at_ms").and_then(Value::as_u64) else {
-            continue;
-        };
-        if u128::from(expires_at_ms) <= now_ms() {
-            continue;
-        }
         let Some(task) = channels::load_queue_task_for_business_os_command(root, &command_id)?
         else {
             continue;
         };
+        // `expires_at_ms` bounds the interactive browser handoff, not the
+        // durable user's need to authenticate. A queued handoff can outlive
+        // that short window while waiting for the user. Creating a replacement
+        // on every research retry leaves both commands pending and grows an
+        // unbounded backlog. The durable route is therefore the source of truth
+        // for reuse: only a terminal route permits a replacement request.
         if !matches!(
             task.route_status.as_str(),
             "pending" | "leased" | "review_rework" | "blocked"
@@ -2197,13 +2197,14 @@ pub(crate) fn business_records_projection_stamp(
     business_records_projection_metadata_stamp(&conn, &collections, hasher)
 }
 
-/// Return the latest source timestamp per registered projection collection.
+/// Return the mutation version and latest source timestamp per registered
+/// projection collection.
 /// `None` means the clock table is unavailable and callers must conservatively
 /// fall back to scanning every registered collection.
 pub(crate) fn business_records_projection_clocks(
     root: &Path,
     collections: &[String],
-) -> anyhow::Result<Option<HashMap<String, i64>>> {
+) -> anyhow::Result<Option<HashMap<String, (i64, i64)>>> {
     let path = business_os_store_path(root);
     if !path.exists() {
         return Ok(Some(HashMap::new()));
@@ -2222,12 +2223,18 @@ pub(crate) fn business_records_projection_clocks(
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(
         params_from_iter(collections.iter().map(String::as_str)),
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(4)?)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(4)?,
+            ))
+        },
     )?;
     let mut clocks = HashMap::new();
     for row in rows {
-        let (collection, latest_updated_at_ms) = row?;
-        clocks.insert(collection, latest_updated_at_ms.max(0));
+        let (collection, version, latest_updated_at_ms) = row?;
+        clocks.insert(collection, (version.max(0), latest_updated_at_ms.max(0)));
     }
     Ok(Some(clocks))
 }
@@ -15355,6 +15362,13 @@ pub(super) struct RecoverablePersonResearchCommand {
     pub(super) status: String,
 }
 
+pub(super) struct TerminalPersonResearchProjectionCandidate {
+    pub(super) command: BusinessCommand,
+    pub(super) terminal_status: String,
+    pub(super) result: Value,
+    pub(super) error_message: Option<String>,
+}
+
 pub(super) fn authorize_recoverable_person_research_command(
     root: &Path,
     command: &BusinessCommand,
@@ -15474,6 +15488,132 @@ pub(super) fn recoverable_person_research_commands(
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub(super) fn terminal_person_research_projection_candidates(
+    root: &Path,
+) -> anyhow::Result<Vec<TerminalPersonResearchProjectionCandidate>> {
+    let store_path = business_os_store_path(root);
+    if !store_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(
+        &store_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| {
+        format!(
+            "open Business OS store for person-research recovery {}",
+            store_path.display()
+        )
+    })?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
+        .context("configure person-research recovery busy_timeout")?;
+    let canonical_path = crate::paths::core_db(root);
+    let mut canonical_uri = Url::from_file_path(&canonical_path).map_err(|_| {
+        anyhow::anyhow!(
+            "build read-only canonical command database URI for {}",
+            canonical_path.display()
+        )
+    })?;
+    canonical_uri.query_pairs_mut().append_pair("mode", "ro");
+    conn.execute(
+        "ATTACH DATABASE ?1 AS canonical_person_research",
+        [canonical_uri.as_str()],
+    )
+    .with_context(|| {
+        format!(
+            "attach canonical command database for person-research recovery {}",
+            canonical_path.display()
+        )
+    })?;
+    let mut statement = conn.prepare(
+        "SELECT command.command_id, command.module, command.record_id,
+                command.payload_json, command.client_context_json, command.status
+         FROM business_commands AS command
+         LEFT JOIN business_records AS stored
+           ON stored.collection = 'business_commands'
+          AND stored.record_id = command.command_id
+          AND stored.deleted = 0
+         LEFT JOIN canonical_person_research.business_command_aggregates AS canonical
+           ON canonical.command_id = command.command_id
+         WHERE command.command_type = 'web_stack.person_research'
+           AND command.status IN ('completed', 'failed', 'cancelled')
+           AND (
+             COALESCE(json_extract(stored.payload_json, '$.terminal_status'), 'none')
+               NOT IN ('completed', 'failed', 'cancelled')
+             OR COALESCE(canonical.terminal_status, 'none')
+               NOT IN ('completed', 'failed', 'cancelled')
+           )
+         ORDER BY command.observed_at_ms ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (command_id, module, record_id, payload_json, client_context_json, terminal_status) =
+            row?;
+        let stored =
+            stored_rxdb_business_command_outcome(&conn, &command_id)?.with_context(|| {
+                format!("terminal person-research projection missing for {command_id}")
+            })?;
+        let canonical = channels::business_command_projection(root, &command_id)?;
+        let canonical_terminal = canonical
+            .get("terminal_status")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        let stored_terminal = stored
+            .get("terminal_status")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        if canonical_terminal == terminal_status && stored_terminal == terminal_status {
+            continue;
+        }
+        let recovery_terminal_status =
+            matches!(canonical_terminal, "completed" | "failed" | "cancelled")
+                .then_some(canonical_terminal)
+                .unwrap_or(terminal_status.as_str())
+                .to_string();
+        let recovery_source = if canonical_terminal == recovery_terminal_status {
+            &canonical
+        } else {
+            &stored
+        };
+        let result = recovery_source
+            .get("result")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let error_message = recovery_source
+            .get("error_message")
+            .or_else(|| result.get("error"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        candidates.push(TerminalPersonResearchProjectionCandidate {
+            command: BusinessCommand {
+                id: Some(command_id),
+                module,
+                command_type: "web_stack.person_research".to_string(),
+                record_id: (!record_id.trim().is_empty()).then_some(record_id),
+                payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+                client_context: serde_json::from_str(&client_context_json).unwrap_or(Value::Null),
+                origin: CommandOrigin::TrustedLocal,
+            },
+            terminal_status: recovery_terminal_status,
+            result,
+            error_message,
+        });
+    }
+    Ok(candidates)
 }
 
 /// Persist the native-enriched v2 command document as the canonical Business OS
@@ -23213,6 +23353,17 @@ pub(super) mod tests {
         let first = business_records_projection_stamp(temp.path(), &collections)?;
         assert_eq!(first.row_count, 9);
         assert_eq!(first.latest_updated_at_ms, 5_002);
+        let clocks = business_records_projection_clocks(temp.path(), &collections)?
+            .context("projection clocks available")?;
+        assert_eq!(clocks.len(), 3);
+        for collection in &collections {
+            let (version, latest_updated_at_ms) = clocks
+                .get(collection)
+                .copied()
+                .context("collection projection clock")?;
+            assert_eq!(version, 3);
+            assert_eq!(latest_updated_at_ms, 5_002);
+        }
 
         let conn = open_store(temp.path())?;
         upsert_business_record(
@@ -36375,6 +36526,150 @@ pub(super) mod tests {
                 message["commandId"] == command_id && message["status"] == "completed"
             })
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn person_research_recovery_terminalizes_durable_completed_projection() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_person_research_terminal_projection_recovery";
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some(command_id.to_string()),
+            module: "research".to_string(),
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some("company-example".to_string()),
+            payload: serde_json::json!({
+                "company": "Example GmbH",
+                "country": "DE",
+                "mode": "have_data",
+                "fields": [],
+                "include_private": []
+            }),
+            client_context: serde_json::json!({}),
+        };
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim(command_id, &command)?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+        channels::progress_business_control_command(
+            root,
+            command_id,
+            "running",
+            &serde_json::json!({ "status": "running" }),
+        )?;
+
+        let completed_result = serde_json::json!({
+            "ok": true,
+            "status": "completed",
+            "tool": "ctox_person_research"
+        });
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'completed', ?5, ?6, 1)",
+            params![
+                command_id,
+                command.module,
+                command.command_type,
+                command.record_id,
+                serde_json::to_string(&command.payload)?,
+                serde_json::to_string(&command.client_context)?,
+            ],
+        )?;
+        upsert_business_record(
+            &conn,
+            "business_commands",
+            command_id,
+            1,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "research",
+                "command_type": "web_stack.person_research",
+                "record_id": "company-example",
+                "status": "completed",
+                "task_status": "completed",
+                "execution_mode": "control",
+                "execution_phase": "running",
+                "terminal_status": "none",
+                "result": completed_result
+            }),
+        )?;
+        drop(conn);
+
+        assert_eq!(
+            terminal_person_research_projection_candidates(root)?.len(),
+            1
+        );
+        assert_eq!(
+            crate::business_os::person_research_command::recover_once(root)?,
+            1
+        );
+        let canonical = channels::business_command_projection(root, command_id)?;
+        assert_eq!(canonical["execution_phase"], "terminal");
+        assert_eq!(canonical["terminal_status"], "completed");
+        let conn = open_store(root)?;
+        let projected = load_business_record_payload(&conn, "business_commands", command_id)?
+            .context("recovered terminal projection")?;
+        assert_eq!(projected["execution_phase"], "terminal");
+        assert_eq!(projected["terminal_status"], "completed");
+        drop(conn);
+        assert!(terminal_person_research_projection_candidates(root)?.is_empty());
+
+        // A canonical-only drift must still be selected even when the stored
+        // Browser projection already has the expected terminal status. The
+        // optimized recovery query joins both stores instead of trusting one.
+        let canonical_conn = Connection::open(crate::paths::core_db(root))?;
+        canonical_conn.execute(
+            "UPDATE business_command_aggregates
+             SET execution_phase = 'running', terminal_status = 'none'
+             WHERE command_id = ?1",
+            [command_id],
+        )?;
+        drop(canonical_conn);
+        assert_eq!(
+            terminal_person_research_projection_candidates(root)?.len(),
+            1
+        );
+        assert_eq!(
+            crate::business_os::person_research_command::recover_once(root)?,
+            1
+        );
+        assert_eq!(
+            channels::business_command_projection(root, command_id)?["terminal_status"],
+            "completed"
+        );
+
+        // A conflict between already-terminal projections and the intake row
+        // cannot be resolved here without a result-bearing source of truth.
+        // Reprocessing it on every service poll is both ineffective and
+        // expensive, so terminal-vs-terminal history is intentionally left to
+        // an explicit reconciliation path.
+        let conn = open_store(root)?;
+        conn.execute(
+            "UPDATE business_records
+             SET payload_json = json_set(
+                 payload_json,
+                 '$.execution_phase', 'terminal',
+                 '$.terminal_status', 'failed'
+             )
+             WHERE collection = 'business_commands' AND record_id = ?1",
+            [command_id],
+        )?;
+        drop(conn);
+        let canonical_conn = Connection::open(crate::paths::core_db(root))?;
+        canonical_conn.execute(
+            "UPDATE business_command_aggregates
+             SET execution_phase = 'terminal', terminal_status = 'failed'
+             WHERE command_id = ?1",
+            [command_id],
+        )?;
+        drop(canonical_conn);
+        assert!(terminal_person_research_projection_candidates(root)?.is_empty());
         Ok(())
     }
 

@@ -21,6 +21,9 @@
 use super::protocol_contract_generated;
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,16 +41,18 @@ use crate::plugins::replication::{
     RxReplicationState, StreamFactory,
 };
 use crate::plugins::replication_webrtc::connection_handler_rs::{
-    publish_best_effort_send_error, CollectionAuthzHook, DocumentReadAuthzHook,
-    DocumentWriteAuthzHook, WebRTCRsConfig, WebRTCRsConnectionHandler, WebRTCRsPeer,
+    publish_best_effort_send_error, CollectionAuthzHook, CollectionEagerPullHook,
+    DocumentReadAuthzHook, DocumentWriteAuthzHook, WebRTCRsConfig, WebRTCRsConnectionHandler,
+    WebRTCRsPeer,
 };
 use crate::plugins::replication_webrtc::signaling_client::SignalingClient;
 use crate::plugins::replication_webrtc::webrtc_helper::{
     is_master_in_webrtc_replication, send_message_and_await_answer,
 };
 use crate::plugins::replication_webrtc::webrtc_types::{
-    WebRTCConnectionHandler, WebRTCDocumentFilter, WebRTCMessage, WebRTCPeerValidator,
-    WebRTCResponse, WebRTCWireFrame,
+    WebRTCConnectionHandler, WebRTCDocumentFilter, WebRTCMessage, WebRTCPeerSessionValidator,
+    WebRTCPeerValidator, WebRTCResponse, WebRTCWireFrame, CTOX_BROWSER_INPUT_RESPONSE_COLLECTION,
+    CTOX_BROWSER_LIVE_RESPONSE_COLLECTION,
 };
 use crate::plugins::utils::utils_string::random_token;
 use crate::replication_protocol::index_mod::rx_storage_instance_to_replication_handler;
@@ -69,6 +74,26 @@ const FORK_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 const PROTOCOL_ROOM_PAYLOAD_CACHE_TTL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_MASTER_PULLS: usize = 4;
 const MAX_CONCURRENT_REQUEST_TASKS: usize = 32;
+const MAX_CONCURRENT_AUXILIARY_REQUESTS: usize = 8;
+const BROWSER_LIVE_METHOD: &str = "ctox.browser.live.v1";
+
+static BROWSER_LIVE_WIRE_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static BROWSER_LIVE_HANDLER_FOUND: AtomicU64 = AtomicU64::new(0);
+static BROWSER_LIVE_HANDLER_MISSING: AtomicU64 = AtomicU64::new(0);
+
+pub fn auxiliary_request_metrics_snapshot() -> Value {
+    serde_json::json!({
+        "schema": "ctox.rxdb.auxiliary_request_counters.v1",
+        "browser_live_wire_received": BROWSER_LIVE_WIRE_RECEIVED.load(Ordering::Relaxed),
+        "browser_live_handler_found": BROWSER_LIVE_HANDLER_FOUND.load(Ordering::Relaxed),
+        "browser_live_handler_missing": BROWSER_LIVE_HANDLER_MISSING.load(Ordering::Relaxed),
+    })
+}
+
+pub type AuxiliaryRequestFuture =
+    Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
+pub type AuxiliaryRequestHandler =
+    Arc<dyn Fn(String, String, Vec<Value>) -> AuxiliaryRequestFuture + Send + Sync + 'static>;
 const CTOX_RXDB_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-rxdb-native-v1",
     "ctox-file-chunks-v1",
@@ -80,6 +105,7 @@ const CTOX_RXDB_NATIVE_CAPABILITIES: &[&str] = &[
     CTOX_APP_RUNTIME_CAPABILITY,
     CTOX_QUERY_FETCH_CAPABILITY,
     CTOX_COMMAND_LIFECYCLE_CAPABILITY,
+    "ctox-browser-live-v1",
     // Presence is ephemeral transport state (ctox-presence-v1): always
     // advertised, never gated on a runtime flag — there is no persistence or
     // policy surface behind it, only the in-memory hub in the connection
@@ -107,6 +133,7 @@ pub struct SyncOptionsWebRTC<H: WebRTCConnectionHandler> {
     pub connection_handler: Arc<H>,
     pub topic: Option<String>,
     pub is_peer_valid: Option<WebRTCPeerValidator<H::Peer>>,
+    pub is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
     pub pull_batch_size: u64,
     pub push_batch_size: u64,
     pub retry_time: u64,
@@ -119,6 +146,7 @@ impl<H: WebRTCConnectionHandler> SyncOptionsWebRTC<H> {
             connection_handler,
             topic: None,
             is_peer_valid: None,
+            is_peer_session_valid: None,
             pull_batch_size: 20,
             push_batch_size: 20,
             retry_time: 5_000,
@@ -133,6 +161,7 @@ pub struct SyncOptionsWebRTCRs {
     pub peer_session_id: String,
     pub ice_servers: Vec<RTCIceServer>,
     pub is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
+    pub is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
     pub pull_batch_size: u64,
     pub push_batch_size: u64,
     pub retry_time: u64,
@@ -151,6 +180,7 @@ impl SyncOptionsWebRTCRs {
             peer_session_id: format!("rxdb-rs-{}", random_token(Some(16))),
             ice_servers: Vec::new(),
             is_peer_valid: None,
+            is_peer_session_valid: None,
             pull_batch_size: 20,
             push_batch_size: 20,
             retry_time: 5_000,
@@ -162,6 +192,7 @@ impl SyncOptionsWebRTCRs {
 struct WebRTCReplicationTuning {
     topic: Option<String>,
     peer_session_id: Option<Arc<str>>,
+    is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
     pull_batch_size: u64,
     push_batch_size: u64,
     retry_time: u64,
@@ -172,6 +203,7 @@ impl Default for WebRTCReplicationTuning {
         Self {
             topic: None,
             peer_session_id: None,
+            is_peer_session_valid: None,
             pull_batch_size: 20,
             push_batch_size: 20,
             retry_time: 5_000,
@@ -206,6 +238,10 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     pub error_subject: RxSubject<RxError>,
     pub query_fetch_registry: Arc<super::query_fetch_handler::QueryFetchRegistry>,
     pub file_fetch_registry: Arc<super::file_fetch_handler::FileFetchRegistry>,
+    /// Typed, explicitly registered request methods that share the authenticated
+    /// WebRTC DataChannel without becoming RxDB documents. This is reserved for
+    /// latency-sensitive ephemeral control planes such as the live Browser.
+    auxiliary_request_handlers: Mutex<HashMap<String, AuxiliaryRequestHandler>>,
     /// Legacy compatibility must not hide an unverifiable multiplex handshake;
     /// this counter keeps every allowed or rejected omission operator-visible.
     missing_collection_schemas_warning_count: std::sync::atomic::AtomicU64,
@@ -230,6 +266,7 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     /// Bounds concurrently executing inbound request futures across protocol,
     /// replication, query, and file-fetch methods.
     request_semaphore: Arc<Semaphore>,
+    auxiliary_request_semaphore: Arc<Semaphore>,
     /// Per-peer sub-tasks (the master-change relay tasks, one per collection).
     peer_states: Mutex<HashMap<H::Peer, PeerState>>,
     /// Fork replication states keyed by (collection, peer). One entry per
@@ -308,12 +345,16 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
             error_subject: RxSubject::new(),
             query_fetch_registry: registry,
             file_fetch_registry: file_registry,
+            auxiliary_request_handlers: Mutex::new(HashMap::new()),
             missing_collection_schemas_warning_count: std::sync::atomic::AtomicU64::new(0),
             collections: collection_map,
             protocol_room_payload_cache: Mutex::new(ProtocolRoomPayloadCache::default()),
             protocol_room_payload_build: AsyncMutex::new(()),
             master_pull_semaphore: Semaphore::new(MAX_CONCURRENT_MASTER_PULLS),
             request_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUEST_TASKS)),
+            auxiliary_request_semaphore: Arc::new(Semaphore::new(
+                MAX_CONCURRENT_AUXILIARY_REQUESTS,
+            )),
             peer_states: Mutex::new(HashMap::new()),
             fork_states: Mutex::new(HashMap::new()),
             fork_state_lifecycle: AsyncMutex::new(()),
@@ -324,6 +365,16 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
     /// All collections multiplexed onto this connection.
     pub fn collections(&self) -> Vec<Arc<RxCollection>> {
         self.collections.values().cloned().collect()
+    }
+
+    pub fn set_auxiliary_request_handler(
+        &self,
+        method: impl Into<String>,
+        handler: AuxiliaryRequestHandler,
+    ) {
+        self.auxiliary_request_handlers
+            .lock()
+            .insert(method.into(), handler);
     }
 
     /// Snapshot the number of unverifiable multiplex schema handshakes seen.
@@ -436,6 +487,37 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
         let _ = start_tx.send(());
     }
 
+    /// Track latency-sensitive auxiliary work (for example Browser live input
+    /// and frames) independently from bulk replication requests. A restored
+    /// workspace can occupy every ordinary request permit with collection
+    /// pulls; queuing interactive work behind those pulls turns a healthy
+    /// DataChannel into a deterministic 30-second UI timeout.
+    fn spawn_auxiliary_tracked<F>(self: &Arc<Self>, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let semaphore = Arc::clone(&self.auxiliary_request_semaphore);
+        let task = tokio::spawn(async move {
+            if start_rx.await.is_err() {
+                return;
+            }
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return;
+            };
+            future.await;
+        });
+        let mut tasks = self.tasks.lock();
+        tasks.retain(|task| !task.is_finished());
+        if self.canceled.load(std::sync::atomic::Ordering::SeqCst) {
+            task.abort();
+            return;
+        }
+        tasks.push(task);
+        drop(tasks);
+        let _ = start_tx.send(());
+    }
+
     /// Record a per-(collection, peer) fork replication state so cancel
     /// propagates on `remove_peer` / `cancel`.
     pub async fn add_fork_state(
@@ -460,6 +542,9 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
     }
 
     pub async fn remove_peer(&self, peer: &H::Peer) {
+        let peer_identity = self.connection_handler.peer_identity(peer);
+        self.query_fetch_registry.cancel_peer(&peer_identity);
+        self.file_fetch_registry.cancel_peer(&peer_identity);
         let sub_tasks = self
             .peer_states
             .lock()
@@ -564,6 +649,31 @@ pub async fn replicate_web_rtc_multi<H>(
 where
     H: WebRTCConnectionHandler + 'static,
 {
+    replicate_web_rtc_multi_with_validators(
+        collections,
+        connection_handler,
+        is_peer_valid,
+        None,
+        tuning_topic,
+        peer_session_id,
+    )
+    .await
+}
+
+/// Multiplexed entry point with independent signaling-peer and durable
+/// `peerSession.sessionId` admission predicates. The legacy entry point above
+/// keeps existing callers source-compatible and disables the durable gate.
+pub async fn replicate_web_rtc_multi_with_validators<H>(
+    collections: Vec<Arc<RxCollection>>,
+    connection_handler: Arc<H>,
+    is_peer_valid: Option<WebRTCPeerValidator<H::Peer>>,
+    is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
+    tuning_topic: Option<String>,
+    peer_session_id: Option<Arc<str>>,
+) -> Result<Arc<RxWebRTCReplicationPool<H>>, RxError>
+where
+    H: WebRTCConnectionHandler + 'static,
+{
     replicate_web_rtc_inner(
         collections,
         connection_handler,
@@ -571,6 +681,7 @@ where
         WebRTCReplicationTuning {
             topic: tuning_topic,
             peer_session_id,
+            is_peer_session_valid,
             ..WebRTCReplicationTuning::default()
         },
     )
@@ -590,6 +701,7 @@ where
         WebRTCReplicationTuning {
             topic: options.topic,
             peer_session_id: None,
+            is_peer_session_valid: options.is_peer_session_valid,
             pull_batch_size: options.pull_batch_size,
             push_batch_size: options.push_batch_size,
             retry_time: options.retry_time,
@@ -615,6 +727,7 @@ pub async fn replicate_web_rtc_rs(
         WebRTCReplicationTuning {
             topic: Some(options.topic),
             peer_session_id: Some(Arc::<str>::from(options.peer_session_id)),
+            is_peer_session_valid: options.is_peer_session_valid,
             pull_batch_size: options.pull_batch_size,
             push_batch_size: options.push_batch_size,
             retry_time: options.retry_time,
@@ -657,6 +770,7 @@ pub async fn replicate_web_rtc_rs_multi(
         None,
         None,
         None,
+        None,
         pull_batch_size,
         push_batch_size,
         retry_time,
@@ -678,6 +792,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_provider(
     ice_servers: Vec<RTCIceServer>,
     is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     collection_authz: Option<CollectionAuthzHook>,
+    collection_eager_pull: Option<CollectionEagerPullHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
     document_write_authz: Option<DocumentWriteAuthzHook>,
@@ -694,6 +809,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_provider(
         ice_servers,
         is_peer_valid,
         collection_authz,
+        collection_eager_pull,
         collection_write_authz,
         document_read_authz,
         document_write_authz,
@@ -720,6 +836,47 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
     ice_servers: Vec<RTCIceServer>,
     is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     collection_authz: Option<CollectionAuthzHook>,
+    collection_eager_pull: Option<CollectionEagerPullHook>,
+    collection_write_authz: Option<CollectionAuthzHook>,
+    document_read_authz: Option<DocumentReadAuthzHook>,
+    document_write_authz: Option<DocumentWriteAuthzHook>,
+    pull_batch_size: u64,
+    push_batch_size: u64,
+    retry_time: u64,
+) -> Result<Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>, RxError> {
+    replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
+        collections,
+        signaling_url_provider,
+        topic,
+        peer_session_id,
+        ice_servers,
+        is_peer_valid,
+        None,
+        collection_authz,
+        collection_eager_pull,
+        collection_write_authz,
+        document_read_authz,
+        document_write_authz,
+        pull_batch_size,
+        push_batch_size,
+        retry_time,
+    )
+    .await
+}
+
+/// URL-list provider variant with a separate durable browser-session gate.
+/// Existing callers keep using the wrapper above with that gate disabled.
+#[allow(clippy::too_many_arguments)]
+pub async fn replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
+    collections: Vec<Arc<RxCollection>>,
+    signaling_url_provider: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    topic: String,
+    peer_session_id: String,
+    ice_servers: Vec<RTCIceServer>,
+    is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
+    is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
+    collection_authz: Option<CollectionAuthzHook>,
+    collection_eager_pull: Option<CollectionEagerPullHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
     document_write_authz: Option<DocumentWriteAuthzHook>,
@@ -736,6 +893,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
     let handler = WebRTCRsConnectionHandler::new_with_signaling(config).await?;
     // #12c: install the per-collection authz hook before peers connect.
     handler.set_collection_authz(collection_authz);
+    handler.set_collection_eager_pull(collection_eager_pull);
     handler.set_collection_write_authz(collection_write_authz);
     handler.set_document_read_authz(document_read_authz);
     handler.set_document_write_authz(document_write_authz);
@@ -746,6 +904,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
         WebRTCReplicationTuning {
             topic: Some(topic),
             peer_session_id: Some(Arc::<str>::from(peer_session_id)),
+            is_peer_session_valid,
             pull_batch_size,
             push_batch_size,
             retry_time,
@@ -786,6 +945,7 @@ where
     let request_flag = random_token(Some(10));
     let request_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let peer_session_id = tuning.peer_session_id.clone();
+    let is_peer_session_valid = tuning.is_peer_session_valid.clone();
     let pool = RxWebRTCReplicationPool::<H>::new_multi(
         collections.clone(),
         Arc::clone(&connection_handler),
@@ -821,6 +981,7 @@ where
         let representative = Arc::clone(&representative);
         let storage_token = storage_token.clone();
         let peer_session_id = peer_session_id.clone();
+        let is_peer_session_valid = is_peer_session_valid.clone();
         let mut msg_stream = connection_handler.message_stream();
         let t = tokio::spawn(async move {
             while let Some(item) = msg_stream.next().await {
@@ -888,6 +1049,79 @@ where
                     }
                     continue;
                 }
+                let is_browser_live = item.message.method == BROWSER_LIVE_METHOD;
+                if is_browser_live {
+                    BROWSER_LIVE_WIRE_RECEIVED.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(auxiliary_handler) = pool_clone
+                    .auxiliary_request_handlers
+                    .lock()
+                    .get(&item.message.method)
+                    .cloned()
+                {
+                    if is_browser_live {
+                        BROWSER_LIVE_HANDLER_FOUND.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let pool_task = Arc::clone(&pool_clone);
+                    let handler_task = Arc::clone(&handler);
+                    let peer = item.peer.clone();
+                    let request = item.message.clone();
+                    let browser_operation = request
+                        .params
+                        .first()
+                        .and_then(|params| params.get("op"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("live")
+                        .to_string();
+                    let peer_identity = handler.peer_identity(&peer);
+                    let capability_token = handler.peer_capability_token(&peer).unwrap_or_default();
+                    pool_clone.spawn_auxiliary_tracked(async move {
+                        let answer =
+                            auxiliary_handler(peer_identity, capability_token, request.params)
+                                .await;
+                        let (result, error) = match answer {
+                            Ok(result) => (result, None),
+                            Err(error) => (Value::Null, Some(error)),
+                        };
+                        let response = WebRTCResponse {
+                            id: request.id,
+                            result,
+                            error,
+                            // Internal scheduler marker: Browser live frames
+                            // and input ACKs jump ahead of the normal sync
+                            // response backlog while staying on the single,
+                            // ACK-safe primary transport.
+                            collection: Some(
+                                if browser_operation == "input" {
+                                    CTOX_BROWSER_INPUT_RESPONSE_COLLECTION
+                                } else {
+                                    CTOX_BROWSER_LIVE_RESPONSE_COLLECTION
+                                }
+                                .to_string(),
+                            ),
+                        };
+                        // Browser -> native live requests use the dedicated
+                        // auxiliary channel so input is never queued behind a
+                        // collection transfer. Send the answer through the
+                        // primary framed transport: it already provides ACK,
+                        // retry and bounded backpressure, while the current
+                        // Rust WebRTC auxiliary channel silently drops its
+                        // native -> browser direction on the production TURN
+                        // path despite reporting send success. Pending RPC ids
+                        // are shared across both channels, so the browser
+                        // correlates this response without a protocol change.
+                        if let Err(error) = handler_task
+                            .send(&peer, WebRTCWireFrame::Response(response))
+                            .await
+                        {
+                            pool_task.error_subject.next(error);
+                        }
+                    });
+                    continue;
+                }
+                if is_browser_live {
+                    BROWSER_LIVE_HANDLER_MISSING.fetch_add(1, Ordering::Relaxed);
+                }
                 // Phase 3 demux: the `collection` field on the frame selects
                 // which collection's master handler answers a plain
                 // replication request. Handshake frames (`token` /
@@ -914,6 +1148,7 @@ where
                 let representative_task = Arc::clone(&representative);
                 let storage_token = storage_token.clone();
                 let peer_session_id = peer_session_id.clone();
+                let is_peer_session_valid = is_peer_session_valid.clone();
                 pool_clone.spawn_tracked(async move {
                     if pool_task
                         .canceled
@@ -923,6 +1158,34 @@ where
                     }
                     let frame_collection = item.message.collection.clone();
                     if item.message.method == "ctoxProtocol" {
+                        if let Some(check) = &is_peer_session_valid {
+                            let remote_session_id = item
+                                .message
+                                .params
+                                .first()
+                                .and_then(|payload| payload.pointer("/peerSession/sessionId"))
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|session_id| !session_id.is_empty());
+                            let accepted =
+                                remote_session_id.is_some_and(|session_id| check(session_id));
+                            if !accepted {
+                                let response = WebRTCResponse {
+                                    id: item.message.id,
+                                    result: Value::Null,
+                                    error: Some("peer_revoked".to_string()),
+                                    collection: frame_collection,
+                                };
+                                if let Err(error) = handler_task
+                                    .send(&item.peer, WebRTCWireFrame::Response(response))
+                                    .await
+                                {
+                                    pool_task.error_subject.next(error);
+                                }
+                                handler_task.close_peer(&item.peer).await;
+                                return;
+                            }
+                        }
                         if let Some(token) = item
                             .message
                             .params
@@ -1016,6 +1279,13 @@ where
                                     }),
                                     Vec::new(),
                                 )
+                            } else if method == "masterChangesSince"
+                                && !handler_task.is_eager_collection_pull_authorized_for_peer(
+                                    &item.peer,
+                                    &target_name,
+                                )
+                            {
+                                demand_only_master_pull_result(&item.message.params)
                             } else {
                                 match pool_task.master_handler_for(&target_name) {
                                     Some(master) => {
@@ -1096,6 +1366,7 @@ where
         let collections = collections.clone();
         let storage_token = storage_token.clone();
         let request_counter = Arc::clone(&request_counter);
+        let is_peer_session_valid = is_peer_session_valid.clone();
         let mut connect_stream = connection_handler.connect_stream();
         let t = tokio::spawn(async move {
             while let Some(peer) = connect_stream.next().await {
@@ -1127,6 +1398,7 @@ where
                 let request_counter = Arc::clone(&request_counter);
                 let request_flag = request_flag.clone();
                 let peer_session_id = peer_session_id.clone();
+                let is_peer_session_valid = is_peer_session_valid.clone();
                 let tuning = tuning.clone();
                 let peer_for_tracking = peer.clone();
                 let handshake_task = tokio::spawn(async move {
@@ -1184,6 +1456,28 @@ where
                             return;
                         }
                     };
+                    if let Some(check) = &is_peer_session_valid {
+                        let remote_session_id = protocol_response
+                            .result
+                            .pointer("/peerSession/sessionId")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|session_id| !session_id.is_empty());
+                        let accepted =
+                            remote_session_id.is_some_and(|session_id| check(session_id));
+                        if !accepted {
+                            pool_clone.error_subject.next(new_rx_error(
+                                "RC_WEBRTC_PEER",
+                                Some(serde_json::json!({
+                                    "code": "peer_revoked",
+                                    "message": "remote peerSession.sessionId is missing or revoked",
+                                    "peerSessionId": remote_session_id,
+                                })),
+                            ));
+                            handler.close_peer(&peer).await;
+                            return;
+                        }
+                    }
                     // The single-collection name/hash check on `local_protocol
                     // .collection` is meaningless under multiplex (the remote's
                     // representative may differ from ours). We still enforce
@@ -2116,6 +2410,14 @@ fn periodic_resync_stream(
     }))
 }
 
+fn demand_only_master_pull_result(params: &[Value]) -> Value {
+    serde_json::json!({
+        "documents": [],
+        "checkpoint": params.first().cloned().unwrap_or(Value::Null),
+        "demandOnly": true,
+    })
+}
+
 /// Dispatch a method call on the master replication handler.
 async fn call_master_method(
     handler: &dyn RxReplicationHandler,
@@ -2328,6 +2630,18 @@ mod tests {
         assert!(
             checked >= 1,
             "corpus must cover at least one generated ctox_rxdb_* code"
+        );
+    }
+
+    #[test]
+    fn demand_only_pull_finishes_without_reading_master_storage() {
+        let checkpoint = serde_json::json!({ "id": "last", "lwt": 42 });
+        let result = demand_only_master_pull_result(&[checkpoint.clone(), Value::from(20)]);
+        assert_eq!(result.get("documents"), Some(&serde_json::json!([])));
+        assert_eq!(result.get("checkpoint"), Some(&checkpoint));
+        assert_eq!(
+            result.get("demandOnly").and_then(Value::as_bool),
+            Some(true)
         );
     }
 
@@ -3259,6 +3573,29 @@ mod tests {
         }
     }
 
+    fn ctox_protocol_frame_with_session(
+        id: &str,
+        collection: &str,
+        session_id: Option<&str>,
+    ) -> WebRTCMessage {
+        let mut peer_session = serde_json::Map::from_iter([(
+            "role".to_string(),
+            Value::String("browser".to_string()),
+        )]);
+        if let Some(session_id) = session_id {
+            peer_session.insert(
+                "sessionId".to_string(),
+                Value::String(session_id.to_string()),
+            );
+        }
+        WebRTCMessage {
+            id: id.to_string(),
+            method: "ctoxProtocol".to_string(),
+            params: vec![serde_json::json!({ "peerSession": peer_session })],
+            collection: Some(collection.to_string()),
+        }
+    }
+
     #[tokio::test]
     async fn ctox_protocol_response_carries_multiplex_room_payload() {
         let alpha = crate::rx_collection::test_support::test_collection_named("proto_alpha").await;
@@ -3315,6 +3652,150 @@ mod tests {
             Some("proto_beta")
         );
 
+        pool.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn revoked_inbound_peer_session_answers_and_closes_without_handshake() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("revoked_inbound").await;
+        let handler = MockHandler::new();
+        let validator: WebRTCPeerSessionValidator =
+            StdArc::new(|session_id| session_id != "revoked-browser-device");
+        let pool = replicate_web_rtc_multi_with_validators(
+            vec![StdArc::clone(&collection)],
+            StdArc::clone(&handler),
+            None,
+            Some(validator),
+            Some("revocation-room".to_string()),
+            Some(StdArc::<str>::from("native-session")),
+        )
+        .await
+        .expect("bring up pool with durable validator");
+
+        handler.inject_message(
+            "ephemeral-socket-peer",
+            ctox_protocol_frame_with_session(
+                "revoked-request",
+                "revoked_inbound",
+                Some("revoked-browser-device"),
+            ),
+        );
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if !handler.sent_responses().is_empty() && !handler.closed_peers.lock().is_empty() {
+                break;
+            }
+        }
+
+        let response = handler
+            .sent_responses()
+            .into_iter()
+            .find(|response| response.id == "revoked-request")
+            .expect("revocation response sent");
+        assert_eq!(response.result, Value::Null);
+        assert_eq!(response.error.as_deref(), Some("peer_revoked"));
+        assert_eq!(response.collection.as_deref(), Some("revoked_inbound"));
+        assert_eq!(
+            handler.closed_peers.lock().as_slice(),
+            &["ephemeral-socket-peer".to_string()]
+        );
+        assert_eq!(
+            handler.sent_responses().len(),
+            1,
+            "revoked request must not continue into the normal handshake response"
+        );
+        pool.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn missing_inbound_peer_session_is_rejected_when_validator_is_enabled() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("missing_session").await;
+        let handler = MockHandler::new();
+        let validator: WebRTCPeerSessionValidator = StdArc::new(|_| true);
+        let pool = replicate_web_rtc_multi_with_validators(
+            vec![StdArc::clone(&collection)],
+            StdArc::clone(&handler),
+            None,
+            Some(validator),
+            Some("revocation-room".to_string()),
+            Some(StdArc::<str>::from("native-session")),
+        )
+        .await
+        .expect("bring up pool with durable validator");
+
+        handler.inject_message(
+            "missing-session-peer",
+            ctox_protocol_frame_with_session("missing-request", "missing_session", None),
+        );
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if !handler.sent_responses().is_empty() && !handler.closed_peers.lock().is_empty() {
+                break;
+            }
+        }
+        let response = handler
+            .sent_responses()
+            .into_iter()
+            .find(|response| response.id == "missing-request")
+            .expect("missing session rejection sent");
+        assert_eq!(response.result, Value::Null);
+        assert_eq!(response.error.as_deref(), Some("peer_revoked"));
+        assert_eq!(
+            handler.closed_peers.lock().as_slice(),
+            &["missing-session-peer".to_string()]
+        );
+        pool.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn accepted_inbound_peer_session_completes_protocol_response() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("accepted_inbound").await;
+        let handler = MockHandler::new();
+        let validator: WebRTCPeerSessionValidator =
+            StdArc::new(|session_id| session_id == "accepted-browser-device");
+        let pool = replicate_web_rtc_multi_with_validators(
+            vec![StdArc::clone(&collection)],
+            StdArc::clone(&handler),
+            None,
+            Some(validator),
+            Some("revocation-room".to_string()),
+            Some(StdArc::<str>::from("native-session")),
+        )
+        .await
+        .expect("bring up pool with durable validator");
+
+        handler.inject_message(
+            "ephemeral-socket-peer",
+            ctox_protocol_frame_with_session(
+                "accepted-request",
+                "accepted_inbound",
+                Some("accepted-browser-device"),
+            ),
+        );
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if !handler.sent_responses().is_empty() {
+                break;
+            }
+        }
+
+        let response = handler
+            .sent_responses()
+            .into_iter()
+            .find(|response| response.id == "accepted-request")
+            .expect("normal protocol response sent");
+        assert!(response.error.is_none());
+        assert_eq!(
+            response
+                .result
+                .pointer("/peerSession/sessionId")
+                .and_then(Value::as_str),
+            Some("native-session")
+        );
+        assert!(handler.closed_peers.lock().is_empty());
         pool.cancel().await;
     }
 
@@ -3507,6 +3988,91 @@ mod tests {
             err.to_string().contains("no answer within"),
             "error should name the deadline: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn revoked_outbound_peer_session_fails_handshake_and_closes_peer() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("revoked_outbound").await;
+        let handler = MockHandler::new();
+        let validator: WebRTCPeerSessionValidator =
+            StdArc::new(|session_id| session_id != "revoked-browser-device");
+        let pool = replicate_web_rtc_multi_with_validators(
+            vec![StdArc::clone(&collection)],
+            StdArc::clone(&handler),
+            None,
+            Some(validator),
+            Some("revocation-room".to_string()),
+            Some(StdArc::<str>::from("native-session")),
+        )
+        .await
+        .expect("bring up pool with durable validator");
+        let mut errors = pool.error_subject.subscribe();
+        let peer = MockPeer("ephemeral-socket-peer".to_string());
+        handler.connect.next(peer.clone());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut answered_protocol = false;
+        while tokio::time::Instant::now() < deadline && !answered_protocol {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let requests: Vec<WebRTCMessage> = handler
+                .sent
+                .lock()
+                .iter()
+                .filter_map(|frame| match frame {
+                    WebRTCWireFrame::Message(message) => Some(message.clone()),
+                    _ => None,
+                })
+                .collect();
+            for request in requests {
+                if request.method != "ctoxProtocol" || answered_protocol {
+                    continue;
+                }
+                answered_protocol = true;
+                let mut remote_protocol = request.params.first().cloned().unwrap_or(Value::Null);
+                remote_protocol["peerSession"]["sessionId"] =
+                    Value::String("revoked-browser-device".to_string());
+                handler.response.next(PeerWithResponse {
+                    peer: peer.clone(),
+                    response: WebRTCResponse {
+                        id: request.id,
+                        result: remote_protocol,
+                        error: None,
+                        collection: None,
+                    },
+                });
+            }
+        }
+        assert!(
+            answered_protocol,
+            "native outbound ctoxProtocol request observed"
+        );
+
+        let error = tokio::time::timeout(Duration::from_secs(2), errors.next())
+            .await
+            .expect("revocation error surfaces")
+            .expect("error stream alive");
+        assert_eq!(error.code(), "RC_WEBRTC_PEER");
+        assert_eq!(
+            error.parameters().get("code").and_then(Value::as_str),
+            Some("peer_revoked")
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline && handler.closed_peers.lock().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            handler.closed_peers.lock().as_slice(),
+            &["ephemeral-socket-peer".to_string()]
+        );
+        assert!(
+            handler.sent.lock().iter().all(|frame| !matches!(
+                frame,
+                WebRTCWireFrame::Message(message) if message.method == "token"
+            )),
+            "rejected durable identity must stop before token handshake"
+        );
+        pool.cancel().await;
     }
 
     /// REGRESSION (52a1bf45): an empty/non-string `token` answer corrupts the
@@ -3727,5 +4293,29 @@ mod tests {
         assert_eq!(storage_touches.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(responses.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(pool.tasks.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn auxiliary_requests_do_not_wait_behind_saturated_replication_work() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("auxiliary-priority").await;
+        let handler = MockHandler::new();
+        let pool = RxWebRTCReplicationPool::new(collection, handler);
+        let ordinary_permits = Arc::clone(&pool.request_semaphore)
+            .acquire_many_owned(MAX_CONCURRENT_REQUEST_TASKS as u32)
+            .await
+            .unwrap();
+        let finished = StdArc::new(tokio::sync::Notify::new());
+        let finished_for_task = StdArc::clone(&finished);
+
+        pool.spawn_auxiliary_tracked(async move {
+            finished_for_task.notify_one();
+        });
+
+        tokio::time::timeout(Duration::from_millis(100), finished.notified())
+            .await
+            .expect("interactive auxiliary work must have a reserved execution lane");
+        drop(ordinary_permits);
+        pool.cancel().await;
     }
 }

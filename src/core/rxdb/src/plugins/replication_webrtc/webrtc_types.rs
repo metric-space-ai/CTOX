@@ -22,6 +22,16 @@ use crate::rx_error::RxError;
 use crate::rxjs_compat::RxStream;
 use crate::types::RxStorageDefaultCheckpoint;
 
+/// Internal routing marker for Browser live responses. It is never a database
+/// collection; the native send scheduler uses it to place interactive JPEG and
+/// input acknowledgements ahead of ordinary replication responses.
+pub const CTOX_BROWSER_LIVE_RESPONSE_COLLECTION: &str = "__ctox_browser_live__";
+/// Internal scheduler marker for pointer/keyboard acknowledgements. Input must
+/// be allowed to overtake a queued JPEG response and the one sync response the
+/// live-frame fairness rule normally inserts; otherwise a keystroke inherits
+/// multi-second collection-sync latency.
+pub const CTOX_BROWSER_INPUT_RESPONSE_COLLECTION: &str = "__ctox_browser_input__";
+
 // ref: rxdb/src/plugins/replication-webrtc/webrtc-types.ts:16
 pub type WebRTCReplicationCheckpoint = RxStorageDefaultCheckpoint;
 
@@ -114,6 +124,15 @@ pub trait WebRTCConnectionHandler: Send + Sync {
 
     async fn send(&self, peer: &Self::Peer, frame: WebRTCWireFrame) -> Result<(), RxError>;
 
+    async fn send_auxiliary(
+        &self,
+        peer: &Self::Peer,
+        _label: &str,
+        frame: WebRTCWireFrame,
+    ) -> Result<(), RxError> {
+        self.send(peer, frame).await
+    }
+
     async fn close(&self) -> Result<(), RxError>;
 
     /// Force-close ONE peer's transport (peer connection + data channel) so
@@ -154,10 +173,28 @@ pub trait WebRTCConnectionHandler: Send + Sync {
     /// per-collection authz gate below.
     fn set_peer_capability_token(&self, _peer: &Self::Peer, _token: String) {}
 
+    /// Capability token captured during the authenticated room handshake.
+    /// Auxiliary request handlers use the same identity boundary as collection
+    /// replication instead of accepting actor data supplied in request params.
+    fn peer_capability_token(&self, _peer: &Self::Peer) -> Option<String> {
+        None
+    }
+
     /// #12c: whether `peer` may replicate `collection`. Generic handlers default
     /// to true (no enforcement); the CTOX handler consults the role bound to the
     /// peer's captured capability token when authz is enabled.
     fn is_collection_authorized_for_peer(&self, _peer: &Self::Peer, _collection: &str) -> bool {
+        true
+    }
+
+    /// Optional server-authoritative gate for ordinary full-collection pulls.
+    /// Demand-query methods use their own bounded dispatcher and are not
+    /// affected. Generic handlers remain fail-open.
+    fn is_eager_collection_pull_authorized_for_peer(
+        &self,
+        _peer: &Self::Peer,
+        _collection: &str,
+    ) -> bool {
         true
     }
 
@@ -203,8 +240,13 @@ pub trait WebRTCConnectionHandler: Send + Sync {
     }
 }
 
-/// Peer admission predicate shared by WebRTC replication options.
+/// Signaling-peer admission predicate shared by WebRTC replication options.
 pub type WebRTCPeerValidator<P> = Arc<dyn Fn(&P) -> bool + Send + Sync>;
+
+/// Stable `ctoxProtocol.peerSession.sessionId` admission predicate. Unlike the
+/// signaling peer id, this identity survives socket reconnects and can back
+/// durable browser-device revocation.
+pub type WebRTCPeerSessionValidator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Per-peer document visibility predicate shared by replication and query fetch.
 pub type WebRTCDocumentFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;

@@ -243,17 +243,30 @@ assert.match(html, /data-browser-private/);
 assert.match(html, /data-browser-viewport/);
 assert.match(html, /data-browser-new-tab/);
 assert.match(html, /data-browser-go/);
+assert.doesNotMatch(html, />Los<\/button>/, 'the address action must stay a compact icon control');
+assert.match(html, /data-browser-sessions-toggle/);
+assert.match(css, /grid-template-columns:\s*minmax\(120px, 1fr\) 30px 34px/);
+assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions/);
+assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions-toggle[\s\S]*z-index:\s*21/);
 assert.match(html, /data-browser-upload/);
+assert.match(html, /data-browser-automation-overlay/);
+assert.match(html, /data-browser-automation-code/);
 assert.match(html, /data-browser-controller-acquire/);
 assert.match(html, /data-browser-controller-release/);
 assert.match(html, /data-browser-clipboard-copy/);
 assert.match(html, /data-browser-clipboard-paste/);
 assert.match(html, /data-browser-downloads/);
 assert.match(js, /waitsForRuntime \? 'terminal' : 'accepted'/);
+const dispatchBrowserCommandSource = js.match(/async function dispatchBrowserCommand[\s\S]*?\n\}/)?.[0] || '';
+assert.doesNotMatch(
+  dispatchBrowserCommandSource,
+  /startCommandSync\(ctx\)/,
+  'browser dispatch must not restart the command bridge already owned by the command bus',
+);
 assert.match(
-  js.match(/async function dispatchBrowserCommand[\s\S]*?\n\}/)?.[0] || '',
-  /await startCommandSync\(ctx\);[\s\S]*?dispatch\(command,[\s\S]*?waitsForRuntime \? 'terminal' : 'accepted'/,
-  'every browser command must await the replicated command collection before dispatch',
+  dispatchBrowserCommandSource,
+  /dispatch\(command,[\s\S]*?waitsForRuntime \? 'terminal' : 'accepted'/,
+  'every browser command must use the confirmed command-bus path',
 );
 assert.match(
   js.match(/async function dispatchBrowserCommand[\s\S]*?\n\}/)?.[0] || '',
@@ -264,7 +277,7 @@ assert.match(
   js.match(/async function refreshBrowserProjections[\s\S]*?\n\}/)?.[0] || '',
   /restartCollection\(collection, \{ forceDirect: true \}\)/,
 );
-assert.match(js, /state\.latestSession = requestedSessionPending\s*\? null/);
+assert.match(js, /state\.latestSession = requestedSessionPending\s*\? directOptimisticSession/);
 assert.match(js, /browserSessionError\(session\)/, 'the Browser surface renders the persisted runtime reason');
 assert.doesNotMatch(
   js,
@@ -274,6 +287,37 @@ assert.doesNotMatch(
 assert.match(js, /\[refs\.go, refs\.stop,/);
 assert.match(js, /templateUrl\.search = moduleUrl\.search/);
 assert.match(js, /templateUrl\.searchParams\.set\('fragment', STYLE_BUILD\)/);
+assert.match(js, /searchParams\.get\('v'\) \|\| 'browser-source'/);
+assert.match(js, /ctox\.browser\.live\.v1/);
+assert.match(js, /function renderAutomationOverlay[\s\S]*?capture_script[\s\S]*?Playwright-Scraper/);
+assert.match(css, /\.browser-automation-overlay[\s\S]*?position:\s*absolute/);
+assert.match(
+  js,
+  /refs\.address\?\.addEventListener\('keydown',[\s\S]*?event\.key !== 'Enter'[\s\S]*?submitAddress\(\)/,
+  'Enter in the compact address bar must navigate without relying on implicit form submission',
+);
+assert.equal(
+  (js.match(/collection: 'business_commands'/g) || []).length,
+  6,
+  'browser live list, start, navigation, controller, input and frame requests must use the already-warm command bridge',
+);
+assert.match(
+  js.match(/const flushInput = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '',
+  /op: 'input'[\s\S]*?events: pending[\s\S]*?timeoutMs: 3_000/,
+  'pointer and keyboard events must use the latency-sensitive input-only WebRTC lane',
+);
+assert.match(js, /dataset\.browserInputSentSeq = String\(seq\)/);
+assert.match(js, /dataset\.browserInputAckSeq = String\(acknowledgedSeq\)/);
+assert.match(
+  js.match(/const pump = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '',
+  /events: \[\]/,
+  'the JPEG polling lane must not hold browser input while waiting for a frame',
+);
+assert.match(
+  js.match(/async function requestBrowserControllerLease[\s\S]*?\n\}/)?.[0] || '',
+  /requestNative\('ctox\.browser\.live\.v1',[\s\S]*?op: operation/,
+  'controller acquire, renew and release must use the direct authenticated WebRTC control path',
+);
 assert.match(js, /fetch\(templateUrl, \{ cache: 'no-store' \}\)/);
 if (desktopWrapperJs) {
   assert.match(desktopWrapperJs, /browserModuleUrl\.search = new URL\(import\.meta\.url\)\.search/);
@@ -293,7 +337,12 @@ assert.doesNotMatch(
   'credential fill must never place secret values on the RxDB command bus',
 );
 assert.match(syncJs, /isReadOnlyProjectionCollection[\s\S]{0,500}browser_sessions/);
+assert.match(syncJs, /isDemandOnlyPullCollection[\s\S]{0,1800}browser_sessions/);
+assert.match(syncJs, /isDemandOnlyPullCollection[\s\S]{0,1800}browser_tabs/);
 assert.doesNotMatch(js, /upsertDoc\(browserCollection\(ctx, 'browser_sessions'\)/);
+assert.match(js, /selector:\s*\{ owner_user_id:\s*\{ \$in: actorIds \} \}/);
+assert.match(js, /op: 'session\.list'/);
+assert.match(js, /if \(!browserSessionIdFromArgs\(args\)\) return;/);
 assert.doesNotMatch(html, /data-browser-(?:seed|clear|reset)/);
 assert.match(js, /addEventListener\?\.\('focus', handleFocusRefresh\)/);
 assert.doesNotMatch(
@@ -344,6 +393,49 @@ assert.match(js, /__ctoxPaneGrammar/);
 // In-place selection flip: selecting a session marks rows in place and must
 // NOT rebuild the list (a rebuild resets the well scroll to the top).
 assert.match(js, /refs\.sessions\?\.addEventListener\('click'[\s\S]*?markActiveSession\(refs, sessionId\)/);
+assert.match(
+  js,
+  /state\.selectedSessionId = sessionId;[\s\S]*?state\.latestSession = selectedSession;[\s\S]*?state\.latestDirectFrame = null;/,
+  'selecting a session must synchronously bind the work surface before async refreshes',
+);
+assert.match(
+  js,
+  /if \(refreshInFlight\) \{[\s\S]*?refreshQueued = true;[\s\S]*?refreshInFlight = loadAndRender\(\)/,
+  'reactive collection updates must coalesce instead of exhausting query streams',
+);
+assert.match(
+  js,
+  /const replicatedInputs = state\.directLiveEnabled[\s\S]*?Promise\.resolve\(\[\]\)[\s\S]*?browser_input_events/,
+  'direct live must not read the replicated input collection',
+);
+assert.match(
+  js,
+  /const frames = !state\.directLiveEnabled && frameSessionId/,
+  'direct live must not read the replicated frame collection',
+);
+assert.doesNotMatch(
+  js,
+  /replicated live fallback|BROWSER_FALLBACK_SYNC_COLLECTIONS/,
+  'a direct-live outage must not re-enable persisted frame/input transport',
+);
+assert.match(js, /direct WebRTC live path reconnecting/);
+assert.match(js, /op: 'session\.start'/);
+assert.match(js, /direct session start unavailable; using durable command/);
+assert.doesNotMatch(
+  js.match(/for \(const collection of \[[\s\S]*?\]\) \{\n    const sub/)?.[0] || '',
+  /browser_frames|browser_input_events/,
+  'legacy live collections must not be subscribed during direct-live bootstrap',
+);
+assert.match(
+  js,
+  /const directSessionId = state\.latestSession\?\.id \|\| state\.requestedSessionId[\s\S]*?waitingForNewSession/,
+  'a newly requested session must be reachable directly before its projection arrives',
+);
+assert.match(
+  js,
+  /const directOptimisticSession[\s\S]*?requestedSessionPending[\s\S]*?directOptimisticSession/,
+  'an async collection refresh must not erase a working direct session while its projection is delayed',
+);
 assert.match(js, /function markActiveSession[\s\S]*?classList\.toggle\('is-selected'/);
 assert.doesNotMatch(
   js.match(/refs\.sessions\?\.addEventListener\('click'[\s\S]*?\}\);/)?.[0] || '',
@@ -634,6 +726,51 @@ function pointerEvent(overrides = {}) {
     preventDefault() {},
     ...overrides,
   };
+}
+
+// A 16:9 remote viewport inside a taller responsive canvas is letterboxed.
+// Pointer coordinates must be relative to the painted pixels, not to the CSS
+// box including its top and bottom margins.
+{
+  const canvas = createCanvasStub();
+  canvas.getBoundingClientRect = () => ({ left: 10, top: 20, width: 800, height: 600 });
+  assert.deepEqual(
+    hooks.canvasPoint(canvas, { clientX: 410, clientY: 95 }),
+    { x: 640, y: 0 },
+  );
+  assert.deepEqual(
+    hooks.canvasPoint(canvas, { clientX: 410, clientY: 320 }),
+    { x: 640, y: 360 },
+  );
+}
+
+{
+  const state = {
+    latestSession: { id: 'browser_session_new' },
+    requestedSessionId: '',
+    directNavigationEpoch: 4,
+  };
+  assert.equal(hooks.directResponseBelongsToSurface(state, 'browser_session_new', 4), true);
+  assert.equal(hooks.directResponseBelongsToSurface(state, 'browser_session_new', 3), false);
+  assert.equal(hooks.directResponseBelongsToSurface(state, 'browser_session_old', 4), false);
+}
+
+{
+  const state = {
+    latestSession: {
+      id: 'browser_session_new',
+      current_url: 'https://example.com/',
+      title: 'Example Domain',
+    },
+    latestTab: { title: 'Example Domain' },
+  };
+  hooks.applyDirectNavigationState(state, {
+    url: 'https://httpbingo.org/forms/post',
+    title: '',
+  });
+  assert.equal(state.latestSession.current_url, 'https://httpbingo.org/forms/post');
+  assert.equal(state.latestSession.title, 'httpbingo.org');
+  assert.equal(state.latestTab.title, 'httpbingo.org');
 }
 
 {
