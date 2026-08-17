@@ -49,7 +49,7 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | in Arbeit | Command-Stamp grün; 60-s-Catch-up knapp rot, 120-s-Folgefix committed | nein | isolierten Neubau, korrigierte Kurz- und Ein-Stunden-Probe abschließen |
+| Idle-CPU des Dienstes | in Arbeit | 60 s und 120 s messbar rot; 300-s-Folgefix committed | nein | isolierten Neubau, korrigierte Kurz- und Ein-Stunden-Probe abschließen |
 | OA-2 synthetische 300k-Baseline | teilweise | 304.515-Dokumente-Einzel-Smoke strukturell grün | entfällt | 30×30-Matrix und Latenzziel offen |
 | OA-1 bounded Demand-Sync | ja | 4 RPCs, 650 materialisierte Dokumente, kein Vollpull | nein | Latenz- und Löschungsabnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
@@ -448,7 +448,17 @@ Rollout-Zwischenstand vom 16.08.2026:
   die Idle-Ticks stiegen. Das Fenster enthielt neben zwei Recovery-Slices noch
   einmalige Warm-up-/Memory-Trim-Arbeit. Deshalb wird nicht erneut auf Basis
   eines kurzen Fensters gedrosselt: Die verbindliche warme Ein-Stunden-Probe
-  läuft auf demselben Binary und entscheidet über einen weiteren Eingriff.
+  wurde auf demselben Binary begonnen.
+- Auch der warme Trend blieb anschließend rot: Über 558 Sekunden stieg die
+  Prozess-CPU-Zeit um 33,31 Sekunden (5,97 %), während vier weitere
+  Business-Records-Slices liefen und der Command-Intake ausschließlich
+  Idle-Ticks mit null Rows meldete. Der Lauf wurde deshalb vorzeitig beendet,
+  statt weitere 45 Minuten einen bereits belegten roten Trend zu sammeln.
+- Commit `500f416c6` lässt nun fünf Minuten zwischen den weiterhin kleinen
+  25er-Slices. Damit bleiben etwa 7.200 historische Dokumente pro Tag als
+  endlicher Safety-Catch-up möglich und es entsteht rechnerisch wie gemessen
+  genügend Reserve für andere periodische Sicherheitsarbeit. Headroom-Test
+  `1/1` und Rustfmt sind grün; sauberer Archiv-Build und Messung folgen.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
@@ -725,6 +735,7 @@ Kein Commit darf:
 | `b1a605dac` | historische Business-Records-Aufholung auf eine kleine Seite pro Ruhefenster begrenzen |
 | `e3db706fc` | Idle-Probe auf den exakten CPU-Samplezeitraum korrigieren |
 | `39dcbb031` | nach gemessenem 5,36-%-Rest das Recovery-Ruhefenster auf 120 Sekunden vergrößern |
+| `500f416c6` | nach weiterem warmen 5,97-%-Trend das Recovery-Ruhefenster auf 300 Sekunden vergrößern |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -744,7 +755,7 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den begrenzten Business-Records-Catch-up `39dcbb031` aus dem sauberen Archiv
+2. Den begrenzten Business-Records-Catch-up `500f416c6` aus dem sauberen Archiv
    als Release bauen und ausschließlich im isolierten Test-Root gegen die
    repräsentativen Datenbanken kurz nachmessen.
 3. Bei bestandenem Kurztest die einstündige Idle-Nachhermessung im isolierten

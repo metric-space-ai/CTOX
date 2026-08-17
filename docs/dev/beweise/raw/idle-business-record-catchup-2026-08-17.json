@@ -104,6 +104,27 @@
       "cpu_gate_under_five_percent": "failed",
       "interpretation": "the five-minute window still contains warm-up and memory-trim work; the required one-hour warm measurement decides whether another throttle is justified"
     },
-    "one_hour_after_probe": "in_progress"
+    "one_hour_after_probe": {
+      "status": "aborted_after_558_second_warm_trend",
+      "process_cpu_seconds": 33.31,
+      "sample_elapsed_seconds": 558,
+      "process_cpu_duration_percent": 5.96953405,
+      "business_record_slices": 4,
+      "command_rows": 0,
+      "decision": "increase the partial recovery interval before spending the remaining 45 minutes on a predictably red run"
+    }
+  },
+  "final_candidate_change": {
+    "commit": "500f416c6",
+    "partial_sync_interval_seconds_before": 120,
+    "partial_sync_interval_seconds_after": 300,
+    "sync_limit": 25,
+    "page_size": 25,
+    "estimated_recovery_documents_per_day": 7200,
+    "targeted_headroom_test": "passed_1_of_1",
+    "rustfmt": "passed",
+    "isolated_release_build": "pending",
+    "corrected_short_after_probe": "pending",
+    "one_hour_after_probe": "pending"
   }
 }
