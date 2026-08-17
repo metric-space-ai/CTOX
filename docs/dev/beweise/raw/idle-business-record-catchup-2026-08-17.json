@@ -1,0 +1,57 @@
+{
+  "schema": "ctox.performance.idle_business_record_catchup.v1",
+  "observed_date": "2026-08-17",
+  "host_timezone": "Europe/Berlin",
+  "isolation": {
+    "source_commit": "8e3edc015",
+    "source_snapshot": "/Volumes/tmp/ctox-idle-8e3edc015.Mzm9bJFN",
+    "binary_sha256": "ce6ab0b5873136a57ba8b99fee893d48dafc53f6bc00394958d0798b55870eec",
+    "service_root": "/Volumes/tmp/ctox-idle-b41cc74ca-isolated.voTfBX/root",
+    "service_pid": 31425,
+    "service_stopped_after_profile": true,
+    "productive_local_service_modified": false,
+    "productive_launchctl_modified": false,
+    "business_os_rxdb_bytes": 2119155712
+  },
+  "command_intake": {
+    "retry_candidates_stable_zero": true,
+    "command_revisions_unchanged": true,
+    "intake_failures_stable_zero": true,
+    "idle_ticks_advanced": true,
+    "business_command_stamp_ms_range": [32, 244]
+  },
+  "baseline_probe": {
+    "requested_duration_seconds": 30,
+    "actual_elapsed_seconds": 82.814,
+    "sample_count": 31,
+    "sampled_cpu_average_percent": 77.28,
+    "sampled_cpu_p50_percent": 77.4,
+    "sampled_cpu_p95_percent": 95.2,
+    "sampled_cpu_max_percent": 96.0,
+    "process_cpu_seconds": 22.98,
+    "process_cpu_duration_percent": 27.7489
+  },
+  "dominant_work": {
+    "stack": "sync_business_record_projections_slice_with_database -> sqlite3_step",
+    "first_slice_changed_documents": 388,
+    "first_slice_elapsed_ms": 224482,
+    "second_slice_changed_documents": 2000,
+    "second_slice_elapsed_ms": 201537,
+    "cursor_version": 3,
+    "next_collection_index_after_probe": 21,
+    "interpretation": "finite legacy catch-up, but each old 2000-document slice monopolizes SQLite long enough to keep the daemon hot and delay query-fetch"
+  },
+  "candidate_change": {
+    "commit": "b1a605dac",
+    "partial_sync_interval_seconds_before": 30,
+    "partial_sync_interval_seconds_after": 60,
+    "sync_limit_before": 2000,
+    "sync_limit_after": 25,
+    "page_size": 25,
+    "targeted_headroom_test": "passed_1_of_1",
+    "rustfmt": "passed",
+    "isolated_release_build": "in_progress",
+    "short_after_probe": "pending",
+    "one_hour_after_probe": "pending"
+  }
+}

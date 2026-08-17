@@ -1,6 +1,6 @@
 # Gesamtplan: Refactoring und Sync-Performance
 
-Stand: 16.08.2026
+Stand: 17.08.2026
 
 Arbeitsbranch: `main`
 
@@ -49,9 +49,9 @@ nachgewiesen. Messdetails und Rohdaten liegen unter `docs/dev/beweise/`.
 | Baseline, Beweise und Integrationshygiene | ja | ja | entfällt | erledigt |
 | Größenwächter und `service.rs`-Moves | ja | ja | entfällt | erledigt |
 | OA-6 endlicher Command-Intake | ja | ja | nein | Betriebsmessung offen |
-| Idle-CPU des Dienstes | in Arbeit | sechster Reader-Fix gebaut; siebter indexgerechter Command-Stamp-Fix in Prüfung | nein | Kurz- und Ein-Stunden-Probe in isolierter/remote Umgebung wiederholen |
-| OA-2 synthetische 300k-Baseline | teilweise | teilweise | entfällt | Browsermatrix offen |
-| OA-1 bounded Demand-Sync | ja | gezielte Smokes ja | nein | Scale-Abnahme offen |
+| Idle-CPU des Dienstes | in Arbeit | Command-Stamp grün; begrenzte Business-Records-Aufholung committed | nein | isolierten Neubau, Kurz- und Ein-Stunden-Probe abschließen |
+| OA-2 synthetische 300k-Baseline | teilweise | 304.515-Dokumente-Einzel-Smoke strukturell grün | entfällt | 30×30-Matrix und Latenzziel offen |
+| OA-1 bounded Demand-Sync | ja | 4 RPCs, 650 materialisierte Dokumente, kein Vollpull | nein | Latenz- und Löschungsabnahme offen |
 | OA-4 Command-Roundtrip | teilweise | Messung vorhanden | nein | Zielwert verfehlt |
 | `store.rs`-Refactoring | ja | ja | entfällt | erledigt |
 | `app.js`-Refactoring | nein | nein | entfällt | wartet auf saubere Arbeitsregion |
@@ -400,10 +400,31 @@ Rollout-Zwischenstand vom 16.08.2026:
   kanonischen Altprädikat. Commit `e42e3386f` enthält ausschließlich diese
   Änderung und Tests. Beide neuen Tests sind `2/2` grün; der bestehende
   vollständige Command-Lifecycle-Test ist zusätzlich `1/1` grün. Der
-  isolierte Snapshot-Neuaufbau wurde während der Abhängigkeitskompilierung
-  kontrolliert beendet, um den gemeinsam genutzten Cargo-Lock freizugeben.
-  Reiner Archiv-/Release-Build sowie Kurz- und Ein-Stunden-Probe sind noch
-  offen.
+  erste isolierte Snapshot-Neuaufbau wurde während der
+  Abhängigkeitskompilierung kontrolliert beendet, um den gemeinsam genutzten
+  Cargo-Lock freizugeben.
+- Der anschließende reine Archiv-Build von `8e3edc015` ist nach 56:03 Minuten
+  erfolgreich abgeschlossen. Das ausschließlich im isolierten Root gestartete
+  arm64-Release-Binary hat SHA-256
+  `ce6ab0b5873136a57ba8b99fee893d48dafc53f6bc00394958d0798b55870eec`.
+  Der neue Command-Stamp blieb mit 32 bis 244 ms und null Kandidaten ruhig;
+  Command-Revisionen und offene Intake-Fehler blieben unverändert, während die
+  Idle-Ticks stiegen. Damit ist OA-6 in dieser Messung korrekt und endlich.
+- Das CPU-Tor blieb dennoch rot: Die 30-Sekunden-Probe benötigte unter der
+  laufenden Datenbanklast real 82,814 Sekunden, verbrauchte 22,98 CPU-Sekunden
+  und maß p50 77,4 %, p95 95,2 %. Ein Stack-Sample ordnete die Last eindeutig
+  der endlichen historischen Business-Records-Aufholung zu. Deren erste
+  Slices verarbeiteten 388 Dokumente in 224,482 Sekunden und anschließend
+  2.000 Dokumente in 201,537 Sekunden. Der Cursor rückte dabei auf Collection
+  21 weiter; es ist kein unendlicher Wiederholungspfad, aber die alten großen
+  Slices halten SQLite nahezu kontinuierlich besetzt und erklären auch den
+  langsamen Query-Fetch-Start.
+- Commit `b1a605dac` begrenzt deshalb jeden unvollständigen Recovery-Tick auf
+  genau eine 25-Dokumente-Seite und lässt zwischen solchen Slices mindestens
+  60 Sekunden Ruhe. Der normale Command-/Browserpfad und die sofortige
+  Projektion bleiben unverändert. Der neue Headroom-Guard ist `1/1` grün und
+  `cargo fmt --all -- --check` ist grün. Der reine Archiv-Release-Build und die
+  Nachhermessung laufen; erst deren Messwert entscheidet über das CPU-Tor.
 - Die davon getrennte Remote-Abnahme auf `thesen.ctox.dev` bestätigte, dass TID
   `1000424` nicht der hier belegte periodische Acht-Sekunden-Pfad war. Exaktes
   Host-Stackprofil war durch `perf_event_paranoid=4`, `ptrace_scope=1` und
@@ -466,6 +487,37 @@ Gemessene native Baseline:
 Der reale Einzel-Smoke besteht das strukturelle Gate ohne Vollpull mit vier
 Query-RPCs und höchstens 800 materialisierten Sellify-Dokumenten. Die kalte
 Latenz liegt noch über fünf Sekunden und ist deshalb noch kein Release-Gate.
+
+Browser-Nachmessung vom 17.08.2026:
+
+- Der erste reale Matrixversuch provisionierte alle 304.515 Sellify-Dokumente,
+  brach aber korrekt mit `QUERY_NOT_SUPPORTED` ab. Ursache war keine fehlende
+  Tabelle, sondern die fail-closed native V1.5-Registry: Der synthetische
+  Smoke hatte die vier Sellify-Schemas nur im Browser, nicht als lokales
+  Runtime-Modul vor dem Native-Peer-Start registriert.
+- Der Smoke materialisiert deshalb nun vor Peer-Start ein isoliertes
+  `sellify-scale-smoke`-Modul mit denselben vier Schemas und
+  `syncProfile: "demand-only"`. Der statische Regressionstest und der
+  Benchmark-Smoke sind grün. Der Native-Peer registriert danach 182 statt 178
+  Collections; `QUERY_NOT_SUPPORTED` tritt nicht mehr auf.
+- Der erste vollständige reale Einzel-Smoke ist strukturell grün: vier
+  Query-RPCs/-Responses, 650 materialisierte Dokumente, 50 sichtbare Zeilen,
+  `localCoverage="windowed"`, `queryReady=true`, kein Vollpull und rund
+  2,83 MB IndexedDB-Nutzung nach den vier Fenstern.
+- Das Latenztor bleibt deutlich rot: 19.653 ms bis benutzbar, davon 13.929 ms
+  für das erste Activities-Fenster. Dieselbe indexgestützte SQLite-Abfrage
+  benötigt außerhalb des laufenden Dienstes nur 0,06 s (nach `ANALYZE`
+  0,02 s). Der belegte Restengpass ist damit Startup-/Write-Lock-Konkurrenz im
+  laufenden Native-Peer, nicht ein fehlender Sellify-Index. Eine 30×30-Matrix
+  wäre vor Beseitigung dieses Engpasses nur eine teure Wiederholung des roten
+  Befunds und bleibt deshalb offen.
+- Die dauerhaft reproduzierbare Registrierung und die zugehörigen statischen
+  Guards sind als Commit `dfccf3ede` getrennt committed. Rohdaten des realen
+  Einzel-Smokes liegen unter
+  `beweise/raw/sellify-scale-browser-single-2026-08-17.json`.
+- Die vollständige RxDB-JavaScript-Suite ist auf diesem Stand mit 101 grünen,
+  null roten und zwei mangels gebautem Wire-Daemon ausdrücklich übersprungenen
+  Cross-Process-Smokes abgeschlossen.
 
 Noch offene Browserabnahme, jeweils 30 Läufe kalt und warm:
 
@@ -645,6 +697,8 @@ Kein Commit darf:
 | `fa100e322` | Command-Completion der Recovery dauerhaft persistieren und projizieren |
 | `8f43dcc58` | indexuntauglichen Command-Stamp-Hotpath und Vorhermessung dokumentieren |
 | `e42e3386f` | Command-Stamp über vier indexgerechte Lifecycle-Zweige aggregieren |
+| `dfccf3ede` | isolierte Sellify-Scale-Schemas vor dem nativen Peer registrieren und den echten Browser-Smoke härten |
+| `b1a605dac` | historische Business-Records-Aufholung auf eine kleine Seite pro Ruhefenster begrenzen |
 
 ## Bekannte rote Baseline und nicht übernommene Paralleländerungen
 
@@ -664,13 +718,15 @@ Kein Commit darf:
 
 1. Die lokale Betriebsgrenze respektieren: keine weitere Manipulation des
    produktiven LaunchAgents; Messungen nur remote oder im isolierten Test-Root.
-2. Den bereits gezielt getesteten Multi-DB-Reader-Fix aus dem vorbereiteten
-   isolierten `fa100e322`-Snapshot als Release bauen und zunächst im isolierten
-   Test-Root gegen die repräsentativen Datenbanken nachmessen.
-3. Danach Kurzprobe und einstündige Idle-Nachhermessung remote oder im
-   isolierten Test-Root durchführen und als Rohdaten versionieren.
-4. Commit→Browser-/Query-Fetch-Engpass beheben und Command-p50 erneut messen.
-5. Echte 30-Lauf-Cold-/Warm-Browsermatrix auf dem synthetischen Scale-Store.
+2. Den begrenzten Business-Records-Catch-up `b1a605dac` aus dem sauberen Archiv
+   als Release bauen und ausschließlich im isolierten Test-Root gegen die
+   repräsentativen Datenbanken kurz nachmessen.
+3. Bei bestandenem Kurztest die einstündige Idle-Nachhermessung im isolierten
+   Test-Root durchführen und als Rohdaten versionieren.
+4. Mit dem entlasteten Native-Peer Sellify-Einzel-Smoke und Command-p50 erneut
+   messen; nur den danach noch dominierenden Abschnitt weiter optimieren.
+5. Erst nach bestandenem Einzel-Smoke eine echte 30-Lauf-Cold-/Warm-
+   Browsermatrix auf dem synthetischen Scale-Store ausführen.
 6. Reale Handshake-/Boot-, Reconnect-, Peerwechsel- und Multi-Tab-Abnahme.
 7. Nach Freigabe der Arbeitsregion `app.js` move-only zerlegen.
 8. Verbleibende fremde Größenwächter jeweils in ihrer eigenen Arbeitsspur

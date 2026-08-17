@@ -1,0 +1,49 @@
+{
+  "schema": "ctox.business_os_sellify_scale_browser.v1",
+  "observed_date": "2026-08-17",
+  "synthetic": true,
+  "source_commit": "dfccf3ede",
+  "fixture_root": "/Volumes/tmp/ctox-sellify-8e3edc015.7lM7nEj5",
+  "populations": {
+    "sellify_activities": 139804,
+    "sellify_campaigns": 86551,
+    "sellify_people": 60640,
+    "sellify_companies": 17520,
+    "business_commands": 5964,
+    "desktop_file_chunks": 3690
+  },
+  "sellify_server_documents": 304515,
+  "total_documents": 314169,
+  "native_registered_collections": 182,
+  "result": {
+    "usable_ms": 19653,
+    "first_query_ms": 13929,
+    "visible_rows": 50,
+    "query_requests": 4,
+    "query_responses": 4,
+    "materialized_sellify_documents": 650,
+    "indexed_db_bytes_approx": 2830000,
+    "full_pull_before_usable": false,
+    "local_coverage": "windowed",
+    "query_ready": true,
+    "structural_gate": "passed",
+    "cold_latency_gate_under_5000_ms": "failed"
+  },
+  "diagnosis": {
+    "initial_failure": "QUERY_NOT_SUPPORTED",
+    "initial_failure_cause": "the fail-closed native V1.5 registry did not know the synthetic browser-only Sellify schemas",
+    "fixture_change": "register an isolated demand-only local runtime module before native peer startup",
+    "equivalent_sql_query_ms": 60,
+    "equivalent_sql_query_after_analyze_ms": 20,
+    "remaining_bottleneck": "native startup and SQLite writer contention, not the Sellify query index"
+  },
+  "verification": {
+    "javascript_syntax": "passed",
+    "static_scale_smoke": "passed",
+    "rxdb_javascript_suite": "passed_101_failed_0_skipped_2_wire_daemon_not_built",
+    "real_browser_single_run": "passed_structurally",
+    "cold_runs": 1,
+    "warm_runs": 0,
+    "thirty_by_thirty_matrix": "deferred_until_single_run_latency_is_fixed"
+  }
+}
