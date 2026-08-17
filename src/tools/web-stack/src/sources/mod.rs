@@ -688,10 +688,7 @@ mod tests {
         let linkedin = find("linkedin.com").expect("linkedin source");
         let recipe = linkedin.browser_recipe().expect("linkedin browser recipe");
         assert_eq!(recipe.source_id, "linkedin.com");
-        assert_eq!(
-            recipe.required_secret_name,
-            Some("LINKEDIN_SALES_NAV_TOKEN")
-        );
+        assert_eq!(recipe.required_secret_name, Some("LINKEDIN_BROWSER_LOGIN"));
         assert!(recipe.allowed_domains.iter().any(|d| d == "linkedin.com"));
         assert!(recipe
             .allowed_domains

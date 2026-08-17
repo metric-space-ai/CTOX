@@ -2137,7 +2137,7 @@ mod tests {
         assert_eq!(linkedin.get("stream").and_then(Value::as_str), Some("rxdb"));
         assert_eq!(
             linkedin.get("required_secret_name").and_then(Value::as_str),
-            Some("LINKEDIN_SALES_NAV_TOKEN")
+            Some("LINKEDIN_BROWSER_LOGIN")
         );
         assert_eq!(
             linkedin
@@ -2185,7 +2185,7 @@ mod tests {
                 "browser_assist": {
                     "stream": "rxdb",
                     "target_url": "https://www.linkedin.com/login",
-                    "required_secret_name": "LINKEDIN_SALES_NAV_TOKEN",
+                    "required_secret_name": "LINKEDIN_BROWSER_LOGIN",
                     "credential_selector": "input[name=\"session_password\"]",
                     "capture_script": "linkedin.profile_capture.v1",
                     "secret_value_in_payload": false,
@@ -2202,7 +2202,7 @@ mod tests {
         );
         let serialized = serde_json::to_string(&tasks).unwrap();
         assert!(!serialized.contains("secret_value\":\""));
-        assert!(serialized.contains("LINKEDIN_SALES_NAV_TOKEN"));
+        assert!(serialized.contains("LINKEDIN_BROWSER_LOGIN"));
     }
 
     #[test]

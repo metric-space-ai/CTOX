@@ -34,6 +34,9 @@
 //! Programm-Scope). Der Token liegt im SQLite-Runtime-Store unter
 //! `LINKEDIN_SALES_NAV_TOKEN` und wird über
 //! [`runtime_config::get`](crate::runtime_config::get) gelesen.
+//! Der interaktive Browser-Assist verwendet davon getrennt
+//! `LINKEDIN_BROWSER_LOGIN` (Benutzername/Passwort); ein API-Bearer-Token darf
+//! nie als Browser-Passwort behandelt werden.
 //!
 //! ## Extrahierte Felder
 //!
@@ -58,7 +61,8 @@ use crate::runtime_config;
 
 const API_BASE: &str = "https://api.linkedin.com/v2";
 const PROFILE_BASE: &str = "https://www.linkedin.com/in";
-const SECRET_NAME: &str = "LINKEDIN_SALES_NAV_TOKEN";
+const API_SECRET_NAME: &str = "LINKEDIN_SALES_NAV_TOKEN";
+const BROWSER_SECRET_NAME: &str = "LINKEDIN_BROWSER_LOGIN";
 const LOGIN_URL: &str = "https://www.linkedin.com/login";
 const VERIFY_SELECTOR: &str =
     "a[href*=\"/in/\"], input[placeholder*=\"Search\"], [data-control-name=\"identity_welcome_message\"]";
@@ -99,7 +103,7 @@ impl SourceModule for LinkedIn {
     }
 
     fn requires_credential(&self) -> Option<&'static str> {
-        Some(SECRET_NAME)
+        Some(API_SECRET_NAME)
     }
 
     fn browser_recipe(&self) -> Option<BrowserSourceRecipe> {
@@ -111,7 +115,7 @@ impl SourceModule for LinkedIn {
                 "www.linkedin.com".to_string(),
                 "api.linkedin.com".to_string(),
             ],
-            required_secret_name: Some(SECRET_NAME),
+            required_secret_name: Some(BROWSER_SECRET_NAME),
             verify_selector: Some(VERIFY_SELECTOR),
             credential_selector: Some(CREDENTIAL_SELECTOR),
             capture_script: Some(CAPTURE_SCRIPT),
@@ -141,11 +145,11 @@ impl SourceModule for LinkedIn {
             return Some(Err(SourceError::NoMatch));
         }
 
-        let token = match runtime_config::get(ctx.root, SECRET_NAME) {
+        let token = match runtime_config::get(ctx.root, API_SECRET_NAME) {
             Some(t) => t,
             None => {
                 return Some(Err(SourceError::CredentialMissing {
-                    secret_name: SECRET_NAME,
+                    secret_name: API_SECRET_NAME,
                 }));
             }
         };
@@ -536,6 +540,11 @@ mod tests {
         assert!(matches!(m.tier(), Tier::C));
         assert_eq!(m.countries(), &[Country::De, Country::At, Country::Ch]);
         assert_eq!(m.requires_credential(), Some("LINKEDIN_SALES_NAV_TOKEN"));
+        assert_eq!(
+            m.browser_recipe()
+                .and_then(|recipe| recipe.required_secret_name),
+            Some("LINKEDIN_BROWSER_LOGIN")
+        );
         assert!(m
             .authoritative_for()
             .iter()

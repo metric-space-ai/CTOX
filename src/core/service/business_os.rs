@@ -3190,9 +3190,11 @@ pub(crate) fn authenticated_person_research_capture_tasks(
         .flatten()
     {
         let Some(source_id) = task.get("source_id").and_then(serde_json::Value::as_str) else {
-            tasks.push(task.clone());
             continue;
         };
+        if !web_stack_authenticated_source_capture_supported(source_id) {
+            continue;
+        }
         if sources.insert(source_id.to_ascii_lowercase()) {
             tasks.push(task.clone());
         }
@@ -4407,16 +4409,33 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(source_module);
+    let source_slug = rxdb_id_slug(source_id);
+    // Authentication state belongs to a user/source pair, not to one research
+    // command. A task-scoped session id left every completed capture alive and
+    // created a fresh Chromium process for the next company, exhausting the
+    // per-user browser budget after three leads. Keep the command id task-
+    // scoped for traceability while reusing one live browser/profile per
+    // source and owner.
+    let session_suffix = format!("{}_{}", source_slug, rxdb_id_slug(owner_user_id));
+    let generated_session_id = format!("browser_session_web_stack_auth_{session_suffix}");
     if let Some(existing) = crate::business_os::store::reusable_web_stack_auth_assist_request(
         root,
         source_id,
         secret_name,
         owner_user_id,
     )? {
-        return Ok(existing);
+        // Do not perpetuate pre-fix task-scoped sessions. After deployment the
+        // daemon starts the stable source/user session and reuses it for every
+        // following company.
+        if existing
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(generated_session_id.as_str())
+        {
+            return Ok(existing);
+        }
     }
     let now = now_ms();
-    let source_slug = rxdb_id_slug(source_id);
     let dedupe_key = format!(
         "{}:{}",
         source_id,
@@ -4431,12 +4450,6 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
     } else {
         format!("web_stack_auth_assist_harness_{}_{}", now, Uuid::new_v4())
     };
-    let session_suffix = if requesting_task_id.trim().is_empty() {
-        source_slug.clone()
-    } else {
-        format!("{}_{}", source_slug, rxdb_id_slug(requesting_task_id))
-    };
-    let generated_session_id = format!("browser_session_web_stack_auth_{session_suffix}");
     let session_id = preferred_auth_assist
         .and_then(|assist| assist.get("session_id"))
         .and_then(serde_json::Value::as_str)
@@ -6244,6 +6257,13 @@ mod tests {
 
         assert_eq!(first.get("command_id"), second.get("command_id"));
         assert_eq!(first.get("task_id"), second.get("task_id"));
+        assert_eq!(first.get("session_id"), second.get("session_id"));
+        assert!(first
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|session_id| {
+                session_id.contains("leadfeeder-com_user-a") && !session_id.contains("request-one")
+            }));
         assert_eq!(
             second
                 .get("owner_user_id")
@@ -6277,6 +6297,7 @@ mod tests {
             true,
         )?;
         assert_ne!(first.get("command_id"), other_owner.get("command_id"));
+        assert_ne!(first.get("session_id"), other_owner.get("session_id"));
         assert_eq!(
             other_owner
                 .get("owner_user_id")
@@ -6831,6 +6852,26 @@ mod tests {
 
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["reason"], "blocked");
+    }
+
+    #[test]
+    fn authenticated_capture_does_not_execute_unsupported_browser_assists() {
+        let payload = serde_json::json!({
+            "browser_assist_tasks": [{
+                "source_id": "handelsregister.de",
+                "target_fields": ["firma_name"],
+                "reason": "blocked"
+            }, {
+                "source_id": "xing.com",
+                "target_fields": ["person_xing"],
+                "reason": "blocked"
+            }]
+        });
+
+        let tasks = authenticated_person_research_capture_tasks(&payload);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["source_id"], "xing.com");
     }
 
     #[test]

@@ -70,6 +70,7 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
                         &command,
                         "failed",
                         Some(message.as_str()),
+                        None,
                     ),
                 );
             }
@@ -78,7 +79,7 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
     }
     log_lead_projection_error(
         command.id.as_deref().unwrap_or_default(),
-        project_thesen_outbound_lead_state(root, &command, "running", None),
+        project_thesen_outbound_lead_state(root, &command, "running", None, None),
     );
     Ok(running)
 }
@@ -106,7 +107,13 @@ pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
         };
         log_lead_projection_error(
             command_id,
-            project_thesen_outbound_lead_state(root, &candidate.command, lead_status, lead_error),
+            project_thesen_outbound_lead_state(
+                root,
+                &candidate.command,
+                lead_status,
+                lead_error,
+                (candidate.terminal_status == "completed").then_some(&candidate.result),
+            ),
         );
         recovered += 1;
     }
@@ -162,19 +169,23 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
             let _active_guard = active_guard;
             let result =
                 panic::catch_unwind(AssertUnwindSafe(|| execute(&root, &worker_command.payload)));
-            let (persisted, lead_status, lead_error) = match result {
-                Ok(Ok(outcome)) => (
-                    store::write_rxdb_control_command_outcome(
-                        &root,
-                        &worker_command,
-                        "completed",
+            let (persisted, lead_status, lead_error, lead_result) = match result {
+                Ok(Ok(outcome)) => {
+                    let lead_result = outcome.clone();
+                    (
+                        store::write_rxdb_control_command_outcome(
+                            &root,
+                            &worker_command,
+                            "completed",
+                            None,
+                            Some("completed"),
+                            outcome,
+                        ),
+                        "needs_review",
                         None,
-                        Some("completed"),
-                        outcome,
-                    ),
-                    "needs_review",
-                    None,
-                ),
+                        Some(lead_result),
+                    )
+                }
                 Ok(Err(error)) => {
                     let message = error.to_string();
                     (
@@ -186,6 +197,7 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
                         ),
                         "failed",
                         Some(message),
+                        None,
                     )
                 }
                 Err(_) => {
@@ -199,6 +211,7 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
                         ),
                         "failed",
                         Some(message),
+                        None,
                     )
                 }
             };
@@ -214,6 +227,7 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
                         &worker_command,
                         lead_status,
                         lead_error.as_deref(),
+                        lead_result.as_ref(),
                     ),
                 );
             }
@@ -229,26 +243,401 @@ fn project_thesen_outbound_lead_state(
     command: &BusinessCommand,
     research_status: &str,
     error: Option<&str>,
+    result: Option<&Value>,
 ) -> anyhow::Result<()> {
     let Some(record_id) = thesen_outbound_writeback_record_id(command) else {
         return Ok(());
     };
     let now = now_ms();
     let command_id = command.id.as_deref().unwrap_or_default();
-    let lead_payload = thesen_outbound_lead_state_patch(command_id, research_status, error, now);
+    let mut lead_document =
+        thesen_outbound_lead_state_document(record_id, command_id, research_status, error, now);
+    if let Some(result) = result {
+        let existing =
+            store::load_rxdb_collection_record(root, "thesen_outbound_leads", record_id)?
+                .unwrap_or_else(|| serde_json::json!({ "id": record_id }));
+        let outcome_patch = thesen_outbound_research_outcome_patch(&existing, result, now);
+        merge_json_object_values(&mut lead_document, &outcome_patch);
+    }
     store::upsert_rxdb_collection_record(
         root,
         "thesen_outbound_leads",
         record_id,
         now,
-        serde_json::json!({
-            "id": record_id,
-            "research_status": research_status,
-            "command_id": command_id,
-            "task_id": "",
-            "payload": lead_payload,
-        }),
+        lead_document,
     )
+}
+
+fn thesen_outbound_lead_state_document(
+    record_id: &str,
+    command_id: &str,
+    research_status: &str,
+    error: Option<&str>,
+    now: i64,
+) -> Value {
+    let mut document = serde_json::json!({
+        "id": record_id,
+        "research_status": research_status,
+        "command_id": command_id,
+        "task_id": "",
+        "payload": thesen_outbound_lead_state_patch(command_id, research_status, error, now),
+    });
+    if research_status != "running" {
+        document["research_error"] = error
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null);
+        document["research_updated_at_ms"] = Value::Number(now.into());
+    }
+    document
+}
+
+fn thesen_outbound_research_outcome_patch(
+    existing: &Value,
+    command_result: &Value,
+    now: i64,
+) -> Value {
+    let outcome = command_result
+        .get("result")
+        .filter(|value| value.is_object())
+        .unwrap_or(command_result);
+    let mut data = existing
+        .get("data")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut contacts = existing
+        .get("contacts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut contact = contacts
+        .first()
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut evidence = existing
+        .get("evidence")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut researched_field_keys = Vec::new();
+
+    for (field_key, field) in outcome
+        .get("fields")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let Some(value) = field
+            .get("value")
+            .filter(|value| research_scalar_is_populated(value))
+        else {
+            continue;
+        };
+        researched_field_keys.push(field_key.clone());
+        if field_key.starts_with("person_") {
+            contact[field_key] = value.clone();
+        } else {
+            data[field_key] = value.clone();
+        }
+        for candidate in field
+            .get("candidates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let source_id = candidate
+                .get("source_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let source_url = candidate
+                .get("source_url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if source_id.trim().is_empty() && source_url.trim().is_empty() {
+                continue;
+            }
+            evidence.push(serde_json::json!({
+                "field_key": field_key,
+                "value": candidate.get("value").cloned().unwrap_or(Value::Null),
+                "confidence": candidate.get("confidence").cloned().unwrap_or(Value::Null),
+                "source_id": source_id,
+                "source_url": source_url,
+                "tier": candidate.get("tier").cloned().unwrap_or(Value::Null),
+                "via": candidate.get("via").cloned().unwrap_or(Value::Null),
+                "label": if source_id.trim().is_empty() { source_url } else { source_id },
+            }));
+        }
+    }
+
+    evidence = deduplicate_research_evidence(evidence);
+    if let Some(normalized) = normalize_researched_contact(contact) {
+        let normalized = with_stable_contact_id(
+            existing.get("id").and_then(Value::as_str).unwrap_or("lead"),
+            normalized,
+            0,
+        );
+        if contacts.is_empty() {
+            contacts.push(normalized);
+        } else {
+            contacts[0] = normalized;
+        }
+    }
+    let contact_ids = contacts
+        .iter()
+        .filter_map(|contact| contact.get("id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let selected_contact_ids = existing
+        .get("selected_contact_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| contact_ids.contains(id))
+        .map(|id| Value::String(id.to_string()))
+        .collect::<Vec<_>>();
+    let unverified_field_keys = researched_field_keys
+        .iter()
+        .filter(|field_key| independent_research_evidence_count(&evidence, field_key) < 2)
+        .cloned()
+        .collect::<Vec<_>>();
+    let verified_field_keys = researched_field_keys
+        .iter()
+        .filter(|field_key| !unverified_field_keys.contains(field_key))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "data": data,
+        "contacts": contacts,
+        "selected_contact_ids": selected_contact_ids,
+        "evidence": evidence,
+        "research_status": if !researched_field_keys.is_empty() && unverified_field_keys.is_empty() { "completed" } else { "needs_review" },
+        "research_error": Value::Null,
+        "research_updated_at_ms": now,
+        "payload": {
+            "researched_field_keys": researched_field_keys,
+            "verified_field_keys": verified_field_keys,
+            "unverified_field_keys": unverified_field_keys,
+            "research_finished_at_ms": now,
+            "research_tool": outcome.get("tool").cloned().unwrap_or(Value::Null),
+            "browser_assist_tasks": outcome.get("browser_assist_tasks").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+            "authenticated_source_capture_runs": outcome.get("authenticated_source_capture_runs").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        }
+    })
+}
+
+fn research_scalar_is_populated(value: &Value) -> bool {
+    match value {
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Number(_) | Value::Bool(_) => true,
+        _ => false,
+    }
+}
+
+fn deduplicate_research_evidence(entries: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let key = [
+                entry
+                    .get("field_key")
+                    .or_else(|| entry.get("field"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry
+                    .get("source_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry
+                    .get("source_url")
+                    .or_else(|| entry.get("url"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry.get("value").map(Value::to_string).unwrap_or_default(),
+            ]
+            .join("|")
+            .to_ascii_lowercase();
+            !key.replace('|', "").is_empty() && seen.insert(key)
+        })
+        .collect()
+}
+
+fn independent_research_evidence_count(evidence: &[Value], field_key: &str) -> usize {
+    evidence
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("field_key")
+                .or_else(|| entry.get("field"))
+                .and_then(Value::as_str)
+                == Some(field_key)
+        })
+        .filter_map(research_evidence_source_key)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn research_evidence_source_key(entry: &Value) -> Option<String> {
+    if let Some(source_id) = entry
+        .get("source_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(source_id.to_ascii_lowercase());
+    }
+    let source_url = entry
+        .get("source_url")
+        .or_else(|| entry.get("url"))
+        .and_then(Value::as_str)?;
+    url::Url::parse(source_url)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.trim_start_matches("www.").to_string())
+        })
+        .filter(|host| !host.is_empty())
+}
+
+fn normalize_researched_contact(mut contact: Value) -> Option<Value> {
+    let first_name = contact
+        .get("person_vorname")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let last_name = contact
+        .get("person_nachname")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let name = format!("{first_name} {last_name}").trim().to_string();
+    let email = contact_string(&contact, &["person_email", "email"]);
+    let phone = contact_string(&contact, &["person_telefon", "phone"]);
+    let position = contact_string(&contact, &["person_position", "position"]);
+    let profile = contact_string(
+        &contact,
+        &["person_linkedin", "person_xing", "linkedin", "xing"],
+    );
+    if name.is_empty()
+        && email.is_empty()
+        && phone.is_empty()
+        && position.is_empty()
+        && profile.is_empty()
+    {
+        return None;
+    }
+    let role = contact_string(&contact, &["person_funktion", "person_position", "role"]);
+    if let Some(object) = contact.as_object_mut() {
+        object.insert("name".to_string(), Value::String(name));
+        object.insert("role".to_string(), Value::String(role));
+        object.insert("position".to_string(), Value::String(position));
+        object.insert("email".to_string(), Value::String(email));
+        object.insert("phone".to_string(), Value::String(phone));
+    }
+    Some(contact)
+}
+
+fn contact_string(contact: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| {
+            contact
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn with_stable_contact_id(lead_id: &str, mut contact: Value, index: usize) -> Value {
+    if contact
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return contact;
+    }
+    let identity = [
+        "name",
+        "first_name",
+        "last_name",
+        "person_vorname",
+        "person_nachname",
+        "email",
+        "person_email",
+        "phone",
+        "person_telefon",
+        "linkedin",
+        "xing",
+    ]
+    .iter()
+    .map(|key| {
+        contact
+            .get(*key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+    })
+    .collect::<Vec<_>>()
+    .join("|");
+    let identity = if identity.replace('|', "").is_empty() {
+        format!("position-{index}")
+    } else {
+        identity
+    };
+    let id = format!(
+        "contact_{}",
+        javascript_fingerprint(&format!("{lead_id}|{identity}"))
+    );
+    contact["id"] = Value::String(id);
+    contact
+}
+
+fn javascript_fingerprint(value: &str) -> String {
+    let mut hash = 2_166_136_261_u32;
+    for unit in value.to_lowercase().encode_utf16() {
+        hash ^= u32::from(unit);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    base36(hash)
+}
+
+fn base36(mut value: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return "0".to_string();
+    }
+    let mut output = Vec::new();
+    while value > 0 {
+        output.push(DIGITS[(value % 36) as usize] as char);
+        value /= 36;
+    }
+    output.iter().rev().collect()
+}
+
+fn merge_json_object_values(target: &mut Value, patch: &Value) {
+    let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) else {
+        *target = patch.clone();
+        return;
+    };
+    for (key, value) in patch {
+        match (target.get_mut(key), value) {
+            (Some(existing), Value::Object(_)) if existing.is_object() => {
+                merge_json_object_values(existing, value);
+            }
+            _ => {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
 }
 
 fn thesen_outbound_lead_state_patch(
@@ -686,5 +1075,73 @@ mod tests {
         assert_eq!(completed["research_error"], Value::Null);
         assert_eq!(completed["native_research_terminal_status"], "needs_review");
         assert_eq!(completed["research_finished_at_ms"], 2_000);
+
+        let document = thesen_outbound_lead_state_document(
+            "lead-1",
+            "cmd-completed",
+            "needs_review",
+            None,
+            2_000,
+        );
+        assert_eq!(document["research_error"], Value::Null);
+        assert_eq!(document["research_updated_at_ms"], 2_000);
+        assert_eq!(document["payload"]["research_error"], Value::Null);
+    }
+
+    #[test]
+    fn terminal_research_outcome_projects_contact_data_and_evidence_without_browser() {
+        let existing = serde_json::json!({
+            "id": "lead-1",
+            "data": {"legacy": "kept"},
+            "contacts": [],
+            "selected_contact_ids": [],
+            "evidence": [],
+            "research_error": "old failure"
+        });
+        let outcome = serde_json::json!({
+            "tool": "ctox_person_research",
+            "fields": {
+                "firma_domain": {
+                    "value": "example.test",
+                    "candidates": [
+                        {"value": "example.test", "source_id": "source-a", "source_url": "https://a.test/company"},
+                        {"value": "example.test", "source_id": "source-b", "source_url": "https://b.test/company"}
+                    ]
+                },
+                "person_vorname": {
+                    "value": "Ada",
+                    "candidates": [{"value": "Ada", "source_id": "xing.com", "source_url": "https://www.xing.com/profile/Ada_Lovelace"}]
+                },
+                "person_nachname": {
+                    "value": "Lovelace",
+                    "candidates": [{"value": "Lovelace", "source_id": "xing.com", "source_url": "https://www.xing.com/profile/Ada_Lovelace"}]
+                },
+                "person_xing": {
+                    "value": "https://www.xing.com/profile/Ada_Lovelace",
+                    "candidates": [{"value": "https://www.xing.com/profile/Ada_Lovelace", "source_id": "xing.com", "source_url": "https://www.xing.com/profile/Ada_Lovelace"}]
+                }
+            },
+            "browser_assist_tasks": []
+        });
+
+        let patch = thesen_outbound_research_outcome_patch(&existing, &outcome, 2_000);
+
+        assert_eq!(patch["data"]["legacy"], "kept");
+        assert_eq!(patch["data"]["firma_domain"], "example.test");
+        assert_eq!(patch["contacts"][0]["name"], "Ada Lovelace");
+        assert_eq!(
+            patch["contacts"][0]["person_xing"],
+            "https://www.xing.com/profile/Ada_Lovelace"
+        );
+        assert!(patch["contacts"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("contact_")));
+        assert_eq!(patch["research_status"], "needs_review");
+        assert_eq!(patch["research_error"], Value::Null);
+        assert_eq!(patch["payload"]["research_tool"], "ctox_person_research");
+        assert_eq!(
+            patch["payload"]["verified_field_keys"],
+            serde_json::json!(["firma_domain"])
+        );
     }
 }

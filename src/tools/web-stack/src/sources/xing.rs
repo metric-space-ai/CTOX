@@ -34,6 +34,8 @@
 //!
 //! ## Extrahierte Felder
 //!
+//! * `person_vorname` / `person_nachname` = verified member-result identity,
+//!   `Confidence::Medium` for the browser path.
 //! * `person_funktion` = `professional_experience.primary_company.title`,
 //!   `Confidence::High` (strukturiertes API-Feld; vom XING-User selbst gepflegt).
 //! * `person_xing`     = `permalink`,
@@ -382,7 +384,12 @@ impl SourceModule for Xing {
     }
 
     fn authoritative_for(&self) -> &'static [FieldKey] {
-        &[FieldKey::PersonFunktion, FieldKey::PersonXing]
+        &[
+            FieldKey::PersonVorname,
+            FieldKey::PersonNachname,
+            FieldKey::PersonFunktion,
+            FieldKey::PersonXing,
+        ]
     }
 
     fn requires_credential(&self) -> Option<&'static str> {
@@ -769,6 +776,14 @@ mod tests {
             .authoritative_for()
             .iter()
             .any(|k| matches!(k, FieldKey::PersonFunktion)));
+        assert!(m
+            .authoritative_for()
+            .iter()
+            .any(|k| matches!(k, FieldKey::PersonVorname)));
+        assert!(m
+            .authoritative_for()
+            .iter()
+            .any(|k| matches!(k, FieldKey::PersonNachname)));
         assert!(m
             .authoritative_for()
             .iter()
