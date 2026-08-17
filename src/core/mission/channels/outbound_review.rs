@@ -51,15 +51,12 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 thread_local! {
-    static CHANNEL_DB_READ_ONLY: RefCell<Option<CachedChannelReadOnlyConnection>> = const { RefCell::new(None) };
+    static CHANNEL_DB_READ_ONLY: RefCell<BTreeMap<ChannelSchemaCacheKey, Connection>> = const { RefCell::new(BTreeMap::new()) };
     #[cfg(test)]
     static CHANNEL_DB_READ_ONLY_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-struct CachedChannelReadOnlyConnection {
-    key: ChannelSchemaCacheKey,
-    conn: Connection,
-}
+const CHANNEL_DB_READ_ONLY_MAX_ENTRIES: usize = 8;
 
 pub(super) fn is_review_required_outbound_channel(channel: &str) -> bool {
     matches!(
@@ -3410,29 +3407,31 @@ pub(super) fn queue_task_projection_clock_stamp(path: &Path) -> Result<QueueTask
     })
 }
 
-fn with_cached_channel_db_read_only<T>(
+pub(super) fn with_cached_channel_db_read_only<T>(
     path: &Path,
     f: impl FnOnce(Option<&Connection>) -> Result<T>,
 ) -> Result<T> {
     CHANNEL_DB_READ_ONLY.with(|cell| {
         let mut cached = cell.borrow_mut();
         if !path.exists() {
-            *cached = None;
+            cached.clear();
             return f(None);
         }
         let key = channel_schema_cache_key(path);
-        if cached.as_ref().is_none_or(|entry| entry.key != key) {
+        if !cached.contains_key(&key) {
+            if cached.len() >= CHANNEL_DB_READ_ONLY_MAX_ENTRIES {
+                cached.clear();
+            }
             let Some(conn) = open_channel_db_read_only(path)? else {
-                *cached = None;
                 return f(None);
             };
             #[cfg(test)]
             CHANNEL_DB_READ_ONLY_OPEN_COUNT.with(|count| count.set(count.get() + 1));
-            *cached = Some(CachedChannelReadOnlyConnection { key, conn });
+            cached.insert(key.clone(), conn);
         }
-        let result = f(cached.as_ref().map(|entry| &entry.conn));
+        let result = f(cached.get(&key));
         if result.is_err() {
-            *cached = None;
+            cached.remove(&key);
         }
         result
     })
@@ -3440,7 +3439,7 @@ fn with_cached_channel_db_read_only<T>(
 
 #[cfg(test)]
 pub(super) fn reset_channel_db_read_only_cache_for_tests() {
-    CHANNEL_DB_READ_ONLY.with(|cell| *cell.borrow_mut() = None);
+    CHANNEL_DB_READ_ONLY.with(|cell| cell.borrow_mut().clear());
     CHANNEL_DB_READ_ONLY_OPEN_COUNT.with(|count| count.set(0));
 }
 

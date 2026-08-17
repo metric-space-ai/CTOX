@@ -863,77 +863,74 @@ pub(crate) fn communication_intake_source_stamp(
     if !db_path.exists() {
         return Ok(empty_communication_intake_source_stamp(false));
     }
-    let Some(mut conn) = open_channel_db_read_only(&db_path)? else {
-        return Ok(empty_communication_intake_source_stamp(false));
-    };
-
-    let mut accounts_table_exists =
-        channel_projection_tables_exist(&conn, &["communication_accounts"])?;
-    let mut threads_table_exists =
-        channel_projection_tables_exist(&conn, &["communication_threads"])?;
-    let mut messages_table_exists =
-        channel_projection_tables_exist(&conn, &["communication_messages"])?;
-    let mut routing_table_exists =
-        channel_projection_tables_exist(&conn, &["communication_routing_state"])?;
-    let clock_table_exists =
-        channel_projection_tables_exist(&conn, &["communication_projection_clock"])?;
-
-    if !clock_table_exists {
-        drop(conn);
-        let schema_conn = open_channel_db(&db_path)?;
-        drop(schema_conn);
-        let Some(reopened) = open_channel_db_read_only(&db_path)? else {
+    super::outbound_review::with_cached_channel_db_read_only(&db_path, |conn| {
+        let Some(conn) = conn else {
             return Ok(empty_communication_intake_source_stamp(false));
         };
-        conn = reopened;
-        accounts_table_exists =
-            channel_projection_tables_exist(&conn, &["communication_accounts"])?;
-        threads_table_exists = channel_projection_tables_exist(&conn, &["communication_threads"])?;
-        messages_table_exists =
-            channel_projection_tables_exist(&conn, &["communication_messages"])?;
-        routing_table_exists =
-            channel_projection_tables_exist(&conn, &["communication_routing_state"])?;
-    }
+        let mut accounts_table_exists =
+            channel_projection_tables_exist(conn, &["communication_accounts"])?;
+        let mut threads_table_exists =
+            channel_projection_tables_exist(conn, &["communication_threads"])?;
+        let mut messages_table_exists =
+            channel_projection_tables_exist(conn, &["communication_messages"])?;
+        let mut routing_table_exists =
+            channel_projection_tables_exist(conn, &["communication_routing_state"])?;
+        let clock_table_exists =
+            channel_projection_tables_exist(conn, &["communication_projection_clock"])?;
 
-    let (
-        projection_version,
-        account_count,
-        thread_count,
-        message_count,
-        routing_count,
-        clock_updated_at,
-    ) = conn
-        .query_row(COMMUNICATION_INTAKE_SOURCE_STAMP_SQL, [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-            ))
+        if !clock_table_exists {
+            let schema_conn = open_channel_db(&db_path)?;
+            drop(schema_conn);
+            accounts_table_exists =
+                channel_projection_tables_exist(conn, &["communication_accounts"])?;
+            threads_table_exists =
+                channel_projection_tables_exist(conn, &["communication_threads"])?;
+            messages_table_exists =
+                channel_projection_tables_exist(conn, &["communication_messages"])?;
+            routing_table_exists =
+                channel_projection_tables_exist(conn, &["communication_routing_state"])?;
+        }
+
+        let (
+            projection_version,
+            account_count,
+            thread_count,
+            message_count,
+            routing_count,
+            clock_updated_at,
+        ) = conn
+            .query_row(COMMUNICATION_INTAKE_SOURCE_STAMP_SQL, [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .optional()?
+            .unwrap_or_else(|| (0, 0, 0, 0, 0, String::new()));
+
+        Ok(CommunicationIntakeSourceStamp {
+            database_exists: true,
+            accounts_table_exists,
+            threads_table_exists,
+            messages_table_exists,
+            routing_table_exists,
+            projection_version,
+            account_count: non_negative_i64_to_usize(account_count),
+            latest_account_updated_at_ms: 0,
+            thread_count: non_negative_i64_to_usize(thread_count),
+            latest_thread_updated_at_ms: 0,
+            message_count: non_negative_i64_to_usize(message_count),
+            latest_message_updated_at_ms: 0,
+            routing_count: non_negative_i64_to_usize(routing_count),
+            clock_updated_at: clock_updated_at.clone(),
+            content_hash: format!(
+                "communication-projection-clock:{projection_version}:{clock_updated_at}"
+            ),
         })
-        .optional()?
-        .unwrap_or_else(|| (0, 0, 0, 0, 0, String::new()));
-
-    Ok(CommunicationIntakeSourceStamp {
-        database_exists: true,
-        accounts_table_exists,
-        threads_table_exists,
-        messages_table_exists,
-        routing_table_exists,
-        projection_version,
-        account_count: non_negative_i64_to_usize(account_count),
-        latest_account_updated_at_ms: 0,
-        thread_count: non_negative_i64_to_usize(thread_count),
-        latest_thread_updated_at_ms: 0,
-        message_count: non_negative_i64_to_usize(message_count),
-        latest_message_updated_at_ms: 0,
-        routing_count: non_negative_i64_to_usize(routing_count),
-        clock_updated_at: clock_updated_at.clone(),
-        content_hash: format!(
-            "communication-projection-clock:{projection_version}:{clock_updated_at}"
-        ),
     })
 }
 
@@ -961,4 +958,38 @@ pub(super) fn empty_communication_intake_source_stamp(
 
 pub(super) fn non_negative_i64_to_usize(value: i64) -> usize {
     value.max(0) as usize
+}
+
+#[cfg(test)]
+mod communication_intake_cache_tests {
+    use super::*;
+
+    #[test]
+    fn intake_stamp_reuses_reader_and_observes_projection_commits() {
+        let root = tempfile::tempdir().expect("create intake cache test root");
+        let db_path = resolve_db_path(root.path(), None);
+        let conn = open_channel_db(&db_path).expect("create channel schema");
+        super::super::outbound_review::reset_channel_db_read_only_cache_for_tests();
+
+        let first = communication_intake_source_stamp(root.path()).expect("read first stamp");
+        let repeated = communication_intake_source_stamp(root.path()).expect("repeat stamp");
+        assert_eq!(repeated, first);
+        assert_eq!(
+            super::super::outbound_review::channel_db_read_only_open_count_for_tests(),
+            1
+        );
+
+        conn.execute(
+            "UPDATE communication_projection_clock SET version = version + 1, updated_at = '2026-08-17T02:00:00Z' WHERE id = 1",
+            [],
+        )
+        .expect("advance projection clock");
+        let advanced = communication_intake_source_stamp(root.path()).expect("read advanced stamp");
+        assert_ne!(advanced, first);
+        assert_eq!(
+            super::super::outbound_review::channel_db_read_only_open_count_for_tests(),
+            1
+        );
+        super::super::outbound_review::reset_channel_db_read_only_cache_for_tests();
+    }
 }

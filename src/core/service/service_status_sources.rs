@@ -1,9 +1,9 @@
+include!("service_sqlite_read_cache.rs");
 #[cfg(test)]
 static DURABLE_STATUS_LOAD_COUNTS: OnceLock<Mutex<BTreeMap<PathBuf, usize>>> = OnceLock::new();
 #[cfg(test)]
 static DURABLE_STATUS_LCM_OUTCOME_OPEN_COUNTS: OnceLock<Mutex<BTreeMap<PathBuf, usize>>> =
     OnceLock::new();
-
 fn durable_status_snapshot_cache() -> &'static DurableServiceStatusCache {
     static CACHE: OnceLock<DurableServiceStatusCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
@@ -23,7 +23,6 @@ fn durable_status_snapshot_cached(root: &Path, ttl: Duration) -> DurableServiceS
             }
         }
     }
-
     let source_stamp = durable_status_source_stamp(root);
     {
         let mut guard = cache.lock().unwrap_or_else(|err| err.into_inner());
@@ -35,7 +34,6 @@ fn durable_status_snapshot_cached(root: &Path, ttl: Duration) -> DurableServiceS
             }
         }
     }
-
     let snapshot = load_durable_status_snapshot(root);
     let source_stamp = durable_status_source_stamp(root);
     let file_stamp = durable_status_file_stamp(root);
@@ -87,7 +85,6 @@ fn channel_router_source_stamp(root: &Path) -> ChannelRouterSourceStamp {
             }
         }
     }
-
     #[cfg(test)]
     record_channel_router_source_stamp_load_for_tests(root);
     let source_stamp = ChannelRouterSourceStamp {
@@ -376,46 +373,47 @@ fn router_schedule_source_stamp(core_db_path: &Path) -> RouterScheduleSourceStam
 }
 
 fn router_schedule_table_stamp(core_db_path: &Path) -> Result<RouterScheduleTableStamp> {
-    let Some(conn) = open_existing_sqlite_read_only(core_db_path, "router schedule stamp")? else {
-        return Ok(RouterScheduleTableStamp {
-            database_exists: false,
-            table_exists: false,
-            enabled_count: 0,
-            earliest_next_run_at: String::new(),
-            latest_updated_at: String::new(),
-        });
-    };
-    let table_exists = sqlite_table_exists(&conn, "scheduled_tasks")?;
-    if !table_exists {
-        return Ok(RouterScheduleTableStamp {
+    with_cached_service_sqlite_read_only(core_db_path, "router schedule stamp", |conn| {
+        let Some(conn) = conn else {
+            return Ok(RouterScheduleTableStamp {
+                database_exists: false,
+                table_exists: false,
+                enabled_count: 0,
+                earliest_next_run_at: String::new(),
+                latest_updated_at: String::new(),
+            });
+        };
+        if !sqlite_table_exists(conn, "scheduled_tasks")? {
+            return Ok(RouterScheduleTableStamp {
+                database_exists: true,
+                table_exists: false,
+                enabled_count: 0,
+                earliest_next_run_at: String::new(),
+                latest_updated_at: String::new(),
+            });
+        }
+        let (enabled_count, earliest_next_run_at, latest_updated_at) = conn.query_row(
+            r#"
+            SELECT COUNT(*), COALESCE(MIN(next_run_at), ''), COALESCE(MAX(updated_at), '')
+            FROM scheduled_tasks
+            WHERE enabled = 1
+            "#,
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        Ok(RouterScheduleTableStamp {
             database_exists: true,
-            table_exists: false,
-            enabled_count: 0,
-            earliest_next_run_at: String::new(),
-            latest_updated_at: String::new(),
-        });
-    }
-    let (enabled_count, earliest_next_run_at, latest_updated_at) = conn.query_row(
-        r#"
-        SELECT COUNT(*), COALESCE(MIN(next_run_at), ''), COALESCE(MAX(updated_at), '')
-        FROM scheduled_tasks
-        WHERE enabled = 1
-        "#,
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
-    )?;
-    Ok(RouterScheduleTableStamp {
-        database_exists: true,
-        table_exists: true,
-        enabled_count: enabled_count.max(0) as usize,
-        earliest_next_run_at,
-        latest_updated_at,
+            table_exists: true,
+            enabled_count: enabled_count.max(0) as usize,
+            earliest_next_run_at,
+            latest_updated_at,
+        })
     })
 }
 
@@ -431,39 +429,40 @@ fn router_document_report_db_path(root: &Path) -> PathBuf {
 }
 
 fn router_document_report_table_stamp(path: &Path) -> Result<RouterDocumentReportTableStamp> {
-    let Some(conn) = open_existing_sqlite_read_only(path, "router document report stamp")? else {
-        return Ok(RouterDocumentReportTableStamp {
-            database_exists: false,
-            table_exists: false,
-            pending_count: 0,
-            latest_observed_at_ms: 0,
-        });
-    };
-    let table_exists = sqlite_table_exists(&conn, "business_commands")?;
-    if !table_exists {
-        return Ok(RouterDocumentReportTableStamp {
+    with_cached_service_sqlite_read_only(path, "router document report stamp", |conn| {
+        let Some(conn) = conn else {
+            return Ok(RouterDocumentReportTableStamp {
+                database_exists: false,
+                table_exists: false,
+                pending_count: 0,
+                latest_observed_at_ms: 0,
+            });
+        };
+        if !sqlite_table_exists(conn, "business_commands")? {
+            return Ok(RouterDocumentReportTableStamp {
+                database_exists: true,
+                table_exists: false,
+                pending_count: 0,
+                latest_observed_at_ms: 0,
+            });
+        }
+        let query = format!(
+            "SELECT COUNT(*), COALESCE(MAX(observed_at_ms), 0)
+             FROM business_commands
+             WHERE module = 'documents'
+               AND command_type = 'research.systematic.report.create'
+               AND status NOT IN ({})",
+            crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
+        );
+        let (pending_count, latest_observed_at_ms) = conn.query_row(&query, [], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        Ok(RouterDocumentReportTableStamp {
             database_exists: true,
-            table_exists: false,
-            pending_count: 0,
-            latest_observed_at_ms: 0,
-        });
-    }
-    let query = format!(
-        "SELECT COUNT(*), COALESCE(MAX(observed_at_ms), 0)
-         FROM business_commands
-         WHERE module = 'documents'
-           AND command_type = 'research.systematic.report.create'
-           AND status NOT IN ({})",
-        crate::command_lifecycle::CTOX_COMMAND_TERMINAL_OUTCOME_SQL_LIST,
-    );
-    let (pending_count, latest_observed_at_ms) = conn.query_row(&query, [], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    Ok(RouterDocumentReportTableStamp {
-        database_exists: true,
-        table_exists: true,
-        pending_count: pending_count.max(0) as usize,
-        latest_observed_at_ms,
+            table_exists: true,
+            pending_count: pending_count.max(0) as usize,
+            latest_observed_at_ms,
+        })
     })
 }
 
@@ -475,78 +474,81 @@ fn router_ticket_source_stamp(core_db_path: &Path) -> RouterTicketSourceStamp {
 }
 
 fn router_ticket_table_stamp(core_db_path: &Path) -> Result<RouterTicketTableStamp> {
-    let Some(conn) = open_existing_sqlite_read_only(core_db_path, "router ticket stamp")? else {
-        return Ok(RouterTicketTableStamp {
-            database_exists: false,
-            events_table_exists: false,
-            event_routing_table_exists: false,
-            self_work_table_exists: false,
-            cases_table_exists: false,
-            routed_event_count: 0,
-            latest_routed_event_updated_at: String::new(),
-            active_self_work_count: 0,
-            latest_active_self_work_updated_at: String::new(),
-            open_case_count: 0,
-            latest_open_case_updated_at: String::new(),
-        });
-    };
-    let events_table_exists = sqlite_table_exists(&conn, "ticket_events")?;
-    let event_routing_table_exists = sqlite_table_exists(&conn, "ticket_event_routing_state")?;
-    let self_work_table_exists = sqlite_table_exists(&conn, "ticket_self_work_items")?;
-    let cases_table_exists = sqlite_table_exists(&conn, "ticket_cases")?;
-    let (routed_event_count, latest_routed_event_updated_at) =
-        if events_table_exists && event_routing_table_exists {
-            conn.query_row(
-                r#"
+    with_cached_service_sqlite_read_only(core_db_path, "router ticket stamp", |conn| {
+        let Some(conn) = conn else {
+            return Ok(RouterTicketTableStamp {
+                database_exists: false,
+                events_table_exists: false,
+                event_routing_table_exists: false,
+                self_work_table_exists: false,
+                cases_table_exists: false,
+                routed_event_count: 0,
+                latest_routed_event_updated_at: String::new(),
+                active_self_work_count: 0,
+                latest_active_self_work_updated_at: String::new(),
+                open_case_count: 0,
+                latest_open_case_updated_at: String::new(),
+            });
+        };
+        let events_table_exists = sqlite_table_exists(conn, "ticket_events")?;
+        let event_routing_table_exists = sqlite_table_exists(conn, "ticket_event_routing_state")?;
+        let self_work_table_exists = sqlite_table_exists(conn, "ticket_self_work_items")?;
+        let cases_table_exists = sqlite_table_exists(conn, "ticket_cases")?;
+        let (routed_event_count, latest_routed_event_updated_at) =
+            if events_table_exists && event_routing_table_exists {
+                conn.query_row(
+                    r#"
                 SELECT COUNT(*), COALESCE(MAX(r.updated_at), '')
                 FROM ticket_events e
                 JOIN ticket_event_routing_state r ON r.event_key = e.event_key
                 WHERE r.route_status NOT IN ('handled', 'blocked', 'failed', 'cancelled')
                 "#,
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )?
+            } else {
+                (0, String::new())
+            };
+        let (active_self_work_count, latest_active_self_work_updated_at) = if self_work_table_exists
+        {
+            conn.query_row(
+                r#"
+            SELECT COUNT(*), COALESCE(MAX(updated_at), '')
+            FROM ticket_self_work_items
+            WHERE state IN ('published', 'queued', 'created', 'open', 'blocked', 'restored')
+            "#,
                 [],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )?
         } else {
             (0, String::new())
         };
-    let (active_self_work_count, latest_active_self_work_updated_at) = if self_work_table_exists {
-        conn.query_row(
-            r#"
-            SELECT COUNT(*), COALESCE(MAX(updated_at), '')
-            FROM ticket_self_work_items
-            WHERE state IN ('published', 'queued', 'created', 'open', 'blocked', 'restored')
-            "#,
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?
-    } else {
-        (0, String::new())
-    };
-    let (open_case_count, latest_open_case_updated_at) = if cases_table_exists {
-        conn.query_row(
-            r#"
+        let (open_case_count, latest_open_case_updated_at) = if cases_table_exists {
+            conn.query_row(
+                r#"
             SELECT COUNT(*), COALESCE(MAX(updated_at), '')
             FROM ticket_cases
             WHERE state <> 'closed'
             "#,
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?
-    } else {
-        (0, String::new())
-    };
-    Ok(RouterTicketTableStamp {
-        database_exists: true,
-        events_table_exists,
-        event_routing_table_exists,
-        self_work_table_exists,
-        cases_table_exists,
-        routed_event_count: routed_event_count.max(0) as usize,
-        latest_routed_event_updated_at,
-        active_self_work_count: active_self_work_count.max(0) as usize,
-        latest_active_self_work_updated_at,
-        open_case_count: open_case_count.max(0) as usize,
-        latest_open_case_updated_at,
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+        } else {
+            (0, String::new())
+        };
+        Ok(RouterTicketTableStamp {
+            database_exists: true,
+            events_table_exists,
+            event_routing_table_exists,
+            self_work_table_exists,
+            cases_table_exists,
+            routed_event_count: routed_event_count.max(0) as usize,
+            latest_routed_event_updated_at,
+            active_self_work_count: active_self_work_count.max(0) as usize,
+            latest_active_self_work_updated_at,
+            open_case_count: open_case_count.max(0) as usize,
+            latest_open_case_updated_at,
+        })
     })
 }
 
@@ -571,7 +573,6 @@ fn durable_communication_source_stamp(
             }
         }
     }
-
     let source_stamp = match channels::communication_intake_source_stamp(root) {
         Ok(stamp) => DurableCommunicationSourceStamp::Source(stamp),
         Err(_) => DurableCommunicationSourceStamp::File(core_db_stamp.clone()),
@@ -710,7 +711,6 @@ fn load_durable_status_snapshot(root: &Path) -> DurableServiceStatusSnapshot {
     };
     let runnable_count = channels::count_queue_tasks(root, &runnable_statuses)
         .unwrap_or(runnable_durable_tasks.len());
-
     let blocked_statuses = ["blocked".to_string()];
     let blocked_durable_tasks = match channels::list_queue_tasks(root, &blocked_statuses, 6) {
         Ok(tasks) => tasks,
