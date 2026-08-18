@@ -8,6 +8,7 @@ pub mod db_migration;
 pub mod governance;
 pub mod harness_flow;
 pub mod harness_mining;
+pub mod instance_descriptor;
 pub mod mission_governor;
 pub mod process_mining;
 pub mod reset;

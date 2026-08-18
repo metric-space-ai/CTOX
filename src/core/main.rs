@@ -627,6 +627,9 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 );
                 runtime_env::save_runtime_env_map(&root, &env_map)?;
             }
+            // Publish the local-instance descriptor CTOX Desktop discovers,
+            // and keep its `lastSeenAt` fresh for as long as this daemon runs.
+            service::instance_descriptor::start(root);
             service::run_foreground(root)
         }
         Some("version") => {

@@ -21870,7 +21870,7 @@ pub(super) fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
+pub(crate) fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
     let runtime = root.join("runtime");
     std::fs::create_dir_all(&runtime)
         .with_context(|| format!("failed to create runtime dir {}", runtime.display()))?;
