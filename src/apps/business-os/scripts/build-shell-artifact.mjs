@@ -34,6 +34,7 @@ export const RUNTIME_TREES = Object.freeze([
   'rxdb',
   'shared',
   'template-store',
+  'themes',
   'vendor',
 ]);
 export const MAX_RUNTIME_FILE_COUNT = 20_000;
