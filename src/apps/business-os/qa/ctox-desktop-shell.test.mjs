@@ -9,6 +9,9 @@ const businessOsDir = join(qaDir, '..');
 const css = readFileSync(join(businessOsDir, 'themes', 'ctox-desktop-shell.css'), 'utf8');
 const appCss = readFileSync(join(businessOsDir, 'app.css'), 'utf8');
 const baseCss = readFileSync(join(businessOsDir, 'shared', 'base.css'), 'utf8');
+// The chat dock renders its stylesheet from this module, so its class grammar
+// is part of the production surface the theme may restyle.
+const chatJs = readFileSync(join(businessOsDir, 'shared', 'business-chat.js'), 'utf8');
 const html = readFileSync(join(qaDir, 'ctox-desktop-shell.html'), 'utf8');
 const js = readFileSync(join(qaDir, 'ctox-desktop-shell.js'), 'utf8');
 const scope = 'html[data-desktop-host="ctox"]';
@@ -57,7 +60,7 @@ test('theme is guarded by the CTOX desktop host scope', () => {
 });
 
 test('theme reuses production shell and kit selectors', () => {
-  const productionCss = `${appCss}\n${baseCss}`;
+  const productionCss = `${appCss}\n${baseCss}\n${chatJs}`;
   const classNames = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-zA-Z_][\w-]*)/g)].map((match) => match[1]));
   assert.ok(classNames.size > 10, 'theme should exercise the production shell grammar');
   for (const className of classNames) {
@@ -68,8 +71,12 @@ test('theme reuses production shell and kit selectors', () => {
 test('theme declares restrained light and dark primitive tokens', () => {
   assert.match(css, /html\[data-desktop-host="ctox"\]\[data-theme="light"\]\s*\{/);
   assert.match(css, /html\[data-desktop-host="ctox"\]\[data-theme="dark"\]\s*\{/);
+  const lightBlock = css.match(/html\[data-desktop-host="ctox"\]\[data-theme="light"\]\s*\{[^}]*\}/)?.[0] ?? '';
+  const darkBlock = css.match(/html\[data-desktop-host="ctox"\]\[data-theme="dark"\]\s*\{[^}]*\}/)?.[0] ?? '';
   for (const token of ['--bg', '--surface', '--surface-2', '--line', '--text', '--muted', '--accent', '--accent-soft']) {
-    assert.equal((css.match(new RegExp(`${token}:`, 'g')) || []).length, 2, `${token} must have light and dark values`);
+    for (const [name, block] of [['light', lightBlock], ['dark', darkBlock]]) {
+      assert.equal((block.match(new RegExp(`${token}:`, 'g')) || []).length, 1, `${token} must be defined exactly once in the ${name} token block`);
+    }
   }
   assert.match(css, /font-family:\s*var\(--font-sans\)/);
   assert.match(css, /font-size:\s*13px/);

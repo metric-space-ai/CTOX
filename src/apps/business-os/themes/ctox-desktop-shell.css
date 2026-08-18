@@ -74,9 +74,13 @@ html[data-desktop-host="ctox"] {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
+  /* T3 system font stack so guest typography matches the Workjet shell. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-sans);
   font-size: 13px;
   font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 html[data-desktop-host="ctox"] body {
@@ -420,4 +424,86 @@ html[data-desktop-host="ctox"] :where(button, input, select, textarea, [tabindex
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/*
+ * Chat dock: flatten the floating glass bar into the same T3 chrome as the
+ * topbar — solid deep ground, hairline border, one host accent instead of the
+ * per-module chip palette, and a bottom offset that lines up with the Workjet
+ * sidebar footer.
+ */
+html[data-desktop-host="ctox"] .ctox-chat-root {
+  left: 12px;
+  right: 88px;
+  bottom: 10px;
+  max-width: calc(100% - 112px);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-dock {
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--shadow-lg);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-dock:hover {
+  border-color: var(--line);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-date-pill {
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-date-pill:hover {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-nav,
+html[data-desktop-host="ctox"] .ctox-chat-new {
+  border-radius: 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-new {
+  border-color: var(--hairline);
+  background: var(--surface);
+  color: var(--text);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-nav:hover,
+html[data-desktop-host="ctox"] .ctox-chat-new:hover {
+  transform: none;
+  background: var(--surface-2);
+  color: var(--text-strong);
+}
+
+/* One host accent for every chat chip; the shell's per-module palette is
+   overridden at equal !important weight with higher specificity. */
+html[data-desktop-host="ctox"] .ctox-chat-chip,
+html[data-desktop-host="ctox"] .ctox-chat-chip[data-chat-module] {
+  --accent: var(--ctox-host-accent, oklch(0.588 0.217 264)) !important;
+  --accent-soft: var(--ctox-host-accent-soft, #1c2447) !important;
+  border-radius: 6px;
+}
+
+html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-chip,
+html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-chip[data-chat-module] {
+  --accent: var(--ctox-host-accent, oklch(0.488 0.217 264)) !important;
+  --accent-soft: var(--ctox-host-accent-soft, #e3e9fc) !important;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-window {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
