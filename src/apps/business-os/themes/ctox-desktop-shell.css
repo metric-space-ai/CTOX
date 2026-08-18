@@ -507,3 +507,15 @@ html[data-desktop-host="ctox"] .ctox-chat-window {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+
+/* The desktop module paints its own aurora wallpaper (noise + teal/violet
+   radial gradients). Under the desktop host it must sit on the same flat
+   T3 ground as the rest of the chrome. */
+html[data-desktop-host="ctox"][data-theme][data-shell-style] .desktop-module {
+  background-color: var(--bg);
+  background-image: none;
+}
+
+html[data-desktop-host="ctox"][data-theme][data-shell-style] .desktop-module::before {
+  background-image: none;
+}

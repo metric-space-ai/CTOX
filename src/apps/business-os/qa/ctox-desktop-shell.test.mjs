@@ -12,6 +12,8 @@ const baseCss = readFileSync(join(businessOsDir, 'shared', 'base.css'), 'utf8');
 // The chat dock renders its stylesheet from this module, so its class grammar
 // is part of the production surface the theme may restyle.
 const chatJs = readFileSync(join(businessOsDir, 'shared', 'business-chat.js'), 'utf8');
+// The desktop module owns the wallpaper surface the host theme flattens.
+const desktopCss = readFileSync(join(businessOsDir, 'modules', 'desktop', 'index.css'), 'utf8');
 const html = readFileSync(join(qaDir, 'ctox-desktop-shell.html'), 'utf8');
 const js = readFileSync(join(qaDir, 'ctox-desktop-shell.js'), 'utf8');
 const scope = 'html[data-desktop-host="ctox"]';
@@ -60,7 +62,7 @@ test('theme is guarded by the CTOX desktop host scope', () => {
 });
 
 test('theme reuses production shell and kit selectors', () => {
-  const productionCss = `${appCss}\n${baseCss}\n${chatJs}`;
+  const productionCss = `${appCss}\n${baseCss}\n${chatJs}\n${desktopCss}`;
   const classNames = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-zA-Z_][\w-]*)/g)].map((match) => match[1]));
   assert.ok(classNames.size > 10, 'theme should exercise the production shell grammar');
   for (const className of classNames) {
