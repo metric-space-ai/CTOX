@@ -7,60 +7,64 @@
 
 html[data-desktop-host="ctox"][data-theme="light"] {
   color-scheme: light;
-  --bg: #f4f4f5;
-  --surface: #fafafa;
-  --surface-2: #eeeeef;
-  --surface-3: #ffffff;
-  --line: #d4d4d8;
-  --hairline: #e2e2e5;
-  --text: #27272a;
-  --text-strong: #111113;
-  --muted: #626268;
-  --accent: #287c72;
-  --accent-foreground: #ffffff;
-  --accent-soft: #dcece9;
+  /* T3 zinc-light base; --ctox-host-* variables let the Workjet appearance
+     theme recolor the guest (built-in and user-created themes alike). */
+  --bg: var(--ctox-host-bg, #fafafa);
+  --surface: var(--ctox-host-surface, #ffffff);
+  --surface-2: var(--ctox-host-surface-2, #f4f4f5);
+  --surface-3: var(--ctox-host-surface-3, #ffffff);
+  --line: var(--ctox-host-line, #e4e4e7);
+  --hairline: var(--ctox-host-hairline, #ececee);
+  --text: var(--ctox-host-text, #27272a);
+  --text-strong: var(--ctox-host-text-strong, #111113);
+  --muted: var(--ctox-host-muted, #71717a);
+  --accent: var(--ctox-host-accent, oklch(0.488 0.217 264));
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, #e3e9fc);
   --danger: #b3423c;
   --shadow: 0 2px 8px rgb(24 24 27 / 0.08);
   --shadow-sm: none;
   --shadow-md: 0 2px 8px rgb(24 24 27 / 0.08);
   --shadow-lg: 0 6px 18px rgb(24 24 27 / 0.12);
   --panel-shadow: none;
-  --panel-radius: 4px;
-  --control-radius: 3px;
-  --shell-topbar-bg: #f7f7f8;
-  --shell-app-bg: #f4f4f5;
-  --shell-control-bg: #eeeeef;
+  --panel-radius: 6px;
+  --control-radius: 4px;
+  --shell-topbar-bg: var(--ctox-host-bg, #fafafa);
+  --shell-app-bg: var(--ctox-host-bg, #fafafa);
+  --shell-control-bg: var(--ctox-host-surface-2, #f4f4f5);
   --shell-topbar-shadow: none;
-  --shell-desktop-bg: #f4f4f5;
+  --shell-desktop-bg: var(--ctox-host-bg, #fafafa);
 }
 
 html[data-desktop-host="ctox"][data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0d0d0f;
-  --surface: #121214;
-  --surface-2: #1a1a1d;
-  --surface-3: #202024;
-  --line: #2b2b30;
-  --hairline: #232328;
-  --text: #e8e8ea;
-  --text-strong: #fafafa;
-  --muted: #9a9aa2;
-  --accent: #70b9ad;
-  --accent-foreground: #07110f;
-  --accent-soft: #19332f;
+  /* T3 zinc-dark base: the deep near-black ground and a seamless topbar so
+     the guest chrome reads as one surface with the Workjet shell. */
+  --bg: var(--ctox-host-bg, #0a0a0a);
+  --surface: var(--ctox-host-surface, #111113);
+  --surface-2: var(--ctox-host-surface-2, #18181b);
+  --surface-3: var(--ctox-host-surface-3, #1f1f23);
+  --line: var(--ctox-host-line, #27272a);
+  --hairline: var(--ctox-host-hairline, #1f1f22);
+  --text: var(--ctox-host-text, #d4d4d8);
+  --text-strong: var(--ctox-host-text-strong, #f4f4f5);
+  --muted: var(--ctox-host-muted, #a1a1aa);
+  --accent: var(--ctox-host-accent, oklch(0.588 0.217 264));
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, #1c2447);
   --danger: #e06c65;
   --shadow: 0 2px 8px rgb(0 0 0 / 0.3);
   --shadow-sm: none;
   --shadow-md: 0 2px 8px rgb(0 0 0 / 0.3);
   --shadow-lg: 0 6px 18px rgb(0 0 0 / 0.42);
   --panel-shadow: none;
-  --panel-radius: 4px;
-  --control-radius: 3px;
-  --shell-topbar-bg: #121214;
-  --shell-app-bg: #0d0d0f;
-  --shell-control-bg: #1a1a1d;
+  --panel-radius: 6px;
+  --control-radius: 4px;
+  --shell-topbar-bg: var(--ctox-host-bg, #0a0a0a);
+  --shell-app-bg: var(--ctox-host-bg, #0a0a0a);
+  --shell-control-bg: var(--ctox-host-surface-2, #18181b);
   --shell-topbar-shadow: none;
-  --shell-desktop-bg: #0d0d0f;
+  --shell-desktop-bg: var(--ctox-host-bg, #0a0a0a);
 }
 
 html[data-desktop-host="ctox"] {
