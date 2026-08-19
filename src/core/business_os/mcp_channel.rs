@@ -767,7 +767,7 @@ fn request_internal_command_session_token(request: &Request) -> Option<String> {
 
 /// Inbound `/mcp` requests must carry a valid bearer token. Fail closed: a
 /// missing token, a wrong token, or an unreadable secret store all deny.
-fn mcp_request_authorized(root: &Path, request: &Request) -> bool {
+pub(super) fn mcp_request_authorized(root: &Path, request: &Request) -> bool {
     let expected = match mcp_auth_token(root) {
         Ok(token) => token,
         Err(error) => {
@@ -4693,13 +4693,13 @@ fn handle_mcp_http_request(root: &Path, mut request: Request) -> anyhow::Result<
                 handle_json_rpc_with_gateway_context(root, body, trusted_context.as_ref());
             respond_json_value(request, response)?;
         }
+        (method, path) if super::workjet_mailbox_routes::is_mailbox_path(path) => {
+            super::workjet_mailbox_routes::handle_mailbox_request(root, &method, path, request)?
+        }
         _ => respond_json_status(
             request,
             404,
-            serde_json::json!({
-                "ok": false,
-                "error": "not_found"
-            }),
+            serde_json::json!({ "ok": false, "error": "not_found" }),
         )?,
     }
     Ok(())

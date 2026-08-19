@@ -46,6 +46,8 @@ mod store_projections;
 mod store_release_review;
 mod support;
 mod threads;
+mod workjet_mailbox;
+mod workjet_mailbox_routes;
 
 pub(crate) use app_runtime::inspect_module as inspect_app_runtime_module;
 pub use browser_control::browser_context_capture;
@@ -65,5 +67,14 @@ pub use rxdb_peer::{ensure_native_peer, native_peer_maintenance_health, restart_
 pub use server::serve_business_os;
 pub use server::BusinessOsServeOptions;
 
-pub(crate) use external_sql_sync::start_background_sync;
+/// Starts the Business OS background cadences the daemon owns.
+///
+/// The external SQL poll loop already had this startup point; the Workjet
+/// mailbox expiry sweep joins it here rather than adding a second daemon
+/// startup hook (and rather than growing an over-budget module to reach an
+/// existing periodic loop).
+pub(crate) fn start_background_sync(root: &std::path::Path) {
+    workjet_mailbox::start_expired_envelope_sweep(root);
+    external_sql_sync::start_background_sync(root);
+}
 pub(crate) use person_research_command::recover_once as recover_person_research_commands_once;

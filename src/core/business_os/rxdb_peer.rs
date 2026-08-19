@@ -7484,19 +7484,19 @@ fn collection_creators_for_root(root: &Path) -> HashMap<String, RxCollectionCrea
 }
 
 pub(super) fn collection_creators() -> HashMap<String, RxCollectionCreator> {
-    business_os_collections()
-        .iter()
-        .map(|(name, primary_key)| {
-            (
-                name.clone(),
-                RxCollectionCreator {
-                    schema: business_os_schema(name, primary_key),
-                    conflict_handler: None,
-                    options: HashMap::new(),
-                },
-            )
-        })
-        .collect()
+    let mut creators = HashMap::new();
+    for (name, primary_key) in business_os_collections() {
+        creators.insert(
+            name.clone(),
+            RxCollectionCreator {
+                schema: business_os_schema(&name, &primary_key),
+                conflict_handler: None,
+                options: HashMap::new(),
+            },
+        );
+    }
+    // Daemon-owned collections absent from the generated schema contract join here.
+    super::workjet_mailbox::with_mailbox_collection(creators)
 }
 
 fn runtime_installed_module_collection_creators(
