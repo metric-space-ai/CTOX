@@ -129,6 +129,11 @@ pub struct WebRTCRsConfig {
     pub ice_servers: Vec<RTCIceServer>,
     pub data_channel_label: String,
     pub udp_bind_addr: String,
+    /// Offer to the peers the room announces instead of waiting to be offered
+    /// to. See `WebRTCRsConnectionHandler::initiate_to_room_peers`. Leave
+    /// `false` for a room this instance SERVES; set it only when joining a
+    /// foreign room where no browser will ever open the connection.
+    pub initiate_to_room_peers: bool,
 }
 
 impl WebRTCRsConfig {
@@ -142,6 +147,7 @@ impl WebRTCRsConfig {
             }],
             data_channel_label: "rxdb".to_string(),
             udp_bind_addr: default_udp_bind_addr(),
+            initiate_to_room_peers: false,
         }
     }
 }
@@ -591,6 +597,16 @@ pub struct WebRTCRsConnectionHandler {
     document_read_authz: Arc<Mutex<Option<DocumentReadAuthzHook>>>,
     document_write_authz: Arc<Mutex<Option<DocumentWriteAuthzHook>>>,
     peer_capability_tokens: Arc<Mutex<HashMap<WebRTCRsPeer, String>>>,
+    /// Whether this handler OFFERS to the peers the signaling room announces.
+    ///
+    /// Default `false`, which is the serving posture every CTOX daemon has had
+    /// so far: browsers offer, the native peer answers. A daemon that JOINS a
+    /// foreign room has no browser to wait for — both endpoints are native, so
+    /// with the default both stay passive, the room reports two peers, and not
+    /// one SDP offer is ever exchanged. The joiner sets this and takes the
+    /// browser's role; the serving side keeps the default, so its behavior
+    /// toward browsers is unchanged and no validation is relaxed.
+    initiate_to_room_peers: std::sync::atomic::AtomicBool,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -607,6 +623,9 @@ impl WebRTCRsConnectionHandler {
             &config.data_channel_label,
             &config.udp_bind_addr,
         ));
+        handler
+            .initiate_to_room_peers
+            .store(config.initiate_to_room_peers, Ordering::SeqCst);
         wait_for_own_peer_id(&config.signaling).await?;
         config.signaling.join(config.room).await?;
         handler.start_signaling_tasks();
@@ -651,6 +670,7 @@ impl WebRTCRsConnectionHandler {
             document_read_authz: Arc::new(Mutex::new(None)),
             document_write_authz: Arc::new(Mutex::new(None)),
             peer_capability_tokens: Arc::new(Mutex::new(HashMap::new())),
+            initiate_to_room_peers: std::sync::atomic::AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
         }
     }
@@ -943,6 +963,25 @@ impl WebRTCRsConnectionHandler {
                     // offer hit the fast path in `ensure_peer_connection` and
                     // never receive an answer. The responder is created when
                     // the actual offer arrives in `handle_signal`.
+                    //
+                    // ...unless this handler JOINED a foreign room. Then there
+                    // is no browser on the other end — the remote is another
+                    // native peer holding the same passive posture — and the
+                    // room would sit at two peers with zero offers forever. The
+                    // joiner therefore takes the browser's role and offers. The
+                    // hazard the comment above describes does not apply: only
+                    // ONE side of a mesh edge ever sets this, so no offer
+                    // glare is possible, and `ensure_peer_connection`'s
+                    // per-peer build slot still collapses concurrent attempts.
+                    if !handler.initiate_to_room_peers.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    if let Err(err) = handler
+                        .ensure_peer_connection(remote_peer_id.clone(), true)
+                        .await
+                    {
+                        handler.error_subject.next(err);
+                    }
                 }
             }
         });

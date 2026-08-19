@@ -47,6 +47,7 @@ pub use index_mod::{
     master_change_stream_id, replicate_web_rtc, replicate_web_rtc_multi,
     replicate_web_rtc_multi_with_validators, replicate_web_rtc_rs, replicate_web_rtc_rs_multi,
     replicate_web_rtc_rs_multi_with_capability_token,
+    replicate_web_rtc_rs_multi_with_capability_token_and_posture,
     replicate_web_rtc_rs_multi_with_url_list_provider,
     replicate_web_rtc_rs_multi_with_url_list_provider_and_validators,
     replicate_web_rtc_rs_multi_with_url_provider,

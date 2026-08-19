@@ -972,12 +972,65 @@ pub async fn replicate_web_rtc_rs_multi_with_capability_token(
     push_batch_size: u64,
     retry_time: u64,
 ) -> Result<Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>, RxError> {
+    replicate_web_rtc_rs_multi_with_capability_token_and_posture(
+        collections,
+        signaling_url_provider,
+        topic,
+        peer_session_id,
+        local_capability_token,
+        ice_servers,
+        is_peer_valid,
+        is_peer_session_valid,
+        collection_authz,
+        collection_write_authz,
+        document_read_authz,
+        document_write_authz,
+        pull_batch_size,
+        push_batch_size,
+        retry_time,
+        false,
+    )
+    .await
+}
+
+/// Like [`replicate_web_rtc_rs_multi_with_capability_token`], but this peer
+/// also chooses its CONNECTION POSTURE.
+///
+/// With `initiate_to_room_peers = false` (every pre-existing caller) the native
+/// peer stays passive and answers offers, which is correct for the room a
+/// daemon SERVES: browsers offer.
+///
+/// A daemon that JOINS a foreign daemon's room must pass `true`. Both endpoints
+/// are then native, and with the passive default neither would ever offer: the
+/// signaling room reports two peers and the session sits handshaked-but-silent
+/// forever — the exact shape of a healthy-looking dead mesh. Only the joining
+/// side of an edge sets this, so there is no offer glare.
+#[allow(clippy::too_many_arguments)]
+pub async fn replicate_web_rtc_rs_multi_with_capability_token_and_posture(
+    collections: Vec<Arc<RxCollection>>,
+    signaling_url_provider: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    topic: String,
+    peer_session_id: String,
+    local_capability_token: Option<String>,
+    ice_servers: Vec<RTCIceServer>,
+    is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
+    is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
+    collection_authz: Option<CollectionAuthzHook>,
+    collection_write_authz: Option<CollectionAuthzHook>,
+    document_read_authz: Option<DocumentReadAuthzHook>,
+    document_write_authz: Option<DocumentWriteAuthzHook>,
+    pull_batch_size: u64,
+    push_batch_size: u64,
+    retry_time: u64,
+    initiate_to_room_peers: bool,
+) -> Result<Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>, RxError> {
     let provider = Arc::clone(&signaling_url_provider);
     let signaling = SignalingClient::connect_with_url_list_provider(move || provider()).await?;
     let mut config = WebRTCRsConfig::new(signaling, topic.clone());
     if !ice_servers.is_empty() {
         config.ice_servers = ice_servers;
     }
+    config.initiate_to_room_peers = initiate_to_room_peers;
     let handler = WebRTCRsConnectionHandler::new_with_signaling(config).await?;
     // #12c: install the per-collection authz hook before peers connect.
     handler.set_collection_authz(collection_authz);
@@ -3614,7 +3667,10 @@ mod tests {
         revoked.store(true, std::sync::atomic::Ordering::SeqCst);
         let severed_deadline = Instant::now() + Duration::from_secs(8);
         loop {
-            let closed = handler.closed_peers.lock().contains(&"browser-1".to_string());
+            let closed = handler
+                .closed_peers
+                .lock()
+                .contains(&"browser-1".to_string());
             let removed = pool.peer_states.lock().is_empty();
             if closed && removed {
                 break;
@@ -3630,10 +3686,9 @@ mod tests {
 
     #[tokio::test]
     async fn revocation_sweep_severs_peer_with_revoked_session_identity() {
-        let collection = crate::rx_collection::test_support::test_collection_named(
-            "revocation_sweep_session",
-        )
-        .await;
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("revocation_sweep_session")
+                .await;
         let handler = MockHandler::new();
         let session_revoked = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let session_revoked_for_validator = StdArc::clone(&session_revoked);
@@ -3649,7 +3704,9 @@ mod tests {
             .await
             .expect("replication pool");
 
-        handler.connect.next(MockPeer("browser-session".to_string()));
+        handler
+            .connect
+            .next(MockPeer("browser-session".to_string()));
         let tracked_deadline = Instant::now() + Duration::from_secs(5);
         while pool.peer_states.lock().is_empty() {
             assert!(
@@ -3658,7 +3715,10 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        pool.record_peer_session(&MockPeer("browser-session".to_string()), "device-1".to_string());
+        pool.record_peer_session(
+            &MockPeer("browser-session".to_string()),
+            "device-1".to_string(),
+        );
 
         // While the session identity is valid the sweep must leave it alone.
         tokio::time::sleep(Duration::from_millis(2_500)).await;
