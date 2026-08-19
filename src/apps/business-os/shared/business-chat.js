@@ -766,8 +766,29 @@ function setStyleIfChanged(element, prop, value) {
   return true;
 }
 
-function stageWindowChats(activeExpandedChat) {
-  return activeExpandedChat ? [activeExpandedChat] : [];
+// The 3D carousel stages the active chat window plus its immediate neighbours.
+// Three windows are exactly what the relation model can express (left / center
+// / right), and every staged window is a real card the user can click to focus.
+const MAX_STAGED_CHAT_WINDOWS = 3;
+
+// REGRESSION GUARD: this used to return `[activeExpandedChat]`, which mounted a
+// single window and silently removed the carousel — the relation model, the
+// perspective stage and the carousel layout in alignChatWindows all stayed in
+// the code but never had more than one window to arrange.
+function stageWindowChats(expandedChats, activeExpandedChat = null) {
+  // Tolerate the historical single-argument call shape.
+  if (!Array.isArray(expandedChats)) {
+    const only = expandedChats || activeExpandedChat;
+    return only ? [only] : [];
+  }
+  const staged = expandedChats.filter((chat) => chat && !chat.minimized);
+  if (!staged.length) return activeExpandedChat ? [activeExpandedChat] : [];
+  if (staged.length <= MAX_STAGED_CHAT_WINDOWS) return staged;
+
+  const activeIndex = Math.max(0, staged.findIndex((chat) => chat.id === activeExpandedChat?.id));
+  const half = Math.floor(MAX_STAGED_CHAT_WINDOWS / 2);
+  const start = Math.max(0, Math.min(activeIndex - half, staged.length - MAX_STAGED_CHAT_WINDOWS));
+  return staged.slice(start, start + MAX_STAGED_CHAT_WINDOWS);
 }
 
 // The last full dock markup that was written into a root, and the last inner
@@ -915,10 +936,11 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const activeExpandedChat = activeChat && !activeChat.minimized
     ? activeChat
     : expandedChats.find((chat) => chat.id === state.activeChatId) || expandedChats[0] || null;
-  // The dock already provides navigation between chats. Rendering historical
-  // chats as translucent cards behind the active one made covered app controls
-  // look clickable while an inactive chat surface intercepted the click.
-  const visibleWindowChats = stageWindowChats(activeExpandedChat);
+  // The staged windows are the 3D carousel: the active card plus its immediate
+  // neighbours. The neighbours are decoration and a focus target only — their
+  // own controls are inert (see `.ctox-chat-window:not(.is-active) *`), so they
+  // cannot swallow a click meant for an app control underneath.
+  const visibleWindowChats = stageWindowChats(expandedChats, activeExpandedChat);
   const hiddenChatCount = Math.max(0, openChats.length - visibleChats.length);
   const hasVisibleChats = openChats.length > 0;
   const showChatStrip = !Boolean(state.dockCollapsed) && hasVisibleChats;
@@ -1202,7 +1224,20 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   // Safety net for every remaining rebuild: identical markup must not touch the
   // DOM. Rewriting it would remount every chip, restart ctoxChipSlideIn and
   // discard scroll and hover state for no visible gain — the jitter itself.
-  if (dockElement && lastFullDockHtml.get(root) === nextDockHtml) return;
+  //
+  // REGRESSION GUARD: the memo only describes what the last FULL render wrote.
+  // Anything that replaces the chat root's content behind the renderer's back
+  // leaves the memo describing a DOM that is no longer on screen, and the skip
+  // then freezes a stale expanded stage over the app after a collapse. So the
+  // memo is only trusted once the mounted DOM corroborates the two properties
+  // the skip could otherwise get catastrophically wrong: the collapse state and
+  // the number of staged windows.
+  const mountedCollapsed = Boolean(dockElement?.classList?.contains?.('is-collapsed'));
+  const intendedWindowCount = dockCollapsed ? 0 : visibleWindowChats.length;
+  const memoDescribesMountedDom = Boolean(dockElement)
+    && mountedCollapsed === dockCollapsed
+    && existingWindows.length === intendedWindowCount;
+  if (memoDescribesMountedDom && lastFullDockHtml.get(root) === nextDockHtml) return;
   lastFullDockHtml.set(root, nextDockHtml);
   root.innerHTML = nextDockHtml;
 
@@ -4987,10 +5022,15 @@ function installChatStyles() {
       --accent: #f43f5e !important;
       --accent-soft: rgba(244, 63, 94, 0.12) !important;
     }
+    /* The staged neighbours ARE the 3D carousel. They used to be
+       opacity 0 plus visibility hidden, which removed the carousel from the
+       product while leaving all of its transforms in the sheet. They stay
+       clickable as a whole (a click focuses that chat); every control inside
+       them is inert, so they cannot swallow a click meant for a control. */
     .ctox-chat-window:not(.is-active) {
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
+      opacity: 0.62;
+      filter: saturate(0.7);
+      z-index: 62;
     }
     .ctox-chat-window:not(.is-active)[data-chat-rel="left"] {
       transform: rotateY(32deg) scale(0.8) translateZ(-160px) translateY(18px);
