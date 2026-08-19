@@ -174,6 +174,22 @@ struct WebRTCReplicationTuning {
     /// Revocation is server-authoritative: the connect-time gate alone would
     /// let a peer revoked *after* connecting keep its established session.
     revocation_sweep_interval_ms: u64,
+    /// This peer's OWN capability token, advertised as
+    /// `peerSession.capabilityToken` in every `ctoxProtocol` frame this peer
+    /// sends (both the request it initiates and the response it answers with).
+    ///
+    /// The remote captures it via `set_peer_capability_token` and feeds it to
+    /// its per-collection authz hooks. Browsers have always sent this (see
+    /// `src/apps/business-os/rxdb/src/schema.mjs`); the native peer used to
+    /// send `peerSession` WITHOUT a token, which is harmless while the remote
+    /// installs no authz hook but fails closed against a CTOX daemon that does
+    /// (an absent token maps to the empty string = least privilege). A native
+    /// peer that JOINS a foreign CTOX room must therefore present the
+    /// capability token from that room's pairing invite.
+    ///
+    /// `None` reproduces the historical payload byte-for-byte: the
+    /// `capabilityToken` key stays ABSENT, never present-and-empty.
+    local_capability_token: Option<Arc<str>>,
 }
 
 impl Default for WebRTCReplicationTuning {
@@ -186,7 +202,31 @@ impl Default for WebRTCReplicationTuning {
             push_batch_size: 20,
             retry_time: 5_000,
             revocation_sweep_interval_ms: 2_000,
+            local_capability_token: None,
         }
+    }
+}
+
+/// Inserts this peer's own capability token into an outgoing `ctoxProtocol`
+/// payload's `peerSession` object.
+///
+/// Absent or blank token => the payload is left untouched, so the historical
+/// wire shape (`peerSession` = `{role, sessionId}`) is unchanged.
+fn attach_local_capability_token(payload: &mut Value, token: Option<&Arc<str>>) {
+    let Some(token) = token
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    if let Some(peer_session) = payload
+        .get_mut("peerSession")
+        .and_then(Value::as_object_mut)
+    {
+        peer_session.insert(
+            "capabilityToken".to_string(),
+            Value::String(token.to_string()),
+        );
     }
 }
 
@@ -885,6 +925,53 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
     push_batch_size: u64,
     retry_time: u64,
 ) -> Result<Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>, RxError> {
+    replicate_web_rtc_rs_multi_with_capability_token(
+        collections,
+        signaling_url_provider,
+        topic,
+        peer_session_id,
+        None,
+        ice_servers,
+        is_peer_valid,
+        is_peer_session_valid,
+        collection_authz,
+        collection_write_authz,
+        document_read_authz,
+        document_write_authz,
+        pull_batch_size,
+        push_batch_size,
+        retry_time,
+    )
+    .await
+}
+
+/// Like [`replicate_web_rtc_rs_multi_with_url_list_provider_and_validators`],
+/// but this peer also PRESENTS a capability token of its own in the
+/// `ctoxProtocol` handshake (`peerSession.capabilityToken`).
+///
+/// Required when a native CTOX peer JOINS a foreign CTOX room: the serving
+/// daemon installs per-collection read/write authz hooks that are evaluated
+/// against the token the joining peer presented, and an absent token is
+/// least privilege — the join would connect, hand-shake, and then replicate
+/// nothing. Passing `None` is byte-identical to the token-less variant.
+#[allow(clippy::too_many_arguments)]
+pub async fn replicate_web_rtc_rs_multi_with_capability_token(
+    collections: Vec<Arc<RxCollection>>,
+    signaling_url_provider: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    topic: String,
+    peer_session_id: String,
+    local_capability_token: Option<String>,
+    ice_servers: Vec<RTCIceServer>,
+    is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
+    is_peer_session_valid: Option<WebRTCPeerSessionValidator>,
+    collection_authz: Option<CollectionAuthzHook>,
+    collection_write_authz: Option<CollectionAuthzHook>,
+    document_read_authz: Option<DocumentReadAuthzHook>,
+    document_write_authz: Option<DocumentWriteAuthzHook>,
+    pull_batch_size: u64,
+    push_batch_size: u64,
+    retry_time: u64,
+) -> Result<Arc<RxWebRTCReplicationPool<WebRTCRsConnectionHandler>>, RxError> {
     let provider = Arc::clone(&signaling_url_provider);
     let signaling = SignalingClient::connect_with_url_list_provider(move || provider()).await?;
     let mut config = WebRTCRsConfig::new(signaling, topic.clone());
@@ -905,6 +992,11 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider_and_validators(
             topic: Some(topic),
             peer_session_id: Some(Arc::<str>::from(peer_session_id)),
             is_peer_session_valid,
+            local_capability_token: local_capability_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(Arc::<str>::from),
             pull_batch_size,
             push_batch_size,
             retry_time,
@@ -946,6 +1038,7 @@ where
     let request_flag = random_token(Some(10));
     let request_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let peer_session_id = tuning.peer_session_id.clone();
+    let local_capability_token = tuning.local_capability_token.clone();
     let is_peer_session_valid = tuning.is_peer_session_valid.clone();
     let pool = RxWebRTCReplicationPool::<H>::new_multi(
         collections.clone(),
@@ -1028,6 +1121,7 @@ where
         let representative = Arc::clone(&representative);
         let storage_token = storage_token.clone();
         let peer_session_id = peer_session_id.clone();
+        let local_capability_token = local_capability_token.clone();
         let is_peer_session_valid = is_peer_session_valid.clone();
         let mut msg_stream = connection_handler.message_stream();
         let t = tokio::spawn(async move {
@@ -1122,6 +1216,7 @@ where
                 let representative_task = Arc::clone(&representative);
                 let storage_token = storage_token.clone();
                 let peer_session_id = peer_session_id.clone();
+                let local_capability_token = local_capability_token.clone();
                 let is_peer_session_valid = is_peer_session_valid.clone();
                 pool_clone.spawn_tracked(async move {
                     if pool_task
@@ -1190,7 +1285,7 @@ where
                                 .and_then(|name| pool_task.collection_by_name(name))
                                 .unwrap_or_else(|| Arc::clone(&representative_task));
                             let room_payload = pool_task.protocol_room_payload().await;
-                            ctox_protocol_response_with_flag(
+                            let mut response = ctox_protocol_response_with_flag(
                                 &target,
                                 peer_session_id.as_deref(),
                                 flag,
@@ -1198,7 +1293,12 @@ where
                                 room_payload.collection_checkpoints,
                                 Some(&storage_token),
                             )
-                            .await
+                            .await;
+                            attach_local_capability_token(
+                                &mut response,
+                                local_capability_token.as_ref(),
+                            );
+                            response
                         }
                         // masterChangesSince | masterWrite — route to the
                         // frame's collection master handler. An unknown
@@ -1392,7 +1492,7 @@ where
                     let local_flag = pool_clone.query_fetch_registry.is_feature_enabled();
                     let local_room_payload = pool_clone.protocol_room_payload().await;
                     let local_collection_schemas = local_room_payload.collection_schemas.clone();
-                    let local_protocol = ctox_protocol_response_with_flag(
+                    let mut local_protocol = ctox_protocol_response_with_flag(
                         &representative,
                         peer_session_id.as_deref(),
                         local_flag,
@@ -1401,6 +1501,11 @@ where
                         Some(&storage_token),
                     )
                     .await;
+                    attach_local_capability_token(
+                        &mut local_protocol,
+                        tuning.local_capability_token.as_ref(),
+                    );
+                    let local_protocol = local_protocol;
                     let protocol_response = match send_message_and_await_answer(
                         Arc::clone(&handler),
                         peer.clone(),
@@ -2851,6 +2956,60 @@ mod tests {
                 .and_then(Value::as_str),
             Some("rxdb-rs-session-b")
         );
+    }
+
+    /// A native peer that JOINS a foreign CTOX room must present the pairing
+    /// invite's capability token, because the serving daemon evaluates its
+    /// per-collection authz hooks against the token the peer advertised.
+    #[test]
+    fn local_capability_token_is_advertised_in_the_peer_session() {
+        let mut payload = ctox_protocol_response_payload(Value::Null, Some("rxdb-rs-session-a"));
+        attach_local_capability_token(&mut payload, Some(&Arc::<str>::from("  cap-token-1  ")));
+        assert_eq!(
+            payload
+                .pointer("/peerSession/capabilityToken")
+                .and_then(Value::as_str),
+            Some("cap-token-1"),
+            "the token must be trimmed and placed where the remote reads it"
+        );
+        // The session id and role must survive untouched: the remote's
+        // `is_peer_session_valid` gate reads them from the same object.
+        assert_eq!(
+            payload
+                .pointer("/peerSession/sessionId")
+                .and_then(Value::as_str),
+            Some("rxdb-rs-session-a")
+        );
+        assert_eq!(
+            payload.pointer("/peerSession/role").and_then(Value::as_str),
+            Some("ctox_instance")
+        );
+        assert!(validate_ctox_protocol_response(&payload, None, false).is_ok());
+    }
+
+    /// Without a configured token the wire shape must be byte-identical to the
+    /// historical payload — an EMPTY `capabilityToken` key would look like a
+    /// deliberate empty credential to a remote that logs handshake fields.
+    #[test]
+    fn absent_or_blank_local_capability_token_leaves_the_payload_untouched() {
+        let baseline = ctox_protocol_response_payload(Value::Null, Some("rxdb-rs-session-a"));
+        for token in [
+            None,
+            Some(Arc::<str>::from("")),
+            Some(Arc::<str>::from("   ")),
+        ] {
+            let mut payload =
+                ctox_protocol_response_payload(Value::Null, Some("rxdb-rs-session-a"));
+            attach_local_capability_token(&mut payload, token.as_ref());
+            assert!(
+                payload.pointer("/peerSession/capabilityToken").is_none(),
+                "blank tokens must not add the key"
+            );
+            assert_eq!(
+                payload.pointer("/peerSession"),
+                baseline.pointer("/peerSession")
+            );
+        }
     }
 
     #[test]
