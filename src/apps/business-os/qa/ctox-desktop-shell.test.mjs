@@ -155,3 +155,41 @@ test('fixture-only script is deterministic and limited to QA toggles', () => {
   assert.doesNotMatch(js, /localStorage|sessionStorage|Date\(|Math\.random|setTimeout|setInterval/);
   assert.doesNotMatch(js, /import\s|export\s/);
 });
+
+test('theme homogenizes the chat dock into a seamless footer bar', () => {
+  const dockRule = css.match(/html\[data-desktop-host="ctox"\] \.ctox-chat-dock,[\s\S]*?\{([\s\S]*?)\}/)?.[1] ?? '';
+  assert.ok(dockRule, 'the host theme must restyle the chat dock');
+  // Mirror of the topbar: full-width ground, hairline on top, no island.
+  assert.match(dockRule, /width:\s*100%/);
+  assert.match(dockRule, /border-top:\s*1px solid var\(--line\)/);
+  assert.match(dockRule, /border-radius:\s*0/);
+  assert.match(dockRule, /background:\s*var\(--bg\)/);
+  assert.match(dockRule, /box-shadow:\s*none/);
+  assert.match(dockRule, /min-height:\s*44px/);
+  // The collapsed dock must not keep the expanded track widths, which is what
+  // made the collapsed bar render at full expanded size in the host.
+  assert.match(css, /\.ctox-chat-dock\.is-collapsed \{\s*grid-template-columns:/);
+  assert.match(css, /\.ctox-chat-root\.is-collapsed/);
+});
+
+test('theme keeps the chat carousel and its host palette intact', () => {
+  // REGRESSION GUARD: the host layer flattens shadows and transforms in several
+  // places. It must never flatten the 3D chat stage, or the carousel of open
+  // chat windows collapses into a single flat card under the desktop host.
+  assert.doesNotMatch(css, /\.ctox-chat-stage[^{]*\{[^}]*(?:perspective|transform-style)\s*:/);
+  assert.doesNotMatch(css, /\.ctox-chat-window(?!\.is-active)[^{,]*\{[^}]*transform:\s*none/);
+  assert.doesNotMatch(css, /\.ctox-chat-window[^{,]*\{[^}]*(?:opacity|visibility)\s*:/);
+  // The shell's per-module green/blue accents must be replaced on the window
+  // too, not only on the chips — otherwise the window keeps a green border and
+  // a green send button under the host palette.
+  assert.match(css, /\.ctox-chat-window\[data-chat-module\][\s\S]{0,200}--accent:\s*var\(--ctox-host-accent/);
+  assert.match(css, /\.ctox-chat-form button \{[^}]*background:\s*var\(--accent\)/);
+  // A chip is a flat surface chip; only the active one carries the accent.
+  const chipBase = css.match(/html\[data-desktop-host="ctox"\] \.ctox-chat-chip,\n[\s\S]*?\.is-task-idle\) \{([\s\S]*?)\}/)?.[1] ?? '';
+  assert.match(chipBase, /background:\s*var\(--surface\)/);
+  assert.match(chipBase, /border:\s*1px solid var\(--hairline\)/);
+  assert.match(chipBase, /color:\s*var\(--text\)/);
+  const chipActive = css.match(/\.ctox-chat-chip\.is-active \{([\s\S]*?)\}/)?.[1] ?? '';
+  assert.match(chipActive, /background:\s*var\(--accent-soft\)/);
+  assert.match(chipActive, /border-color:\s*var\(--accent\)/);
+});

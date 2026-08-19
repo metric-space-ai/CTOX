@@ -427,30 +427,77 @@ html[data-desktop-host="ctox"] :where(button, input, select, textarea, [tabindex
 }
 
 /*
- * Chat dock: flatten the floating glass bar into the same T3 chrome as the
- * topbar — solid deep ground, hairline border, one host accent instead of the
- * per-module chip palette, and a bottom offset that lines up with the Workjet
- * sidebar footer.
+ * Chat dock: the guest's floating glass island becomes one seamless footer bar
+ * — the mirror of the topbar. Full-width deep ground, a hairline on top
+ * instead of a border box, no radius, no shadow, and a 44px collapsed height
+ * that matches the topbar row. The host palette replaces the shell's per-module
+ * green/blue accents everywhere in the dock and in the chat windows.
  */
-html[data-desktop-host="ctox"] .ctox-chat-root {
-  left: 12px;
-  right: 88px;
-  bottom: 10px;
-  max-width: calc(100% - 112px);
+html[data-desktop-host="ctox"] .ctox-chat-root,
+html[data-desktop-host="ctox"] .ctox-chat-root.is-collapsed {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  max-width: 100%;
+  gap: 0;
 }
 
-html[data-desktop-host="ctox"] .ctox-chat-dock {
-  padding: 5px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+html[data-desktop-host="ctox"] .ctox-chat-dock,
+html[data-desktop-host="ctox"] .ctox-chat-dock.is-collapsed,
+html[data-desktop-host="ctox"] .ctox-chat-dock.has-many-chats {
+  width: 100%;
+  max-width: 100%;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
   background: var(--bg);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  box-shadow: var(--shadow-lg);
+  box-shadow: none;
+}
+
+/* The chip strip takes the leftover width so the bar reads as one ground
+   rather than a short island floating in an empty footer. */
+html[data-desktop-host="ctox"] .ctox-chat-dock.has-visible-chats {
+  grid-template-columns: 88px var(--ctox-date-pill-width) minmax(0, 1fr) 34px;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-dock.has-nav {
+  grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, 1fr) 28px 34px;
+}
+
+/* Collapsed the bar keeps its full-width ground and shows only the FAB and the
+   date pill. Without this the guest kept the expanded track widths and the
+   collapsed bar rendered at full expanded size. */
+html[data-desktop-host="ctox"] .ctox-chat-dock.is-collapsed {
+  grid-template-columns: 88px var(--ctox-date-pill-width) minmax(0, 1fr);
 }
 
 html[data-desktop-host="ctox"] .ctox-chat-dock:hover {
+  border-top-color: var(--line);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-fab {
+  border: 1px solid var(--hairline);
+  border-radius: var(--control-radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-fab:hover {
+  transform: none;
   border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--text-strong);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-fab b {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 html[data-desktop-host="ctox"] .ctox-chat-date-pill {
@@ -485,27 +532,104 @@ html[data-desktop-host="ctox"] .ctox-chat-new:hover {
   color: var(--text-strong);
 }
 
-/* One host accent for every chat chip; the shell's per-module palette is
-   overridden at equal !important weight with higher specificity. */
+/* One host accent for the whole dock and stage; the shell's per-module palette
+   is overridden at equal !important weight with higher specificity. */
 html[data-desktop-host="ctox"] .ctox-chat-chip,
-html[data-desktop-host="ctox"] .ctox-chat-chip[data-chat-module] {
+html[data-desktop-host="ctox"] .ctox-chat-chip[data-chat-module],
+html[data-desktop-host="ctox"] .ctox-chat-window,
+html[data-desktop-host="ctox"] .ctox-chat-window[data-chat-module] {
   --accent: var(--ctox-host-accent, oklch(0.588 0.217 264)) !important;
   --accent-soft: var(--ctox-host-accent-soft, #1c2447) !important;
-  border-radius: 6px;
 }
 
 html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-chip,
-html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-chip[data-chat-module] {
+html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-chip[data-chat-module],
+html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-window,
+html[data-desktop-host="ctox"][data-theme="light"] .ctox-chat-window[data-chat-module] {
   --accent: var(--ctox-host-accent, oklch(0.488 0.217 264)) !important;
   --accent-soft: var(--ctox-host-accent-soft, #e3e9fc) !important;
 }
 
+/* A chip is a flat surface chip. The shell tints every open chip with 26% of
+   the accent, which under the host palette turned the strip into a row of
+   filled blue boxes; only the active chip carries the accent. */
+html[data-desktop-host="ctox"] .ctox-chat-chip,
+html[data-desktop-host="ctox"] .ctox-chat-chip.is-expanded:not(.is-active),
+html[data-desktop-host="ctox"] .ctox-chat-chip.is-minimized,
+html[data-desktop-host="ctox"] .ctox-chat-chip.is-minimized:not(.is-task-idle) {
+  border: 1px solid var(--hairline);
+  border-radius: var(--control-radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: none;
+  transform: none;
+  animation: none;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-chip:hover,
+html[data-desktop-host="ctox"] .ctox-chat-chip.is-minimized:hover,
+html[data-desktop-host="ctox"] .ctox-chat-chip.is-minimized:not(.is-task-idle):hover {
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--text-strong);
+  transform: none;
+  box-shadow: none;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-chip.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  transform: none;
+  animation: none;
+}
+
+/* Chat window: host palette instead of the shell's module green, flat surfaces
+   for the header and the composer, and no glass. */
 html[data-desktop-host="ctox"] .ctox-chat-window {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--panel-radius);
   background: var(--surface);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+  box-shadow: var(--shadow-lg);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-window.is-active {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lg);
+  animation: none;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-window header {
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-2);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-form {
+  border-top: 1px solid var(--hairline) !important;
+  background: var(--surface-2) !important;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-form:focus-within {
+  background: var(--surface-2) !important;
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-form button {
+  border-radius: var(--control-radius);
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-form button:hover {
+  transform: none;
+  filter: none;
+  background: var(--accent);
+}
+
+html[data-desktop-host="ctox"] .ctox-chat-messages {
+  background: var(--surface);
 }
 
 /* The desktop module paints its own aurora wallpaper (noise + teal/violet
