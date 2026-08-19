@@ -2477,10 +2477,10 @@ async fn run_native_peer(
         .collect();
     store::ensure_legacy_collection_grants(&root, &collection_names)
         .context("materialize exact legacy collection grants")?;
-    let collection_list: Vec<Arc<RxCollection>> = collections
-        .into_iter()
-        .map(|(_, collection)| collection)
-        .collect();
+    let collection_list: Vec<Arc<RxCollection>> = super::workjet_mesh_join::start_mesh_join(
+        &root,
+        collections.into_iter().map(|(_, item)| item).collect(),
+    );
     let collection_count = collection_list.len();
     let mut pools: Vec<WebRtcPool> = Vec::with_capacity(1);
     if collection_count == 0 {
@@ -2909,7 +2909,7 @@ async fn run_native_peer(
     Ok(exit)
 }
 
-fn ice_servers_from_sync_config(values: &[Value]) -> Vec<RTCIceServer> {
+pub(super) fn ice_servers_from_sync_config(values: &[Value]) -> Vec<RTCIceServer> {
     values
         .iter()
         .filter_map(|value| {
@@ -3156,7 +3156,7 @@ fn native_peer_retry_delay(base: Duration) -> Duration {
 type NativeSignalingUrlProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 type NativeSignalingClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
-fn native_signaling_url_provider(
+pub(super) fn native_signaling_url_provider(
     base_urls: Vec<String>,
     sync_room: String,
     signaling_room_password: String,

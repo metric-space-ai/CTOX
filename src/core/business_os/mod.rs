@@ -48,6 +48,11 @@ mod support;
 mod threads;
 mod workjet_mailbox;
 mod workjet_mailbox_routes;
+mod workjet_mesh;
+mod workjet_mesh_cli;
+mod workjet_mesh_join;
+#[cfg(test)]
+mod workjet_mesh_two_daemon;
 
 pub(crate) use app_runtime::inspect_module as inspect_app_runtime_module;
 pub use browser_control::browser_context_capture;
@@ -66,6 +71,7 @@ pub(crate) use rxdb_peer::sync_knowledge_tables;
 pub use rxdb_peer::{ensure_native_peer, native_peer_maintenance_health, restart_native_peer};
 pub use server::serve_business_os;
 pub use server::BusinessOsServeOptions;
+pub(crate) use workjet_mesh_cli::handle_workjet_command;
 
 /// Starts the Business OS background cadences the daemon owns.
 ///

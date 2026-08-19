@@ -676,6 +676,11 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
         Some("business-os") | Some("business") => {
             service::business_os::handle_business_os_command(root, &args[1..])
         }
+        // Daemon-to-daemon Workjet mailbox mesh. Kept as its own top-level verb
+        // rather than under `business-os`: the mailbox is a Workjet-owned
+        // payload that CTOX only transports, and `business-os` is already the
+        // largest CLI surface in the binary.
+        Some("workjet") => business_os::handle_workjet_command(root, &args[1..]),
         Some("coding-agent") | Some("coding-agents") => coding_agents::handle_cli(root, &args[1..]),
         Some("turn") => service::turn_ledger::handle_turn_command(root, &args[1..]),
         Some("harness-flow") => {
