@@ -1933,7 +1933,199 @@ function makeTimerWindow(timers) {
   });
 }
 
-function makeChatRootFixture({ chat, mutations }) {
+// REGRESSION: with the chat list / busy panel open, EVERY sync tick used to run
+// the full-rebuild path (`root.innerHTML = ...`). That remounted all chips,
+// re-ran ctoxChipSlideIn and dropped scroll and hover state — exactly the state
+// a user with many chats and running agent tasks is in, and exactly the
+// "nervoeses Zucken" they reported. An open panel is now refreshed in place.
+{
+  const { renderChatRoot, getLocalDateString } = __businessChatTestInternals;
+
+  const withChatDomEnvironment = (run) => {
+    const previous = {
+      document: globalThis.document,
+      window: globalThis.window,
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      innerWidth: globalThis.innerWidth,
+    };
+    globalThis.document = {
+      documentElement: { lang: 'de' },
+      getElementById() { return null; },
+      createElement() { return { id: '', textContent: '', setAttribute() {} }; },
+      head: { appendChild() {} },
+    };
+    globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
+    globalThis.cancelAnimationFrame = () => {};
+    globalThis.innerWidth = 1200;
+    globalThis.window = {
+      innerWidth: 1200,
+      setTimeout() { return 1; },
+      clearTimeout() {},
+      setInterval() { return 1; },
+      clearInterval() {},
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return true; },
+    };
+    try {
+      return run();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete globalThis[key];
+        else globalThis[key] = value;
+      }
+    }
+  };
+
+  const makeTrackedChat = (id, title, status, createdAt) => ({
+    id,
+    title,
+    open: true,
+    minimized: false,
+    maximized: false,
+    createdAt,
+    draft: '',
+    attachments: [],
+    lastTrackingId: `task-${id}`,
+    messages: [{
+      id: `status-${id}`,
+      role: 'ctox',
+      text: 'Task angelegt und in der CTOX Queue.',
+      commandId: `cmd-${id}`,
+      taskId: `task-${id}`,
+      status,
+      createdAt,
+    }],
+  });
+
+  // 13 open chats push the dock past MAX_RENDERED_CHAT_TABS, which is the only
+  // situation in which the busy panel exists at all.
+  const makeBusyScenario = (mutations) => {
+    const createdAt = Date.now();
+    const chats = Array.from({ length: 13 }, (_, index) => makeTrackedChat(
+      `chat-${String(index).padStart(2, '0')}`,
+      `Recherche ${index}`,
+      'queued',
+      createdAt,
+    ));
+    const chat = chats[0];
+    chat.title = 'Recherche';
+    const state = {
+      ownerUserId: 'user-1',
+      selectedDate: getLocalDateString(createdAt),
+      activeChatId: chat.id,
+      dockCollapsed: false,
+      chatListOpen: true,
+      dateWorkloadOpen: false,
+      chats,
+    };
+    const root = makeChatRootFixture({
+      chat,
+      mutations,
+      busyPanel: true,
+      // Deliberately wrong, so the first render takes the full path and prints
+      // the real signature into the markup.
+      stripSignature: 'pending-first-render',
+    });
+    return { root, state, chat, chats };
+  };
+
+  const render = (root, state) => renderChatRoot({
+    root,
+    state,
+    commandBus: null,
+    db: null,
+    getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+  });
+
+  const adoptRenderedStripSignature = (root) => {
+    const match = /data-chat-strip-signature="([^"]*)"/.exec(root.__lastRootHtml);
+    assert.ok(match, 'the dock markup must carry the strip shape signature');
+    root.__fixtureDock.dataset.chatStripSignature = match[1];
+    return match[1];
+  };
+
+  test('an open busy panel no longer forces a full dock rebuild on a status tick', () => {
+    withChatDomEnvironment(() => {
+      const mutations = [];
+      const { root, state, chat } = makeBusyScenario(mutations);
+
+      render(root, state);
+      const signature = adoptRenderedStripSignature(root);
+      assert.match(signature, /^strip\|nav\|list-open\|1\|/);
+      // One in-place pass converges the hand-built fixture onto the values the
+      // real markup would carry; only afterwards is silence meaningful.
+      render(root, state);
+      mutations.length = 0;
+
+      // Identical tick: nothing at all may be written.
+      render(root, state);
+      assert.deepEqual(mutations, [], `identical tick with an open panel must not touch the DOM, got: ${JSON.stringify(mutations)}`);
+
+      // Task-state-only change: the chip status text updates in place and the
+      // panel content follows, but the root is never rebuilt.
+      chat.messages[0].status = 'running';
+      render(root, state);
+      const rootRebuilds = mutations.filter((entry) => entry.type === 'innerHTML' && entry.target === 'root');
+      assert.deepEqual(rootRebuilds, [], 'a task-state tick must not rebuild the chat root');
+      assert.ok(
+        mutations.some((entry) => entry.type === 'textContent' && entry.target === 'chipSmall' && entry.value === 'Aktiv'),
+        `the chip status text must update in place, got: ${JSON.stringify(mutations)}`,
+      );
+      assert.ok(
+        mutations.some((entry) => entry.type === 'innerHTML' && entry.target === 'busyPanel'),
+        'the open busy panel must refresh its own content',
+      );
+      assert.equal(root.__fixtureChip.className.includes('is-task-running'), true);
+    });
+  });
+
+  test('a panel content change writes only the panel, never the root', () => {
+    withChatDomEnvironment(() => {
+      const mutations = [];
+      const { root, state, chats } = makeBusyScenario(mutations);
+      render(root, state);
+      adoptRenderedStripSignature(root);
+      render(root, state);
+      mutations.length = 0;
+
+      // A background chat changes state. It has no window and no rendered chip
+      // in this fixture, so the busy panel is the only surface that may move.
+      chats[7].messages[0].status = 'running';
+      render(root, state);
+      assert.deepEqual(
+        mutations.map((entry) => `${entry.type}:${entry.target}`),
+        ['innerHTML:busyPanel'],
+        `only the panel may be written, got: ${JSON.stringify(mutations.map((entry) => `${entry.type}:${entry.target}`))}`,
+      );
+    });
+  });
+
+  test('a full rebuild that would produce identical markup is skipped entirely', () => {
+    withChatDomEnvironment(() => {
+      const mutations = [];
+      const { root, state } = makeBusyScenario(mutations);
+
+      // The strip signature stays deliberately stale, so every call reaches the
+      // full-rebuild path. The memoized markup must still stop the second write.
+      render(root, state);
+      render(root, state);
+      render(root, state);
+
+      const rootWrites = mutations.filter((entry) => entry.type === 'innerHTML' && entry.target === 'root');
+      assert.equal(
+        rootWrites.length,
+        1,
+        `identical full rebuilds must write the root exactly once, got ${rootWrites.length}`,
+      );
+    });
+  });
+}
+
+function makeChatRootFixture({ chat, mutations, stripSignature = 'strip|no-nav|list-closed|0|chat-stable', busyPanel = false }) {
   const classListFor = (initial = []) => {
     const set = new Set(initial);
     return {
@@ -2055,6 +2247,7 @@ function makeChatRootFixture({ chat, mutations }) {
       return { left: 20, right: 140, width: 120, top: 0, bottom: 28, height: 28 };
     },
     scrollIntoView() { track('scrollIntoView', 'chip'); },
+    addEventListener() {},
   };
 
   const interactiveNodes = [];
@@ -2133,6 +2326,7 @@ function makeChatRootFixture({ chat, mutations }) {
   const dock = {
     className: 'ctox-chat-dock has-visible-chats has-one-chat has-no-nav',
     classList: classListFor(['ctox-chat-dock', 'has-visible-chats', 'has-one-chat', 'has-no-nav']),
+    dataset: { chatStripSignature: stripSignature },
     querySelector(selector) {
       if (selector === '[data-chat-strip]') return strip;
       return null;
@@ -2205,9 +2399,25 @@ function makeChatRootFixture({ chat, mutations }) {
     },
   };
 
+  let busyPanelHtml = '';
+  const busyPanelNode = busyPanel ? {
+    className: 'ctox-chat-busy-panel',
+    scrollTop: 0,
+    get innerHTML() { return busyPanelHtml; },
+    set innerHTML(value) {
+      const next = String(value ?? '');
+      if (busyPanelHtml === next) return;
+      busyPanelHtml = next;
+      track('innerHTML', 'busyPanel', next);
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    addEventListener() {},
+  } : null;
+
   const nodesBySelector = new Map([
     ['[data-chat-date-picker]', datePicker],
-    ['[data-chat-busy-panel]', null],
+    ['[data-chat-busy-panel]', busyPanelNode],
     ['[data-chat-date-workload-panel]', null],
     ['[data-chat-dock]', dock],
     ['.ctox-chat-fab b', fabBadge],
@@ -2245,9 +2455,14 @@ function makeChatRootFixture({ chat, mutations }) {
     },
     addEventListener() {},
     set innerHTML(value) {
+      root.__lastRootHtml = String(value || '');
       track('innerHTML', 'root', String(value || '').slice(0, 80));
     },
   };
+  root.__fixtureDock = dock;
+  root.__fixtureBusyPanel = busyPanelNode;
+  root.__fixtureChip = chip;
+  root.__lastRootHtml = '';
 
   return root;
 }

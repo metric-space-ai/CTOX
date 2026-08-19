@@ -770,6 +770,128 @@ function stageWindowChats(activeExpandedChat) {
   return activeExpandedChat ? [activeExpandedChat] : [];
 }
 
+// The last full dock markup that was written into a root, and the last inner
+// markup written into a mounted panel. Both memos exist for exactly one reason:
+// a render that produces byte-identical markup must not touch the DOM. Under
+// load the dock re-renders on every sync tick, and an unconditional
+// `innerHTML =` remounts every chip (re-running ctoxChipSlideIn), drops scroll
+// offsets and hover state — the visible nervous twitching of the chat bar.
+const lastFullDockHtml = new WeakMap();
+const lastPanelInnerHtml = new WeakMap();
+
+function activeElementInside(node) {
+  if (!node) return false;
+  const active = globalThis.document?.activeElement;
+  if (!active || active === globalThis.document?.body) return false;
+  if (active === node) return true;
+  return typeof node.contains === 'function' ? node.contains(active) : false;
+}
+
+// Refresh a mounted panel's content without recreating the panel element.
+// Returns true when the DOM was actually written.
+function updatePanelInPlace(panel, inner, wire) {
+  if (!panel) return false;
+  const next = String(inner ?? '').trim();
+  if (lastPanelInnerHtml.get(panel) === next) return false;
+  if (panel.innerHTML !== undefined && panel.innerHTML.trim() === next) {
+    lastPanelInnerHtml.set(panel, next);
+    return false;
+  }
+  // Never rip the DOM out from under a control the user is currently using:
+  // a filter field or a focused list row keeps its focus, and the refresh is
+  // simply retried on the next tick.
+  if (activeElementInside(panel)) return false;
+
+  const panelScrollTop = panel.scrollTop;
+  const canQuery = typeof panel.querySelectorAll === 'function';
+  const listScrollTops = canQuery
+    ? Array.from(panel.querySelectorAll('[data-chat-busy-list]')).map((node) => node.scrollTop)
+    : [];
+  panel.innerHTML = next;
+  lastPanelInnerHtml.set(panel, next);
+  if (panelScrollTop) panel.scrollTop = panelScrollTop;
+  if (canQuery) {
+    Array.from(panel.querySelectorAll('[data-chat-busy-list]')).forEach((node, index) => {
+      if (listScrollTops[index]) node.scrollTop = listScrollTops[index];
+    });
+  }
+  wire?.(panel);
+  return true;
+}
+
+// Everything the rendered chip strip depends on. A change here is a real shape
+// change of the dock and must rebuild, so a genuinely new chip still gets its
+// ctoxChipSlideIn mount animation.
+function chatStripSignature({ visibleChats, hiddenChatCount, showChatStrip, showChatNav, state }) {
+  return [
+    showChatStrip ? 'strip' : 'no-strip',
+    showChatNav ? 'nav' : 'no-nav',
+    state.chatListOpen ? 'list-open' : 'list-closed',
+    String(hiddenChatCount),
+    visibleChats.map((chat) => chat.id).join(','),
+  ].join('|');
+}
+
+function wireDateWorkloadPanelHandlers(scope, ctx) {
+  if (!scope) return;
+  const { root, state, commandBus, db, getActiveModule } = ctx;
+  scope.querySelector('[data-chat-date-picker-panel]')?.addEventListener('change', async (event) => {
+    const val = event.currentTarget.value;
+    if (!val) return;
+    state.selectedDate = val;
+    state.dateWorkloadOpen = false;
+    renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
+  });
+
+  scope.querySelectorAll('[data-chat-date-select]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const val = button.dataset.chatDateSelect;
+      if (!val) return;
+      state.selectedDate = val;
+      state.dateWorkloadOpen = false;
+      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
+    });
+  });
+
+  scope.querySelector('[data-chat-date-workload-close]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    state.dateWorkloadOpen = false;
+    renderChatRoot({ root, state, commandBus, db, getActiveModule });
+  });
+}
+
+function wireBusyPanelHandlers(scope, ctx) {
+  if (!scope) return;
+  const { root, state, commandBus, db, getActiveModule } = ctx;
+  scope.querySelector('[data-chat-overflow-close]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    state.chatListOpen = false;
+    renderChatRoot({ root, state, commandBus, db, getActiveModule });
+  });
+
+  scope.querySelectorAll('[data-chat-list-filter]').forEach((control) => {
+    const updateFilter = () => {
+      const key = control.dataset.chatListFilter;
+      state.chatListFilter = normalizeChatListFilter(state.chatListFilter);
+      state.chatListFilter[key] = control.value;
+      renderChatRoot({ root, state, commandBus, db, getActiveModule });
+    };
+    control.addEventListener(control.tagName === 'INPUT' ? 'input' : 'change', updateFilter);
+  });
+
+  scope.querySelectorAll('[data-chat-list-focus]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const chat = state.chats.find((item) => item.id === button.dataset.chatListFocus);
+      if (!chat) return;
+      toggleChatFromDock(state, chat);
+      state.chatListOpen = false;
+      state.dockCollapsed = false;
+      touchChats(state, [chat]);
+      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
+    });
+  });
+}
+
 function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const syncFacade = root.__ctoxChatSync || null;
   initSchedulerLoop({
@@ -834,6 +956,18 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const taskStateUnchanged = windowShapeUnchanged && existingWindows.every((win, idx) => (
     windowTaskStateMatches(win, visibleWindowChats[idx])
   ));
+  // The panels no longer force a rebuild: an open chat list, busy panel or date
+  // workload panel is refreshed in place. Only the panel OPEN/CLOSE transition
+  // — a real change of the dock's shape — still rebuilds.
+  const wantsBusyPanel = Boolean(state.chatListOpen) && openChats.length > MAX_RENDERED_CHAT_TABS;
+  const wantsDatePanel = Boolean(state.dateWorkloadOpen);
+  const panelShapeUnchanged = hasBusyPanel === wantsBusyPanel && hasDatePanel === wantsDatePanel;
+  // With panels staying mounted, the chip strip must be checked explicitly:
+  // adding or removing a chat changes the strip even when the staged window
+  // does not, and a new chip legitimately deserves its slide-in remount.
+  const stripSignature = chatStripSignature({ visibleChats, hiddenChatCount, showChatStrip, showChatNav, state });
+  const dockElement = root.querySelector('[data-chat-dock]');
+  const stripShapeUnchanged = dockElement?.dataset?.chatStripSignature === stripSignature;
   // taskStateUnchanged is deliberately NOT required: a status change is exactly
   // when the bar must update WITHOUT a full rebuild. The in-place path below
   // refreshes every task-state-dependent part (window class, chip class, status
@@ -841,13 +975,11 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const canUpdateInPlace = windowShapeUnchanged &&
                            attachmentsUnchanged &&
                            composerShapeUnchanged &&
-                           root.querySelector('[data-chat-dock]') &&
+                           dockElement &&
                            wasCollapsed === dockCollapsed &&
                            matchesCurrentDate &&
-                           !state.chatListOpen &&
-                           !hasBusyPanel &&
-                           !state.dateWorkloadOpen &&
-                           !hasDatePanel;
+                           panelShapeUnchanged &&
+                           stripShapeUnchanged;
 
   if (canUpdateInPlace) {
     let inPlaceDomChanged = false;
@@ -972,10 +1104,33 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       }
     });
 
+    // 3b. Refresh mounted panels in place. This is what keeps the dock calm
+    // while the chat list or the date workload panel is open: their content is
+    // regenerated as a string and written back only when it really differs.
+    const panelContext = { root, state, commandBus, db, getActiveModule };
+    if (wantsDatePanel) {
+      const datePanel = root.querySelector('[data-chat-date-workload-panel]');
+      const inner = dateWorkloadPanelInner({ chats: state.chats, selectedDate });
+      if (updatePanelInPlace(datePanel, inner, (scope) => wireDateWorkloadPanelHandlers(scope, panelContext))) {
+        inPlaceDomChanged = true;
+      }
+    }
+    if (wantsBusyPanel) {
+      const busyPanel = root.querySelector('[data-chat-busy-panel]');
+      const inner = chatBusyPanelInner({ chats: openChats, selectedDate, state });
+      if (updatePanelInPlace(busyPanel, inner, (scope) => wireBusyPanelHandlers(scope, panelContext))) {
+        inPlaceDomChanged = true;
+      }
+    }
+
     // 4. Align position and scroll — only when something actually moved.
     // A no-op status tick must not call scrollIntoView or rewrite left styles;
     // that is the visible "chat bar rebuilds every 2 seconds" twitch.
     if (inPlaceDomChanged) {
+      // The memoized full markup describes the DOM as of the last full render.
+      // An in-place write moves the DOM past it, so the memo must not be able to
+      // veto a later rebuild that would restore an earlier state.
+      lastFullDockHtml.delete(root);
       alignChatWindows(root);
       scrollActiveChatIntoView(root, state, { forceMessages: messagesDomChanged });
       updateChatStripOverflowState(root);
@@ -986,9 +1141,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   // --- END OF IN-PLACE DOM UPDATE FAST-PATH ---
 
   const maxDateVal = getLocalDateString(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000);
-
-  root.innerHTML = `
-    <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
+  const nextDockHtml = `
+    <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock data-chat-strip-signature="${escapeAttr(stripSignature)}">
       <button class="ctox-chat-fab" type="button" data-chat-open aria-label="${dockCollapsed ? (chatUiIsGerman() ? 'Chat öffnen' : 'Open chat') : (chatUiIsGerman() ? 'Chat einklappen' : 'Collapse chat')}">
         <span>Chat</span><b>${openChats.length || ''}</b>
       </button>
@@ -1029,8 +1183,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         </button>
       ` : ''}
     </section>
-    ${state.dateWorkloadOpen ? dateWorkloadPanel({ chats: state.chats, selectedDate }) : ''}
-    ${state.chatListOpen && openChats.length > MAX_RENDERED_CHAT_TABS ? chatBusyPanel({ chats: openChats, selectedDate, state }) : ''}
+    ${wantsDatePanel ? dateWorkloadPanel({ chats: state.chats, selectedDate }) : ''}
+    ${wantsBusyPanel ? chatBusyPanel({ chats: openChats, selectedDate, state }) : ''}
     <div class="ctox-chat-stage" data-chat-stage>
       <div class="ctox-chat-stage-inner ${hasMaximized ? 'has-maximized' : ''}">
         ${dockCollapsed ? '' : (() => {
@@ -1044,6 +1198,28 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       </div>
     </div>
   `;
+
+  // Safety net for every remaining rebuild: identical markup must not touch the
+  // DOM. Rewriting it would remount every chip, restart ctoxChipSlideIn and
+  // discard scroll and hover state for no visible gain — the jitter itself.
+  if (dockElement && lastFullDockHtml.get(root) === nextDockHtml) return;
+  lastFullDockHtml.set(root, nextDockHtml);
+  root.innerHTML = nextDockHtml;
+
+  // Seed the panel memos with the markup that was just mounted, so the first
+  // in-place tick after a rebuild does not rewrite an already correct panel.
+  if (wantsDatePanel) {
+    const mountedDatePanel = root.querySelector('[data-chat-date-workload-panel]');
+    if (mountedDatePanel) {
+      lastPanelInnerHtml.set(mountedDatePanel, dateWorkloadPanelInner({ chats: state.chats, selectedDate }).trim());
+    }
+  }
+  if (wantsBusyPanel) {
+    const mountedBusyPanel = root.querySelector('[data-chat-busy-panel]');
+    if (mountedBusyPanel) {
+      lastPanelInnerHtml.set(mountedBusyPanel, chatBusyPanelInner({ chats: openChats, selectedDate, state }).trim());
+    }
+  }
 
   root.querySelector('[data-chat-date-prev]')?.addEventListener('click', async () => {
     shiftSelectedDate(state, -1);
@@ -1064,29 +1240,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     }
   });
 
-  root.querySelector('[data-chat-date-picker-panel]')?.addEventListener('change', async (event) => {
-    const val = event.currentTarget.value;
-    if (!val) return;
-    state.selectedDate = val;
-    state.dateWorkloadOpen = false;
-    renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
-  });
-
-  root.querySelectorAll('[data-chat-date-select]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const val = button.dataset.chatDateSelect;
-      if (!val) return;
-      state.selectedDate = val;
-      state.dateWorkloadOpen = false;
-      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
-    });
-  });
-
-  root.querySelector('[data-chat-date-workload-close]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    state.dateWorkloadOpen = false;
-    renderChatRoot({ root, state, commandBus, db, getActiveModule });
-  });
+  wireDateWorkloadPanelHandlers(root, { root, state, commandBus, db, getActiveModule });
 
   root.querySelector('.ctox-date-picker-trigger')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -1103,33 +1257,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     renderChatRoot({ root, state, commandBus, db, getActiveModule });
   });
 
-  root.querySelector('[data-chat-overflow-close]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    state.chatListOpen = false;
-    renderChatRoot({ root, state, commandBus, db, getActiveModule });
-  });
-
-  root.querySelectorAll('[data-chat-list-filter]').forEach((control) => {
-    const updateFilter = () => {
-      const key = control.dataset.chatListFilter;
-      state.chatListFilter = normalizeChatListFilter(state.chatListFilter);
-      state.chatListFilter[key] = control.value;
-      renderChatRoot({ root, state, commandBus, db, getActiveModule });
-    };
-    control.addEventListener(control.tagName === 'INPUT' ? 'input' : 'change', updateFilter);
-  });
-
-  root.querySelectorAll('[data-chat-list-focus]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const chat = state.chats.find((item) => item.id === button.dataset.chatListFocus);
-      if (!chat) return;
-      toggleChatFromDock(state, chat);
-      state.chatListOpen = false;
-      state.dockCollapsed = false;
-      touchChats(state, [chat]);
-      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
-    });
-  });
+  wireBusyPanelHandlers(root, { root, state, commandBus, db, getActiveModule });
 
   root.querySelector('[data-chat-new]')?.addEventListener('click', async () => {
     const next = createChat(state.ownerUserId, state.selectedDate);
@@ -2043,7 +2171,20 @@ function chatOverflowItem(hiddenCount, active) {
   `;
 }
 
+// The panels are rendered as shell + inner content so the in-place update path
+// can refresh the CONTENT of a panel that is already mounted without recreating
+// the panel element itself. Only the inner string is compared and written.
+function chatBusyPanelShell(inner, selectedDate) {
+  return `
+    <section class="ctox-chat-busy-panel" data-chat-busy-panel aria-label="Chatliste fuer ${escapeAttr(formatGermanDateLabel(selectedDate))}">${inner}</section>
+  `;
+}
+
 function chatBusyPanel({ chats, selectedDate, state }) {
+  return chatBusyPanelShell(chatBusyPanelInner({ chats, selectedDate, state }), selectedDate);
+}
+
+function chatBusyPanelInner({ chats, selectedDate, state }) {
   const filters = normalizeChatListFilter(state.chatListFilter);
   const stats = chatWorkloadForDate(chats);
   const filtered = filterBusyChats(chats, filters);
@@ -2061,7 +2202,6 @@ function chatBusyPanel({ chats, selectedDate, state }) {
   ];
   const list = busyListMarkup({ filtered, filters, activeId: state.activeChatId });
   return `
-    <section class="ctox-chat-busy-panel" data-chat-busy-panel aria-label="Chatliste fuer ${escapeAttr(formatGermanDateLabel(selectedDate))}">
       <header>
         <div>
           <strong>${escapeHtml(formatGermanDateLabel(selectedDate))}</strong>
@@ -2098,16 +2238,24 @@ function chatBusyPanel({ chats, selectedDate, state }) {
         ${list.remaining > 0 ? `<div class="ctox-chat-busy-more">${formatCompactCount(list.remaining)} weitere Treffer durch Filter eingrenzen</div>` : ''}
         ${list.groupRemaining > 0 ? `<div class="ctox-chat-busy-more">${formatCompactCount(list.groupRemaining)} weitere Gruppen durch Filter eingrenzen</div>` : ''}
       </div>
-    </section>
+  `;
+}
+
+function dateWorkloadPanelShell(inner) {
+  return `
+    <section class="ctox-date-workload-panel" data-chat-date-workload-panel aria-label="Task-Aufkommen nach Datum">${inner}</section>
   `;
 }
 
 function dateWorkloadPanel({ chats, selectedDate }) {
+  return dateWorkloadPanelShell(dateWorkloadPanelInner({ chats, selectedDate }));
+}
+
+function dateWorkloadPanelInner({ chats, selectedDate }) {
   const days = workloadDaysAround(chats, selectedDate, 28);
   const max = Math.max(1, ...days.map((day) => day.count));
   const selected = days.find((day) => day.date === selectedDate);
   return `
-    <section class="ctox-date-workload-panel" data-chat-date-workload-panel aria-label="Task-Aufkommen nach Datum">
       <header>
         <div>
           <strong>${escapeHtml(formatGermanDateLabel(selectedDate))}</strong>
@@ -2121,7 +2269,6 @@ function dateWorkloadPanel({ chats, selectedDate }) {
       <div class="ctox-date-heatmap" role="list" aria-label="Task-Aufkommen der umliegenden Tage">
         ${days.map((day) => dateHeatmapDay(day, max, selectedDate)).join('')}
       </div>
-    </section>
   `;
 }
 
