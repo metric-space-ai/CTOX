@@ -1523,8 +1523,10 @@ populate_rebuild_release_layout() {
 
   if [[ -n "$ctox_binary" && -x "$ctox_binary" ]]; then
     cp "$ctox_binary" "$release_root/bin/ctox-real"
+    codesign_binary "$release_root/bin/ctox-real"
     write_managed_launch_wrapper "$release_root/bin/ctox" "$release_root" "$release_root/bin/ctox-real"
     cp "$release_root/bin/ctox-real" "$BIN_DIR/ctox-real" 2>/dev/null || true
+    codesign_binary "$BIN_DIR/ctox-real"
     write_managed_launch_wrapper "$INSTALL_ROOT/bin/ctox" "$release_root" "$BIN_DIR/ctox-real"
   fi
 
@@ -1814,7 +1816,19 @@ CUDASRC
 # ── Build ────────────────────────────────────────────────────────────────────
 build_ctox() {
   local source_root="$1"
-  local cargo; cargo="$(resolve_cargo)"
+  local cargo
+  # Fleet guests install from prebuilt releases and have no toolchain; under
+  # `set -e` an unguarded resolve_cargo kills the whole installer without a
+  # single line of output (welsch.ctox.dev, 2026-08-19).
+  cargo="$(resolve_cargo 2>/dev/null || true)"
+  if [[ -z "$cargo" || ! -x "$cargo" ]]; then
+    ensure_rust_toolchain
+    cargo="$(resolve_cargo 2>/dev/null || true)"
+  fi
+  if [[ -z "$cargo" || ! -x "$cargo" ]]; then
+    printf 'Error: cargo not found and rustup bootstrap failed; cannot build CTOX from source.\n' >&2
+    return 1
+  fi
   local main_target_dir="$source_root/runtime/build/cargo-target"
   local configured_target_dir="${CTOX_BUILD_TARGET_DIR:-}"
   local managed_release_build=0
@@ -2165,9 +2179,61 @@ sync_business_os_shell_assets() {
 }
 
 # ── Managed installation layout ─────────────────────────────────────────────
+stop_running_ctox_service() {
+  # Upgrades must never race a running service: it holds files in the release
+  # dir (rm fails with "Directory not empty"), keeps serving the OLD binary
+  # after the swap, and can materialize release_dir/runtime as a real
+  # directory before the STATE_ROOT symlink is created.
+  if [[ "$PLATFORM" == "darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/com.metric-space.ctox.service" >/dev/null 2>&1 || true
+  fi
+  pkill -f "ctox-real service" >/dev/null 2>&1 || true
+  # Give the process a moment to release file handles before rm/rsync.
+  local waited=0
+  while pgrep -f "ctox-real service" >/dev/null 2>&1 && [[ $waited -lt 10 ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Ad-hoc code signature for replaced binaries: macOS SIGKILLs a binary whose
+# content no longer matches its signature (exit 137 on every invocation).
+codesign_binary() {
+  [[ "$PLATFORM" == "darwin" ]] || return 0
+  command -v codesign >/dev/null 2>&1 || return 0
+  codesign -s - -f "$1" >/dev/null 2>&1 || true
+}
+
+# One-time migration of legacy per-release runtime state into STATE_ROOT.
+# Older releases carried a REAL runtime/ directory inside the release dir
+# (instance identity, business-os.sqlite3, secrets). A managed upgrade that
+# ignores it silently boots a brand-new empty instance.
+migrate_previous_runtime_state() {
+  local previous_release="$1"
+  [[ -n "$previous_release" ]] || return 0
+  local previous_runtime="$INSTALL_ROOT/releases/$previous_release/runtime"
+  # Only real directories are legacy state; a symlink already points at
+  # STATE_ROOT and needs no migration.
+  [[ -d "$previous_runtime" && ! -L "$previous_runtime" ]] || return 0
+  local previous_db="$previous_runtime/business-os.sqlite3"
+  local state_db="$STATE_ROOT/business-os.sqlite3"
+  local previous_size=0 state_size=0
+  [[ -f "$previous_db" ]] && previous_size=$(stat -f%z "$previous_db" 2>/dev/null || stat -c%s "$previous_db" 2>/dev/null || echo 0)
+  [[ -f "$state_db" ]] && state_size=$(stat -f%z "$state_db" 2>/dev/null || stat -c%s "$state_db" 2>/dev/null || echo 0)
+  # Migrate when STATE_ROOT clearly does not carry the tenant state yet
+  # (no instance identity, or a fresh/near-empty store while the previous
+  # release holds the real one). Never overwrite a larger state DB.
+  if [[ ! -f "$STATE_ROOT/business-os-instance-id" || "$state_size" -lt "$previous_size" ]]; then
+    printf '  migrating legacy runtime state from %s into %s
+' "$previous_release" "$STATE_ROOT" >&2
+    rsync -a --exclude='*.sock' --exclude='*.lock' "$previous_runtime/" "$STATE_ROOT/"
+  fi
+}
+
 setup_managed_install() {
   local source_root="$1"
   mkdir -p "$INSTALL_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$BIN_DIR" "$TOOLS_ROOT" "$DEPENDENCIES_ROOT"
+  stop_running_ctox_service
 
   local version; version="$(resolve_source_version "$source_root")"
   version="${version#v}"
@@ -2215,11 +2281,21 @@ setup_managed_install() {
   mkdir -p "$INSTALL_ROOT/bin"
   if [[ -x "$release_dir/bin/ctox-real" ]]; then
     cp "$release_dir/bin/ctox-real" "$BIN_DIR/ctox-real" 2>/dev/null || true
+    codesign_binary "$BIN_DIR/ctox-real"
     write_managed_launch_wrapper "$release_dir/bin/ctox" "$release_dir" "$BIN_DIR/ctox-real"
     write_managed_launch_wrapper "$INSTALL_ROOT/bin/ctox" "$release_dir" "$BIN_DIR/ctox-real"
   fi
   [[ -x "$release_dir/bin/ctox-desktop-host" ]] && cp "$release_dir/bin/ctox-desktop-host" "$INSTALL_ROOT/bin/ctox-desktop-host" 2>/dev/null || true
   ln -sfn "$release_dir" "$INSTALL_ROOT/current"
+  migrate_previous_runtime_state "$previous_release"
+  if [[ -d "$release_dir/runtime" && ! -L "$release_dir/runtime" ]]; then
+    # A service race materialized a real runtime dir inside the release.
+    # Fold it into STATE_ROOT (state wins on conflicts is fine here: the
+    # racy dir is minutes old) and restore the canonical symlink.
+    rsync -a --ignore-existing --exclude='*.sock' --exclude='*.lock' \
+      "$release_dir/runtime/" "$STATE_ROOT/"
+    rm -rf "$release_dir/runtime"
+  fi
   [[ ! -e "$release_dir/runtime" ]] && ln -sfn "$STATE_ROOT" "$release_dir/runtime"
 
   local previous_release_json="null"
