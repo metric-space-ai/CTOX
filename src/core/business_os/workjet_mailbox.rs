@@ -60,7 +60,7 @@ pub(super) const MAILBOX_COLLECTION: &str = "workjet_mailbox_envelopes";
 /// the store resolves agree without a second source of truth.
 const MAILBOX_SCHEMA_VERSION: i64 = 0;
 
-const MAILBOX_TABLE: &str = "ctox_business_os__workjet_mailbox_envelopes__v0";
+pub(super) const MAILBOX_TABLE: &str = "ctox_business_os__workjet_mailbox_envelopes__v0";
 
 /// Envelope ids and routing ids are bounded and charset-restricted. CTOX
 /// validates nothing else about them: they are Workjet identifiers.
@@ -340,6 +340,25 @@ pub(super) fn open_mailbox_store(root: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// Writes one envelope row in the shape RxDB replication understands.
+///
+/// # Why the revision is not just a fresh unique string
+///
+/// This row is replicated. RxDB decides which side of a conflict wins by the
+/// HEIGHT of `_rev`, the integer before the first `-` (`plugins::utils::
+/// utils_revision`). The loopback writer originally stamped `rev_<uuid>`, which
+/// has no parseable height at all, and it kept the revision only in the SQLite
+/// column — never inside the document JSON, which is what the storage hands
+/// back as the document. The observable consequence was narrow and nasty: a
+/// first INSERT still replicated (the remote had nothing to compare against),
+/// while every later UPDATE of the same id — the expiry TOMBSTONE above all —
+/// was dropped by the receiving peer. An envelope retired on one machine stayed
+/// live forever on the other. So the write must (1) carry `_rev` in the
+/// document and (2) increment its height over the row's previous revision.
+///
+/// `_deleted` and `_meta.lwt` are written for the same reason: they are the
+/// fields RxDB reads off the document, and `document_columns` in the sqlite
+/// storage derives its own columns from exactly these three.
 fn write_document(
     conn: &Connection,
     id: &str,
@@ -347,6 +366,30 @@ fn write_document(
     deleted: bool,
     write_time_ms: i64,
 ) -> anyhow::Result<()> {
+    let previous_revision: Option<String> = conn
+        .query_row(
+            &format!(r#"SELECT revision FROM "{MAILBOX_TABLE}" WHERE id = ?1"#),
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let height = previous_revision
+        .as_deref()
+        .and_then(|revision| revision.split_once('-'))
+        .and_then(|(height, _)| height.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    // `simple()` renders the uuid without dashes, so the revision keeps exactly
+    // one `-` and stays parseable by `get_height_of_revision`.
+    let revision = format!("{height}-{}", Uuid::new_v4().simple());
+
+    let mut stored = document.clone();
+    stored["_rev"] = Value::String(revision.clone());
+    stored["_deleted"] = Value::Bool(deleted);
+    stored["_meta"] = json!({ "lwt": write_time_ms });
+    stored["_attachments"] = json!({});
+
     conn.execute(
         &format!(
             r#"
@@ -361,10 +404,10 @@ fn write_document(
         ),
         params![
             id,
-            format!("rev_{}", Uuid::new_v4()),
+            revision,
             i64::from(deleted),
             write_time_ms as f64,
-            serde_json::to_string(document)?
+            serde_json::to_string(&stored)?
         ],
     )?;
     Ok(())
@@ -613,6 +656,55 @@ pub(super) fn mark_consumed(
 /// `DELETE` is what RxDB replication understands: a hard row delete would keep
 /// the envelope alive on every peer that has not seen the removal. Returns the
 /// number of envelopes tombstoned.
+/// Builds the retirement document for one expired envelope.
+///
+/// # Why a tombstone keeps the envelope's required fields
+///
+/// A tombstone is a REPLICATED WRITE like any other, and the receiving peer runs
+/// `rx_schema::validate_write_document` over it before persisting. That guard
+/// rejects any document missing a `required` field with a 422 and DROPS it from
+/// the batch — silently, as far as the sender is concerned. A bare
+/// `{id, _deleted}` tombstone therefore retires the envelope locally and is
+/// thrown away by every peer: the envelope stays live on every other machine
+/// forever, and the row that proves it was retired never arrives. So the
+/// tombstone carries the schema's required identity (`id`,
+/// `target_environment_id`, `envelope_json`) plus the routing ids.
+///
+/// It deliberately does NOT carry `payload_json`. Dropping the opaque blob is
+/// the whole point of retiring an envelope; the identity is small and bounded,
+/// the payload is up to 200 KB.
+///
+/// A row whose stored JSON cannot be parsed still gets a minimal tombstone — a
+/// corrupt row must still be retirable — and that one may indeed be refused by
+/// a strict peer, which is strictly better than leaving it live locally.
+fn tombstone_document(id: &str, stored_json: &str, now: i64) -> Value {
+    let mut tombstone = json!({
+        "id": id,
+        "is_deleted": true,
+        "_deleted": true,
+        "updated_at_ms": now,
+    });
+    let Ok(previous) = serde_json::from_str::<Value>(stored_json) else {
+        return tombstone;
+    };
+    for field in [
+        "target_environment_id",
+        "envelope_json",
+        "source_workspace_id",
+        "target_workspace_id",
+        "source_environment_id",
+        "created_at_ms",
+        "expires_at_ms",
+    ] {
+        if let Some(value) = previous.get(field) {
+            if !value.is_null() {
+                tombstone[field] = value.clone();
+            }
+        }
+    }
+    tombstone
+}
+
 pub(super) fn sweep_expired_envelopes(
     root: &Path,
     now: i64,
@@ -621,7 +713,7 @@ pub(super) fn sweep_expired_envelopes(
     let conn = open_mailbox_store(root)?;
     let mut statement = conn.prepare(&format!(
         r#"
-        SELECT id
+        SELECT id, data
         FROM "{MAILBOX_TABLE}"
         WHERE deleted = 0
           AND CAST(COALESCE(json_extract(data, '$.expires_at_ms'), 0) AS INTEGER) > 0
@@ -632,19 +724,14 @@ pub(super) fn sweep_expired_envelopes(
     ))?;
     let expired = statement
         .query_map(params![now, batch_limit as i64], |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
-        .collect::<Result<Vec<String>, _>>()?;
+        .collect::<Result<Vec<(String, String)>, _>>()?;
     drop(statement);
 
     let mut swept = 0usize;
-    for id in expired {
-        let tombstone = json!({
-            "id": id,
-            "is_deleted": true,
-            "_deleted": true,
-            "updated_at_ms": now,
-        });
+    for (id, raw) in expired {
+        let tombstone = tombstone_document(&id, &raw, now);
         match write_document(&conn, &id, &tombstone, true, now) {
             Ok(()) => swept += 1,
             // log-and-continue: one bad row must not abort the whole sweep.
@@ -895,6 +982,94 @@ mod tests {
         );
         let consumed = mark_consumed(root, "target-a", &["old-0".to_string()])?;
         assert_eq!(consumed["missing"], json!(["old-0"]));
+        Ok(())
+    }
+
+    /// REGRESSION: every write must produce an RxDB-parseable `_rev` whose
+    /// height grows. The original writer stamped `rev_<uuid>` and kept it out
+    /// of the document, so a replicated peer accepted the first insert and then
+    /// silently discarded every update — including the expiry tombstone, which
+    /// left retired envelopes alive on the other machine forever.
+    #[test]
+    fn every_write_bumps_a_parseable_revision_height_inside_the_document() -> anyhow::Result<()> {
+        let root = temp_root();
+        let root = root.path();
+        let conn = open_mailbox_store(root)?;
+
+        publish_envelope(root, &publish_request("env-rev", "target-a"))?;
+        let (_, inserted) = load_document(&conn, "env-rev")?.expect("inserted");
+        let first = inserted["_rev"].as_str().expect("insert carries _rev");
+        assert_eq!(first.split('-').next(), Some("1"));
+        assert_eq!(
+            first.matches('-').count(),
+            1,
+            "exactly one height separator"
+        );
+        assert_eq!(inserted["_deleted"].as_bool(), Some(false));
+        assert!(inserted["_meta"]["lwt"].as_i64().is_some());
+
+        mark_consumed(root, "target-a", &["env-rev".to_string()])?;
+        let (_, updated) = load_document(&conn, "env-rev")?.expect("updated");
+        assert_eq!(
+            updated["_rev"]
+                .as_str()
+                .and_then(|rev| rev.split('-').next()),
+            Some("2"),
+            "an update must outrank the insert it replaces"
+        );
+
+        sweep_expired_envelopes(root, now_ms() + DEFAULT_TTL_MS + 1, 10)?;
+        let (deleted, tombstone) = load_document(&conn, "env-rev")?.expect("tombstone");
+        assert!(deleted);
+        assert_eq!(
+            tombstone["_rev"]
+                .as_str()
+                .and_then(|rev| rev.split('-').next()),
+            Some("3"),
+            "the tombstone must outrank the document it retires, or peers keep it alive"
+        );
+        assert_eq!(tombstone["_deleted"].as_bool(), Some(true));
+        Ok(())
+    }
+
+    /// REGRESSION: a tombstone must survive the write-path validation every
+    /// receiving peer runs. The original bare `{id, _deleted}` tombstone was
+    /// rejected with a 422 and dropped from the replication batch, so an
+    /// envelope retired on one machine stayed live on every other one — and the
+    /// sender saw nothing wrong. Asserted against the REAL validator, not a
+    /// restatement of the schema, so the two cannot drift apart.
+    #[test]
+    fn a_tombstone_passes_the_peer_write_validator_and_sheds_the_payload() -> anyhow::Result<()> {
+        let root = temp_root();
+        let root = root.path();
+        let mut request = publish_request("env-tomb", "target-a");
+        request["payload_json"] = json!("x".repeat(4096));
+        request["source_environment_id"] = json!("source-env");
+        publish_envelope(root, &request)?;
+
+        let swept = sweep_expired_envelopes(root, now_ms() + DEFAULT_TTL_MS + 1, 10)?;
+        assert_eq!(swept, 1);
+
+        let (deleted, tombstone) =
+            load_document(&open_mailbox_store(root)?, "env-tomb")?.expect("tombstone row");
+        assert!(deleted);
+        assert_eq!(tombstone["_deleted"].as_bool(), Some(true));
+        assert_eq!(
+            tombstone["target_environment_id"].as_str(),
+            Some("target-a")
+        );
+        assert_eq!(
+            tombstone["source_environment_id"].as_str(),
+            Some("source-env")
+        );
+        assert!(
+            tombstone.get("payload_json").is_none(),
+            "a retired envelope must not keep carrying its payload"
+        );
+
+        let schema = mailbox_rx_schema();
+        rxdb::rx_schema::validate_write_document(&schema, "id", &tombstone)
+            .expect("a tombstone every peer drops is not a tombstone");
         Ok(())
     }
 
