@@ -54,6 +54,7 @@ export async function mount(ctx) {
     viewport: root.querySelector('[data-browser-viewport]'),
     newTab: root.querySelector('[data-browser-new-tab]'),
     contextMenu: root.querySelector('[data-browser-context-menu]'),
+    tabstrip: root.querySelector('[data-browser-tabstrip]'),
     upload: root.querySelector('[data-browser-upload]'),
     controllerAcquire: root.querySelector('[data-browser-controller-acquire]'),
     controllerRelease: root.querySelector('[data-browser-controller-release]'),
@@ -223,6 +224,7 @@ export async function mount(ctx) {
       filters: detail.filters || {},
     };
     renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderTabstrip(ctx, refs, state);
   };
   root.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
@@ -819,6 +821,7 @@ export async function mount(ctx) {
       };
     }
     renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderTabstrip(ctx, refs, state);
     // Auto-reveal: the remote work surface is meaningful once a session is
     // selected (visible = hasSelection && !userCollapsed). No session -> the
     // canvas shows its empty state instead of stale chrome.
@@ -1512,6 +1515,67 @@ function requireCommandBus(ctx) {
     throw new Error('CTOX command bus is unavailable. The action was not submitted.');
   }
   return ctx.commandBus;
+}
+
+// custom: Tab-Leiste der fernen Sitzung.
+//
+// Der Runner fuehrt seit jeher mehrere Tabs (tab_open/tab_activate/tab_close),
+// sichtbar waren sie in der Oberflaeche aber nur als Zaehler "0 Tabs" -- und
+// der Knopf "Neuer Tab" schrieb einen Befehl, den niemand ausfuehrte.
+//
+// Bei einem einzigen Tab bleibt die Leiste verborgen: eine Leiste mit genau
+// einem Eintrag kostet Hoehe und sagt nichts.
+function tabsDerSitzung(state) {
+  const sessionId = state.latestSession?.id;
+  if (!sessionId) return [];
+  return (Array.isArray(state.tabs) ? state.tabs : [])
+    .filter((tab) => tab.session_id === sessionId && tab.status !== 'closed')
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0)
+      || String(a.id).localeCompare(String(b.id)));
+}
+
+function renderTabstrip(ctx, refs, state) {
+  const leiste = refs.tabstrip;
+  if (!leiste) return;
+  const tabs = tabsDerSitzung(state);
+  if (tabs.length < 2) {
+    leiste.hidden = true;
+    leiste.replaceChildren();
+    return;
+  }
+  // Nur neu bauen, wenn sich wirklich etwas geaendert hat -- sonst verliert
+  // ein Klick waehrend eines Renderdurchlaufs sein Ziel.
+  const signatur = tabs.map((tab) => `${tab.id}:${tab.active ? 1 : 0}:${tab.title || tab.url || ''}`).join('|');
+  if (leiste.dataset.signatur === signatur) return;
+  leiste.dataset.signatur = signatur;
+  leiste.hidden = false;
+  leiste.replaceChildren(...tabs.map((tab) => {
+    const eintrag = document.createElement('div');
+    eintrag.className = 'browser-tab' + (tab.active ? ' is-active' : '');
+    const knopf = document.createElement('button');
+    knopf.type = 'button';
+    knopf.className = 'browser-tab-title';
+    knopf.setAttribute('role', 'tab');
+    knopf.setAttribute('aria-selected', tab.active ? 'true' : 'false');
+    const beschriftung = String(tab.title || tab.url || tab.id).trim();
+    knopf.textContent = beschriftung;
+    knopf.title = String(tab.url || beschriftung);
+    knopf.addEventListener('click', () => {
+      if (tab.active) return;
+      dispatchBrowserCommand(ctx, state, 'browser.tab.activate', { tab_id: tab.id });
+    });
+    const schliessen = document.createElement('button');
+    schliessen.type = 'button';
+    schliessen.className = 'browser-tab-close';
+    schliessen.setAttribute('aria-label', tBrowser(ctx, 'tabClose', 'Tab schließen'));
+    schliessen.textContent = '\u00d7';
+    schliessen.addEventListener('click', (event) => {
+      event.stopPropagation();
+      dispatchBrowserCommand(ctx, state, 'browser.tab.close', { tab_id: tab.id });
+    });
+    eintrag.append(knopf, schliessen);
+    return eintrag;
+  }));
 }
 
 // custom: Eigenes Kontextmenue ueber der Buehne.
@@ -2564,6 +2628,7 @@ function importBrowserSessions(ctx, state, refs) {
     }
     state.importedSessions = imported;
     renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderTabstrip(ctx, refs, state);
     ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: `${imported.length} Sitzungen geladen (nur lokal).` });
   });
   input.click();

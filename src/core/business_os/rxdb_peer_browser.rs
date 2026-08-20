@@ -6,14 +6,13 @@ use super::browser_control::{
     browser_frame_capture_dimensions, browser_frame_capture_request,
     browser_session_automation_with_database, browser_session_status_with_database,
     redact_browser_frame_data, redacted_browser_context_capture, redacted_browser_session_status,
-    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_JPEG_QUALITY, BROWSER_FRAME_RATE_LIMIT,
+    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_JPEG_QUALITY, BROWSER_FRAME_RATE_IDLE,
+    BROWSER_FRAME_RATE_LIMIT, BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_FRAME_RECENT_KEEP_COUNT,
+    BROWSER_INPUT_ACTIVE_WINDOW_MS, BROWSER_INPUT_EVENT_GC_LIMIT,
+    BROWSER_INPUT_EVENT_RETENTION_SECS, BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS,
+    BROWSER_RUNTIME_COMMAND_LOCK, BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS,
+    BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS, BROWSER_SESSION_ABANDONED_AFTER_MS,
     BUSINESS_COMMAND_GC_LIMIT, BUSINESS_COMMAND_RETENTION_MS,
-    BROWSER_FRAME_RATE_IDLE, BROWSER_INPUT_ACTIVE_WINDOW_MS,
-    BROWSER_SESSION_ABANDONED_AFTER_MS,
-    BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_FRAME_RECENT_KEEP_COUNT,
-    BROWSER_INPUT_EVENT_GC_LIMIT, BROWSER_INPUT_EVENT_RETENTION_SECS,
-    BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS, BROWSER_RUNTIME_COMMAND_LOCK,
-    BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS, BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
 };
 use super::browser_runtime::{browser_runtime_manager, BrowserSessionAutomationRequest};
 use super::policy::BusinessOsPermission;
@@ -808,6 +807,9 @@ pub(super) fn is_browser_runtime_command(command_type: &str) -> bool {
             | "browser.controller.renew"
             | "browser.controller.release"
             | "browser.credential.fill"
+            | "browser.tab.open"
+            | "browser.tab.activate"
+            | "browser.tab.close"
     )
 }
 
@@ -1219,6 +1221,16 @@ pub(super) async fn apply_browser_runtime_command(
         "browser.reload" => ("reload", json!({ "timeoutMs": 30000 })),
         "browser.back" => ("back", json!({ "timeoutMs": 30000 })),
         "browser.forward" => ("forward", json!({ "timeoutMs": 30000 })),
+        // The runner has carried tab_open/tab_activate/tab_close all along;
+        // only the bridge was missing, so the "new tab" button in the UI wrote
+        // a command nothing consumed. `tab_id` comes from the command payload,
+        // which is what lets the caller address a specific tab.
+        "browser.tab.open" => (
+            "tab_open",
+            json!({ "tabId": tab_id, "url": target_url, "timeoutMs": 30000 }),
+        ),
+        "browser.tab.activate" => ("tab_activate", json!({ "tabId": tab_id })),
+        "browser.tab.close" => ("tab_close", json!({ "tabId": tab_id })),
         "browser.credential.fill" => {
             let fill = credential_fill
                 .as_ref()
@@ -3925,7 +3937,13 @@ mod tests {
         // so nobody can ever take the lease: the deadlock that left every
         // session on the tenant frameless.
         assert!(browser_frame_capture_due(NOW, None, None, RATE, None));
-        assert!(browser_frame_capture_due(NOW, None, Some(NOW - 1), RATE, None));
+        assert!(browser_frame_capture_due(
+            NOW,
+            None,
+            Some(NOW - 1),
+            RATE,
+            None
+        ));
 
         // With a frame in place the lease decides. Waehrend der Bedienung gilt
         // die volle Rate: nach 50 ms noch nicht faellig, nach 67 ms schon.
@@ -3990,8 +4008,20 @@ mod tests {
         // A session that records no lease at all keeps streaming: several
         // lifecycle writers never record one, and reading "absent" as "expired"
         // would end the stream after its very first frame.
-        assert!(browser_frame_capture_due(NOW, Some(NOW - 67), None, RATE, Some(NOW)));
-        assert!(!browser_frame_capture_due(NOW, Some(NOW - 50), None, RATE, Some(NOW)));
+        assert!(browser_frame_capture_due(
+            NOW,
+            Some(NOW - 67),
+            None,
+            RATE,
+            Some(NOW)
+        ));
+        assert!(!browser_frame_capture_due(
+            NOW,
+            Some(NOW - 50),
+            None,
+            RATE,
+            Some(NOW)
+        ));
 
         // A stored rate of zero must never divide by zero or freeze the stream.
         assert!(browser_frame_capture_due(

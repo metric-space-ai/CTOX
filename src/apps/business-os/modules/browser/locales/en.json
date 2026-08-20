@@ -45,5 +45,6 @@
   "ctxForward": "Forward",
   "ctxReload": "Reload",
   "ctxCopy": "Copy",
-  "ctxPaste": "Paste"
+  "ctxPaste": "Paste",
+  "tabClose": "Close tab"
 }

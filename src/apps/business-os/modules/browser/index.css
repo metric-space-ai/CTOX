@@ -240,8 +240,9 @@
   /* Der Umschalter sitzt als eigene Zeile ueber der Buehne. Ohne die
      auto-Zeile faellt die Buehne in eine implizite Zeile und der
      Umschalter frisst als einziges 1fr-Kind die gesamte Resthoehe --
-     der Frame stand dann in der unteren Fensterhaelfte. */
-  grid-template-rows: auto minmax(0, 1fr);
+     der Frame stand dann in der unteren Fensterhaelfte. Dritte Zeile:
+     Tab-Leiste, Umschalter, Buehne. */
+  grid-template-rows: auto auto minmax(0, 1fr);
   background: var(--bg);
 }
 
@@ -630,4 +631,72 @@
   border: 0;
   border-top: 1px solid var(--border, #333a42);
   margin: 0.25rem 0.1rem;
+}
+
+/* custom: Tab-Leiste der fernen Sitzung. Bleibt bei einem einzigen Tab
+   verborgen (siehe renderTabstrip), damit sie keine Hoehe verschenkt. */
+.browser-tabstrip {
+  display: flex;
+  gap: 0.125rem;
+  align-items: stretch;
+  overflow-x: auto;
+  padding: 0.25rem 0.25rem 0;
+  border-bottom: 1px solid var(--border, #333a42);
+  scrollbar-width: thin;
+}
+
+.browser-tabstrip[hidden] {
+  display: none;
+}
+
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  max-width: 14rem;
+  padding: 0.2rem 0.35rem;
+  border-radius: 0.35rem 0.35rem 0 0;
+  background: var(--panel, #1b1f24);
+  border: 1px solid transparent;
+  border-bottom: 0;
+}
+
+.browser-tab.is-active {
+  background: var(--bg, #12161a);
+  border-color: var(--border, #333a42);
+}
+
+.browser-tab-title {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  padding: 0.1rem 0.2rem;
+  min-width: 0;
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.browser-tab-close {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.browser-tab-close:hover,
+.browser-tab-close:focus-visible {
+  opacity: 1;
+  background: var(--hover, #262c33);
 }

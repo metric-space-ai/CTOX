@@ -126,12 +126,19 @@
     </div>
 
     <div class="browser-workbench" aria-label="Browser Inhalt">
+      <!-- custom: Tab-Leiste der fernen Sitzung. Der Runner fuehrt seit je
+           mehrere Tabs; sichtbar waren sie bisher nur als Zaehler. -->
+      <div class="browser-tabstrip" data-browser-tabstrip role="tablist" aria-label="Browser-Tabs" hidden></div>
       <div class="browser-view-switch" role="tablist" aria-label="Ansicht">
         <button type="button" class="ctox-btn ctox-btn-ghost is-active" data-browser-view="live" role="tab" aria-selected="true" data-t="viewLive">Ansicht</button>
         <button type="button" class="ctox-btn ctox-btn-ghost" data-browser-view="script" role="tab" aria-selected="false" data-t="viewScript">Skript</button>
         <span class="browser-view-path" data-browser-script-path></span>
       </div>
-      <div class="browser-frame-shell" data-browser-frame-shell>
+      <!-- no-ctox-context: ueber der Buehne gehoert der Rechtsklick der
+           fernen Seite, nicht dem CTOX-Kontextmenue der Shell. Die Klasse
+           ist der dafuer vorgesehene Ausweg (isCtoxContextMenuBypassTarget
+           in app.js); sie deckt Canvas und eigenes Menue zugleich ab. -->
+      <div class="browser-frame-shell no-ctox-context" data-browser-frame-shell>
         <canvas data-browser-canvas width="1280" height="720" tabindex="0" aria-label="Remote browser frame"></canvas>
         <div class="browser-script-panel" data-browser-script-panel hidden>
           <pre class="browser-script-code" data-browser-script-code tabindex="0" aria-label="Automatisierungsskript dieser Sitzung"></pre>
