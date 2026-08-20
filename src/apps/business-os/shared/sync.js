@@ -553,19 +553,25 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       const budgetMs = Number(options?.timeoutMs) > 0 ? Number(options.timeoutMs) : 0;
       if (coordinator && !coordinator.isLeader?.() && typeof coordinator.requestNativeViaLeader === 'function') {
         try {
-          return await coordinator.requestNativeViaLeader(
-            method,
-            params,
-            options,
-            budgetMs ? { timeoutMs: Math.max(500, Math.round(budgetMs * 0.6)) } : {},
-          );
+          // The proxy hop is an optimisation, not the contract: it must not eat
+          // the caller's budget. Splitting the budget between hop and fallback
+          // left the actual call ~1s of a 5s allowance, and the Browser app's
+          // lease reacquisition failed with "exceeded 5000ms" every single time
+          // — the surface then reports "Steuerung abgelaufen und konnte nicht
+          // zurückgeholt werden" while the channel itself is perfectly healthy.
+          // Bound the hop on its own short deadline and leave the caller's
+          // budget to the direct call below.
+          return await coordinator.requestNativeViaLeader(method, params, options, {
+            timeoutMs: budgetMs ? Math.min(1500, Math.max(500, Math.round(budgetMs * 0.3))) : 1500,
+          });
         } catch (error) {
           if (stopped) throw error;
           // The failed proxy call already dropped the unresponsive lease and
-          // called for an election. Give that election a moment to land so the
-          // direct bridge below is built as a leader rather than as a follower
-          // that can never connect.
-          await waitForLeadership(coordinator, budgetMs ? Math.round(budgetMs * 0.2) : 4000);
+          // called for an election. Give that election a brief moment to land
+          // so the direct bridge below is built as a leader rather than as a
+          // follower that can never connect — brief, because the caller's
+          // deadline is still running.
+          await waitForLeadership(coordinator, 500);
         }
       }
       return requestNativeDirectly(method, params, options);

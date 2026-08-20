@@ -915,7 +915,14 @@ async function requestBrowserControllerLease(ctx, state, operation, leaseId) {
     }, {
       collection: 'business_commands',
       requiredCapability: 'ctox-browser-live-v1',
-      timeoutMs: 5_000,
+      // A lease operation writes the session projection, and on a large store
+      // that write is not a 5s affair: measured 5.6s on a customer instance
+      // with a 947 MB database, so EVERY reacquisition failed with "exceeded
+      // 5000ms" and the surface reported "Steuerung abgelaufen und konnte
+      // nicht zurückgeholt werden" while the channel was healthy. This runs on
+      // a 30s background timer, so a longer deadline costs nothing; a frame
+      // request keeps its own, much tighter budget.
+      timeoutMs: 15_000,
     });
     const released = operation === 'controller.release';
     const actorId = browserActorIds(ctx.session)[0] || '';
