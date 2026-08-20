@@ -79,6 +79,10 @@ export async function mount(ctx) {
     shell: root.querySelector('[data-browser-frame-shell]'),
     canvas: root.querySelector('[data-browser-canvas]'),
     empty: root.querySelector('[data-browser-empty]'),
+    viewSwitch: root.querySelectorAll('[data-browser-view]'),
+    scriptPanel: root.querySelector('[data-browser-script-panel]'),
+    scriptCode: root.querySelector('[data-browser-script-code]'),
+    scriptPath: root.querySelector('[data-browser-script-path]'),
     automationOverlay: root.querySelector('[data-browser-automation-overlay]'),
     automationTitle: root.querySelector('[data-browser-automation-title]'),
     automationStatus: root.querySelector('[data-browser-automation-status]'),
@@ -577,6 +581,7 @@ export async function mount(ctx) {
     }
   });
   installInputHandlers(ctx, refs, state, scheduleRefresh);
+  installViewSwitch(ctx, refs, state);
   cleanups.push(startDirectBrowserLive(ctx, refs, state, () => mounted, scheduleRefresh));
   const leaseRenewTimer = globalThis.setInterval(renewControllerLeaseIfNeeded, 30_000);
   cleanups.push(() => globalThis.clearInterval(leaseRenewTimer));
@@ -3111,6 +3116,78 @@ function erkenneEigenePachtWieder(ctx, state) {
   const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return;
   state.controllerLeaseId = leaseId;
+}
+
+// Umschalter zwischen Live-Ansicht und dem Automatisierungsskript dieser
+// Sitzung. Das Skript wird pro Sitzung erzeugt und liegt neben dem Profil --
+// es ist damit die einzige verlaessliche Antwort auf "was steuert diese
+// Scraping-Sitzung gerade". Der Quellbaum kann davon abweichen: genau diese
+// Abweichung kostete am 20.08.2026 einen Tag, weil der ausgelieferte Runner
+// die Bildoperation gar nicht kannte, der Checkout aber schon.
+//
+// Bewusst nur lesend. Der Runner hat die Datei beim Start geladen; sie hier
+// zu aendern wuerde nichts an der laufenden Sitzung aendern und nur den
+// Eindruck erwecken, es taete es.
+function installViewSwitch(ctx, refs, state) {
+  const knoepfe = [...(refs.viewSwitch || [])];
+  if (!knoepfe.length || !refs.scriptPanel) return;
+  const zeige = async (ansicht) => {
+    state.ansicht = ansicht;
+    for (const k of knoepfe) {
+      const aktiv = k.dataset.browserView === ansicht;
+      k.classList.toggle('is-active', aktiv);
+      k.setAttribute('aria-selected', aktiv ? 'true' : 'false');
+    }
+    const skript = ansicht === 'script';
+    refs.scriptPanel.hidden = !skript;
+    if (refs.canvas) refs.canvas.style.visibility = skript ? 'hidden' : '';
+    if (refs.empty && skript) refs.empty.hidden = true;
+    if (!skript || !refs.scriptCode) return;
+    const sessionId = state.latestSession?.id;
+    if (!sessionId) {
+      refs.scriptCode.textContent = tBrowser(ctx, 'scriptNoSession', 'Keine laufende Sitzung — es gibt kein Skript zu zeigen.');
+      return;
+    }
+    // Der Live-Kanal verlangt die Steuerungspacht fuer JEDE Operation, auch
+    // fuer diese rein lesende. Ohne Vorabpruefung bekaeme der Betrachter hier
+    // "controller lease is missing or expired" zu lesen -- fuer einen Klick auf
+    // "Skript" eine Meldung, die niemand mit der Ursache verbindet.
+    const pacht = state.controllerLeaseId || state.latestSession?.controller_lease_id || '';
+    if (!pacht) {
+      refs.scriptCode.textContent = tBrowser(ctx, 'scriptNeedsControl', 'Nur der Steuernde kann das Skript lesen — übernimm zuerst die Steuerung.');
+      return;
+    }
+    refs.scriptCode.textContent = tBrowser(ctx, 'scriptLoading', 'Skript wird geladen …');
+    try {
+      const antwort = await ctx.sync.requestNative('ctox.browser.live.v1', {
+        op: 'script',
+        session_id: sessionId,
+        lease_id: pacht,
+      }, {
+        collection: 'business_commands',
+        requiredCapability: 'ctox-browser-live-v1',
+        timeoutMs: 15_000,
+      });
+      refs.scriptCode.textContent = String(antwort?.script || '');
+      if (refs.scriptPath) {
+        const bytes = Number(antwort?.bytes || 0);
+        refs.scriptPath.textContent = antwort?.path
+          ? `${antwort.path} · ${Math.round(bytes / 1024)} KB`
+          : '';
+      }
+    } catch (error) {
+      refs.scriptCode.textContent = `${tBrowser(ctx, 'scriptFailed', 'Skript konnte nicht gelesen werden')}: ${error?.message || error}`;
+    }
+  };
+  for (const k of knoepfe) {
+    k.addEventListener('click', () => { zeige(k.dataset.browserView || 'live'); });
+  }
+  zeige('live');
+}
+
+function tBrowser(ctx, schluessel, standard) {
+  const t = ctx?.i18n?.t;
+  return typeof t === 'function' ? t(schluessel, standard) : standard;
 }
 
 function newBrowserControllerLeaseId() {

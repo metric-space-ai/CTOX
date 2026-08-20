@@ -12,6 +12,7 @@
 //! live processes and serializes access to each one.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -44,6 +45,35 @@ pub struct LiveBrowserSession {
 }
 
 impl LiveBrowserSession {
+    /// The automation script this session is actually running, plus its path.
+    ///
+    /// The pinned `ctox-web-stack` keeps `runner_path` private and exposes no
+    /// accessor for it, so the path is recovered from the live process instead:
+    /// the generated runner is `<root>/.ctox-browser-live-<pid>-<ts>.mjs`, and
+    /// node was started with it as its script argument. Matching the candidates
+    /// in `root` against that command line stays session-exact even when one
+    /// CTOX process owns several sessions, which a name glob alone would not.
+    ///
+    /// Read-only: the runner already loaded the file, so editing it here would
+    /// race with a live process and change nothing about the running session.
+    pub fn runner_script(&self) -> Result<(String, String)> {
+        let pid = self
+            .handle
+            .lock()
+            .map_err(|_| anyhow::anyhow!("browser runtime handle is poisoned"))?
+            .process_id();
+        let path = self.runner_script_path(pid)?;
+        let script = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        Ok((script, path.display().to_string()))
+    }
+
+    /// Locate the runner file that `pid` was started with, inside this
+    /// session's reference directory.
+    fn runner_script_path(&self, pid: u32) -> Result<PathBuf> {
+        select_runner_script(&self.root, pid, &runner_command_line(pid))
+    }
+
     pub fn record_input_seq(&self, seq: u64) {
         self.last_input_seq.fetch_max(seq, Ordering::Relaxed);
     }
@@ -452,6 +482,66 @@ impl BrowserRuntimeManager {
     }
 }
 
+/// Pick the runner file that `pid` was started with out of `root`.
+///
+/// Several sessions of one CTOX process share a reference directory, so the
+/// command line -- which carries the runner path as node's script argument --
+/// is what makes the answer session-exact. Comparing file names rather than
+/// splitting the command line keeps paths containing spaces working.
+fn select_runner_script(root: &Path, pid: u32, command_line: &str) -> Result<PathBuf> {
+    let mut only_candidate: Option<PathBuf> = None;
+    let mut candidates = 0usize;
+    for entry in
+        std::fs::read_dir(root).with_context(|| format!("failed to list {}", root.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to list {}", root.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(".ctox-browser-live-") || !name.ends_with(".mjs") {
+            continue;
+        }
+        candidates += 1;
+        if command_line.contains(&name) {
+            return Ok(entry.path());
+        }
+        only_candidate = Some(entry.path());
+    }
+    // A single candidate is unambiguous even when the command line could not be
+    // read back, so a hardened `ps` still yields the right answer for the
+    // common case of one live session.
+    if candidates == 1 {
+        if let Some(path) = only_candidate {
+            return Ok(path);
+        }
+    }
+    anyhow::bail!(
+        "found no runner script for pid {pid} among {candidates} candidate(s) in {}",
+        root.display()
+    )
+}
+
+/// The command line of the persistent runner process.
+///
+/// Best effort: an empty string means "could not tell", which
+/// [`select_runner_script`] treats as ambiguity rather than as a match.
+fn runner_command_line(pid: u32) -> String {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("ps")
+            .arg("-o")
+            .arg("command=")
+            .arg("-p")
+            .arg(pid.to_string())
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +576,40 @@ mod tests {
             browser_profile_key(owner, companyhouse, false),
             browser_profile_key(owner, "browser_session_regular", false)
         );
+    }
+
+    #[test]
+    fn runner_script_is_picked_by_command_line_not_by_name_glob() {
+        let dir = std::env::temp_dir().join(format!(
+            "ctox-runner-select-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mine = dir.join(".ctox-browser-live-42-1000.mjs");
+        let other = dir.join(".ctox-browser-live-42-2000.mjs");
+        std::fs::write(&mine, "// mine").expect("write");
+        std::fs::write(&other, "// other").expect("write");
+
+        // Two sessions of one CTOX process share the directory, so only the
+        // command line tells them apart.
+        let command_line = format!("node {}", mine.display());
+        let picked = select_runner_script(&dir, 42, &command_line).expect("picked");
+        assert_eq!(picked, mine);
+
+        // Without a usable command line the answer stays ambiguous rather than
+        // guessing one of the two.
+        assert!(select_runner_script(&dir, 42, "").is_err());
+
+        std::fs::remove_file(&other).expect("remove");
+        // A single candidate is unambiguous even with no command line.
+        assert_eq!(
+            select_runner_script(&dir, 42, "").expect("sole candidate"),
+            mine
+        );
+
+        std::fs::remove_file(&mine).expect("remove");
+        assert!(select_runner_script(&dir, 42, "").is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

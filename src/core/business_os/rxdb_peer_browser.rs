@@ -594,6 +594,28 @@ async fn handle_browser_live_webrtc_request_inner(
         }
         return Ok(response);
     }
+    // Read the automation script this session is actually running. Operators
+    // asked to switch between the live view and the script inside the app,
+    // because the source tree can differ from what a release shipped -- today
+    // that difference cost a full day: the runner in the pinned build did not
+    // implement `live` at all while the checkout did. Read-only: editing the
+    // driver of a session that already loaded it would race with the process.
+    if operation == "script" {
+        // Reading it locks the runtime handle and touches the disk, so it goes
+        // to a blocking worker like every other request against the process.
+        let session = Arc::clone(&session);
+        let (script, path) = tokio::task::spawn_blocking(move || session.runner_script())
+            .await
+            .map_err(|error| format!("browser live script worker panicked: {error}"))?
+            .map_err(|error| format!("browser live script read failed: {error:#}"))?;
+        return Ok(json!({
+            "ok": true,
+            "operation": "script",
+            "path": path,
+            "bytes": script.len(),
+            "script": script,
+        }));
+    }
     if operation != "live" {
         return Err(format!("unsupported browser live operation: {operation}"));
     }

@@ -544,3 +544,37 @@
   color: var(--ctox-text-muted, #8a93a0);
   opacity: 0.5;
 }
+
+/* Umschalter Live-Ansicht / Automatisierungsskript */
+.browser-view-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 0;
+}
+.browser-view-switch .ctox-btn.is-active {
+  background: var(--surface-strong, rgba(255, 255, 255, 0.08));
+  color: var(--text-strong, var(--text));
+}
+.browser-view-path {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.browser-script-panel {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: var(--surface, #0e1116);
+}
+.browser-script-code {
+  margin: 0;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre;
+  tab-size: 2;
+}

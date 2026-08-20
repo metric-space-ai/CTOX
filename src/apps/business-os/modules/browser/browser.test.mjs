@@ -298,8 +298,8 @@ assert.match(
 );
 assert.equal(
   (js.match(/collection: 'business_commands'/g) || []).length,
-  6,
-  'browser live list, start, navigation, controller, input and frame requests must use the already-warm command bridge',
+  7,
+  'browser live list, start, navigation, controller, input, frame and script requests must use the already-warm command bridge',
 );
 assert.match(
   js.match(/const flushInput = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '',
@@ -1070,4 +1070,32 @@ function pointerEvent(overrides = {}) {
     '',
     'tote angeforderte Sitzung bleibt startbar',
   );
+}
+
+// Jede Beschriftung muss in BEIDEN Sprachen existieren. Ohne diesen Waechter
+// faellt genau der Fall durch, der beim Skript-Umschalter passiert ist: die
+// Funktion war fertig und getestet, die Knoepfe trugen aber nur den deutschen
+// HTML-Fallback -- im englischen Produkt haette dort deutscher Text gestanden,
+// und ein rein funktionaler Test haette das grün gemeldet.
+{
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const de = JSON.parse(await readFile(new URL('./locales/de.json', import.meta.url), 'utf8'));
+  const en = JSON.parse(await readFile(new URL('./locales/en.json', import.meta.url), 'utf8'));
+  const htmlKeys = [...html.matchAll(/data-t="([^"]+)"/g)].map((treffer) => treffer[1]);
+  assert.ok(htmlKeys.length > 0, 'index.html traegt data-t-Beschriftungen');
+  for (const schluessel of htmlKeys) {
+    assert.ok(schluessel in de, `data-t="${schluessel}" fehlt in locales/de.json`);
+    assert.ok(schluessel in en, `data-t="${schluessel}" fehlt in locales/en.json`);
+  }
+  assert.deepEqual(
+    Object.keys(de).sort(),
+    Object.keys(en).sort(),
+    'de.json und en.json muessen dieselben Schluessel tragen',
+  );
+  // Die im Code nachgeschlagenen Schluessel zaehlen genauso, auch wenn sie nie
+  // im HTML stehen.
+  for (const schluessel of ['viewLive', 'viewScript', 'scriptNoSession', 'scriptLoading', 'scriptFailed', 'scriptNeedsControl']) {
+    assert.ok(schluessel in de, `${schluessel} fehlt in locales/de.json`);
+    assert.ok(schluessel in en, `${schluessel} fehlt in locales/en.json`);
+  }
 }

@@ -126,8 +126,16 @@
     </div>
 
     <div class="browser-workbench" aria-label="Browser Inhalt">
+      <div class="browser-view-switch" role="tablist" aria-label="Ansicht">
+        <button type="button" class="ctox-btn ctox-btn-ghost is-active" data-browser-view="live" role="tab" aria-selected="true" data-t="viewLive">Ansicht</button>
+        <button type="button" class="ctox-btn ctox-btn-ghost" data-browser-view="script" role="tab" aria-selected="false" data-t="viewScript">Skript</button>
+        <span class="browser-view-path" data-browser-script-path></span>
+      </div>
       <div class="browser-frame-shell" data-browser-frame-shell>
         <canvas data-browser-canvas width="1280" height="720" tabindex="0" aria-label="Remote browser frame"></canvas>
+        <div class="browser-script-panel" data-browser-script-panel hidden>
+          <pre class="browser-script-code" data-browser-script-code tabindex="0" aria-label="Automatisierungsskript dieser Sitzung"></pre>
+        </div>
         <div class="browser-empty ctox-empty" data-browser-empty data-t="framePreparing">Browser-Fenster wird vorbereitet</div>
         <aside class="browser-automation-overlay" data-browser-automation-overlay hidden aria-live="polite">
           <div class="browser-automation-heading">
