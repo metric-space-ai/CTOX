@@ -9,12 +9,23 @@ const businessOsDir = join(qaDir, '..');
 const css = readFileSync(join(businessOsDir, 'themes', 'ctox-desktop-shell.css'), 'utf8');
 const appCss = readFileSync(join(businessOsDir, 'app.css'), 'utf8');
 const baseCss = readFileSync(join(businessOsDir, 'shared', 'base.css'), 'utf8');
+const chatJs = readFileSync(join(businessOsDir, 'shared', 'business-chat.js'), 'utf8');
+const indexHtml = readFileSync(join(businessOsDir, 'index.html'), 'utf8');
 const html = readFileSync(join(qaDir, 'ctox-desktop-shell.html'), 'utf8');
 const js = readFileSync(join(qaDir, 'ctox-desktop-shell.js'), 'utf8');
 const scope = 'html[data-desktop-host="ctox"]';
+// Every assertion below inspects RULES, never prose. The host layer's own doc
+// comment necessarily names :root, !important, @media and ctox-desktop-guest
+// while explaining why none of them appear in it any more.
+const cssRules = stripComments(css);
+const indexHtmlMarkup = indexHtml.replace(/<!--[\s\S]*?-->/g, '');
+
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '');
+}
 
 function styleRuleHeaders(source) {
-  const stripped = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  const stripped = stripComments(source);
   const headers = [];
 
   for (let index = 0; index < stripped.length; index += 1) {
@@ -46,52 +57,129 @@ function splitSelectors(header) {
   return selectors;
 }
 
-test('theme is guarded by the CTOX desktop host scope', () => {
+test('the host layer stays scoped to the desktop host attribute', () => {
   assert.match(html, /<html[^>]+data-desktop-host="ctox"/);
   const selectors = styleRuleHeaders(css).flatMap(splitSelectors);
-  assert.ok(selectors.length > 20, 'fixture theme should contain a substantive scoped layer');
+  assert.ok(selectors.length > 0, 'host layer should still exist');
   for (const selector of selectors) {
-    assert.ok(selector.startsWith(scope), `unscoped theme selector: ${selector}`);
+    assert.ok(selector.startsWith(scope), `unscoped host-layer selector: ${selector}`);
   }
-  assert.doesNotMatch(css, /(^|[\s,{]):root\b/m);
+  assert.doesNotMatch(cssRules, /(^|[\s,{]):root\b/m);
 });
 
-test('theme reuses production shell and kit selectors', () => {
-  const productionCss = `${appCss}\n${baseCss}`;
-  const classNames = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-zA-Z_][\w-]*)/g)].map((match) => match[1]));
-  assert.ok(classNames.size > 10, 'theme should exercise the production shell grammar');
-  for (const className of classNames) {
-    assert.ok(productionCss.includes(`.${className}`), `theme introduces non-production class .${className}`);
+// The whole point of the change this file guards: the desktop-adapted design
+// IS the product design. The host layer may only relax sizing constraints that
+// exist because the guest is an Electron WebContentsView and not a browser
+// tab. The moment it declares a colour, a radius, a font or a shadow again,
+// browser and desktop have started drifting into two products.
+test('the host layer declares no design of its own', () => {
+  const declarations = stripComments(css)
+    .split('}')
+    .flatMap((block) => block.split('{').slice(1))
+    .flatMap((body) => body.split(';'))
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  assert.ok(declarations.length > 0, 'host layer should still declare something');
+
+  const allowedProperties = new Set([
+    'width', 'min-width', 'max-width',
+    'height', 'min-height', 'max-height',
+  ]);
+  for (const declaration of declarations) {
+    const property = declaration.slice(0, declaration.indexOf(':')).trim();
+    assert.ok(
+      allowedProperties.has(property),
+      `host layer may only relax sizing, found "${property}" in "${declaration}"`,
+    );
   }
+
+  assert.doesNotMatch(cssRules, /!important/, 'the host layer must not need to out-shout the shell');
+  assert.doesNotMatch(cssRules, /--(bg|surface|line|text|muted|accent|panel-radius|control-radius|shadow)\b\s*:/,
+    'primitive tokens belong on :root in app.css, not in the host layer');
+  assert.doesNotMatch(cssRules, /\b(color|background|background-color|border|border-radius|box-shadow|font-family|font-size|backdrop-filter)\s*:/,
+    'the host layer must not restyle anything');
+  assert.doesNotMatch(cssRules, /gradient\s*\(/i);
+  assert.doesNotMatch(cssRules, /url\s*\(/i);
+  assert.doesNotMatch(cssRules, /(?:https?:)?\/\//i);
 });
 
-test('theme declares restrained light and dark primitive tokens', () => {
-  assert.match(css, /html\[data-desktop-host="ctox"\]\[data-theme="light"\]\s*\{/);
-  assert.match(css, /html\[data-desktop-host="ctox"\]\[data-theme="dark"\]\s*\{/);
-  for (const token of ['--bg', '--surface', '--surface-2', '--line', '--text', '--muted', '--accent', '--accent-soft']) {
-    assert.equal((css.match(new RegExp(`${token}:`, 'g')) || []).length, 2, `${token} must have light and dark values`);
+// It was linked from nowhere before, which is exactly how a browser tenant and
+// the desktop ended up rendering differently: the desktop's pinned bundle had
+// the theme, deployed tenants did not.
+test('the host layer is linked unconditionally from the shell', () => {
+  assert.match(indexHtml, /<link rel="stylesheet" href="themes\/ctox-desktop-shell\.css/);
+  const appIndex = indexHtml.indexOf('href="app.css');
+  const baseIndex = indexHtml.indexOf('href="shared/base.css');
+  const themeIndex = indexHtml.indexOf('href="themes/ctox-desktop-shell.css');
+  assert.ok(themeIndex > appIndex && themeIndex > baseIndex, 'host layer must load after the shell stylesheets');
+  assert.doesNotMatch(indexHtmlMarkup, /data-desktop-host="ctox"/,
+    'the shell must not set the host attribute itself — only the Electron host does');
+});
+
+// The palette that used to live in the host layer now lives once, on :root,
+// and stays retintable by the desktop through --ctox-host-*.
+test('the primitive palette is host-tintable on :root', () => {
+  for (const token of ['--bg', '--surface', '--surface-2', '--surface-3', '--line', '--hairline', '--text', '--text-strong', '--muted', '--accent', '--accent-foreground', '--accent-soft']) {
+    const pattern = new RegExp(`${token}:\\s*var\\(--ctox-host-${token.slice(2)},[^)]+\\)`, 'g');
+    assert.equal((appCss.match(pattern) || []).length, 2,
+      `${token} must read var(--ctox-host-*, <fallback>) on both :root blocks`);
   }
-  assert.match(css, /font-family:\s*var\(--font-sans\)/);
-  assert.match(css, /font-size:\s*13px/);
+  assert.equal((appCss.match(/--panel-radius:\s*6px/g) || []).length, 2);
+  assert.equal((appCss.match(/--control-radius:\s*4px/g) || []).length, 2);
 });
 
-test('theme provides accessible focus, reduced motion, and host-width collapse', () => {
-  assert.match(css, /:focus-visible/);
-  assert.match(css, /outline:\s*2px solid var\(--accent\)/);
-  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
-  assert.match(css, /animation-duration:\s*0\.01ms\s*!important/);
-  assert.match(css, /container-name:\s*ctox-desktop-guest/);
-  assert.match(css, /@container ctox-desktop-guest \(max-width:\s*840px\)/);
-  assert.match(css, /@container ctox-desktop-guest \(max-width:\s*620px\)/);
-  assert.match(css, /\.ctox-workspace > \.ctox-pane:last-child/);
-  assert.doesNotMatch(css, /\b\d+(?:\.\d+)?(?:d|s|l)?v[wh]\b/i);
-  assert.doesNotMatch(css, /position:\s*fixed/i);
+// The flat chrome is the default, not an override: both 44px rows and the
+// hairline separators must be declared by the shell itself.
+test('the flat chrome is declared by the shell, unscoped', () => {
+  assert.match(appCss, /\.app-shell \{[^}]*grid-template-rows: 44px minmax\(0, 1fr\)/);
+  assert.match(appCss, /\.topbar \{[^}]*min-height: 44px/);
+  assert.match(appCss, /\.topbar \{[^}]*border-bottom: 1px solid var\(--line\)/);
+  assert.match(chatJs, /\.ctox-chat-dock \{[^}]*min-height: 44px/);
+  assert.match(chatJs, /\.ctox-chat-dock \{[^}]*border-top: 1px solid var\(--line\)/);
+  assert.doesNotMatch(appCss, /:root\[data-shell-style="ctox"\] \.topbar \{/,
+    'the CTOX shell style must not re-lift the topbar into an island');
 });
 
-test('theme and fixture use no gradients or remote assets', () => {
-  const source = `${css}\n${html}\n${js}`;
-  assert.doesNotMatch(source, /gradient\s*\(/i);
-  assert.doesNotMatch(css, /url\s*\(/i);
+// Regression, twice over: an expanded dock holding no chat window reserved a
+// fixed ~340px of the viewport above the 44px bar. The measured version of
+// this lives in scripts/assert-business-chat-behavior.mjs; this is the cheap
+// static guard that the collapsing class still exists and is still applied.
+test('an empty chat stage collapses to zero height', () => {
+  assert.match(chatJs, /const stagedWindowCount = dockCollapsed \? 0 : visibleWindowChats\.length;/);
+  assert.match(chatJs, /stagedWindowCount === 0 \? 'is-empty'/);
+  assert.match(chatJs, /\.ctox-chat-stage-inner\.is-empty \{[^}]*height: 0;/);
+  assert.match(chatJs, /\.ctox-chat-stage-inner\.is-empty \{[^}]*padding-top: 0;/);
+  assert.match(chatJs, /\.ctox-chat-stage-inner\.is-empty \{[^}]*padding-bottom: 0;/);
+  assert.match(chatJs, /\.ctox-chat-stage-inner:not\(\.is-empty\) \{/,
+    'the narrow breakpoint must exempt the empty stage instead of out-shouting it');
+});
+
+// Responsive behaviour is the shell's, and there is exactly one of it. The
+// host layer used to re-implement the collapse as a parallel
+// `ctox-desktop-guest` container layer; two cascades for one job is how narrow
+// width broke last time.
+test('there is a single responsive cascade and the host layer does not duplicate it', () => {
+  assert.doesNotMatch(cssRules, /@container/);
+  assert.doesNotMatch(cssRules, /@media/);
+  assert.doesNotMatch(cssRules, /ctox-desktop-guest/);
+  assert.match(baseCss, /@container business-app-window \(max-width: 760px\)/);
+  assert.match(baseCss, /\.ctox-workspace > \[data-resizer\]/,
+    'the single-column collapse must hide both resizer implementations');
+  assert.match(appCss, /container-name: business-app-window/);
+  assert.match(appCss, /@media \(max-width: 900px\)/);
+  assert.match(appCss, /@media \(max-width: 600px\)/);
+});
+
+test('accessible focus and reduced motion remain shell defaults', () => {
+  assert.match(baseCss, /--focus-ring:/);
+  assert.match(baseCss, /:focus-visible/);
+  assert.match(appCss, /@media \(prefers-reduced-motion:\s*reduce\)/);
+  assert.match(appCss, /animation-duration:\s*0\.01ms\s*!important/);
+});
+
+test('fixture and fixture script use no remote assets', () => {
+  const source = `${html}\n${js}`;
   assert.doesNotMatch(source, /(?:https?:)?\/\//i);
   assert.doesNotMatch(html, /<(?:img|iframe|video|audio|source)\b/i);
   assert.doesNotMatch(js, /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\b/);
@@ -109,6 +197,7 @@ test('fixture excludes duplicate desktop mode and instance controls', () => {
 });
 
 test('fixture proves the production Business OS shell and workspace grammar', () => {
+  const productionCss = `${appCss}\n${baseCss}`;
   for (const className of [
     'app-shell',
     'topbar',
@@ -130,6 +219,7 @@ test('fixture proves the production Business OS shell and workspace grammar', ()
     'ctox-fields',
   ]) {
     assert.match(html, new RegExp(`class="[^"]*\\b${className}\\b`), `fixture must render .${className}`);
+    assert.ok(productionCss.includes(`.${className}`), `fixture uses non-production class .${className}`);
   }
 
   assert.equal((html.match(/<(?:aside|section) class="ctox-pane"/g) || []).length, 3, 'fixture must render three workbench panes');

@@ -985,6 +985,16 @@
   padding: 4px 6px;
   border-bottom: 1px solid var(--hairline, var(--line));
   background: var(--surface);
+  /* The strip scrolls at every width rather than only below 760px. Between
+     roughly 700 and 900px the groups used to crush each other instead: labels
+     wrapped to two lines and the primary action overlapped the status text. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ctox-action-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .ctox-action-strip__group {
@@ -992,6 +1002,7 @@
   align-items: center;
   gap: 2px;
   min-width: 0;
+  flex: 0 0 auto;
   padding-right: 6px;
   margin-right: 2px;
   border-right: 1px solid var(--hairline, var(--line));
@@ -1202,10 +1213,8 @@
     display: none;
   }
 
-  .ctox-action-strip {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-  }
+  /* .ctox-action-strip already scrolls at every width; the narrow-only
+     duplicate of that rule is gone. */
 
   .ctox-record-workbench__header {
     min-height: 44px;
