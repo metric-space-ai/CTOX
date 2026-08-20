@@ -71,7 +71,11 @@ impl LiveBrowserSession {
     /// Locate the runner file that `pid` was started with, inside this
     /// session's reference directory.
     fn runner_script_path(&self, pid: u32) -> Result<PathBuf> {
-        select_runner_script(&self.root, pid, &runner_command_line(pid))
+        select_runner_script(
+            &runner_script_dirs(&self.root),
+            pid,
+            &runner_command_line(pid),
+        )
     }
 
     pub fn record_input_seq(&self, seq: u64) {
@@ -482,28 +486,55 @@ impl BrowserRuntimeManager {
     }
 }
 
+/// Every directory a session's runner file can live in.
+///
+/// `root` is the CTOX root, not the reference directory -- the generated runner
+/// sits under `runtime/browser/interactive-reference` there, while a packaged
+/// install can keep it under the state root instead. The runtime decides
+/// between them at startup (`browser_runtime_reference_dir` in the peer), so
+/// searching only one of them finds nothing on the other kind of install.
+fn runner_script_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(configured) = std::env::var_os("CTOX_WEB_BROWSER_REFERENCE_DIR") {
+        dirs.push(PathBuf::from(configured));
+    }
+    dirs.push(root.join("runtime/browser/interactive-reference"));
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/state/ctox/browser/interactive-reference"));
+    }
+    // Kept last so an install that really does keep the runner beside the root
+    // still resolves, rather than regressing into "no candidates".
+    dirs.push(root.to_path_buf());
+    dirs
+}
+
 /// Pick the runner file that `pid` was started with out of `root`.
 ///
 /// Several sessions of one CTOX process share a reference directory, so the
 /// command line -- which carries the runner path as node's script argument --
 /// is what makes the answer session-exact. Comparing file names rather than
 /// splitting the command line keeps paths containing spaces working.
-fn select_runner_script(root: &Path, pid: u32, command_line: &str) -> Result<PathBuf> {
+fn select_runner_script(dirs: &[PathBuf], pid: u32, command_line: &str) -> Result<PathBuf> {
     let mut only_candidate: Option<PathBuf> = None;
     let mut candidates = 0usize;
-    for entry in
-        std::fs::read_dir(root).with_context(|| format!("failed to list {}", root.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to list {}", root.display()))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(".ctox-browser-live-") || !name.ends_with(".mjs") {
+    for dir in dirs {
+        // A missing directory is not an error: which of the candidates the
+        // runtime actually used is decided at startup, so the others simply
+        // do not exist on this install.
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(".ctox-browser-live-") || !name.ends_with(".mjs") {
+                continue;
+            }
+            candidates += 1;
+            if command_line.contains(&name) {
+                return Ok(entry.path());
+            }
+            only_candidate = Some(entry.path());
         }
-        candidates += 1;
-        if command_line.contains(&name) {
-            return Ok(entry.path());
-        }
-        only_candidate = Some(entry.path());
     }
     // A single candidate is unambiguous even when the command line could not be
     // read back, so a hardened `ps` still yields the right answer for the
@@ -515,7 +546,10 @@ fn select_runner_script(root: &Path, pid: u32, command_line: &str) -> Result<Pat
     }
     anyhow::bail!(
         "found no runner script for pid {pid} among {candidates} candidate(s) in {}",
-        root.display()
+        dirs.iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
@@ -594,22 +628,52 @@ mod tests {
         // Two sessions of one CTOX process share the directory, so only the
         // command line tells them apart.
         let command_line = format!("node {}", mine.display());
-        let picked = select_runner_script(&dir, 42, &command_line).expect("picked");
+        let picked =
+            select_runner_script(std::slice::from_ref(&dir), 42, &command_line).expect("picked");
         assert_eq!(picked, mine);
 
         // Without a usable command line the answer stays ambiguous rather than
         // guessing one of the two.
-        assert!(select_runner_script(&dir, 42, "").is_err());
+        assert!(select_runner_script(std::slice::from_ref(&dir), 42, "").is_err());
 
         std::fs::remove_file(&other).expect("remove");
         // A single candidate is unambiguous even with no command line.
         assert_eq!(
-            select_runner_script(&dir, 42, "").expect("sole candidate"),
+            select_runner_script(std::slice::from_ref(&dir), 42, "").expect("sole candidate"),
             mine
         );
 
         std::fs::remove_file(&mine).expect("remove");
-        assert!(select_runner_script(&dir, 42, "").is_err());
+        assert!(select_runner_script(std::slice::from_ref(&dir), 42, "").is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runner_script_is_found_below_the_root_not_only_beside_it() {
+        // The session root is the CTOX root; the runner lives in the reference
+        // directory below it. Searching the root alone found nothing on a real
+        // install -- the live view answered "0 candidate(s)" while the runner
+        // was running the whole time.
+        let root = std::env::temp_dir().join(format!(
+            "ctox-runner-root-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let reference = root.join("runtime/browser/interactive-reference");
+        std::fs::create_dir_all(&reference).expect("temp dirs");
+        let runner = reference.join(".ctox-browser-live-99-1000.mjs");
+        std::fs::write(&runner, "// runner").expect("write");
+
+        let dirs = runner_script_dirs(&root);
+        assert!(
+            dirs.contains(&reference),
+            "reference directory must be searched, got {dirs:?}"
+        );
+        assert_eq!(
+            select_runner_script(&dirs, 99, &format!("node {}", runner.display()))
+                .expect("found below root"),
+            runner
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
