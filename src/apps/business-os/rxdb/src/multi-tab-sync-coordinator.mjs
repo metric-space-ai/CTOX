@@ -3,7 +3,9 @@ const CHANNEL_PREFIX = 'ctox-rxdb-sync-leader-';
 const HEARTBEAT_MS = 5_000;
 const LEASE_TTL_MS = 15_000;
 const DIRTY_ACK_TIMEOUT_MS = 10_000;
-const NATIVE_REQUEST_TIMEOUT_MS = 20_000;
+// Kept well below a human's patience: when the leader cannot answer, the
+// caller still has to fall back to a direct bridge afterwards.
+const NATIVE_REQUEST_TIMEOUT_MS = 6_000;
 
 export function getMultiTabSyncCoordinator({ databaseName, room } = {}) {
   const key = `${databaseName || 'ctox'}|${room || 'default'}`;
@@ -297,10 +299,22 @@ export function createMultiTabSyncCoordinator({
       if (!channel || !leaderTabId) {
         return Promise.reject(new Error('No multi-tab sync leader is available for native requests.'));
       }
+      const requestedLeaderTabId = leaderTabId;
       const requestId = globalThis.crypto?.randomUUID?.() || `native-${tabId}-${clock()}-${Math.random().toString(36).slice(2)}`;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pendingNativeRequests.delete(requestId);
+          // A leader that never answers is either running an older build
+          // without this handler or is wedged. Either way it must stop being
+          // advertised as healthy, or the Browser app stays dead in this tab
+          // forever. Drop the lease and stand for election so the caller's
+          // direct fallback has a chance to become the leader itself.
+          if (leaderTabId === requestedLeaderTabId) {
+            leaderSeenAtMs = 0;
+            leaderTabId = '';
+            emitRole();
+            attemptElection().catch(() => {});
+          }
           reject(new Error(`The multi-tab leader did not answer ${method} within ${timeoutMs}ms.`));
         }, Math.max(100, Number(timeoutMs) || NATIVE_REQUEST_TIMEOUT_MS));
         pendingNativeRequests.set(requestId, { resolve, reject, timer });

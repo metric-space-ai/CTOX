@@ -453,7 +453,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-followerdirect-rxdb-v179');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-leaderfailover-rxdb-v180');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -551,6 +551,11 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           return await coordinator.requestNativeViaLeader(method, params, options);
         } catch (error) {
           if (stopped) throw error;
+          // The failed proxy call already dropped the unresponsive lease and
+          // called for an election. Give that election a moment to land so the
+          // direct bridge below is built as a leader rather than as a follower
+          // that can never connect.
+          await waitForLeadership(coordinator, 4000);
         }
       }
       return requestNativeDirectly(method, params, options);
@@ -1026,6 +1031,15 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     publishResourceBudget();
     return next;
   };
+  async function waitForLeadership(coordinator, timeoutMs) {
+    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      if (stopped || coordinator.isLeader?.()) return coordinator.isLeader?.() === true;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return coordinator.isLeader?.() === true;
+  }
+
   async function requestNativeDirectly(method, params = {}, options = {}) {
     if (stopped) throw new Error('Business OS sync runtime has been stopped');
     const collection = normalizeCollectionName(options.collection || 'business_commands');
@@ -1382,7 +1396,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-followerdirect-rxdb-v179');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-leaderfailover-rxdb-v180');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }

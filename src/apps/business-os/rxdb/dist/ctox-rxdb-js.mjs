@@ -11328,7 +11328,7 @@ var CHANNEL_PREFIX2 = "ctox-rxdb-sync-leader-";
 var HEARTBEAT_MS = 5e3;
 var LEASE_TTL_MS = 15e3;
 var DIRTY_ACK_TIMEOUT_MS = 1e4;
-var NATIVE_REQUEST_TIMEOUT_MS = 2e4;
+var NATIVE_REQUEST_TIMEOUT_MS = 6e3;
 function getMultiTabSyncCoordinator({ databaseName, room } = {}) {
   const key = `${databaseName || "ctox"}|${room || "default"}`;
   const root = globalThis;
@@ -11625,10 +11625,18 @@ function createMultiTabSyncCoordinator({
       if (!channel || !leaderTabId) {
         return Promise.reject(new Error("No multi-tab sync leader is available for native requests."));
       }
+      const requestedLeaderTabId = leaderTabId;
       const requestId = globalThis.crypto?.randomUUID?.() || `native-${tabId}-${clock()}-${Math.random().toString(36).slice(2)}`;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pendingNativeRequests.delete(requestId);
+          if (leaderTabId === requestedLeaderTabId) {
+            leaderSeenAtMs = 0;
+            leaderTabId = "";
+            emitRole();
+            attemptElection().catch(() => {
+            });
+          }
           reject(new Error(`The multi-tab leader did not answer ${method} within ${timeoutMs}ms.`));
         }, Math.max(100, Number(timeoutMs) || NATIVE_REQUEST_TIMEOUT_MS));
         pendingNativeRequests.set(requestId, { resolve, reject, timer });
