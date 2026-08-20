@@ -453,12 +453,19 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260817-command-change-payload-rxdb-v178');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-followerdirect-rxdb-v179');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
       room: config.sync_room,
     });
+    // Serve follower tabs that ask the leader to run a native request for
+    // them. Without this the Browser app is dead in every tab but one.
+    if (typeof multiTabCoordinator.onNativeRequest === 'function') {
+      multiTabUnsubscribers.push(multiTabCoordinator.onNativeRequest(
+        (method, params, options) => requestNativeDirectly(method, params, options),
+      ));
+    }
     multiTabUnsubscribers.push(multiTabCoordinator.onRoleChange?.((status) => {
       diagnostics.multiTab = sanitizeMultiTabStatus(status);
       emitDiagnostic({ phase: diagnostics.phase || 'ready' });
@@ -535,14 +542,18 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     },
     async requestNative(method, params = {}, options = {}) {
       if (stopped) throw new Error('Business OS sync runtime has been stopped');
-      const collection = normalizeCollectionName(options.collection || 'business_commands');
-      if (!collection) throw new Error('A collection is required for native WebRTC requests.');
-      let bridge = await this.startCollection(collection, { pin: false, forceDirect: true });
-      if (!bridge?.state && bridge?.ready) bridge = await bridge.ready;
-      if (typeof bridge?.state?.requestNative !== 'function') {
-        throw new Error(`Native WebRTC requests are unavailable for ${collection}.`);
+      const coordinator = multiTabCoordinator;
+      // Only the leader holds the WebRTC data channel. A follower that opens
+      // its own direct bridge never connects, so ask the leader first and keep
+      // the direct path as the fallback for when no leader answers.
+      if (coordinator && !coordinator.isLeader?.() && typeof coordinator.requestNativeViaLeader === 'function') {
+        try {
+          return await coordinator.requestNativeViaLeader(method, params, options);
+        } catch (error) {
+          if (stopped) throw error;
+        }
       }
-      return bridge.state.requestNative(method, params, options);
+      return requestNativeDirectly(method, params, options);
     },
     async startModule(moduleManifest) {
       const collections = moduleManifest?.collections || [];
@@ -1015,6 +1026,18 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     publishResourceBudget();
     return next;
   };
+  async function requestNativeDirectly(method, params = {}, options = {}) {
+    if (stopped) throw new Error('Business OS sync runtime has been stopped');
+    const collection = normalizeCollectionName(options.collection || 'business_commands');
+    if (!collection) throw new Error('A collection is required for native WebRTC requests.');
+    let bridge = await syncRuntime.startCollection(collection, { pin: false, forceDirect: true });
+    if (!bridge?.state && bridge?.ready) bridge = await bridge.ready;
+    if (typeof bridge?.state?.requestNative !== 'function') {
+      throw new Error(`Native WebRTC requests are unavailable for ${collection}.`);
+    }
+    return bridge.state.requestNative(method, params, options);
+  }
+
   return syncRuntime;
 }
 
@@ -1359,7 +1382,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260817-command-change-payload-rxdb-v178');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-followerdirect-rxdb-v179');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }

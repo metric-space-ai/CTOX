@@ -11328,6 +11328,7 @@ var CHANNEL_PREFIX2 = "ctox-rxdb-sync-leader-";
 var HEARTBEAT_MS = 5e3;
 var LEASE_TTL_MS = 15e3;
 var DIRTY_ACK_TIMEOUT_MS = 1e4;
+var NATIVE_REQUEST_TIMEOUT_MS = 2e4;
 function getMultiTabSyncCoordinator({ databaseName, room } = {}) {
   const key = `${databaseName || "ctox"}|${room || "default"}`;
   const root = globalThis;
@@ -11348,6 +11349,8 @@ function createMultiTabSyncCoordinator({
   const dirtyListeners = /* @__PURE__ */ new Set();
   const externalChangeListeners = /* @__PURE__ */ new Set();
   const pendingDirtyAcks = /* @__PURE__ */ new Map();
+  const pendingNativeRequests = /* @__PURE__ */ new Map();
+  const nativeRequestHandlers = /* @__PURE__ */ new Set();
   const channel = typeof globalThis.BroadcastChannel === "function" ? new BroadcastChannel(`${CHANNEL_PREFIX2}${databaseName}-${stableHash(room)}`) : null;
   const lockName = `ctox-rxdb-sync:${databaseName}:${stableHash(room)}`;
   let role = "follower";
@@ -11392,6 +11395,32 @@ function createMultiTabSyncCoordinator({
       });
     }
     if (error && !message.requestId) throw new Error(error);
+  };
+  const handleNativeRequestLocally = async (method, params, options) => {
+    const handler = [...nativeRequestHandlers][0];
+    if (typeof handler !== "function") {
+      throw new Error("This tab has no native request handler.");
+    }
+    return handler(method, params || {}, options || {});
+  };
+  const handleNativeRequest = async (message) => {
+    const handler = [...nativeRequestHandlers][0];
+    const respond = (payload) => post({
+      type: "native-response",
+      requestId: message.requestId,
+      targetTabId: message.tabId,
+      ...payload
+    });
+    if (typeof handler !== "function") {
+      respond({ ok: false, error: "The multi-tab leader has no native request handler." });
+      return;
+    }
+    try {
+      const result = await handler(message.method, message.params || {}, message.options || {});
+      respond({ ok: true, result: result === void 0 ? null : result });
+    } catch (cause) {
+      respond({ ok: false, error: String(cause?.message || cause || "native request failed").slice(0, 240) });
+    }
   };
   const becomeLeader = (reason) => {
     if (closed) return;
@@ -11488,6 +11517,17 @@ function createMultiTabSyncCoordinator({
           if (message.ok === false) pending.reject(new Error(message.error || "Leader could not push the collection."));
           else pending.resolve(message);
         }
+      } else if (message.type === "native-request" && role === "leader") {
+        handleNativeRequest(message).catch(() => {
+        });
+      } else if (message.type === "native-response" && String(message.targetTabId || "") === tabId) {
+        const pending = pendingNativeRequests.get(String(message.requestId || ""));
+        if (pending) {
+          pendingNativeRequests.delete(String(message.requestId || ""));
+          clearTimeout(pending.timer);
+          if (message.ok === false) pending.reject(new Error(message.error || "The leader could not serve the native request."));
+          else pending.resolve(message.result ?? null);
+        }
       } else if (message.type === "replicated-change" && role === "follower") {
         for (const listener of externalChangeListeners) {
           try {
@@ -11575,6 +11615,26 @@ function createMultiTabSyncCoordinator({
         post({ type: "dirty", requestId, collection, ids });
       });
     },
+    onNativeRequest(handler) {
+      nativeRequestHandlers.add(handler);
+      return () => nativeRequestHandlers.delete(handler);
+    },
+    hasNativeRequestHandler: () => nativeRequestHandlers.size > 0,
+    requestNativeViaLeader(method, params = {}, options = {}, { timeoutMs = NATIVE_REQUEST_TIMEOUT_MS } = {}) {
+      if (role === "leader") return handleNativeRequestLocally(method, params, options);
+      if (!channel || !leaderTabId) {
+        return Promise.reject(new Error("No multi-tab sync leader is available for native requests."));
+      }
+      const requestId = globalThis.crypto?.randomUUID?.() || `native-${tabId}-${clock()}-${Math.random().toString(36).slice(2)}`;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingNativeRequests.delete(requestId);
+          reject(new Error(`The multi-tab leader did not answer ${method} within ${timeoutMs}ms.`));
+        }, Math.max(100, Number(timeoutMs) || NATIVE_REQUEST_TIMEOUT_MS));
+        pendingNativeRequests.set(requestId, { resolve, reject, timer });
+        post({ type: "native-request", requestId, method, params, options });
+      });
+    },
     notifyReplicatedChange(collection, ids = []) {
       post({ type: "replicated-change", collection, ids });
     },
@@ -11597,6 +11657,12 @@ function createMultiTabSyncCoordinator({
         pending.reject(new Error("Multi-tab sync coordinator closed before leader acknowledgement."));
       }
       pendingDirtyAcks.clear();
+      for (const pending of pendingNativeRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Multi-tab sync coordinator closed before the native response arrived."));
+      }
+      pendingNativeRequests.clear();
+      nativeRequestHandlers.clear();
       listeners.clear();
       dirtyListeners.clear();
       externalChangeListeners.clear();
