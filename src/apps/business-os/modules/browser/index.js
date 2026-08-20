@@ -1543,25 +1543,31 @@ function renderTabstrip(ctx, refs, state) {
     leiste.replaceChildren();
     return;
   }
+  // Welcher Tab aktiv ist, sagt die Sitzung -- NICHT das Feld `active` am Tab:
+  // upsert_browser_tab schreibt dort hart `true` fuer jeden angefassten Tab und
+  // setzt die uebrigen nicht zurueck, sodass jeder je benutzte Tab als aktiv
+  // gilt. `current_tab_id` wird dagegen bei jedem Befehl mitgefuehrt.
+  const aktiverTab = String(state.latestSession?.current_tab_id || '');
   // Nur neu bauen, wenn sich wirklich etwas geaendert hat -- sonst verliert
   // ein Klick waehrend eines Renderdurchlaufs sein Ziel.
-  const signatur = tabs.map((tab) => `${tab.id}:${tab.active ? 1 : 0}:${tab.title || tab.url || ''}`).join('|');
+  const signatur = tabs.map((tab) => `${tab.id}:${tab.id === aktiverTab ? 1 : 0}:${tab.title || tab.url || ''}`).join('|');
   if (leiste.dataset.signatur === signatur) return;
   leiste.dataset.signatur = signatur;
   leiste.hidden = false;
   leiste.replaceChildren(...tabs.map((tab) => {
+    const istAktiv = tab.id === aktiverTab;
     const eintrag = document.createElement('div');
-    eintrag.className = 'browser-tab' + (tab.active ? ' is-active' : '');
+    eintrag.className = 'browser-tab' + (istAktiv ? ' is-active' : '');
     const knopf = document.createElement('button');
     knopf.type = 'button';
     knopf.className = 'browser-tab-title';
     knopf.setAttribute('role', 'tab');
-    knopf.setAttribute('aria-selected', tab.active ? 'true' : 'false');
+    knopf.setAttribute('aria-selected', istAktiv ? 'true' : 'false');
     const beschriftung = String(tab.title || tab.url || tab.id).trim();
     knopf.textContent = beschriftung;
     knopf.title = String(tab.url || beschriftung);
     knopf.addEventListener('click', () => {
-      if (tab.active) return;
+      if (istAktiv) return;
       dispatchBrowserCommand(ctx, state, 'browser.tab.activate', { tab_id: tab.id });
     });
     const schliessen = document.createElement('button');
