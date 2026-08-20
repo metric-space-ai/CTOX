@@ -283,7 +283,13 @@ export async function mount(ctx) {
     const directStart = async () => {
       if (typeof ctx.sync?.requestNative !== 'function') return command();
       try {
-        const response = await ctx.sync.requestNative('ctox.browser.live.v1', {
+        // requestNative respektiert sein timeoutMs nicht zuverlaessig: auf
+        // thesen.ctox.dev am 20.08.2026 gemessen blieb das Promise ewig offen,
+        // der Rueckfall auf den dauerhaften Befehlsweg wurde nie erreicht,
+        // finally lief nie, die Start-Sperre blieb gesetzt — der Los-Knopf war
+        // dauerhaft tot, ohne Meldung. Ein eigenes Zeitlimit erzwingt nach
+        // 10 s den catch-Zweig und damit den funktionierenden Befehlsweg.
+        const direktantwort = ctx.sync.requestNative('ctox.browser.live.v1', {
           op: 'session.start',
           ...startPayload,
         }, {
@@ -291,6 +297,20 @@ export async function mount(ctx) {
           requiredCapability: 'ctox-browser-live-v1',
           timeoutMs: 30_000,
         });
+        const zeitlimit = new Promise((unused, reject) => setTimeout(() => {
+          const fehler = new Error('Direktkanal antwortet nicht (Zeitlimit nach 10 s).');
+          fehler.code = 'native_unavailable';
+          reject(fehler);
+        }, 10_000));
+        const response = await Promise.race([direktantwort, zeitlimit]);
+        // Eine Antwort ohne Inhalt ist keine Antwort. Ohne diese Pruefung wurde
+        // `undefined` als erfolgreicher Start gewertet und die Oberflaeche
+        // meldete eine Sitzung, die es nie gab.
+        if (!response || typeof response !== 'object') {
+          const fehler = new Error('Direktkanal lieferte keine Sitzungsantwort.');
+          fehler.code = 'native_unavailable';
+          throw fehler;
+        }
         const startedAt = Date.now();
         state.latestSession = {
           id: sessionId,

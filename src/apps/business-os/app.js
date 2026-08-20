@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260817-command-change-payload-v206';
+const APP_BUILD = '20260820-nativebridge-v210';
 
 ensureShellStylesheets();
 
@@ -6398,7 +6398,17 @@ function createLiveSyncFacade({ host = null } = {}) {
     get diagnostics() { return state.sync?.diagnostics; },
     requestNative: (...args) => {
       assertActive();
-      return state.sync?.requestNative?.(...args);
+      // Fehlte die native Bruecke, lieferte das optionale Aufrufzeichen still
+      // `undefined` statt zu werfen. Aufrufer behandeln das als Erfolg: der
+      // Browser meldete am 20.08.2026 auf thesen.ctox.dev "Bereit", waehrend
+      // serverseitig weder Sitzung noch Tab noch Chromium existierten — der
+      // Los-Knopf war tot, ohne dass irgendwo ein Fehler entstand.
+      if (typeof state.sync?.requestNative !== 'function') {
+        const error = new Error('CTOX Direktkanal ist nicht verfügbar.');
+        error.code = 'native_unavailable';
+        throw error;
+      }
+      return state.sync.requestNative(...args);
     },
     collectionReadiness: (collection) => currentCollectionReadiness(collection),
     subscribeCollectionReadiness: (collection, listener) => {
