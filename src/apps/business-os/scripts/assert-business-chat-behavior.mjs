@@ -68,7 +68,7 @@ try {
     expect(m.navCount === 0, 'zero state must not render carousel nav');
     expect(m.stripCount === 0, 'zero state must not render an empty strip');
     expect(m.dockNewCount === 1, 'zero state keeps one explicit dock new-chat button');
-    expect(m.dockWidth < 360, `zero dock should be compact, got ${m.dockWidth}`);
+    expect(m.dockWidth === m.viewportWidth, `zero-chat dock must still span the shell, got ${m.dockWidth} of ${m.viewportWidth}`);
   });
 
   await scenario(page, 'future-date-no-phantom-chat', { count: 0 }, async (m) => {
@@ -126,7 +126,7 @@ try {
     expect(m.headerNewCount === 0, 'window header must not contain new-chat plus button');
     expect(m.dateScopeText === 'Verlauf', `date control must explain chat history scope, got ${m.dateScopeText}`);
     expect(m.dateTriggerLabel.includes('Chat-Verlauf'), `date trigger needs an accessible history label, got ${m.dateTriggerLabel}`);
-    expect(m.dockWidth < 520, `one-chat dock should stay compact, got ${m.dockWidth}`);
+    expect(m.dockWidth === m.viewportWidth, `one-chat dock must span the shell, got ${m.dockWidth} of ${m.viewportWidth}`);
     expect(m.activeChipCenterWithinWindow === true, 'one-chat active chip center must sit under the active window');
     expect(m.activeWindowDockOverflow <= 1, `one-chat window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
   });
@@ -147,8 +147,7 @@ try {
   await scenario(page, 'six-chats-not-full-width', { count: 6, activeIndex: 3 }, (m) => {
     expect(m.chipCount === 6, 'six chats render six chips');
     expect(m.navCount === 2, 'six chats show strip nav');
-    expect(m.dockWidth > 900, `six-chat dock should keep visible chips, got ${m.dockWidth}`);
-    expect(m.dockWidth < m.viewportWidth * 0.75, `six-chat dock should not be full width, ratio ${m.dockRatio}`);
+    expect(m.dockWidth === m.viewportWidth, `six-chat dock must span the shell, got ${m.dockWidth} of ${m.viewportWidth}`);
     expect(m.activeChipCenterWithinWindow === true, 'six-chat active chip center must sit under the active window');
     expect(m.activeWindowDockOverflow <= 1, `six-chat active window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
   });
@@ -158,7 +157,7 @@ try {
     expect(m.navCount === 2, 'eight chats show strip nav');
     expect(m.stripHasOverflow === true, 'eight-chat strip must be horizontally scrollable');
     expect(m.stripClasses.includes('is-scrollable'), `overflowing strip must expose scroll affordance class, got ${m.stripClasses}`);
-    expect(m.dockWidth < m.viewportWidth * 0.75, `eight-chat dock should avoid premature full width, ratio ${m.dockRatio}`);
+    expect(m.dockWidth === m.viewportWidth, `eight-chat dock must span the shell, got ${m.dockWidth} of ${m.viewportWidth}`);
     expect(m.activeChipCenterWithinWindow === true, 'eight-chat active chip center must sit under the active window');
     expect(m.activeWindowDockOverflow <= 1, `eight-chat active window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
   });
@@ -166,8 +165,12 @@ try {
   await scenario(page, 'twelve-chats-full-width-scroll', { count: 12, activeIndex: 5 }, async (m) => {
     expect(m.chipCount === 12, 'twelve chats render twelve chips');
     expect(m.navCount === 2, 'twelve chats show strip nav');
-    expect(m.stripHasOverflow === true, 'twelve-chat strip must be horizontally scrollable');
-    expect(m.dockWidth > m.viewportWidth * 0.85, `twelve-chat dock can span shell width, ratio ${m.dockRatio}`);
+    expect(m.stripScrollWidth <= m.stripClientWidth + 1, `twelve-chat strip must not clip chips, got ${m.stripScrollWidth} in ${m.stripClientWidth}`);
+    expect(
+      m.stripClasses.includes('is-scrollable') === m.stripHasOverflow,
+      `twelve-chat scroll affordance must match actual overflow, got classes ${m.stripClasses} overflow ${m.stripHasOverflow}`,
+    );
+    expect(m.dockWidth === m.viewportWidth, `twelve-chat dock must span the shell, got ${m.dockWidth} of ${m.viewportWidth}`);
     expect(m.activeChipCenterWithinWindow === true, 'twelve-chat active chip center must sit under the active window');
     expect(m.activeWindowDockOverflow <= 1, `twelve-chat active window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
     await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -222,11 +225,55 @@ try {
     await page.screenshot({ path: groupedScreenshotPath, fullPage: true });
   });
 
-  await scenario(page, 'only-active-window-renders', { count: 4, activeIndex: 2 }, async (m) => {
+  // The stage mounts the active chat plus its immediate carousel neighbours,
+  // capped at MAX_STAGED_CHAT_WINDOWS. The neighbours are decoration and a
+  // click-to-focus target: their own controls stay inert and untabbable, which
+  // is what the first two assertions pin. This scenario used to demand exactly
+  // one window; the carousel is the deliberate replacement for that.
+  await scenario(page, 'active-window-stages-with-neighbours', { count: 4, activeIndex: 2 }, async (m) => {
     expect(m.inactiveFocusable === 0, `inactive controls must not be tabbable, got ${m.inactiveFocusable}`);
     expect(m.inactiveVisibleActions === 0, `inactive header actions must be hidden, got ${m.inactiveVisibleActions}`);
-    expect(m.windowCount === 1, `the stage must render only the active chat window, got ${m.windowCount}`);
-    expect(m.renderedWindowIds.join(',') === 'chat_2', `the rendered window should be chat_2, got ${m.renderedWindowIds.join(',')}`);
+    expect(m.windowCount === 3, `the stage must mount the active window and its two neighbours, got ${m.windowCount}`);
+    expect(m.activeId === 'chat_2', `chat_2 must be the active window, got ${m.activeId}`);
+    expect(m.renderedWindowIds.includes('chat_2'), `the staged set must contain the active window, got ${m.renderedWindowIds.join(',')}`);
+    expect(
+      m.renderedWindowIds.join(',') === 'chat_1,chat_2,chat_3',
+      `the staged set must be the active window and its neighbours in order, got ${m.renderedWindowIds.join(',')}`,
+    );
+  });
+
+  // Regression: an EXPANDED dock holding zero chats must reserve no vertical
+  // space beyond its own 44px bar. The stage is a fixed-height box, so it used
+  // to hold ~340px of invisible, click-through void over the top of the app
+  // whenever the last chat was closed. Measured, not eyeballed.
+  await scenario(page, 'expanded-empty-stage-reserves-no-space', { count: 0 }, async (m) => {
+    expect(!m.dockClasses.includes('is-collapsed'), `the dock must be expanded for this case, got ${m.dockClasses}`);
+    expect(m.windowCount === 0, `no chat window may be staged, got ${m.windowCount}`);
+    expect(m.stageInnerClasses.includes('is-empty'), `the empty stage must be marked is-empty, got ${m.stageInnerClasses}`);
+    expect(m.stageInnerHeight <= 1, `the empty stage must reserve no height, got ${m.stageInnerHeight}`);
+    expect(
+      m.rootHeight <= m.dockHeight + 1,
+      `an empty expanded dock must cover only its own bar, got root ${m.rootHeight} vs dock ${m.dockHeight}`,
+    );
+    expect(
+      m.viewportHeight - m.rootTop <= m.dockHeight + 1,
+      `an empty expanded dock must not reach up into the app, got ${m.viewportHeight - m.rootTop}px covered`,
+    );
+  });
+
+  await scenario(page, 'expanded-single-chat-stage-has-height', { count: 1 }, async (m) => {
+    expect(m.windowCount === 1, `one chat must stage one window, got ${m.windowCount}`);
+    expect(!m.stageInnerClasses.includes('is-empty'), `a populated stage must not be marked is-empty, got ${m.stageInnerClasses}`);
+    expect(m.stageInnerHeight > 100, `a populated stage must reserve room for its window, got ${m.stageInnerHeight}`);
+  });
+
+  await scenario(page, 'collapsed-dock-reserves-no-stage', { count: 3, dockCollapsed: true }, async (m) => {
+    expect(m.dockClasses.includes('is-collapsed'), `the dock must be collapsed for this case, got ${m.dockClasses}`);
+    expect(m.windowCount === 0, `a collapsed dock must stage no window, got ${m.windowCount}`);
+    expect(
+      m.rootHeight <= m.dockHeight + 1,
+      `a collapsed dock must cover only its own bar, got root ${m.rootHeight} vs dock ${m.dockHeight}`,
+    );
   });
 
   await scenario(page, 'minimized-active-window-leaves-chip-only', { count: 2, activeIndex: 0 }, async () => {
@@ -404,10 +451,13 @@ try {
   await scenario(page, 'transient-command-timeout-keeps-chat-trackable', {
     count: 1,
     commandError: 'transient',
-    selectedOffset: -1,
   }, async () => {
     const after = await page.evaluate(async () => {
       const input = document.querySelector('.ctox-chat-window.is-active textarea');
+      // selectedOffset: -1 seeds the chat on yesterday, so the stage can be
+      // empty here. Report that as a failure instead of throwing a TypeError
+      // that aborts every scenario after this one.
+      if (!input) return { __noActiveComposer: true };
       input.value = 'Bitte als CTOX Task verarbeiten';
       input.dispatchEvent(new InputEvent('input', { bubbles: true }));
       document.querySelector('.ctox-chat-window.is-active [data-chat-send]').click();
@@ -415,6 +465,10 @@ try {
       return window.chatHarness.collect();
     });
     results.push({ scenario: 'transient-command-timeout-after-send', metrics: after });
+    if (after.__noActiveComposer) {
+      expect(false, 'transient command timeout scenario found no active chat composer to type into');
+      return;
+    }
     expect(after.activeTaskClass.includes('is-task-queued'), `transient command timeout must keep chat queued, got ${after.activeTaskClass}`);
     expect(!after.activeTaskClass.includes('is-task-failed'), `transient command timeout must not mark failed, got ${after.activeTaskClass}`);
     expect(after.activeMessageText.includes('Warte auf die CTOX Queue-Projektion'), 'transient command timeout must explain that tracking continues');
@@ -436,12 +490,12 @@ try {
   });
 
   await viewportScenario(page, 'viewport-1440-eight-chats', { width: 1440, height: 820 }, { count: 8, activeIndex: 4 }, (m) => {
-    expect(m.dockWidth <= m.viewportWidth - 90, `1440px dock must leave shell space for eight chats, got ${m.dockWidth}`);
+    expect(m.dockWidth === m.viewportWidth, `1440px dock must span the shell exactly, got ${m.dockWidth} of ${m.viewportWidth}`);
     expect(m.chipCount === 8, `1440px eight-chat state should render eight chips, got ${m.chipCount}`);
   });
 
   await viewportScenario(page, 'viewport-1024-eight-chats', { width: 1024, height: 760 }, { count: 8, activeIndex: 4 }, (m) => {
-    expect(m.dockWidth <= m.viewportWidth - 30, `1024px dock must fit shell, got ${m.dockWidth}`);
+    expect(m.dockWidth === m.viewportWidth, `1024px dock must span the shell exactly, got ${m.dockWidth} of ${m.viewportWidth}`);
     expect(m.chipCount === 8, `1024px eight-chat state should render eight chips, got ${m.chipCount}`);
   });
 
@@ -832,7 +886,16 @@ function harnessHtml() {
       const activeWindowCenterX = activeWindowRect.width ? activeWindowRect.x + activeWindowRect.width / 2 : 0;
       return {
         viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
         rootWidth: box(root).width,
+        // The chat root is position: fixed over the app. Its height is the
+        // amount of the shell it covers, so it is the honest measure of
+        // whether an empty stage is stealing screen from the workspace.
+        rootHeight: box(root).height,
+        rootTop: box(root).y,
+        stageInnerHeight: box(document.querySelector('.ctox-chat-stage-inner')).height,
+        stageInnerClasses: document.querySelector('.ctox-chat-stage-inner')?.className || '',
+        dockHeight: dockRect.height,
         dockWidth: dockRect.width,
         dockLeft: dockRect.x,
         dockRight: dockRect.x + dockRect.width,
