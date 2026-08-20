@@ -1837,6 +1837,14 @@ export class CtoxWebRtcNativePeer {
     const pending = this.pending.get(payload.id);
     if (!pending) {
       this.auxMessageStats.responsesWithoutPendingRequest += 1;
+      // Not every id-carrying message answers a request of ours. The peer
+      // pushes master-change notifications the same way, and they are what
+      // tells a collection to pull again. Dropping them here left replication
+      // "connected/complete" while it silently stopped moving: measured on a
+      // customer instance, the browser sat nine minutes behind the store and
+      // never saw the session it had just started. Hand anything unmatched to
+      // the shared dispatcher, which knows the push shapes.
+      await this.handleDataChannelFrame(connection.remotePeerId, payload);
       return;
     }
     this.pending.delete(payload.id);

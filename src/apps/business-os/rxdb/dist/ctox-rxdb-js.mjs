@@ -5541,6 +5541,7 @@ var CtoxWebRtcNativePeer = class {
     const pending = this.pending.get(payload.id);
     if (!pending) {
       this.auxMessageStats.responsesWithoutPendingRequest += 1;
+      await this.handleDataChannelFrame(connection.remotePeerId, payload);
       return;
     }
     this.pending.delete(payload.id);
