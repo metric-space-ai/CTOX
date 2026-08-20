@@ -1481,7 +1481,13 @@ pub(super) async fn apply_browser_runtime_command(
         &session_id,
         &title,
         &final_url,
-        "active",
+        // A closed tab must not stay projected as "active", or it keeps
+        // showing up in the tab strip after the runner already dropped it.
+        if command_type == "browser.tab.close" {
+            "closed"
+        } else {
+            "active"
+        },
         false,
         can_go_back,
         can_go_forward,

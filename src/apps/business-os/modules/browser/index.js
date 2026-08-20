@@ -1547,7 +1547,11 @@ function renderTabstrip(ctx, refs, state) {
   // upsert_browser_tab schreibt dort hart `true` fuer jeden angefassten Tab und
   // setzt die uebrigen nicht zurueck, sodass jeder je benutzte Tab als aktiv
   // gilt. `current_tab_id` wird dagegen bei jedem Befehl mitgefuehrt.
-  const aktiverTab = String(state.latestSession?.current_tab_id || '');
+  let aktiverTab = String(state.latestSession?.current_tab_id || '');
+  // Nach dem Schliessen zeigt current_tab_id noch auf den geschlossenen Tab --
+  // der Runner ist dann laengst auf einen anderen gewechselt. Ohne diesen
+  // Rueckfall waere kurzzeitig gar kein Tab hervorgehoben.
+  if (!tabs.some((tab) => tab.id === aktiverTab)) aktiverTab = tabs[0].id;
   // Nur neu bauen, wenn sich wirklich etwas geaendert hat -- sonst verliert
   // ein Klick waehrend eines Renderdurchlaufs sein Ziel.
   const signatur = tabs.map((tab) => `${tab.id}:${tab.id === aktiverTab ? 1 : 0}:${tab.title || tab.url || ''}`).join('|');
