@@ -475,6 +475,21 @@ fn capture_chrome_extra_args(headless_without_gui: bool, linux: bool) -> Vec<&'s
 }
 
 fn build_doctor_report(reference_dir: &Path) -> Result<BrowserDoctorReport> {
+    build_browser_readiness_report(reference_dir, true)
+}
+
+/// Build the browser prerequisite report. The explicit doctor command asks
+/// for a real launch/screenshot smoke; production browser startup must not.
+///
+/// Running the smoke here used to launch a throw-away Chromium, open a page,
+/// take a screenshot and close it immediately before launching the user's
+/// actual persistent Chromium. On the tenant that added 10-20 seconds to every
+/// cold Browser session even though `automation_ready` never depended on the
+/// smoke result.
+fn build_browser_readiness_report(
+    reference_dir: &Path,
+    run_smoke: bool,
+) -> Result<BrowserDoctorReport> {
     let package_json_exists = reference_dir.join("package.json").exists();
     let node_modules_exists = reference_dir.join("node_modules").is_dir();
     let runner_dependency_declared = read_runner_dependency_declared(reference_dir)?;
@@ -495,22 +510,25 @@ fn build_doctor_report(reference_dir: &Path) -> Result<BrowserDoctorReport> {
         .map(|major| major >= MINIMUM_NODE_MAJOR)
         .unwrap_or(false);
     let ok = node.available && npm.available && npx.available;
-    let smoke =
-        if ok && node_version_compatible && runner_dependency_installed && runner_browser_installed
-        {
-            run_browser_smoke(reference_dir, chromium_fallback_executable.as_deref())
-        } else {
-            BrowserSmokeReport {
-                ran: false,
-                ok: false,
-                timeout_ms: 8_000,
-                stdout: None,
-                stderr: None,
-                error: Some("skipped because browser prerequisites are incomplete".to_string()),
-            }
-        };
-    let automation_ready =
+    let prerequisites_ready =
         ok && node_version_compatible && runner_dependency_installed && runner_browser_installed;
+    let smoke = if prerequisites_ready && run_smoke {
+        run_browser_smoke(reference_dir, chromium_fallback_executable.as_deref())
+    } else {
+        BrowserSmokeReport {
+            ran: false,
+            ok: prerequisites_ready,
+            timeout_ms: 0,
+            stdout: None,
+            stderr: None,
+            error: Some(if prerequisites_ready {
+                "skipped on the production session-start hot path".to_string()
+            } else {
+                "skipped because browser prerequisites are incomplete".to_string()
+            }),
+        }
+    };
+    let automation_ready = prerequisites_ready;
     Ok(BrowserDoctorReport {
         ok,
         reference_dir: reference_dir.to_path_buf(),
@@ -538,7 +556,10 @@ fn ensure_browser_automation_ready(
     reference_dir: &Path,
     context_label: &str,
 ) -> Result<BrowserDoctorReport> {
-    let mut doctor = build_doctor_report(reference_dir)?;
+    // This function sits on every capture and persistent-session start. Only
+    // inspect prerequisites here; the explicit doctor command owns the costly
+    // Chromium launch/screenshot smoke.
+    let mut doctor = build_browser_readiness_report(reference_dir, false)?;
     if doctor.automation_ready {
         return Ok(doctor);
     }
@@ -547,7 +568,7 @@ fn ensure_browser_automation_ready(
     let install_browser = !doctor.runner_browser_installed;
     if run_npm_install || install_browser {
         install_reference(reference_dir, run_npm_install, install_browser)?;
-        doctor = build_doctor_report(reference_dir)?;
+        doctor = build_browser_readiness_report(reference_dir, false)?;
         if doctor.automation_ready {
             return Ok(doctor);
         }
@@ -2187,8 +2208,37 @@ await context.addInitScript(() => {{
 }}).catch(() => {{}});
 await ensureWebAuthn(page).catch(() => {{}});
 const downloads = [];
+const screencastSessions = new WeakMap();
+let latestScreencastFrame = null;
+const ensureScreencast = async (candidate) => {{
+  if (screencastSessions.has(candidate)) return screencastSessions.get(candidate);
+  const client = await context.newCDPSession(candidate);
+  const state = {{ client, started: false }};
+  screencastSessions.set(candidate, state);
+  await client.send("Page.enable").catch(() => {{}});
+  client.on("Page.screencastFrame", (event) => {{
+    if (candidate === page && event?.data) {{
+      latestScreencastFrame = {{
+        page: candidate,
+        url: candidate.url(),
+        mimeType: "image/jpeg",
+        base64: event.data,
+        capturedAtMs: Date.now(),
+      }};
+    }}
+    client.send("Page.screencastFrameAck", {{ sessionId: event.sessionId }}).catch(() => {{}});
+  }});
+  await client.send("Page.startScreencast", {{
+    format: "jpeg",
+    quality: 70,
+    everyNthFrame: 1,
+  }});
+  state.started = true;
+  return state;
+}};
 const bindPageEvents = (candidate) => {{
   ensureWebAuthn(candidate).catch(() => {{}});
+  ensureScreencast(candidate).catch(() => {{}});
   candidate.on("dialog", (dialog) => {{ pendingDialog = dialog; }});
   candidate.on("download", async (download) => {{
     const suggested = String(download.suggestedFilename() || "download.bin").replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 160);
@@ -2282,9 +2332,34 @@ const screenshot = async (options = {{}}) => {{
   return {{ mimeType: format === "jpeg" ? "image/jpeg" : "image/png", base64: buffer.toString("base64") }};
 }};
 
+const liveScreenshot = async (afterCapturedAtMs = 0) => {{
+  const frame = latestScreencastFrame;
+  if (frame?.page === page
+      && frame.url === page.url()
+      && frame.base64
+      && Number(frame.capturedAtMs || 0) <= Number(afterCapturedAtMs || 0)) {{
+    return null;
+  }}
+  if (frame?.page === page
+      && frame.url === page.url()
+      && frame.base64
+      && Date.now() - Number(frame.capturedAtMs || 0) < 250) {{
+    return {{ mimeType: frame.mimeType, base64: frame.base64, capturedAtMs: frame.capturedAtMs }};
+  }}
+  const fresh = await screenshot({{ format: "jpeg", quality: 70 }});
+  latestScreencastFrame = {{
+    page,
+    url: page.url(),
+    mimeType: fresh.mimeType,
+    base64: fresh.base64,
+    capturedAtMs: Date.now(),
+  }};
+  return {{ ...fresh, capturedAtMs: latestScreencastFrame.capturedAtMs }};
+}};
+
 const applyInput = async (events) => {{
-  let applied = 0;
-  for (const event of Array.isArray(events) ? events : []) {{
+  const results = [];
+  for (const [index, event] of (Array.isArray(events) ? events : []).entries()) {{
     try {{
       const type = event.type;
       const x = Number(event.x || 0);
@@ -2314,15 +2389,36 @@ const applyInput = async (events) => {{
       }} else if (type === "keyUp") {{
         // keyDown already performs a full press; ignore the paired keyUp.
       }} else {{
-        continue;
+        throw new Error(`unsupported input event type: ${{String(type || "missing")}}`);
       }}
-      applied++;
-    }} catch {{
-      // Skip individual input failures; the batch result still advances.
+      results.push({{ index, ok: true }});
+    }} catch (error) {{
+      results.push({{
+        index,
+        ok: false,
+        error: (error && error.message) || String(error),
+      }});
     }}
   }}
-  return applied;
+  return results;
 }};
+
+const inputState = async () => page.evaluate(() => {{
+  const element = document.activeElement;
+  if (!element) return null;
+  const tag = String(element.tagName || "").toLowerCase();
+  const type = String(element.getAttribute?.("type") || "").toLowerCase();
+  const secret = type === "password" || element.getAttribute?.("autocomplete") === "one-time-code";
+  const value = !secret && "value" in element ? String(element.value || "") : "";
+  return {{
+    tag,
+    type,
+    name: String(element.getAttribute?.("name") || ""),
+    id: String(element.id || ""),
+    editable: tag === "input" || tag === "textarea" || element.isContentEditable === true,
+    valueLength: secret ? null : value.length,
+  }};
+}}).catch(() => null);
 
 	const observe = async (limit, textMax) => {{
 	  const cappedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(80, Math.floor(limit))) : 24;
@@ -2712,8 +2808,20 @@ for await (const line of rl) {{
       await page.evaluate((input) => globalThis.__ctoxResolvePermission?.(input.kind, input.accept), {{ kind: request.kind, accept: Boolean(message.accept) }});
       respond({{ id, ok: true, accepted: Boolean(message.accept), permission: request.kind, nav: await navState() }});
     }} else if (op === "input") {{
-      const applied = await applyInput(message.events);
-      respond({{ id, ok: true, applied, nav: await navState() }});
+      const results = await applyInput(message.events);
+      const applied = results.filter((result) => result.ok).length;
+      respond({{ id, ok: true, applied, results, input: await inputState(), nav: await navState() }});
+    }} else if (op === "live") {{
+      const results = await applyInput(message.events);
+      const applied = results.filter((result) => result.ok).length;
+      respond({{
+        id,
+        ok: true,
+        applied,
+        results,
+        screenshot: await liveScreenshot(message.frameAfterMs),
+        nav: await navState(),
+      }});
     }} else if (op === "screenshot") {{
       respond({{ id, ok: true, screenshot: await screenshot(message), nav: await navState() }});
     }} else if (op === "nav_state") {{
@@ -2985,6 +3093,7 @@ fn unix_ts() -> u64 {
 mod tests {
     use super::browser_doctor_report;
     use super::build_browser_capture_runner_script;
+    use super::build_browser_readiness_report;
     use super::build_browser_runner_script;
     use super::build_persistent_browser_runner_script;
     use super::capture_chrome_extra_args;
@@ -3100,6 +3209,16 @@ mod tests {
     }
 
     #[test]
+    fn production_browser_readiness_never_launches_the_doctor_smoke() {
+        let reference_dir = temp_path("hot-path-readiness");
+        fs::create_dir_all(&reference_dir).unwrap();
+        let report = build_browser_readiness_report(&reference_dir, false).unwrap();
+        assert!(!report.smoke.ran);
+        assert_eq!(report.smoke.timeout_ms, 0);
+        let _ = fs::remove_dir_all(&reference_dir);
+    }
+
+    #[test]
     fn browser_automation_pragma_overrides_timeout() {
         let (directive, body) = parse_browser_automation_source(
             "// ctox-browser: timeout_ms=15000\nawait page.goto('https://example.com');",
@@ -3167,6 +3286,10 @@ mod tests {
         assert!(script.contains("blocked browser egress host"));
         assert!(script.contains("op === \"webauthn_respond\""));
         assert!(script.contains("op === \"credential_fill\""));
+        assert!(script.contains("op === \"live\""));
+        assert!(script.contains("results.filter((result) => result.ok).length"));
+        assert!(script.contains("Page.startScreencast"));
+        assert!(script.contains("Page.screencastFrameAck"));
         assert!(script.contains("username field was not found"));
         assert!(script.contains("message.usernameValue = \"[redacted]\""));
         assert!(script.contains("message.passwordValue = \"[redacted]\""));
