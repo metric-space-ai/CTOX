@@ -2178,14 +2178,12 @@ sync_business_os_shell_assets() {
     --exclude='/notes/***' \
     "$source_business_os_root/" "$state_business_os_root/"
 
-  if [[ -d "$source_business_os_root/installed-modules" ]]; then
-    mkdir -p "$state_business_os_root/installed-modules"
-    # One-way legacy migration only: import apps missing from managed state,
-    # but never overwrite an app that is already installed there.
-    rsync -a --ignore-existing --exclude='/node_modules/***' \
-      "$source_business_os_root/installed-modules/" \
-      "$state_business_os_root/installed-modules/"
-  fi
+  # installed-modules is tenant state, full stop. A release archive must NEVER
+  # seed it: the former "legacy migration" import copied every app bundled in
+  # the source tree onto every fresh install — including one customer's
+  # private apps onto another customer's instance (welsch, 2026-08-20).
+  # Apps reach an instance only through the app store / explicit restore.
+  mkdir -p "$state_business_os_root/installed-modules"
 }
 
 # ── Managed installation layout ─────────────────────────────────────────────
