@@ -91,9 +91,14 @@
     0 2px 6px oklch(0.22 0.015 235 / 0.14),
     0 26px 60px oklch(0.22 0.015 235 / 0.24),
     0 56px 112px oklch(0.22 0.015 235 / 0.14);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-sans);
+  /* No synthesised bold/italic and no subpixel smoothing: the flat design has
+     no shadows to hide a faked weight behind, and the shell must look the same
+     whether it renders in a browser tab or in the desktop's WebContentsView. */
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 :root[data-theme="dark"] {
