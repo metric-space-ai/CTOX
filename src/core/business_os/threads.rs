@@ -6548,6 +6548,72 @@ mod tests {
     }
 
     #[test]
+    fn app_relevance_projection_surfaces_pipeline_decision_for_owner() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let now = now_ms();
+        let conn = store::open_store(temp.path())?;
+        store::upsert_business_record(
+            &conn,
+            "kundenpipeline_entscheidungen",
+            "kpl-e-triage-1",
+            now,
+            json!({
+                "id": "kpl-e-triage-1",
+                "vorgang_id": "kpl-v-1",
+                "typ": "triage",
+                "titel": "Portal-Login defekt",
+                "title": "Portal-Login defekt",
+                "status": "offen",
+                "owner_user_id": "michael",
+                "assigned_user_id": "michael",
+                "updated_at_ms": now
+            }),
+        )?;
+        drop(conn);
+
+        let open = project_app_relevance(temp.path(), &[("kundenpipeline_entscheidungen", 0)], 50)?;
+        assert!(open.changed_count > 0, "an open decision must raise a thread");
+        let (_, thread_id) = open
+            .projections
+            .iter()
+            .find(|(collection, _)| *collection == "user_threads")
+            .context("projected decision thread")?;
+        let thread = load_record(temp.path(), "user_threads", thread_id)?
+            .context("projected decision thread record")?;
+        assert_eq!(value_string(&thread, "kind"), "approval");
+        assert_eq!(value_string(&thread, "status"), "open");
+        assert_eq!(value_string(&thread, "assigned_user_id"), "michael");
+
+        // Answering the decision natively must close the inbox item.
+        let conn = store::open_store(temp.path())?;
+        store::upsert_business_record(
+            &conn,
+            "kundenpipeline_entscheidungen",
+            "kpl-e-triage-1",
+            now + 1,
+            json!({
+                "id": "kpl-e-triage-1",
+                "vorgang_id": "kpl-v-1",
+                "typ": "triage",
+                "titel": "Portal-Login defekt",
+                "title": "Portal-Login defekt",
+                "status": "entschieden",
+                "owner_user_id": "michael",
+                "assigned_user_id": "michael",
+                "updated_at_ms": now + 1
+            }),
+        )?;
+        drop(conn);
+
+        project_app_relevance(temp.path(), &[("kundenpipeline_entscheidungen", now)], 50)?;
+        let closed = load_record(temp.path(), "user_threads", thread_id)?
+            .context("answered decision thread")?;
+        assert_eq!(value_string(&closed, "status"), "completed");
+
+        Ok(())
+    }
+
+    #[test]
     fn app_relevance_projection_surfaces_ticket_approval_for_reviewer() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let now = now_ms();
