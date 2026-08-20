@@ -1529,6 +1529,21 @@ function requireCommandBus(ctx) {
 // Bei einem einzigen Tab bleibt die Leiste verborgen: eine Leiste mit genau
 // einem Eintrag kostet Hoehe und sagt nichts.
 function tabsDerSitzung(state) {
+  // Zuerst die Live-Liste des Runners: sie beschreibt, was der ferne Browser
+  // WIRKLICH offen hat, und braucht keine Replikation.
+  if (Array.isArray(state.liveTabs) && state.liveTabs.length) {
+    return state.liveTabs
+      .map((tab) => ({
+        id: String(tab.id || tab.tab_id || ''),
+        title: tab.title || '',
+        url: tab.url || '',
+        // Der Runner setzt `active` aus dem tatsaechlich gewaehlten Page-Objekt
+        // -- im Gegensatz zur Projektion, die jeden angefassten Tab als aktiv
+        // schreibt.
+        liveAktiv: tab.active === true,
+      }))
+      .filter((tab) => tab.id);
+  }
   const sessionId = state.latestSession?.id;
   if (!sessionId) return [];
   return (Array.isArray(state.tabs) ? state.tabs : [])
@@ -1562,7 +1577,10 @@ function renderTabstrip(ctx, refs, state) {
   // upsert_browser_tab schreibt dort hart `true` fuer jeden angefassten Tab und
   // setzt die uebrigen nicht zurueck, sodass jeder je benutzte Tab als aktiv
   // gilt. `current_tab_id` wird dagegen bei jedem Befehl mitgefuehrt.
-  let aktiverTab = String(state.latestSession?.current_tab_id || '');
+  let aktiverTab = String(tabs.find((tab) => tab.liveAktiv)?.id
+    || state.liveActiveTabId
+    || state.latestSession?.current_tab_id
+    || '');
   // Nach dem Schliessen zeigt current_tab_id noch auf den geschlossenen Tab --
   // der Runner ist dann laengst auf einen anderen gewechselt. Ohne diesen
   // Rueckfall waere kurzzeitig gar kein Tab hervorgehoben.
@@ -2121,6 +2139,15 @@ function applyDirectNavigationState(state, nav) {
   // "Example Domain"). Use the new host as the honest fallback instead.
   const title = String(nav?.title || '').trim() || browserUrlLabel(currentUrl);
   state.latestTab = { ...(state.latestTab || {}), ...nav, title };
+  // Der Runner liefert seine Tab-Liste in JEDER Antwort mit (navState()).
+  // Sie ist der verlaesslichere Weg als die replizierte Sammlung
+  // `browser_tabs`: die stand auf dieser Instanz auf 0, waehrend der Runner
+  // laengst zwei Tabs fuehrte. Beide Quellen bleiben erhalten, die Live-
+  // Antwort hat Vorrang.
+  if (Array.isArray(nav?.tabs)) {
+    state.liveTabs = nav.tabs;
+    state.liveActiveTabId = String(nav.active_tab_id || '');
+  }
   state.latestSession = {
     ...(state.latestSession || {}),
     current_url: currentUrl,
