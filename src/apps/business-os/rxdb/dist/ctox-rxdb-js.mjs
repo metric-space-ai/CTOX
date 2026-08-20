@@ -5484,7 +5484,11 @@ var CtoxWebRtcNativePeer = class {
       }
     }
     connection.auxChannels.set(label, channel);
-    channel.onmessage = (event) => this.handleAuxiliaryChannelMessage(connection, label, event.data);
+    channel.onmessage = (event) => {
+      this.handleAuxiliaryChannelMessage(connection, label, event.data).catch((error) => {
+        this.events.emit("error", { code: "ctox_aux_message_failed", label, error });
+      });
+    };
     channel.onclose = () => {
       if (connection.auxChannels?.get(label) === channel) {
         connection.auxChannels.delete(label);
@@ -5492,7 +5496,7 @@ var CtoxWebRtcNativePeer = class {
     };
     this.events.emit("aux-channel", { peerId: connection.remotePeerId, label, channel });
   }
-  handleAuxiliaryChannelMessage(connection, label, raw) {
+  async handleAuxiliaryChannelMessage(connection, label, raw) {
     this.auxMessageStats.messagesReceived += 1;
     this.auxMessageStats.lastMessageAtMs = Date.now();
     let payload;
@@ -5500,6 +5504,11 @@ var CtoxWebRtcNativePeer = class {
       payload = JSON.parse(String(raw || ""));
     } catch {
       this.auxMessageStats.parseErrors += 1;
+      return;
+    }
+    if (payload?.ctoxFrame === CTOX_FRAME_PROTOCOL) {
+      this.auxMessageStats.transportFramesReceived = Number(this.auxMessageStats.transportFramesReceived || 0) + 1;
+      await this.handleTransportFrame(connection.remotePeerId, payload);
       return;
     }
     if (payload?.ctoxAuxFrame === "ctox-aux-frame-v1") {
@@ -5523,6 +5532,10 @@ var CtoxWebRtcNativePeer = class {
         this.auxMessageStats.parseErrors += 1;
         return;
       }
+    }
+    if (payload?.method) {
+      await this.handleDataChannelFrame(connection.remotePeerId, payload);
+      return;
     }
     if (!payload?.id || !Object.prototype.hasOwnProperty.call(payload, "result") && !Object.prototype.hasOwnProperty.call(payload, "error")) return;
     const pending = this.pending.get(payload.id);

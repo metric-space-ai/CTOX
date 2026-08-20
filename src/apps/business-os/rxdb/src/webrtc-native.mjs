@@ -1763,7 +1763,11 @@ export class CtoxWebRtcNativePeer {
       try { previous.close(); } catch {}
     }
     connection.auxChannels.set(label, channel);
-    channel.onmessage = (event) => this.handleAuxiliaryChannelMessage(connection, label, event.data);
+    channel.onmessage = (event) => {
+      this.handleAuxiliaryChannelMessage(connection, label, event.data).catch((error) => {
+        this.events.emit("error", { code: "ctox_aux_message_failed", label, error });
+      });
+    };
     channel.onclose = () => {
       if (connection.auxChannels?.get(label) === channel) {
         connection.auxChannels.delete(label);
@@ -1772,12 +1776,29 @@ export class CtoxWebRtcNativePeer {
     this.events.emit('aux-channel', { peerId: connection.remotePeerId, label, channel });
   }
 
-  handleAuxiliaryChannelMessage(connection, label, raw) {
+  async handleAuxiliaryChannelMessage(connection, label, raw) {
     this.auxMessageStats.messagesReceived += 1;
     this.auxMessageStats.lastMessageAtMs = Date.now();
     let payload;
     try { payload = JSON.parse(String(raw || '')); } catch {
       this.auxMessageStats.parseErrors += 1;
+      return;
+    }
+    // The native peer answers over whichever channel it considers cheapest,
+    // and for a response that exceeds the inline budget it uses the ACK-based
+    // transport framing — on this auxiliary channel. Measured on a customer
+    // instance: the browser sent `ctoxProtocol` on the primary channel, the
+    // peer replied with a 7-frame / 96 KB transfer on `ctox-browser-live-v1`,
+    // and this handler dropped every frame because it only knew the aux
+    // framing. No ACK went back, the sender stalled after its first window of
+    // four, the handshake timed out, and the whole data plane never came up —
+    // silently, on every reconnect. Transport frames belong to the shared
+    // reassembler regardless of which channel carried them; its ACKs go out on
+    // the primary channel, where the peer correlates them by transfer id.
+    if (payload?.ctoxFrame === CTOX_FRAME_PROTOCOL) {
+      this.auxMessageStats.transportFramesReceived =
+        Number(this.auxMessageStats.transportFramesReceived || 0) + 1;
+      await this.handleTransportFrame(connection.remotePeerId, payload);
       return;
     }
     if (payload?.ctoxAuxFrame === 'ctox-aux-frame-v1') {
@@ -1799,6 +1820,18 @@ export class CtoxWebRtcNativePeer {
         this.auxMessageStats.parseErrors += 1;
         return;
       }
+    }
+    // The peer also *asks* over this channel, not just answers. The handshake's
+    // second leg is a `token` request from the native peer, and dropping it
+    // here left the browser waiting for a request that had already arrived —
+    // "Timed out waiting for remote WebRTC request token" on every collection
+    // while the frame counters showed the traffic. Requests belong to the same
+    // dispatcher as on the primary channel; it records the observation that
+    // releases the handshake and answers over the primary channel, which the
+    // peer correlates by request id.
+    if (payload?.method) {
+      await this.handleDataChannelFrame(connection.remotePeerId, payload);
+      return;
     }
     if (!payload?.id || (!Object.prototype.hasOwnProperty.call(payload, 'result') && !Object.prototype.hasOwnProperty.call(payload, 'error'))) return;
     const pending = this.pending.get(payload.id);
