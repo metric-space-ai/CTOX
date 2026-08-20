@@ -546,16 +546,26 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       // Only the leader holds the WebRTC data channel. A follower that opens
       // its own direct bridge never connects, so ask the leader first and keep
       // the direct path as the fallback for when no leader answers.
+      // Callers budget these calls (the Browser app renews its controller
+      // lease on a 5s budget). Splitting that budget across the proxy hop and
+      // the direct fallback keeps a slow leader from blowing the caller's
+      // deadline, which is what silently starved the lease renewal.
+      const budgetMs = Number(options?.timeoutMs) > 0 ? Number(options.timeoutMs) : 0;
       if (coordinator && !coordinator.isLeader?.() && typeof coordinator.requestNativeViaLeader === 'function') {
         try {
-          return await coordinator.requestNativeViaLeader(method, params, options);
+          return await coordinator.requestNativeViaLeader(
+            method,
+            params,
+            options,
+            budgetMs ? { timeoutMs: Math.max(500, Math.round(budgetMs * 0.6)) } : {},
+          );
         } catch (error) {
           if (stopped) throw error;
           // The failed proxy call already dropped the unresponsive lease and
           // called for an election. Give that election a moment to land so the
           // direct bridge below is built as a leader rather than as a follower
           // that can never connect.
-          await waitForLeadership(coordinator, 4000);
+          await waitForLeadership(coordinator, budgetMs ? Math.round(budgetMs * 0.2) : 4000);
         }
       }
       return requestNativeDirectly(method, params, options);
@@ -1049,7 +1059,26 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     if (typeof bridge?.state?.requestNative !== 'function') {
       throw new Error(`Native WebRTC requests are unavailable for ${collection}.`);
     }
-    return bridge.state.requestNative(method, params, options);
+    const budgetMs = Number(options?.timeoutMs) > 0 ? Number(options.timeoutMs) : 0;
+    const call = bridge.state.requestNative(method, params, options);
+    if (!budgetMs) return call;
+    // A peer that never finishes negotiating leaves the transport promise
+    // pending forever. The caller's budget has to win, or its retry loop
+    // never runs again.
+    let timer = null;
+    try {
+      return await Promise.race([
+        call,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Native request ${method} exceeded ${budgetMs}ms.`)),
+            budgetMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   return syncRuntime;
