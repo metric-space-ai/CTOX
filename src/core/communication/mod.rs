@@ -6,6 +6,7 @@ pub(crate) mod attachments;
 pub(crate) mod chat_native;
 pub(crate) mod chat_outbox;
 pub(crate) mod discord_native;
+pub(crate) mod email_accounts;
 pub(crate) mod email_native;
 pub(crate) mod gateway;
 pub(crate) mod google_chat_native;
