@@ -9057,6 +9057,14 @@ function renderShellCtoxVersion(status = state.ctoxHealth) {
   const labelEl = container.querySelector('[data-ctox-version-label]');
   const button = container.querySelector('[data-ctox-update-button]');
   const parts = [`CTOX ${version}`];
+  // Die Versionsnummer stammt aus Cargo.toml und wird auf main nie
+  // hochgezaehlt: sie zeigt seit Monaten 0.3.22, egal wie oft aktualisiert
+  // wurde. Ein Betreiber konnte am Bildschirm nicht erkennen, ob ein Upgrade
+  // angekommen ist — auf thesen.ctox.dev lief drei Wochen ein alter Build
+  // hinter einer Zahl, die aktuell aussah. Der Build-Stand des laufenden
+  // Release ist die Angabe, die sich tatsaechlich aendert.
+  const buildStand = platformBuildStamp(platform?.current_release);
+  if (buildStand) parts.push(buildStand);
   if (state.ctoxUpdateInstallRunning) {
     parts.push(shellText('ctoxUpdateInstalling'));
   } else if (updateAvailable) {
@@ -9085,6 +9093,17 @@ function sessionCanManageCtoxPlatform(session = state.session) {
     session?.authenticated
     && (user.is_admin || roleCanManage(user.role || '')),
   );
+}
+
+// Zieht den Datumsstempel aus einem Release-Namen wie
+// "branch-main-20260819T121418Z" und macht "Stand 19.08.2026" daraus.
+// Leer, wenn der Name keinen Stempel traegt (etwa bei getaggten Releases,
+// deren Nummer ohnehin aussagekraeftig ist).
+function platformBuildStamp(release) {
+  const treffer = String(release || '').match(/(20\d{2})(\d{2})(\d{2})T\d{6}Z/);
+  if (!treffer) return '';
+  const [, jahr, monat, tag] = treffer;
+  return `Stand ${tag}.${monat}.${jahr}`;
 }
 
 function platformDisplayVersion(value) {

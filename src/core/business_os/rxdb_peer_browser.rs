@@ -7,6 +7,9 @@ use super::browser_control::{
     browser_session_automation_with_database, browser_session_status_with_database,
     redact_browser_frame_data, redacted_browser_context_capture, redacted_browser_session_status,
     BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_JPEG_QUALITY, BROWSER_FRAME_RATE_LIMIT,
+    BUSINESS_COMMAND_GC_LIMIT, BUSINESS_COMMAND_RETENTION_MS,
+    BROWSER_FRAME_RATE_IDLE, BROWSER_INPUT_ACTIVE_WINDOW_MS,
+    BROWSER_SESSION_ABANDONED_AFTER_MS,
     BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_FRAME_RECENT_KEEP_COUNT,
     BROWSER_INPUT_EVENT_GC_LIMIT, BROWSER_INPUT_EVENT_RETENTION_SECS,
     BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS, BROWSER_RUNTIME_COMMAND_LOCK,
@@ -1716,6 +1719,19 @@ pub(super) async fn browser_runtime_maintenance_loop(
                 Instant::now()
             });
         }
+        // Die Aufraeumer muessen wie der Tombstone-Sweep UEBER dem Ausstieg
+        // stehen. Sie hingen darunter und wurden damit genau dann uebersprungen,
+        // wenn aufgeraeumt werden koennte: ohne laufende Sitzung. Auf der
+        // Thesen-Instanz am 19.08.2026 gemessen — 452 abgelaufene Bilder, 241
+        // verbrauchte Eingaben und 5525 erledigte Befehle lagen unberuehrt in
+        // einem 930 MB grossen Speicher, waehrend beide Aufraeumer existierten
+        // und keiner je lief.
+        {
+            let _guard = database_write_lock.lock().await;
+            if let Err(err) = run_browser_runtime_maintenance(&database).await {
+                eprintln!("[business-os] browser storage gc failed: {err:#}");
+            }
+        }
         if browser_runtime_manager().active_session_ids().is_empty() {
             consecutive_idle_rounds = 0;
             tokio::time::sleep(Duration::from_secs(
@@ -1792,6 +1808,7 @@ async fn run_browser_runtime_maintenance(database: &Arc<RxDatabase>) -> anyhow::
     // client; current clients reconnect the direct channel instead.
     rows_touched = rows_touched.saturating_add(gc_expired_browser_frames(database).await?);
     rows_touched = rows_touched.saturating_add(gc_consumed_browser_input_events(database).await?);
+    rows_touched = rows_touched.saturating_add(gc_settled_business_commands(database).await?);
     Ok(rows_touched)
 }
 
@@ -1806,11 +1823,76 @@ async fn run_browser_runtime_maintenance(database: &Arc<RxDatabase>) -> anyhow::
 /// case: several lifecycle writers never record one, and treating "absent" as
 /// "expired" would cut the stream off after its very first frame. Those stream
 /// as long as the runtime still holds the page.
+/// Zeitpunkt der letzten Eingabe je Sitzung, rein lokal im Peer.
+///
+/// Bewusst kein Feld im Sitzungsdokument: das haette die Wire-Contracts
+/// beruehrt, und der Wert ist fluechtig — er steuert nur die Bildrate.
+static BROWSER_LAST_INPUT_MS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+pub(super) fn note_browser_input_activity(session_id: &str) {
+    let map = BROWSER_LAST_INPUT_MS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = map.lock() {
+        map.insert(session_id.to_string(), now_ms() as u64);
+    }
+}
+
+fn browser_last_input_ms(session_id: &str) -> Option<u64> {
+    let map = BROWSER_LAST_INPUT_MS.get_or_init(|| Mutex::new(HashMap::new()));
+    map.lock().ok().and_then(|map| map.get(session_id).copied())
+}
+
+/// Volle Rate waehrend und kurz nach einer Eingabe, sonst Ruhetakt.
+///
+/// Die bisherige Entscheidung kannte nur die Uhr: sie nahm alle 66 ms ein Bild
+/// auf, unabhaengig davon, ob sich etwas geaendert hatte oder ob ueberhaupt
+/// jemand zusah. Ein Werbebanner erzeugte damit dieselbe Last wie echte
+/// Bedienung.
+/// Wird diese Sitzung ueberhaupt angesehen?
+///
+/// Die Oberflaeche zeigt immer nur EINEN Bildschirm. Bilder von Sitzungen, die
+/// niemand betrachtet, sind reine Verschwendung: auf der Thesen-Instanz standen
+/// 111 Sitzungen, 110 davon tot, und die Aufnahmeschleife bediente sie weiter.
+///
+/// Als betrachtet gilt eine Sitzung, wenn ein Direktbetrachter angehaengt ist,
+/// oder wenn sie kuerzlich bedient oder bewegt wurde (Navigation aktualisiert
+/// das Sitzungsdokument). Das erste Bild einer neuen Sitzung entsteht ohnehin
+/// vor dieser Pruefung, sonst saehe der Nutzer nie etwas.
+fn browser_session_is_watched(
+    session_id: &str,
+    now_ms: u64,
+    session_updated_at_ms: Option<u64>,
+) -> bool {
+    if browser_direct_live_session_active(session_id) {
+        return true;
+    }
+    let letzte_regung = [browser_last_input_ms(session_id), session_updated_at_ms]
+        .into_iter()
+        .flatten()
+        .max();
+    letzte_regung
+        .is_some_and(|zeit| now_ms.saturating_sub(zeit) <= BROWSER_SESSION_ABANDONED_AFTER_MS)
+}
+
+fn browser_effective_frame_rate(
+    frame_rate_target: u64,
+    now_ms: u64,
+    last_input_ms: Option<u64>,
+) -> u64 {
+    let interaktiv = last_input_ms
+        .is_some_and(|input_ms| now_ms.saturating_sub(input_ms) <= BROWSER_INPUT_ACTIVE_WINDOW_MS);
+    if interaktiv {
+        frame_rate_target
+    } else {
+        BROWSER_FRAME_RATE_IDLE.min(frame_rate_target.max(1))
+    }
+}
+
 fn browser_frame_capture_due(
     now_ms: u64,
     last_frame_ms: Option<u64>,
     lease_expires_ms: Option<u64>,
     frame_rate_target: u64,
+    last_input_ms: Option<u64>,
 ) -> bool {
     let Some(last_frame_ms) = last_frame_ms else {
         return true;
@@ -1818,7 +1900,8 @@ fn browser_frame_capture_due(
     if lease_expires_ms.is_some_and(|expires_ms| expires_ms <= now_ms) {
         return false;
     }
-    let min_interval_ms = browser_frame_capture_interval_ms(frame_rate_target);
+    let rate = browser_effective_frame_rate(frame_rate_target, now_ms, last_input_ms);
+    let min_interval_ms = browser_frame_capture_interval_ms(rate);
     now_ms.saturating_sub(last_frame_ms) >= min_interval_ms
 }
 
@@ -1930,6 +2013,11 @@ async fn refresh_browser_session_frame(
             .get("frame_rate_target")
             .and_then(Value::as_u64)
             .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT),
+        browser_last_input_ms(session_id),
+    ) && browser_session_is_watched(
+        session_id,
+        now_ms() as u64,
+        session_doc.get("updated_at_ms").and_then(Value::as_u64),
     );
     if !due {
         // A live stream remains active between capture slots so the maintenance
@@ -1989,6 +2077,9 @@ async fn drain_browser_session_inputs(
         return Ok(0);
     }
     let touched_rows = rows.len();
+    // Ab hier gilt die Sitzung als bedient: die Bildrate darf fuer das
+    // Rueckmeldefenster hochgehen und faellt danach wieder in den Ruhetakt.
+    note_browser_input_activity(session_id);
 
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2479,6 +2570,57 @@ async fn prune_browser_session_frames(
 }
 
 /// Remove expired frames so `browser_frames` does not grow without bound.
+/// Erledigte Befehle nach einer Aufbewahrungsfrist entfernen.
+///
+/// `business_commands` war faktisch append-only: nichts hat je etwas daraus
+/// entfernt. Auf der Thesen-Instanz standen am 19.08.2026 6768 Zeilen darin,
+/// davon 6742 in einem Endzustand und 3688 volle 47 Tage alt, in einem 929 MB
+/// grossen Speicher. Jede Client-Aktion fragt diese Collection erneut ab;
+/// gemessen wurden dort 3,7 s, 5,0 s und 12,3 s fuer eine einzelne Abfrage.
+/// Der Browserstart lief deshalb in seine Zeitueberschreitung und meldete dem
+/// Nutzer "CTOX ist nicht mit dem Browser-Datenkanal verbunden" — ein
+/// Verbindungsfehler, den es nie gab.
+///
+/// Nur Endzustaende werden geraeumt und nur jenseits der Frist; laufende und
+/// angenommene Befehle bleiben unangetastet. Die Obergrenze je Durchlauf haelt
+/// die Wartung kurz, statt einmalig eine grosse Loeschung zu fahren.
+async fn gc_settled_business_commands(database: &Arc<RxDatabase>) -> anyhow::Result<usize> {
+    let cutoff = (now_ms() as u64).saturating_sub(BUSINESS_COMMAND_RETENTION_MS);
+    let commands = database
+        .collection("business_commands")
+        .context("business_commands collection is not registered")?;
+    let settled = commands
+        .find(Some(MangoQuery {
+            selector: Some(json!({
+                "status": { "$in": ["completed", "failed", "cancelled", "canceled", "blocked"] },
+                "updated_at_ms": { "$lt": cutoff }
+            })),
+            limit: Some(BUSINESS_COMMAND_GC_LIMIT),
+            ..Default::default()
+        }))
+        .map_err(|err| anyhow::anyhow!("query settled business_commands: {err}"))?
+        .exec(false)
+        .await
+        .map_err(|err| anyhow::anyhow!("exec settled business_commands query: {err}"))?;
+    let Some(rows) = settled.as_array() else {
+        return Ok(0);
+    };
+    let ids: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let removed = ids.len();
+    commands
+        .bulk_remove_by_ids(ids)
+        .await
+        .map_err(|err| anyhow::anyhow!("remove settled business_commands: {err}"))?;
+    Ok(removed)
+}
+
 async fn gc_expired_browser_frames(database: &Arc<RxDatabase>) -> anyhow::Result<usize> {
     let now = now_ms() as u64;
     let frames = database
@@ -3760,22 +3902,50 @@ mod tests {
         // controller holds a lease. Without this the UI never shows a picture,
         // so nobody can ever take the lease: the deadlock that left every
         // session on the tenant frameless.
-        assert!(browser_frame_capture_due(NOW, None, None, RATE));
-        assert!(browser_frame_capture_due(NOW, None, Some(NOW - 1), RATE));
+        assert!(browser_frame_capture_due(NOW, None, None, RATE, None));
+        assert!(browser_frame_capture_due(NOW, None, Some(NOW - 1), RATE, None));
 
-        // With a frame in place the lease decides. A watched session is
-        // captured once the rate-limit window has passed, not before.
+        // With a frame in place the lease decides. Waehrend der Bedienung gilt
+        // die volle Rate: nach 50 ms noch nicht faellig, nach 67 ms schon.
         assert!(!browser_frame_capture_due(
             NOW,
             Some(NOW - 50),
             Some(NOW + 60_000),
-            RATE
+            RATE,
+            Some(NOW)
         ));
         assert!(browser_frame_capture_due(
             NOW,
             Some(NOW - 67),
             Some(NOW + 60_000),
-            RATE
+            RATE,
+            Some(NOW)
+        ));
+
+        // Ohne Eingabe gilt der Ruhetakt: dieselben 67 ms reichen nicht mehr,
+        // erst nach einer halben Sekunde wird wieder aufgenommen. Das ist der
+        // Unterschied zwischen Fernsteuerung und Videofeed.
+        assert!(!browser_frame_capture_due(
+            NOW,
+            Some(NOW - 67),
+            Some(NOW + 60_000),
+            RATE,
+            None
+        ));
+        assert!(browser_frame_capture_due(
+            NOW,
+            Some(NOW - 500),
+            Some(NOW + 60_000),
+            RATE,
+            None
+        ));
+        // Eine Eingabe, die laenger zurueckliegt als das Fenster, zaehlt nicht.
+        assert!(!browser_frame_capture_due(
+            NOW,
+            Some(NOW - 67),
+            Some(NOW + 60_000),
+            RATE,
+            Some(NOW - 5_000)
         ));
 
         // An expired lease stops the stream instead of screenshotting an
@@ -3784,27 +3954,30 @@ mod tests {
             NOW,
             Some(NOW - 60_000),
             Some(NOW),
-            RATE
+            RATE,
+            Some(NOW)
         ));
         assert!(!browser_frame_capture_due(
             NOW,
             Some(NOW - 60_000),
             Some(NOW - 1),
-            RATE
+            RATE,
+            Some(NOW)
         ));
 
         // A session that records no lease at all keeps streaming: several
         // lifecycle writers never record one, and reading "absent" as "expired"
         // would end the stream after its very first frame.
-        assert!(browser_frame_capture_due(NOW, Some(NOW - 67), None, RATE));
-        assert!(!browser_frame_capture_due(NOW, Some(NOW - 50), None, RATE));
+        assert!(browser_frame_capture_due(NOW, Some(NOW - 67), None, RATE, Some(NOW)));
+        assert!(!browser_frame_capture_due(NOW, Some(NOW - 50), None, RATE, Some(NOW)));
 
         // A stored rate of zero must never divide by zero or freeze the stream.
         assert!(browser_frame_capture_due(
             NOW,
             Some(NOW - 1_000),
             Some(NOW + 60_000),
-            0
+            0,
+            Some(NOW)
         ));
     }
 }

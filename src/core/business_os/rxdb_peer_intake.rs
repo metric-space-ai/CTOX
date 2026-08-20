@@ -636,11 +636,74 @@ pub(super) fn pending_business_command_documents_sync(
     Ok(documents)
 }
 
+/// Verjaehrungsfrist fuer pendente Befehle. Am 19.08.2026 hat der erste
+/// erfolgreiche Upgrade-Neustart seit Wochen den gesamten Befehls-Rueckstau
+/// der alten Version ausgefuehrt: Befehle vom 22. Juli und 3. August wurden
+/// um 12:46 erneut "accepted", darunter ein alter Lead-Schreiber, der um
+/// 12:47:38 alle 19 Leads der Kampagne "Chemie-Unternehmen Recherche
+/// 2026-08-16" mit dem Juli-Stand ueberschrieb. Ein Befehl, den wochenlang
+/// niemand ausgefuehrt hat, ist keine Arbeit mehr, sondern eine Zeitbombe.
+const STALE_BUSINESS_COMMAND_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
+
+fn business_command_created_at_ms(document: &Value) -> Option<u64> {
+    ["created_at_ms", "updated_at_ms"]
+        .iter()
+        .find_map(|key| document.get(*key).and_then(Value::as_u64))
+        .filter(|value| *value > 0)
+}
+
+/// Ein Befehl, der nie mehr gelingen kann, darf nicht ewig wiederholt werden.
+/// idempotency_conflict hiess bisher RetryableFailure: der Intake sortierte
+/// das Dokument jede Runde wieder nach vorn und verstopfte mit dem
+/// Wiederholungskampf die Replikation aller uebrigen Collections.
+fn business_command_store_error_is_permanent(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("idempotency_conflict")
+}
+
+async fn terminalize_business_command_document(
+    database: &Arc<RxDatabase>,
+    document: &Value,
+    error: &str,
+) -> anyhow::Result<()> {
+    let mut marked = document.clone();
+    if let Some(object) = marked.as_object_mut() {
+        object.remove("_rev");
+        object.remove("_meta");
+        object.insert("status".to_string(), Value::String("failed".to_string()));
+        object.insert("task_status".to_string(), Value::String("failed".to_string()));
+        object.insert("error".to_string(), Value::String(error.to_string()));
+        object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+    }
+    database
+        .collection("business_commands")
+        .context("business_commands collection is not registered")?
+        .incremental_upsert(marked)
+        .await
+        .map_err(|err| anyhow::anyhow!("terminalize stale business command: {err}"))?;
+    Ok(())
+}
+
 pub(super) async fn accept_pending_business_command(
     root: &Path,
     database: &Arc<RxDatabase>,
     document: Value,
 ) -> anyhow::Result<PendingBusinessCommandIntakeOutcome> {
+    // Verjaehrung VOR jeder Ausfuehrung — auch vor Browser-Kommandos.
+    if let Some(created_at) = business_command_created_at_ms(&document) {
+        let age = (now_ms() as u64).saturating_sub(created_at);
+        if age > STALE_BUSINESS_COMMAND_MAX_AGE_MS {
+            let fehler = format!(
+                "stale_command_expired: Befehl ist {} Stunden alt und wird nicht mehr ausgefuehrt",
+                age / 3_600_000
+            );
+            eprintln!(
+                "[business-os] verweigere Replay eines veralteten Befehls {}: {fehler}",
+                document.get("id").and_then(Value::as_str).unwrap_or("?")
+            );
+            terminalize_business_command_document(database, &document, &fehler).await?;
+            return Ok(PendingBusinessCommandIntakeOutcome::Terminalized);
+        }
+    }
     let command_type = document
         .get("command_type")
         .or_else(|| document.get("type"))
@@ -694,6 +757,16 @@ pub(super) async fn accept_pending_business_command(
             return Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure {
                 error: format!("transient native business command store contention: {err:#}"),
             });
+        }
+        Ok(Err(err)) if business_command_store_error_is_permanent(&err) => {
+            eprintln!("[business-os] permanent command store error, terminalizing: {err:#}");
+            terminalize_business_command_document(
+                database,
+                &document,
+                &format!("permanent_store_error: {err:#}"),
+            )
+            .await?;
+            return Ok(PendingBusinessCommandIntakeOutcome::Terminalized);
         }
         Ok(Err(err)) => {
             eprintln!("[business-os] native business command store execution failed: {err:#}");

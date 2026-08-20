@@ -5283,6 +5283,18 @@ async function requestResearchSourceAdapterCommand(row, commandType, statusPatch
   saveResearchSettingsTemporaryState(drawer);
   const source = researchSourceFromRow(row);
   if (!source.id && !source.url) return;
+  // Die Startargumente der Anmeldung (Ziel-URL, erlaubte Domains, Sitzung)
+  // stehen erst im Kommandoergebnis — das Fenster kann also nicht frueher mit
+  // Inhalt aufgehen. Es kann aber SOFORT aufgehen: bis zur Antwort sah der
+  // Nutzer sonst 60 Sekunden lang gar nichts und hielt den Knopf fuer tot.
+  // Das leere Fenster mit Wartezustand ist die ehrlichere Rueckmeldung.
+  if (commandType === 'outbound.research_source.auth_assist') {
+    try {
+      await state.ctx?.openDesktopApp?.('browser', { title: t('browser', 'Browser'), mode: 'maximized' });
+    } catch (error) {
+      console.warn('[outbound] Browserfenster konnte nicht vorab geoeffnet werden', error);
+    }
+  }
   const adapter = await upsertResearchAdapterDocumentForCampaign(campaign, source, statusPatch);
   if (!adapter) {
     showBusinessAlert(t('adapterCollectionMissing', 'Research-Adapter konnten nicht gespeichert werden.'));

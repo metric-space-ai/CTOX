@@ -599,11 +599,17 @@ export async function mount(ctx) {
       });
   }
 
-  function versucheSteuerungZurueckzuholen() {
+  // writeInputEvent liegt ausserhalb dieses Bereichs und kennt nur ctx/state.
+  // Ueber diesen Haken kann ein blockierter Klick die Steuerung anfordern.
+  state.steuerungZurueckholen = (optionen) => versucheSteuerungZurueckzuholen(optionen);
+
+  function versucheSteuerungZurueckzuholen(optionen = {}) {
     const session = state.latestSession;
     if (!shouldReacquireControllerLease(session, browserActorIds(ctx.session), Date.now(), {
       reacquireInFlight: state.leaseReacquireInFlight,
       lastReacquireAtMs: state.lastReacquireAtMs,
+      uebernahmeDurchInteraktion: Boolean(optionen.uebernahmeDurchInteraktion),
+      currentLeaseId: state.controllerLeaseId,
     })) return;
     state.leaseReacquireInFlight = true;
     state.lastReacquireAtMs = Date.now();
@@ -1433,7 +1439,21 @@ async function startBrowserRuntimeSync(ctx, collections = [
     error.code = 'sync_unavailable';
     throw error;
   }
-  await Promise.all(collections.map((collection) => ctx.sync.startCollection(collection)));
+  // startCollection kann nach einem Dienst-Neustart ewig haengen: die Bruecke
+  // wartet auf ein Ready-Ereignis, das nie kommt. Gemessen am 20.08.2026 auf
+  // thesen.ctox.dev: jeder Sitzungsstart blieb VOR dem Dispatch stumm stehen —
+  // kein Fehler, kein Protokoll, kein Chromium. Der Befehlsbus prueft seine
+  // Bereitschaft selbst; nach 8 s wird deshalb abgebrochen statt gewartet,
+  // und der Aufrufer faehrt ueber seinen Fehlerpfad fort.
+  const zeitlimit = new Promise((unused, reject) => setTimeout(() => {
+    const error = new Error('Browser-Datenkanal antwortet nicht (Zeitlimit nach 8 s).');
+    error.code = 'sync_unavailable';
+    reject(error);
+  }, 8_000));
+  await Promise.race([
+    Promise.all(collections.map((collection) => ctx.sync.startCollection(collection))),
+    zeitlimit,
+  ]);
 }
 
 function actorContext(session) {
@@ -1558,6 +1578,13 @@ async function writeInputEvent(ctx, state, type, patch) {
   // nicht zu unterscheiden.
   if (!browserSurfaceCanControl(ctx, state)) {
     meldeEingabeGesperrt(ctx, state, type);
+    // Ein Klick IN dieses Fenster ist die ausdrueckliche Ansage, hier steuern
+    // zu wollen. Haelt ein totes Fenster desselben Nutzers noch die Pacht,
+    // wird sie jetzt uebernommen — sonst bliebe die Sitzung unbedienbar, bis
+    // die Pacht von allein ablaeuft.
+    if (type === 'mouseDown' || type === 'keyDown') {
+      try { state.steuerungZurueckholen?.({ uebernahmeDurchInteraktion: true }); } catch {}
+    }
     return;
   }
   const session = state.latestSession;
@@ -2903,6 +2930,14 @@ function setzeEingabeHinweis(ctx, state, text) {
   if (!state) return;
   if (state.eingabeHinweis === text) return;
   state.eingabeHinweis = text;
+  // eingabeHinweis wurde gesetzt und NIRGENDS gerendert — es gab nur die zwei
+  // Zuweisungen in dieser Funktion. Der Nutzer sah deshalb exakt nichts: kein
+  // Klick wirkte, keine Meldung erschien. Am 19.08.2026 auf thesen.ctox.dev
+  // gemessen: jede Eingabe endete in "Die Steuerung wurde an ein anderes
+  // Fenster uebergeben", sichtbar allein in der Browserkonsole. Der Grund
+  // gehoert dorthin, wo der Nutzer hinsieht — in die Statuszeile.
+  if (text) state.notice = text;
+  else if (state.notice === state.letzteSperrmeldung) state.notice = '';
   try { renderBrowserSurface?.(ctx, state); } catch {}
 }
 
@@ -3002,7 +3037,18 @@ function shouldReacquireControllerLease(session, actorId, now = Date.now(), opti
   // Navigations-Zweig waehlen und machte den Start-Zweig unerreichbar.
   if (browserSessionNeedsStart(session)) return false;
   const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
-  return !Number.isFinite(expiresAt) || expiresAt <= now;
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return true;
+  // Gleicher Nutzer, andere Pacht: ein anderes Fenster haelt die Steuerung —
+  // meist ein totes, etwa der Tab von vor einem Dienstneustart. Bisher wurde
+  // nur bei ABGELAUFENER Pacht zurueckgeholt, also sperrte sich das lebende
+  // Fenster selbst aus, solange die tote Pacht noch gueltig war. Die Uebernahme
+  // laeuft nur auf ausdrueckliche Interaktion (ein Klick IN dieses Fenster),
+  // nie auf einem Zeitgeber — sonst reissen sich zwei offene Tabs die Steuerung
+  // im Wechsel gegenseitig weg. Fremde Nutzer sind oben bereits ausgeschlossen.
+  if (!options.uebernahmeDurchInteraktion) return false;
+  const eigene = String(options.currentLeaseId || '').trim();
+  const fremde = String(session.controller_lease_id || '').trim();
+  return Boolean(fremde) && fremde !== eigene;
 }
 
 function newBrowserControllerLeaseId() {

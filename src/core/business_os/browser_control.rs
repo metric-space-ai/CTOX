@@ -37,11 +37,30 @@ pub(super) const BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS: u32 = 1;
 /// rate; unchanged samples are discarded before an RxDB frame is written.
 pub(super) const BROWSER_FRAME_RATE_TARGET_DEFAULT: u64 = 15;
 pub(super) const BROWSER_FRAME_RATE_LIMIT: u64 = 15;
+/// Bildrate ohne Interaktion. Fernsteuerung ist kein Videofeed: eine Seite,
+/// die vor sich hin animiert, waehrend niemand etwas tut, braucht keine 15
+/// Bilder pro Sekunde. Gemessen auf der Thesen-Instanz am 19.08.2026: acht
+/// aktive Sitzungen erzeugten 120 Bildschirmfotos je Sekunde und hielten
+/// ctox-real dauerhaft bei 150 % CPU, ohne dass jemand den Browser bediente.
+pub(super) const BROWSER_FRAME_RATE_IDLE: u64 = 2;
+/// Wie lange nach einer Eingabe die volle Bildrate gilt. Lang genug, dass das
+/// Ergebnis eines Klicks fluessig sichtbar wird, kurz genug, dass eine
+/// unbeaufsichtigte Sitzung sofort wieder in den Ruhetakt faellt.
+pub(super) const BROWSER_INPUT_ACTIVE_WINDOW_MS: u64 = 1_500;
+/// Ab wann eine Sitzung ohne Betrachter und ohne Regung als verwaist gilt und
+/// keine Bilder mehr erzeugt.
+pub(super) const BROWSER_SESSION_ABANDONED_AFTER_MS: u64 = 5 * 60 * 1_000;
 pub(super) const BROWSER_FRAME_JPEG_QUALITY: u64 = 70;
 pub(super) const BROWSER_FRAME_MAX_WIDTH: u64 = 1280;
 pub(super) const BROWSER_FRAME_MAX_HEIGHT: u64 = 720;
 pub(super) const BROWSER_FRAME_RECENT_KEEP_COUNT: usize = 2;
 pub(super) const BROWSER_FRAME_GC_LIMIT: u64 = 256;
+
+/// Aufbewahrungsfrist fuer erledigte `business_commands`. Die Collection hatte
+/// bis 19.08.2026 gar keine Grenze; siehe gc_settled_business_commands.
+pub(super) const BUSINESS_COMMAND_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// Obergrenze je Wartungsdurchlauf, damit die Raeumung die Schleife nicht blockiert.
+pub(super) const BUSINESS_COMMAND_GC_LIMIT: u64 = 256;
 pub(super) const BROWSER_INPUT_EVENT_GC_LIMIT: u64 = 512;
 pub(super) const BROWSER_INPUT_EVENT_RETENTION_SECS: u64 = 60 * 60;
 

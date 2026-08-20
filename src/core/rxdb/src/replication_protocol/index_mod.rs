@@ -355,6 +355,31 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         let mut conflicts: Vec<serde_json::Value> = Vec::new();
         let mut write_rows: Vec<BulkWriteRow> = Vec::new();
 
+        // Rueckkehrer-Schutz: Ein Client mit tagealtem lokalen Spiegel besteht
+        // die optimistische Sperre, indem er erst den aktuellen Master zieht
+        // und seinen alten Inhalt obendrauf setzt. Am 19.08.2026 hat genau das
+        // auf thesen.ctox.dev zweimal Bestandsdaten rueckwaerts ueberschrieben
+        // (12:47 alle 19 Leads, 23:08 zwei weitere — Schreiber oazkvgmhxl und
+        // vyeayvygxs). Traegt der eingehende Zustand ein updated_at_ms, das
+        // deutlich AELTER ist als der Master, ist das keine Bearbeitung,
+        // sondern eine Regression: sie wird als Konflikt beantwortet, der
+        // Client uebernimmt den Master.
+        const STALE_REGRESSION_THRESHOLD_MS: i64 = 60 * 60 * 1_000;
+        fn incoming_is_stale_regression(
+            incoming: &serde_json::Value,
+            master: &serde_json::Value,
+        ) -> bool {
+            let lesen = |doc: &serde_json::Value| -> Option<i64> {
+                doc.get("updated_at_ms")
+                    .and_then(serde_json::Value::as_i64)
+                    .filter(|value| *value > 0)
+            };
+            match (lesen(incoming), lesen(master)) {
+                (Some(neu), Some(bestand)) => neu + STALE_REGRESSION_THRESHOLD_MS < bestand,
+                _ => false,
+            }
+        }
+
         for (id, row) in row_by_id.into_iter() {
             let master_state = master_docs_state.get(&id).cloned();
             match (master_state, row.assumed_master_state.as_ref()) {
@@ -392,7 +417,9 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
                     // Mixed-version peers can use conflict handlers that reject
                     // two structurally identical wire states. The exact JSON
                     // equality is authoritative for this optimistic-lock check.
-                    if handler_matches || deep_equal(&master_state_doc, assumed) {
+                    if (handler_matches || deep_equal(&master_state_doc, assumed))
+                        && !incoming_is_stale_regression(&row.new_document_state, &master_state_doc)
+                    {
                         let doc = doc_state_to_write_doc(
                             &self.database_instance_token,
                             has_attachments,

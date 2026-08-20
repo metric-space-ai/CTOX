@@ -231,6 +231,18 @@ const XING_BROWSER_RECORD_PARSER: &str = r#"const parseXingRecords = (companyNam
   if (!companyHit && profiles.length > 0) {
     push("firma_name", companyName, "medium", "XING member results match company", memberSearch.sourceUrl);
   }
+  // Namen ALLER gefundenen Profile: das Zeilenfenster unten kann in die
+  // benachbarte Trefferkarte hineinragen, und deren Personenname darf nie als
+  // Funktion durchgehen. Gemessen am 19.08.2026 (ANGUS Chemie): person_funktion
+  // von Thorsten Bruns wurde "Dr. Sandra Junghänel" — der Name der naechsten
+  // Karte, vom Rollensignal "Dr." als Funktion akzeptiert.
+  const alleProfilNamen = new Set(profiles.map((entry) => personNameKey(entry.name)).filter(Boolean));
+  const sieht_aus_wie_personenname = (text) => {
+    if (alleProfilNamen.has(personNameKey(text))) return true;
+    // Titel + zwei grossgeschriebene Woerter ohne Rollenwort dahinter:
+    // "Dr. Sandra Junghänel", "Prof. Max Muster".
+    return /^(Dr\.|Prof\.|Dipl\.[-\w.]*)\s+\p{Lu}[\p{L}-]+\s+\p{Lu}[\p{L}-]+$/u.test(clean(text));
+  };
   for (const { lines, companyIndex, profile, name, nameParts } of profiles) {
     push("person_vorname", nameParts[0], "medium", "XING member search result", profile.url);
     push("person_nachname", nameParts.slice(1).join(" "), "medium", "XING member search result", profile.url);
@@ -239,7 +251,7 @@ const XING_BROWSER_RECORD_PARSER: &str = r#"const parseXingRecords = (companyNam
     const candidateIndexes = [companyIndex - 1, companyIndex - 2, companyIndex + 1, companyIndex + 2]
       .filter((index) => index >= 0 && index < lines.length);
     const functionLine = candidateIndexes.map((index) => lines[index])
-      .find((line) => plausibleFunctionLine(line, name));
+      .find((line) => plausibleFunctionLine(line, name) && !sieht_aus_wie_personenname(line));
     if (functionLine) {
       push("person_funktion", functionLine, "medium", "XING member result employment context", profile.url);
     }
