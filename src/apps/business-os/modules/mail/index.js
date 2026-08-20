@@ -416,6 +416,7 @@ export async function mount(ctx) {
       render();
     };
     window.addEventListener('hashchange', hashHandler);
+    wireExternalAccounts(root);
     cleanups.push(() => window.removeEventListener('hashchange', hashHandler));
   }
 
@@ -2805,3 +2806,107 @@ export const __mailTestHooks = {
   stableJson,
   sha256Text,
 };
+
+
+// --- Persönliche externe E-Mail-Konten (App-Setting; Secrets bleiben server-seitig) ---
+function wireExternalAccounts(root) {
+  const form = root.querySelector('[data-mail-external-form]');
+  if (!form) return;
+  const q = (sel) => root.querySelector(sel);
+  const statusNode = q('[data-mail-ext-status]');
+  const listNode = q('[data-mail-ext-list]');
+  const countNode = q('[data-mail-ext-count]');
+  const setStatus = (text, isError) => {
+    if (!statusNode) return;
+    statusNode.textContent = text || '';
+    statusNode.classList.toggle('is-error', Boolean(isError));
+  };
+
+  async function loadAccounts() {
+    try {
+      const response = await fetch('/api/business-os/mail/accounts', { headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      renderAccounts(Array.isArray(data.accounts) ? data.accounts : []);
+    } catch (error) {
+      setStatus(`Konten konnten nicht geladen werden: ${error.message}`, true);
+    }
+  }
+
+  function renderAccounts(accounts) {
+    if (countNode) countNode.textContent = String(accounts.length);
+    if (!listNode) return;
+    listNode.replaceChildren();
+    for (const account of accounts) {
+      const row = document.createElement('div');
+      row.className = 'mail-mailbox-row';
+      const info = document.createElement('div');
+      const strong = document.createElement('strong');
+      strong.textContent = account.address;
+      const small = document.createElement('small');
+      small.textContent = [
+        `IMAP ${account.imap_host}:${account.imap_port}`,
+        `SMTP ${account.smtp_host}:${account.smtp_port}`,
+        account.has_password ? 'Passwort hinterlegt' : 'KEIN Passwort hinterlegt',
+        account.owner_user_id ? `Owner ${account.owner_user_id}` : ''
+      ].filter(Boolean).join(' · ');
+      info.append(strong, document.createElement('br'), small);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'ctox-pane-icon';
+      remove.setAttribute('aria-label', `Konto ${account.address} trennen`);
+      remove.title = 'Konto trennen';
+      remove.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+      remove.addEventListener('click', async () => {
+        try {
+          const response = await fetch('/api/business-os/mail/accounts/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ address: account.address })
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          setStatus(`Konto ${account.address} getrennt.`, false);
+          await loadAccounts();
+        } catch (error) {
+          setStatus(`Trennen fehlgeschlagen: ${error.message}`, true);
+        }
+      });
+      row.append(info, remove);
+      listNode.append(row);
+    }
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const value = (sel) => (q(sel)?.value || '').trim();
+    const payload = {
+      address: value('[data-mail-ext-address]'),
+      provider: 'imap',
+      imap_host: value('[data-mail-ext-imap-host]'),
+      imap_port: Number(value('[data-mail-ext-imap-port]')) || 0,
+      smtp_host: value('[data-mail-ext-smtp-host]'),
+      smtp_port: Number(value('[data-mail-ext-smtp-port]')) || 0,
+      password: q('[data-mail-ext-password]')?.value || ''
+    };
+    setStatus('Verbinde …', false);
+    try {
+      const response = await fetch('/api/business-os/mail/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `HTTP ${response.status}`);
+      }
+      if (q('[data-mail-ext-password]')) q('[data-mail-ext-password]').value = '';
+      setStatus(`Konto ${payload.address} verbunden. Der Abruf startet mit dem nächsten Sync-Lauf.`, false);
+      await loadAccounts();
+    } catch (error) {
+      setStatus(`Verbinden fehlgeschlagen: ${error.message}`, true);
+    }
+  });
+
+  root.querySelector('[data-mail-reload-mailboxes]')?.addEventListener('click', () => { loadAccounts(); });
+  loadAccounts();
+}

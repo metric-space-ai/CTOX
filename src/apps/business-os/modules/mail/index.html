@@ -231,6 +231,23 @@
       </form>
       <div class="mail-mailbox-status" data-mail-mailbox-status role="status" aria-live="polite"></div>
       <section class="mail-mailbox-users"><div class="mail-section-heading"><span data-mail-existing-mailboxes-label>Vorhandene Postfächer</span><span data-mail-mailbox-count>0</span></div><div class="mail-mailbox-list" data-mail-mailbox-list></div></section>
+
+      <form class="mail-external-account-form" data-mail-external-form>
+        <div class="mail-section-heading"><span>Persönliches Konto verbinden</span><span class="mail-section-hint">Dein externes Postfach (IMAP/SMTP) — App-Einstellung, kein Systemkanal</span></div>
+        <div class="mail-settings-grid">
+          <label class="mail-field-wide"><span>E-Mail-Adresse</span><input class="ctox-input" type="email" data-mail-ext-address autocomplete="off" required placeholder="ich@meinefirma.de" /></label>
+          <label><span>IMAP-Host</span><input class="ctox-input" data-mail-ext-imap-host placeholder="imap.meinefirma.de" required /></label>
+          <label><span>IMAP-Port</span><input class="ctox-input" type="number" min="1" max="65535" data-mail-ext-imap-port value="993" required /></label>
+          <label><span>SMTP-Host</span><input class="ctox-input" data-mail-ext-smtp-host placeholder="smtp.meinefirma.de" required /></label>
+          <label><span>SMTP-Port</span><input class="ctox-input" type="number" min="1" max="65535" data-mail-ext-smtp-port value="465" required /></label>
+          <label class="mail-field-wide"><span>Passwort</span><input class="ctox-input" type="password" data-mail-ext-password autocomplete="new-password" placeholder="Wird sicher im CTOX-Secret-Store abgelegt" /></label>
+        </div>
+        <div class="mail-external-account-actions">
+          <button type="submit" class="ctox-button is-primary" data-mail-ext-save>Konto verbinden</button>
+          <span class="mail-external-account-status" data-mail-ext-status role="status" aria-live="polite"></span>
+        </div>
+      </form>
+      <section class="mail-external-accounts"><div class="mail-section-heading"><span>Verbundene persönliche Konten</span><span data-mail-ext-count>0</span></div><div class="mail-mailbox-list" data-mail-ext-list></div></section>
     </div>
     <footer class="mail-mailbox-admin-footer"><span data-mail-mailbox-security>Das Passwort wird nach der Einrichtung aus dem Command entfernt.</span><button type="button" class="ctox-button" data-mail-reload-mailboxes>Neu laden</button></footer>
   </section>

@@ -572,3 +572,8 @@
   .mail-scope-card,
   .mail-record-row { animation: none; transition: none; }
 }
+
+/* Persönliche externe Konten */
+.mail-external-account-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.mail-external-account-status { font-size: 12px; color: var(--muted); }
+.mail-external-account-status.is-error { color: var(--danger); }
