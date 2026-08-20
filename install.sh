@@ -1829,6 +1829,16 @@ build_ctox() {
     printf 'Error: cargo not found and rustup bootstrap failed; cannot build CTOX from source.\n' >&2
     return 1
   fi
+  # bindgen (btls-sys/boringssl) needs libclang plus clang resource headers;
+  # warm-pool guest images ship without them and the build dies mid-workspace.
+  if [[ "$(uname -s)" == "Linux" ]] && ! command -v clang >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      sudo -n apt-get install -y -qq clang libclang-dev >/dev/null 2>&1 \
+        || printf 'Warning: could not install clang/libclang-dev; bindgen crates may fail to build.\n' >&2
+    else
+      printf 'Warning: clang not found and no passwordless sudo; bindgen crates may fail to build.\n' >&2
+    fi
+  fi
   local main_target_dir="$source_root/runtime/build/cargo-target"
   local configured_target_dir="${CTOX_BUILD_TARGET_DIR:-}"
   local managed_release_build=0
