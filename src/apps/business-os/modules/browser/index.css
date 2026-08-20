@@ -237,7 +237,11 @@
 
 .browser-workbench {
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  /* Der Umschalter sitzt als eigene Zeile ueber der Buehne. Ohne die
+     auto-Zeile faellt die Buehne in eine implizite Zeile und der
+     Umschalter frisst als einziges 1fr-Kind die gesamte Resthoehe --
+     der Frame stand dann in der unteren Fensterhaelfte. */
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--bg);
 }
 
