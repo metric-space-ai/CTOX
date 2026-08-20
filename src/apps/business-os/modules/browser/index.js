@@ -769,6 +769,7 @@ export async function mount(ctx) {
       : selectedSession || latestSession(visibleSessions, newestFrame?.session_id) || latestSession(visibleSessions);
     if (!requestedSessionPending) {
       state.selectedSessionId = state.latestSession?.id || '';
+      erkenneEigenePachtWieder(ctx, state);
       if (state.latestSession?.id === state.requestedSessionId
         && browserSessionIsLive(state.latestSession)) {
         state.requestedSessionId = '';
@@ -3069,6 +3070,32 @@ function shouldReacquireControllerLease(session, actorId, now = Date.now(), opti
   const eigene = String(options.currentLeaseId || '').trim();
   const fremde = String(session.controller_lease_id || '').trim();
   return Boolean(fremde) && fremde !== eigene;
+}
+
+// Nach einem Neuladen ist state.controllerLeaseId leer, waehrend die Sitzung
+// uns weiterhin als Steuernden mit gueltiger Pacht fuehrt. Die Erneuerung
+// verlangt aber Gleichheit beider Kennungen, also erkennt die App ihre eigene
+// Pacht nicht wieder und erneuert sie nie. Sie muss stattdessen jedes Mal den
+// Ablauf abwarten und zurueckholen — und in genau diesem Fenster lehnt der
+// Server jeden Bildabruf ab ("browser live controller lease is missing or
+// expired"), weshalb die Flaeche leer bleibt. Auf der Kundeninstanz gemessen:
+// eigene=- fremd=d52e78cc rest=-2s, ueber Minuten unveraendert, waehrend die
+// Sitzung serverseitig lief.
+//
+// Nur die EIGENE, noch gueltige Pacht wird wiedererkannt. Eine abgelaufene
+// bleibt Sache von shouldReacquireControllerLease, und eine fremde Pacht --
+// auch die eines anderen Fensters desselben Nutzers -- bleibt der Uebernahme
+// durch ausdrueckliche Interaktion vorbehalten.
+function erkenneEigenePachtWieder(ctx, state) {
+  if (state.controllerLeaseId) return;
+  const session = state.latestSession;
+  const leaseId = String(session?.controller_lease_id || '').trim();
+  if (!leaseId) return;
+  const actorIds = browserActorIds(ctx.session);
+  if (!actorIds.includes(String(session.controller_user_id || ''))) return;
+  const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return;
+  state.controllerLeaseId = leaseId;
 }
 
 function newBrowserControllerLeaseId() {
