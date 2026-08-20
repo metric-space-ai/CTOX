@@ -146,6 +146,9 @@ export async function mount(ctx) {
   let refreshInFlight = null;
   let refreshQueued = false;
   const scheduleRefresh = debounce(safeLoadAndRender, 80);
+  // Die Tab-Leiste wird ausserhalb dieses Scopes gebaut, braucht nach einer
+  // Tab-Aktion aber denselben Auffrischer wie jeder andere Knopf.
+  state.refresh = safeLoadAndRender;
   const requestedStartTimers = new Set();
 
   function openRequestedBrowserSession(args, attempt = 0) {
@@ -1534,6 +1537,18 @@ function tabsDerSitzung(state) {
       || String(a.id).localeCompare(String(b.id)));
 }
 
+// Ein Tab-Befehl endet wie jede andere Aktion: auffrischen, und ein
+// Fehlschlag landet im Hinweisband statt in einer stillen Konsolenzeile --
+// "keine Steuerung" ist der haeufigste Fall und muss erklaert werden.
+function tabBefehl(ctx, state, commandType, tabId) {
+  return dispatchBrowserCommand(ctx, state, commandType, { tab_id: tabId })
+    .then(() => state.refresh?.())
+    .catch((error) => {
+      state.notice = `Der Vorgang konnte nicht gestartet werden: ${error?.message || error}`;
+      state.refresh?.();
+    });
+}
+
 function renderTabstrip(ctx, refs, state) {
   const leiste = refs.tabstrip;
   if (!leiste) return;
@@ -1572,7 +1587,7 @@ function renderTabstrip(ctx, refs, state) {
     knopf.title = String(tab.url || beschriftung);
     knopf.addEventListener('click', () => {
       if (istAktiv) return;
-      dispatchBrowserCommand(ctx, state, 'browser.tab.activate', { tab_id: tab.id });
+      tabBefehl(ctx, state, 'browser.tab.activate', tab.id);
     });
     const schliessen = document.createElement('button');
     schliessen.type = 'button';
@@ -1581,7 +1596,7 @@ function renderTabstrip(ctx, refs, state) {
     schliessen.textContent = '\u00d7';
     schliessen.addEventListener('click', (event) => {
       event.stopPropagation();
-      dispatchBrowserCommand(ctx, state, 'browser.tab.close', { tab_id: tab.id });
+      tabBefehl(ctx, state, 'browser.tab.close', tab.id);
     });
     eintrag.append(knopf, schliessen);
     return eintrag;
