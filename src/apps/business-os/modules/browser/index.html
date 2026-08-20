@@ -136,6 +136,18 @@
         <div class="browser-script-panel" data-browser-script-panel hidden>
           <pre class="browser-script-code" data-browser-script-code tabindex="0" aria-label="Automatisierungsskript dieser Sitzung"></pre>
         </div>
+        <!-- custom: Eigenes Kontextmenue. Es lebt IM Buehnen-Container, nicht
+             auf Shell-Ebene, und seine Eintraege loesen die vorhandenen
+             Knoepfe aus, damit Steuerungs- und Sperrlogik nur einmal
+             existiert. -->
+        <div class="browser-context-menu" data-browser-context-menu hidden role="menu" aria-label="Seitenaktionen">
+          <button type="button" role="menuitem" data-browser-context-action="back" data-t="ctxBack">Zurück</button>
+          <button type="button" role="menuitem" data-browser-context-action="forward" data-t="ctxForward">Vorwärts</button>
+          <button type="button" role="menuitem" data-browser-context-action="reload" data-t="ctxReload">Neu laden</button>
+          <hr />
+          <button type="button" role="menuitem" data-browser-context-action="copy" data-t="ctxCopy">Kopieren</button>
+          <button type="button" role="menuitem" data-browser-context-action="paste" data-t="ctxPaste">Einfügen</button>
+        </div>
         <div class="browser-empty ctox-empty" data-browser-empty data-t="framePreparing">Browser-Fenster wird vorbereitet</div>
         <aside class="browser-automation-overlay" data-browser-automation-overlay hidden aria-live="polite">
           <div class="browser-automation-heading">

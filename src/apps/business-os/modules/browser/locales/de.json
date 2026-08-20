@@ -40,5 +40,10 @@
   "bandClosed": "Beendet",
   "filterProfileAll": "Alle Profile",
   "filterProfilePersistent": "Persönlich",
-  "filterProfilePrivate": "Privat"
+  "filterProfilePrivate": "Privat",
+  "ctxBack": "Zurück",
+  "ctxForward": "Vorwärts",
+  "ctxReload": "Neu laden",
+  "ctxCopy": "Kopieren",
+  "ctxPaste": "Einfügen"
 }

@@ -53,6 +53,7 @@ export async function mount(ctx) {
     privateMode: root.querySelector('[data-browser-private]'),
     viewport: root.querySelector('[data-browser-viewport]'),
     newTab: root.querySelector('[data-browser-new-tab]'),
+    contextMenu: root.querySelector('[data-browser-context-menu]'),
     upload: root.querySelector('[data-browser-upload]'),
     controllerAcquire: root.querySelector('[data-browser-controller-acquire]'),
     controllerRelease: root.querySelector('[data-browser-controller-release]'),
@@ -1513,6 +1514,66 @@ function requireCommandBus(ctx) {
   return ctx.commandBus;
 }
 
+// custom: Eigenes Kontextmenue ueber der Buehne.
+//
+// Ohne preventDefault oeffnet der AEUSSERE Browser sein eigenes Menue ueber
+// dem Remote-Bild. Dessen Eintraege ("Zurueck", "Neu laden") wirken dann auf
+// die Shell statt auf die ferne Seite -- also genau falsch herum.
+//
+// Die Eintraege loesen die vorhandenen Knoepfe aus, statt die Befehle noch
+// einmal zu bauen: Steuerungspflicht, Sperren und Fehlermeldungen existieren
+// damit weiterhin nur an einer Stelle, und ein gesperrter Knopf graut den
+// Menueeintrag automatisch mit aus.
+function installContextMenu(refs) {
+  const menu = refs.contextMenu;
+  if (!menu || !refs.canvas) return;
+  const ziele = {
+    back: () => refs.back,
+    forward: () => refs.forward,
+    reload: () => refs.reload,
+    copy: () => refs.clipboardCopy,
+    paste: () => refs.clipboardPaste,
+  };
+  const schliessen = () => {
+    menu.hidden = true;
+  };
+  refs.canvas.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    const shell = menu.offsetParent || refs.canvas.parentElement;
+    const box = shell?.getBoundingClientRect();
+    if (!box) return;
+    for (const eintrag of menu.querySelectorAll('[data-browser-context-action]')) {
+      const knopf = ziele[eintrag.dataset.browserContextAction]?.();
+      eintrag.disabled = !knopf || knopf.disabled;
+    }
+    menu.hidden = false;
+    // Innerhalb der Buehne halten, damit das Menue am rechten oder unteren
+    // Rand nicht aus dem Fenster laeuft.
+    const breite = menu.offsetWidth || 160;
+    const hoehe = menu.offsetHeight || 200;
+    const x = Math.min(Math.max(0, event.clientX - box.left), Math.max(0, box.width - breite));
+    const y = Math.min(Math.max(0, event.clientY - box.top), Math.max(0, box.height - hoehe));
+    menu.style.left = `${Math.round(x)}px`;
+    menu.style.top = `${Math.round(y)}px`;
+  });
+  menu.addEventListener('click', (event) => {
+    const eintrag = event.target.closest?.('[data-browser-context-action]');
+    if (!eintrag || eintrag.disabled) return;
+    schliessen();
+    ziele[eintrag.dataset.browserContextAction]?.()?.click();
+  });
+  // Jeder Weg aus dem Menue heraus schliesst es -- auch der Klick auf die
+  // Buehne, der sonst als Eingabe an die ferne Seite ginge.
+  refs.canvas.addEventListener('pointerdown', schliessen);
+  menu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      schliessen();
+      refs.canvas.focus();
+    }
+  });
+}
+
 function installInputHandlers(ctx, refs, state, scheduleRefresh) {
   const afterInput = () => {
     if (!state.directLiveEnabled) scheduleRefresh();
@@ -1552,6 +1613,7 @@ function installInputHandlers(ctx, refs, state, scheduleRefresh) {
     event.preventDefault();
     writeKeyboardInput(ctx, state, 'keyUp', event).then(afterInput);
   });
+  installContextMenu(refs);
 }
 
 async function writePointerInput(ctx, refs, state, type, event, extra = {}) {

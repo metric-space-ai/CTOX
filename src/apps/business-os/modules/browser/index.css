@@ -582,3 +582,52 @@
   white-space: pre;
   tab-size: 2;
 }
+
+/* custom: Kontextmenue der Buehne. Absolut im .browser-frame-shell verankert
+   (nicht auf Shell-Ebene), damit es mit dem Fenster wandert und beim
+   Schliessen des Moduls mit verschwindet. */
+.browser-context-menu {
+  position: absolute;
+  z-index: 5;
+  min-width: 10rem;
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  background: var(--panel, #1b1f24);
+  border: 1px solid var(--border, #333a42);
+  border-radius: 0.5rem;
+  box-shadow: var(--shadow-lg);
+}
+
+.browser-context-menu[hidden] {
+  display: none;
+}
+
+.browser-context-menu button {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.browser-context-menu button:hover:not(:disabled),
+.browser-context-menu button:focus-visible {
+  background: var(--hover, #262c33);
+}
+
+.browser-context-menu button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.browser-context-menu hr {
+  border: 0;
+  border-top: 1px solid var(--border, #333a42);
+  margin: 0.25rem 0.1rem;
+}
