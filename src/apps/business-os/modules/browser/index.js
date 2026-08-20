@@ -2256,7 +2256,7 @@ function sessionShardMarkup(session, tabCount, ctx = null) {
       data-context-label="${escapeHtml(title)}">
       <span class="browser-session-zustand" title="${escapeHtml(z.text)}" aria-label="${escapeHtml(z.text)}">${z.symbol}</span>
       <span class="browser-session-title">${escapeHtml(title)}</span>
-      <span class="browser-session-meta">${escapeHtml(meta)}</span>
+      <span class="browser-session-meta" title="${escapeHtml(meta)}">${escapeHtml(meta)}</span>
     </div>`;
 }
 

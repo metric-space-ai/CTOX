@@ -858,7 +858,7 @@ function renderList(threads, { resetScroll = false } = {}) {
         </span>
         <span class="threads-item-main">
           <span class="threads-item-top">
-            <span class="threads-list-title">${escapeHtml(thread.title || thread.id)}</span>
+            <span class="threads-list-title" title="${escapeHtml(thread.title || thread.id)}">${escapeHtml(thread.title || thread.id)}</span>
             <time class="threads-item-time">${escapeHtml(relativeTime(thread.last_message_at_ms || thread.updated_at_ms))}</time>
           </span>
           ${why ? `<span class="threads-attention">${escapeHtml(why)}</span>` : ''}
