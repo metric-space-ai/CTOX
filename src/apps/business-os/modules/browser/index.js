@@ -2825,8 +2825,12 @@ function renderNotice(refs, notice) {
 }
 
 async function renderFrame(refs, frame, state) {
+  // Der Buehnen-Platzhalter liegt im selben Container wie die Skriptansicht.
+  // Ohne diese Abfrage schien "Browser-Inhalt wird geladen" mitten in den
+  // angezeigten Quelltext hinein, sobald neu gerendert wurde.
+  const skriptSichtbar = state.ansicht === 'script';
   if (!frame?.data || state.drawing) {
-    refs.empty.hidden = Boolean(frame?.data);
+    refs.empty.hidden = skriptSichtbar || Boolean(frame?.data);
     if (!frame?.data) refs.empty.textContent = frameEmptyText(state);
     return;
   }
@@ -2846,7 +2850,7 @@ async function renderFrame(refs, frame, state) {
     refs.empty.hidden = true;
   } catch (error) {
     console.error('[browser] frame render failed', error);
-    refs.empty.hidden = false;
+    refs.empty.hidden = skriptSichtbar;
     refs.empty.textContent = t('frameRenderFailed', 'Die Seite konnte nicht angezeigt werden.');
   } finally {
     state.drawing = false;
