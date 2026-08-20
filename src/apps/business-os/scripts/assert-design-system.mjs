@@ -9,8 +9,21 @@ const baseCss = readFileSync(join(root, 'shared/base.css'), 'utf8');
 const lab = readFileSync(join(root, 'design-lab.html'), 'utf8');
 const readModule = (id, file) => readFileSync(join(root, 'modules', id, file), 'utf8');
 
-assert.match(appCss, /--panel-radius:\s*4px/);
-assert.match(appCss, /--control-radius:\s*3px/);
+// Radii ratchet: the flat default design uses a 6px panel / 4px control pair.
+// Both values must stay declared on :root and :root[data-theme="dark"] alike.
+assert.match(appCss, /--panel-radius:\s*6px/);
+assert.match(appCss, /--control-radius:\s*4px/);
+// The primitive palette must stay host-tintable: the CTOX desktop pushes
+// --ctox-host-* onto the guest, a browser tenant renders the fallback. Losing
+// the var() wrapper would silently re-split browser and desktop rendering.
+for (const token of ['--bg', '--surface', '--surface-2', '--line', '--text', '--muted', '--accent', '--accent-soft']) {
+  const host = `--ctox-host-${token.slice(2)}`;
+  assert.equal(
+    (appCss.match(new RegExp(`${token}:\\s*var\\(${host},`, 'g')) || []).length,
+    2,
+    `${token} must read var(${host}, <fallback>) on both :root blocks`,
+  );
+}
 assert.match(appCss, /Operational Instrument contract/);
 assert.match(baseCss, /\.ctox-run-control\s*\{/);
 assert.match(baseCss, /\.ctox-action-strip\s*\{/);
