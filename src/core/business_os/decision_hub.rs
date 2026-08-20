@@ -149,7 +149,7 @@ pub fn project_inbound_messages(root: &Path) -> anyhow::Result<usize> {
                 "zuordnung",
                 &kurz(&sender_address_of(&vorgang), 40),
                 zeilen,
-                &workspace_owner_user_id(root),
+                &workspace_decision_user_ids(root),
                 now,
             );
             upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision)?;
@@ -362,7 +362,7 @@ fn handle_triage_write(root: &Path, command: &BusinessCommand) -> anyhow::Result
             "triage",
             &kurz(&titel, 40),
             zeilen,
-            &workspace_owner_user_id(root),
+            &workspace_decision_user_ids(root),
             now,
         );
         upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision)?;
@@ -630,9 +630,10 @@ fn decision_record(
     typ: &str,
     titel: &str,
     zeilen: Vec<String>,
-    owner_user_id: &str,
+    decision_user_ids: &[String],
     now: i64,
 ) -> Value {
+    let owner_user_id = decision_user_ids.first().cloned().unwrap_or_default();
     // `title` and `owner_user_id` feed the Threads relevance projection
     // (APP_RELEVANCE_SPECS): every open decision surfaces as an approval
     // thread assigned to the workspace owner.
@@ -650,27 +651,33 @@ fn decision_record(
         "antwort_json": {},
         "owner_user_id": owner_user_id,
         "assigned_user_id": owner_user_id,
+        "participant_ids": decision_user_ids,
         "is_deleted": false,
         "created_at_ms": now,
         "updated_at_ms": now,
     })
 }
 
-/// The workspace owner (first active chef, then admin) — the person whose
-/// inbox every pipeline decision belongs to.
-fn workspace_owner_user_id(root: &Path) -> String {
+/// Everyone who may decide, oldest account first. The first entry is the
+/// workspace owner (the account the workspace was set up with); the rest ride
+/// along as thread participants so the decision stays visible even when an
+/// instance carries several authority identities. Ranking by role instead of
+/// age picked a machine identity over the actual login on welsch.
+fn workspace_decision_user_ids(root: &Path) -> Vec<String> {
     let Ok(conn) = open_store(root) else {
-        return String::new();
+        return Vec::new();
     };
-    conn.query_row(
+    let Ok(mut statement) = conn.prepare(
         "SELECT user_id FROM business_users
          WHERE active = 1 AND role IN ('chef', 'admin')
-         ORDER BY CASE role WHEN 'chef' THEN 0 ELSE 1 END, created_at_ms ASC
-         LIMIT 1",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .unwrap_or_default()
+         ORDER BY created_at_ms ASC, user_id ASC",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
 }
 
 fn audit_entry(now: i64, aktion: &str, akteur: &str, kanal: &str) -> Value {
