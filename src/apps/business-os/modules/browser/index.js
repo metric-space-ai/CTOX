@@ -594,6 +594,14 @@ export async function mount(ctx) {
   };
 
   function renewControllerLeaseIfNeeded() {
+    // Auch hier wiedererkennen, nicht nur beim Neuzeichnen: Nach einem
+    // Zurueckholen laeuft die Liste nicht zwangslaeufig neu durch, und ohne
+    // die eigene Kennung schlaegt die Erneuerung unten still fehl — die Pacht
+    // altert dann bis zum Ablauf aus, das Bild friert ein, und erst der
+    // naechste Rueckholzyklus bringt es zurueck. Auf der Kundeninstanz
+    // gemessen: 89s -> 72s -> 54s -> 36s -> 25s ohne eine einzige Erneuerung,
+    // obwohl Sichtbarkeit, Fokus und Fensterfokus alle gesetzt waren.
+    erkenneEigenePachtWieder(ctx, state);
     const session = state.latestSession;
     const actorIds = browserActorIds(ctx.session);
     const surface = ctx.host?.closest?.('.shell-window');
