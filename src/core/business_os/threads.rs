@@ -2519,7 +2519,7 @@ fn app_thread_status(collection: &str, document: &Value) -> String {
         "pending" | "pending_review" | "review" | "needs_review" | "requested" => {
             "needs_review".to_owned()
         }
-        "waiting" | "waiting_on_user" | "snoozed" | "verschoben" => "waiting".to_owned(),
+        "waiting" | "waiting_on_user" | "snoozed" => "waiting".to_owned(),
         "queued" | "accepted" | "running" | "in_progress" | "collecting" | "processing" => {
             "running".to_owned()
         }

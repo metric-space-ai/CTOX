@@ -226,6 +226,7 @@ pub fn handle_command(
 ) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "kundenpipeline.triage.write" => handle_triage_write(root, command),
+        "kundenpipeline.decision.answer" => handle_decision_answer(root, command),
         "kundenpipeline.mail.send" => handle_mail_send(root, command),
         "kundenpipeline.delegate" => handle_delegate(root, command),
         other => anyhow::bail!("unknown kundenpipeline command `{other}`"),
@@ -237,6 +238,77 @@ fn write_requirement() -> CommandPolicyRequirement {
         BusinessOsPermission::DataWrite,
         BusinessOsScope::collection(COL_VORGAENGE),
     )
+}
+
+/// Record the owner's answer natively. The app also patches the decision in
+/// RxDB for instant feedback, but only this native write reaches
+/// `business_records` — and that is the store the Threads relevance
+/// projection reads. Without it an approval thread would never close.
+fn handle_decision_answer(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    let payload = command.payload.clone();
+    enforce_command_policy(root, command, |_| Ok(write_requirement()), |session| {
+        let decision_id = payload
+            .get("entscheidung_id")
+            .and_then(Value::as_str)
+            .context("entscheidung_id is required")?
+            .to_string();
+        let wert = payload
+            .get("wert")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let status = match wert.as_str() {
+            "annehmen" => "entschieden",
+            "ablehnen" => "abgelehnt",
+            other => anyhow::bail!("unknown decision answer `{other}`"),
+        };
+        let kanal = payload
+            .get("kanal")
+            .and_then(Value::as_str)
+            .unwrap_or("desktop")
+            .to_string();
+        let mut decision = load_any_record(root, COL_ENTSCHEIDUNGEN, &decision_id)?
+            .with_context(|| format!("unknown Entscheidung `{decision_id}`"))?;
+        let now = now_ms() as i64;
+        let akteur = session
+            .user
+            .as_ref()
+            .map(|user| user.id.clone())
+            .unwrap_or_else(|| "owner".to_string());
+        decision["status"] = json!(status);
+        decision["updated_at_ms"] = json!(now);
+        if !decision["antwort_json"].is_object() {
+            decision["antwort_json"] = json!({});
+        }
+        decision["antwort_json"]["wert"] = json!(wert);
+        decision["antwort_json"]["kanal"] = json!(kanal);
+        decision["antwort_json"]["zeit_ms"] = json!(now);
+        decision["antwort_json"]["akteur"] = json!(akteur.clone());
+        upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision.clone())?;
+
+        let vorgang_id = payload
+            .get("vorgang_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                decision
+                    .get("vorgang_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        if !vorgang_id.is_empty() {
+            if let Some(mut vorgang) = load_any_record(root, COL_VORGAENGE, &vorgang_id)? {
+                let typ = decision.get("typ").and_then(Value::as_str).unwrap_or("");
+                push_audit(&mut vorgang, now, &format!("{typ}:{wert}"), &akteur, &kanal);
+                vorgang["updated_at_ms"] = json!(now);
+                upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang)?;
+            }
+        }
+        Ok(json!({ "ok": true, "entscheidung_id": decision_id, "status": status }))
+    })?
+    .into_outcome()
 }
 
 fn handle_triage_write(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {

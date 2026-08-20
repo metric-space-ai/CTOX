@@ -1298,6 +1298,7 @@ fn dispatch_business_command(
             handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         "kundenpipeline.triage.write"
+        | "kundenpipeline.decision.answer"
         | "kundenpipeline.mail.send"
         | "kundenpipeline.delegate" => super::decision_hub::handle_command(root, command_id, command)
             .map(BusinessCommandDispatchOutcome::Returned),
