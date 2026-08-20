@@ -43,6 +43,13 @@ struct AppRelevanceSpec {
 
 const APP_RELEVANCE_SPECS: &[AppRelevanceSpec] = &[
     AppRelevanceSpec {
+        collection: "kundenpipeline_entscheidungen",
+        module: "kundenpipeline",
+        record_type: "entscheidung",
+        link_type: "kundenpipeline_entscheidung",
+        kind: "approval",
+    },
+    AppRelevanceSpec {
         collection: "ctox_ticket_approvals",
         module: "tickets",
         record_type: "ticket_case",
@@ -2512,14 +2519,15 @@ fn app_thread_status(collection: &str, document: &Value) -> String {
         "pending" | "pending_review" | "review" | "needs_review" | "requested" => {
             "needs_review".to_owned()
         }
-        "waiting" | "waiting_on_user" | "snoozed" => "waiting".to_owned(),
+        "waiting" | "waiting_on_user" | "snoozed" | "verschoben" => "waiting".to_owned(),
         "queued" | "accepted" | "running" | "in_progress" | "collecting" | "processing" => {
             "running".to_owned()
         }
         "blocked" | "failed" | "error" => "blocked".to_owned(),
-        "completed" | "done" | "resolved" | "approved" | "sent" | "final" => "completed".to_owned(),
-        "rejected" | "cancelled" | "canceled" | "closed" => "archived".to_owned(),
-        "draft" | "imported" | "ready" | "open" | "new" => "open".to_owned(),
+        "completed" | "done" | "resolved" | "approved" | "sent" | "final" | "entschieden"
+        | "freigegeben" | "abgeschlossen" => "completed".to_owned(),
+        "rejected" | "cancelled" | "canceled" | "closed" | "abgelehnt" => "archived".to_owned(),
+        "draft" | "imported" | "ready" | "open" | "new" | "offen" => "open".to_owned(),
         other if !other.is_empty() => other.to_owned(),
         _ => "open".to_owned(),
     }

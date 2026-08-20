@@ -149,6 +149,7 @@ pub fn project_inbound_messages(root: &Path) -> anyhow::Result<usize> {
                 "zuordnung",
                 &kurz(&sender_address_of(&vorgang), 40),
                 zeilen,
+                &workspace_owner_user_id(root),
                 now,
             );
             upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision)?;
@@ -283,7 +284,15 @@ fn handle_triage_write(root: &Path, command: &BusinessCommand) -> anyhow::Result
             .map(|name| name.to_string())
             .unwrap_or_else(|| sender_address_of(&vorgang));
         let decision_id = deterministic_id("kpl-e-triage", &vorgang_id);
-        let decision = decision_record(&decision_id, &vorgang_id, "triage", &kurz(&titel, 40), zeilen, now);
+        let decision = decision_record(
+            &decision_id,
+            &vorgang_id,
+            "triage",
+            &kurz(&titel, 40),
+            zeilen,
+            &workspace_owner_user_id(root),
+            now,
+        );
         upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision)?;
         Ok(json!({ "ok": true, "vorgang_id": vorgang_id, "decision_id": decision_id }))
     })?
@@ -549,23 +558,47 @@ fn decision_record(
     typ: &str,
     titel: &str,
     zeilen: Vec<String>,
+    owner_user_id: &str,
     now: i64,
 ) -> Value {
+    // `title` and `owner_user_id` feed the Threads relevance projection
+    // (APP_RELEVANCE_SPECS): every open decision surfaces as an approval
+    // thread assigned to the workspace owner.
     json!({
         "id": decision_id,
         "vorgang_id": vorgang_id,
         "typ": typ,
         "titel": titel,
+        "title": titel,
         "zeilen_json": zeilen,
         "detail_seiten_json": [],
         "aktionen_json": [],
         "backing_ref": "",
         "status": "offen",
         "antwort_json": {},
+        "owner_user_id": owner_user_id,
+        "assigned_user_id": owner_user_id,
         "is_deleted": false,
         "created_at_ms": now,
         "updated_at_ms": now,
     })
+}
+
+/// The workspace owner (first active chef, then admin) — the person whose
+/// inbox every pipeline decision belongs to.
+fn workspace_owner_user_id(root: &Path) -> String {
+    let Ok(conn) = open_store(root) else {
+        return String::new();
+    };
+    conn.query_row(
+        "SELECT user_id FROM business_users
+         WHERE active = 1 AND role IN ('chef', 'admin')
+         ORDER BY CASE role WHEN 'chef' THEN 0 ELSE 1 END, created_at_ms ASC
+         LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap_or_default()
 }
 
 fn audit_entry(now: i64, aktion: &str, akteur: &str, kanal: &str) -> Value {
