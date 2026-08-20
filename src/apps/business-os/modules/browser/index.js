@@ -1672,13 +1672,17 @@ function installContextMenu(refs) {
   // Jeder Weg aus dem Menue heraus schliesst es -- auch der Klick auf die
   // Buehne, der sonst als Eingabe an die ferne Seite ginge.
   refs.canvas.addEventListener('pointerdown', schliessen);
-  menu.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.stopPropagation();
-      schliessen();
-      refs.canvas.focus();
-    }
-  });
+  // Escape muss das Menue schliessen, egal wo der Fokus gerade steht -- beim
+  // Oeffnen per Maus liegt er nicht im Menue, und ein Menue, das offen bleibt,
+  // verdeckt die Buehne.
+  const aufEscape = (event) => {
+    if (event.key !== 'Escape' || menu.hidden) return;
+    event.stopPropagation();
+    schliessen();
+    refs.canvas.focus();
+  };
+  menu.addEventListener('keydown', aufEscape);
+  document.addEventListener('keydown', aufEscape, true);
 }
 
 function installInputHandlers(ctx, refs, state, scheduleRefresh) {
