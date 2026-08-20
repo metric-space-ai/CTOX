@@ -298,8 +298,8 @@ assert.match(
 );
 assert.equal(
   (js.match(/collection: 'business_commands'/g) || []).length,
-  7,
-  'browser live list, start, navigation, controller, input, frame and script requests must use the already-warm command bridge',
+  8,
+  'browser live list, start, navigation, controller, input, frame, script and tab-state requests must use the already-warm command bridge',
 );
 assert.match(
   js.match(/const flushInput = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '',

@@ -1552,11 +1552,37 @@ function tabsDerSitzung(state) {
       || String(a.id).localeCompare(String(b.id)));
 }
 
+// Der Frame-Takt liefert die Tab-Liste des Runners mit, laeuft aber nur bei
+// Fokus UND gehaltener Pacht. Ohne gezielten Abruf bliebe die Leiste deshalb
+// leer, bis jemand zufaellig in die Buehne klickt -- gemessen genau so: der
+// Tab war offen, der Befehl "completed", die Leiste unsichtbar.
+async function holeLiveZustand(ctx, state) {
+  const sessionId = state.latestSession?.id;
+  if (!sessionId || !state.controllerLeaseId) return;
+  if (typeof ctx.sync?.requestNative !== 'function') return;
+  try {
+    const antwort = await ctx.sync.requestNative('ctox.browser.live.v1', {
+      session_id: sessionId,
+      lease_id: state.controllerLeaseId,
+      events: [],
+      frame_after_ms: 0,
+    }, {
+      collection: 'business_commands',
+      requiredCapability: 'ctox-browser-live-v1',
+      timeoutMs: 10_000,
+    });
+    if (antwort?.nav) applyDirectNavigationState(state, antwort.nav);
+  } catch (error) {
+    console.warn('[browser] Live-Zustand konnte nicht geholt werden', error);
+  }
+}
+
 // Ein Tab-Befehl endet wie jede andere Aktion: auffrischen, und ein
 // Fehlschlag landet im Hinweisband statt in einer stillen Konsolenzeile --
 // "keine Steuerung" ist der haeufigste Fall und muss erklaert werden.
 function tabBefehl(ctx, state, commandType, tabId) {
   return dispatchBrowserCommand(ctx, state, commandType, { tab_id: tabId })
+    .then(() => holeLiveZustand(ctx, state))
     .then(() => state.refresh?.())
     .catch((error) => {
       state.notice = `Der Vorgang konnte nicht gestartet werden: ${error?.message || error}`;
@@ -1567,6 +1593,14 @@ function tabBefehl(ctx, state, commandType, tabId) {
 function renderTabstrip(ctx, refs, state) {
   const leiste = refs.tabstrip;
   if (!leiste) return;
+  // Einmal pro Sitzung nachfassen, falls der Takt noch nicht laeuft.
+  if (!Array.isArray(state.liveTabs)
+    && state.latestSession?.id
+    && state.controllerLeaseId
+    && state.liveTabsAbrufFuer !== state.latestSession.id) {
+    state.liveTabsAbrufFuer = state.latestSession.id;
+    holeLiveZustand(ctx, state).then(() => renderTabstrip(ctx, refs, state));
+  }
   const tabs = tabsDerSitzung(state);
   if (tabs.length < 2) {
     leiste.hidden = true;
