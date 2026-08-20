@@ -81,16 +81,22 @@
    Column widths are driven by custom properties so the shell-owned
    declarative resizers ([data-resizer-var]) work without module JS.
    -------------------------------------------------------------------------- */
+/* The 8px gutter tracks below must stay in sync with the [data-resizer] and
+   .workspace-col-resizer widths in app.css. The default side widths are
+   proportional clamps rather than a flat 320px so the workbench keeps a
+   usable centre column on a narrow desktop guest as well as on a wide
+   browser window; a resized pane overrides them through the custom
+   property the shell resizer writes. */
 .ctox-workspace {
   display: grid;
   grid-template-columns:
-    var(--ctox-left-width, 320px)
-    12px
+    var(--ctox-left-width, clamp(220px, 23%, 280px))
+    8px
     minmax(0, 1fr)
-    12px
-    var(--ctox-right-width, 320px);
+    8px
+    var(--ctox-right-width, clamp(270px, 27%, 330px));
   gap: 0;
-  padding: 12px;
+  padding: 8px;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -102,7 +108,7 @@
 }
 
 .ctox-workspace--two-pane {
-  grid-template-columns: var(--ctox-left-width, 320px) 12px minmax(0, 1fr);
+  grid-template-columns: var(--ctox-left-width, clamp(220px, 23%, 280px)) 8px minmax(0, 1fr);
 }
 
 .ctox-workspace--single {
@@ -165,7 +171,7 @@
    .ctox-pane-header / .ctox-pane-kicker / .ctox-pane-title typography
    from app.css. */
 .ctox-pane-band {
-  padding: 14px 14px 10px;
+  padding: 10px 12px 8px;
   border-bottom: 1px solid var(--hairline, var(--line));
 }
 
@@ -180,13 +186,16 @@
   margin-top: 8px;
 }
 
+/* Text-entry fields are recessed: the page ground inside a pane surface,
+   framed by the full --line rather than the softer hairline. That reads as
+   "you can type here" on a flat design with no shadows to spend. */
 .ctox-pane-search {
   width: 100%;
   min-width: 0;
   min-height: 32px;
-  border: 1px solid var(--hairline, var(--line));
+  border: 1px solid var(--line);
   border-radius: var(--control-radius);
-  background: var(--surface-2);
+  background: var(--bg);
   color: var(--text);
   padding: 0 10px;
   font: inherit;
@@ -208,8 +217,10 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  min-height: 34px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--hairline, var(--line));
+  background: var(--surface);
 }
 
 .ctox-input,
@@ -217,9 +228,9 @@
 .ctox-textarea {
   width: 100%;
   min-height: 32px;
-  border: 1px solid var(--hairline, var(--line));
+  border: 1px solid var(--line);
   border-radius: var(--control-radius);
-  background: var(--surface-2);
+  background: var(--bg);
   color: var(--text);
   padding: 0 10px;
   font: inherit;
@@ -306,7 +317,7 @@
 .ctox-button.is-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--surface);
+  color: var(--accent-foreground);
 }
 
 .ctox-button.is-primary:hover {
@@ -420,11 +431,17 @@
    -------------------------------------------------------------------------- */
 /* Grouped by a surface step, not a full border — so bordered inputs inside a
    card no longer read as a frame-in-a-frame. */
+/* Cards are sections of the pane they sit in, not tiles floating on it:
+   no fill, no radius, separated from the next card by a hairline. */
 .ctox-card {
   border: 0;
-  border-radius: var(--panel-radius);
-  background: var(--surface-2);
+  border-radius: 0;
+  background: transparent;
   overflow: hidden;
+}
+
+.ctox-card + .ctox-card {
+  border-top: 1px solid var(--hairline, var(--line));
 }
 
 .ctox-card > header {
@@ -459,7 +476,7 @@
 .ctox-list-item {
   display: block;
   width: 100%;
-  padding: 10px 14px;
+  padding: 9px 12px;
   border: 0;
   border-bottom: 1px solid var(--hairline, var(--line));
   background: transparent;
@@ -467,6 +484,39 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* A list row is a title line plus up to two meta lines, each on its own row
+   and each ellipsised. Without this the three inline children reflowed into
+   a ragged paragraph as soon as a name got long, and the row height jumped
+   around while a list filtered. */
+/* Callers that already separated the lines with <br> would otherwise get an
+   extra empty line now that the children are blocks. */
+.ctox-list-item > br {
+  display: none;
+}
+
+.ctox-list-item > strong,
+.ctox-list-item > span,
+.ctox-list-item > small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-list-item > strong {
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 650;
+}
+
+.ctox-list-item > span,
+.ctox-list-item > small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--fs-meta);
 }
 
 .ctox-list-item:hover {
@@ -669,13 +719,13 @@
 .ctox-pane-icon.is-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--surface);
+  color: var(--accent-foreground);
 }
 
 .ctox-pane-icon.is-primary:hover {
   background: color-mix(in srgb, var(--accent) 86%, var(--text));
   border-color: color-mix(in srgb, var(--accent) 86%, var(--text));
-  color: var(--surface);
+  color: var(--accent-foreground);
 }
 
 /* Compact select for the pane tools row (grouping/state filters). */
@@ -683,9 +733,9 @@
   min-width: 0;
   min-height: 32px;
   flex: 0 1 auto;
-  border: 1px solid var(--hairline, var(--line));
+  border: 1px solid var(--line);
   border-radius: var(--control-radius);
-  background: var(--surface-2);
+  background: var(--bg);
   color: var(--text);
   padding: 0 8px;
   font: inherit;
@@ -778,7 +828,7 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  padding: 8px 10px;
+  padding: 7px 9px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   color: var(--muted);
@@ -791,7 +841,7 @@
 }
 
 .ctox-table td {
-  padding: 8px 10px;
+  padding: 7px 9px;
   border-bottom: 1px solid var(--hairline, var(--line));
   color: var(--text);
   vertical-align: top;
@@ -806,9 +856,12 @@
   background: var(--kit-hover);
 }
 
+/* Same selection marker as .ctox-list-item: an accent bar on the leading
+   edge, so a selected row and a selected list entry read identically. */
 .ctox-table tbody tr.is-selected,
 .ctox-table tbody tr[aria-selected="true"] {
   background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* Numeric columns: right-aligned, tabular digits. Apply to th and td. */
@@ -976,13 +1029,15 @@
    Routine actions stay compact and neutral; the one app-specific automation
    may use the high-contrast Run Control.
    -------------------------------------------------------------------------- */
+/* The action strip and the toolbar are the same band at the same height, so
+   a pane that uses one and a pane that uses the other line up. */
 .ctox-action-strip {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
-  min-height: 36px;
-  padding: 4px 6px;
+  min-height: 34px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--hairline, var(--line));
   background: var(--surface);
 }
@@ -1009,15 +1064,15 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 38px;
-  padding: 0 16px;
-  border: 1px solid color-mix(in srgb, var(--accent) 78%, var(--text));
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--accent);
   border-radius: var(--control-radius);
   background: var(--accent);
   color: var(--accent-foreground);
   font: inherit;
   font-size: var(--fs-sm);
-  font-weight: 760;
+  font-weight: 700;
   letter-spacing: 0.01em;
   cursor: pointer;
 }
@@ -1106,14 +1161,18 @@
   display: none;
 }
 
+/* The workbench body is one continuous surface; its cards supply their own
+   padding and the hairline between them supplies the separation, so the
+   body adds neither gap nor inset of its own. */
 .ctox-record-workbench__body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 8px;
+  padding: 0;
+  background: var(--surface);
 }
 
 .ctox-compact-form {
@@ -1198,7 +1257,12 @@
     padding: 6px;
   }
 
-  .ctox-column-resizer {
+  /* Single column: neither resizer implementation has a seam to drag any
+     more. Hiding only .ctox-column-resizer left the shell-owned
+     [data-resizer] buttons behind as full-width strips between the stacked
+     panes. */
+  .ctox-column-resizer,
+  .ctox-workspace > [data-resizer] {
     display: none;
   }
 
@@ -1216,9 +1280,8 @@
     display: none;
   }
 
-  .ctox-record-workbench__body {
-    padding: 6px;
-  }
+  /* The workbench body has no inset at any width now, so the former
+     narrow-width padding override is gone rather than re-added smaller. */
 
   .ctox-compact-form {
     grid-template-columns: minmax(0, 1fr);
