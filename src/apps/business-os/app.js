@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260820-leasebudget-v214';
+const APP_BUILD = '20260820-replicapurge-v215';
 
 ensureShellStylesheets();
 
@@ -1001,6 +1001,10 @@ async function bootstrap() {
   setStartupProgress(50, shellText('bootDatastore'));
   const syncConfig = await loadSyncConfig();
   await purgeLegacySharedBusinessDb(syncConfig);
+  await purgeSupersededBusinessDbGenerations(syncConfig).catch((error) => {
+    // Never fatal: a browser that refuses the cleanup must still boot.
+    console.warn('[business-os] superseded replica cleanup failed', error);
+  });
   await resetBusinessDataPlaneForBuildIfNeeded(syncConfig);
   await openBusinessDataPlane(syncConfig);
 
@@ -1160,6 +1164,59 @@ async function purgeLegacySharedBusinessDb(syncConfig) {
     throw error;
   });
   if (resetCompleted) localStorage.setItem(marker, 'complete');
+}
+
+// Advancing BUSINESS_DB_STORAGE_GENERATION deliberately opens a fresh replica
+// instead of migrating the old one. What it did NOT do was remove the replica
+// it walked away from, so every superseded generation stayed in IndexedDB
+// forever. Measured on a customer instance: 2059 MB of orphaned replicas, and a
+// tab that climbed to 3.2 GB of a 4 GB heap within 30 s and was killed by the
+// renderer before its first replication could finish — every click dead, no
+// error anywhere. A generation bump has to take its predecessor with it.
+async function purgeSupersededBusinessDbGenerations(syncConfig) {
+  if (typeof indexedDB?.databases !== 'function') return;
+  const currentName = businessDbName(syncConfig);
+  const suffix = currentName.slice(
+    currentName.indexOf(BUSINESS_DB_STORAGE_GENERATION) + BUSINESS_DB_STORAGE_GENERATION.length,
+  );
+  const prefix = `${BUSINESS_DB_NAME}_`;
+  let entries = [];
+  try {
+    entries = await indexedDB.databases();
+  } catch (error) {
+    console.warn('[business-os] could not enumerate IndexedDB for generation cleanup', error);
+    return;
+  }
+  const superseded = entries
+    .map((entry) => String(entry?.name || ''))
+    .filter((name) => (
+      name
+      && name !== currentName
+      && name.startsWith(prefix)
+      && name.includes(suffix)
+      && !name.includes(BUSINESS_DB_STORAGE_GENERATION)
+    ));
+  if (!superseded.length) return;
+  const removed = [];
+  for (const name of superseded) {
+    // Also take the paired recovery journal; it is scoped to the same replica.
+    for (const target of [name, `${name}__recovery_v2`]) {
+      const ok = await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+        const request = indexedDB.deleteDatabase(target);
+        request.onsuccess = () => finish(true);
+        request.onerror = () => finish(false);
+        request.onblocked = () => finish(false);
+        setTimeout(() => finish(false), 8000);
+      });
+      if (ok) removed.push(target);
+    }
+  }
+  console.info('[business-os] removed superseded local replica generations', {
+    current: currentName,
+    removed,
+  });
 }
 
 async function resetBusinessDataPlaneForBuildIfNeeded(syncConfig) {
