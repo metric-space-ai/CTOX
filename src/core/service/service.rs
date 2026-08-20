@@ -13539,6 +13539,13 @@ fn start_channel_syncer(root: std::path::PathBuf) {
     thread::spawn(move || loop {
         let settings = live_service_settings(&root);
         sync_configured_channels(&root, &settings);
+        // Decision Hub: eingehende Mails in Vorgänge projizieren. Idempotent
+        // und billig ohne neue Nachrichten; unabhängig davon, ob ein
+        // Mail-Konto konfiguriert ist (Nachrichten können auch aus anderen
+        // Quellen in communication_messages landen).
+        if let Err(error) = crate::business_os::decision_hub::project_inbound_messages(&root) {
+            eprintln!("[decision-hub] inbound projection failed: {error:#}");
+        }
         thread::sleep(Duration::from_secs(channel_sync_poll_secs(&settings)));
     });
 }

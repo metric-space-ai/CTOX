@@ -786,6 +786,143 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 }
             }
         }
+        (Method::Get, "/api/business-os/mail/accounts") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let manage_all = store::session_can_manage_all(&session);
+                let session_user = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                let accounts = crate::communication::email_accounts::load_accounts(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|account| manage_all || account.owner_user_id == session_user)
+                    .map(|account| {
+                        crate::communication::email_accounts::public_json(root, &account)
+                    })
+                    .collect::<Vec<_>>();
+                respond_json_value(request, serde_json::json!({ "ok": true, "accounts": accounts }))?;
+            }
+        }
+        (Method::Post, "/api/business-os/mail/accounts") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let manage_all = store::session_can_manage_all(&session);
+                let session_user = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                let body = read_json(&mut request)?;
+                let field = |key: &str| -> String {
+                    body.get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned()
+                };
+                let port = |key: &str| -> u16 {
+                    body.get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u16::try_from(value).ok())
+                        .unwrap_or(0)
+                };
+                let requested_owner = field("owner_user_id");
+                let owner = if manage_all && !requested_owner.is_empty() {
+                    requested_owner
+                } else {
+                    session_user.clone()
+                };
+                let address = crate::communication::email_accounts::normalize_address(
+                    &field("address"),
+                );
+                let existing_owner = crate::communication::email_accounts::load_accounts(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|account| account.address == address)
+                    .map(|account| account.owner_user_id);
+                if let Some(existing_owner) = existing_owner {
+                    if !manage_all && existing_owner != session_user {
+                        respond_status(request, 403, "account belongs to another user")?;
+                        return Ok(());
+                    }
+                }
+                let config = crate::communication::email_accounts::EmailAccountConfig {
+                    address,
+                    display_name: field("display_name"),
+                    provider: field("provider"),
+                    imap_host: field("imap_host"),
+                    imap_port: port("imap_port"),
+                    smtp_host: field("smtp_host"),
+                    smtp_port: port("smtp_port"),
+                    username: field("username"),
+                    owner_user_id: owner,
+                };
+                let password = field("password");
+                let password = if password.is_empty() {
+                    None
+                } else {
+                    Some(password)
+                };
+                match crate::communication::email_accounts::upsert_account(
+                    root,
+                    config,
+                    password.as_deref(),
+                ) {
+                    Ok(saved) => respond_json_value(
+                        request,
+                        serde_json::json!({
+                            "ok": true,
+                            "account": crate::communication::email_accounts::public_json(root, &saved),
+                        }),
+                    )?,
+                    Err(error) => respond_status(request, 400, &error.to_string())?,
+                }
+            }
+        }
+        (Method::Post, "/api/business-os/mail/accounts/delete") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let manage_all = store::session_can_manage_all(&session);
+                let session_user = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                let body = read_json(&mut request)?;
+                let address = crate::communication::email_accounts::normalize_address(
+                    body.get("address").and_then(Value::as_str).unwrap_or(""),
+                );
+                let owner = crate::communication::email_accounts::load_accounts(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|account| account.address == address)
+                    .map(|account| account.owner_user_id);
+                match owner {
+                    None => respond_status(request, 404, "unknown mail account")?,
+                    Some(owner) if !manage_all && owner != session_user => {
+                        respond_status(request, 403, "account belongs to another user")?
+                    }
+                    Some(_) => {
+                        match crate::communication::email_accounts::delete_account(root, &address) {
+                            Ok(removed) => respond_json_value(
+                                request,
+                                serde_json::json!({ "ok": true, "removed": removed }),
+                            )?,
+                            Err(error) => respond_status(request, 400, &error.to_string())?,
+                        }
+                    }
+                }
+            }
+        }
         (Method::Post, "/api/business-os/channels/test") => {
             let session = request_session(root, &request);
             if !session.authenticated {
@@ -965,6 +1102,13 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
             // through workspace.branding.manage and never carry RxDB data.
             | "/api/business-os/design-templates"
             | "/api/business-os/design-templates/delete"
+            // Personal external mail-account configuration (Mail app setting).
+            // Carries connector config only; passwords go straight into the
+            // CTOX secret store and never appear in responses. No Business OS
+            // collection records flow here — message data still syncs
+            // exclusively through RxDB/WebRTC.
+            | "/api/business-os/mail/accounts"
+            | "/api/business-os/mail/accounts/delete"
             // Peer-lifecycle control for the rxdb-soak rollover mode: restarts
             // the in-process native peer. No Business OS records flow here and
             // the route itself answers 403 unless

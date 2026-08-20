@@ -1297,6 +1297,10 @@ fn dispatch_business_command(
         | "ctox.source.diff" => {
             handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
+        "kundenpipeline.triage.write"
+        | "kundenpipeline.mail.send"
+        | "kundenpipeline.delegate" => super::decision_hub::handle_command(root, command_id, command)
+            .map(BusinessCommandDispatchOutcome::Returned),
         "ctox.mailserver.get_config"
         | "ctox.mailserver.save_domain"
         | "ctox.mailserver.save_runtime"

@@ -10101,6 +10101,48 @@ pub(super) fn load_rxdb_collection_record(
     Ok(Some(record))
 }
 
+/// List all live records of one RxDB-backed Business OS collection.
+/// Used by server-side projections that must see browser-written records.
+pub(super) fn load_rxdb_collection_records(
+    root: &Path,
+    collection: &str,
+) -> anyhow::Result<Vec<Value>> {
+    if !is_safe_rxdb_collection_name(collection) {
+        anyhow::bail!("invalid collection name `{collection}`");
+    }
+    let path = rxdb_store_path(root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&path)?;
+    let Some(table) = rxdb_collection_table_name(&path, &conn, collection) else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(&format!("SELECT id, data FROM {table}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, raw)| {
+            let mut record: Value = serde_json::from_str(&raw).ok()?;
+            if let Some(object) = record.as_object_mut() {
+                object
+                    .entry("id".to_string())
+                    .or_insert_with(|| Value::String(id));
+            }
+            if record.get("is_deleted").and_then(Value::as_bool) == Some(true)
+                || record.get("_deleted").and_then(Value::as_bool) == Some(true)
+            {
+                return None;
+            }
+            Some(record)
+        })
+        .collect())
+}
+
 fn find_rxdb_collection_record_by_string_field(
     root: &Path,
     collection: &str,

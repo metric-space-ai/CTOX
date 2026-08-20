@@ -8,6 +8,7 @@ mod browser_control;
 mod browser_runtime;
 mod capability;
 mod command_plane;
+pub mod decision_hub;
 mod control_command_types;
 mod desktop_files;
 mod external_sql_sync;

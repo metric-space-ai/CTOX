@@ -180,6 +180,40 @@ pub(crate) fn service_sync(
     root: &Path,
     settings: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
+    // Instanz-Konto (CTO_EMAIL_*) plus persönliche Konten aus der Mail-App.
+    let instance = service_sync_single(root, settings)?;
+    let accounts = super::email_accounts::load_accounts(root).unwrap_or_default();
+    if accounts.is_empty() {
+        return Ok(instance);
+    }
+    let instance_address = setting(settings, "CTO_EMAIL_ADDRESS").to_ascii_lowercase();
+    let mut results = Vec::new();
+    if let Some(value) = instance {
+        results.push(json!({ "account": instance_address, "scope": "instance", "result": value }));
+    }
+    for account in accounts {
+        if account.address == instance_address {
+            continue;
+        }
+        let mut account_settings = settings.clone();
+        account_settings.extend(super::email_accounts::account_runtime_overrides(root, &account));
+        let entry = match service_sync_single(root, &account_settings) {
+            Ok(Some(value)) => json!({ "account": account.address, "scope": "personal", "result": value }),
+            Ok(None) => json!({ "account": account.address, "scope": "personal", "skipped": true }),
+            Err(error) => json!({ "account": account.address, "scope": "personal", "error": error.to_string() }),
+        };
+        results.push(entry);
+    }
+    if results.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({ "accounts": results })))
+}
+
+fn service_sync_single(
+    root: &Path,
+    settings: &BTreeMap<String, String>,
+) -> Result<Option<Value>> {
     let email = setting(settings, "CTO_EMAIL_ADDRESS");
     if email.is_empty() {
         return Ok(None);
