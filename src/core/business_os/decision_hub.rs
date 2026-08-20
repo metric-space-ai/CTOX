@@ -203,7 +203,7 @@ fn enqueue_triage_task(
             thread_key: format!("kundenpipeline/triage/{vorgang_id}"),
             workspace_root: None,
             priority: "normal".to_string(),
-            suggested_skill: None,
+            suggested_skill: Some("decision-hub-triage".to_string()),
             parent_message_key: None,
             extra_metadata: Some(json!({
                 "source": "decision-hub-triage",
