@@ -3503,8 +3503,17 @@ fn backup_state_root(state_root: &Path) -> Result<PathBuf> {
         .join("backups")
         .join(format!("update-{}", current_utc().format("%Y%m%dT%H%M%SZ")));
     ensure_dir(&backup_root)?;
+    // Managed-browser profiles are regenerable cache, and Chromium keeps their
+    // SQLite files locked for as long as a session runs. Backing them up buys
+    // nothing and made every upgrade abort on a live guest (welsch,
+    // 2026-08-20: "state backup aborted ... first_party_sets.db").
+    let browser_profiles = state_root.join("browser").join("profiles");
+    let skip_browser_profiles = browser_profiles.clone();
     copy_filtered(state_root, &backup_root, &|path, is_dir| {
         if path == backup_root {
+            return true;
+        }
+        if path.starts_with(&skip_browser_profiles) {
             return true;
         }
         let Some(name) = path.file_name().and_then(OsStr::to_str) else {
@@ -3528,6 +3537,9 @@ fn backup_state_root(state_root: &Path) -> Result<PathBuf> {
         )
     })?;
     for database in collect_sqlite_database_files(state_root) {
+        if database.starts_with(&browser_profiles) {
+            continue;
+        }
         let Ok(relative) = database.strip_prefix(state_root) else {
             continue;
         };
