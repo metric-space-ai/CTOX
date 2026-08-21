@@ -69,6 +69,9 @@ jobs:
           sudo apt-get install -y \
             libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev libcap-dev sqlite3
 
+      - name: Install Business OS browser test runtime
+        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+
       - name: Business OS JS dependency bootstrap
         run: |
           npm ci --ignore-scripts --prefix src/apps/business-os
@@ -88,9 +91,6 @@ jobs:
             --docx-corpus-evidence src/apps/business-os/office-engine/oracle/evidence/document.docx-roundtrip-corpus.json \
             --xlsx-corpus-evidence src/apps/business-os/office-engine/oracle/evidence/spreadsheet.xlsx-roundtrip-corpus.json \
             --output runtime/build/ctox-office-release-candidate-evidence.json
-
-      - name: Install Business OS browser test runtime
-        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
 
       - name: Build rxdb wire daemon (cross-process smokes)
         # Required so run-all.mjs --require-wire-daemon below actually runs
