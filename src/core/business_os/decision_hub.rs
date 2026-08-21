@@ -91,8 +91,8 @@ pub fn project_inbound_messages(root: &Path) -> anyhow::Result<usize> {
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut created = 0usize;
-    for (message_key, thread_key, sender_display, sender_address, subject, body_text, created_at)
-        in rows
+    for (message_key, thread_key, sender_display, sender_address, subject, body_text, created_at) in
+        rows
     {
         let vorgang_id = deterministic_id("kpl-v", &message_key);
         if load_any_record(root, COL_VORGAENGE, &vorgang_id)?.is_some() {
@@ -101,7 +101,11 @@ pub fn project_inbound_messages(root: &Path) -> anyhow::Result<usize> {
         let clean_body = strip_mail_ballast(&body_text);
         let (treffer, vorschlag) = route_sender(&projekte, &sender_address);
         let now = now_ms() as i64;
-        let status = if treffer.is_some() { "zugeordnet" } else { "eingegangen" };
+        let status = if treffer.is_some() {
+            "zugeordnet"
+        } else {
+            "eingegangen"
+        };
         let vorgang = json!({
             "id": vorgang_id,
             "title": kurz(non_empty(&subject, "(kein Betreff)"), 120),
@@ -246,222 +250,364 @@ fn write_requirement() -> CommandPolicyRequirement {
 /// projection reads. Without it an approval thread would never close.
 fn handle_decision_answer(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
     let payload = command.payload.clone();
-    enforce_command_policy(root, command, |_| Ok(write_requirement()), |session| {
-        let decision_id = payload
-            .get("entscheidung_id")
-            .and_then(Value::as_str)
-            .context("entscheidung_id is required")?
-            .to_string();
-        let wert = payload
-            .get("wert")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let status = match wert.as_str() {
-            "annehmen" => "entschieden",
-            "ablehnen" => "abgelehnt",
-            other => anyhow::bail!("unknown decision answer `{other}`"),
-        };
-        let kanal = payload
-            .get("kanal")
-            .and_then(Value::as_str)
-            .unwrap_or("desktop")
-            .to_string();
-        let mut decision = load_any_record(root, COL_ENTSCHEIDUNGEN, &decision_id)?
-            .with_context(|| format!("unknown Entscheidung `{decision_id}`"))?;
-        let now = now_ms() as i64;
-        let akteur = session
-            .user
-            .as_ref()
-            .map(|user| user.id.clone())
-            .unwrap_or_else(|| "owner".to_string());
-        decision["status"] = json!(status);
-        decision["updated_at_ms"] = json!(now);
-        if !decision["antwort_json"].is_object() {
-            decision["antwort_json"] = json!({});
-        }
-        decision["antwort_json"]["wert"] = json!(wert);
-        decision["antwort_json"]["kanal"] = json!(kanal);
-        decision["antwort_json"]["zeit_ms"] = json!(now);
-        decision["antwort_json"]["akteur"] = json!(akteur.clone());
-        upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision.clone())?;
-
-        let vorgang_id = payload
-            .get("vorgang_id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                decision
-                    .get("vorgang_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        if !vorgang_id.is_empty() {
-            if let Some(mut vorgang) = load_any_record(root, COL_VORGAENGE, &vorgang_id)? {
-                let typ = decision.get("typ").and_then(Value::as_str).unwrap_or("");
-                push_audit(&mut vorgang, now, &format!("{typ}:{wert}"), &akteur, &kanal);
-                vorgang["updated_at_ms"] = json!(now);
-                upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang)?;
+    enforce_command_policy(
+        root,
+        command,
+        |_| Ok(write_requirement()),
+        |session| {
+            let decision_id = payload
+                .get("entscheidung_id")
+                .and_then(Value::as_str)
+                .context("entscheidung_id is required")?
+                .to_string();
+            let wert = payload
+                .get("wert")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let status = match wert.as_str() {
+                "annehmen" => "entschieden",
+                "ablehnen" => "abgelehnt",
+                other => anyhow::bail!("unknown decision answer `{other}`"),
+            };
+            let kanal = payload
+                .get("kanal")
+                .and_then(Value::as_str)
+                .unwrap_or("desktop")
+                .to_string();
+            let mut decision = load_any_record(root, COL_ENTSCHEIDUNGEN, &decision_id)?
+                .with_context(|| format!("unknown Entscheidung `{decision_id}`"))?;
+            let now = now_ms() as i64;
+            let akteur = session
+                .user
+                .as_ref()
+                .map(|user| user.id.clone())
+                .unwrap_or_else(|| "owner".to_string());
+            decision["status"] = json!(status);
+            decision["updated_at_ms"] = json!(now);
+            if !decision["antwort_json"].is_object() {
+                decision["antwort_json"] = json!({});
             }
-        }
-        Ok(json!({ "ok": true, "entscheidung_id": decision_id, "status": status }))
-    })?
+            decision["antwort_json"]["wert"] = json!(wert);
+            decision["antwort_json"]["kanal"] = json!(kanal);
+            decision["antwort_json"]["zeit_ms"] = json!(now);
+            decision["antwort_json"]["akteur"] = json!(akteur.clone());
+            upsert_projection_record(
+                root,
+                COL_ENTSCHEIDUNGEN,
+                &decision_id,
+                now,
+                decision.clone(),
+            )?;
+
+            let vorgang_id = payload
+                .get("vorgang_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    decision
+                        .get("vorgang_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
+            if !vorgang_id.is_empty() {
+                if let Some(mut vorgang) = load_any_record(root, COL_VORGAENGE, &vorgang_id)? {
+                    let typ = decision.get("typ").and_then(Value::as_str).unwrap_or("");
+                    push_audit(&mut vorgang, now, &format!("{typ}:{wert}"), &akteur, &kanal);
+                    vorgang["updated_at_ms"] = json!(now);
+                    upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang)?;
+                }
+            }
+            // Die Folge einer Annahme gehoert hierher, nicht in die Oberflaeche:
+            // Brille, Desktop und MCP loesen denselben Command aus und muessen
+            // dieselbe Wirkung bekommen — und genau EINMAL.
+            let mut folge = Value::Null;
+            if status == "entschieden" && !vorgang_id.is_empty() {
+                let typ = decision.get("typ").and_then(Value::as_str).unwrap_or("");
+                folge = run_acceptance_followup(root, command, typ, &vorgang_id)?;
+            }
+            Ok(json!({
+                "ok": true,
+                "entscheidung_id": decision_id,
+                "status": status,
+                "folge": folge,
+            }))
+        },
+    )?
     .into_outcome()
+}
+
+/// Was eine Annahme ausloest: Mailfreigabe versendet, angenommene Triage
+/// delegiert. Ein Fehler hier darf die bereits erfasste Antwort nicht
+/// zurueckrollen — er wird als `folge.error` berichtet.
+fn run_acceptance_followup(
+    root: &Path,
+    command: &BusinessCommand,
+    typ: &str,
+    vorgang_id: &str,
+) -> anyhow::Result<Value> {
+    let derived = |command_type: &str, payload: Value| BusinessCommand {
+        origin: command.origin,
+        id: command.id.clone(),
+        module: command.module.clone(),
+        command_type: command_type.to_string(),
+        record_id: command.record_id.clone(),
+        payload,
+        client_context: command.client_context.clone(),
+    };
+    let outcome = match typ {
+        "mailfreigabe" => {
+            let art = load_any_record(root, COL_VORGAENGE, vorgang_id)?
+                .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string))
+                .filter(|status| status == "ergebnisVorliegend")
+                .map(|_| "ergebnis")
+                .unwrap_or("bestaetigung");
+            handle_mail_send(
+                root,
+                &derived(
+                    "kundenpipeline.mail.send",
+                    json!({ "vorgang_id": vorgang_id, "art": art }),
+                ),
+            )
+        }
+        "triage" => {
+            let beschreibung = load_any_record(root, COL_VORGAENGE, vorgang_id)?
+                .and_then(|v| {
+                    v.pointer("/triage_json/aufgabe/beschreibung")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .filter(|text| !text.trim().is_empty());
+            let Some(beschreibung) = beschreibung else {
+                return Ok(json!({ "skipped": "triage without a task description" }));
+            };
+            handle_delegate(
+                root,
+                &derived(
+                    "kundenpipeline.delegate",
+                    json!({ "vorgang_id": vorgang_id, "beschreibung": beschreibung }),
+                ),
+            )
+        }
+        _ => return Ok(Value::Null),
+    };
+    Ok(match outcome {
+        Ok(value) => value,
+        Err(error) => json!({ "error": format!("{error:#}") }),
+    })
+}
+
+/// Offene Entscheidungen samt ihrer Vorgaenge — die Karten fuer die Brille.
+pub fn cards_json(root: &Path) -> anyhow::Result<Value> {
+    let mut decisions = load_rxdb_collection_records(root, COL_ENTSCHEIDUNGEN)?
+        .into_iter()
+        .filter(|d| d.get("status").and_then(Value::as_str) == Some("offen"))
+        .filter(|d| d.get("is_deleted").and_then(Value::as_bool) != Some(true))
+        .collect::<Vec<_>>();
+    decisions.sort_by_key(|d| d.get("created_at_ms").and_then(Value::as_i64).unwrap_or(0));
+    let mut vorgaenge: Vec<Value> = Vec::new();
+    for decision in &decisions {
+        let Some(id) = decision.get("vorgang_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if vorgaenge
+            .iter()
+            .any(|v| v.get("id").and_then(Value::as_str) == Some(id))
+        {
+            continue;
+        }
+        if let Some(vorgang) = load_any_record(root, COL_VORGAENGE, id)? {
+            vorgaenge.push(vorgang);
+        }
+    }
+    Ok(json!({ "ok": true, "decisions": decisions, "vorgaenge": vorgaenge }))
 }
 
 fn handle_triage_write(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
     let payload = command.payload.clone();
-    enforce_command_policy(root, command, |_| Ok(write_requirement()), |_session| {
-        let vorgang_id = payload
-            .get("vorgang_id")
-            .and_then(Value::as_str)
-            .context("vorgang_id is required")?
-            .to_string();
-        let triage = payload
-            .get("triage")
-            .cloned()
-            .filter(Value::is_object)
-            .context("triage object is required")?;
-        let mut vorgang = load_any_record(root, COL_VORGAENGE, &vorgang_id)?
-            .with_context(|| format!("unknown Vorgang `{vorgang_id}`"))?;
-        let now = now_ms() as i64;
-        vorgang["triage_json"] = triage.clone();
-        vorgang["status"] = json!("triagiert");
-        vorgang["updated_at_ms"] = json!(now);
-        push_audit(&mut vorgang, now, "triage:vorschlag", "triage-agent", "system");
-        upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang.clone())?;
+    enforce_command_policy(
+        root,
+        command,
+        |_| Ok(write_requirement()),
+        |_session| {
+            let vorgang_id = payload
+                .get("vorgang_id")
+                .and_then(Value::as_str)
+                .context("vorgang_id is required")?
+                .to_string();
+            let triage = payload
+                .get("triage")
+                .cloned()
+                .filter(Value::is_object)
+                .context("triage object is required")?;
+            let mut vorgang = load_any_record(root, COL_VORGAENGE, &vorgang_id)?
+                .with_context(|| format!("unknown Vorgang `{vorgang_id}`"))?;
+            let now = now_ms() as i64;
+            vorgang["triage_json"] = triage.clone();
+            vorgang["status"] = json!("triagiert");
+            vorgang["updated_at_ms"] = json!(now);
+            push_audit(
+                &mut vorgang,
+                now,
+                "triage:vorschlag",
+                "triage-agent",
+                "system",
+            );
+            upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang.clone())?;
 
-        // Triage decision card for the app / glasses queue.
-        let mut zeilen = vec!["▸ MAIL".to_string()];
-        zeilen.extend(wrap_text(&clean_body_or(&vorgang), WRAP_WIDTH));
-        if let Some(text) = triage.get("antwort_vorschlag").and_then(Value::as_str) {
-            zeilen.push(String::new());
-            zeilen.push("▸ ANTWORT-VORSCHLAG".to_string());
-            zeilen.extend(wrap_text(text, WRAP_WIDTH));
-        }
-        if let Some(aufgabe) = triage.get("aufgabe").and_then(Value::as_object) {
-            let agent = aufgabe.get("agent").and_then(Value::as_str).unwrap_or("Agent");
-            zeilen.push(String::new());
-            zeilen.push(format!("▸ AUFGABE → {agent}"));
-            if let Some(text) = aufgabe.get("beschreibung").and_then(Value::as_str) {
+            // Triage decision card for the app / glasses queue.
+            let mut zeilen = vec!["▸ MAIL".to_string()];
+            zeilen.extend(wrap_text(&clean_body_or(&vorgang), WRAP_WIDTH));
+            if let Some(text) = triage.get("antwort_vorschlag").and_then(Value::as_str) {
+                zeilen.push(String::new());
+                zeilen.push("▸ ANTWORT-VORSCHLAG".to_string());
                 zeilen.extend(wrap_text(text, WRAP_WIDTH));
             }
-        }
-        let titel = vorgang
-            .get("kunde_name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-            .map(|name| name.to_string())
-            .unwrap_or_else(|| sender_address_of(&vorgang));
-        let decision_id = deterministic_id("kpl-e-triage", &vorgang_id);
-        let decision = decision_record(
-            &decision_id,
-            &vorgang_id,
-            "triage",
-            &kurz(&titel, 40),
-            zeilen,
-            &workspace_decision_user_ids(root),
-            now,
-        );
-        upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision)?;
-        Ok(json!({ "ok": true, "vorgang_id": vorgang_id, "decision_id": decision_id }))
-    })?
+            if let Some(aufgabe) = triage.get("aufgabe").and_then(Value::as_object) {
+                let agent = aufgabe
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Agent");
+                zeilen.push(String::new());
+                zeilen.push(format!("▸ AUFGABE → {agent}"));
+                if let Some(text) = aufgabe.get("beschreibung").and_then(Value::as_str) {
+                    zeilen.extend(wrap_text(text, WRAP_WIDTH));
+                }
+            }
+            let titel = vorgang
+                .get("kunde_name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| sender_address_of(&vorgang));
+            let decision_id = deterministic_id("kpl-e-triage", &vorgang_id);
+            let decision = decision_record(
+                &decision_id,
+                &vorgang_id,
+                "triage",
+                &kurz(&titel, 40),
+                zeilen,
+                &workspace_decision_user_ids(root),
+                now,
+            );
+            upsert_projection_record(root, COL_ENTSCHEIDUNGEN, &decision_id, now, decision)?;
+            Ok(json!({ "ok": true, "vorgang_id": vorgang_id, "decision_id": decision_id }))
+        },
+    )?
     .into_outcome()
 }
 
 fn handle_mail_send(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
     let payload = command.payload.clone();
-    enforce_command_policy(root, command, |_| Ok(write_requirement()), |session| {
-        let vorgang_id = payload
-            .get("vorgang_id")
-            .and_then(Value::as_str)
-            .context("vorgang_id is required")?
-            .to_string();
-        let art = payload
-            .get("art")
-            .and_then(Value::as_str)
-            .unwrap_or("bestaetigung")
-            .to_string();
-        let mut vorgang = load_any_record(root, COL_VORGAENGE, &vorgang_id)?
-            .with_context(|| format!("unknown Vorgang `{vorgang_id}`"))?;
+    enforce_command_policy(
+        root,
+        command,
+        |_| Ok(write_requirement()),
+        |session| {
+            let vorgang_id = payload
+                .get("vorgang_id")
+                .and_then(Value::as_str)
+                .context("vorgang_id is required")?
+                .to_string();
+            let art = payload
+                .get("art")
+                .and_then(Value::as_str)
+                .unwrap_or("bestaetigung")
+                .to_string();
+            let mut vorgang = load_any_record(root, COL_VORGAENGE, &vorgang_id)?
+                .with_context(|| format!("unknown Vorgang `{vorgang_id}`"))?;
 
-        let to = sender_address_of(&vorgang);
-        anyhow::ensure!(!to.is_empty(), "Vorgang has no sender address to reply to");
-        let betreff = vorgang
-            .pointer("/quelle_json/betreff")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let subject = if betreff.to_lowercase().starts_with("re:") {
-            betreff.to_string()
-        } else {
-            format!("Re: {betreff}")
-        };
-        let body = payload
-            .get("body")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                if art == "ergebnis" {
-                    vorgang
-                        .pointer("/run_json/zusammenfassung")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                } else {
-                    vorgang
-                        .pointer("/triage_json/antwort_vorschlag")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                }
-            })
-            .context("no mail body available (payload.body / triage / run summary)")?;
+            let to = sender_address_of(&vorgang);
+            anyhow::ensure!(!to.is_empty(), "Vorgang has no sender address to reply to");
+            let betreff = vorgang
+                .pointer("/quelle_json/betreff")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let subject = if betreff.to_lowercase().starts_with("re:") {
+                betreff.to_string()
+            } else {
+                format!("Re: {betreff}")
+            };
+            let body = payload
+                .get("body")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    if art == "ergebnis" {
+                        vorgang
+                            .pointer("/run_json/zusammenfassung")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    } else {
+                        vorgang
+                            .pointer("/triage_json/antwort_vorschlag")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    }
+                })
+                .context("no mail body available (payload.body / triage / run summary)")?;
 
-        // Deliver through the CTOX mailserver outbound queue (throttled,
-        // tracked in mailserver health) — same path governed sending uses.
-        let db_path = root.join("runtime/ctox.sqlite3").to_string_lossy().into_owned();
-        let mail_store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
-        mail_store.init()?;
-        let hostname = mail_store
-            .load_runtime_settings()
-            .map(|settings| settings.hostname)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "ctox.local".to_string());
-        let from = format!("decisions@{hostname}");
-        let msg_id = format!("<{}@{}>", uuid::Uuid::new_v4(), hostname);
-        let rfc822 = format!(
-            "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nMessage-ID: {msg_id}\r\n\
+            // Deliver through the CTOX mailserver outbound queue (throttled,
+            // tracked in mailserver health) — same path governed sending uses.
+            let db_path = root
+                .join("runtime/ctox.sqlite3")
+                .to_string_lossy()
+                .into_owned();
+            let mail_store = ctox_mailserver::store::sqlite::SqliteStore::new(&db_path);
+            mail_store.init()?;
+            let hostname = mail_store
+                .load_runtime_settings()
+                .map(|settings| settings.hostname)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "ctox.local".to_string());
+            let from = format!("decisions@{hostname}");
+            let msg_id = format!("<{}@{}>", uuid::Uuid::new_v4(), hostname);
+            let rfc822 = format!(
+                "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nMessage-ID: {msg_id}\r\n\
              Date: {date}\r\nMIME-Version: 1.0\r\n\
              Content-Type: text/plain; charset=utf-8\r\n\
              Content-Transfer-Encoding: 8bit\r\n\r\n{body}\r\n",
-            date = chrono::Utc::now().to_rfc2822(),
-        );
-        mail_store.queue_email(&from, &to, &rfc822)?;
+                date = chrono::Utc::now().to_rfc2822(),
+            );
+            mail_store.queue_email(&from, &to, &rfc822)?;
 
-        let now = now_ms() as i64;
-        let actor = session
-            .user
-            .as_ref()
-            .map(|user| user.id.clone())
-            .unwrap_or_else(|| "owner".to_string());
-        if let Some(mails) = vorgang.get_mut("mails_json").and_then(Value::as_array_mut) {
-            mails.push(json!({
-                "richtung": "ausgehend",
-                "art": art,
-                "an": to,
-                "betreff": subject,
-                "body": body,
-                "gesendet_ms": now,
-                "message_id": msg_id,
-            }));
-        }
-        vorgang["status"] = json!(if art == "ergebnis" { "abgeschlossen" } else { "inArbeit" });
-        vorgang["updated_at_ms"] = json!(now);
-        push_audit(&mut vorgang, now, &format!("mail:{art}:gesendet"), &actor, "system");
-        upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang)?;
-        Ok(json!({ "ok": true, "queued": true, "to": to, "subject": subject }))
-    })?
+            let now = now_ms() as i64;
+            let actor = session
+                .user
+                .as_ref()
+                .map(|user| user.id.clone())
+                .unwrap_or_else(|| "owner".to_string());
+            if let Some(mails) = vorgang.get_mut("mails_json").and_then(Value::as_array_mut) {
+                mails.push(json!({
+                    "richtung": "ausgehend",
+                    "art": art,
+                    "an": to,
+                    "betreff": subject,
+                    "body": body,
+                    "gesendet_ms": now,
+                    "message_id": msg_id,
+                }));
+            }
+            vorgang["status"] = json!(if art == "ergebnis" {
+                "abgeschlossen"
+            } else {
+                "inArbeit"
+            });
+            vorgang["updated_at_ms"] = json!(now);
+            push_audit(
+                &mut vorgang,
+                now,
+                &format!("mail:{art}:gesendet"),
+                &actor,
+                "system",
+            );
+            upsert_projection_record(root, COL_VORGAENGE, &vorgang_id, now, vorgang)?;
+            Ok(json!({ "ok": true, "queued": true, "to": to, "subject": subject }))
+        },
+    )?
     .into_outcome()
 }
 
@@ -561,7 +707,11 @@ struct Projekt {
 
 /// Load a record from the RxDB collection store (browser writes) with a
 /// fallback to the server-side `business_records` projection table.
-fn load_any_record(root: &Path, collection: &str, record_id: &str) -> anyhow::Result<Option<Value>> {
+fn load_any_record(
+    root: &Path,
+    collection: &str,
+    record_id: &str,
+) -> anyhow::Result<Option<Value>> {
     if let Some(record) = load_rxdb_collection_record(root, collection, record_id)? {
         if record.get("is_deleted").and_then(Value::as_bool) != Some(true) {
             return Ok(Some(record));
@@ -589,8 +739,16 @@ fn route_sender(projekte: &[Value], sender: &str) -> (Option<Projekt>, Option<Pr
             continue;
         }
         let projekt = Projekt {
-            id: raw.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-            name: raw.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+            id: raw
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: raw
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             code_projekt: raw
                 .get("code_projekt")
                 .and_then(Value::as_str)
@@ -602,7 +760,9 @@ fn route_sender(projekte: &[Value], sender: &str) -> (Option<Projekt>, Option<Pr
         if projekt.adressen.iter().any(|item| item == &address) {
             return (Some(projekt), None);
         }
-        if !domain.is_empty() && vorschlag.is_none() && projekt.domains.iter().any(|item| item == &domain)
+        if !domain.is_empty()
+            && vorschlag.is_none()
+            && projekt.domains.iter().any(|item| item == &domain)
         {
             vorschlag = Some(projekt);
         }
@@ -703,13 +863,21 @@ fn clean_body_or(vorgang: &Value) -> String {
         .pointer("/quelle_json/body_clean")
         .and_then(Value::as_str)
         .filter(|body| !body.trim().is_empty())
-        .or_else(|| vorgang.pointer("/quelle_json/betreff").and_then(Value::as_str))
+        .or_else(|| {
+            vorgang
+                .pointer("/quelle_json/betreff")
+                .and_then(Value::as_str)
+        })
         .unwrap_or_default()
         .to_string()
 }
 
 fn non_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
-    if value.trim().is_empty() { fallback } else { value }
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
 }
 
 /// Deterministic, collision-resistant record id below the 180-char schema cap.
@@ -748,7 +916,9 @@ fn strip_mail_ballast(text: &str) -> String {
                 break 'outer;
             }
         }
-        if lowered.starts_with("-----original") || lowered.starts_with("am ") && lowered.contains(" schrieb ") {
+        if lowered.starts_with("-----original")
+            || lowered.starts_with("am ") && lowered.contains(" schrieb ")
+        {
             break;
         }
         lines.push(line);

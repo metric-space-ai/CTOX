@@ -786,6 +786,51 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 }
             }
         }
+        // Karten fuer die Brille: offene Entscheidungen lesen und beantworten.
+        // Auth laeuft ueber das signierte Capability-Token als Bearer, das der
+        // Owner einmalig ausstellt — die Brille kennt kein Passwort.
+        (Method::Get, "/api/business-os/kundenpipeline/cards") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                match crate::business_os::decision_hub::cards_json(root) {
+                    Ok(value) => respond_json_value(request, value)?,
+                    Err(error) => respond_status(request, 500, &format!("{error:#}"))?,
+                }
+            }
+        }
+        (Method::Post, "/api/business-os/kundenpipeline/answer") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let body = read_json(&mut request)?;
+                let actor = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                // Der Command-Pfad erzwingt dieselbe Policy wie im Desktop und
+                // loest serverseitig Versand bzw. Delegation aus.
+                let command = store::BusinessCommand {
+                    origin: store::CommandOrigin::TrustedLocal,
+                    id: body
+                        .get("command_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    module: "kundenpipeline".to_string(),
+                    command_type: "kundenpipeline.decision.answer".to_string(),
+                    record_id: None,
+                    payload: body.clone(),
+                    client_context: serde_json::json!({ "actor": actor, "kanal": "brille" }),
+                };
+                match crate::business_os::decision_hub::handle_command(root, "", &command) {
+                    Ok(value) => respond_json_value(request, value)?,
+                    Err(error) => respond_status(request, 400, &format!("{error:#}"))?,
+                }
+            }
+        }
         (Method::Get, "/api/business-os/mail/accounts") => {
             let session = request_session(root, &request);
             if !session.authenticated {
@@ -805,7 +850,10 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                         crate::communication::email_accounts::public_json(root, &account)
                     })
                     .collect::<Vec<_>>();
-                respond_json_value(request, serde_json::json!({ "ok": true, "accounts": accounts }))?;
+                respond_json_value(
+                    request,
+                    serde_json::json!({ "ok": true, "accounts": accounts }),
+                )?;
             }
         }
         (Method::Post, "/api/business-os/mail/accounts") => {
@@ -839,9 +887,8 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 } else {
                     session_user.clone()
                 };
-                let address = crate::communication::email_accounts::normalize_address(
-                    &field("address"),
-                );
+                let address =
+                    crate::communication::email_accounts::normalize_address(&field("address"));
                 let existing_owner = crate::communication::email_accounts::load_accounts(root)
                     .unwrap_or_default()
                     .into_iter()
