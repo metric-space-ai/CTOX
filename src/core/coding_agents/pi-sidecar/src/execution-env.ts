@@ -874,7 +874,8 @@ function normalizeAbsolutePath(filePath: string): string {
 // Unix hands us as `/workspace/file`. Canonicalize that boundary before any
 // lookup to avoid creating a second backslash-named file in the projection.
 function normalizeVirtualInputPath(filePath: string): string {
-  return String(filePath || "").replaceAll("\\", "/");
+  const portablePath = String(filePath || "").replaceAll("\\", "/");
+  return /^[A-Za-z]:\//.test(portablePath) ? portablePath.slice(2) : portablePath;
 }
 
 function abortFileResult<T>(abortSignal: AbortSignal | undefined, filePath: string): Result<T, FileError> | undefined {

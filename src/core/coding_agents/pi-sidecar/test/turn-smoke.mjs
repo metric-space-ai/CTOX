@@ -39,6 +39,10 @@ const portableWrite = await env.writeFile("\\workspace\\portable.js", "portable\
 assert.ok(portableWrite.ok, "Windows-shaped virtual write ok");
 const portableRead = await env.readTextFile("/workspace/portable.js");
 assert.deepEqual(portableRead, { ok: true, value: "portable\n" }, "Windows-shaped path is canonicalized");
+const driveWrite = await env.writeFile("D:\\workspace\\drive.js", "drive portable\n");
+assert.ok(driveWrite.ok, "Windows drive-prefixed virtual write ok");
+const driveRead = await env.readTextFile("/workspace/drive.js");
+assert.deepEqual(driveRead, { ok: true, value: "drive portable\n" }, "Windows drive prefix is removed");
 
 const result = await runCtoxPiCodingTurn({
   env,
