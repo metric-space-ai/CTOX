@@ -660,6 +660,38 @@ fn business_command_store_error_is_permanent(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("idempotency_conflict")
 }
 
+/// Die Felder, die einen Befehl endgueltig terminal machen.
+///
+/// Es reicht NICHT, `status` auf "failed" zu setzen:
+/// [`BUSINESS_COMMAND_RETRY_CANDIDATE_SQL`] laesst ein `failed`-Dokument
+/// weiterhin als Wiederholungskandidat gelten, solange `terminal_status` fehlt.
+/// Auf einer Produktivinstanz drehten deshalb zwei ueber 500 Stunden alte
+/// Befehle rund 20-mal pro Sekunde durch die Verjaehrung, und der Dienst
+/// verbrannte dauerhaft einen vollen Kern, nur um sie wieder und wieder
+/// abzulehnen. `execution_phase` und `terminal_status` muessen dabei laut
+/// `validate_terminal_pair` gemeinsam gesetzt werden.
+fn apply_terminal_failure_fields(object: &mut serde_json::Map<String, Value>, error: &str) {
+    object.insert("status".to_string(), Value::String("failed".to_string()));
+    object.insert(
+        "task_status".to_string(),
+        Value::String("failed".to_string()),
+    );
+    object.insert(
+        "execution_phase".to_string(),
+        Value::String("terminal".to_string()),
+    );
+    object.insert(
+        "terminal_status".to_string(),
+        Value::String("failed".to_string()),
+    );
+    object.insert(
+        "error_code".to_string(),
+        Value::String("deadline_exceeded".to_string()),
+    );
+    object.insert("error".to_string(), Value::String(error.to_string()));
+    object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+}
+
 async fn terminalize_business_command_document(
     database: &Arc<RxDatabase>,
     document: &Value,
@@ -669,15 +701,17 @@ async fn terminalize_business_command_document(
     if let Some(object) = marked.as_object_mut() {
         object.remove("_rev");
         object.remove("_meta");
-        object.insert("status".to_string(), Value::String("failed".to_string()));
-        object.insert("task_status".to_string(), Value::String("failed".to_string()));
-        object.insert("error".to_string(), Value::String(error.to_string()));
-        object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+        apply_terminal_failure_fields(object, error);
     }
-    database
+    // Nicht collection.incremental_upsert: das schrieb am 20.08.2026 ins Leere
+    // (Dokument blieb pending), und die Verjaehrung verweigerte dieselben zwei
+    // Zombie-Befehle im Sekundentakt — eine Endlosschleife im Journal. Der
+    // kanonische Projektionsschreiber prueft den Bestand und schreibt die
+    // Statusaenderung wirklich.
+    let collection = database
         .collection("business_commands")
-        .context("business_commands collection is not registered")?
-        .incremental_upsert(marked)
+        .context("business_commands collection is not registered")?;
+    incremental_upsert_document_with_envelope(&collection, marked, "stale business command")
         .await
         .map_err(|err| anyhow::anyhow!("terminalize stale business command: {err}"))?;
     Ok(())
@@ -1207,7 +1241,10 @@ pub(super) fn enrich_native_command_lifecycle(
 
 #[cfg(test)]
 mod tests {
-    use super::{business_commands_table_stamp_sql, BUSINESS_COMMAND_RETRY_CANDIDATE_SQL};
+    use super::{
+        apply_terminal_failure_fields, business_commands_table_stamp_sql,
+        BUSINESS_COMMAND_RETRY_CANDIDATE_SQL,
+    };
     use rusqlite::{params, Connection};
     use serde_json::json;
 
@@ -1259,6 +1296,80 @@ mod tests {
             !plan.iter().any(|detail| detail == "SCAN business_commands"),
             "query plan: {plan:#?}"
         );
+    }
+
+    #[test]
+    fn a_terminalized_command_stops_being_a_retry_candidate() {
+        // Die Luecke, die auf der Produktivinstanz einen ganzen Kern kostete:
+        // das SQL-Praedikat war korrekt und der Schreiber schrieb wirklich --
+        // aber er setzte `terminal_status` nicht, also blieb das Dokument
+        // Kandidat und drehte ~20-mal pro Sekunde durch die Verjaehrung.
+        // Dieser Test bindet beide Seiten aneinander.
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE business_commands (
+                id TEXT PRIMARY KEY,
+                deleted INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("create table");
+
+        // Ein Zombie, wie er real vorlag: verjaehrt, aber noch Kandidat.
+        let mut zombie = json!({
+            "id": "cmd_thesen_source_zombie",
+            "status": "failed",
+            "command_type": "outbound.research_source.test",
+        });
+        let vorher: (i64,) = {
+            conn.execute(
+                "INSERT INTO business_commands (id, deleted, data) VALUES ('z', 0, ?1)",
+                params![zombie.to_string()],
+            )
+            .expect("insert zombie");
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM business_commands
+                     WHERE deleted = 0 AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("count before")
+        };
+        assert_eq!(vorher.0, 1, "ohne terminal_status muss er Kandidat sein");
+
+        apply_terminal_failure_fields(
+            zombie.as_object_mut().expect("object"),
+            "stale_command_expired: Befehl ist 569 Stunden alt",
+        );
+        conn.execute(
+            "UPDATE business_commands SET data = ?1 WHERE id = 'z'",
+            params![zombie.to_string()],
+        )
+        .expect("update terminalized");
+
+        let nachher: (i64,) = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM business_commands
+                     WHERE deleted = 0 AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("count after");
+        assert_eq!(
+            nachher.0, 0,
+            "nach der Terminalisierung darf er NICHT mehr aufgegriffen werden"
+        );
+
+        // execution_phase und terminal_status muessen zusammenpassen,
+        // sonst weist validate_terminal_pair das Dokument zurueck.
+        assert_eq!(zombie["execution_phase"], "terminal");
+        assert_eq!(zombie["terminal_status"], "failed");
     }
 
     #[test]
