@@ -16,6 +16,10 @@
   "minimum_stable_releases_after_switch": 1,
   "qualifying_releases": [],
   "legacy_removal_authorized": false,
+  "legacy_runtime_policy": {
+    "document": "retained_until_release_observation",
+    "spreadsheet": "removed_no_safe_fallback"
+  },
   "feature_status_before_authorization": "differential_passed",
   "feature_status_after_authorization": "shipped",
   "required_release_gates": [

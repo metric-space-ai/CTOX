@@ -89,6 +89,7 @@ export async function mount(ctx) {
   const state = {
     ctx,
     ctoxSpreadsheetsModule: null,
+    officeEngine: 'ctox_spreadsheets',
     spreadsheets: [],
     runbooks: [],
     selectedId: '',
@@ -1268,6 +1269,9 @@ function isOfficeSpreadsheetRecord(record) {
 }
 
 async function mountCtoxSpreadsheets(state, host, record, version) {
+  if (state.officeEngine !== 'ctox_spreadsheets') {
+    throw new Error(`Unsupported spreadsheet office engine: ${state.officeEngine}`);
+  }
   if (state.editorHandle?.kind === 'ctox-spreadsheets') await state.editorHandle.destroy();
   state.editorHandle = null;
   state.spreadsheetContainer = null;

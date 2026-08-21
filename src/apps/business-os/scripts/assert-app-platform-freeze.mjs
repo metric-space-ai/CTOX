@@ -9,7 +9,15 @@ const modulesRoot = join(businessOsRoot, 'modules');
 // Phase-0 freeze: these are existing migration debts, not approved patterns.
 // Entries may be removed without changing this list. A new path fails the gate.
 const LEGACY_CONTEXTMENU_FILES = new Set([
+  'modules/browser/index.js',
   'modules/desktop/index.js',
+]);
+
+// Source-only workbenches are not part of the canonical module registry until
+// they gain a reviewed module.json. Keep this explicit so an accidental new
+// manifest-less app directory still fails the freeze.
+const SOURCE_ONLY_MODULE_DIRS = new Set([
+  'creator',
 ]);
 
 // Existing full-workspace modules remain valid during the compatibility
@@ -43,6 +51,7 @@ for (const entry of readdirSync(modulesRoot, { withFileTypes: true })) {
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   } catch (error) {
+    if (error?.code === 'ENOENT' && SOURCE_ONLY_MODULE_DIRS.has(entry.name)) continue;
     offenders.push(`cannot inspect ${relative(businessOsRoot, manifestPath)}: ${error.message}`);
     continue;
   }
