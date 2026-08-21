@@ -46,5 +46,14 @@
   "ctxReload": "Neu laden",
   "ctxCopy": "Kopieren",
   "ctxPaste": "Einfügen",
-  "tabClose": "Tab schließen"
+  "tabClose": "Tab schließen",
+  "btnNewTab": "Neuer Tab",
+  "btnUpload": "Hochladen",
+  "btnTakeControl": "Steuerung übernehmen",
+  "btnReleaseControl": "Steuerung freigeben",
+  "btnObserverAdd": "Beobachter hinzufügen",
+  "btnObserverRemove": "Beobachter entfernen",
+  "btnClipCopy": "Zwischenablage kopieren",
+  "btnClipPaste": "Zwischenablage einfügen",
+  "btnClipClear": "Zwischenablage leeren"
 }
