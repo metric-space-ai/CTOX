@@ -44,7 +44,7 @@ expectIncludes(source, "openChats.length > 1 && openChats.length < MANY_CHAT_THR
 expectIncludes(source, "openChats.length >= MANY_CHAT_THRESHOLD ? 'has-many-chats' : ''", 'Many-chat mode must not activate before high tab counts');
 expectIncludes(source, 'function selectVisibleChats(openChats, activeChat)', 'Busy days must not render every chat tab/window');
 expectIncludes(source, 'const expandedChats = openChats.filter((chat) => !chat.minimized);', 'Minimized chats must be removed from the rendered window set');
-expectIncludes(source, 'const visibleWindowChats = selectVisibleChats(expandedChats, activeExpandedChat);', 'Chat tabs and rendered windows must be selected independently');
+expectIncludes(source, 'const visibleWindowChats = stageWindowChats(activeExpandedChat);', 'Chat tabs and rendered windows must be selected independently');
 expectIncludes(
   source,
   'const windowShapeUnchanged = existingWindows.length === visibleWindowChats.length',
@@ -65,7 +65,8 @@ expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskSta
 expectIncludes(source, '`is-task-${taskState}`', 'Chat chips must include task-state classes');
 expectIncludes(source, '.ctox-chat-chip.is-minimized:not(.is-task-idle)', 'Minimized non-idle chats must keep visible status styling');
 expectIncludes(source, 'function chatDateAriaLabel(dateStr, total = 0)', 'Date history control needs a clear accessible label');
-expectIncludes(source, '<span class="ctox-date-scope">Verlauf</span>', 'Date control must visibly explain it is chat history');
+expectIncludes(source, 'class="ctox-date-scope"', 'Date control must render a visible history label');
+expectIncludes(source, "chatUiIsGerman() ? 'Verlauf' : 'History'", 'Date control must visibly explain it is chat history in the active locale');
 expectIncludes(source, 'chatBusyPanel({ chats: openChats, selectedDate, state })', 'Busy days need a filterable list panel');
 expectIncludes(source, 'data-chat-list-filter="source"', 'Busy-day list must include source filtering');
 expectIncludes(source, 'data-chat-list-filter="group"', 'Busy-day list must include grouping control');
