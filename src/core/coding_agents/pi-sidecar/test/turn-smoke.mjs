@@ -32,6 +32,14 @@ const streamFn = (_model, context) => {
 // business_module_source_files).
 const env = createCtoxSourceExecutionEnv({ files: { "index.js": "export const v = 1;\n" } });
 
+// Pi resolves tool paths with the host platform before invoking our virtual
+// operations. A Windows path must address the same POSIX-shaped projection,
+// not create a second file whose name contains backslashes.
+const portableWrite = await env.writeFile("\\workspace\\portable.js", "portable\n");
+assert.ok(portableWrite.ok, "Windows-shaped virtual write ok");
+const portableRead = await env.readTextFile("/workspace/portable.js");
+assert.deepEqual(portableRead, { ok: true, value: "portable\n" }, "Windows-shaped path is canonicalized");
+
 const result = await runCtoxPiCodingTurn({
   env,
   prompt: "bump v to 2",

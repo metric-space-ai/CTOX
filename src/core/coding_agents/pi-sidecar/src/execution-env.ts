@@ -357,15 +357,18 @@ export class VercelVirtualExecutionEnv implements ExecutionEnv {
   }
 
   private resolvePath(filePath: string): string {
-    return path.isAbsolute(filePath)
-      ? normalizeAbsolutePath(filePath)
-      : normalizeAbsolutePath(path.resolve(this.cwd, filePath));
+    const portablePath = normalizeVirtualInputPath(filePath);
+    return path.isAbsolute(portablePath)
+      ? normalizeAbsolutePath(portablePath)
+      : normalizeAbsolutePath(path.resolve(this.cwd, portablePath));
   }
 
   private resolveFrom(cwd: string, filePath: string): string {
-    return path.isAbsolute(filePath)
-      ? normalizeAbsolutePath(filePath)
-      : normalizeAbsolutePath(path.resolve(cwd, filePath));
+    const portableCwd = normalizeVirtualInputPath(cwd);
+    const portablePath = normalizeVirtualInputPath(filePath);
+    return path.isAbsolute(portablePath)
+      ? normalizeAbsolutePath(portablePath)
+      : normalizeAbsolutePath(path.resolve(portableCwd, portablePath));
   }
 
   private ensureParentDirSync(filePath: string): void {
@@ -863,6 +866,15 @@ export function createVercelVirtualExecutionEnv(options?: VercelVirtualExecution
 function normalizeAbsolutePath(filePath: string): string {
   const normalized = path.normalize(filePath || "/");
   return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+// Upstream Pi's file tools resolve paths with the host platform's node:path.
+// The CTOX projection is deliberately POSIX-shaped on every platform, so a
+// Windows runner can hand us `\workspace\file` for the same virtual path that
+// Unix hands us as `/workspace/file`. Canonicalize that boundary before any
+// lookup to avoid creating a second backslash-named file in the projection.
+function normalizeVirtualInputPath(filePath: string): string {
+  return String(filePath || "").replaceAll("\\", "/");
 }
 
 function abortFileResult<T>(abortSignal: AbortSignal | undefined, filePath: string): Result<T, FileError> | undefined {
