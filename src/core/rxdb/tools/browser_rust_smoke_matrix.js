@@ -1319,7 +1319,11 @@ function validateSmokeMatrixSummaryArtifact(candidate, options = {}, validationO
     if (candidate.source.artifactHashes && typeof candidate.source.artifactHashes === 'object') {
       require(isSha256(candidate.source.artifactHashes.browserBundleSha256), 'source.artifactHashes.browserBundleSha256');
       require(typeof candidate.source.artifactHashes.smokeBinaryPath === 'string' && candidate.source.artifactHashes.smokeBinaryPath.length > 0, 'source.artifactHashes.smokeBinaryPath');
-      require(isSha256(candidate.source.artifactHashes.smokeBinarySha256), 'source.artifactHashes.smokeBinarySha256');
+      const smokeBinaryHash = candidate.source.artifactHashes.smokeBinarySha256;
+      require(
+        isSha256(smokeBinaryHash) || (configurationFailed && !options.final && smokeBinaryHash === null),
+        'source.artifactHashes.smokeBinarySha256',
+      );
     }
   }
   require(typeof candidate.ctoxBin === 'string' && candidate.ctoxBin.length > 0, 'ctoxBin');
