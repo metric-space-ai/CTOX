@@ -10,8 +10,8 @@ base64 = "0.22"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
-eframe = "0.31"
-egui = "0.31"
+eframe = "0.32.3"
+egui = "0.32.3"
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 portable-pty = "0.8"

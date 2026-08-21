@@ -101,7 +101,7 @@ not known reachable P0/P1/P2 findings in the current feature graph.
   passed.
 - Dependency scans: npm audit reports zero vulnerabilities for Business OS,
   Desktop, and ctox.dev; cargo audit has no vulnerability or denied-unsoundness
-  failures across the root, harness, and SQL Server tool lockfiles.
+  failures across every versioned Rust lockfile.
 
 ## Residual risk
 

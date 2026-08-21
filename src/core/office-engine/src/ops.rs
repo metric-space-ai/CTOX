@@ -18,9 +18,9 @@
 // requires updating the execution-surfaces.md tables (CI guard:
 // src/scripts/check-office-skill-gating.mjs).
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
@@ -371,7 +371,10 @@ fn strip_rsid_attrs(start: &BytesStart<'_>) -> anyhow::Result<(BytesStart<'stati
             removed += 1;
             continue;
         }
-        rebuilt.push_attribute((key.as_str(), attr.unescape_value()?.as_ref()));
+        rebuilt.push_attribute((
+            key.as_str(),
+            attr.normalized_value(XmlVersion::Implicit1_0)?.as_ref(),
+        ));
     }
     Ok((rebuilt, removed))
 }
@@ -429,7 +432,10 @@ fn attr_equals(start: &BytesStart<'_>, attr_name: &str, value: &str) -> anyhow::
     for attr in start.attributes() {
         let attr = attr.context("bad attribute")?;
         if String::from_utf8_lossy(attr.key.as_ref()) == attr_name {
-            return Ok(attr.unescape_value()?.as_ref().contains(value));
+            return Ok(attr
+                .normalized_value(XmlVersion::Implicit1_0)?
+                .as_ref()
+                .contains(value));
         }
     }
     Ok(false)
@@ -818,7 +824,7 @@ fn reject_tracked_changes_xml(xml: &[u8]) -> anyhow::Result<Vec<u8>> {
                         let attr = attr.context("bad attribute")?;
                         renamed.push_attribute((
                             String::from_utf8_lossy(attr.key.as_ref()).as_ref(),
-                            attr.unescape_value()?.as_ref(),
+                            attr.normalized_value(XmlVersion::Implicit1_0)?.as_ref(),
                         ));
                     }
                     writer.write_event(Event::Start(renamed))?;
@@ -979,20 +985,21 @@ fn redact_xml(
             }
             Event::Text(text) => {
                 if in_text_depth > 0 {
-                    let value = text.unescape().context("bad text node")?.to_string();
+                    let decoded = text.xml10_content().context("bad text encoding")?;
+                    let value = quick_xml::escape::unescape(&decoded)
+                        .context("bad text node")?
+                        .into_owned();
                     let mut masked = value.clone();
                     for (index, pattern) in patterns.iter().enumerate() {
                         let mut result = String::with_capacity(masked.len());
                         let mut last = 0usize;
                         for found in pattern.find_iter(&masked.clone()) {
                             result.push_str(&masked[last..found.start()]);
-                            result.extend(masked[found.range()].chars().map(|c| {
-                                if c.is_whitespace() {
-                                    c
-                                } else {
-                                    '\u{2588}'
-                                }
-                            }));
+                            result.extend(
+                                masked[found.range()]
+                                    .chars()
+                                    .map(|c| if c.is_whitespace() { c } else { '\u{2588}' }),
+                            );
                             last = found.end();
                             replacements += 1;
                             if index < term_count {
@@ -1140,7 +1147,7 @@ pub fn resolve_comments(package: &[u8], comment_id: Option<&str>) -> anyhow::Res
                 for attr in start.attributes() {
                     let attr = attr.context("bad attribute")?;
                     if String::from_utf8_lossy(attr.key.as_ref()).ends_with("paraId") {
-                        para_id = Some(attr.unescape_value()?.to_string());
+                        para_id = Some(attr.normalized_value(XmlVersion::Implicit1_0)?.to_string());
                     }
                 }
                 let should_flip = para_id
@@ -1156,7 +1163,10 @@ pub fn resolve_comments(package: &[u8], comment_id: Option<&str>) -> anyhow::Res
                         if key.ends_with("done") {
                             continue;
                         }
-                        rebuilt.push_attribute((key.as_str(), attr.unescape_value()?.as_ref()));
+                        rebuilt.push_attribute((
+                            key.as_str(),
+                            attr.normalized_value(XmlVersion::Implicit1_0)?.as_ref(),
+                        ));
                     }
                     rebuilt.push_attribute(("w15:done", "1"));
                     flipped += 1;
@@ -1913,7 +1923,9 @@ fn attr_value(start: &BytesStart<'_>, key: &str) -> anyhow::Result<Option<String
     for attr in start.attributes() {
         let attr = attr.context("bad attribute")?;
         if String::from_utf8_lossy(attr.key.as_ref()) == key {
-            return Ok(Some(attr.unescape_value()?.to_string()));
+            return Ok(Some(
+                attr.normalized_value(XmlVersion::Implicit1_0)?.to_string(),
+            ));
         }
     }
     Ok(None)
@@ -2171,7 +2183,10 @@ fn a11y_fix_xml(
                             if key == "descr" {
                                 continue;
                             }
-                            rebuilt.push_attribute((key.as_str(), attr.unescape_value()?.as_ref()));
+                            rebuilt.push_attribute((
+                                key.as_str(),
+                                attr.normalized_value(XmlVersion::Implicit1_0)?.as_ref(),
+                            ));
                         }
                         rebuilt.push_attribute(("descr", alt.as_str()));
                         alts += 1;
@@ -2407,7 +2422,7 @@ fn analyze_simple_run(events: &[Event<'static>]) -> Option<SimpleRun> {
     let mut text: Option<String> = None;
     let mut space_preserve = false;
     let mut index = 1; // skip Start(w:r)
-                       // Optional rPr subtree.
+    // Optional rPr subtree.
     if let Some(Event::Start(start)) = events.get(index) {
         if qname_string(start) == "w:rPr" {
             let mut depth = 0usize;
@@ -3083,10 +3098,12 @@ mod tests {
         assert!(!document.contains("w:rsid"));
         let settings = part_text(&scrubbed, "word/settings.xml");
         assert!(!settings.contains("w:rsids"));
-        assert!(read_parts(&scrubbed)
-            .unwrap()
-            .get("docProps/custom.xml")
-            .is_none());
+        assert!(
+            read_parts(&scrubbed)
+                .unwrap()
+                .get("docProps/custom.xml")
+                .is_none()
+        );
         let content_types = part_text(&scrubbed, "[Content_Types].xml");
         assert!(!content_types.contains("custom.xml"));
         let rels = part_text(&scrubbed, "_rels/.rels");
@@ -3549,8 +3566,11 @@ mod tests {
         let csv = "Name,Value\n\"quoted, comma\",\"line\nbreak\"\nplain,42";
         let imported = table_import(&package, csv, true).unwrap();
         let document = part_text(&imported, "word/document.xml");
-        assert!(document
-            .contains("<w:tblGrid><w:gridCol w:w=\"4680\"/><w:gridCol w:w=\"4680\"/></w:tblGrid>"));
+        assert!(
+            document.contains(
+                "<w:tblGrid><w:gridCol w:w=\"4680\"/><w:gridCol w:w=\"4680\"/></w:tblGrid>"
+            )
+        );
         assert!(document.contains("quoted, comma"));
         assert!(document.contains(">42</w:t>"));
         // Round trip: the imported table is extractable again (it is the

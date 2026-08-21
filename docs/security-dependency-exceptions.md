@@ -1,9 +1,10 @@
 # Rust dependency audit exceptions
 
-CTOX's Rust dependency gate scans the root, harness, and SQL Server tool
-lockfiles. It permits three root-lockfile-only advisories while failing if
-either affected package becomes reachable in any target's active dependency
-graph.
+CTOX's Rust dependency gate scans every versioned Rust lockfile. It permits
+three lockfile-only advisories only in the root lockfile and, for the RSA
+advisory, the harness lockfile. The gate independently fails if an affected
+package becomes reachable in either active dependency graph. Other standalone
+lockfiles do not inherit these exceptions.
 
 - `quick-xml 0.39.4` (`RUSTSEC-2026-0194`, `RUSTSEC-2026-0195`) is recorded by
   the optional `object_store` cloud feature of `polars-io`. CTOX disables the
@@ -14,8 +15,9 @@ graph.
   generation and key-format validation use `aws-lc-rs` instead.
 
 `src/scripts/audit-rust-dependencies.sh` proves these packages are unreachable
-before passing their advisory IDs to `cargo audit`. Any future feature change
-that activates either package therefore fails CI before the exception applies.
+before passing their advisory IDs to `cargo audit`; the harness has a separate
+RSA reachability proof. Any future feature change that activates either package
+therefore fails CI before the exception applies.
 
 ## RustSec unsoundness warnings
 

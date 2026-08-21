@@ -12,19 +12,41 @@ for package in quick-xml@0.39.4 rsa@0.9.10; do
   fi
 done
 
-for lockfile in Cargo.lock src/core/harness/Cargo.lock src/tools/sqlserver-mcp/Cargo.lock; do
-  cargo audit \
-    --file "$lockfile" \
-    --deny unsound \
-    --ignore RUSTSEC-2026-0194 \
-    --ignore RUSTSEC-2026-0195 \
-    --ignore RUSTSEC-2023-0071 \
-    --ignore RUSTSEC-2026-0002 \
-    --ignore RUSTSEC-2026-0097 \
-    --ignore RUSTSEC-2026-0183 \
-    --ignore RUSTSEC-2026-0184 \
-    --ignore RUSTSEC-2026-0186 \
-    --ignore RUSTSEC-2026-0190 \
-    --ignore RUSTSEC-2026-0221 \
-    --ignore RUSTSEC-2026-0253
-done
+if [ -n "$(cargo tree --locked --manifest-path src/core/harness/Cargo.toml --target all -i rsa@0.9.10 2>/dev/null)" ]; then
+  echo "security exception became reachable in the harness: rsa@0.9.10" >&2
+  exit 1
+fi
+
+audit_args=(
+  --deny unsound
+  --ignore RUSTSEC-2026-0002
+  --ignore RUSTSEC-2026-0097
+  --ignore RUSTSEC-2026-0183
+  --ignore RUSTSEC-2026-0184
+  --ignore RUSTSEC-2026-0186
+  --ignore RUSTSEC-2026-0190
+  --ignore RUSTSEC-2026-0221
+  --ignore RUSTSEC-2026-0253
+)
+
+# The XML and RSA exceptions are root-lockfile-only. Never extend them to a
+# standalone component without a separate reachability proof.
+cargo audit \
+  --file Cargo.lock \
+  "${audit_args[@]}" \
+  --ignore RUSTSEC-2026-0194 \
+  --ignore RUSTSEC-2026-0195 \
+  --ignore RUSTSEC-2023-0071
+
+while IFS= read -r lockfile; do
+  [ "$lockfile" = "Cargo.lock" ] && continue
+  if [ "$lockfile" = "src/core/harness/Cargo.lock" ]; then
+    cargo audit \
+      --no-fetch \
+      --file "$lockfile" \
+      "${audit_args[@]}" \
+      --ignore RUSTSEC-2023-0071
+  else
+    cargo audit --no-fetch --file "$lockfile" "${audit_args[@]}"
+  fi
+done < <(git ls-files | awk '/(^|\/)Cargo[.]lock$/' | sort)
