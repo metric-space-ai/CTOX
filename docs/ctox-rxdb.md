@@ -362,8 +362,14 @@ documents is `runtime/business-os-rxdb.sqlite3` as above.
   role. Re-labeling a browser connection as `ctox_instance` therefore fails;
   changing a commitment moves the peer into another namespace. Missing or
   invalid bindings fail closed. Canonical `wss://signaling.ctox.dev` URLs are
-  migrated to the strict role-bound `/v2` endpoint; the worker root remains a
-  temporary compatibility path for pre-v2 clients.
+  migrated to the strict role-bound `/v2` endpoint. Browser bootstrap payloads
+  contain only the browser-role token, never the underlying room secret or the
+  native-role token. `ctox business-os peer rotate` rotates both role
+  credentials for incident response; the narrower `rotate-room` and
+  `rotate-native` commands are available for controlled maintenance. The
+  signaling worker root is retired with HTTP 410; role-bound CTOX clients use
+  `/v2`, while the separate Metric Space compatibility route remains scoped to
+  its own host/path and credential contract.
 - **Token freshness is re-stamped per connect attempt on BOTH sides.**
   Browser: `webrtc-native.mjs::buildSignalingUrl` rewrites
   `token_iat`/`token_exp` keeping the original TTL length on every connect.

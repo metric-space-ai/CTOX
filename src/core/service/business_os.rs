@@ -621,8 +621,14 @@ fn handle_business_os_peer(root: &Path, args: &[String]) -> anyhow::Result<()> {
         None | Some("status") => print_json(&serde_json::to_value(
             crate::business_os::store::sync_config(root)?,
         )?),
-        Some("rotate") | Some("rotate-room") => print_json(&serde_json::to_value(
+        Some("rotate") => print_json(&serde_json::to_value(
+            crate::business_os::store::rotate_sync_credentials(root)?,
+        )?),
+        Some("rotate-room") => print_json(&serde_json::to_value(
             crate::business_os::store::rotate_sync_room_password(root)?,
+        )?),
+        Some("rotate-native") => print_json(&serde_json::to_value(
+            crate::business_os::store::rotate_sync_native_signaling_token(root)?,
         )?),
         Some("start") => crate::business_os::run_native_peer_foreground(root),
         Some("ensure") => {
@@ -3804,8 +3810,8 @@ fn business_os_usage() -> String {
             "  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]\n  ctox business-os app bench status --run-id <id> [--validate]",
         )
         .replace(
-            "  ctox business-os peer start\n  ctox business-os desktop invite",
-            "  ctox business-os peer start\n  ctox business-os auth issue-capability --user <user-id> [--display-name <name>] [--role chef|admin|founder|user] [--ensure-user]\n  ctox business-os desktop invite",
+            "  ctox business-os peer rotate\n  ctox business-os peer start\n  ctox business-os desktop invite",
+            "  ctox business-os peer rotate\n  ctox business-os peer rotate-room\n  ctox business-os peer rotate-native\n  ctox business-os peer start\n  ctox business-os auth issue-capability --user <user-id> [--display-name <name>] [--role chef|admin|founder|user] [--ensure-user]\n  ctox business-os desktop invite",
         )
         .replace(
             "  ctox business-os desktop invite [--display-name <name>] [--ttl-hours <n> | --expires-at <rfc3339>] [--format json|link] [--output <path>]",

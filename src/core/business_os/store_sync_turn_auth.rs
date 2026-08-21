@@ -570,12 +570,19 @@ fn signaling_token_hash(token: &str) -> String {
 }
 
 fn business_os_native_signaling_token(root: &Path) -> anyhow::Result<String> {
-    static TOKEN_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _token_init_guard = TOKEN_INIT_LOCK
-        .get_or_init(|| Mutex::new(()))
+    let _token_init_guard = native_signaling_token_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("native signaling token initialization lock poisoned"))?;
 
+    read_or_create_native_signaling_token(root)
+}
+
+fn native_signaling_token_lock() -> &'static Mutex<()> {
+    static TOKEN_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TOKEN_INIT_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn read_or_create_native_signaling_token(root: &Path) -> anyhow::Result<String> {
     if let Ok(value) = crate::secrets::read_secret_value(
         root,
         BUSINESS_OS_SECRET_SCOPE,
@@ -587,20 +594,29 @@ fn business_os_native_signaling_token(root: &Path) -> anyhow::Result<String> {
         }
     }
 
+    let generated = generate_native_signaling_token()?;
+    write_native_signaling_token(root, &generated, "business_os_sync_config")?;
+    Ok(generated)
+}
+
+fn generate_native_signaling_token() -> anyhow::Result<String> {
     let mut bytes = [0u8; 32];
     SystemRandom::new()
         .fill(&mut bytes)
         .map_err(|_| anyhow::anyhow!("failed to generate native signaling token"))?;
-    let generated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn write_native_signaling_token(root: &Path, token: &str, source: &str) -> anyhow::Result<()> {
     crate::secrets::write_secret_record(
         root,
         BUSINESS_OS_SECRET_SCOPE,
         BUSINESS_OS_SIGNALING_NATIVE_TOKEN_SECRET_NAME,
-        &generated,
+        token,
         Some("Business OS native-only WebRTC signaling credential".to_owned()),
-        serde_json::json!({"source": "business_os_sync_config", "auto_managed": true}),
+        serde_json::json!({"source": source, "auto_managed": true}),
     )?;
-    Ok(generated)
+    Ok(())
 }
 
 pub fn sync_config_for_browser(
@@ -608,6 +624,9 @@ pub fn sync_config_for_browser(
     turn_session_id: &str,
 ) -> anyhow::Result<BusinessOsSyncConfig> {
     let mut config = sync_config(root)?;
+    // Role-bound signaling gives the browser its own credential. Do not expose
+    // the root room secret as a redundant credential in any browser payload.
+    config.signaling_room_password.clear();
     if let Some(turn) = ephemeral_turn_server(root, turn_session_id) {
         config.ice_servers.push(turn);
     }
@@ -615,16 +634,32 @@ pub fn sync_config_for_browser(
     Ok(config)
 }
 
+pub fn rotate_sync_native_signaling_token(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
+    let _rotation_guard = native_signaling_token_lock()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native signaling token rotation lock poisoned"))?;
+    let generated = generate_native_signaling_token()?;
+    write_native_signaling_token(
+        root,
+        &generated,
+        "business_os_native_signaling_token_rotation",
+    )?;
+    // Avoid reacquiring the same non-reentrant lock through sync_config().
+    drop(_rotation_guard);
+    sync_config(root)
+}
+
+/// Rotate both signaling roles for incident response and managed pairing
+/// revocation. The room change forces the native peer to respawn while the
+/// independent native token invalidates any leaked native-only credential.
+pub fn rotate_sync_credentials(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
+    ensure_sync_room_password_rotation_allowed()?;
+    rotate_sync_native_signaling_token(root)?;
+    rotate_sync_room_password(root)
+}
+
 pub fn rotate_sync_room_password(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
-    if env::var("CTOX_BUSINESS_OS_ROOM_PASSWORD")
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        anyhow::bail!(
-            "CTOX_BUSINESS_OS_ROOM_PASSWORD is set; unset the environment override before rotating the persisted Business OS room password"
-        );
-    }
+    ensure_sync_room_password_rotation_allowed()?;
 
     let generated = format!("ctox-room-{}", Uuid::new_v4().simple());
     crate::secrets::write_secret_record(
@@ -636,6 +671,19 @@ pub fn rotate_sync_room_password(root: &Path) -> anyhow::Result<BusinessOsSyncCo
         serde_json::json!({"source": "business_os_sync_config_rotation"}),
     )?;
     sync_config(root)
+}
+
+fn ensure_sync_room_password_rotation_allowed() -> anyhow::Result<()> {
+    if env::var("CTOX_BUSINESS_OS_ROOM_PASSWORD")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "CTOX_BUSINESS_OS_ROOM_PASSWORD is set; unset the environment override before rotating the persisted Business OS room password"
+        );
+    }
+    Ok(())
 }
 
 fn ice_servers_config(root: &Path) -> Vec<Value> {

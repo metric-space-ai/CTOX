@@ -2393,6 +2393,7 @@ async fn run_native_peer(
     let mut sync_config = store::sync_config(&root)?;
     let stable_native_peer_id = sync_config.peer_id.clone();
     let signaling_auth = store::signaling_auth_config(&root, &signaling_room_password)?;
+    let active_native_token_hash = signaling_auth.native_token_hash.clone();
     // The provider re-derives the URLs — including fresh `token_iat`/
     // `token_exp` — on EVERY signaling (re)connect attempt. Baking the token
     // window in once meant that after >24h uptime any socket drop became a
@@ -2935,6 +2936,7 @@ async fn run_native_peer(
                     &root,
                     &sync_room,
                     &signaling_room_password,
+                    &active_native_token_hash,
                     &configured_signaling_urls,
                 ) {
                     Ok(true) => {
@@ -3041,11 +3043,14 @@ fn native_peer_sync_config_changed(
     root: &Path,
     active_sync_room: &str,
     active_signaling_room_password: &str,
+    active_native_token_hash: &str,
     active_signaling_urls: &[String],
 ) -> anyhow::Result<bool> {
     let config = store::sync_connection_config(root)?;
+    let signaling_auth = store::signaling_auth_config(root, &config.signaling_room_password)?;
     Ok(config.sync_room != active_sync_room
         || config.signaling_room_password != active_signaling_room_password
+        || signaling_auth.native_token_hash != active_native_token_hash
         || normalized_signaling_urls(&config.signaling_urls)
             != normalized_signaling_urls(active_signaling_urls))
 }
@@ -11264,6 +11269,7 @@ pub(in crate::business_os) mod tests {
                 root.path(),
                 &initial.sync_room,
                 &initial.signaling_room_password,
+                &initial.signaling_native_token_hash,
                 &initial.signaling_urls,
             )
             .expect("unchanged config check"),
@@ -11278,10 +11284,32 @@ pub(in crate::business_os) mod tests {
                 root.path(),
                 &initial.sync_room,
                 &initial.signaling_room_password,
+                &initial.signaling_native_token_hash,
                 &initial.signaling_urls,
             )
             .expect("rotated config check"),
             "room rotation must force native peer respawn"
+        );
+    }
+
+    #[test]
+    fn native_peer_sync_config_change_detects_native_token_rotation() {
+        let root = tempfile::tempdir().expect("temp root");
+        let initial = store::sync_config(root.path()).expect("initial sync config");
+
+        store::rotate_sync_native_signaling_token(root.path())
+            .expect("rotate native signaling token");
+
+        assert!(
+            native_peer_sync_config_changed(
+                root.path(),
+                &initial.sync_room,
+                &initial.signaling_room_password,
+                &initial.signaling_native_token_hash,
+                &initial.signaling_urls,
+            )
+            .expect("native token rotation check"),
+            "native token rotation must force native peer respawn"
         );
     }
 

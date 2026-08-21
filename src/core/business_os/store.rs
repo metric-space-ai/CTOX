@@ -456,6 +456,7 @@ pub struct BusinessOsSyncConfig {
     pub native_peer_id: String,
     pub peer_role: &'static str,
     pub sync_room: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub signaling_room_password: String,
     pub signaling_auth_version: &'static str,
     pub signaling_browser_token: String,
@@ -23585,6 +23586,19 @@ pub(super) mod tests {
         assert!(server.get("credential").and_then(Value::as_str).is_some());
 
         let config = sync_config_for_browser(root, "browser-2")?;
+        assert!(
+            config.signaling_room_password.is_empty(),
+            "browser sync config must not expose the root room secret"
+        );
+        assert!(
+            !config.signaling_browser_token.is_empty(),
+            "browser sync config must retain its role-bound credential"
+        );
+        let browser_json = serde_json::to_value(&config)?;
+        assert!(
+            browser_json.get("signaling_room_password").is_none(),
+            "browser sync config must omit the root room secret field"
+        );
         assert!(config
             .ice_servers
             .iter()
@@ -33146,6 +33160,32 @@ pub(super) mod tests {
         );
         assert_eq!(rotated.sync_room, reloaded.sync_room);
         assert!(rotated.sync_room.starts_with("ctox-business-os:"));
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_sync_credentials_revokes_both_signaling_roles() -> anyhow::Result<()> {
+        if env::var("CTOX_BUSINESS_OS_ROOM_PASSWORD")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Ok(());
+        }
+
+        let temp = tempdir()?;
+        let root = temp.path();
+        let first = sync_config(root)?;
+        let rotated = rotate_sync_credentials(root)?;
+
+        assert_ne!(first.sync_room, rotated.sync_room);
+        assert_ne!(
+            first.signaling_browser_token_hash,
+            rotated.signaling_browser_token_hash
+        );
+        assert_ne!(
+            first.signaling_native_token_hash,
+            rotated.signaling_native_token_hash
+        );
         Ok(())
     }
 

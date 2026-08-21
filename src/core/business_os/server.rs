@@ -754,15 +754,19 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
         }
         (Method::Get, "/api/business-os/sync/config") => {
             let session = request_session(root, &request);
-            let turn_session = session
-                .user
-                .as_ref()
-                .map(|user| user.id.clone())
-                .unwrap_or_else(|| "browser".to_owned());
-            respond_json(
-                request,
-                &store::sync_config_for_browser(root, &turn_session)?,
-            )?;
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let turn_session = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                respond_json(
+                    request,
+                    &store::sync_config_for_browser(root, &turn_session)?,
+                )?;
+            }
         }
         (Method::Post, "/api/business-os/sync/native-peer/restart") => {
             if std::env::var_os("CTOX_BUSINESS_OS_ENABLE_SMOKE_CONTROLS").is_none() {
@@ -783,145 +787,6 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 match crate::mission::channels::list_communication_accounts_for_business_os(root) {
                     Ok(value) => respond_json_value(request, value)?,
                     Err(error) => respond_status(request, 500, &error.to_string())?,
-                }
-            }
-        }
-        (Method::Get, "/api/business-os/mail/accounts") => {
-            let session = request_session(root, &request);
-            if !session.authenticated {
-                respond_status(request, 401, "login required")?;
-            } else {
-                let manage_all = store::session_can_manage_all(&session);
-                let session_user = session
-                    .user
-                    .as_ref()
-                    .map(|user| user.id.clone())
-                    .unwrap_or_default();
-                let accounts = crate::communication::email_accounts::load_accounts(root)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|account| manage_all || account.owner_user_id == session_user)
-                    .map(|account| {
-                        crate::communication::email_accounts::public_json(root, &account)
-                    })
-                    .collect::<Vec<_>>();
-                respond_json_value(
-                    request,
-                    serde_json::json!({ "ok": true, "accounts": accounts }),
-                )?;
-            }
-        }
-        (Method::Post, "/api/business-os/mail/accounts") => {
-            let session = request_session(root, &request);
-            if !session.authenticated {
-                respond_status(request, 401, "login required")?;
-            } else {
-                let manage_all = store::session_can_manage_all(&session);
-                let session_user = session
-                    .user
-                    .as_ref()
-                    .map(|user| user.id.clone())
-                    .unwrap_or_default();
-                let body = read_json(&mut request)?;
-                let field = |key: &str| -> String {
-                    body.get(key)
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim()
-                        .to_owned()
-                };
-                let port = |key: &str| -> u16 {
-                    body.get(key)
-                        .and_then(Value::as_u64)
-                        .and_then(|value| u16::try_from(value).ok())
-                        .unwrap_or(0)
-                };
-                let requested_owner = field("owner_user_id");
-                let owner = if manage_all && !requested_owner.is_empty() {
-                    requested_owner
-                } else {
-                    session_user.clone()
-                };
-                let address =
-                    crate::communication::email_accounts::normalize_address(&field("address"));
-                let existing_owner = crate::communication::email_accounts::load_accounts(root)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|account| account.address == address)
-                    .map(|account| account.owner_user_id);
-                if let Some(existing_owner) = existing_owner {
-                    if !manage_all && existing_owner != session_user {
-                        respond_status(request, 403, "account belongs to another user")?;
-                        return Ok(());
-                    }
-                }
-                let config = crate::communication::email_accounts::EmailAccountConfig {
-                    address,
-                    display_name: field("display_name"),
-                    provider: field("provider"),
-                    imap_host: field("imap_host"),
-                    imap_port: port("imap_port"),
-                    smtp_host: field("smtp_host"),
-                    smtp_port: port("smtp_port"),
-                    username: field("username"),
-                    owner_user_id: owner,
-                };
-                let password = field("password");
-                let password = if password.is_empty() {
-                    None
-                } else {
-                    Some(password)
-                };
-                match crate::communication::email_accounts::upsert_account(
-                    root,
-                    config,
-                    password.as_deref(),
-                ) {
-                    Ok(saved) => respond_json_value(
-                        request,
-                        serde_json::json!({
-                            "ok": true,
-                            "account": crate::communication::email_accounts::public_json(root, &saved),
-                        }),
-                    )?,
-                    Err(error) => respond_status(request, 400, &error.to_string())?,
-                }
-            }
-        }
-        (Method::Post, "/api/business-os/mail/accounts/delete") => {
-            let session = request_session(root, &request);
-            if !session.authenticated {
-                respond_status(request, 401, "login required")?;
-            } else {
-                let manage_all = store::session_can_manage_all(&session);
-                let session_user = session
-                    .user
-                    .as_ref()
-                    .map(|user| user.id.clone())
-                    .unwrap_or_default();
-                let body = read_json(&mut request)?;
-                let address = crate::communication::email_accounts::normalize_address(
-                    body.get("address").and_then(Value::as_str).unwrap_or(""),
-                );
-                let owner = crate::communication::email_accounts::load_accounts(root)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|account| account.address == address)
-                    .map(|account| account.owner_user_id);
-                match owner {
-                    None => respond_status(request, 404, "unknown mail account")?,
-                    Some(owner) if !manage_all && owner != session_user => {
-                        respond_status(request, 403, "account belongs to another user")?
-                    }
-                    Some(_) => {
-                        match crate::communication::email_accounts::delete_account(root, &address) {
-                            Ok(removed) => respond_json_value(
-                                request,
-                                serde_json::json!({ "ok": true, "removed": removed }),
-                            )?,
-                            Err(error) => respond_status(request, 400, &error.to_string())?,
-                        }
-                    }
                 }
             }
         }
@@ -1104,13 +969,6 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
             // through workspace.branding.manage and never carry RxDB data.
             | "/api/business-os/design-templates"
             | "/api/business-os/design-templates/delete"
-            // Personal external mail-account configuration (Mail app setting).
-            // Carries connector config only; passwords go straight into the
-            // CTOX secret store and never appear in responses. No Business OS
-            // collection records flow here — message data still syncs
-            // exclusively through RxDB/WebRTC.
-            | "/api/business-os/mail/accounts"
-            | "/api/business-os/mail/accounts/delete"
             // Peer-lifecycle control for the rxdb-soak rollover mode: restarts
             // the in-process native peer. No Business OS records flow here and
             // the route itself answers 403 unless
@@ -3872,7 +3730,23 @@ fn add_cors_headers<R: io::Read>(response: &mut Response<R>) {
 }
 
 fn add_common_response_headers<R: io::Read>(response: &mut Response<R>) {
-    let _ = response;
+    response.add_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap());
+    response.add_header(Header::from_bytes("X-Frame-Options", "DENY").unwrap());
+    response.add_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap());
+    response.add_header(
+        Header::from_bytes(
+            "Permissions-Policy",
+            "camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), serial=()",
+        )
+        .unwrap(),
+    );
+    response.add_header(
+        Header::from_bytes(
+            "Content-Security-Policy",
+            "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'",
+        )
+        .unwrap(),
+    );
     // tiny_http filters hop-by-hop response headers such as Connection here.
     // Static Business OS assets use respond_static_success() so Chromium does
     // not leave the ES-module graph stuck on a kept-alive loopback connection.
@@ -3988,11 +3862,21 @@ fn write_static_not_modified_response<W: Write>(
 ) -> io::Result<()> {
     write!(writer, "HTTP/1.1 304 Not Modified\r\n")?;
     write!(writer, "Cache-Control: {cache_control}\r\n")?;
+    write_static_security_headers(&mut writer)?;
     write!(writer, "ETag: {etag}\r\n")?;
     write!(writer, "Vary: Accept-Encoding\r\n")?;
     write!(writer, "Connection: close\r\n")?;
     write!(writer, "\r\n")?;
     writer.flush()
+}
+
+fn write_static_security_headers<W: Write>(writer: &mut W) -> io::Result<()> {
+    write!(writer, "X-Content-Type-Options: nosniff\r\n")?;
+    write!(writer, "X-Frame-Options: DENY\r\n")?;
+    write!(writer, "Referrer-Policy: no-referrer\r\n")?;
+    write!(writer, "Permissions-Policy: camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), serial=()\r\n")?;
+    write!(writer, "Content-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n")?;
+    Ok(())
 }
 
 fn write_static_success_response<W: Write>(
@@ -4006,6 +3890,7 @@ fn write_static_success_response<W: Write>(
     write!(writer, "HTTP/1.1 200 OK\r\n")?;
     write!(writer, "Content-Type: {content_type}\r\n")?;
     write!(writer, "Cache-Control: {cache_control}\r\n")?;
+    write_static_security_headers(&mut writer)?;
     if let Some(etag) = etag {
         write!(writer, "ETag: {etag}\r\n")?;
     }
@@ -4361,6 +4246,10 @@ mod tests {
         assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(raw.contains("\r\nContent-Type: text/javascript; charset=utf-8\r\n"));
         assert!(raw.contains("\r\nCache-Control: public, max-age=300\r\n"));
+        assert!(raw.contains("\r\nX-Content-Type-Options: nosniff\r\n"));
+        assert!(raw.contains("\r\nX-Frame-Options: DENY\r\n"));
+        assert!(raw.contains("\r\nReferrer-Policy: no-referrer\r\n"));
+        assert!(raw.contains("\r\nContent-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n"));
         assert!(!raw.contains("\r\nETag:"));
         assert!(raw.contains("\r\nContent-Length: 18\r\n"));
         assert!(raw.contains("\r\nConnection: close\r\n"));
@@ -4400,22 +4289,20 @@ mod tests {
     }
 
     #[test]
-    fn static_index_revalidates_with_a_bodyless_304() {
+    fn static_not_modified_response_is_bodyless_and_hardened() {
         assert_eq!(
             business_os_static_cache_control(true, "index.html", "/"),
-            "no-cache, must-revalidate"
+            "no-store"
         );
         let mut response = Vec::new();
-        write_static_not_modified_response(
-            &mut response,
-            "no-cache, must-revalidate",
-            "W/\"shell\"",
-        )
-        .expect("write 304 response");
+        write_static_not_modified_response(&mut response, "no-store", "W/\"shell\"")
+            .expect("write 304 response");
         let raw = String::from_utf8(response).expect("utf8 response");
         assert!(raw.starts_with("HTTP/1.1 304 Not Modified\r\n"));
-        assert!(raw.contains("\r\nCache-Control: no-cache, must-revalidate\r\n"));
+        assert!(raw.contains("\r\nCache-Control: no-store\r\n"));
         assert!(raw.contains("\r\nETag: W/\"shell\"\r\n"));
+        assert!(raw.contains("\r\nX-Content-Type-Options: nosniff\r\n"));
+        assert!(raw.contains("\r\nContent-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n"));
         assert!(raw.ends_with("\r\n\r\n"));
     }
 
