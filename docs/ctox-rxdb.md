@@ -349,12 +349,21 @@ documents is `runtime/business-os-rxdb.sqlite3` as above.
 - **Signaling URL, browser:** `sync.js::signalingUrlWithBrowserMetadata` sets
   `client=ctox-business-os-browser`, `role=browser`, `instance_id`,
   `protocol=ctox-rxdb-protocol-v1`, `cap=` for each browser capability, and a
-  token = first 32 chars of base64url(SHA-256(room password)) with
-  `token_iat`/`token_exp` (24 h TTL).
+  a browser-only token = first 32 chars of base64url(SHA-256(room password))
+  with `token_iat`/`token_exp` (24 h TTL).
 - **Signaling URL, native:** `rxdb_peer.rs::signaling_url_with_native_metadata`
-  mirrors this with `client=ctox-business-os-native`, `role=ctox_instance`
-  and the same token derivation (`signaling_token_from_room_password`,
-  `SIGNALING_TOKEN_TTL_SECONDS = 24h`).
+  uses the stable `ctox-core-{instance hash}` identity,
+  `role=ctox_instance`, and a separate random credential persisted only in
+  the CTOX secret store. The browser never receives that native credential.
+- **Cryptographic role binding:** both peers send
+  `auth_version=ctox-role-bound-v1` plus SHA-256 commitments for the browser
+  and native credentials. The signaling service derives one room namespace
+  from both commitments and verifies the presented token against the claimed
+  role. Re-labeling a browser connection as `ctox_instance` therefore fails;
+  changing a commitment moves the peer into another namespace. Missing or
+  invalid bindings fail closed. Canonical `wss://signaling.ctox.dev` URLs are
+  migrated to the strict role-bound `/v2` endpoint; the worker root remains a
+  temporary compatibility path for pre-v2 clients.
 - **Token freshness is re-stamped per connect attempt on BOTH sides.**
   Browser: `webrtc-native.mjs::buildSignalingUrl` rewrites
   `token_iat`/`token_exp` keeping the original TTL length on every connect.
@@ -367,6 +376,11 @@ documents is `runtime/business-os-rxdb.sqlite3` as above.
   (peerId, role, protocol, …; `signaling_protocol.rs::SignalingPeerDescriptor`);
   control-plane rejections arrive as `ctoxError` frames just before the
   server closes the socket.
+- When `native_peer_id` is configured, the browser accepts only a descriptor
+  matching that stable identity. It does not fall back to another peer merely
+  because that peer self-declares `role=ctox_instance`; supervised native
+  process restarts keep the stable identity while `peer_session_id` still
+  rotates for checkpoint and lifecycle invalidation.
 
 ### 5.2 Who initiates
 

@@ -16,7 +16,7 @@ const RXDB_RESET_TIMEOUT_MS = 5000;
 const INDEXEDDB_PREFLIGHT_TIMEOUT_MS = 8000;
 const RXDB_MODULE_IMPORT_TIMEOUT_MS = 8000;
 const RXDB_CREATE_DATABASE_TIMEOUT_MS = 8000;
-const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260820-safetynet-rxdb-v184';
+const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260821-role-bound-signaling-v185';
 const DEMAND_CACHE_MIGRATION = 'sellify-demand-cache-v1';
 const SELLIFY_DEMAND_CACHE_COLLECTIONS = Object.freeze([
   'sellify_activities',
