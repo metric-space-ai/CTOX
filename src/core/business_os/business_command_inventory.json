@@ -223,7 +223,10 @@
     "browser.reload",
     "browser.reset",
     "browser.session.start",
-    "browser.session.stop"
+    "browser.session.stop",
+    "browser.tab.activate",
+    "browser.tab.close",
+    "browser.tab.open"
   ],
   "control_predicates": [
     "command_type.starts_with(\"ctox.channel.\")",
@@ -292,7 +295,6 @@
     "ctox.mailserver.delete_user",
     "ctox.mailserver.get_config",
     "ctox.mailserver.save_domain",
-    "ctox.mailserver.save_runtime",
     "ctox.mailserver.save_user",
     "ctox.maintenance.client_ready",
     "ctox.module.assign_founder",
@@ -356,7 +358,6 @@
     "outbound.pipeline.outreach_draft",
     "outbound.pipeline.write_outreach_draft",
     "outbound.source.import",
-    "rem.persistence.save",
     "research.knowledge.refresh",
     "research.systematic.report.create",
     "research.systematic.run",

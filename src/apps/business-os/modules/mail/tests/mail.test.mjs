@@ -8,7 +8,7 @@ import { build } from 'esbuild';
 import { collections as conversationCollections } from '../../conversations/schema.js';
 // Gleicher Query-String wie in ../schema.js — sonst erzeugt Node eine zweite
 // Modulinstanz und die Referenzgleichheits-Pruefung unten schlaegt fehl.
-import { collections as ctoxCollections } from '../../ctox/schema.js?v=20260811-verlauf-startet-heute-v98';
+import { collections as ctoxCollections } from '../../ctox/schema.js?v=20260811-fremde-collection-mitladen-v106';
 import { collections as appStoreCollections } from '../../app-store/schema.js';
 import { collections as documentCollections } from '../../documents/schema.js';
 import { collections as mailCollections } from '../schema.js';

@@ -3,7 +3,6 @@ use std::ffi::OsStr;
 use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
-use serial_test::serial;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -20,6 +19,8 @@ use ctox_protocol::models::LocalShellExecAction;
 use ctox_protocol::models::LocalShellStatus;
 use ctox_protocol::models::MessagePhase;
 use ctox_protocol::models::ResponseItem;
+
+static ARC_MONITOR_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct EnvVarGuard {
     key: &'static str,
@@ -247,8 +248,8 @@ async fn build_arc_monitor_request_includes_relevant_history_and_null_policies()
 }
 
 #[tokio::test]
-#[serial(arc_monitor_env)]
 async fn monitor_action_posts_expected_arc_request() {
+    let _test_guard = ARC_MONITOR_ENV_TEST_LOCK.lock().await;
     let server = MockServer::start().await;
     let (session, mut turn_context) = make_session_and_context().await;
     turn_context.auth_manager = Some(crate::test_support::auth_manager_from_auth(
@@ -330,8 +331,8 @@ async fn monitor_action_posts_expected_arc_request() {
 }
 
 #[tokio::test]
-#[serial(arc_monitor_env)]
 async fn monitor_action_uses_env_url_and_token_overrides() {
+    let _test_guard = ARC_MONITOR_ENV_TEST_LOCK.lock().await;
     let server = MockServer::start().await;
     let _url_guard = EnvVarGuard::set(
         CODEX_ARC_MONITOR_ENDPOINT_OVERRIDE,
@@ -387,8 +388,8 @@ async fn monitor_action_uses_env_url_and_token_overrides() {
 }
 
 #[tokio::test]
-#[serial(arc_monitor_env)]
 async fn monitor_action_rejects_legacy_response_fields() {
+    let _test_guard = ARC_MONITOR_ENV_TEST_LOCK.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/codex/safety/arc"))

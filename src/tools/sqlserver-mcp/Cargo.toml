@@ -14,7 +14,7 @@ anyhow = "1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls", "tokio"] }
+tiberius = { path = "patches/tiberius", default-features = false, features = ["tds73", "rustls", "tokio"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 

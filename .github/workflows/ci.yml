@@ -46,7 +46,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: src/apps/business-os-desktop
-        run: npm ci
+        run: |
+          npm ci
+          npm audit --audit-level=low
 
       - name: Unit tests
         working-directory: src/apps/business-os-desktop
@@ -187,6 +189,14 @@ jobs:
       - name: Format check
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo fmt --check
+
+      - name: Install Rust dependency auditor
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit Rust dependencies
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: src/scripts/audit-rust-dependencies.sh
 
       - name: Installer script checks
         if: matrix.target == 'x86_64-unknown-linux-gnu'

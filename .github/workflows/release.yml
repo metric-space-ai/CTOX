@@ -69,6 +69,12 @@ jobs:
           sudo apt-get install -y \
             libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev libcap-dev sqlite3
 
+      - name: Install Rust dependency auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit Rust dependencies
+        run: src/scripts/audit-rust-dependencies.sh
+
       - name: Business OS JS dependency bootstrap
         run: |
           npm ci --ignore-scripts --prefix src/apps/business-os
@@ -508,7 +514,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: src/apps/business-os-desktop
-        run: npm ci
+        run: |
+          npm ci
+          npm audit --audit-level=low
 
       - name: Unit and syntax checks
         working-directory: src/apps/business-os-desktop

@@ -1057,7 +1057,10 @@ fn read_core_db_business_record(
     }
 }
 
-pub(in crate::business_os) fn find_queue_task_for_command(root: &Path, command_id: &str) -> Option<String> {
+pub(in crate::business_os) fn find_queue_task_for_command(
+    root: &Path,
+    command_id: &str,
+) -> Option<String> {
     let command_id = command_id.trim();
     if command_id.is_empty() {
         return None;

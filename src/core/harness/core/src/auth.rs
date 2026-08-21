@@ -5,8 +5,6 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(test)]
-use serial_test::serial;
 use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;

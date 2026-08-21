@@ -290,7 +290,17 @@ async function waitFor(predicate, timeoutMs = 2_000) {
         return {
           state: {
             demandStatus: { peerConnected: true },
-            async pushDocumentsToRemotePeers() { return true; },
+            async pushDocumentsToRemotePeers() {
+              stored = {
+                ...stored,
+                status: 'accepted',
+                replication_phase: 'native_observed',
+                execution_task_id: 'queue:ok::1',
+                updated_at_ms: now + 5,
+              };
+              listeners.forEach((listener) => listener({ toJSON: () => ({ ...stored }) }));
+              return true;
+            },
             async pullFromRemotePeers() {
               if (!stored) return;
               stored = {

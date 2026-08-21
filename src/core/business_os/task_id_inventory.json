@@ -3,25 +3,60 @@
   "compatibility_rule": "task_id remains read-only compatibility data; new lifecycle code must use execution_task_id, target_task_id or target_record_id",
   "sites": [
     {
-      "file": "src/core/business_os/store.rs",
+      "file": "src/core/business_os/command_plane.rs",
       "function": "accept_rxdb_business_command_with_origin",
       "occurrence": 1,
       "semantics": "compatibility_mixed",
       "target_field": "return explicit execution_task_id/target fields"
     },
     {
-      "file": "src/core/business_os/store.rs",
+      "file": "src/core/business_os/command_plane.rs",
       "function": "accept_rxdb_business_command_with_origin",
       "occurrence": 2,
       "semantics": "compatibility_mixed",
       "target_field": "return explicit execution_task_id/target fields"
     },
     {
-      "file": "src/core/business_os/store.rs",
-      "function": "accept_rxdb_business_command_with_origin",
-      "occurrence": 3,
+      "file": "src/core/business_os/command_plane.rs",
+      "function": "dispatch_business_command",
+      "occurrence": 1,
       "semantics": "compatibility_mixed",
       "target_field": "return explicit execution_task_id/target fields"
+    },
+    {
+      "file": "src/core/business_os/command_plane.rs",
+      "function": "write_rxdb_control_command_state",
+      "occurrence": 1,
+      "semantics": "compatibility_target",
+      "target_field": "target_task_id/target_record_id; execution_task_id stays empty"
+    },
+    {
+      "file": "src/core/business_os/command_plane.rs",
+      "function": "write_rxdb_control_command_state",
+      "occurrence": 2,
+      "semantics": "compatibility_target",
+      "target_field": "target_task_id/target_record_id; execution_task_id stays empty"
+    },
+    {
+      "file": "src/core/business_os/person_research_command.rs",
+      "function": "thesen_outbound_lead_state_document",
+      "occurrence": 1,
+      "semantics": "compatibility_target",
+      "target_field": "task_id stays empty; command_id carries the lifecycle link"
+    },
+    {
+      "file": "src/core/business_os/store_outbound_commands.rs",
+      "function": "outbound_queue_research_scraper_generation",
+      "occurrence": 1,
+      "semantics": "domain_queue_reference",
+      "target_field": "target_task_id or a domain-specific queue reference"
+    },
+    {
+      "file": "src/core/business_os/store_projections.rs",
+      "function": "persist_terminal_business_chat_command_projection",
+      "occurrence": 1,
+      "semantics": "execution_link",
+      "target_field": "execution_task_id"
     },
     {
       "file": "src/core/business_os/store.rs",
@@ -46,21 +81,7 @@
     },
     {
       "file": "src/core/business_os/store.rs",
-      "function": "outbound_queue_research_scraper_generation",
-      "occurrence": 1,
-      "semantics": "domain_queue_reference",
-      "target_field": "target_task_id or a domain-specific queue reference"
-    },
-    {
-      "file": "src/core/business_os/store.rs",
       "function": "persist_systematic_research_failure",
-      "occurrence": 1,
-      "semantics": "execution_link",
-      "target_field": "execution_task_id"
-    },
-    {
-      "file": "src/core/business_os/store.rs",
-      "function": "persist_terminal_business_chat_command_projection",
       "occurrence": 1,
       "semantics": "execution_link",
       "target_field": "execution_task_id"
@@ -171,18 +192,39 @@
       "target_field": "execution_task_id"
     },
     {
-      "file": "src/core/business_os/store.rs",
-      "function": "write_rxdb_control_command_state",
+      "file": "src/core/business_os/support.rs",
+      "function": "project_agent_suggestion",
       "occurrence": 1,
-      "semantics": "compatibility_target",
-      "target_field": "target_task_id/target_record_id; execution_task_id stays empty"
+      "semantics": "domain_queue_reference",
+      "target_field": "support task reference"
     },
     {
-      "file": "src/core/business_os/store.rs",
-      "function": "write_rxdb_control_command_state",
-      "occurrence": 2,
-      "semantics": "compatibility_target",
-      "target_field": "target_task_id/target_record_id; execution_task_id stays empty"
+      "file": "src/core/business_os/threads.rs",
+      "function": "create_link",
+      "occurrence": 1,
+      "semantics": "domain_queue_reference",
+      "target_field": "thread-linked task reference"
+    },
+    {
+      "file": "src/core/business_os/threads.rs",
+      "function": "upsert_app_record_link",
+      "occurrence": 1,
+      "semantics": "domain_queue_reference",
+      "target_field": "thread-linked task reference"
+    },
+    {
+      "file": "src/core/business_os/threads.rs",
+      "function": "upsert_ctox_command_link",
+      "occurrence": 1,
+      "semantics": "domain_queue_reference",
+      "target_field": "thread-linked task reference"
+    },
+    {
+      "file": "src/core/business_os/threads.rs",
+      "function": "upsert_ctox_task_link",
+      "occurrence": 1,
+      "semantics": "target_task",
+      "target_field": "target_task_id"
     }
   ]
 }

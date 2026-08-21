@@ -1300,8 +1300,10 @@ fn dispatch_business_command(
         "kundenpipeline.triage.write"
         | "kundenpipeline.decision.answer"
         | "kundenpipeline.mail.send"
-        | "kundenpipeline.delegate" => super::decision_hub::handle_command(root, command_id, command)
-            .map(BusinessCommandDispatchOutcome::Returned),
+        | "kundenpipeline.delegate" => {
+            super::decision_hub::handle_command(root, command_id, command)
+                .map(BusinessCommandDispatchOutcome::Returned)
+        }
         "ctox.mailserver.get_config"
         | "ctox.mailserver.save_domain"
         | "ctox.mailserver.save_runtime"

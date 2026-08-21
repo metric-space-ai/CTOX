@@ -25,13 +25,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn annotations(destructive_hint: Option<bool>, open_world_hint: Option<bool>) -> ToolAnnotations {
-    ToolAnnotations {
-        destructive_hint,
-        idempotent_hint: None,
-        open_world_hint,
-        read_only_hint: None,
-        title: None,
-    }
+    ToolAnnotations::from_raw(None, None, destructive_hint, None, open_world_hint)
 }
 
 fn app(id: &str) -> AppInfo {
@@ -66,17 +60,7 @@ fn plugin_names(names: &[&str]) -> Vec<String> {
 }
 
 fn test_tool_definition(tool_name: &str) -> Tool {
-    Tool {
-        name: tool_name.to_string().into(),
-        title: None,
-        description: None,
-        input_schema: Arc::new(JsonObject::default()),
-        output_schema: None,
-        annotations: None,
-        execution: None,
-        icons: None,
-        meta: None,
-    }
+    Tool::new_with_raw(tool_name.to_string(), None, Arc::new(JsonObject::default()))
 }
 
 fn google_calendar_accessible_connector(plugin_display_names: &[&str]) -> AppInfo {
@@ -314,17 +298,11 @@ fn accessible_connectors_from_mcp_tools_preserves_description() {
             server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
             tool_name: "calendar_create_event".to_string(),
             tool_namespace: "mcp__codex_apps__calendar".to_string(),
-            tool: Tool {
-                name: "calendar_create_event".to_string().into(),
-                title: None,
-                description: Some("Create a calendar event".into()),
-                input_schema: Arc::new(JsonObject::default()),
-                output_schema: None,
-                annotations: None,
-                execution: None,
-                icons: None,
-                meta: None,
-            },
+            tool: Tool::new(
+                "calendar_create_event",
+                "Create a calendar event",
+                Arc::new(JsonObject::default()),
+            ),
             connector_id: Some("calendar".to_string()),
             connector_name: Some("Calendar".to_string()),
             connector_description: Some("Plan events".to_string()),

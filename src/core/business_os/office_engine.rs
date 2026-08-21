@@ -9828,7 +9828,6 @@ fn spreadsheet_worksheet_pivot_paths<R: Read + Seek>(
         .collect()
 }
 
-
 fn materialize_spreadsheet_shared_strings(
     original: &EditorPayloadManifest,
     changed: &EditorPayloadManifest,

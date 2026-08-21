@@ -12,6 +12,7 @@ const repoRoot = path.resolve(businessOsDir, '../../..');
 const storePath = path.join(businessOsDir, 'store.rs');
 const commandPlanePath = path.join(businessOsDir, 'command_plane.rs');
 const peerPath = path.join(businessOsDir, 'rxdb_peer.rs');
+const peerBrowserPath = path.join(businessOsDir, 'rxdb_peer_browser.rs');
 const browserRoot = path.join(repoRoot, 'src/apps/business-os');
 const outputPath = path.join(businessOsDir, 'business_command_inventory.json');
 const storeSource = fs.readFileSync(storePath, 'utf8');
@@ -19,7 +20,7 @@ const commandPlaneSource = fs.readFileSync(commandPlanePath, 'utf8');
 // The classifier lives wherever the dispatcher lives; the helpers it needs may
 // still be in either file, so both are searched.
 const source = `${commandPlaneSource}\n${storeSource}`;
-const peerSource = fs.readFileSync(peerPath, 'utf8');
+const peerSource = `${fs.readFileSync(peerPath, 'utf8')}\n${fs.readFileSync(peerBrowserPath, 'utf8')}`;
 const functionStart = source.indexOf('pub fn accept_rxdb_business_command_with_origin');
 const matchStart = source.indexOf('match command.command_type.as_str()', functionStart);
 const fallback = source.indexOf('        _ => {}', matchStart);

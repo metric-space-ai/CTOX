@@ -121,6 +121,16 @@ function test(name, fn) {
   }
 }
 
+function withoutExpectedWarnings(fn) {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return fn();
+  } finally {
+    console.warn = warn;
+  }
+}
+
 test('Presentation layer stays compact and shell-native', () => {
   const css = readFileSync(new URL('./index.css', import.meta.url), 'utf8');
   const js = readFileSync(new URL('./index.js', import.meta.url), 'utf8');
@@ -302,10 +312,12 @@ test('Readiness wiring stays fail-soft when subscribeCollectionReadiness throws'
     },
   };
 
-  assert.doesNotThrow(() => {
-    const cleanup = wireTaskSourceReadiness(state);
-    assert.equal(typeof cleanup, 'function');
-    cleanup();
+  withoutExpectedWarnings(() => {
+    assert.doesNotThrow(() => {
+      const cleanup = wireTaskSourceReadiness(state);
+      assert.equal(typeof cleanup, 'function');
+      cleanup();
+    });
   });
 });
 
@@ -343,10 +355,12 @@ test('Readiness wiring ignores a listener re-render throw and still unsubscribes
     },
   };
 
-  const cleanup = wireTaskSourceReadiness(state);
-  assert.equal(typeof listener, 'function');
-  assert.doesNotThrow(() => listener({ collection: 'ctox_queue_tasks', state: 'live', ready: true }));
-  cleanup();
+  withoutExpectedWarnings(() => {
+    const cleanup = wireTaskSourceReadiness(state);
+    assert.equal(typeof listener, 'function');
+    assert.doesNotThrow(() => listener({ collection: 'ctox_queue_tasks', state: 'live', ready: true }));
+    cleanup();
+  });
   assert.ok(unsubscribed >= 1);
 });
 

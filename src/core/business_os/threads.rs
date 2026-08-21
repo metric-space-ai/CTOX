@@ -6572,7 +6572,10 @@ mod tests {
         drop(conn);
 
         let open = project_app_relevance(temp.path(), &[("kundenpipeline_entscheidungen", 0)], 50)?;
-        assert!(open.changed_count > 0, "an open decision must raise a thread");
+        assert!(
+            open.changed_count > 0,
+            "an open decision must raise a thread"
+        );
         let (_, thread_id) = open
             .projections
             .iter()

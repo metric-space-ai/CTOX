@@ -196,8 +196,8 @@ pub(crate) fn account_runtime_overrides(
             String::new()
         },
     );
-    let password = secrets::read_secret_value(root, SECRET_SCOPE, &config.address)
-        .unwrap_or_default();
+    let password =
+        secrets::read_secret_value(root, SECRET_SCOPE, &config.address).unwrap_or_default();
     overrides.insert("CTO_EMAIL_PASSWORD".to_owned(), password);
     // Instanz-spezifische Graph/EWS/ActiveSync-Werte nicht erben.
     for key in [
@@ -280,7 +280,10 @@ mod tests {
         assert_eq!(accounts[0].imap_host, "imap2.example.com");
 
         let overrides = account_runtime_overrides(root, &accounts[0]);
-        assert_eq!(overrides.get("CTO_EMAIL_ADDRESS").unwrap(), "jill@example.com");
+        assert_eq!(
+            overrides.get("CTO_EMAIL_ADDRESS").unwrap(),
+            "jill@example.com"
+        );
         assert_eq!(overrides.get("CTO_EMAIL_PASSWORD").unwrap(), "geheim");
         // Instanzwerte werden explizit geleert, nicht geerbt.
         assert_eq!(overrides.get("CTO_EMAIL_EWS_URL").unwrap(), "");

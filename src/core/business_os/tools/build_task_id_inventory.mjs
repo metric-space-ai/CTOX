@@ -5,11 +5,24 @@ import { fileURLToPath } from 'node:url';
 const toolDir = path.dirname(fileURLToPath(import.meta.url));
 const businessOsDir = path.resolve(toolDir, '..');
 const outputPath = path.join(businessOsDir, 'task_id_inventory.json');
-const sourceFiles = ['store.rs', 'rxdb_peer.rs'];
+const sourceFiles = [
+  'command_plane.rs',
+  'mcp_channel.rs',
+  'person_research_command.rs',
+  'rxdb_peer.rs',
+  'store.rs',
+  'store_customer_commands.rs',
+  'store_outbound_commands.rs',
+  'store_projections.rs',
+  'support.rs',
+  'threads.rs',
+];
 const classifications = new Map(Object.entries({
   accept_rxdb_business_command_with_origin: ['compatibility_mixed', 'return explicit execution_task_id/target fields'],
   complete_business_command_from_app_validation_success: ['execution_link', 'execution_task_id'],
+  create_link: ['domain_queue_reference', 'thread-linked task reference'],
   delete_ctox_task: ['target_task', 'target_task_id'],
+  dispatch_business_command: ['compatibility_mixed', 'return explicit execution_task_id/target fields'],
   fail_business_command_from_queue_error: ['execution_link', 'execution_task_id'],
   outbound_queue_research_scraper_generation: ['domain_queue_reference', 'target_task_id or a domain-specific queue reference'],
   persist_systematic_research_failure: ['execution_link', 'execution_task_id'],
@@ -19,11 +32,16 @@ const classifications = new Map(Object.entries({
   process_documents_report_command: ['execution_link', 'execution_task_id'],
   process_source_parse_command: ['execution_link', 'execution_task_id'],
   process_systematic_research_command: ['execution_link', 'execution_task_id'],
+  project_agent_suggestion: ['domain_queue_reference', 'support task reference'],
   push_repair_action: ['domain_queue_reference', 'target_task_id or a domain-specific repair-task reference'],
   record_command: ['execution_link', 'execution_task_id'],
   record_report: ['execution_link', 'execution_task_id'],
   record_report_command: ['execution_link', 'execution_task_id'],
   reusable_web_stack_auth_assist_request: ['execution_link', 'execution_task_id'],
+  thesen_outbound_lead_state_document: ['compatibility_target', 'task_id stays empty; command_id carries the lifecycle link'],
+  upsert_app_record_link: ['domain_queue_reference', 'thread-linked task reference'],
+  upsert_ctox_command_link: ['domain_queue_reference', 'thread-linked task reference'],
+  upsert_ctox_task_link: ['target_task', 'target_task_id'],
   write_rxdb_control_command_outcome: ['compatibility_target', 'target_task_id/target_record_id; execution_task_id stays empty'],
   write_rxdb_control_command_state: ['compatibility_target', 'target_task_id/target_record_id; execution_task_id stays empty'],
 }));
@@ -32,7 +50,9 @@ const sites = [];
 const occurrences = new Map();
 for (const file of sourceFiles) {
   const source = fs.readFileSync(path.join(businessOsDir, file), 'utf8');
-  const production = source.split(/\n#\[cfg\(test\)\]\nmod tests \{/)[0];
+  const production = source.split(
+    /\n#\[cfg\(test\)\]\n(?:pub(?:\([^)]*\))?\s+)?mod tests\s*\{/,
+  )[0];
   let currentFunction = '<module>';
   for (const [index, line] of production.split('\n').entries()) {
     const functionMatch = line.match(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)/);

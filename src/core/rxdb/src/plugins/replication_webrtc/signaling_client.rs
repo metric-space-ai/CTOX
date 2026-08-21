@@ -452,7 +452,7 @@ impl SignalingClient {
                 Some(serde_json::json!({ "message": "signaling client is closed" })),
             )
         })?;
-        w.send(Message::Text(text)).await.map_err(|e| {
+        w.send(Message::Text(text.into())).await.map_err(|e| {
             new_rx_error(
                 "RC_WEBRTC_SIGNAL",
                 Some(serde_json::json!({
@@ -727,7 +727,7 @@ mod tests {
                 conns_s.fetch_add(1, Ordering::SeqCst);
                 let mut ws = accept_async(stream).await.unwrap();
                 ws.send(Message::Text(
-                    r#"{"type":"init","yourPeerId":"p1"}"#.to_string(),
+                    r#"{"type":"init","yourPeerId":"p1"}"#.to_string().into(),
                 ))
                 .await
                 .unwrap();
@@ -740,7 +740,7 @@ mod tests {
                     }
                 }
                 ws.send(Message::Text(
-                    r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string(),
+                    r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string().into(),
                 ))
                 .await
                 .unwrap();
@@ -795,7 +795,7 @@ mod tests {
             let mut first_ws = accept_async(first_stream).await.unwrap();
             first_ws
                 .send(Message::Text(
-                    r#"{"type":"init","yourPeerId":"old-peer"}"#.to_string(),
+                    r#"{"type":"init","yourPeerId":"old-peer"}"#.to_string().into(),
                 ))
                 .await
                 .unwrap();
@@ -809,7 +809,8 @@ mod tests {
             first_ws
                 .send(Message::Text(
                     r#"{"type":"joined","otherPeerIds":["old-browser"],"peers":[{"peerId":"old-browser","role":"browser"}]}"#
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 ))
                 .await
                 .unwrap();
@@ -871,7 +872,7 @@ mod tests {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = accept_async(stream).await.unwrap();
         ws.send(Message::Text(
-            r#"{"type":"init","yourPeerId":"p1"}"#.to_string(),
+            r#"{"type":"init","yourPeerId":"p1"}"#.to_string().into(),
         ))
         .await
         .unwrap();
@@ -884,7 +885,7 @@ mod tests {
             }
         }
         ws.send(Message::Text(
-            r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string(),
+            r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string().into(),
         ))
         .await
         .unwrap();

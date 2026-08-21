@@ -10,6 +10,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use polars::prelude::*;
+use polars_utils::pl_path::PlRefPath;
 use rusqlite::params;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -24,9 +25,9 @@ use std::path::Path;
 
 /// Lazily scan the parquet file backing a knowledge data table.
 ///
-/// Polars 0.52 takes a `PlPath` rather than a `&Path` here.
+/// Polars takes an owned `PlRefPath` rather than a `&Path` here.
 pub(super) fn scan_table(path: &Path) -> PolarsResult<LazyFrame> {
-    let pl = PlPath::new(&path.to_string_lossy());
+    let pl = PlRefPath::new(path.to_string_lossy().into_owned());
     LazyFrame::scan_parquet(pl, ScanArgsParquet::default())
 }
 

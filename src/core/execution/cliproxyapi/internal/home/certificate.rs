@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize};
+use aws_lc_rs::signature::KeyPair as _;
 use base64::Engine;
-use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
-use rsa::rand_core::OsRng;
-use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -120,21 +120,35 @@ impl CertificateProvisioner {
                 &claims.ca_fingerprint,
             );
         }
-        let key = match key {
-            Some(raw) => RsaPrivateKey::from_pkcs1_pem(
-                std::str::from_utf8(&raw).map_err(|e| CertificateError::Crypto(e.to_string()))?,
-            )
-            .map_err(|e| CertificateError::Crypto(e.to_string()))?,
-            None => RsaPrivateKey::new(&mut OsRng, 2048)
-                .map_err(|e| CertificateError::Crypto(e.to_string()))?,
+        let (key, key_pem) = match key {
+            Some(raw) => {
+                let text = std::str::from_utf8(&raw)
+                    .map_err(|e| CertificateError::Crypto(e.to_string()))?;
+                let (label, der) = private_key_pem_parts(text)?;
+                let key = match label {
+                    "RSA PRIVATE KEY" => RsaKeyPair::from_der(&der),
+                    "PRIVATE KEY" => RsaKeyPair::from_pkcs8(&der),
+                    _ => {
+                        return Err(CertificateError::Crypto(
+                            "unsupported RSA key PEM label".into(),
+                        ))
+                    }
+                }
+                .map_err(|e| CertificateError::Crypto(format!("invalid RSA private key: {e}")))?;
+                (key, encode_pem(label, &der))
+            }
+            None => {
+                let key = RsaKeyPair::generate(KeySize::Rsa2048).map_err(|e| {
+                    CertificateError::Crypto(format!("RSA key generation failed: {e}"))
+                })?;
+                let der = AsDer::<Pkcs8V1Der>::as_der(&key).map_err(|e| {
+                    CertificateError::Crypto(format!("RSA key encoding failed: {e}"))
+                })?;
+                let pem = encode_pem("PRIVATE KEY", der.as_ref());
+                (key, pem)
+            }
         };
-        let key_pem = key
-            .to_pkcs1_pem(LineEnding::LF)
-            .map_err(|e| CertificateError::Crypto(e.to_string()))?;
-        let public_key_pem = key
-            .to_public_key()
-            .to_pkcs1_pem(LineEnding::LF)
-            .map_err(|e| CertificateError::Crypto(e.to_string()))?;
+        let public_key_pem = encode_pem("RSA PUBLIC KEY", key.public_key().as_ref());
         let response = self.enrollment.enroll(EnrollmentRequest {
             certificate_id: claims.certificate_id.clone(),
             cluster_id: claims.cluster_id.clone(),
@@ -153,6 +167,45 @@ impl CertificateProvisioner {
             .write_private(CLIENT_CERT_NAME, &response.certificate)?;
         self.store.write_private(CA_CERT_NAME, &response.ca)
     }
+}
+
+fn private_key_pem_parts(value: &str) -> Result<(&str, Vec<u8>), CertificateError> {
+    let begin = value
+        .find("-----BEGIN ")
+        .map(|index| index + "-----BEGIN ".len())
+        .ok_or_else(|| CertificateError::Crypto("private key PEM header is missing".into()))?;
+    let label_end = value[begin..]
+        .find("-----")
+        .map(|offset| begin + offset)
+        .ok_or_else(|| CertificateError::Crypto("private key PEM label is invalid".into()))?;
+    let label = &value[begin..label_end];
+    let body_start = label_end + "-----".len();
+    let footer = format!("-----END {label}-----");
+    let body_end = value[body_start..]
+        .find(&footer)
+        .map(|offset| body_start + offset)
+        .ok_or_else(|| CertificateError::Crypto("private key PEM footer is missing".into()))?;
+    let payload = value[body_start..body_end]
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=')
+        })
+        .collect::<String>();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| CertificateError::Crypto("private key PEM payload is invalid".into()))?;
+    Ok((label, der))
+}
+
+fn encode_pem(label: &str, der: &[u8]) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut output = format!("-----BEGIN {label}-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        output.push_str(std::str::from_utf8(chunk).expect("base64 is valid ASCII"));
+        output.push('\n');
+    }
+    output.push_str(&format!("-----END {label}-----\n"));
+    output
 }
 
 pub fn parse_home_jwt_claims(raw: &str) -> Result<HomeJwtClaims, CertificateError> {

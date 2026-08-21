@@ -59,6 +59,18 @@ Installer flags, model setup examples, and update commands
 (`ctox upgrade --stable`) are documented in the
 [installation docs](https://metric-space-ai.github.io/ctox/docs.html#install).
 
+### Remote CTOX Update
+
+Managed operators can inspect and apply the same guarded update lifecycle over
+the remote command channel:
+
+```sh
+ctox update status
+ctox update check
+ctox upgrade --stable
+ctox update rollback
+```
+
 ### Business OS Desktop Beta
 
 The signed Desktop beta connects managed ctox.dev tenants, manual WebRTC

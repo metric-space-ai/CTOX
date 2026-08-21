@@ -93,7 +93,10 @@ impl Drop for SystemdCacheInvalidator {
     }
 }
 
-pub(super) fn systemd_unit_status_cached(root: &Path, ttl: Duration) -> Result<Option<SystemdUnitStatus>> {
+pub(super) fn systemd_unit_status_cached(
+    root: &Path,
+    ttl: Duration,
+) -> Result<Option<SystemdUnitStatus>> {
     let cache = systemd_unit_status_cache();
     if let Some((probed_at, cached_root, cached)) =
         cache.lock().unwrap_or_else(|err| err.into_inner()).as_ref()

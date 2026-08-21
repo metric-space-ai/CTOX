@@ -58,7 +58,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 # Phase-4: WebSocket transport for signaling
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 url = "2"
 rustls = { version = "0.23", features = ["ring"] }
 
