@@ -629,11 +629,47 @@ pub(super) fn run_lock_holder_is_alive(path: &Path) -> bool {
     if pid <= 0 {
         return false;
     }
+    process_is_alive(pid)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: i64) -> bool {
     if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
         return true;
     }
     // EPERM: the process exists but belongs to someone else — still alive.
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: i64) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // Match the Unix EPERM behavior: an inaccessible process still exists
+        // and must retain its lock.
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let mut exit_code = 0u32;
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    unsafe {
+        CloseHandle(process);
+    }
+    queried && i32::try_from(exit_code).ok() == Some(STILL_ACTIVE)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_alive(_pid: i64) -> bool {
+    false
 }
 
 pub(super) fn probe_portal_health(url: &str, skip_probe: bool) -> ProbeResult {

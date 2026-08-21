@@ -1,6 +1,6 @@
 //! P2: native owner of the pi-code coding sidecar
 //! (`src/core/coding_agents/pi-sidecar`). Spawns the LocalTransport daemon and
-//! drives one bounded turn over a Unix socket, then reaps it.
+//! drives one bounded turn over private platform IPC, then reaps it.
 //!
 //! This is the transport client the higher-level owner uses: it projects a
 //! module's app source into a `CtoxTurnRequest.files` snapshot, runs one bounded
@@ -10,11 +10,12 @@
 use anyhow::Context;
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+use crate::execution::models::local_transport::{LocalStream, LocalTransport};
 
 #[path = "anthropic_coding_bridge.rs"]
 pub(crate) mod anthropic_coding_bridge;
@@ -263,22 +264,28 @@ pub fn resolve_coding_model_preset(root: &Path, preset_id: &str) -> anyhow::Resu
     }
 }
 
-/// A spawned sidecar daemon listening on a Unix socket. Killed + cleaned on drop
-/// so a turn can never leak a live agent process.
+/// A spawned sidecar daemon listening on private platform IPC. Killed + cleaned
+/// on drop so a turn can never leak a live agent process.
 struct SidecarDaemon {
     child: Child,
-    socket_path: PathBuf,
+    unix_socket_path: Option<PathBuf>,
 }
 
 impl Drop for SidecarDaemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.socket_path);
+        if let Some(path) = &self.unix_socket_path {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
-fn spawn_sidecar(dist: &Path, socket_path: &Path, faux: bool) -> anyhow::Result<SidecarDaemon> {
+fn spawn_sidecar(
+    dist: &Path,
+    transport: &LocalTransport,
+    faux: bool,
+) -> anyhow::Result<SidecarDaemon> {
     anyhow::ensure!(
         dist.exists(),
         "pi-sidecar bundle is not built: {} (run `npm run build` in pi-sidecar)",
@@ -287,7 +294,7 @@ fn spawn_sidecar(dist: &Path, socket_path: &Path, faux: bool) -> anyhow::Result<
     let mut command = Command::new("node");
     command
         .arg(dist)
-        .arg(socket_path)
+        .arg(transport.endpoint_string())
         // Sandbox invariant: the sidecar is a bounded leaf executor whose rights
         // must be a strict SUBSET of the CTOX daemon's. It must NOT inherit the
         // daemon's environment (secret store, tokens, state-root paths). Start
@@ -306,14 +313,19 @@ fn spawn_sidecar(dist: &Path, socket_path: &Path, faux: bool) -> anyhow::Result<
         .context("spawn pi-sidecar daemon (is `node` on PATH?)")?;
     Ok(SidecarDaemon {
         child,
-        socket_path: socket_path.to_path_buf(),
+        unix_socket_path: transport.unix_socket_path().map(Path::to_path_buf),
     })
 }
 
-fn connect_with_retry(socket_path: &Path, timeout: Duration) -> anyhow::Result<UnixStream> {
+fn connect_with_retry(
+    transport: &LocalTransport,
+    timeout: Duration,
+) -> anyhow::Result<LocalStream> {
     let deadline = Instant::now() + timeout;
     loop {
-        match UnixStream::connect(socket_path) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let attempt_timeout = remaining.min(Duration::from_millis(100));
+        match transport.connect_blocking(attempt_timeout) {
             Ok(stream) => return Ok(stream),
             Err(_) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -329,7 +341,7 @@ const MAX_PI_TURN_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PI_TURN_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const PI_TURN_TIMEOUT: Duration = Duration::from_secs(600);
 
-fn read_line(stream: &mut UnixStream, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+fn read_line(stream: &mut LocalStream, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -350,9 +362,13 @@ fn read_line(stream: &mut UnixStream, max_bytes: usize) -> anyhow::Result<Vec<u8
 /// (a `CtoxTurnRequest` JSON), return the `CtoxTurnResponse` JSON. `faux` runs
 /// the sidecar's offline no-model mode (owner integration tests).
 pub fn run_pi_turn(dist: &Path, request: &Value, faux: bool) -> anyhow::Result<Value> {
-    let socket_path = std::env::temp_dir().join(format!("ctox-pi-{}.sock", Uuid::new_v4()));
-    let _daemon = spawn_sidecar(dist, &socket_path, faux)?;
-    let mut stream = connect_with_retry(&socket_path, Duration::from_secs(10))?;
+    let endpoint_id = Uuid::new_v4();
+    let transport = LocalTransport::ipc_for_host(
+        std::env::temp_dir().join(format!("ctox-pi-{endpoint_id}.sock")),
+        format!("ctox-pi-{endpoint_id}"),
+    );
+    let _daemon = spawn_sidecar(dist, &transport, faux)?;
+    let mut stream = connect_with_retry(&transport, Duration::from_secs(10))?;
     stream
         .set_write_timeout(Some(Duration::from_secs(30)))
         .context("set pi-sidecar write timeout")?;
