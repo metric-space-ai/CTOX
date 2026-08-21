@@ -3989,6 +3989,9 @@ var TERMINAL_SIGNALING_REJECTION_CODES = /* @__PURE__ */ new Set([
   "protocol_missing",
   "protocol_mismatch",
   "instance_mismatch",
+  "role_auth_missing",
+  "role_auth_binding_invalid",
+  "role_credential_invalid",
   "peer_revoked",
   "role_mismatch",
   "token_invalid",
@@ -4653,11 +4656,10 @@ var CtoxWebRtcNativePeer = class {
       }
       this.pruneStaleNativeCandidateConnections(descriptors);
       const expectedNativePeerId = String(this.options.expectedNativePeerId || "").trim();
-      const hasExpectedDescriptor = Boolean(expectedNativePeerId) && descriptors.some((descriptor) => this.peerMatchesExpectedNativePeerId(descriptor.peerId, descriptor));
       for (const descriptor of descriptors) {
         const remotePeerId = descriptor.peerId;
         if (!remotePeerId) continue;
-        if (hasExpectedDescriptor && !this.peerMatchesExpectedNativePeerId(remotePeerId, descriptor)) {
+        if (expectedNativePeerId && !this.peerMatchesExpectedNativePeerId(remotePeerId, descriptor)) {
           this.removeConnection(remotePeerId, "signaling-non-target-native-peer");
           continue;
         }
@@ -5644,7 +5646,10 @@ var CtoxWebRtcNativePeer = class {
     const peerId = String(remotePeerId || "");
     if (!peerId || peerId === this.currentSignalingPeerId()) return false;
     const metadata = this.peerMetadata.get(peerId);
-    if (this.peerMatchesExpectedNativePeerId(peerId, metadata)) return true;
+    const expectedNativePeerId = String(this.options.expectedNativePeerId || "").trim();
+    if (expectedNativePeerId) {
+      return this.peerMatchesExpectedNativePeerId(peerId, metadata);
+    }
     if (this.nativeCandidateConnectionCount(peerId) > 0) return false;
     return this.isNativePeerCandidate(peerId, metadata);
   }
@@ -9061,7 +9066,10 @@ var VOLATILE_SIGNALING_QUERY_PARAMS = /* @__PURE__ */ new Set([
   "capabilities",
   "token",
   "token_iat",
-  "token_exp"
+  "token_exp",
+  "auth_version",
+  "browser_token_hash",
+  "native_token_hash"
 ]);
 function sharedRoomPeerKey(signalingUrl, room) {
   return `${stableSignalingUrlKey(signalingUrl)}::${String(room || "")}`;
