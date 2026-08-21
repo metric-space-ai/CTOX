@@ -1155,8 +1155,50 @@ pub fn business_os_update_check(root: &Path) -> Result<serde_json::Value> {
 // The Candle-based ctox-engine binary no longer exists; CTOX now calls
 // directly into per-model crates under src/inference/models/<model>/.
 
-/// Lightweight health check: prints current versions, engine presence, and a
-/// concrete next-step hint when things look off.
+fn appsec_doctor_args(root: &Path) -> Vec<String> {
+    vec![
+        "ctox-appsec".to_string(),
+        "--state-dir".to_string(),
+        root.join("runtime/appsec/doctor")
+            .to_string_lossy()
+            .to_string(),
+        "--tools-root".to_string(),
+        root.join("runtime/tools/appsec")
+            .to_string_lossy()
+            .to_string(),
+        "tools".to_string(),
+        "readiness".to_string(),
+        "--profile".to_string(),
+        "standard".to_string(),
+        "--probe-versions".to_string(),
+        "--smoke".to_string(),
+        "--smoke-timeout".to_string(),
+        "10".to_string(),
+    ]
+}
+
+fn collect_appsec_doctor(root: &Path) -> serde_json::Value {
+    let args = appsec_doctor_args(root);
+    match ctox_appsec_pentest::run_cli_json(args.clone(), Some(root.to_path_buf())) {
+        Ok(output) => json!({
+            "ok": output.get("ok").and_then(serde_json::Value::as_bool) == Some(true),
+            "profile": "standard",
+            "checks": ["managed scanner path", "binary checksum/provenance", "exact pinned version", "pinned data bundles", "functional startup smoke"],
+            "command": args,
+            "result": output,
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "profile": "standard",
+            "checks": ["managed scanner path", "binary checksum/provenance", "exact pinned version", "pinned data bundles", "functional startup smoke"],
+            "command": args,
+            "error": format!("{error:#}"),
+        }),
+    }
+}
+
+/// Health check with release-relevant AppSec version and functional smoke
+/// evidence, plus concrete next-step hints when things look off.
 pub fn handle_doctor_command(root: &Path) -> Result<()> {
     let layout = InstallLayout::resolve(root)?;
     let manifest = load_install_manifest(&layout.install_manifest_path())?;
@@ -1185,6 +1227,13 @@ pub fn handle_doctor_command(root: &Path) -> Result<()> {
             }
         ));
     }
+    let appsec = collect_appsec_doctor(root);
+    if appsec.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        hints.push(
+            "AppSec standard toolchain is not ready — inspect `.appsec.result.proof` and run `ctox appsec tools proof-run --profile standard --probe-versions --smoke-timeout 10`"
+                .to_string(),
+        );
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -1194,6 +1243,7 @@ pub fn handle_doctor_command(root: &Path) -> Result<()> {
             "update_channel": remote.as_ref().and_then(|entry| entry.channel.clone()),
             "latest_release": remote.as_ref().and_then(|entry| entry.latest_release.clone()),
             "current_release": manifest.as_ref().and_then(|entry| entry.current_release.clone()),
+            "appsec": appsec,
             "hints": hints,
         }))?
     );
@@ -5587,5 +5637,23 @@ mod tests {
         assert!(!releases
             .join("previous/tools/model-runtime/target")
             .exists());
+    }
+
+    #[test]
+    fn doctor_appsec_contract_includes_version_and_functional_smoke() {
+        let root = Path::new("/tmp/ctox-doctor-contract");
+        let args = appsec_doctor_args(root);
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--profile", "standard"]));
+        assert!(args.iter().any(|arg| arg == "--probe-versions"));
+        assert!(args.iter().any(|arg| arg == "--smoke"));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--smoke-timeout", "10"]));
+        assert!(args
+            .iter()
+            .any(|arg| arg.ends_with("runtime/appsec/doctor")));
+        assert!(args.iter().any(|arg| arg.ends_with("runtime/tools/appsec")));
     }
 }
