@@ -1,35 +1,52 @@
 /* Single source of truth for shell design tokens. Light values live on :root,
    dark values on :root[data-theme="dark"]. Do not redefine these tokens further
-   down in this file or in module CSS — tests/business-os guard enforces this. */
+   down in this file or in module CSS — tests/business-os guard enforces this.
+
+   PALETTE CONTRACT — one design for every host.
+   The primitive colour tokens read `var(--ctox-host-<name>, <fallback>)`. The
+   fallback IS the product palette (T3 zinc ground, blue accent) and is what a
+   browser tenant renders. The CTOX Electron desktop pushes `--ctox-host-*`
+   custom properties onto the guest document at runtime to recolour the same
+   design with the user's Workjet appearance theme; nothing about the layout,
+   spacing or elevation changes with it. There is no second stylesheet and no
+   host-conditional branch for any of this — see
+   themes/ctox-desktop-shell.css for the small remainder that is genuinely
+   about being embedded as a WebContentsView. */
 :root {
   color-scheme: light;
-  --bg: oklch(0.965 0.006 235);
-  --surface: oklch(0.987 0.005 235);
-  --surface-2: oklch(0.94 0.009 238);
-  --line: oklch(0.8 0.014 235);
-  --text: oklch(0.22 0.015 235);
-  --text-strong: oklch(0.14 0.018 235);
-  --muted: oklch(0.435 0.017 235);
-  --accent: oklch(0.48 0.115 215);
-  --accent-foreground: #ffffff;
-  --accent-soft: oklch(0.9 0.04 215);
-  --danger: oklch(0.56 0.13 28);
-  --shadow: 0 8px 24px oklch(0.22 0.015 235 / 0.12);
-  --shadow-sm: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
-  --shadow-md: 0 4px 12px oklch(0.22 0.015 235 / 0.12);
-  --shadow-lg: 0 8px 24px oklch(0.22 0.015 235 / 0.18);
-  --hairline: color-mix(in srgb, var(--line) 62%, transparent);
-  --panel-radius: 4px;
-  --control-radius: 3px;
-  --panel-shadow: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
+  --bg: var(--ctox-host-bg, #fafafa);
+  --surface: var(--ctox-host-surface, #ffffff);
+  --surface-2: var(--ctox-host-surface-2, #f4f4f5);
+  --line: var(--ctox-host-line, #e4e4e7);
+  --text: var(--ctox-host-text, #27272a);
+  --text-strong: var(--ctox-host-text-strong, #111113);
+  --muted: var(--ctox-host-muted, #71717a);
+  --accent: var(--ctox-host-accent, oklch(0.48 0.115 215));
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, oklch(0.9 0.04 215));
+  --danger: #b3423c;
+  /* Flat surfaces: elevation is carried by a hairline and a tonal step, not by
+     a drop shadow. Only genuinely floating layers (windows, menus, toasts,
+     chat windows) still use --shadow-lg. */
+  --shadow: 0 2px 8px rgb(24 24 27 / 0.08);
+  --shadow-sm: none;
+  --shadow-md: 0 2px 8px rgb(24 24 27 / 0.08);
+  --shadow-lg: 0 6px 18px rgb(24 24 27 / 0.12);
+  --hairline: var(--ctox-host-hairline, #ececee);
+  --panel-radius: 6px;
+  --control-radius: 4px;
+  --panel-shadow: none;
   /* Kit additions: raised step above --surface-2 (active segments, hovered
      chips in dark surfaces) and the softer content radius for callouts,
      choice rows and code blocks. Consumed by shared/base.css. */
-  --surface-3: oklch(0.996 0.002 235);
+  --surface-3: var(--ctox-host-surface-3, #ffffff);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
-  --shell-topbar-bg: var(--surface);
+  /* The topbar is a seamless full-width bar on the same ground as the app, not
+     a floating island: it shares --bg so shell chrome and canvas read as one
+     surface, separated only by the bottom hairline. */
+  --shell-topbar-bg: var(--bg);
   --shell-app-bg: var(--bg);
   --shell-control-bg: var(--surface-2);
   --shell-topbar-shadow: none;
@@ -42,10 +59,11 @@
   --motion-slow: 200ms;
   --ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  /* CTOX shell-style elevation ladder: desktop sits one tonal step below
-     window surfaces so stacked windows read as physical layers. Consumed
+  /* CTOX shell-style ground: the desktop canvas sits on the same flat ground
+     as the rest of the chrome; stacked windows read as layers through their
+     hairline and --win-elev shadow, not through a darker wallpaper. Consumed
      only by the :root[data-shell-style="ctox"] chrome layer at file end. */
-  --shell-desktop-bg: oklch(0.882 0.024 240);
+  --shell-desktop-bg: var(--ctox-host-bg, #fafafa);
   --win-radius: 16px;
   --win-border: color-mix(in srgb, var(--line) 92%, transparent);
   --win-border-focus: color-mix(in srgb, var(--accent) 62%, var(--line));
@@ -73,43 +91,48 @@
     0 2px 6px oklch(0.22 0.015 235 / 0.14),
     0 26px 60px oklch(0.22 0.015 235 / 0.24),
     0 56px 112px oklch(0.22 0.015 235 / 0.14);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-sans);
+  /* No synthesised bold/italic and no subpixel smoothing: the flat design has
+     no shadows to hide a faked weight behind, and the shell must look the same
+     whether it renders in a browser tab or in the desktop's WebContentsView. */
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0f1216;
-  --surface: #151920;
-  --surface-2: #1b2029;
-  --line: #2d343e;
-  --text: #e6e9eb;
-  --text-strong: #ffffff;
-  --muted: #a0a9b1;
-  --accent: #72b8aa;
-  --accent-foreground: #08110f;
-  --accent-soft: rgba(108, 184, 170, 0.16);
-  --danger: #e06b60;
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.42);
-  --hairline: #262d35;
-  --panel-radius: 4px;
-  --control-radius: 3px;
-  --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --bg: var(--ctox-host-bg, #0a0a0a);
+  --surface: var(--ctox-host-surface, #111113);
+  --surface-2: var(--ctox-host-surface-2, #18181b);
+  --line: var(--ctox-host-line, #27272a);
+  --text: var(--ctox-host-text, #d4d4d8);
+  --text-strong: var(--ctox-host-text-strong, #f4f4f5);
+  --muted: var(--ctox-host-muted, #a1a1aa);
+  --accent: var(--ctox-host-accent, #72b8aa);
+  --accent-foreground: var(--ctox-host-accent-foreground, #08110f);
+  --accent-soft: var(--ctox-host-accent-soft, rgba(108, 184, 170, 0.16));
+  --danger: #e06c65;
+  --shadow: 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-sm: none;
+  --shadow-md: 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 6px 18px rgb(0 0 0 / 0.42);
+  --hairline: var(--ctox-host-hairline, #1f1f22);
+  --panel-radius: 6px;
+  --control-radius: 4px;
+  --panel-shadow: none;
   /* Kit additions: raised step above --surface-2 (active segments) and the
      softer content radius. Consumed by shared/base.css. */
-  --surface-3: #232b36;
+  --surface-3: var(--ctox-host-surface-3, #1f1f23);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
-  --shell-topbar-bg: var(--surface);
+  --shell-topbar-bg: var(--bg);
   --shell-app-bg: var(--bg);
   --shell-control-bg: var(--surface-2);
   --shell-topbar-shadow: none;
-  --shell-desktop-bg: #0a0e15;
+  --shell-desktop-bg: var(--ctox-host-bg, #0a0a0a);
   --win-radius: 16px;
   --win-border: #363d47;
   --win-border-focus: color-mix(in srgb, var(--accent) 68%, #363d47);
@@ -197,7 +220,9 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  /* 44px chrome row: the topbar and the chat dock are the same height, so the
+     shell reads as one ground framed by two hairlines. */
+  grid-template-rows: 44px minmax(0, 1fr);
   width: 100dvw;
   min-width: 360px;
   max-width: none;
@@ -205,10 +230,11 @@ button {
   min-height: 100dvh;
   max-height: 100dvh;
   overflow: hidden;
+  background: var(--shell-app-bg);
 }
 
 body[data-maintenance-active="true"] .app-shell {
-  grid-template-rows: 48px auto minmax(0, 1fr);
+  grid-template-rows: 44px auto minmax(0, 1fr);
 }
 
 .ctox-maintenance-banner {
@@ -338,17 +364,21 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   }
 }
 
+/* The topbar is a seamless full-width bar on the shell ground, separated from
+   the canvas by a single hairline — no island margin, no radius, no glass.
+   The chat dock at the bottom is its exact mirror. */
 .topbar {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: 44px;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-3);
   min-width: 0;
-  min-height: 48px;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--hairline, var(--line));
-  background: var(--shell-topbar-bg, var(--surface));
-  box-shadow: var(--shell-topbar-shadow, 0 1px 0 color-mix(in srgb, var(--bg) 25%, transparent));
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--shell-topbar-bg, var(--bg));
+  box-shadow: var(--shell-topbar-shadow, none);
   position: relative;
   z-index: 5;
 }
@@ -356,7 +386,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 .topbar-left-group {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -447,19 +477,23 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--startup-gradient-from) 30%, transparent));
 }
 
+/* One 44px row means the workspace name and its sync badge sit side by side
+   instead of stacking; stacked they no longer fit the chrome row. */
 .topbar-status-bar {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   justify-content: center;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .topbar-status-bar .brand-status {
-  color: var(--muted);
-  font-size: var(--fs-meta);
+  color: var(--text);
+  font-size: var(--fs-sm);
   line-height: var(--lh-tight);
-  font-weight: 500;
-  max-width: 160px;
+  font-weight: 650;
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -693,7 +727,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  min-height: 32px;
+  min-height: 30px;
   padding: 0;
   scrollbar-width: none;
 }
@@ -717,7 +751,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 .icon-button {
   min-height: 28px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   background: transparent;
   color: var(--text);
 }
@@ -767,16 +801,18 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   display: none;
 }
 
+/* The tab itself carries the state; the icon is a plain glyph, not a second
+   boxed chip inside it. */
 .module-tab-icon {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
-  color: color-mix(in srgb, var(--text) 74%, var(--muted));
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: currentColor;
   font-size: var(--fs-micro);
   font-weight: 820;
   line-height: 1;
@@ -886,16 +922,23 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   cursor: default;
 }
 
+.module-tab:hover {
+  border-color: transparent;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* Active tab: a soft accent fill plus a 2px underline seated on the topbar
+   hairline. No gradient, no glow, no lift. */
 .module-tab[aria-current="page"] {
   border-color: transparent;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+  box-shadow: inset 0 -2px 0 var(--accent);
   position: relative;
 }
 
 .module-tab[aria-current="page"] .module-tab-icon {
-  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
 }
 
@@ -938,15 +981,22 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 32px;
+  min-height: 30px;
   max-width: 190px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: var(--control-radius);
+  background: transparent;
+  color: var(--muted);
   padding: 0 var(--space-2);
   list-style: none;
   cursor: pointer;
+}
+
+/* A tab group reads exactly like a tab: transparent, then surface on hover,
+   then the accent fill plus underline when its group holds the current app. */
+.module-group-summary:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .module-group-summary::-webkit-details-marker {
@@ -979,8 +1029,9 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .module-group[data-active="true"] > .module-group-summary {
-  color: var(--accent);
-  background: var(--surface-2);
+  color: var(--text-strong);
+  background: var(--accent-soft);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .module-group.is-drop-target > .module-group-summary {
@@ -1172,22 +1223,25 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   display: none;
 }
 
+/* Same seam language as [data-resizer]: a full-height hairline, accent on
+   hover. Kept deliberately identical so the two resizer implementations
+   cannot drift into two visual languages again. */
 .workspace-col-resizer::before {
   content: "";
-  width: 4px;
-  height: 48px;
+  width: 1px;
+  height: 100%;
   border: 0;
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--line);
-  opacity: 0.5;
-  transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
+  opacity: 1;
+  transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard), width var(--motion-fast) var(--ease-standard);
 }
 
 .workspace-col-resizer:hover::before,
 .workspace-col-resizer.is-active::before {
+  width: 2px;
   opacity: 1;
   background: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 body.is-workspace-col-resizing,
@@ -1196,12 +1250,14 @@ body.is-workspace-col-resizing * {
   user-select: none !important;
 }
 
+/* Resizer gutter. 8px wide to match the .ctox-workspace gutter tracks in
+   shared/base.css — the two literals must stay in sync. */
 [data-resizer] {
   align-self: stretch;
-  width: 12px;
-  min-width: 12px;
-  max-width: 12px;
-  flex: 0 0 12px;
+  width: 8px;
+  min-width: 8px;
+  max-width: 8px;
+  flex: 0 0 8px;
   border: 0;
   background: transparent;
   cursor: col-resize;
@@ -1225,17 +1281,19 @@ body.is-workspace-col-resizing * {
   display: none !important;
 }
 
+/* The handle is the seam itself: a full-height hairline, not a floating pill.
+   It reads as part of the pane grid until hover promotes it to the accent. */
 [data-resizer]::before {
   content: "";
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 4px;
-  height: 48px;
-  border-radius: 999px;
+  width: 1px;
+  height: 100%;
+  border-radius: 0;
   background: var(--line);
-  opacity: 0.5;
+  opacity: 1;
   transition: opacity var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
   pointer-events: none;
 }
@@ -1243,9 +1301,10 @@ body.is-workspace-col-resizing * {
 [data-resizer]:hover::before,
 [data-resizer].is-active::before,
 [data-resizer].is-dragging::before {
+  width: 2px;
   opacity: 1;
   background: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: none;
 }
 
 body.is-resizing,
@@ -1528,15 +1587,17 @@ body.is-resizing * {
   text-align: center;
 }
 
+/* The workspace panes are regions of one continuous ground, not stacked
+   cards: the module's own kit panes carry the only frames on this surface. */
 .workspace-pane {
   min-width: 0;
   height: 100%;
   min-height: 0;
   overflow: auto;
-  background: var(--surface);
-  border: 1px solid var(--hairline, var(--line));
-  border-radius: var(--panel-radius);
-  box-shadow: var(--shadow-sm);
+  background: var(--bg);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .workspace-pane-left,
@@ -1552,8 +1613,9 @@ body.is-resizing * {
 }
 
 .workspace-pane-center {
-  background: var(--surface);
-  box-shadow: var(--shadow-md);
+  background: var(--bg);
+  overflow: hidden;
+  box-shadow: none;
   /* Full-workspace modules and windowed modules use the same adaptive
      container contract. Without this named container a side chat/dock can
      shrink a maximized module while its @container rules still see only the
@@ -4380,20 +4442,13 @@ body[data-auth-state="locked"] .topbar {
 }
 
 /* Matching-aligned shell finish. The token values for this section
-   (--panel-shadow, --shell-topbar-bg, --shell-app-bg, --shell-control-bg,
-   --shell-topbar-shadow) are defined once in the :root blocks at the top of
-   this file. */
-.topbar {
-  min-height: 52px;
-  border-bottom-color: var(--hairline);
-  background: var(--shell-topbar-bg);
-  box-shadow: var(--shell-topbar-shadow);
-}
+   (--panel-shadow, --shell-app-bg, --shell-control-bg) are defined once in
+   the :root blocks at the top of this file.
 
-.app-shell {
-  grid-template-rows: 52px minmax(0, 1fr);
-  background: var(--shell-app-bg);
-}
+   The .topbar and .app-shell re-statements that used to sit here (a second
+   52px geometry, restating background and shadow the base rule already reads
+   from the same tokens) are gone: they only existed to beat the canonical
+   rules further up, which now carry the 44px flat geometry directly. */
 
 .brand-mark,
 .module-tab,
@@ -4416,22 +4471,17 @@ body[data-auth-state="locked"] .topbar {
   border-radius: 10px;
 }
 
-.module-tab,
-.module-group-summary,
+/* Filled controls. Tabs and tab groups are deliberately NOT in this list:
+   they are transparent until hovered or current, styled once at the
+   canonical .module-tab rules above. */
 .header-select,
 .account-button,
 .text-button,
 .icon-button,
 .template-store-card input,
 .list button {
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   background: var(--shell-control-bg);
-}
-
-.module-tab[aria-current="page"],
-.module-group[data-active="true"] > .module-group-summary {
-  background: color-mix(in srgb, var(--accent) 13%, var(--surface-2));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .module-group-menu,
@@ -7619,25 +7669,13 @@ button.shell-window-header-meta:focus-visible,
   padding-inline: 2px;
 }
 
-/* --- Topbar: a floating glass island, not a full-width bar --------------
-   .app-shell gives this row a fixed 48px track. The island takes 5px of
-   air above and spans edge-inset by 12px margins: 5px + 43px = 48px, so
-   nothing clips. Interior chrome is compacted to fit the 33px content box. */
-:root[data-shell-style="ctox"] .topbar {
-  min-height: 0 !important;
-  margin: var(--space-1) var(--space-3) 0;
-  padding: var(--space-1) var(--space-3) !important;
-  gap: var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--line) 56%, transparent) !important;
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--shell-topbar-bg) 56%, transparent) !important;
-  backdrop-filter: blur(24px) saturate(180%) !important;
-  -webkit-backdrop-filter: blur(24px) saturate(180%) !important;
-  box-shadow:
-    inset 0 1px 0 var(--chrome-edge-island),
-    0 10px 28px color-mix(in srgb, var(--bg) 22%, transparent),
-    0 2px 8px color-mix(in srgb, var(--bg) 10%, transparent) !important;
-}
+/* --- Topbar ------------------------------------------------------------
+   The CTOX shell style used to lift the topbar into a floating glass island
+   here, overriding the base rule with !important. The flat default design
+   makes the base .topbar rule (a seamless 44px bar with a bottom hairline)
+   correct for every shell style, so this layer no longer restyles it — and
+   the !important stack it needed is gone with it. The macOS and Windows
+   shell styles keep their own topbar variants further up. */
 
 :root[data-shell-style="ctox"] .topbar-brand-triad {
   padding: 0 var(--space-1);
@@ -7654,35 +7692,19 @@ button.shell-window-header-meta:focus-visible,
   height: 30px;
 }
 
-/* --- Module tabs: quiet pills, the active one a small accent-glass gem -- */
+/* --- Module tabs -------------------------------------------------------
+   The pill/gradient/glow treatment that lived here is replaced by the flat
+   default in the base .module-tab rules; only the transition is shell-style
+   specific enough to keep. */
 
 :root[data-shell-style="ctox"] .module-tab {
-  border-radius: 999px;
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard),
     box-shadow var(--motion-fast) var(--ease-standard);
 }
 
-:root[data-shell-style="ctox"] .module-tab:hover {
-  background: color-mix(in srgb, var(--surface) 48%, transparent);
-  color: var(--text);
-}
-
-:root[data-shell-style="ctox"] .module-tab[aria-current="page"] {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--accent) 20%, var(--surface)) 0%,
-    color-mix(in srgb, var(--accent) 13%, var(--surface)) 100%
-  );
-  color: var(--accent);
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent),
-    inset 0 1px 0 var(--chrome-edge-inset),
-    0 3px 10px color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
-/* --- Start menu: a floating glass panel under the island ---------------- */
+/* --- Start menu: a floating panel under the bar ------------------------- */
 
 :root[data-shell-style="ctox"] .shell-start-menu-panel {
   top: 54px;
@@ -7712,23 +7734,9 @@ button.shell-window-header-meta:focus-visible,
     0 0 56px color-mix(in srgb, var(--accent) 14%, transparent) !important;
 }
 
-:root[data-shell-style="ctox"][data-theme="dark"] .topbar {
-  background: color-mix(in srgb, var(--shell-topbar-bg) 50%, transparent) !important;
-  border-color: color-mix(in srgb, var(--line) 42%, transparent) !important;
-  box-shadow:
-    0 12px 32px rgba(0, 0, 0, 0.38),
-    0 2px 8px rgba(0, 0, 0, 0.24) !important;
-}
-
-:root[data-shell-style="ctox"][data-theme="dark"] .module-tab:hover {
-  background: color-mix(in srgb, var(--surface) 42%, transparent);
-}
-
-:root[data-shell-style="ctox"][data-theme="dark"] .module-tab[aria-current="page"] {
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent),
-    0 3px 12px color-mix(in srgb, var(--accent) 18%, transparent);
-}
+/* The topbar and the module tabs are theme-neutral now: both read their
+   colours from the primitive tokens, which already carry the dark values, so
+   the former dark-only glass and glow overrides are gone. */
 
 :root[data-shell-style="ctox"][data-theme="dark"] .shell-start-menu-panel {
   background: color-mix(in srgb, var(--surface) 68%, transparent);

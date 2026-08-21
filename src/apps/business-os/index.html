@@ -49,6 +49,11 @@
     </style>
     <link rel="stylesheet" href="app.css?v=20260816-browser-sync-guards-v141" />
     <link rel="stylesheet" href="shared/base.css?v=20260816-browser-sync-guards-v141" />
+    <!-- Loaded unconditionally and last. It is scoped to
+         html[data-desktop-host="ctox"], an attribute only the Electron host
+         sets, so it is inert in a browser: no host detection, no conditional
+         loading. It carries no design of its own — see the file header. -->
+    <link rel="stylesheet" href="themes/ctox-desktop-shell.css?v=20260816-browser-sync-guards-v141" />
   </head>
   <body data-module-shell="full" data-module-loading="startup">
     <script>

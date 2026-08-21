@@ -584,6 +584,22 @@ function alignChatWindows(root) {
         }
       }
     }
+    // Chips are ~142px apart but a window is 320px wide, so the spread above
+    // cannot leave all three windows under their own chip. Anchor the ACTIVE
+    // one — the window the user is reading — and let its neighbours carry the
+    // displacement. Without this the first window's frame clamp won, and the
+    // active card drifted a third of its width off the chip that opened it.
+    const anchor = positions.find(({ win }) => win.classList.contains('is-active'));
+    if (anchor) {
+      const wantedLeft = clampChatWindowLeft(anchor.preferredLeft, anchor.width, layoutFrame);
+      const rowLeft = positions[0].left;
+      const rowRight = positions[positions.length - 1].left + positions[positions.length - 1].width;
+      const shift = Math.max(
+        layoutFrame.left - rowLeft,
+        Math.min(layoutFrame.right - rowRight, wantedLeft - anchor.left),
+      );
+      if (shift) positions.forEach((item) => { item.left += shift; });
+    }
   } else if (positions.length > 0) {
     const availableSpan = Math.max(0, layoutFrame.width - widestWindow);
     const naturalStep = positions.length > 1 ? availableSpan / (positions.length - 1) : 0;
@@ -766,8 +782,151 @@ function setStyleIfChanged(element, prop, value) {
   return true;
 }
 
-function stageWindowChats(activeExpandedChat) {
-  return activeExpandedChat ? [activeExpandedChat] : [];
+// The 3D carousel stages the active chat window plus its immediate neighbours.
+// Three windows are exactly what the relation model can express (left / center
+// / right), and every staged window is a real card the user can click to focus.
+const MAX_STAGED_CHAT_WINDOWS = 3;
+
+// REGRESSION GUARD: this used to return `[activeExpandedChat]`, which mounted a
+// single window and silently removed the carousel — the relation model, the
+// perspective stage and the carousel layout in alignChatWindows all stayed in
+// the code but never had more than one window to arrange.
+function stageWindowChats(expandedChats, activeExpandedChat = null) {
+  // Tolerate the historical single-argument call shape.
+  if (!Array.isArray(expandedChats)) {
+    const only = expandedChats || activeExpandedChat;
+    return only ? [only] : [];
+  }
+  const staged = expandedChats.filter((chat) => chat && !chat.minimized);
+  if (!staged.length) return activeExpandedChat ? [activeExpandedChat] : [];
+  if (staged.length <= MAX_STAGED_CHAT_WINDOWS) return staged;
+
+  const activeIndex = Math.max(0, staged.findIndex((chat) => chat.id === activeExpandedChat?.id));
+  const half = Math.floor(MAX_STAGED_CHAT_WINDOWS / 2);
+  const start = Math.max(0, Math.min(activeIndex - half, staged.length - MAX_STAGED_CHAT_WINDOWS));
+  return staged.slice(start, start + MAX_STAGED_CHAT_WINDOWS);
+}
+
+// The last full dock markup that was written into a root, and the last inner
+// markup written into a mounted panel. Both memos exist for exactly one reason:
+// a render that produces byte-identical markup must not touch the DOM. Under
+// load the dock re-renders on every sync tick, and an unconditional
+// `innerHTML =` remounts every chip (re-running ctoxChipSlideIn), drops scroll
+// offsets and hover state — the visible nervous twitching of the chat bar.
+const lastFullDockHtml = new WeakMap();
+const lastPanelInnerHtml = new WeakMap();
+
+function activeElementInside(node) {
+  if (!node) return false;
+  const active = globalThis.document?.activeElement;
+  if (!active || active === globalThis.document?.body) return false;
+  if (active === node) return true;
+  return typeof node.contains === 'function' ? node.contains(active) : false;
+}
+
+// Refresh a mounted panel's content without recreating the panel element.
+// Returns true when the DOM was actually written.
+function updatePanelInPlace(panel, inner, wire) {
+  if (!panel) return false;
+  const next = String(inner ?? '').trim();
+  if (lastPanelInnerHtml.get(panel) === next) return false;
+  if (panel.innerHTML !== undefined && panel.innerHTML.trim() === next) {
+    lastPanelInnerHtml.set(panel, next);
+    return false;
+  }
+  // Never rip the DOM out from under a control the user is currently using:
+  // a filter field or a focused list row keeps its focus, and the refresh is
+  // simply retried on the next tick.
+  if (activeElementInside(panel)) return false;
+
+  const panelScrollTop = panel.scrollTop;
+  const canQuery = typeof panel.querySelectorAll === 'function';
+  const listScrollTops = canQuery
+    ? Array.from(panel.querySelectorAll('[data-chat-busy-list]')).map((node) => node.scrollTop)
+    : [];
+  panel.innerHTML = next;
+  lastPanelInnerHtml.set(panel, next);
+  if (panelScrollTop) panel.scrollTop = panelScrollTop;
+  if (canQuery) {
+    Array.from(panel.querySelectorAll('[data-chat-busy-list]')).forEach((node, index) => {
+      if (listScrollTops[index]) node.scrollTop = listScrollTops[index];
+    });
+  }
+  wire?.(panel);
+  return true;
+}
+
+// Everything the rendered chip strip depends on. A change here is a real shape
+// change of the dock and must rebuild, so a genuinely new chip still gets its
+// ctoxChipSlideIn mount animation.
+function chatStripSignature({ visibleChats, hiddenChatCount, showChatStrip, showChatNav, state }) {
+  return [
+    showChatStrip ? 'strip' : 'no-strip',
+    showChatNav ? 'nav' : 'no-nav',
+    state.chatListOpen ? 'list-open' : 'list-closed',
+    String(hiddenChatCount),
+    visibleChats.map((chat) => chat.id).join(','),
+  ].join('|');
+}
+
+function wireDateWorkloadPanelHandlers(scope, ctx) {
+  if (!scope) return;
+  const { root, state, commandBus, db, getActiveModule } = ctx;
+  scope.querySelector('[data-chat-date-picker-panel]')?.addEventListener('change', async (event) => {
+    const val = event.currentTarget.value;
+    if (!val) return;
+    state.selectedDate = val;
+    state.dateWorkloadOpen = false;
+    renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
+  });
+
+  scope.querySelectorAll('[data-chat-date-select]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const val = button.dataset.chatDateSelect;
+      if (!val) return;
+      state.selectedDate = val;
+      state.dateWorkloadOpen = false;
+      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
+    });
+  });
+
+  scope.querySelector('[data-chat-date-workload-close]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    state.dateWorkloadOpen = false;
+    renderChatRoot({ root, state, commandBus, db, getActiveModule });
+  });
+}
+
+function wireBusyPanelHandlers(scope, ctx) {
+  if (!scope) return;
+  const { root, state, commandBus, db, getActiveModule } = ctx;
+  scope.querySelector('[data-chat-overflow-close]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    state.chatListOpen = false;
+    renderChatRoot({ root, state, commandBus, db, getActiveModule });
+  });
+
+  scope.querySelectorAll('[data-chat-list-filter]').forEach((control) => {
+    const updateFilter = () => {
+      const key = control.dataset.chatListFilter;
+      state.chatListFilter = normalizeChatListFilter(state.chatListFilter);
+      state.chatListFilter[key] = control.value;
+      renderChatRoot({ root, state, commandBus, db, getActiveModule });
+    };
+    control.addEventListener(control.tagName === 'INPUT' ? 'input' : 'change', updateFilter);
+  });
+
+  scope.querySelectorAll('[data-chat-list-focus]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const chat = state.chats.find((item) => item.id === button.dataset.chatListFocus);
+      if (!chat) return;
+      toggleChatFromDock(state, chat);
+      state.chatListOpen = false;
+      state.dockCollapsed = false;
+      touchChats(state, [chat]);
+      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
+    });
+  });
 }
 
 function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
@@ -793,10 +952,11 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const activeExpandedChat = activeChat && !activeChat.minimized
     ? activeChat
     : expandedChats.find((chat) => chat.id === state.activeChatId) || expandedChats[0] || null;
-  // The dock already provides navigation between chats. Rendering historical
-  // chats as translucent cards behind the active one made covered app controls
-  // look clickable while an inactive chat surface intercepted the click.
-  const visibleWindowChats = stageWindowChats(activeExpandedChat);
+  // The staged windows are the 3D carousel: the active card plus its immediate
+  // neighbours. The neighbours are decoration and a focus target only — their
+  // own controls are inert (see `.ctox-chat-window:not(.is-active) *`), so they
+  // cannot swallow a click meant for an app control underneath.
+  const visibleWindowChats = stageWindowChats(expandedChats, activeExpandedChat);
   const hiddenChatCount = Math.max(0, openChats.length - visibleChats.length);
   const hasVisibleChats = openChats.length > 0;
   const showChatStrip = !Boolean(state.dockCollapsed) && hasVisibleChats;
@@ -812,6 +972,11 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     showChatNav ? 'has-nav' : 'has-no-nav',
   ].filter(Boolean).join(' ');
   const dockCollapsed = Boolean(state.dockCollapsed);
+  // How many windows the stage will actually mount. The stage is a fixed-height
+  // box, so without this it reserved ~340px of the viewport even with nothing
+  // in it: an expanded dock holding zero chats blanked the top third of the
+  // app behind an invisible, click-through void. `.is-empty` collapses it.
+  const stagedWindowCount = dockCollapsed ? 0 : visibleWindowChats.length;
   const wasCollapsed = root.classList.contains('is-collapsed');
   root.classList.toggle('is-collapsed', dockCollapsed);
 
@@ -834,6 +999,18 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const taskStateUnchanged = windowShapeUnchanged && existingWindows.every((win, idx) => (
     windowTaskStateMatches(win, visibleWindowChats[idx])
   ));
+  // The panels no longer force a rebuild: an open chat list, busy panel or date
+  // workload panel is refreshed in place. Only the panel OPEN/CLOSE transition
+  // — a real change of the dock's shape — still rebuilds.
+  const wantsBusyPanel = Boolean(state.chatListOpen) && openChats.length > MAX_RENDERED_CHAT_TABS;
+  const wantsDatePanel = Boolean(state.dateWorkloadOpen);
+  const panelShapeUnchanged = hasBusyPanel === wantsBusyPanel && hasDatePanel === wantsDatePanel;
+  // With panels staying mounted, the chip strip must be checked explicitly:
+  // adding or removing a chat changes the strip even when the staged window
+  // does not, and a new chip legitimately deserves its slide-in remount.
+  const stripSignature = chatStripSignature({ visibleChats, hiddenChatCount, showChatStrip, showChatNav, state });
+  const dockElement = root.querySelector('[data-chat-dock]');
+  const stripShapeUnchanged = dockElement?.dataset?.chatStripSignature === stripSignature;
   // taskStateUnchanged is deliberately NOT required: a status change is exactly
   // when the bar must update WITHOUT a full rebuild. The in-place path below
   // refreshes every task-state-dependent part (window class, chip class, status
@@ -841,13 +1018,11 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const canUpdateInPlace = windowShapeUnchanged &&
                            attachmentsUnchanged &&
                            composerShapeUnchanged &&
-                           root.querySelector('[data-chat-dock]') &&
+                           dockElement &&
                            wasCollapsed === dockCollapsed &&
                            matchesCurrentDate &&
-                           !state.chatListOpen &&
-                           !hasBusyPanel &&
-                           !state.dateWorkloadOpen &&
-                           !hasDatePanel;
+                           panelShapeUnchanged &&
+                           stripShapeUnchanged;
 
   if (canUpdateInPlace) {
     let inPlaceDomChanged = false;
@@ -972,10 +1147,33 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       }
     });
 
+    // 3b. Refresh mounted panels in place. This is what keeps the dock calm
+    // while the chat list or the date workload panel is open: their content is
+    // regenerated as a string and written back only when it really differs.
+    const panelContext = { root, state, commandBus, db, getActiveModule };
+    if (wantsDatePanel) {
+      const datePanel = root.querySelector('[data-chat-date-workload-panel]');
+      const inner = dateWorkloadPanelInner({ chats: state.chats, selectedDate });
+      if (updatePanelInPlace(datePanel, inner, (scope) => wireDateWorkloadPanelHandlers(scope, panelContext))) {
+        inPlaceDomChanged = true;
+      }
+    }
+    if (wantsBusyPanel) {
+      const busyPanel = root.querySelector('[data-chat-busy-panel]');
+      const inner = chatBusyPanelInner({ chats: openChats, selectedDate, state });
+      if (updatePanelInPlace(busyPanel, inner, (scope) => wireBusyPanelHandlers(scope, panelContext))) {
+        inPlaceDomChanged = true;
+      }
+    }
+
     // 4. Align position and scroll — only when something actually moved.
     // A no-op status tick must not call scrollIntoView or rewrite left styles;
     // that is the visible "chat bar rebuilds every 2 seconds" twitch.
     if (inPlaceDomChanged) {
+      // The memoized full markup describes the DOM as of the last full render.
+      // An in-place write moves the DOM past it, so the memo must not be able to
+      // veto a later rebuild that would restore an earlier state.
+      lastFullDockHtml.delete(root);
       alignChatWindows(root);
       scrollActiveChatIntoView(root, state, { forceMessages: messagesDomChanged });
       updateChatStripOverflowState(root);
@@ -986,9 +1184,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   // --- END OF IN-PLACE DOM UPDATE FAST-PATH ---
 
   const maxDateVal = getLocalDateString(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000);
-
-  root.innerHTML = `
-    <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
+  const nextDockHtml = `
+    <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock data-chat-strip-signature="${escapeAttr(stripSignature)}">
       <button class="ctox-chat-fab" type="button" data-chat-open aria-label="${dockCollapsed ? (chatUiIsGerman() ? 'Chat öffnen' : 'Open chat') : (chatUiIsGerman() ? 'Chat einklappen' : 'Collapse chat')}">
         <span>Chat</span><b>${openChats.length || ''}</b>
       </button>
@@ -1029,10 +1226,10 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         </button>
       ` : ''}
     </section>
-    ${state.dateWorkloadOpen ? dateWorkloadPanel({ chats: state.chats, selectedDate }) : ''}
-    ${state.chatListOpen && openChats.length > MAX_RENDERED_CHAT_TABS ? chatBusyPanel({ chats: openChats, selectedDate, state }) : ''}
+    ${wantsDatePanel ? dateWorkloadPanel({ chats: state.chats, selectedDate }) : ''}
+    ${wantsBusyPanel ? chatBusyPanel({ chats: openChats, selectedDate, state }) : ''}
     <div class="ctox-chat-stage" data-chat-stage>
-      <div class="ctox-chat-stage-inner ${hasMaximized ? 'has-maximized' : ''}">
+      <div class="ctox-chat-stage-inner ${stagedWindowCount === 0 ? 'is-empty' : (hasMaximized ? 'has-maximized' : '')}">
         ${dockCollapsed ? '' : (() => {
           const activeIndex = visibleWindowChats.findIndex((c) => c.id === activeExpandedChat?.id);
           return visibleWindowChats.map((chat, idx) => {
@@ -1044,6 +1241,41 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       </div>
     </div>
   `;
+
+  // Safety net for every remaining rebuild: identical markup must not touch the
+  // DOM. Rewriting it would remount every chip, restart ctoxChipSlideIn and
+  // discard scroll and hover state for no visible gain — the jitter itself.
+  //
+  // REGRESSION GUARD: the memo only describes what the last FULL render wrote.
+  // Anything that replaces the chat root's content behind the renderer's back
+  // leaves the memo describing a DOM that is no longer on screen, and the skip
+  // then freezes a stale expanded stage over the app after a collapse. So the
+  // memo is only trusted once the mounted DOM corroborates the two properties
+  // the skip could otherwise get catastrophically wrong: the collapse state and
+  // the number of staged windows.
+  const mountedCollapsed = Boolean(dockElement?.classList?.contains?.('is-collapsed'));
+  const intendedWindowCount = dockCollapsed ? 0 : visibleWindowChats.length;
+  const memoDescribesMountedDom = Boolean(dockElement)
+    && mountedCollapsed === dockCollapsed
+    && existingWindows.length === intendedWindowCount;
+  if (memoDescribesMountedDom && lastFullDockHtml.get(root) === nextDockHtml) return;
+  lastFullDockHtml.set(root, nextDockHtml);
+  root.innerHTML = nextDockHtml;
+
+  // Seed the panel memos with the markup that was just mounted, so the first
+  // in-place tick after a rebuild does not rewrite an already correct panel.
+  if (wantsDatePanel) {
+    const mountedDatePanel = root.querySelector('[data-chat-date-workload-panel]');
+    if (mountedDatePanel) {
+      lastPanelInnerHtml.set(mountedDatePanel, dateWorkloadPanelInner({ chats: state.chats, selectedDate }).trim());
+    }
+  }
+  if (wantsBusyPanel) {
+    const mountedBusyPanel = root.querySelector('[data-chat-busy-panel]');
+    if (mountedBusyPanel) {
+      lastPanelInnerHtml.set(mountedBusyPanel, chatBusyPanelInner({ chats: openChats, selectedDate, state }).trim());
+    }
+  }
 
   root.querySelector('[data-chat-date-prev]')?.addEventListener('click', async () => {
     shiftSelectedDate(state, -1);
@@ -1064,29 +1296,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     }
   });
 
-  root.querySelector('[data-chat-date-picker-panel]')?.addEventListener('change', async (event) => {
-    const val = event.currentTarget.value;
-    if (!val) return;
-    state.selectedDate = val;
-    state.dateWorkloadOpen = false;
-    renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
-  });
-
-  root.querySelectorAll('[data-chat-date-select]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const val = button.dataset.chatDateSelect;
-      if (!val) return;
-      state.selectedDate = val;
-      state.dateWorkloadOpen = false;
-      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
-    });
-  });
-
-  root.querySelector('[data-chat-date-workload-close]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    state.dateWorkloadOpen = false;
-    renderChatRoot({ root, state, commandBus, db, getActiveModule });
-  });
+  wireDateWorkloadPanelHandlers(root, { root, state, commandBus, db, getActiveModule });
 
   root.querySelector('.ctox-date-picker-trigger')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -1103,33 +1313,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     renderChatRoot({ root, state, commandBus, db, getActiveModule });
   });
 
-  root.querySelector('[data-chat-overflow-close]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    state.chatListOpen = false;
-    renderChatRoot({ root, state, commandBus, db, getActiveModule });
-  });
-
-  root.querySelectorAll('[data-chat-list-filter]').forEach((control) => {
-    const updateFilter = () => {
-      const key = control.dataset.chatListFilter;
-      state.chatListFilter = normalizeChatListFilter(state.chatListFilter);
-      state.chatListFilter[key] = control.value;
-      renderChatRoot({ root, state, commandBus, db, getActiveModule });
-    };
-    control.addEventListener(control.tagName === 'INPUT' ? 'input' : 'change', updateFilter);
-  });
-
-  root.querySelectorAll('[data-chat-list-focus]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const chat = state.chats.find((item) => item.id === button.dataset.chatListFocus);
-      if (!chat) return;
-      toggleChatFromDock(state, chat);
-      state.chatListOpen = false;
-      state.dockCollapsed = false;
-      touchChats(state, [chat]);
-      renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
-    });
-  });
+  wireBusyPanelHandlers(root, { root, state, commandBus, db, getActiveModule });
 
   root.querySelector('[data-chat-new]')?.addEventListener('click', async () => {
     const next = createChat(state.ownerUserId, state.selectedDate);
@@ -2043,7 +2227,20 @@ function chatOverflowItem(hiddenCount, active) {
   `;
 }
 
+// The panels are rendered as shell + inner content so the in-place update path
+// can refresh the CONTENT of a panel that is already mounted without recreating
+// the panel element itself. Only the inner string is compared and written.
+function chatBusyPanelShell(inner, selectedDate) {
+  return `
+    <section class="ctox-chat-busy-panel" data-chat-busy-panel aria-label="Chatliste fuer ${escapeAttr(formatGermanDateLabel(selectedDate))}">${inner}</section>
+  `;
+}
+
 function chatBusyPanel({ chats, selectedDate, state }) {
+  return chatBusyPanelShell(chatBusyPanelInner({ chats, selectedDate, state }), selectedDate);
+}
+
+function chatBusyPanelInner({ chats, selectedDate, state }) {
   const filters = normalizeChatListFilter(state.chatListFilter);
   const stats = chatWorkloadForDate(chats);
   const filtered = filterBusyChats(chats, filters);
@@ -2061,7 +2258,6 @@ function chatBusyPanel({ chats, selectedDate, state }) {
   ];
   const list = busyListMarkup({ filtered, filters, activeId: state.activeChatId });
   return `
-    <section class="ctox-chat-busy-panel" data-chat-busy-panel aria-label="Chatliste fuer ${escapeAttr(formatGermanDateLabel(selectedDate))}">
       <header>
         <div>
           <strong>${escapeHtml(formatGermanDateLabel(selectedDate))}</strong>
@@ -2098,16 +2294,24 @@ function chatBusyPanel({ chats, selectedDate, state }) {
         ${list.remaining > 0 ? `<div class="ctox-chat-busy-more">${formatCompactCount(list.remaining)} weitere Treffer durch Filter eingrenzen</div>` : ''}
         ${list.groupRemaining > 0 ? `<div class="ctox-chat-busy-more">${formatCompactCount(list.groupRemaining)} weitere Gruppen durch Filter eingrenzen</div>` : ''}
       </div>
-    </section>
+  `;
+}
+
+function dateWorkloadPanelShell(inner) {
+  return `
+    <section class="ctox-date-workload-panel" data-chat-date-workload-panel aria-label="Task-Aufkommen nach Datum">${inner}</section>
   `;
 }
 
 function dateWorkloadPanel({ chats, selectedDate }) {
+  return dateWorkloadPanelShell(dateWorkloadPanelInner({ chats, selectedDate }));
+}
+
+function dateWorkloadPanelInner({ chats, selectedDate }) {
   const days = workloadDaysAround(chats, selectedDate, 28);
   const max = Math.max(1, ...days.map((day) => day.count));
   const selected = days.find((day) => day.date === selectedDate);
   return `
-    <section class="ctox-date-workload-panel" data-chat-date-workload-panel aria-label="Task-Aufkommen nach Datum">
       <header>
         <div>
           <strong>${escapeHtml(formatGermanDateLabel(selectedDate))}</strong>
@@ -2121,7 +2325,6 @@ function dateWorkloadPanel({ chats, selectedDate }) {
       <div class="ctox-date-heatmap" role="list" aria-label="Task-Aufkommen der umliegenden Tage">
         ${days.map((day) => dateHeatmapDay(day, max, selectedDate)).join('')}
       </div>
-    </section>
   `;
 }
 
@@ -3860,17 +4063,22 @@ function installChatStyles() {
         box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 0 1px var(--accent) inset;
       }
     }
+    /* The dock is the mirror of the topbar: a full-width 44px footer bar on
+       the shell ground, separated from the app by one hairline. It used to be
+       a floating glass island inset from three edges, which left a strip of
+       app visible underneath it and gave the shell two different chrome
+       languages at top and bottom. */
     .ctox-chat-root {
       position: fixed;
-      left: 18px;
-      right: 96px;
-      bottom: 18px;
+      left: 0;
+      right: 0;
+      bottom: 0;
       z-index: 60;
       display: grid;
       grid-template-rows: auto auto;
-      gap: var(--space-2);
-      width: auto;
-      max-width: calc(100dvw - 132px);
+      gap: 0;
+      width: 100%;
+      max-width: 100%;
       box-sizing: border-box;
       pointer-events: none;
       min-width: 0;
@@ -3887,29 +4095,34 @@ function installChatStyles() {
       pointer-events: auto;
       grid-row: 2;
       display: grid;
-      grid-template-columns: 88px var(--ctox-date-pill-width) 34px;
+      grid-template-columns: 88px var(--ctox-date-pill-width) minmax(0, 1fr);
       align-items: center;
       gap: var(--space-2);
       min-width: 0;
-      width: max-content;
+      width: 100%;
       max-width: 100%;
-      padding: 6px;
-      border: 1px solid color-mix(in srgb, var(--line) 35%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 35%, transparent);
-      backdrop-filter: blur(20px) saturate(180%);
-      -webkit-backdrop-filter: blur(20px) saturate(180%);
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
-      transition: border-color var(--motion-slow) var(--ease-spring), box-shadow var(--motion-slow) var(--ease-spring);
+      min-height: 44px;
+      /* The bar spans the viewport, so its own padding must sit inside that
+         width. Without this it inherited the host page's box-sizing and a
+         full-width dock overhung the viewport by its 20px of padding. */
+      box-sizing: border-box;
+      padding: 0 10px;
+      border: 0;
+      border-top: 1px solid var(--line);
+      border-radius: 0;
+      background: var(--bg);
+      transition: border-color var(--motion-slow) var(--ease-spring);
     }
     .ctox-chat-dock:hover {
-      border-color: color-mix(in srgb, var(--line) 55%, transparent);
+      border-top-color: var(--line);
     }
+    /* The chip strip takes the leftover width in every mode, so the bar reads
+       as one ground rather than a short island floating in an empty footer. */
     .ctox-chat-dock.has-visible-chats {
-      grid-template-columns: 88px var(--ctox-date-pill-width) minmax(136px, auto) 34px;
+      grid-template-columns: 88px var(--ctox-date-pill-width) minmax(0, 1fr) 34px;
     }
     .ctox-chat-dock.has-nav {
-      grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, auto) 28px 34px;
+      grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, 1fr) 28px 34px;
     }
     .ctox-chat-dock.has-many-chats {
       grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, 1fr) 28px 34px;
@@ -3932,17 +4145,17 @@ function installChatStyles() {
       height: 34px;
       width: var(--ctox-date-pill-width);
       min-width: var(--ctox-date-pill-width);
-      border: 1px solid color-mix(in srgb, var(--line) 20%, transparent);
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--surface) 15%, transparent);
+      border: 1px solid var(--hairline, var(--line));
+      border-radius: var(--control-radius);
+      background: var(--surface);
       padding: 0 2px;
       box-sizing: border-box;
       gap: 2px;
       transition: border-color var(--motion-base) var(--ease-standard), background-color var(--motion-base) var(--ease-standard);
     }
     .ctox-chat-date-pill:hover {
-      border-color: color-mix(in srgb, var(--line) 55%, transparent);
-      background: color-mix(in srgb, var(--surface) 35%, transparent);
+      border-color: var(--line);
+      background: var(--surface-2);
     }
     .ctox-date-nav-btn {
       display: flex;
@@ -4046,14 +4259,17 @@ function installChatStyles() {
       appearance: none;
       z-index: 10;
     }
+    /* Collapsed the bar keeps its full-width ground and shows only the FAB and
+       the date pill; the third track absorbs the rest. It used to shrink to
+       its content width, which turned the footer into a stub island again. */
     .ctox-chat-root.is-collapsed {
-      right: auto;
-      width: auto;
-      max-width: none;
+      right: 0;
+      width: 100%;
+      max-width: 100%;
     }
     .ctox-chat-dock.is-collapsed {
-      grid-template-columns: 88px var(--ctox-date-pill-width);
-      width: auto;
+      grid-template-columns: 88px var(--ctox-date-pill-width) minmax(0, 1fr);
+      width: 100%;
     }
     .ctox-chat-dock.is-collapsed .ctox-chat-nav,
     .ctox-chat-dock.is-collapsed .ctox-chat-strip,
@@ -4073,21 +4289,19 @@ function installChatStyles() {
       height: 34px;
       width: 88px;
       min-width: 82px;
-      border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+      border: 1px solid var(--hairline, var(--line));
+      border-radius: var(--control-radius);
+      background: var(--surface);
       color: var(--text);
       padding: 0 10px;
-      font-weight: 760;
+      font-weight: 700;
       cursor: pointer;
-      transition: transform var(--motion-slow) var(--ease-spring), background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+      transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
     }
     .ctox-chat-fab:hover {
-      transform: translateY(-1px) scale(1.02);
-      background: color-mix(in srgb, var(--accent) 15%, var(--surface));
-    }
-    .ctox-chat-fab:active {
-      transform: scale(0.98);
+      border-color: var(--line);
+      background: var(--surface-2);
+      color: var(--text-strong);
     }
     .ctox-chat-fab b {
       display: grid;
@@ -4095,7 +4309,7 @@ function installChatStyles() {
       min-width: 18px;
       height: 18px;
       border-radius: 999px;
-      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      background: var(--accent-soft);
       color: var(--accent);
       font-size: var(--fs-meta);
     }
@@ -4105,34 +4319,26 @@ function installChatStyles() {
       align-items: center;
       justify-content: center;
       height: 30px;
-      border: 1px solid color-mix(in srgb, var(--line) 30%, transparent);
-      border-radius: 50%;
-      background: color-mix(in srgb, var(--surface) 25%, transparent);
+      border: 1px solid transparent;
+      border-radius: var(--control-radius);
+      background: transparent;
       color: var(--muted);
       cursor: pointer;
-      transition: transform var(--motion-slow) var(--ease-spring), background-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard);
+      transition: background-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard);
     }
     .ctox-chat-nav {
       width: 28px;
     }
     .ctox-chat-new {
       width: 30px;
-      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-      background: color-mix(in srgb, var(--accent) 12%, transparent);
-      color: var(--accent);
+      border-color: var(--hairline, var(--line));
+      background: var(--surface);
+      color: var(--text);
     }
     .ctox-chat-nav:hover,
     .ctox-chat-new:hover {
-      transform: scale(1.1) translateY(-1px);
-      background: color-mix(in srgb, var(--surface-2) 60%, transparent);
-      color: var(--text);
-    }
-    .ctox-chat-new:hover {
-      background: color-mix(in srgb, var(--accent) 20%, transparent);
-    }
-    .ctox-chat-nav:active,
-    .ctox-chat-new:active {
-      transform: scale(0.95);
+      background: var(--surface-2);
+      color: var(--text-strong);
     }
     .ctox-chat-strip {
       display: flex;
@@ -4512,50 +4718,21 @@ function installChatStyles() {
       gap: var(--space-2);
       height: 34px;
       min-width: 0;
-      border: 1px solid transparent;
-      border-radius: 10px;
-      background: transparent;
-      color: var(--muted);
+      border: 1px solid var(--hairline, var(--line));
+      border-radius: var(--control-radius);
+      background: var(--surface);
+      color: var(--text);
       padding: 0 9px;
       text-align: left;
       cursor: pointer;
-      animation: ctoxChipSlideIn var(--motion-slow) var(--ease-spring) both;
-      transition: transform var(--motion-slow) var(--ease-spring), background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-spring);
-      --accent: var(--theme-accent, #10b981);
-      --accent-soft: var(--theme-accent-soft, rgba(16, 185, 129, 0.12));
+      transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-spring);
     }
-    .ctox-chat-chip[data-chat-module="ctox"] {
-      --accent: #10b981 !important;
-      --accent-soft: rgba(16, 185, 129, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="documents"] {
-      --accent: #3b82f6 !important;
-      --accent-soft: rgba(59, 130, 246, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="knowledge"] {
-      --accent: #a855f7 !important;
-      --accent-soft: rgba(168, 85, 247, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="research"] {
-      --accent: #06b6d4 !important;
-      --accent-soft: rgba(6, 182, 212, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="matching"] {
-      --accent: #f59e0b !important;
-      --accent-soft: rgba(245, 158, 11, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="reports"] {
-      --accent: #ef4444 !important;
-      --accent-soft: rgba(239, 68, 68, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="conversations"] {
-      --accent: #6366f1 !important;
-      --accent-soft: rgba(99, 102, 241, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="outbound"] {
-      --accent: #f43f5e !important;
-      --accent-soft: rgba(244, 63, 94, 0.12) !important;
-    }
+    /* One accent for the whole dock and stage. The eight per-module palettes
+       that used to live here (32 !important declarations forcing --accent and
+       --accent-soft on chips and windows) are gone: the dock now inherits the
+       shell accent, which the CTOX desktop host can retint. Module identity is
+       carried by the chip's title and icon, not by a colour the user never
+       chose. */
     .ctox-chat-chip.is-task-running {
       --status-color: var(--accent);
       --status-soft: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -4577,49 +4754,49 @@ function installChatStyles() {
       --status-soft: rgba(56, 189, 248, 0.13);
     }
     .ctox-chat-chip:hover {
-      transform: translateY(-1.5px);
-      background: color-mix(in srgb, var(--surface) 35%, transparent);
-      color: var(--text);
+      border-color: var(--line);
+      background: var(--surface-2);
+      color: var(--text-strong);
     }
-    .ctox-chat-chip.is-minimized {
-      border-color: color-mix(in srgb, var(--line) 30%, transparent) !important;
-      background: color-mix(in srgb, var(--surface) 30%, transparent) !important;
-      color: var(--muted) !important;
-      box-shadow: none !important;
-      opacity: 0.75 !important;
-      transform: none !important;
-    }
-    .ctox-chat-chip.is-minimized:not(.is-task-idle) {
-      border-color: color-mix(in srgb, var(--status-color) 46%, transparent) !important;
-      background: color-mix(in srgb, var(--status-color) 12%, var(--surface)) !important;
-      color: color-mix(in srgb, var(--text) 82%, var(--status-color)) !important;
-      opacity: 0.94 !important;
-    }
-    .ctox-chat-chip.is-minimized:hover {
-      border-color: color-mix(in srgb, var(--line) 45%, transparent) !important;
-      background: color-mix(in srgb, var(--surface-2) 40%, transparent) !important;
-      color: var(--text) !important;
-      opacity: 0.98 !important;
-      transform: translateY(-1px) !important;
-    }
-    .ctox-chat-chip.is-minimized:not(.is-task-idle):hover {
-      border-color: color-mix(in srgb, var(--status-color) 64%, transparent) !important;
-      background: color-mix(in srgb, var(--status-color) 18%, var(--surface-2)) !important;
-    }
+    /* Only the ACTIVE chip carries the accent. Tinting every open chip with
+       26% accent turned the strip into a row of filled boxes the moment more
+       than one chat was open. */
     .ctox-chat-chip.is-expanded:not(.is-active) {
-      border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-      background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
-      color: color-mix(in srgb, var(--text) 95%, var(--accent));
-      opacity: 0.96;
+      border-color: var(--line);
+      background: var(--surface-2);
+      color: var(--text);
     }
     .ctox-chat-chip.is-active {
       border-color: var(--accent);
-      background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
+      background: var(--accent-soft);
+      color: var(--text-strong);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    /* Minimized wins over expanded/active. These four rules used to sit ABOVE
+       them and needed 22 !important declarations to be heard; they are simply
+       ordered last now and carry none. */
+    .ctox-chat-chip.is-minimized {
+      border-color: var(--hairline, var(--line));
+      background: var(--surface);
+      color: var(--muted);
+      box-shadow: none;
+      opacity: 0.75;
+    }
+    .ctox-chat-chip.is-minimized:not(.is-task-idle) {
+      border-color: color-mix(in srgb, var(--status-color) 46%, transparent);
+      background: color-mix(in srgb, var(--status-color) 12%, var(--surface));
+      color: color-mix(in srgb, var(--text) 82%, var(--status-color));
+      opacity: 0.94;
+    }
+    .ctox-chat-chip.is-minimized:hover {
+      border-color: var(--line);
+      background: var(--surface-2);
       color: var(--text);
-      box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 0 1px var(--accent) inset;
-      opacity: 1 !important;
-      transform: translateY(-1px) scale(1.02);
-      animation: ctoxChipActivePulse var(--motion-slow) var(--ease-standard) both;
+      opacity: 0.98;
+    }
+    .ctox-chat-chip.is-minimized:not(.is-task-idle):hover {
+      border-color: color-mix(in srgb, var(--status-color) 64%, transparent);
+      background: color-mix(in srgb, var(--status-color) 18%, var(--surface-2));
     }
     .ctox-chat-chip-mark {
       display: flex;
@@ -4751,6 +4928,16 @@ function installChatStyles() {
       perspective: 1200px;
       transform-style: preserve-3d;
     }
+    /* An expanded dock with no staged window must reserve no space at all.
+       The height stays animated by the transition on the base rule, so the
+       stage still grows and shrinks when the first chat opens or the last
+       one closes. Padding has to go too: with box-sizing: border-box a
+       height of 0 still leaves the vertical padding standing. */
+    .ctox-chat-stage-inner.is-empty {
+      height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
     .ctox-chat-stage-inner.has-maximized {
       height: min(480px, calc(100dvh - 132px));
     }
@@ -4782,13 +4969,11 @@ function installChatStyles() {
       overflow: hidden;
       box-sizing: border-box;
       max-width: min(440px, calc(100dvw - 24px));
-      border: 1px solid color-mix(in srgb, var(--line) 25%, transparent);
-      border-radius: 16px;
-      background: color-mix(in srgb, var(--surface) 94%, transparent);
-      backdrop-filter: blur(24px) saturate(180%);
-      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
       color: var(--text);
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+      box-shadow: var(--shadow-lg);
       font-family: var(--font-family, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
       font-size: var(--fs-sm);
       line-height: 1.4;
@@ -4803,47 +4988,18 @@ function installChatStyles() {
         border-color var(--motion-slow) var(--ease-standard),
         box-shadow var(--motion-slow) var(--ease-standard),
         filter var(--motion-slow) var(--ease-standard);
-      --accent: var(--theme-accent, #10b981);
-      --accent-soft: var(--theme-accent-soft, rgba(16, 185, 129, 0.12));
       transform-style: preserve-3d;
       backface-visibility: hidden;
     }
-    .ctox-chat-window[data-chat-module="ctox"] {
-      --accent: #10b981 !important;
-      --accent-soft: rgba(16, 185, 129, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="documents"] {
-      --accent: #3b82f6 !important;
-      --accent-soft: rgba(59, 130, 246, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="knowledge"] {
-      --accent: #a855f7 !important;
-      --accent-soft: rgba(168, 85, 247, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="research"] {
-      --accent: #06b6d4 !important;
-      --accent-soft: rgba(6, 182, 212, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="matching"] {
-      --accent: #f59e0b !important;
-      --accent-soft: rgba(245, 158, 11, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="reports"] {
-      --accent: #ef4444 !important;
-      --accent-soft: rgba(239, 68, 68, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="conversations"] {
-      --accent: #6366f1 !important;
-      --accent-soft: rgba(99, 102, 241, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="outbound"] {
-      --accent: #f43f5e !important;
-      --accent-soft: rgba(244, 63, 94, 0.12) !important;
-    }
+    /* The staged neighbours ARE the 3D carousel. They used to be
+       opacity 0 plus visibility hidden, which removed the carousel from the
+       product while leaving all of its transforms in the sheet. They stay
+       clickable as a whole (a click focuses that chat); every control inside
+       them is inert, so they cannot swallow a click meant for a control. */
     .ctox-chat-window:not(.is-active) {
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
+      opacity: 0.62;
+      filter: saturate(0.7);
+      z-index: 62;
     }
     .ctox-chat-window:not(.is-active)[data-chat-rel="left"] {
       transform: rotateY(32deg) scale(0.8) translateZ(-160px) translateY(18px);
@@ -4893,7 +5049,7 @@ function installChatStyles() {
     }
     .ctox-chat-window.is-active {
       border-color: var(--accent);
-      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.15), 0 0 0 1px var(--accent) inset, 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent);
+      box-shadow: var(--shadow-lg);
       z-index: 65;
       opacity: 1;
       filter: none;
@@ -4995,8 +5151,8 @@ function installChatStyles() {
       align-items: center;
       justify-content: space-between;
       gap: var(--space-2);
-      border-bottom: 1px solid color-mix(in srgb, var(--line) 30%, transparent);
-      background: color-mix(in srgb, var(--surface) 20%, transparent);
+      border-bottom: 1px solid var(--hairline, var(--line));
+      background: var(--surface-2);
       padding: 0 6px 0 10px;
       height: 38px;
       min-width: 0;
@@ -5088,7 +5244,7 @@ function installChatStyles() {
       gap: var(--space-2);
       overflow: auto;
       padding: var(--space-3);
-      background: transparent;
+      background: var(--surface);
       scrollbar-width: thin;
       min-width: 0;
       max-width: 100%;
@@ -5317,10 +5473,14 @@ function installChatStyles() {
       display: flex;
       align-items: center;
       min-width: 0;
+      /* These six stay !important: the composer is a real <form> and the
+         surrounding Business OS app stylesheet gives every form a border,
+         radius, margin and padding. This is a reset against rules this file
+         does not own, not against rules above it. */
       border: none !important;
-      border-top: 1px solid color-mix(in srgb, var(--line) 20%, transparent) !important;
+      border-top: 1px solid var(--hairline, var(--line)) !important;
       border-radius: 0 !important;
-      background: color-mix(in srgb, var(--surface) 25%, transparent) !important;
+      background: var(--surface-2) !important;
       margin: 0 !important;
       padding: var(--space-2) var(--space-3) !important;
       transition: background-color var(--motion-base) var(--ease-standard);
@@ -5328,7 +5488,7 @@ function installChatStyles() {
       gap: var(--space-2);
     }
     .ctox-chat-form:focus-within {
-      background: color-mix(in srgb, var(--surface-2) 40%, transparent) !important;
+      background: var(--surface-2) !important;
     }
     .ctox-chat-form textarea {
       flex: 1;
@@ -5357,9 +5517,9 @@ function installChatStyles() {
       align-items: center;
       justify-content: center;
       border: none;
-      border-radius: 50%;
+      border-radius: var(--control-radius);
       background: var(--accent);
-      color: var(--bg);
+      color: var(--accent-foreground);
       cursor: pointer;
       width: 26px;
       height: 26px;
@@ -5370,8 +5530,7 @@ function installChatStyles() {
       align-self: flex-end;
     }
     .ctox-chat-form button:hover {
-      transform: scale(1.08) translateY(-0.5px);
-      filter: brightness(1.1);
+      background: color-mix(in srgb, var(--accent) 88%, var(--text));
     }
     .ctox-chat-form button:active {
       transform: scale(0.95);
@@ -5653,7 +5812,9 @@ function installChatStyles() {
         width: 100% !important;
         padding: 0 !important;
       }
-      .ctox-chat-stage-inner {
+      /* :not(.is-empty) rather than a competing !important: the empty stage
+         must keep its zero height and zero padding at this width too. */
+      .ctox-chat-stage-inner:not(.is-empty) {
         grid-column: auto !important;
         display: flex !important;
         flex-direction: row !important;

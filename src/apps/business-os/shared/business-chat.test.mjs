@@ -38,10 +38,27 @@ test('business chat renders no agent scope panel without visible scope context',
   assert.equal(renderChatAgentScopeHtml({ client_context: { module: 'inventory' } }), '');
 });
 
-test('business chat stage renders only the active chat window', () => {
-  const active = { id: 'chat-active' };
-  assert.deepEqual(__businessChatTestInternals.stageWindowChats(active), [active]);
-  assert.deepEqual(__businessChatTestInternals.stageWindowChats(null), []);
+// CORRECTED TEST: this used to assert `stageWindowChats(active) === [active]`,
+// which enshrined the regression that only one chat window could ever be
+// mounted and therefore removed the 3D carousel from the product. The stage
+// carries the active window plus its immediate neighbours.
+test('business chat stages the active chat window and its carousel neighbours', () => {
+  const { stageWindowChats } = __businessChatTestInternals;
+  const a = { id: 'chat-a' };
+  const b = { id: 'chat-b' };
+  const c = { id: 'chat-c' };
+  const d = { id: 'chat-d' };
+  const minimized = { id: 'chat-min', minimized: true };
+
+  assert.deepEqual(stageWindowChats([], null), []);
+  assert.deepEqual(stageWindowChats([a], a), [a]);
+  assert.deepEqual(stageWindowChats([a, b], a), [a, b]);
+  assert.deepEqual(stageWindowChats([a, b, c], b), [a, b, c]);
+  // Minimized chats live in the dock, never on the stage.
+  assert.deepEqual(stageWindowChats([a, minimized, b], a), [a, b]);
+  // Beyond three open windows the stage recenters on the active chat.
+  assert.deepEqual(stageWindowChats([a, b, c, d], d), [b, c, d]);
+  assert.deepEqual(stageWindowChats([a, b, c, d], a), [a, b, c]);
 });
 
 test('business chat does not restore terminal task windows over app content', () => {
@@ -1933,7 +1950,205 @@ function makeTimerWindow(timers) {
   });
 }
 
-function makeChatRootFixture({ chat, mutations }) {
+// REGRESSION: with the chat list / busy panel open, EVERY sync tick used to run
+// the full-rebuild path (`root.innerHTML = ...`). That remounted all chips,
+// re-ran ctoxChipSlideIn and dropped scroll and hover state — exactly the state
+// a user with many chats and running agent tasks is in, and exactly the
+// "nervoeses Zucken" they reported. An open panel is now refreshed in place.
+{
+  const { renderChatRoot, getLocalDateString } = __businessChatTestInternals;
+
+  const withChatDomEnvironment = (run) => {
+    const previous = {
+      document: globalThis.document,
+      window: globalThis.window,
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      innerWidth: globalThis.innerWidth,
+    };
+    globalThis.document = {
+      documentElement: { lang: 'de' },
+      getElementById() { return null; },
+      createElement() { return { id: '', textContent: '', setAttribute() {} }; },
+      head: { appendChild() {} },
+    };
+    globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
+    globalThis.cancelAnimationFrame = () => {};
+    globalThis.innerWidth = 1200;
+    globalThis.window = {
+      innerWidth: 1200,
+      setTimeout() { return 1; },
+      clearTimeout() {},
+      setInterval() { return 1; },
+      clearInterval() {},
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return true; },
+    };
+    try {
+      return run();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete globalThis[key];
+        else globalThis[key] = value;
+      }
+    }
+  };
+
+  const makeTrackedChat = (id, title, status, createdAt) => ({
+    id,
+    title,
+    open: true,
+    minimized: false,
+    maximized: false,
+    createdAt,
+    draft: '',
+    attachments: [],
+    lastTrackingId: `task-${id}`,
+    messages: [{
+      id: `status-${id}`,
+      role: 'ctox',
+      text: 'Task angelegt und in der CTOX Queue.',
+      commandId: `cmd-${id}`,
+      taskId: `task-${id}`,
+      status,
+      createdAt,
+    }],
+  });
+
+  // 13 open chats push the dock past MAX_RENDERED_CHAT_TABS, which is the only
+  // situation in which the busy panel exists at all.
+  const makeBusyScenario = (mutations) => {
+    const createdAt = Date.now();
+    const chats = Array.from({ length: 13 }, (_, index) => makeTrackedChat(
+      `chat-${String(index).padStart(2, '0')}`,
+      `Recherche ${index}`,
+      'queued',
+      createdAt,
+    ));
+    const chat = chats[0];
+    chat.title = 'Recherche';
+    // This fixture models exactly one mounted chat window, so the other twelve
+    // chats live minimized in the dock — which is also how a user with 13 open
+    // chats actually works. Without this the stage would carry the active chat
+    // plus its two carousel neighbours and the hand-built root would no longer
+    // describe the mounted DOM.
+    chats.slice(1).forEach((item) => { item.minimized = true; });
+    const state = {
+      ownerUserId: 'user-1',
+      selectedDate: getLocalDateString(createdAt),
+      activeChatId: chat.id,
+      dockCollapsed: false,
+      chatListOpen: true,
+      dateWorkloadOpen: false,
+      chats,
+    };
+    const root = makeChatRootFixture({
+      chat,
+      mutations,
+      busyPanel: true,
+      // Deliberately wrong, so the first render takes the full path and prints
+      // the real signature into the markup.
+      stripSignature: 'pending-first-render',
+    });
+    return { root, state, chat, chats };
+  };
+
+  const render = (root, state) => renderChatRoot({
+    root,
+    state,
+    commandBus: null,
+    db: null,
+    getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+  });
+
+  const adoptRenderedStripSignature = (root) => {
+    const match = /data-chat-strip-signature="([^"]*)"/.exec(root.__lastRootHtml);
+    assert.ok(match, 'the dock markup must carry the strip shape signature');
+    root.__fixtureDock.dataset.chatStripSignature = match[1];
+    return match[1];
+  };
+
+  test('an open busy panel no longer forces a full dock rebuild on a status tick', () => {
+    withChatDomEnvironment(() => {
+      const mutations = [];
+      const { root, state, chat } = makeBusyScenario(mutations);
+
+      render(root, state);
+      const signature = adoptRenderedStripSignature(root);
+      assert.match(signature, /^strip\|nav\|list-open\|1\|/);
+      // One in-place pass converges the hand-built fixture onto the values the
+      // real markup would carry; only afterwards is silence meaningful.
+      render(root, state);
+      mutations.length = 0;
+
+      // Identical tick: nothing at all may be written.
+      render(root, state);
+      assert.deepEqual(mutations, [], `identical tick with an open panel must not touch the DOM, got: ${JSON.stringify(mutations)}`);
+
+      // Task-state-only change: the chip status text updates in place and the
+      // panel content follows, but the root is never rebuilt.
+      chat.messages[0].status = 'running';
+      render(root, state);
+      const rootRebuilds = mutations.filter((entry) => entry.type === 'innerHTML' && entry.target === 'root');
+      assert.deepEqual(rootRebuilds, [], 'a task-state tick must not rebuild the chat root');
+      assert.ok(
+        mutations.some((entry) => entry.type === 'textContent' && entry.target === 'chipSmall' && entry.value === 'Aktiv'),
+        `the chip status text must update in place, got: ${JSON.stringify(mutations)}`,
+      );
+      assert.ok(
+        mutations.some((entry) => entry.type === 'innerHTML' && entry.target === 'busyPanel'),
+        'the open busy panel must refresh its own content',
+      );
+      assert.equal(root.__fixtureChip.className.includes('is-task-running'), true);
+    });
+  });
+
+  test('a panel content change writes only the panel, never the root', () => {
+    withChatDomEnvironment(() => {
+      const mutations = [];
+      const { root, state, chats } = makeBusyScenario(mutations);
+      render(root, state);
+      adoptRenderedStripSignature(root);
+      render(root, state);
+      mutations.length = 0;
+
+      // A background chat changes state. It has no window and no rendered chip
+      // in this fixture, so the busy panel is the only surface that may move.
+      chats[7].messages[0].status = 'running';
+      render(root, state);
+      assert.deepEqual(
+        mutations.map((entry) => `${entry.type}:${entry.target}`),
+        ['innerHTML:busyPanel'],
+        `only the panel may be written, got: ${JSON.stringify(mutations.map((entry) => `${entry.type}:${entry.target}`))}`,
+      );
+    });
+  });
+
+  test('a full rebuild that would produce identical markup is skipped entirely', () => {
+    withChatDomEnvironment(() => {
+      const mutations = [];
+      const { root, state } = makeBusyScenario(mutations);
+
+      // The strip signature stays deliberately stale, so every call reaches the
+      // full-rebuild path. The memoized markup must still stop the second write.
+      render(root, state);
+      render(root, state);
+      render(root, state);
+
+      const rootWrites = mutations.filter((entry) => entry.type === 'innerHTML' && entry.target === 'root');
+      assert.equal(
+        rootWrites.length,
+        1,
+        `identical full rebuilds must write the root exactly once, got ${rootWrites.length}`,
+      );
+    });
+  });
+}
+
+function makeChatRootFixture({ chat, mutations, stripSignature = 'strip|no-nav|list-closed|0|chat-stable', busyPanel = false }) {
   const classListFor = (initial = []) => {
     const set = new Set(initial);
     return {
@@ -2055,6 +2270,7 @@ function makeChatRootFixture({ chat, mutations }) {
       return { left: 20, right: 140, width: 120, top: 0, bottom: 28, height: 28 };
     },
     scrollIntoView() { track('scrollIntoView', 'chip'); },
+    addEventListener() {},
   };
 
   const interactiveNodes = [];
@@ -2133,6 +2349,7 @@ function makeChatRootFixture({ chat, mutations }) {
   const dock = {
     className: 'ctox-chat-dock has-visible-chats has-one-chat has-no-nav',
     classList: classListFor(['ctox-chat-dock', 'has-visible-chats', 'has-one-chat', 'has-no-nav']),
+    dataset: { chatStripSignature: stripSignature },
     querySelector(selector) {
       if (selector === '[data-chat-strip]') return strip;
       return null;
@@ -2205,9 +2422,25 @@ function makeChatRootFixture({ chat, mutations }) {
     },
   };
 
+  let busyPanelHtml = '';
+  const busyPanelNode = busyPanel ? {
+    className: 'ctox-chat-busy-panel',
+    scrollTop: 0,
+    get innerHTML() { return busyPanelHtml; },
+    set innerHTML(value) {
+      const next = String(value ?? '');
+      if (busyPanelHtml === next) return;
+      busyPanelHtml = next;
+      track('innerHTML', 'busyPanel', next);
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    addEventListener() {},
+  } : null;
+
   const nodesBySelector = new Map([
     ['[data-chat-date-picker]', datePicker],
-    ['[data-chat-busy-panel]', null],
+    ['[data-chat-busy-panel]', busyPanelNode],
     ['[data-chat-date-workload-panel]', null],
     ['[data-chat-dock]', dock],
     ['.ctox-chat-fab b', fabBadge],
@@ -2245,9 +2478,14 @@ function makeChatRootFixture({ chat, mutations }) {
     },
     addEventListener() {},
     set innerHTML(value) {
+      root.__lastRootHtml = String(value || '');
       track('innerHTML', 'root', String(value || '').slice(0, 80));
     },
   };
+  root.__fixtureDock = dock;
+  root.__fixtureBusyPanel = busyPanelNode;
+  root.__fixtureChip = chip;
+  root.__lastRootHtml = '';
 
   return root;
 }
@@ -2350,3 +2588,493 @@ test('eine Antwort auf einen alten Chat holt sich die Ansicht nicht', () => {
   assert.equal(state.selectedDate, heute);
   assert.notEqual(state.selectedDate, '2026-07-26');
 });
+
+// ---------------------------------------------------------------------------
+// REGRESSION BLOCK: multi-window stage, 3D carousel relations, collapse.
+//
+// The installed shell (rc.11) showed three defects at once: only one chat
+// window could ever be mounted, the 3D carousel that arranges the other open
+// windows behind it was therefore gone, and collapsing the dock could leave an
+// expanded stage on screen. The fixture below mounts the markup the renderer
+// actually writes and re-derives its element stubs from it, so a render can be
+// asserted the way the browser sees it.
+// ---------------------------------------------------------------------------
+{
+  const { renderChatRoot, getLocalDateString } = __businessChatTestInternals;
+
+  const withDom = (run) => {
+    const previous = {
+      document: globalThis.document,
+      window: globalThis.window,
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      innerWidth: globalThis.innerWidth,
+    };
+    globalThis.document = {
+      documentElement: { lang: 'de' },
+      getElementById() { return null; },
+      createElement() { return { id: '', textContent: '', setAttribute() {} }; },
+      head: { appendChild() {} },
+      activeElement: null,
+      body: null,
+    };
+    globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
+    globalThis.cancelAnimationFrame = () => {};
+    globalThis.innerWidth = 1200;
+    globalThis.window = {
+      innerWidth: 1200,
+      setTimeout() { return 1; },
+      clearTimeout() {},
+      setInterval() { return 1; },
+      clearInterval() {},
+      requestAnimationFrame: globalThis.requestAnimationFrame,
+      cancelAnimationFrame: globalThis.cancelAnimationFrame,
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() { return true; },
+    };
+    try {
+      return run();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete globalThis[key];
+        else globalThis[key] = value;
+      }
+    }
+  };
+
+  const makeClassList = (initial = []) => {
+    const set = new Set(initial.filter(Boolean));
+    return {
+      contains(name) { return set.has(name); },
+      add(...names) { names.forEach((name) => set.add(name)); },
+      remove(...names) { names.forEach((name) => set.delete(name)); },
+      toggle(name, force) {
+        if (force === true) set.add(name);
+        else if (force === false) set.delete(name);
+        else if (set.has(name)) set.delete(name);
+        else set.add(name);
+        return set.has(name);
+      },
+      toString() { return [...set].join(' '); },
+    };
+  };
+
+  const makeStyle = () => new Proxy({}, {
+    get(target, prop) { return target[prop] || ''; },
+    set(target, prop, value) { target[prop] = String(value ?? ''); return true; },
+  });
+
+  const attrValue = (attrs, name) => {
+    const match = new RegExp(`${name}="([^"]*)"`).exec(attrs);
+    return match ? match[1] : '';
+  };
+
+  const makeMessagesNode = () => {
+    let html = '';
+    return {
+      className: 'ctox-chat-messages',
+      scrollTop: 0,
+      scrollHeight: 0,
+      clientHeight: 0,
+      get innerHTML() { return html; },
+      set innerHTML(value) { html = String(value ?? ''); },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    };
+  };
+
+  // Rebuilds the element stubs from the markup the renderer just wrote. This is
+  // the whole point of the fixture: every assertion below is made against the
+  // markup that would really be mounted, not against a hand-maintained tree.
+  function mountChatMarkup(html) {
+    const windows = [];
+    const windowRe = /<section class="(ctox-chat-window[^"]*)"([^>]*)>/g;
+    for (let match = windowRe.exec(html); match; match = windowRe.exec(html)) {
+      const [, classes, attrs] = match;
+      const messages = makeMessagesNode();
+      const win = {
+        classList: makeClassList(classes.split(/\s+/)),
+        dataset: {
+          chatId: attrValue(attrs, 'data-chat-id'),
+          chatRel: attrValue(attrs, 'data-chat-rel'),
+          chatAttachmentSignature: attrValue(attrs, 'data-chat-attachment-signature'),
+          chatComposerSignature: attrValue(attrs, 'data-chat-composer-signature'),
+        },
+        style: makeStyle(),
+        querySelector(selector) {
+          if (selector === '.ctox-chat-messages') return messages;
+          return null;
+        },
+        querySelectorAll() { return []; },
+        getBoundingClientRect() {
+          return { left: 40, right: 360, width: 320, top: 100, bottom: 500, height: 400 };
+        },
+        addEventListener() {},
+      };
+      let className = classes;
+      Object.defineProperty(win, 'className', {
+        configurable: true,
+        get() { return className; },
+        set(value) {
+          className = String(value ?? '');
+          win.classList = makeClassList(className.split(/\s+/));
+        },
+      });
+      windows.push(win);
+    }
+
+    const chips = [];
+    const chipRe = /<button class="(ctox-chat-chip[^"]*)" type="button" data-chat-focus="([^"]*)"/g;
+    for (let match = chipRe.exec(html); match; match = chipRe.exec(html)) {
+      const [, classes, chatId] = match;
+      const chip = {
+        dataset: { chatFocus: chatId },
+        classList: makeClassList(classes.split(/\s+/)),
+        getAttribute() { return null; },
+        setAttribute() {},
+        querySelector() { return null; },
+        getBoundingClientRect() {
+          return { left: 20, right: 140, width: 120, top: 0, bottom: 28, height: 28 };
+        },
+        scrollIntoView() {},
+        addEventListener() {},
+      };
+      let className = classes;
+      Object.defineProperty(chip, 'className', {
+        configurable: true,
+        get() { return className; },
+        set(value) { className = String(value ?? ''); },
+      });
+      chips.push(chip);
+    }
+
+    const dockMatch = /<section class="(ctox-chat-dock[^"]*)"([^>]*)>/.exec(html);
+    let dock = null;
+    if (dockMatch) {
+      const [, classes, attrs] = dockMatch;
+      dock = {
+        classList: makeClassList(classes.split(/\s+/)),
+        dataset: { chatStripSignature: attrValue(attrs, 'data-chat-strip-signature') },
+        querySelector() { return null; },
+        getBoundingClientRect() {
+          return { left: 20, right: 480, width: 460, top: 640, bottom: 700, height: 60 };
+        },
+      };
+      let className = classes;
+      Object.defineProperty(dock, 'className', {
+        configurable: true,
+        get() { return className; },
+        set(value) {
+          className = String(value ?? '');
+          dock.classList = makeClassList(className.split(/\s+/));
+        },
+      });
+    }
+
+    const strip = html.includes('data-chat-strip') ? {
+      classList: makeClassList(['ctox-chat-strip']),
+      scrollLeft: 0,
+      scrollWidth: 120,
+      clientWidth: 400,
+      querySelector(selector) {
+        const match = /\[data-chat-focus="([^"]*)"\]/.exec(selector);
+        if (!match) return null;
+        return chips.find((chip) => chip.dataset.chatFocus === match[1]) || null;
+      },
+      querySelectorAll() { return chips; },
+      getBoundingClientRect() {
+        return { left: 20, right: 420, width: 400, top: 640, bottom: 680, height: 40 };
+      },
+      scrollBy() {},
+      addEventListener() {},
+    } : null;
+
+    const spacer = { style: makeStyle() };
+    const stageInner = {
+      classList: makeClassList(['ctox-chat-stage-inner']),
+      querySelector(selector) {
+        if (selector === '.ctox-chat-stage-spacer') return spacer;
+        return null;
+      },
+      querySelectorAll(selector) {
+        if (selector === '.ctox-chat-window') return windows;
+        return [];
+      },
+      getBoundingClientRect() {
+        return { left: 0, right: 800, width: 800, top: 80, bottom: 600, height: 520 };
+      },
+    };
+    const stage = {
+      querySelector(selector) {
+        if (selector === '.ctox-chat-stage-inner') return stageInner;
+        return null;
+      },
+    };
+
+    const dateMatch = /data-chat-date-picker value="([^"]*)"/.exec(html);
+    const datePicker = dateMatch ? { value: dateMatch[1], addEventListener() {} } : null;
+
+    const makePanel = () => {
+      let inner = '';
+      return {
+        scrollTop: 0,
+        get innerHTML() { return inner; },
+        set innerHTML(value) { inner = String(value ?? ''); },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        addEventListener() {},
+      };
+    };
+
+    return {
+      windows,
+      chips,
+      dock,
+      strip,
+      stage,
+      stageInner,
+      datePicker,
+      busyPanel: html.includes('data-chat-busy-panel') ? makePanel() : null,
+      datePanel: html.includes('data-chat-date-workload-panel') ? makePanel() : null,
+    };
+  }
+
+  function makeLiveChatRoot() {
+    let mounted = mountChatMarkup('');
+    let html = '';
+    let rootWrites = 0;
+
+    const root = {
+      classList: makeClassList(['ctox-chat-root']),
+      className: 'ctox-chat-root',
+      isConnected: true,
+      __ctoxChatSync: null,
+      __ctoxChatOnTrackingStateChanged: null,
+      __ctoxChatLayoutFrame: 0,
+      get innerHTML() { return html; },
+      set innerHTML(value) {
+        html = String(value ?? '');
+        rootWrites += 1;
+        mounted = mountChatMarkup(html);
+      },
+      querySelector(selector) {
+        switch (selector) {
+          case '[data-chat-dock]': return mounted.dock;
+          case '[data-chat-strip]': return mounted.strip;
+          case '[data-chat-stage]': return mounted.stage;
+          case '.ctox-chat-stage-inner': return mounted.stageInner;
+          case '[data-chat-date-picker]': return mounted.datePicker;
+          case '[data-chat-busy-panel]': return mounted.busyPanel;
+          case '[data-chat-date-workload-panel]': return mounted.datePanel;
+          case '.ctox-chat-window': return mounted.windows[0] || null;
+          default: return null;
+        }
+      },
+      querySelectorAll(selector) {
+        switch (selector) {
+          case '.ctox-chat-window': return mounted.windows;
+          case '[data-chat-id]': return mounted.windows;
+          case '[data-chat-id]:not(.is-minimized)':
+            return mounted.windows.filter((win) => !win.classList.contains('is-minimized'));
+          case '.ctox-chat-window.no-left-transition':
+            return mounted.windows.filter((win) => win.classList.contains('no-left-transition'));
+          case '.ctox-chat-chip': return mounted.chips;
+          case '[data-chat-focus]': return mounted.chips;
+          default: return [];
+        }
+      },
+      getBoundingClientRect() {
+        return { left: 0, right: 800, width: 800, top: 80, bottom: 700, height: 620 };
+      },
+      addEventListener() {},
+    };
+
+    root.__html = () => html;
+    root.__rootWrites = () => rootWrites;
+    root.__windows = () => mounted.windows;
+    root.__dock = () => mounted.dock;
+    return root;
+  }
+
+  const makeChat = (id, title, createdAt, overrides = {}) => ({
+    id,
+    title,
+    open: true,
+    minimized: false,
+    maximized: false,
+    createdAt,
+    draft: '',
+    attachments: [],
+    messages: [],
+    ...overrides,
+  });
+
+  const makeState = (chats, overrides = {}) => ({
+    ownerUserId: 'user-1',
+    selectedDate: getLocalDateString(chats[0]?.createdAt ?? Date.now()),
+    activeChatId: chats[0]?.id || '',
+    dockCollapsed: false,
+    chatListOpen: false,
+    dateWorkloadOpen: false,
+    chats,
+    ...overrides,
+  });
+
+  const render = (root, state) => renderChatRoot({
+    root,
+    state,
+    commandBus: null,
+    db: null,
+    getActiveModule: () => ({ id: 'outbound', title: 'Outbound' }),
+  });
+
+  const relationsOf = (root) => root.__windows().map((win) => win.dataset.chatRel);
+  const idsOf = (root) => root.__windows().map((win) => win.dataset.chatId);
+
+  test('the stage mounts every expanded chat window, not only the active one', () => {
+    withDom(() => {
+      const now = Date.now();
+      const chatA = makeChat('chat-a', 'Recherche A', now);
+      const chatB = makeChat('chat-b', 'Recherche B', now);
+      const state = makeState([chatA, chatB], { activeChatId: 'chat-a' });
+      const root = makeLiveChatRoot();
+
+      render(root, state);
+
+      assert.equal(
+        root.__windows().length,
+        2,
+        `both open chats must be mounted as .ctox-chat-window, got ${root.__windows().length}`,
+      );
+      assert.deepEqual(idsOf(root), ['chat-a', 'chat-b']);
+    });
+  });
+
+  test('the 3D carousel tags every staged window with its relation to the active one', () => {
+    withDom(() => {
+      const now = Date.now();
+      const chats = [
+        makeChat('chat-a', 'A', now),
+        makeChat('chat-b', 'B', now),
+        makeChat('chat-c', 'C', now),
+      ];
+      const state = makeState(chats, { activeChatId: 'chat-b' });
+      const root = makeLiveChatRoot();
+
+      render(root, state);
+
+      assert.equal(root.__windows().length, 3);
+      assert.deepEqual(
+        relationsOf(root),
+        ['left', 'center', 'right'],
+        'the carousel needs a left/center/right relation on every staged window',
+      );
+    });
+  });
+
+  test('opening a second chat window rebuilds the dock and restages the relations', () => {
+    withDom(() => {
+      const now = Date.now();
+      const chatA = makeChat('chat-a', 'A', now);
+      const state = makeState([chatA], { activeChatId: 'chat-a' });
+      const root = makeLiveChatRoot();
+
+      render(root, state);
+      const writesAfterFirst = root.__rootWrites();
+      assert.equal(root.__windows().length, 1);
+
+      // An identical tick must stay silent — the jitter protection.
+      render(root, state);
+      assert.equal(root.__rootWrites(), writesAfterFirst, 'an identical tick must not rebuild the dock');
+
+      // A genuinely new window is a real shape change and must rebuild.
+      state.chats.push(makeChat('chat-b', 'B', now));
+      state.activeChatId = 'chat-b';
+      render(root, state);
+
+      assert.ok(root.__rootWrites() > writesAfterFirst, 'a second window must trigger a rebuild');
+      assert.equal(root.__windows().length, 2);
+      assert.deepEqual(relationsOf(root), ['left', 'center']);
+    });
+  });
+
+  test('collapsing the dock always lands a collapsed stage, never a stale expanded one', () => {
+    withDom(() => {
+      const now = Date.now();
+      const chatA = makeChat('chat-a', 'A', now);
+      const chatB = makeChat('chat-b', 'B', now);
+      const state = makeState([chatA, chatB], { activeChatId: 'chat-a' });
+      const root = makeLiveChatRoot();
+
+      render(root, state);
+      render(root, state);
+      assert.equal(root.__windows().length, 2);
+
+      state.dockCollapsed = true;
+      render(root, state);
+
+      assert.equal(root.__windows().length, 0, 'a collapsed dock must not keep chat windows mounted');
+      assert.ok(root.__dock(), 'the dock must stay mounted while collapsed');
+      assert.ok(
+        root.__dock().classList.contains('is-collapsed'),
+        `the collapsed dock must carry is-collapsed, got "${root.__dock().className}"`,
+      );
+      assert.ok(root.classList.contains('is-collapsed'), 'the chat root must carry is-collapsed');
+      assert.ok(!root.__html().includes('class="ctox-chat-strip"'), 'a collapsed dock renders no chip strip');
+
+      // Re-expanding must restore the full stage.
+      state.dockCollapsed = false;
+      render(root, state);
+      assert.equal(root.__windows().length, 2, 're-expanding must restore every window');
+    });
+  });
+
+  test('the memoized dock markup never vetoes a rebuild the mounted DOM contradicts', () => {
+    withDom(() => {
+      const now = Date.now();
+      const state = makeState([makeChat('chat-a', 'A', now), makeChat('chat-b', 'B', now)], {
+        activeChatId: 'chat-a',
+      });
+      const root = makeLiveChatRoot();
+
+      render(root, state);
+      const expandedHtml = root.__html();
+      assert.equal(root.__windows().length, 2);
+
+      state.dockCollapsed = true;
+      render(root, state);
+      assert.equal(root.__windows().length, 0);
+
+      // Something outside the renderer puts the previous expanded markup back
+      // (a shell remount, a restored view). The memo still describes the
+      // collapsed markup, so a naive identical-markup skip would return here
+      // and leave the expanded stage frozen over the app.
+      root.innerHTML = expandedHtml;
+      assert.equal(root.__windows().length, 2);
+      const writesBefore = root.__rootWrites();
+
+      render(root, state);
+
+      assert.ok(root.__rootWrites() > writesBefore, 'the stale expanded stage must be rebuilt away');
+      assert.equal(root.__windows().length, 0, 'the collapse must land even against a memoized skip');
+      assert.ok(root.__dock().classList.contains('is-collapsed'));
+    });
+  });
+
+  test('an empty collapsed dock stays collapsed across repeated renders', () => {
+    withDom(() => {
+      const state = makeState([], { activeChatId: '', dockCollapsed: true });
+      const root = makeLiveChatRoot();
+
+      render(root, state);
+      render(root, state);
+      render(root, state);
+
+      assert.equal(root.__windows().length, 0);
+      assert.ok(root.__dock().classList.contains('is-collapsed'));
+      assert.ok(root.__dock().classList.contains('has-no-chats'));
+      assert.ok(root.classList.contains('is-collapsed'));
+    });
+  });
+}
