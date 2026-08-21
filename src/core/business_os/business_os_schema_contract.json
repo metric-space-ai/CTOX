@@ -2505,10 +2505,7 @@
         "command_type",
         "status",
         "updated_at_ms"
-      ],
-      "module",
-      "command_type",
-      "updated_at_ms"
+      ]
     ]
   },
   "business_consents": {
