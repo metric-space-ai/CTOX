@@ -1099,3 +1099,33 @@ function pointerEvent(overrides = {}) {
     assert.ok(schluessel in en, `${schluessel} fehlt in locales/en.json`);
   }
 }
+
+// Und die andere Haelfte derselben Luecke: der Waechter oben prueft nur, was
+// bereits ein data-t TRAEGT. Zwoelf von 24 Knoepfen trugen keines -- darunter
+// "Steuerung uebernehmen" und die Zwischenablage --, waren also gar nicht
+// uebersetzbar und haetten im englischen Produkt deutschen Text gezeigt.
+// Ein Knopf mit sichtbarem Wort-Text braucht ein data-t; reine Symbolknoepfe
+// (Pfeil, Hamburger) brauchen stattdessen ein aria-label.
+{
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const knoepfe = [...html.matchAll(/<button\b([^>]*)>([^<]*)<\/button>/g)];
+  assert.ok(knoepfe.length > 5, 'index.html enthaelt Knoepfe');
+  const ohneBeschriftung = [];
+  const symbolOhneLabel = [];
+  for (const [, attribute, beschriftung] of knoepfe) {
+    const text = beschriftung.trim();
+    if (!text) continue;
+    // Wort-Text = enthaelt mindestens einen Buchstaben.
+    const istWort = /\p{Letter}/u.test(text);
+    if (istWort && !attribute.includes('data-t=')) ohneBeschriftung.push(text);
+    if (!istWort && !attribute.includes('aria-label')) symbolOhneLabel.push(text);
+  }
+  assert.deepEqual(
+    ohneBeschriftung, [],
+    `Knoepfe mit Wort-Text ohne data-t (im englischen Produkt deutsch): ${ohneBeschriftung.join(', ')}`,
+  );
+  assert.deepEqual(
+    symbolOhneLabel, [],
+    `Symbolknoepfe ohne aria-label (fuer Screenreader stumm): ${symbolOhneLabel.join(', ')}`,
+  );
+}

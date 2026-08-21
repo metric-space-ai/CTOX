@@ -46,5 +46,14 @@
   "ctxReload": "Reload",
   "ctxCopy": "Copy",
   "ctxPaste": "Paste",
-  "tabClose": "Close tab"
+  "tabClose": "Close tab",
+  "btnNewTab": "New tab",
+  "btnUpload": "Upload",
+  "btnTakeControl": "Take control",
+  "btnReleaseControl": "Release control",
+  "btnObserverAdd": "Add observer",
+  "btnObserverRemove": "Remove observer",
+  "btnClipCopy": "Copy clipboard",
+  "btnClipPaste": "Paste clipboard",
+  "btnClipClear": "Clear clipboard"
 }
