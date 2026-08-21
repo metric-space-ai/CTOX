@@ -1,0 +1,26 @@
+name: Build embedded Pi sidecar
+description: Install, audit, type-check, test, and bundle the Pi sidecar required by the CTOX binary.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      with:
+        node-version: "22"
+        cache: npm
+        cache-dependency-path: src/core/coding_agents/pi-sidecar/package-lock.json
+    - name: Install pinned sidecar dependencies
+      shell: bash
+      working-directory: src/core/coding_agents/pi-sidecar
+      run: npm ci
+    - name: Audit sidecar production dependencies
+      shell: bash
+      working-directory: src/core/coding_agents/pi-sidecar
+      run: npm audit --omit=dev --audit-level=high
+    - name: Validate and bundle sidecar
+      shell: bash
+      working-directory: src/core/coding_agents/pi-sidecar
+      run: |
+        npm run typecheck
+        npm run build
+        npm run smoke
