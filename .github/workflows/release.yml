@@ -69,13 +69,16 @@ jobs:
           sudo apt-get install -y \
             libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev libcap-dev sqlite3
 
-      - name: Install Business OS browser test runtime
-        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
-
       - name: Business OS JS dependency bootstrap
         run: |
           npm ci --ignore-scripts --prefix src/apps/business-os
           npm audit --audit-level=low --prefix src/apps/business-os
+
+      - name: Install Business OS browser test runtime
+        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+
+      - name: Business OS JS tests
+        run: |
           npm --prefix src/apps/business-os test
           npm --prefix src/apps/business-os run test:module-bundles
 
