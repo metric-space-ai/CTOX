@@ -1323,7 +1323,7 @@ mod tests {
             "status": "failed",
             "command_type": "outbound.research_source.test",
         });
-        let vorher: (i64,) = {
+        let vorher: i64 = {
             conn.execute(
                 "INSERT INTO business_commands (id, deleted, data) VALUES ('z', 0, ?1)",
                 params![zombie.to_string()],
@@ -1339,7 +1339,7 @@ mod tests {
             )
             .expect("count before")
         };
-        assert_eq!(vorher.0, 1, "ohne terminal_status muss er Kandidat sein");
+        assert_eq!(vorher, 1, "ohne terminal_status muss er Kandidat sein");
 
         apply_terminal_failure_fields(
             zombie.as_object_mut().expect("object"),
@@ -1351,7 +1351,7 @@ mod tests {
         )
         .expect("update terminalized");
 
-        let nachher: (i64,) = conn
+        let nachher: i64 = conn
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM business_commands
@@ -1362,7 +1362,7 @@ mod tests {
             )
             .expect("count after");
         assert_eq!(
-            nachher.0, 0,
+            nachher, 0,
             "nach der Terminalisierung darf er NICHT mehr aufgegriffen werden"
         );
 
