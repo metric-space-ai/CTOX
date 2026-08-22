@@ -801,7 +801,10 @@ mod tests {
         )
         .expect("decode native SQLite row");
 
-        assert_eq!(document.get("_rev").and_then(|value| value.as_str()), Some("3-native"));
+        assert_eq!(
+            document.get("_rev").and_then(|value| value.as_str()),
+            Some("3-native")
+        );
         assert_eq!(
             document
                 .pointer("/_meta/lwt")
@@ -812,6 +815,8 @@ mod tests {
             document.get("_deleted").and_then(|value| value.as_bool()),
             Some(false)
         );
-        assert!(document.get("_attachments").is_some_and(|value| value.is_object()));
+        assert!(document
+            .get("_attachments")
+            .is_some_and(|value| value.is_object()));
     }
 }
