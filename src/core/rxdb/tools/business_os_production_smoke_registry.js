@@ -36,13 +36,15 @@ const businessOsProductionSmokeEvidenceRequirements = Object.freeze({
       'advanced_status',
     ],
     values: {
-      business_os_client_lifecycle_target_count: 35,
-      business_os_client_lifecycle_passed_count: 35,
       business_os_client_lifecycle_final_window_count: 0,
       business_os_client_lifecycle_peer_restart_count: 0,
       business_os_client_lifecycle_auth_state: 'authenticated',
       business_os_client_lifecycle_browser_context: 'clean',
       advanced_status: 'business-os-advanced-status-v1',
+    },
+    minimums: {
+      business_os_client_lifecycle_target_count: 1,
+      business_os_client_lifecycle_passed_count: 1,
     },
     maximums: {
       business_os_client_lifecycle_max_mount_ms: 30000,

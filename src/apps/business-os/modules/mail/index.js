@@ -277,7 +277,6 @@ export async function mount(ctx) {
   root.style.setProperty('--mail-right-width', `${clamp(savedRight, 300, 620)}px`);
 
   wireEvents();
-  startCollectionSync();
   wireCollectionSubscriptions();
   wireReadiness();
   await refreshData();
@@ -417,15 +416,6 @@ export async function mount(ctx) {
     };
     window.addEventListener('hashchange', hashHandler);
     cleanups.push(() => window.removeEventListener('hashchange', hashHandler));
-  }
-
-  function startCollectionSync() {
-    for (const name of Object.keys(collections)) {
-      if (!collections[name]) continue;
-      ctx.sync?.startCollection?.(name)?.catch?.((error) => {
-        console.warn(`[mail] ${name} sync start failed`, error);
-      });
-    }
   }
 
   function wireCollectionSubscriptions() {

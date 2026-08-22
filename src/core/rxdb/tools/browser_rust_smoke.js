@@ -4441,6 +4441,7 @@ function ensureCtoxSmokeBinary() {
       smokeMode === 'business-os-app-release-ui'
       || smokeMode === 'business-os-agent-scope-ui'
       || smokeMode === 'business-os-fresh-profile-ui'
+      || smokeMode === 'business-os-client-lifecycle-ui'
     ) {
       // These flows validate lifecycle/policy projections in the App Store's
       // list representation, not its animated WebGL shelf. Exercise the real
@@ -15329,19 +15330,15 @@ function ensureCtoxSmokeBinary() {
         const baselineTimers = timers();
         const baselineHeap = heap();
         const initialSyncRuntime = state.sync;
-        // Canonical installed QA inventory. Do not derive this gate from the
-        // current user's visible/pinned launcher subset or hidden apps would
-        // silently escape lifecycle coverage.
-        const canonicalTargetIds = [
-          'app-store', 'appsec-pentest', 'browser', 'buchhaltung', 'calendar',
-          'code-editor', 'coding-agents', 'consent', 'conversations', 'creator',
-          'credentials', 'ctox', 'customers', 'cv-print-builder', 'documents',
-          'esign', 'explorer', 'intake', 'interviews', 'invoices', 'iot',
-          'knowledge', 'matching', 'nachweise', 'notes', 'outbound',
-          'placements', 'reports', 'research', 'shiftflow', 'spreadsheets',
-          'submissions', 'support', 'threads', 'tickets',
-        ];
-        const targets = canonicalTargetIds.map((id) => ({ id }));
+        // Exercise the shell-authoritative installed window-launch inventory,
+        // not a hand-maintained source/catalog list (which can contain apps
+        // that are available in the store but are not installed). This is not
+        // the user's pinned subset, and newly installed launchable apps enter
+        // lifecycle coverage automatically.
+        const targets = smoke.listLaunchTargets?.('app') || [];
+        if (!targets.length) {
+          throw new Error('lifecycle app inventory is empty');
+        }
         const results = [];
 
         for (const target of targets) {

@@ -64,6 +64,11 @@ test('mail reuses canonical communication and outbound schemas', () => {
   }
 });
 
+test('mail leaves collection lifecycle ownership with the shell lease', async () => {
+  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /ctx\.sync\?\.startCollection/);
+});
+
 test('ordinary users only see assigned or shared email accounts', () => {
   const accounts = [
     { account_key: 'email:alice@example.test', channel: 'email', address: 'alice@example.test', profile_json: { owner_user_id: 'alice' } },
