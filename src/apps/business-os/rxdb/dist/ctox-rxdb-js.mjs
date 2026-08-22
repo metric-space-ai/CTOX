@@ -10527,7 +10527,7 @@ var CtoxWebRtcReplicationState = class {
     return this.initialReplication;
   }
   awaitInSync() {
-    return Promise.resolve().then(() => this.awaitInitialReplication()).then(() => this.pullFromRemotePeers()).then(() => this.pushToRemotePeers());
+    return Promise.resolve().then(() => this.awaitInitialReplication()).then(() => this.waitForOpenPeerId()).then(() => this.pullFromRemotePeers()).then(() => this.pushToRemotePeers());
   }
   getTransportStatus(options = {}) {
     return this.decorateTransportStatus(this.shared?.getTransportStatus?.(options) || this.transportStatus$.getValue?.() || {});

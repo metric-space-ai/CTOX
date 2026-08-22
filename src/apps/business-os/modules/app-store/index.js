@@ -51,7 +51,13 @@ const state = {
   status: null,
   operations: {},
   unsubscribe: null,
-  viewMode: 'shelf',
+  // The shelf is a continuously animated WebGL surface. Respect the platform
+  // reduced-motion preference from the first render so accessibility clients
+  // (and low-capability GPU environments) never initialize it just to switch
+  // straight back to the equivalent list representation.
+  viewMode: globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    ? 'list'
+    : 'shelf',
   drawerOpen: false,
   // Canonical grammar state + the retail-box shelf (vendor/store-shelf).
   centerBand: 'catalog',

@@ -4389,6 +4389,14 @@ function ensureCtoxSmokeBinary() {
       });
     }
     const page = await browser.newPage();
+    if (smokeMode === 'business-os-app-release-ui') {
+      // This flow validates lifecycle/policy projections in the App Store's
+      // list representation, not its animated WebGL shelf. Exercise the real
+      // accessibility preference so the shelf is never initialized before the
+      // smoke selects the list toggle (which otherwise emits a Linux GPU
+      // driver warning under the production zero-warning budget).
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    }
     outerPhaseTimings.browserLaunchMs = Date.now() - browserLaunchStartedAt;
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) console.log(`[browser:navigation] ${frame.url()}`);

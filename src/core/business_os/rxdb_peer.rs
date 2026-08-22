@@ -2236,8 +2236,7 @@ fn sync_runtime_settings_if_changed(
     )
 }
 
-#[cfg(test)]
-fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
+pub(crate) fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
     with_business_os_database(
         root,
         "failed to create Business OS module catalog sync runtime",
@@ -3143,18 +3142,54 @@ fn runtime_installed_module_schema_metadata_fingerprint(root: &Path) -> anyhow::
 fn runtime_installed_module_schema_fingerprint(root: &Path) -> anyhow::Result<String> {
     let (modules_root, files) = runtime_installed_module_schema_files(root)?;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(b"ctox-runtime-installed-module-schemas-v1");
+    hasher.update(b"ctox-runtime-installed-module-schemas-v2");
     for path in files {
         let rel = path.strip_prefix(&modules_root).unwrap_or(&path);
         hasher.update(rel.to_string_lossy().as_bytes());
         hasher.update([0]);
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read runtime app schema {}", path.display()))?;
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
+        // module.json contains both schema activation inputs and ordinary app
+        // lifecycle metadata. A release changes version/visibility but does
+        // not change the native collection registry; hashing the whole file
+        // caused every release/rollback to tear down the shared WebRTC room.
+        // Hash only the installed marker plus the declared collection set.
+        // Malformed JSON falls back to raw bytes so a valid -> invalid edit
+        // still forces fail-closed reconfiguration (the loader then skips it).
+        let schema_input = if path.file_name().and_then(|name| name.to_str()) == Some("module.json")
+        {
+            runtime_installed_module_schema_manifest_input(&bytes)
+        } else {
+            bytes
+        };
+        hasher.update((schema_input.len() as u64).to_le_bytes());
+        hasher.update(schema_input);
         hasher.update([0xff]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn runtime_installed_module_schema_manifest_input(bytes: &[u8]) -> Vec<u8> {
+    let Ok(manifest) = serde_json::from_slice::<Value>(bytes) else {
+        return bytes.to_vec();
+    };
+    let mut collections = manifest
+        .get("collections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    collections.sort();
+    collections.dedup();
+    serde_json::to_vec(&serde_json::json!({
+        "runtime_installed": manifest_value_is_runtime_installed_for_native_peer(&manifest),
+        "collections": collections,
+    }))
+    .unwrap_or_else(|_| bytes.to_vec())
 }
 
 fn normalized_signaling_urls(values: &[String]) -> Vec<String> {
@@ -10948,6 +10983,21 @@ pub(in crate::business_os) mod tests {
         assert!(
             !native_peer_runtime_installed_schemas_changed(temp.path(), &mut state)?,
             "unchanged runtime app schemas must not force a respawn"
+        );
+        fs::write(
+            module_dir.join("module.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "subscriptions",
+                "entry": "installed-modules/subscriptions/index.html",
+                "install_scope": "installed",
+                "version": "1.0.0",
+                "lifecycle": { "visibility_state": "team" },
+                "collections": ["subscriptions_records"]
+            }))?,
+        )?;
+        assert!(
+            !native_peer_runtime_installed_schemas_changed(temp.path(), &mut state)?,
+            "release-only manifest metadata must not restart the native peer"
         );
         fs::write(
             module_dir.join("collections.schema.json"),

@@ -2,6 +2,7 @@
 // License: Apache-2.0
 
 use super::policy::{BusinessOsPermission, PolicyDecision};
+use super::rxdb_peer::sync_module_catalog as sync_module_catalog_projection_now;
 use super::session::session_user_id;
 use super::store::{
     activate_staged_module_directory, app_root_for_module_manifest,
@@ -24,7 +25,6 @@ use super::store::{
     ModuleSourceRollbackSnapshotRequest, ModuleSourceSaveMutation, ModuleVersionListRequest,
     ModuleVersionRollbackRequest, RuntimeAppStarterAction, TemplateManifest,
 };
-use super::store_catalog_projections::write_module_catalog_projection_to_rxdb;
 use super::store_projections::upsert_business_record;
 use super::store_release_review::{
     data_access_review_from_release_snapshot, module_release_data_access_review_summary,
@@ -563,6 +563,13 @@ pub fn record_module_release(
             return Err(error);
         }
     };
+    // A completed release command is an authorization to consume the new
+    // lifecycle state. Commit its authoritative RxDB catalog projection before
+    // the command outcome is acknowledged; otherwise browsers can observe a
+    // terminal success while business_module_catalog still advertises the old
+    // private version until the periodic projection sweep runs.
+    sync_module_catalog_projection_now(root)
+        .context("released module was persisted but its RxDB catalog projection failed")?;
     let mut governance = module_governance_map(root, session)?;
     if let Some(object) = governance.as_object_mut() {
         object.insert(
@@ -633,6 +640,8 @@ pub fn rollback_module_release(
             return Err(error);
         }
     };
+    sync_module_catalog_projection_now(root)
+        .context("module rollback was persisted but its RxDB catalog projection failed")?;
     let mut governance = module_governance_map(root, session)?;
     if let Some(object) = governance.as_object_mut() {
         object.insert(
@@ -1692,7 +1701,7 @@ pub fn rollback_module_to_version(
         &format!("Rolled back to {version_id}"),
         &created_by,
     )?;
-    write_module_catalog_projection_to_rxdb(root)?;
+    sync_module_catalog_projection_now(root)?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -1912,7 +1921,7 @@ pub fn install_app_module(
         "Installed from store",
         &created_by,
     )?;
-    write_module_catalog_projection_to_rxdb(root)?;
+    sync_module_catalog_projection_now(root)?;
 
     Ok(serde_json::json!({
         "ok": true,

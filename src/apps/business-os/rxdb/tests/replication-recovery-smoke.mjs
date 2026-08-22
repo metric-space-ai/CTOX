@@ -50,6 +50,36 @@ async function makeState(name) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// --- 0b. awaitInSync must not certify an offline stale projection ----------
+{
+  const state = await makeState('await-in-sync-reconnect');
+  // The initial replication completed earlier in the session; the native
+  // peer then went away for a controlled runtime-schema reconfiguration.
+  state.initialReplicationDeferred.resolve(true);
+  let releasePeer;
+  const peerGate = new Promise((resolve) => { releasePeer = resolve; });
+  let pulls = 0;
+  let pushes = 0;
+  state.waitForOpenPeerId = async () => {
+    await peerGate;
+    return 'native-peer-reopened';
+  };
+  state.pullFromRemotePeers = async () => { pulls += 1; };
+  state.pushToRemotePeers = async () => { pushes += 1; };
+
+  let settled = false;
+  const inSync = state.awaitInSync().then(() => { settled = true; });
+  await delay(10);
+  assert(!settled, 'awaitInSync must remain pending while the native peer is offline');
+  assert(pulls === 0 && pushes === 0, 'offline awaitInSync must not certify an empty pull/push pass');
+
+  releasePeer();
+  await inSync;
+  assert(pulls === 1, `reconnected awaitInSync must pull exactly once, got ${pulls}`);
+  assert(pushes === 1, `reconnected awaitInSync must push exactly once, got ${pushes}`);
+  await state.cancel();
+}
+
 // --- 0a. critical command collections have checkpoint catch-up timers -----
 {
   const commands = await makeState('business_commands');

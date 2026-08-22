@@ -513,9 +513,10 @@ mod tests {
         seed_test_business_os_app_root, write_installed_inventory_module,
     };
     use super::super::store::{
-        legacy_preview_audience_grant_id, migrate_legacy_module_lifecycle_authority, now_ms,
-        open_store, record_module_release, resolve_business_os_installed_app_root,
-        rollback_module_release, rxdb_store_path, ModuleReleaseRequest, ModuleRollbackRequest,
+        legacy_preview_audience_grant_id, load_rxdb_collection_record,
+        migrate_legacy_module_lifecycle_authority, now_ms, open_store, record_module_release,
+        resolve_business_os_installed_app_root, rollback_module_release, rxdb_store_path,
+        ModuleReleaseRequest, ModuleRollbackRequest,
     };
     use super::{module_catalog_for_rxdb, write_module_catalog_projection_to_rxdb};
     use anyhow::Context;
@@ -1453,6 +1454,22 @@ mod tests {
             .and_then(Value::as_str)
             .context("second release id")?
             .to_owned();
+
+        let projected_catalog =
+            load_rxdb_collection_record(root, "business_module_catalog", "module-catalog")?
+                .context("release must immediately write the RxDB module catalog")?;
+        assert_eq!(
+            projected_catalog
+                .pointer("/modules")
+                .and_then(Value::as_array)
+                .and_then(|modules| modules.iter().find(|module| {
+                    module.get("id").and_then(Value::as_str) == Some("inventory")
+                }))
+                .and_then(|module| module.get("version"))
+                .and_then(Value::as_str),
+            Some("1.1.0"),
+            "terminal release state must not race a stale RxDB catalog projection",
+        );
 
         let catalog = module_catalog_for_rxdb(root)?;
         let modules = catalog

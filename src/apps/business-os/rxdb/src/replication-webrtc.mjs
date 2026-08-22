@@ -1915,6 +1915,15 @@ class CtoxWebRtcReplicationState {
   awaitInSync() {
     return Promise.resolve()
       .then(() => this.awaitInitialReplication())
+      // `pullFromRemotePeers()` deliberately resolves when no peer is open so
+      // background master-change/retry paths stay non-blocking. An explicit
+      // awaitInSync() call has a stronger contract: callers use its completion
+      // as permission to read an authoritative projection. After the native
+      // peer performs a controlled schema reconfiguration, reporting success
+      // here while offline lets those callers read the stale pre-restart row.
+      // Wait for the negotiated collection peer before running the pull; the
+      // bounded caller still owns the user-visible deadline.
+      .then(() => this.waitForOpenPeerId())
       .then(() => this.pullFromRemotePeers())
       .then(() => this.pushToRemotePeers());
   }
