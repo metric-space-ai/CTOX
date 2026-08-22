@@ -69,6 +69,14 @@ test('mail leaves collection lifecycle ownership with the shell lease', async ()
   assert.doesNotMatch(source, /ctx\.sync\?\.startCollection/);
 });
 
+test('mail treats data-plane teardown reads as transient without hiding other failures', () => {
+  assert.equal(hooks.isTransientCollectionReadError(
+    new DOMException("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.", 'InvalidStateError'),
+  ), true);
+  assert.equal(hooks.isTransientCollectionReadError(new Error('QUERY_CANCELLED: replication-cancel')), true);
+  assert.equal(hooks.isTransientCollectionReadError(new Error('permission denied')), false);
+});
+
 test('ordinary users only see assigned or shared email accounts', () => {
   const accounts = [
     { account_key: 'email:alice@example.test', channel: 'email', address: 'alice@example.test', profile_json: { owner_user_id: 'alice' } },

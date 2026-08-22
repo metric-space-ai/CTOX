@@ -440,9 +440,11 @@ export async function mount(ctx) {
   }
 
   function scheduleRefresh() {
+    if (view.disposed) return;
     if (view.refreshTimer) window.clearTimeout(view.refreshTimer);
     view.refreshTimer = window.setTimeout(async () => {
       view.refreshTimer = null;
+      if (view.disposed) return;
       await refreshData();
       if (!view.disposed) render();
     }, 120);
@@ -2641,9 +2643,15 @@ async function readAll(collection) {
     const docs = await collection.find().exec();
     return docs.map((doc) => doc?.toJSON?.() || doc).filter(Boolean);
   } catch (error) {
+    if (isTransientCollectionReadError(error)) return [];
     console.warn('[mail] collection read failed', error);
     return [];
   }
+}
+
+function isTransientCollectionReadError(error) {
+  const message = String(error?.message || error || '');
+  return /QUERY_CANCELLED|replication-cancel|WebRTC replication cancelled|IDBDatabase.*closing|database connection is closing|collection is closed|closed collection|RxDB Error-Code: COL21/i.test(message);
 }
 
 async function insertCollectionRecord(collection, record) {
@@ -2794,4 +2802,5 @@ export const __mailTestHooks = {
   buildMailRouteCommands,
   stableJson,
   sha256Text,
+  isTransientCollectionReadError,
 };
