@@ -1669,6 +1669,24 @@ async function seedBusinessOsThreadsScaleNativeSetup() {
     messages: 'ctox_business_os__user_thread_messages__v1',
     notifications: 'ctox_business_os__user_notifications__v0',
   };
+  // Provision the canonical native tables before peer startup. Creating them
+  // after the peer has prepared catalog/change-feed statements invalidates
+  // those statements and can transiently tear down replication with
+  // "database schema has changed" while the scale fixture is being seeded.
+  sqlite(Object.values(tables).map((tableName) => {
+    const table = quoteSqlIdentifier(tableName);
+    const index = quoteSqlIdentifier(`idx_${tableName}_lwt`);
+    return `
+      CREATE TABLE IF NOT EXISTS ${table} (
+        id TEXT PRIMARY KEY,
+        revision TEXT NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        lastWriteTime REAL NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS ${index} ON ${table} (lastWriteTime DESC);
+    `;
+  }).join('\n'));
   await waitForSqliteTables(Object.values(tables), 60000);
 
   const fixtures = [
@@ -1700,11 +1718,12 @@ async function seedBusinessOsThreadsScaleNativeSetup() {
           thread_id: id,
           title: `Historical thread ${index}`,
           kind: 'history',
-          status: 'completed',
+          status: 'open',
           participant_ids: ['local-dev', 'threads-requester'],
           watcher_user_ids: [],
           owner_user_id: 'local-dev',
           created_by_id: 'local-dev',
+          assigned_user_id: 'local-dev',
           source_module: 'threads-scale-history',
           source_record_type: 'scale-fixture',
           source_record_id: `threads_scale_record_${index}`,
@@ -4282,6 +4301,11 @@ function ensureCtoxSmokeBinary() {
     sellifyScaleSeedMs = Date.now() - scaleSeedStartedAt;
     console.log(`business_os_sellify_scale_seed_ms=${sellifyScaleSeedMs}`);
   }
+  if (smokeMode === 'business-os-threads-scale-ui') {
+    const scaleSeedStartedAt = Date.now();
+    threadsScaleSeed = await seedBusinessOsThreadsScaleNativeSetup();
+    console.log(`business_os_threads_rightclick_scale_seed_ms=${Date.now() - scaleSeedStartedAt}`);
+  }
   let ctox = startCtoxServer();
   const browserDiagnostics = {
     warnings: 0,
@@ -4348,12 +4372,6 @@ function ensureCtoxSmokeBinary() {
     console.log(`ctox_sync_config_wait_ms=${outerPhaseTimings.syncConfigWaitMs}`);
     if (!config.native_rxdb_peer_available) {
       throw new Error(`native peer unavailable: ${JSON.stringify(config)}`);
-    }
-    if (smokeMode === 'business-os-threads-scale-ui') {
-      const scaleSeedStartedAt = Date.now();
-      threadsScaleSeed = await seedBusinessOsThreadsScaleNativeSetup();
-      outerPhaseTimings.threadsScaleSeedMs = Date.now() - scaleSeedStartedAt;
-      console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
     }
     if (smokeMode === 'business-os-sellify-scale-ui') {
       outerPhaseTimings.sellifyScaleSeedMs = sellifyScaleSeedMs;
@@ -5188,9 +5206,9 @@ function ensureCtoxSmokeBinary() {
         }, waitError).catch((evalError) => ({ evaluateError: String(evalError?.message || evalError) }));
         throw new Error(`Business OS shell did not become ready: ${JSON.stringify(startupState, null, 2)}`);
       }
-      // The isolated scale smoke starts with an empty native store. Register
-      // the module collections only after the real shell database is ready,
-      // then seed the large native fixture into the canonical schema versions.
+      // Register the browser-side module collections once the real shell
+      // database is ready. The native tables and fixture were provisioned
+      // before peer startup so this step cannot invalidate native statements.
       if (smokeMode === 'business-os-threads-scale-ui') {
         await page.evaluate(async () => {
           const rawDb = globalThis.ctoxBusinessOsSmoke?.state?.db?.raw;
@@ -5202,10 +5220,6 @@ function ensureCtoxSmokeBinary() {
           }
           if (Object.keys(missing).length) await rawDb.addCollections(missing);
         });
-        const scaleSeedStartedAt = Date.now();
-        threadsScaleSeed = await seedBusinessOsThreadsScaleNativeSetup();
-        outerPhaseTimings.threadsScaleSeedMs = Date.now() - scaleSeedStartedAt;
-        console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
       }
       if (smokeMode === 'business-os-sellify-scale-ui') {
         const setupDeadline = Date.now() + Number(process.env.SELLIFY_SCALE_SETUP_TIMEOUT_MS || 240000);
