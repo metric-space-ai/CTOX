@@ -1287,10 +1287,20 @@ fn appsec_state_dir_for_args(root: &Path, args: &[String]) -> PathBuf {
 }
 
 pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyhow::Result<Value> {
+    let registry_auth_material = prepare_appsec_oci_registry_auth(root, args)?;
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
-    let mut output = ctox_appsec_pentest::run_cli_json(forwarded.clone(), Some(root.to_path_buf()))
-        .context("ctox appsec command failed")?;
+    let execution_context = ctox_appsec_pentest::NativeExecutionContext {
+        registry_auth_config: registry_auth_material
+            .as_ref()
+            .map(|material| material.path().to_path_buf()),
+    };
+    let mut output = ctox_appsec_pentest::run_cli_json_with_context(
+        forwarded.clone(),
+        Some(root.to_path_buf()),
+        execution_context,
+    )
+    .context("ctox appsec command failed")?;
     let ok = output.get("ok").and_then(serde_json::Value::as_bool) != Some(false);
     if ok && is_appsec_pipeline_enqueue(&args) {
         let enqueue = enqueue_appsec_pipeline_queue_tasks(root, &output)
@@ -1305,6 +1315,125 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         object.insert("ctox_durable_projection".to_string(), projection);
     }
     Ok(output)
+}
+
+fn prepare_appsec_oci_registry_auth(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<Option<tempfile::TempDir>> {
+    if !matches!(appsec_command_pair(args), Some(("scan", Some("oci")))) {
+        return Ok(None);
+    }
+    let Some(reference) = arg_value(args, "--registry-credential-ref") else {
+        return Ok(None);
+    };
+    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
+        "--registry-credential-ref must be an exact local ctox-secret://scope/name reference"
+    })?;
+    let image = arg_value(args, "--image")
+        .context("scan oci requires --image before private-registry credentials can be resolved")?;
+    let registry_host = appsec_oci_registry_host(&image)?;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RegistryCredential {
+        username: String,
+        password: String,
+    }
+    impl Drop for RegistryCredential {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.username.zeroize();
+            self.password.zeroize();
+        }
+    }
+
+    let secret = zeroize::Zeroizing::new(
+        crate::secrets::read_secret_value(root, &scope, &name)
+            .context("failed to resolve OCI registry credential from CTOX Secret Store")?,
+    );
+    let credential: RegistryCredential = serde_json::from_str(&secret).context(
+        "OCI registry secret must be JSON with exactly non-empty `username` and `password` strings",
+    )?;
+    anyhow::ensure!(
+        !credential.username.is_empty() && !credential.password.is_empty(),
+        "OCI registry secret username and password must both be non-empty"
+    );
+
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    let basic = zeroize::Zeroizing::new(format!("{}:{}", credential.username, credential.password));
+    let encoded = zeroize::Zeroizing::new(BASE64_STANDARD.encode(basic.as_bytes()));
+    let config = zeroize::Zeroizing::new(format!(
+        "{{\"auths\":{{\"{registry_host}\":{{\"auth\":\"{}\"}}}}}}",
+        encoded.as_str()
+    ));
+
+    let auth_parent = root.join("runtime/appsec/registry-auth");
+    fs::create_dir_all(&auth_parent).with_context(|| {
+        format!(
+            "failed to create private AppSec registry auth parent {}",
+            auth_parent.display()
+        )
+    })?;
+    let auth_dir = tempfile::Builder::new()
+        .prefix("oci-")
+        .tempdir_in(&auth_parent)
+        .context("failed to create short-lived OCI registry auth directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(auth_dir.path(), fs::Permissions::from_mode(0o700))?;
+    }
+    let config_path = auth_dir.path().join("config.json");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&config_path)
+        .context("failed to create short-lived OCI registry auth config")?;
+    {
+        use std::io::Write;
+        file.write_all(config.as_bytes())
+            .context("failed to write short-lived OCI registry auth config")?;
+        file.sync_all()
+            .context("failed to sync short-lived OCI registry auth config")?;
+    }
+    drop(file);
+
+    Ok(Some(auth_dir))
+}
+
+fn appsec_oci_registry_host(image: &str) -> anyhow::Result<String> {
+    let image = image.trim();
+    anyhow::ensure!(
+        !image.is_empty()
+            && !image.contains(char::is_whitespace)
+            && !image.contains("://")
+            && !image.starts_with('-'),
+        "OCI image reference is malformed"
+    );
+    let name = image.rsplit_once('@').map_or(image, |(name, _)| name);
+    anyhow::ensure!(
+        !name.is_empty()
+            && name.split('/').all(|segment| !segment.is_empty())
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':')),
+        "OCI repository name is malformed"
+    );
+    let first = name.split('/').next().unwrap_or_default();
+    Ok(
+        if first == "localhost" || first.contains('.') || first.contains(':') {
+            first.to_string()
+        } else {
+            "docker.io".to_string()
+        },
+    )
 }
 
 fn append_appsec_credential_proof_arg(root: &Path, args: &[String]) -> anyhow::Result<Vec<String>> {
@@ -5007,10 +5136,10 @@ mod tests {
         find_ctox_root_from_ancestors, handle_appsec_pipeline_work, handle_continuity_update,
         looks_like_ctox_root, openrouter_tool_smoke_summary,
         persist_appsec_command_expected_artifact, persist_runtime_turn_timeout,
-        record_appsec_stage_artifact_bindings, record_appsec_stage_session_bindings,
-        resolve_appsec_stage_command_placeholders, resolve_chat_attachment_paths,
-        resolve_runtime_ctox_root, run_projected_appsec_command, validated_workspace_root_override,
-        AppsecStageExecutionContext,
+        prepare_appsec_oci_registry_auth, record_appsec_stage_artifact_bindings,
+        record_appsec_stage_session_bindings, resolve_appsec_stage_command_placeholders,
+        resolve_chat_attachment_paths, resolve_runtime_ctox_root, run_projected_appsec_command,
+        validated_workspace_root_override, AppsecStageExecutionContext,
     };
     use crate::execution::models::runtime_env;
     use std::fs;
@@ -5328,6 +5457,104 @@ mod tests {
                 row.get("subject_id").and_then(serde_json::Value::as_str) == Some("user-b")
                     && row.get("status").and_then(serde_json::Value::as_str) == Some("missing")
             }));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_oci_registry_credentials_are_ephemeral_and_never_enter_argv() {
+        let root = make_fake_ctox_root("appsec-oci-registry-auth");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "private-registry",
+            r#"{"username":"audit-user","password":"super-sensitive-password"}"#,
+            Some("test OCI registry credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "scan".to_string(),
+            "oci".to_string(),
+            "--image".to_string(),
+            format!("registry.example.test/team/app@sha256:{}", "a".repeat(64)),
+            "--registry-credential-ref".to_string(),
+            "ctox-secret://appsec/private-registry".to_string(),
+        ];
+
+        let material = prepare_appsec_oci_registry_auth(&root, &args)
+            .unwrap()
+            .expect("ephemeral registry auth material");
+        let config_dir = material.path().to_path_buf();
+        let argv = args.join(" ");
+        assert!(!argv.contains("audit-user"));
+        assert!(!argv.contains("super-sensitive-password"));
+        assert!(!argv.contains("--registry-auth-config"));
+        assert!(!argv.contains(config_dir.to_string_lossy().as_ref()));
+        let config = fs::read_to_string(config_dir.join("config.json")).unwrap();
+        assert!(config.contains("registry.example.test"));
+        assert!(!config.contains("audit-user"));
+        assert!(!config.contains("super-sensitive-password"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_dir).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_eq!(
+                fs::metadata(config_dir.join("config.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
+        }
+        drop(material);
+        assert!(!config_dir.exists());
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_oci_registry_credentials_reject_invalid_refs_and_malformed_secret() {
+        let root = make_fake_ctox_root("appsec-oci-registry-auth-invalid");
+        let image = format!("registry.example.test/team/app@sha256:{}", "b".repeat(64));
+        let invalid_ref = vec![
+            "scan".to_string(),
+            "oci".to_string(),
+            "--image".to_string(),
+            image.clone(),
+            "--registry-credential-ref".to_string(),
+            "ctox-secret://appsec/private?leak=yes".to_string(),
+        ];
+        assert!(prepare_appsec_oci_registry_auth(&root, &invalid_ref)
+            .unwrap_err()
+            .to_string()
+            .contains("exact local"));
+
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "malformed",
+            r#"{"username":"audit-user","token":"not-supported"}"#,
+            Some("invalid test OCI registry credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let malformed = vec![
+            "scan".to_string(),
+            "oci".to_string(),
+            "--image".to_string(),
+            image,
+            "--registry-credential-ref".to_string(),
+            "ctox-secret://appsec/malformed".to_string(),
+        ];
+        assert!(prepare_appsec_oci_registry_auth(&root, &malformed)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly non-empty"));
 
         cleanup_test_dir(&root);
     }
