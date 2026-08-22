@@ -1290,6 +1290,7 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
     let registry_auth_material = prepare_appsec_oci_registry_auth(root, args)?;
     let logic_bearer_credential = prepare_appsec_logic_bearer_credential(root, args)?;
     let grpc_bearer_credential = prepare_appsec_grpc_bearer_credential(root, args)?;
+    let transport_session_credential = prepare_appsec_transport_session_credential(root, args)?;
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
     let execution_context = ctox_appsec_pentest::NativeExecutionContext {
@@ -1298,6 +1299,7 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
             .map(|material| material.path().to_path_buf()),
         logic_bearer_credential,
         grpc_bearer_credential,
+        transport_session_credential,
     };
     let mut output = ctox_appsec_pentest::run_cli_json_with_context(
         forwarded.clone(),
@@ -1407,6 +1409,56 @@ fn prepare_appsec_grpc_bearer_credential(
     let token = std::mem::take(&mut credential.bearer_token);
     let credential = ctox_appsec_pentest::NativeGrpcCredential::new(reference, token)
         .context("gRPC bearer credential is invalid")?;
+    Ok(Some(credential))
+}
+
+fn prepare_appsec_transport_session_credential(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<Option<ctox_appsec_pentest::NativeTransportCredential>> {
+    if !matches!(appsec_command_pair(args), Some(("scan", Some("transport")))) {
+        return Ok(None);
+    }
+    let reference_count = args
+        .iter()
+        .filter(|argument| argument.as_str() == "--credential-ref")
+        .count();
+    if reference_count == 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        reference_count == 1,
+        "scan transport accepts exactly one --credential-ref"
+    );
+    let Some(reference) = arg_value(args, "--credential-ref") else {
+        anyhow::bail!("scan transport --credential-ref requires a value");
+    };
+    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
+        "--credential-ref must be an exact local ctox-secret://scope/name reference"
+    })?;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TransportSessionCredential {
+        cookie_header: String,
+    }
+    impl Drop for TransportSessionCredential {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.cookie_header.zeroize();
+        }
+    }
+
+    let secret = zeroize::Zeroizing::new(
+        crate::secrets::read_secret_value(root, &scope, &name)
+            .context("failed to resolve transport session credential from CTOX Secret Store")?,
+    );
+    let mut credential: TransportSessionCredential = serde_json::from_str(&secret).context(
+        "transport credential secret must be JSON with exactly one non-empty `cookie_header` string",
+    )?;
+    let cookie_header = std::mem::take(&mut credential.cookie_header);
+    let credential = ctox_appsec_pentest::NativeTransportCredential::new(reference, cookie_header)
+        .context("transport session credential is invalid")?;
     Ok(Some(credential))
 }
 
@@ -5790,6 +5842,49 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("exactly one"));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_transport_session_credentials_are_exact_secret_refs_and_redacted() {
+        let root = make_fake_ctox_root("appsec-transport-session-auth");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "transport-user",
+            r#"{"cookie_header":"session=super-sensitive-transport-cookie"}"#,
+            Some("test transport session credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "scan".to_string(),
+            "transport".to_string(),
+            "--kind".to_string(),
+            "websocket".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/transport-user".to_string(),
+        ];
+        let credential = prepare_appsec_transport_session_credential(&root, &args)
+            .unwrap()
+            .expect("native transport session credential");
+        assert!(!args.join(" ").contains("super-sensitive-transport-cookie"));
+        assert!(!format!("{credential:?}").contains("super-sensitive-transport-cookie"));
+
+        let duplicate = vec![
+            "scan".to_string(),
+            "transport".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/transport-user".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/transport-user".to_string(),
+        ];
+        assert!(
+            prepare_appsec_transport_session_credential(&root, &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one")
+        );
         cleanup_test_dir(&root);
     }
 
