@@ -1068,6 +1068,7 @@ function renderCard(item) {
   const card = document.createElement('article');
   card.className = 'app-card';
   card.dataset.appId = item.id;
+  card.dataset.contextModuleId = item.id;
   card.dataset.contextRecordId = item.id;
   card.dataset.contextRecordType = 'business_app';
   card.dataset.contextLabel = item.title || item.id;

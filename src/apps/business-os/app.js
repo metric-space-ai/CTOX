@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260821-tabs-abruf-v240';
+const APP_BUILD = '20260822-context-scope-v241';
 
 ensureShellStylesheets();
 
@@ -11796,7 +11796,20 @@ function extractGlobalCtoxContext(mod, target, pointer = {}) {
   const selectedText = String(window.getSelection?.()?.toString?.() || '').trim().slice(0, 1000);
   const clickedText = String(target?.innerText || target?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 500);
 
-  const moduleId = mod?.id || '';
+  const containerModuleId = mod?.id || '';
+  const requestedModuleId = String(
+    descriptor.module_id
+      || descriptor.app_id
+      || target?.closest?.('[data-context-module-id]')?.getAttribute('data-context-module-id')
+      || '',
+  ).trim();
+  // A nested surface such as an App Store card may target another installed
+  // module. Only accept IDs from the shell's server-projected module catalog;
+  // arbitrary DOM attributes must never mint an action scope.
+  const moduleId = requestedModuleId
+    && state.modules.some((candidate) => candidate?.id === requestedModuleId)
+    ? requestedModuleId
+    : containerModuleId;
   const windowEl = target?.closest?.('.shell-window');
   const registeredEntity = descriptor.entity || {};
   const registeredSelection = typeof descriptor.selection === 'function'
@@ -12294,23 +12307,24 @@ function showGlobalCtoxContextMenu(context, x, y) {
     }
 
     try {
+      const clientContext = {
+        source: 'business-os-global-context',
+        action: 'context-chat',
+        mode,
+        target: mode === 'app' ? 'app' : (mode === 'ask' ? 'read' : 'data'),
+        column: context.column,
+        record_type: context.record_type,
+        record_id: context.record_id || mod.id,
+        module_id: mod.id,
+        app_id: mod.id,
+        actor: agentScope.actor,
+        visible_scope: agentScope,
+      };
       const result = await createContextActionsFacade(mod).dispatch(mode, {
         context,
         prompt: instruction,
         title,
-        client_context: {
-          source: 'business-os-global-context',
-          action: 'context-chat',
-          mode,
-          target: mode === 'app' ? 'app' : (mode === 'ask' ? 'read' : 'data'),
-          column: context.column,
-          record_type: context.record_type,
-          record_id: context.record_id || mod.id,
-          module_id: mod.id,
-          app_id: mod.id,
-          actor: agentScope.actor,
-          visible_scope: agentScope,
-        },
+        client_context: clientContext,
         visible_scope: agentScope,
         actor: agentScope.actor,
       });
@@ -12321,6 +12335,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
         record_id: context.record_id || mod.id,
         command_id: result?.command_id || result?.id || '',
         thread_key: `business-os/${mod.id}/${context.record_id || 'module'}`,
+        client_context: clientContext,
         reuseActive: false,
       });
       hideGlobalCtoxContextMenu();

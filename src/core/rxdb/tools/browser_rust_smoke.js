@@ -4389,8 +4389,11 @@ function ensureCtoxSmokeBinary() {
       });
     }
     const page = await browser.newPage();
-    if (smokeMode === 'business-os-app-release-ui') {
-      // This flow validates lifecycle/policy projections in the App Store's
+    if (
+      smokeMode === 'business-os-app-release-ui'
+      || smokeMode === 'business-os-agent-scope-ui'
+    ) {
+      // These flows validate lifecycle/policy projections in the App Store's
       // list representation, not its animated WebGL shelf. Exercise the real
       // accessibility preference so the shelf is never initialized before the
       // smoke selects the list toggle (which otherwise emits a Linux GPU
@@ -10127,7 +10130,6 @@ function ensureCtoxSmokeBinary() {
           }
         };
         const openAppStoreContextMenu = async () => {
-          await seedAgentScopeModuleCatalog({ force: true });
           applyAgentScopeState();
           await state.openModule('app-store', { force: true, asModule: true });
           await waitFor(() => ({
@@ -10135,6 +10137,11 @@ function ensureCtoxSmokeBinary() {
             activeModule: state.activeModule?.id || document.body?.dataset?.activeModule || '',
             text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
           }), 30000, 'agent scope App Store open');
+          // App Store startup performs an authoritative sync before subscribing
+          // to catalog updates. Seed the synthetic fixture only after that
+          // boundary so the test does not rely on stale offline state winning
+          // over a peer pull.
+          await seedAgentScopeModuleCatalog({ force: true });
           document.querySelector('[data-scope="installed"]')?.dispatchEvent(new MouseEvent('click', {
             bubbles: true,
             cancelable: true,
@@ -10148,10 +10155,8 @@ function ensureCtoxSmokeBinary() {
               activeModule: state.activeModule?.id || '',
             };
           }, 15000, 'agent scope App Store card');
-          let contextMenuDispatchCount = 0;
-          let lastContextMenuEventPrevented = false;
           return waitFor(async () => {
-            let menu = document.querySelector('.app-store-context-menu:not([hidden])');
+            let menu = document.querySelector('.ctox-global-context-menu:not([hidden])');
             let panel = menu?.querySelector('.ctox-agent-scope') || null;
             let rows = scopeRowsFromPanel(panel);
             if (!(menu && panel && rows.length >= 4 && /Phase 12 Agent Scope App/.test(panel.textContent || ''))) {
@@ -10166,61 +10171,56 @@ function ensureCtoxSmokeBinary() {
               }
               if (currentCard) {
                 const rect = currentCard.getBoundingClientRect();
-                lastContextMenuEventPrevented = !currentCard.dispatchEvent(new MouseEvent('contextmenu', {
-                  bubbles: true,
-                  cancelable: true,
-                  button: 2,
-                  buttons: 2,
-                  composed: true,
-                  clientX: Math.max(24, Math.round(rect.left + 18)),
-                  clientY: Math.max(24, Math.round(rect.top + 18)),
-                }));
-                contextMenuDispatchCount += 1;
-                menu = document.querySelector('.app-store-context-menu:not([hidden])');
+                smoke.openGlobalCtoxContextMenuForTarget(
+                  currentCard,
+                  Math.max(24, Math.round(rect.left + 18)),
+                  Math.max(24, Math.round(rect.top + 18)),
+                );
+                menu = document.querySelector('.ctox-global-context-menu:not([hidden])');
                 panel = menu?.querySelector('.ctox-agent-scope') || null;
                 rows = scopeRowsFromPanel(panel);
               }
             }
-            const allMenus = [...document.querySelectorAll('.app-store-context-menu')];
             const currentCard = document.querySelector(`[data-app-id="${css(targetModule.id)}"]`);
             const host = document.querySelector('[data-module-content]') || document.querySelector('[data-module-root]');
             return {
               ok: Boolean(menu && panel && rows.length >= 4 && /Phase 12 Agent Scope App/.test(panel.textContent || '')),
               rows,
               text: panel?.textContent?.trim() || '',
-              eventPrevented: lastContextMenuEventPrevented,
-              dispatchCount: contextMenuDispatchCount,
               activeModule: state.activeModule?.id || document.body?.dataset?.activeModule || '',
-              menuCount: allMenus.length,
-              menuHidden: allMenus.map((entry) => entry.hidden),
-              menuText: allMenus.map((entry) => entry.textContent?.trim?.().slice(0, 500) || ''),
               cardConnected: Boolean(currentCard?.isConnected),
               hostHasCard: Boolean(host && currentCard && host.contains(currentCard)),
-              hostLocalContextMenu: host?.getAttribute?.('data-ctox-local-context-menu') || '',
+              contextModuleId: currentCard?.getAttribute?.('data-context-module-id') || '',
               catalogSeedCount: agentScopeCatalogSeedCount,
             };
           }, 5000, 'agent scope App Store context menu');
         };
         const submitAppStoreContextMenu = async () => {
-          let submittedDetail = null;
-          const listener = (event) => {
-            submittedDetail = JSON.parse(JSON.stringify(event.detail || {}));
+          let submittedCommand = null;
+          const originalDispatch = state.commandBus?.dispatch;
+          if (typeof originalDispatch !== 'function') throw new Error('agent scope command bus is unavailable');
+          state.commandBus.dispatch = async (...args) => {
+            submittedCommand = JSON.parse(JSON.stringify(args[0] || {}));
+            return originalDispatch.apply(state.commandBus, args);
           };
-          window.addEventListener('ctox-business-os-chat-submit', listener, { capture: true, once: true });
-          const menu = document.querySelector('.app-store-context-menu:not([hidden])');
-          const form = menu?.querySelector('[data-app-store-context-chat-form]');
-          const textarea = menu?.querySelector('[data-app-store-context-message]');
+          const menu = document.querySelector('.ctox-global-context-menu:not([hidden])');
+          const form = menu?.querySelector('form');
+          const textarea = menu?.querySelector('textarea');
           if (!form || !textarea) throw new Error('agent scope App Store context form is missing');
+          const askInput = menu.querySelector('input[name="contextMode"][value="ask"]');
+          if (!askInput) throw new Error('agent scope App Store ask mode is missing');
+          askInput.checked = true;
+          askInput.dispatchEvent(new Event('change', { bubbles: true }));
           textarea.value = 'Bitte prüfe den App-Store-Scope im Chat.';
           textarea.dispatchEvent(new Event('input', { bubbles: true }));
           form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
           try {
             return await waitFor(() => ({
-              ok: Boolean(submittedDetail),
-              detail: submittedDetail,
+              ok: Boolean(submittedCommand),
+              detail: submittedCommand,
             }), 5000, 'agent scope App Store context submit detail');
           } finally {
-            window.removeEventListener('ctox-business-os-chat-submit', listener, { capture: true });
+            state.commandBus.dispatch = originalDispatch;
           }
         };
         const waitForBusinessChatScope = async (submittedDetail) => {
@@ -10316,8 +10316,8 @@ function ensureCtoxSmokeBinary() {
               && appStoreDetail.client_context?.module_id === targetModule.id
               && appStoreDetail.client_context?.app_id === targetModule.id
               && appStoreDetail.client_context?.actor?.id === actorSession.user.id
-              && appStoreDetail.payload?.mode === 'data'
-              && appStoreDetail.command_type === 'business_os.chat.task'
+              && appStoreDetail.payload?.mode === 'ask'
+              && appStoreDetail.command_type === 'business_os.context.ask'
               && scopeRowsMatchVisibleScope(appStoreMenu.rows, appStoreVisibleScope)
           );
           const businessChatScope = await waitForBusinessChatScope(appStoreDetail);
