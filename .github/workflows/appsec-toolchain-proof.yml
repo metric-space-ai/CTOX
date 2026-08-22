@@ -13,7 +13,7 @@ on:
       profile:
         description: "AppSec scanner profile to prove"
         required: true
-        default: "standard"
+        default: "full"
         type: choice
         options:
           - minimal
@@ -48,7 +48,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: appsec-toolchain-proof-${{ github.ref }}-${{ inputs.profile || 'standard' }}-${{ inputs.platform_scope || 'all' }}
+  group: appsec-toolchain-proof-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.profile || github.event_name == 'pull_request' && 'standard' || 'full' }}-${{ inputs.platform_scope || 'all' }}
   cancel-in-progress: false
 
 jobs:
@@ -63,7 +63,7 @@ jobs:
 
     env:
       CARGO_TERM_COLOR: always
-      APPSEC_PROFILE: ${{ inputs.profile || 'standard' }}
+      APPSEC_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || github.event_name == 'pull_request' && 'standard' || 'full' }}
       APPSEC_INCLUDE_DATA_BUNDLES: ${{ github.event_name != 'workflow_dispatch' || inputs.include_data_bundles }}
       APPSEC_ATTEST_NATIVE: ${{ github.event_name != 'workflow_dispatch' || inputs.attest_native }}
       APPSEC_SMOKE_TIMEOUT_SECONDS: ${{ inputs.smoke_timeout_seconds || '45' }}
