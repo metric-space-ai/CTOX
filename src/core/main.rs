@@ -1489,8 +1489,14 @@ fn prepare_appsec_cloud_credential(
     let private_base = root.join("runtime/appsec/credential-material");
     fs::create_dir_all(&private_base)
         .with_context(|| format!("failed to create {}", private_base.display()))?;
-    let private_root = tempfile::Builder::new()
-        .prefix("gcp-")
+    let mut private_root_builder = tempfile::Builder::new();
+    private_root_builder.prefix("gcp-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        private_root_builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let private_root = private_root_builder
         .tempdir_in(&private_base)
         .context("failed to create private ephemeral GCP credential directory")?;
     let credential_path = private_root.path().join("service-account.json");
@@ -6150,7 +6156,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(prepare_appsec_cloud_credential(&root, &malformed)
-            .unwrap_err()
+            .err()
+            .expect("malformed Azure credential must fail")
             .to_string()
             .contains("exactly"));
         cleanup_test_dir(&root);
@@ -6212,7 +6219,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(prepare_appsec_cloud_credential(&root, &wrong_project)
-            .unwrap_err()
+            .err()
+            .expect("GCP project mismatch must fail")
             .to_string()
             .contains("exactly match"));
         cleanup_test_dir(&root);
