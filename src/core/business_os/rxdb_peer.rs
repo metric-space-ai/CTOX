@@ -11654,9 +11654,16 @@ pub(in crate::business_os) mod tests {
 
     #[tokio::test]
     async fn native_all_schema_hashes_match_browser_contract_fixture() {
-        let fixture: HashMap<String, String> =
-            serde_json::from_str(include_str!("business_os_schema_hashes.json"))
-                .expect("Business OS schema hash fixture must be valid JSON");
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/core/business_os/business_os_schema_hashes.json");
+        let fixture_json = std::fs::read_to_string(&fixture_path).unwrap_or_else(|error| {
+            panic!(
+                "read Business OS schema hash fixture at {}: {error}",
+                fixture_path.display()
+            )
+        });
+        let fixture: HashMap<String, String> = serde_json::from_str(&fixture_json)
+            .expect("Business OS schema hash fixture must be valid JSON");
         let contract = business_os_schema_contract();
         let mut missing = Vec::new();
         let mut stale = Vec::new();
