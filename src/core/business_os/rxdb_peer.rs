@@ -6331,28 +6331,72 @@ pub(super) async fn incremental_upsert_projection_if_changed(
         .map_err(|err| anyhow::anyhow!("load existing {label} projection: {err}"))?
         .into_iter()
         .next();
+    let mut invalid_revision_previous = None;
     if let Some(existing) = existing {
-        // Native intake can discover rows written directly to the shared SQLite
-        // store before the RxDB change stream has observed them. Hydrate the
-        // document cache from the authoritative storage read so incremental_upsert
-        // does not attempt to write against an older cached revision.
-        collection
-            .doc_cache()
-            .map_err(|err| anyhow::anyhow!("load {label} document cache: {err}"))?
-            .get_cached_rx_document(&existing)
-            .map_err(|err| anyhow::anyhow!("refresh existing {label} projection cache: {err}"))?;
-        if projection_document_has_valid_revision(&existing)
-            && canonical_projection_document_for_compare(&existing)
+        if !projection_document_has_valid_revision(&existing) {
+            // Legacy native projections used application revisions such as
+            // `rev_<uuid>`. Do not hydrate those into RxDB's document cache:
+            // the cache parses revision heights and correctly rejects them as
+            // UTL2. The guarded storage write below compares the exact legacy
+            // predecessor and replaces it with a canonical RxDB revision.
+            invalid_revision_previous = Some(existing);
+        } else {
+            // Native intake can discover rows written directly to the shared SQLite
+            // store before the RxDB change stream has observed them. Hydrate the
+            // document cache from the authoritative storage read so incremental_upsert
+            // does not attempt to write against an older cached revision.
+            collection
+                .doc_cache()
+                .map_err(|err| anyhow::anyhow!("load {label} document cache: {err}"))?
+                .get_cached_rx_document(&existing)
+                .map_err(|err| {
+                    anyhow::anyhow!("refresh existing {label} projection cache: {err}")
+                })?;
+            if canonical_projection_document_for_compare(&existing)
                 == canonical_projection_document_for_compare(&document)
-        {
-            return Ok(false);
+            {
+                return Ok(false);
+            }
         }
     }
     let document = fill_projection_document_envelope(collection, document, label)?;
-    collection
-        .incremental_upsert(document)
-        .await
-        .map_err(|err| anyhow::anyhow!("upsert {label} projection: {err}"))?;
+    if let Some(previous) = invalid_revision_previous {
+        let result = collection
+            .storage_instance
+            .bulk_write(
+                vec![BulkWriteRow {
+                    previous: Some(previous),
+                    document,
+                }],
+                "business-os-projection-legacy-revision-repair",
+            )
+            .await
+            .map_err(|err| anyhow::anyhow!("repair {label} projection revision: {err}"))?;
+        if let Some(err) = result.error.first() {
+            anyhow::bail!("repair {label} projection revision conflict: {err:?}");
+        }
+        let repaired = collection
+            .storage_instance
+            .find_documents_by_id(std::slice::from_ref(&document_id), true)
+            .await
+            .map_err(|err| anyhow::anyhow!("load repaired {label} projection: {err}"))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("repaired {label} projection disappeared"))?;
+        if !projection_document_has_valid_revision(&repaired) {
+            anyhow::bail!("repaired {label} projection still has an invalid revision");
+        }
+        collection
+            .doc_cache()
+            .map_err(|err| anyhow::anyhow!("load repaired {label} document cache: {err}"))?
+            .get_cached_rx_document(&repaired)
+            .map_err(|err| anyhow::anyhow!("cache repaired {label} projection: {err}"))?;
+    } else {
+        collection
+            .incremental_upsert(document)
+            .await
+            .map_err(|err| anyhow::anyhow!("upsert {label} projection: {err}"))?;
+    }
     Ok(true)
 }
 
@@ -11074,6 +11118,112 @@ pub(in crate::business_os) mod tests {
                 .and_then(Value::as_f64)
                 .is_some());
             assert!(projection_document_has_valid_revision(&persisted));
+        });
+    }
+
+    #[test]
+    fn projection_writer_repairs_malformed_legacy_revision_before_cache_refresh() {
+        let root = tempfile::tempdir().expect("temp root");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let path = store::rxdb_store_path(root.path());
+            let database = open_test_database(path.clone())
+                .await
+                .expect("open rxdb sqlite");
+            database
+                .add_collections(collection_creators())
+                .await
+                .expect("register collections");
+            let documents = database
+                .collection("documents")
+                .expect("documents collection");
+            let document_id = "projection_legacy_revision_repair_probe";
+            let projection = |title: &str| {
+                json!({
+                    "id": document_id,
+                    "title": title,
+                    "filename": "legacy-revision-repair.txt",
+                    "mime_type": "text/plain",
+                    "status": "imported",
+                    "current_version_id": "",
+                    "index_text": title,
+                    "is_deleted": false,
+                    "created_at_ms": 1_000,
+                    "updated_at_ms": 2_000
+                })
+            };
+
+            incremental_upsert_projection_if_changed(
+                &documents,
+                projection("Initial title"),
+                "accepted business_command",
+            )
+            .await
+            .expect("write initial projection");
+
+            let conn = Connection::open(&path).expect("open projection sqlite");
+            let documents_table: String = conn
+                .query_row(
+                    "SELECT name FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name LIKE '%__documents__v%'
+                     ORDER BY name DESC
+                     LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("resolve documents projection table");
+            let raw: String = conn
+                .query_row(
+                    &format!("SELECT data FROM {documents_table} WHERE id = ?1"),
+                    [document_id],
+                    |row| row.get(0),
+                )
+                .expect("load projected row");
+            let mut damaged: Value = serde_json::from_str(&raw).expect("parse projected row");
+            damaged
+                .as_object_mut()
+                .expect("projected object")
+                .insert("_rev".to_string(), json!("rev_legacy_uuid"));
+            conn.execute(
+                &format!(
+                    "UPDATE {documents_table}
+                     SET revision = 'rev_legacy_uuid', data = ?1
+                     WHERE id = ?2"
+                ),
+                rusqlite::params![
+                    serde_json::to_string(&damaged).expect("serialize damaged row"),
+                    document_id
+                ],
+            )
+            .expect("damage persisted revision");
+            drop(conn);
+
+            assert!(incremental_upsert_projection_if_changed(
+                &documents,
+                projection("Accepted title"),
+                "accepted business_command",
+            )
+            .await
+            .expect("repair malformed revision through projection writer"));
+
+            let repaired = documents
+                .storage_instance
+                .find_documents_by_id(&[document_id.to_string()], true)
+                .await
+                .expect("load repaired projection")
+                .into_iter()
+                .next()
+                .expect("repaired projection");
+            assert_eq!(
+                repaired.get("title").and_then(Value::as_str),
+                Some("Accepted title")
+            );
+            assert!(projection_document_has_valid_revision(&repaired));
         });
     }
 

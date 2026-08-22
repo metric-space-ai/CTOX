@@ -63,7 +63,9 @@ function tryDecodeFrame(buffer) {
 const peers = new Map();
 const rooms = new Map();
 const CONTROL_PLANE_CAPABILITY = 'ctox-control-plane-v1';
+const ROLE_BOUND_SIGNALING_CAPABILITY = 'ctox-role-bound-signaling-v1';
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
+const ROLE_BOUND_AUTH_VERSION = 'ctox-role-bound-v1';
 const MAX_CONTROL_PLANE_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 const CONTROL_PLANE_CLOCK_SKEW_SECONDS = 5 * 60;
 const KNOWN_ROLES = new Set(['browser', 'ctox_instance', 'desktop_shell', 'desktop_terminal', 'ctox_desktop_app']);
@@ -85,6 +87,9 @@ function metadataFromHandshake(header) {
       capabilities,
       tokenIssuedAt: Number(url.searchParams.get('token_iat') || 0),
       tokenExpiresAt: Number(url.searchParams.get('token_exp') || 0),
+      authVersion: (url.searchParams.get('auth_version') || '').trim(),
+      browserTokenHash: (url.searchParams.get('browser_token_hash') || '').trim(),
+      nativeTokenHash: (url.searchParams.get('native_token_hash') || '').trim(),
     };
   } catch {
     return {
@@ -96,11 +101,17 @@ function metadataFromHandshake(header) {
       capabilities: new Set(),
       tokenIssuedAt: 0,
       tokenExpiresAt: 0,
+      authVersion: '',
+      browserTokenHash: '',
+      nativeTokenHash: '',
     };
   }
 }
 
 function roomKey(peer, roomId) {
+  if (peer.capabilities?.has(ROLE_BOUND_SIGNALING_CAPABILITY)) {
+    return `${peer.authVersion}|${peer.browserTokenHash}|${peer.nativeTokenHash}|${roomId}`;
+  }
   return `${peer.signalingToken || ''}|${roomId}`;
 }
 
@@ -117,7 +128,9 @@ function notifyRoom(roomId) {
 }
 
 function redactRoom(roomId) {
-  return String(roomId || '').replace(/^[^|]*\|/, '[token]|');
+  const value = String(roomId || '');
+  const separator = value.lastIndexOf('|');
+  return separator >= 0 ? `[binding]|${value.slice(separator + 1)}` : value;
 }
 
 function normalizeRole(value, client) {
@@ -158,8 +171,34 @@ function controlPlaneErrorCode(reason) {
   if (normalized.includes('missing control plane token')) return 'token_missing';
   if (normalized.includes('instance mismatch')) return 'instance_mismatch';
   if (normalized.includes('missing control plane instance')) return 'instance_missing';
+  if (normalized.includes('role auth missing')) return 'role_auth_missing';
+  if (normalized.includes('role auth binding')) return 'role_auth_binding_invalid';
+  if (normalized.includes('role credential')) return 'role_credential_invalid';
   if (normalized.includes('role')) return 'role_invalid';
   return 'control_plane_rejected';
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function validateRoleBoundJoin(peer) {
+  if (!peer.capabilities?.has(ROLE_BOUND_SIGNALING_CAPABILITY)) return '';
+  if (!peer.authVersion || !peer.browserTokenHash || !peer.nativeTokenHash) {
+    return 'role auth missing';
+  }
+  if (peer.authVersion !== ROLE_BOUND_AUTH_VERSION
+      || !/^[a-f0-9]{64}$/.test(peer.browserTokenHash)
+      || !/^[a-f0-9]{64}$/.test(peer.nativeTokenHash)) {
+    return 'role auth binding invalid';
+  }
+  const expectedHash = peer.role === 'browser'
+    ? peer.browserTokenHash
+    : (peer.role === 'ctox_instance' ? peer.nativeTokenHash : '');
+  if (!expectedHash || sha256Hex(peer.signalingToken) !== expectedHash) {
+    return 'role credential invalid';
+  }
+  return '';
 }
 
 function validateControlPlaneJoin(peer, roomId) {
@@ -177,6 +216,8 @@ function validateControlPlaneJoin(peer, roomId) {
   const roomInstanceId = instanceIdFromBusinessOsRoom(roomId);
   if (roomInstanceId && !peer.instanceId) return 'missing control plane instance';
   if (roomInstanceId && peer.instanceId !== roomInstanceId) return 'control plane instance mismatch';
+  const roleBoundError = validateRoleBoundJoin(peer);
+  if (roleBoundError) return roleBoundError;
   return '';
 }
 
@@ -315,6 +356,55 @@ const server = net.createServer((socket) => {
   socket.on('close', disconnect);
   socket.on('error', disconnect);
 });
+
+function runSelfTest() {
+  const now = Math.floor(Date.now() / 1000);
+  const browserToken = 'browser-role-token';
+  const nativeToken = 'native-role-token';
+  const shared = {
+    client: 'ctox-role-bound-self-test',
+    instanceId: 'inst_self_test',
+    protocol: CTOX_RXDB_PROTOCOL,
+    capabilities: new Set([CONTROL_PLANE_CAPABILITY, ROLE_BOUND_SIGNALING_CAPABILITY]),
+    tokenIssuedAt: now,
+    tokenExpiresAt: now + 60,
+    authVersion: ROLE_BOUND_AUTH_VERSION,
+    browserTokenHash: sha256Hex(browserToken),
+    nativeTokenHash: sha256Hex(nativeToken),
+  };
+  const browser = { ...shared, role: 'browser', signalingToken: browserToken };
+  const native = { ...shared, role: 'ctox_instance', signalingToken: nativeToken };
+  const room = 'ctox-business-os:inst_self_test:room';
+  if (validateControlPlaneJoin(browser, room) || validateControlPlaneJoin(native, room)) {
+    throw new Error('valid role-bound peers were rejected');
+  }
+  if (roomKey(browser, room) !== roomKey(native, room)) {
+    throw new Error('role-bound browser and native peers did not resolve to one room');
+  }
+  const wrongNative = { ...native, signalingToken: browserToken };
+  const wrongNativeError = validateControlPlaneJoin(wrongNative, room);
+  if (controlPlaneErrorCode(wrongNativeError) !== 'role_credential_invalid') {
+    throw new Error('native peer authenticated with a browser credential');
+  }
+  const missingBinding = { ...browser, browserTokenHash: '' };
+  const missingBindingError = validateControlPlaneJoin(missingBinding, room);
+  if (controlPlaneErrorCode(missingBindingError) !== 'role_auth_missing') {
+    throw new Error('missing role binding did not fail closed');
+  }
+  const splitBinding = { ...native, browserTokenHash: sha256Hex('different-browser-token') };
+  if (validateControlPlaneJoin(splitBinding, room)) {
+    throw new Error('self-consistent native binding should remain valid');
+  }
+  if (roomKey(browser, room) === roomKey(splitBinding, room)) {
+    throw new Error('different role bindings resolved to the same room');
+  }
+  console.log('local_signaling_role_binding_self_test=1');
+}
+
+if (process.env.SIGNALING_SELF_TEST === '1') {
+  runSelfTest();
+  process.exit(0);
+}
 
 server.listen(port, host, () => {
   console.log(`CTOX RxDB signaling listening on ws://${host}:${port}`);

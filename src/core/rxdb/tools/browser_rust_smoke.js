@@ -13488,17 +13488,29 @@ function ensureCtoxSmokeBinary() {
 
         await state.openModule('app-store', { force: true, asModule: true });
         await waitFor(() => ({
-          ok: visible('[data-app-store-root]') && visible('[data-apps-grid]'),
+          ok: visible('[data-app-store-root]')
+            && visible('[data-pg-view="list"]')
+            && document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired === 'true',
           activeModule: state.activeModule?.id || document.body?.dataset?.activeModule || '',
+          paneGrammarWired: document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired || '',
           text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
         }), 30000, 'App Store opened for release smoke');
+        click('[data-pg-view="list"]', 'App Store list view');
+        await waitFor(() => ({
+          ok: visible('[data-apps-grid]'),
+          listViewPressed: document.querySelector('[data-pg-view="list"]')?.getAttribute('aria-pressed') || '',
+          gridHidden: document.querySelector('[data-apps-grid]')?.hidden ?? null,
+        }), 10000, 'App Store list view opened for release smoke');
         click('[data-scope="installed"]', 'installed scope');
         await waitFor(() => {
           const card = document.querySelector(`[data-apps-grid] [data-app-id="${css(moduleId)}"]`);
           const releaseButton = card?.querySelector('[data-card-action="release"]');
           const lifecycleBadge = card?.querySelector('.app-lifecycle-badge');
           return {
-            ok: Boolean(card && releaseButton && !releaseButton.disabled && /Privat/.test(lifecycleBadge?.textContent || '')),
+            ok: Boolean(card
+              && releaseButton
+              && !releaseButton.disabled
+              && /Privat/.test(lifecycleBadge?.textContent || card?.innerText || '')),
             hasCard: Boolean(card),
             hasReleaseButton: Boolean(releaseButton),
             releaseDisabled: releaseButton?.disabled ?? null,
@@ -13600,6 +13612,18 @@ function ensureCtoxSmokeBinary() {
         localStorage.removeItem(storageKey);
 
         await state.openModule('app-store', { force: true, asModule: true });
+        if (!visible('[data-apps-grid]')) {
+          await waitFor(() => ({
+            ok: document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired === 'true',
+            paneGrammarWired: document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired || '',
+          }), 10000, 'App Store pane grammar before versions');
+          click('[data-pg-view="list"]', 'App Store list view before versions');
+          await waitFor(() => ({
+            ok: visible('[data-apps-grid]'),
+            listViewPressed: document.querySelector('[data-pg-view="list"]')?.getAttribute('aria-pressed') || '',
+            gridHidden: document.querySelector('[data-apps-grid]')?.hidden ?? null,
+          }), 10000, 'App Store list view before versions');
+        }
         const versionStateReady = await waitFor(async () => {
           await syncBusinessCollections(5000);
           const catalog = await catalogSnapshot();
