@@ -168,7 +168,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
+            bubblewrap libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
 
       - name: Business OS JS dependency bootstrap
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -207,6 +207,7 @@ jobs:
       - name: AppSec non-network fixture gates
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
+          bwrap --version
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml scanner_schema_covers_all_allowlisted_tools --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_realistic_web_scanner_outputs_validate_contracts --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_remaining_allowlisted_tools_have_structured_output --quiet
