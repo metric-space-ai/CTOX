@@ -1622,8 +1622,8 @@ async function seedBusinessOsThreadsRightClickNativeUsers() {
       (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
        active, reason, created_by, created_at_ms, updated_at_ms)
     VALUES
-      ('threads_rightclick_notes_read', 'user', 'threads-requester', 'data.read',
-       'module', 'notes', 1, 'right-click smoke read-only source access',
+      ('threads_rightclick_tickets_read', 'user', 'threads-requester', 'data.read',
+       'module', 'tickets', 1, 'right-click smoke read-only source access',
        'browser-rust-smoke', ${now}, ${now})
     ON CONFLICT(grant_id) DO UPDATE SET
       subject_type = excluded.subject_type,
@@ -10885,9 +10885,9 @@ function ensureCtoxSmokeBinary() {
         appState = state;
 
         const targetModule = {
-          id: 'notes',
-          title: 'Notes',
-          glyph: 'N',
+          id: 'tickets',
+          title: 'Tickets',
+          glyph: 'T',
         };
         const requesterSession = {
           authenticated: true,
@@ -10908,8 +10908,8 @@ function ensureCtoxSmokeBinary() {
           },
         };
         const reviewerId = reviewerSession.user.id;
-        const targetRecordId = 'notes_seed_ops_review';
-        const appTargetRecordId = 'notes';
+        const targetRecordId = 'tickets_seed_ops_review';
+        const appTargetRecordId = 'tickets';
         const threadsCollections = [
           'user_threads',
           'user_thread_messages',
