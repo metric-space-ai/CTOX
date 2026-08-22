@@ -269,6 +269,9 @@ if (smokeMode === 'business-os-app-release-ui') {
 if (smokeMode === 'business-os-agent-scope-ui') {
   prepareBusinessOsAgentScopeModuleFixture(agentScopeModuleFixture);
 }
+if (smokeMode === 'business-os-fresh-profile-ui') {
+  prepareBusinessOsFreshProfileModuleAssets();
+}
 if (smokeMode === 'business-os-sellify-scale-ui') {
   prepareBusinessOsSellifyScaleModuleFixture();
 }
@@ -1058,6 +1061,33 @@ function prepareBusinessOsAgentScopeModuleFixture(fixture) {
   return () => {};
 }
 `);
+}
+
+function prepareBusinessOsFreshProfileModuleAssets() {
+  const moduleIds = [
+    'phase14-fresh-private-app',
+    'phase14-fresh-team-app',
+    'phase14-fresh-restricted-app',
+    ...Array.from({ length: 33 }, (_, index) =>
+      `phase14-scale-app-${String(index + 1).padStart(2, '0')}`),
+  ];
+  const installedModulesRoot = path.join(runtimeRoot, 'runtime/business-os/installed-modules');
+  fs.mkdirSync(installedModulesRoot, { recursive: true });
+  const targetRealPath = fs.realpathSync(installedModulesRoot);
+  const repoRealPath = fs.realpathSync(root);
+  if (targetRealPath === repoRealPath || targetRealPath.startsWith(`${repoRealPath}${path.sep}`)) {
+    throw new Error('fresh-profile fixture would write into the real Business OS source tree');
+  }
+  for (const moduleId of moduleIds) {
+    const moduleRoot = path.join(installedModulesRoot, moduleId);
+    fs.mkdirSync(moduleRoot, { recursive: true });
+    fs.writeFileSync(path.join(moduleRoot, 'schema.js'), 'export const collections = {};\n');
+    fs.writeFileSync(path.join(moduleRoot, 'icon.svg'), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="${moduleId}">
+  <rect width="24" height="24" rx="5" fill="#23665f"/>
+  <path d="M7 12h10M12 7v10" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+</svg>
+`);
+  }
 }
 
 function prepareBusinessOsReleaseModuleFixture(fixture) {
@@ -4392,6 +4422,7 @@ function ensureCtoxSmokeBinary() {
     if (
       smokeMode === 'business-os-app-release-ui'
       || smokeMode === 'business-os-agent-scope-ui'
+      || smokeMode === 'business-os-fresh-profile-ui'
     ) {
       // These flows validate lifecycle/policy projections in the App Store's
       // list representation, not its animated WebGL shelf. Exercise the real
@@ -5637,7 +5668,7 @@ function ensureCtoxSmokeBinary() {
           };
           const moduleIds = [privateModule.id, teamModule.id, restrictedModule.id];
           const allPermissions = Object.values(BusinessOsPermissions);
-          const scaleModuleCount = 32;
+          const scaleModuleCount = 33;
           const scaleModules = Array.from({ length: scaleModuleCount }, (_, index) => {
             const seq = index + 1;
             const version = `1.${Math.floor(index / 8)}.${index % 8}`;
@@ -5851,6 +5882,41 @@ function ensureCtoxSmokeBinary() {
             smoke.renderTabs();
             return Math.round(performance.now() - renderStartedAt);
           };
+          const seedFreshProfileModuleCatalog = async () => {
+            const collection = state.db?.collection?.('business_module_catalog');
+            if (!collection) throw new Error('fresh-profile module catalog is unavailable');
+            const doc = await collection.findOne('module-catalog').exec().catch(() => null);
+            const existing = doc?.toJSON?.() || {
+              id: 'module-catalog',
+              ok: true,
+              modules: [],
+              templates: [],
+              governance: null,
+            };
+            const {
+              _rev,
+              _attachments,
+              ...catalog
+            } = existing;
+            void _rev;
+            void _attachments;
+            const insertedIds = new Set([...moduleIds, ...scaleModuleIds]);
+            const modules = Array.isArray(catalog.modules) ? catalog.modules : [];
+            await collection.upsert({
+              ...catalog,
+              id: 'module-catalog',
+              ok: catalog.ok !== false,
+              modules: [
+                ...modules.filter((mod) => !insertedIds.has(mod?.id)),
+                privateModule,
+                teamModule,
+                restrictedModule,
+                ...scaleModules,
+              ],
+              updated_at_ms: Date.now(),
+              source: catalog.source || 'business-os-fresh-profile-smoke',
+            });
+          };
           globalThis.__ctoxFreshProfileNarrowSetup = async () => {
             installModules(teamSession);
             await state.openModule('app-store', { force: true, asModule: true });
@@ -5858,11 +5924,12 @@ function ensureCtoxSmokeBinary() {
               ok: Boolean(document.querySelector('[data-app-store-root]')),
               text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
             }), 10000, 'fresh-profile narrow app store root');
+            await seedFreshProfileModuleCatalog();
             document.querySelector('[data-app-store-root] [data-scope="installed"]')?.click();
             return waitFor(() => {
               const card = document.querySelector(`[data-app-id="${css(teamModule.id)}"]`);
               const disabled = card?.querySelector('[data-disabled-reason]');
-              const lifecycle = card?.querySelector('.app-lifecycle-badge');
+              const lifecycle = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
               return {
                 ok: Boolean(card && disabled && lifecycle),
                 cardText: card?.innerText || '',
@@ -5943,11 +6010,12 @@ function ensureCtoxSmokeBinary() {
               ok: Boolean(document.querySelector('[data-app-store-root]')),
               text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
             }), 10000, 'fresh-profile app store root');
+            await seedFreshProfileModuleCatalog();
             document.querySelector('[data-app-store-root] [data-scope="installed"]')?.click();
             const appStore = await waitFor(() => {
               const card = document.querySelector(`[data-app-id="${css(teamModule.id)}"]`);
               const disabled = card?.querySelector('[data-disabled-reason]');
-              const lifecycle = card?.querySelector('.app-lifecycle-badge');
+              const lifecycle = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
               const cards = [...document.querySelectorAll('[data-app-id]')];
               const scaleCardCount = scaleModuleIds
                 .filter((id) => document.querySelector(`[data-app-id="${css(id)}"]`))
@@ -6104,7 +6172,7 @@ function ensureCtoxSmokeBinary() {
               const root = document.querySelector('[data-app-store-root]') || document.body;
               const targetCard = document.querySelector('[data-app-id="phase14-fresh-team-app"]');
               targetCard?.scrollIntoView?.({ block: 'center', inline: 'nearest' });
-              const visibleLifecycle = [...document.querySelectorAll('.module-tab-lifecycle, .app-lifecycle-badge')]
+              const visibleLifecycle = [...document.querySelectorAll('.module-tab-lifecycle, .app-card-version-row .ctox-badge[data-state]')]
                 .filter((el) => {
                   const rect = el.getBoundingClientRect();
                   return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.left < window.innerWidth;
@@ -13513,7 +13581,7 @@ function ensureCtoxSmokeBinary() {
         await waitFor(() => {
           const card = document.querySelector(`[data-apps-grid] [data-app-id="${css(moduleId)}"]`);
           const releaseButton = card?.querySelector('[data-card-action="release"]');
-          const lifecycleBadge = card?.querySelector('.app-lifecycle-badge');
+          const lifecycleBadge = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
           return {
             ok: Boolean(card
               && releaseButton
@@ -13586,7 +13654,7 @@ function ensureCtoxSmokeBinary() {
         }) === true;
         const versionBadgeVisible = await waitFor(() => {
           const card = document.querySelector(`[data-app-id="${css(moduleId)}"]`);
-          const lifecycleBadge = card?.querySelector('.app-lifecycle-badge');
+          const lifecycleBadge = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
           const releaseBadge = card?.querySelector('.app-release-state');
           const text = card?.innerText || '';
           return {
