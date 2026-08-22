@@ -1292,6 +1292,7 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
     let grpc_bearer_credential = prepare_appsec_grpc_bearer_credential(root, args)?;
     let transport_session_credential = prepare_appsec_transport_session_credential(root, args)?;
     let cloud_credential_material = prepare_appsec_cloud_credential(root, args)?;
+    let browser_runtime_executor = prepare_appsec_browser_runtime_executor(root, args);
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
     let execution_context = ctox_appsec_pentest::NativeExecutionContext {
@@ -1304,6 +1305,7 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         cloud_credential: cloud_credential_material
             .as_ref()
             .map(|material| material.credential.clone()),
+        browser_runtime_executor,
     };
     let mut output = ctox_appsec_pentest::run_cli_json_with_context(
         forwarded.clone(),
@@ -1325,6 +1327,47 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         object.insert("ctox_durable_projection".to_string(), projection);
     }
     Ok(output)
+}
+
+fn prepare_appsec_browser_runtime_executor(
+    root: &Path,
+    args: &[String],
+) -> Option<ctox_appsec_pentest::NativeBrowserRuntimeExecutor> {
+    if !matches!(
+        appsec_command_pair(args),
+        Some(("scan", Some("browser-runtime")))
+    ) || arg_value(args, "--url").is_none()
+    {
+        return None;
+    }
+    let root = root.to_path_buf();
+    Some(ctox_appsec_pentest::NativeBrowserRuntimeExecutor::new(
+        move |request| {
+            let mut web_stack_args = vec![
+                "authenticated-automation".to_string(),
+                "--source-id".to_string(),
+                request.source_id.clone(),
+                "--target-url".to_string(),
+                request.target_url.clone(),
+                "--credential-ref".to_string(),
+                request.credential_reference.clone(),
+                "--verify-selector".to_string(),
+                request.verify_selector.clone(),
+                "--timeout-ms".to_string(),
+                request.timeout_ms.to_string(),
+            ];
+            if let Some(selector) = request.credential_selector.as_ref() {
+                web_stack_args.push("--credential-selector".to_string());
+                web_stack_args.push(selector.clone());
+            }
+            crate::service::business_os::run_business_os_web_stack_authenticated_automation(
+                &root,
+                &web_stack_args,
+                &request.probe_source,
+            )
+            .context("authenticated AppSec browser runtime execution failed")
+        },
+    ))
 }
 
 struct AppsecCloudCredentialMaterial {
