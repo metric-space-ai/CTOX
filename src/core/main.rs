@@ -1291,6 +1291,7 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
     let logic_bearer_credential = prepare_appsec_logic_bearer_credential(root, args)?;
     let grpc_bearer_credential = prepare_appsec_grpc_bearer_credential(root, args)?;
     let transport_session_credential = prepare_appsec_transport_session_credential(root, args)?;
+    let cloud_credential_material = prepare_appsec_cloud_credential(root, args)?;
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
     let execution_context = ctox_appsec_pentest::NativeExecutionContext {
@@ -1300,6 +1301,9 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         logic_bearer_credential,
         grpc_bearer_credential,
         transport_session_credential,
+        cloud_credential: cloud_credential_material
+            .as_ref()
+            .map(|material| material.credential.clone()),
     };
     let mut output = ctox_appsec_pentest::run_cli_json_with_context(
         forwarded.clone(),
@@ -1321,6 +1325,168 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         object.insert("ctox_durable_projection".to_string(), projection);
     }
     Ok(output)
+}
+
+struct AppsecCloudCredentialMaterial {
+    credential: ctox_appsec_pentest::NativeCloudCredential,
+    _private_root: Option<tempfile::TempDir>,
+}
+
+fn prepare_appsec_cloud_credential(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<Option<AppsecCloudCredentialMaterial>> {
+    if !matches!(appsec_command_pair(args), Some(("scan", Some("cloud")))) {
+        return Ok(None);
+    }
+    let provider = arg_value(args, "--provider").unwrap_or_default();
+    if !matches!(provider.as_str(), "azure" | "gcp") {
+        return Ok(None);
+    }
+    let reference_count = args
+        .iter()
+        .filter(|argument| argument.as_str() == "--credential-ref")
+        .count();
+    if reference_count == 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        reference_count == 1,
+        "scan cloud accepts exactly one --credential-ref"
+    );
+    let reference = arg_value(args, "--credential-ref")
+        .context("scan cloud --credential-ref requires a value")?;
+    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
+        "--credential-ref must be an exact local ctox-secret://scope/name reference"
+    })?;
+    let secret = zeroize::Zeroizing::new(
+        crate::secrets::read_secret_value(root, &scope, &name)
+            .context("failed to resolve cloud credential from CTOX Secret Store")?,
+    );
+
+    if provider == "azure" {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AzureServicePrincipalCredential {
+            tenant_id: String,
+            client_id: String,
+            client_secret: String,
+        }
+        impl Drop for AzureServicePrincipalCredential {
+            fn drop(&mut self) {
+                use zeroize::Zeroize;
+                self.tenant_id.zeroize();
+                self.client_id.zeroize();
+                self.client_secret.zeroize();
+            }
+        }
+        let mut value: AzureServicePrincipalCredential = serde_json::from_str(&secret).context(
+            "Azure credential secret must contain exactly non-empty `tenant_id`, `client_id`, and `client_secret` strings",
+        )?;
+        let credential = ctox_appsec_pentest::NativeCloudCredential::azure_service_principal(
+            reference,
+            std::mem::take(&mut value.tenant_id),
+            std::mem::take(&mut value.client_id),
+            std::mem::take(&mut value.client_secret),
+        )
+        .context("Azure service-principal credential is invalid")?;
+        return Ok(Some(AppsecCloudCredentialMaterial {
+            credential,
+            _private_root: None,
+        }));
+    }
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct GcpServiceAccountCredential {
+        #[serde(rename = "type")]
+        credential_type: String,
+        project_id: String,
+        private_key_id: String,
+        private_key: String,
+        client_email: String,
+        client_id: String,
+        auth_uri: String,
+        token_uri: String,
+        auth_provider_x509_cert_url: String,
+        client_x509_cert_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        universe_domain: Option<String>,
+    }
+    impl Drop for GcpServiceAccountCredential {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.credential_type.zeroize();
+            self.project_id.zeroize();
+            self.private_key_id.zeroize();
+            self.private_key.zeroize();
+            self.client_email.zeroize();
+            self.client_id.zeroize();
+            self.auth_uri.zeroize();
+            self.token_uri.zeroize();
+            self.auth_provider_x509_cert_url.zeroize();
+            self.client_x509_cert_url.zeroize();
+            if let Some(value) = self.universe_domain.as_mut() {
+                value.zeroize();
+            }
+        }
+    }
+    let value: GcpServiceAccountCredential = serde_json::from_str(&secret)
+        .context("GCP credential secret must be an exact standard service-account JSON document")?;
+    anyhow::ensure!(
+        value.credential_type == "service_account",
+        "GCP credential `type` must be `service_account`"
+    );
+    let requested_project =
+        arg_value(args, "--scope-id").context("GCP scan cloud requires --scope-id")?;
+    anyhow::ensure!(
+        value.project_id == requested_project,
+        "GCP credential project_id must exactly match scan cloud --scope-id"
+    );
+    let private_base = root.join("runtime/appsec/credential-material");
+    fs::create_dir_all(&private_base)
+        .with_context(|| format!("failed to create {}", private_base.display()))?;
+    let private_root = tempfile::Builder::new()
+        .prefix("gcp-")
+        .tempdir_in(&private_base)
+        .context("failed to create private ephemeral GCP credential directory")?;
+    let credential_path = private_root.path().join("service-account.json");
+    let serialized = zeroize::Zeroizing::new(
+        serde_json::to_vec(&value).context("failed to serialize GCP service-account credential")?,
+    );
+    write_private_appsec_credential_file(&credential_path, &serialized)?;
+    let credential = ctox_appsec_pentest::NativeCloudCredential::gcp_service_account(
+        reference,
+        requested_project,
+        credential_path,
+    )
+    .context("GCP service-account credential is invalid")?;
+    Ok(Some(AppsecCloudCredentialMaterial {
+        credential,
+        _private_root: Some(private_root),
+    }))
+}
+
+fn write_private_appsec_credential_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).with_context(|| {
+        format!(
+            "failed to create private credential file {}",
+            path.display()
+        )
+    })?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write private credential file {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync private credential file {}", path.display()))?;
+    Ok(())
 }
 
 fn prepare_appsec_logic_bearer_credential(
@@ -5281,7 +5447,9 @@ mod tests {
         find_ctox_root_from_ancestors, handle_appsec_pipeline_work, handle_continuity_update,
         looks_like_ctox_root, openrouter_tool_smoke_summary,
         persist_appsec_command_expected_artifact, persist_runtime_turn_timeout,
-        prepare_appsec_oci_registry_auth, record_appsec_stage_artifact_bindings,
+        prepare_appsec_cloud_credential, prepare_appsec_grpc_bearer_credential,
+        prepare_appsec_logic_bearer_credential, prepare_appsec_oci_registry_auth,
+        prepare_appsec_transport_session_credential, record_appsec_stage_artifact_bindings,
         record_appsec_stage_session_bindings, resolve_appsec_stage_command_placeholders,
         resolve_chat_attachment_paths, resolve_runtime_ctox_root, run_projected_appsec_command,
         validated_workspace_root_override, AppsecStageExecutionContext,
@@ -5885,6 +6053,125 @@ mod tests {
                 .to_string()
                 .contains("exactly one")
         );
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_azure_cloud_credentials_resolve_exact_schema_without_argv_leak() {
+        let root = make_fake_ctox_root("appsec-azure-cloud-auth");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "azure-prod",
+            r#"{"tenant_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","client_id":"11111111-2222-3333-4444-555555555555","client_secret":"secret-sensitive"}"#,
+            Some("test Azure service principal".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "scan".to_string(),
+            "cloud".to_string(),
+            "--provider".to_string(),
+            "azure".to_string(),
+            "--scope-id".to_string(),
+            "11111111-2222-3333-4444-555555555555".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/azure-prod".to_string(),
+        ];
+        let material = prepare_appsec_cloud_credential(&root, &args)
+            .unwrap()
+            .expect("native Azure credential");
+        let debug = format!("{:?}", material.credential);
+        assert!(!args.join(" ").contains("secret-sensitive"));
+        assert!(!debug.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        assert!(!debug.contains("11111111-2222-3333-4444-555555555555"));
+        assert!(!debug.contains("secret-sensitive"));
+
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "azure-malformed",
+            r#"{"tenant_id":"tenant","client_id":"client","client_secret":"secret","extra":"forbidden"}"#,
+            Some("invalid Azure service principal".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let malformed = args
+            .iter()
+            .map(|argument| {
+                if argument == "ctox-secret://appsec/azure-prod" {
+                    "ctox-secret://appsec/azure-malformed".to_string()
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(prepare_appsec_cloud_credential(&root, &malformed)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly"));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_gcp_cloud_credentials_are_project_bound_private_and_ephemeral() {
+        let root = make_fake_ctox_root("appsec-gcp-cloud-auth");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "gcp-prod",
+            r#"{"type":"service_account","project_id":"ctox-prod-123","private_key_id":"key-id","private_key":"-----BEGIN PRIVATE KEY-----\nprivate-sensitive\n-----END PRIVATE KEY-----\n","client_email":"scanner@ctox-prod-123.iam.gserviceaccount.com","client_id":"123456789","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs","client_x509_cert_url":"https://www.googleapis.com/robot/v1/metadata/x509/scanner%40ctox-prod-123.iam.gserviceaccount.com","universe_domain":"googleapis.com"}"#,
+            Some("test GCP service account".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "scan".to_string(),
+            "cloud".to_string(),
+            "--provider".to_string(),
+            "gcp".to_string(),
+            "--scope-id".to_string(),
+            "ctox-prod-123".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/gcp-prod".to_string(),
+        ];
+        let material = prepare_appsec_cloud_credential(&root, &args)
+            .unwrap()
+            .expect("native GCP credential");
+        let credential_path = material
+            ._private_root
+            .as_ref()
+            .expect("GCP private credential root")
+            .path()
+            .join("service-account.json");
+        assert!(credential_path.is_file());
+        assert!(!args.join(" ").contains("private-sensitive"));
+        assert!(!format!("{:?}", material.credential).contains("private-sensitive"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&credential_path).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+        drop(material);
+        assert!(!credential_path.exists());
+
+        let wrong_project = args
+            .iter()
+            .map(|argument| {
+                if argument == "ctox-prod-123" {
+                    "ctox-other-123".to_string()
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(prepare_appsec_cloud_credential(&root, &wrong_project)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly match"));
         cleanup_test_dir(&root);
     }
 

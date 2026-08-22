@@ -218,6 +218,7 @@ jobs:
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml identity_session_fixture_proves_saml_signature_replay_fixation_and_recovery --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml native_grpc_fixture_executes_authenticated_reflection_unary_and_streaming --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml authenticated_transport_fixture_injects_session_without_retaining_it --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml cloud_kubernetes_live_fixture_proves_auth_and_positive_negative_posture --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml finding_bundle_exports_authz_replay_issue_and_fix_check_script --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml finding_verify_bundle_executes_proof_script_and_records_fix_status --quiet
 
