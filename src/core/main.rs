@@ -1288,12 +1288,14 @@ fn appsec_state_dir_for_args(root: &Path, args: &[String]) -> PathBuf {
 
 pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyhow::Result<Value> {
     let registry_auth_material = prepare_appsec_oci_registry_auth(root, args)?;
+    let logic_bearer_credential = prepare_appsec_logic_bearer_credential(root, args)?;
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
     let execution_context = ctox_appsec_pentest::NativeExecutionContext {
         registry_auth_config: registry_auth_material
             .as_ref()
             .map(|material| material.path().to_path_buf()),
+        logic_bearer_credential,
     };
     let mut output = ctox_appsec_pentest::run_cli_json_with_context(
         forwarded.clone(),
@@ -1315,6 +1317,45 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         object.insert("ctox_durable_projection".to_string(), projection);
     }
     Ok(output)
+}
+
+fn prepare_appsec_logic_bearer_credential(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<Option<ctox_appsec_pentest::NativeBearerCredential>> {
+    if !matches!(appsec_command_pair(args), Some(("logic", Some("contract")))) {
+        return Ok(None);
+    }
+    let Some(reference) = arg_value(args, "--credential-ref") else {
+        return Ok(None);
+    };
+    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
+        "--credential-ref must be an exact local ctox-secret://scope/name reference"
+    })?;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LogicBearerCredential {
+        bearer_token: String,
+    }
+    impl Drop for LogicBearerCredential {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.bearer_token.zeroize();
+        }
+    }
+
+    let secret = zeroize::Zeroizing::new(
+        crate::secrets::read_secret_value(root, &scope, &name)
+            .context("failed to resolve logic credential from CTOX Secret Store")?,
+    );
+    let mut credential: LogicBearerCredential = serde_json::from_str(&secret).context(
+        "logic credential secret must be JSON with exactly one non-empty `bearer_token` string",
+    )?;
+    let token = std::mem::take(&mut credential.bearer_token);
+    let credential = ctox_appsec_pentest::NativeBearerCredential::new(reference, token)
+        .context("logic bearer credential is invalid")?;
+    Ok(Some(credential))
 }
 
 fn prepare_appsec_oci_registry_auth(
@@ -5556,6 +5597,71 @@ mod tests {
             .to_string()
             .contains("exactly non-empty"));
 
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_logic_bearer_credentials_resolve_only_from_exact_secret_refs() {
+        let root = make_fake_ctox_root("appsec-logic-bearer-auth");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "logic-operator",
+            r#"{"bearer_token":"super-sensitive-logic-token"}"#,
+            Some("test logic credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "logic".to_string(),
+            "contract".to_string(),
+            "--file".to_string(),
+            "contract.json".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/logic-operator".to_string(),
+        ];
+        let credential = prepare_appsec_logic_bearer_credential(&root, &args)
+            .unwrap()
+            .expect("native bearer credential");
+        assert!(!args.join(" ").contains("super-sensitive-logic-token"));
+        assert!(!format!("{credential:?}").contains("super-sensitive-logic-token"));
+
+        let invalid = vec![
+            "logic".to_string(),
+            "contract".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/logic-operator?leak=yes".to_string(),
+        ];
+        assert!(prepare_appsec_logic_bearer_credential(&root, &invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("exact local"));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_logic_bearer_credentials_reject_malformed_secret_shapes() {
+        let root = make_fake_ctox_root("appsec-logic-bearer-auth-invalid");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "malformed-logic",
+            r#"{"bearer_token":"token","extra":"not-allowed"}"#,
+            Some("invalid test logic credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "logic".to_string(),
+            "contract".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/malformed-logic".to_string(),
+        ];
+        assert!(prepare_appsec_logic_bearer_credential(&root, &args)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one"));
         cleanup_test_dir(&root);
     }
 
