@@ -1289,6 +1289,7 @@ fn appsec_state_dir_for_args(root: &Path, args: &[String]) -> PathBuf {
 pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyhow::Result<Value> {
     let registry_auth_material = prepare_appsec_oci_registry_auth(root, args)?;
     let logic_bearer_credential = prepare_appsec_logic_bearer_credential(root, args)?;
+    let grpc_bearer_credential = prepare_appsec_grpc_bearer_credential(root, args)?;
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
     let execution_context = ctox_appsec_pentest::NativeExecutionContext {
@@ -1296,6 +1297,7 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
             .as_ref()
             .map(|material| material.path().to_path_buf()),
         logic_bearer_credential,
+        grpc_bearer_credential,
     };
     let mut output = ctox_appsec_pentest::run_cli_json_with_context(
         forwarded.clone(),
@@ -1355,6 +1357,56 @@ fn prepare_appsec_logic_bearer_credential(
     let token = std::mem::take(&mut credential.bearer_token);
     let credential = ctox_appsec_pentest::NativeBearerCredential::new(reference, token)
         .context("logic bearer credential is invalid")?;
+    Ok(Some(credential))
+}
+
+fn prepare_appsec_grpc_bearer_credential(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<Option<ctox_appsec_pentest::NativeGrpcCredential>> {
+    if !matches!(appsec_command_pair(args), Some(("scan", Some("grpc")))) {
+        return Ok(None);
+    }
+    let reference_count = args
+        .iter()
+        .filter(|argument| argument.as_str() == "--credential-ref")
+        .count();
+    if reference_count == 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        reference_count == 1,
+        "scan grpc accepts exactly one --credential-ref"
+    );
+    let Some(reference) = arg_value(args, "--credential-ref") else {
+        anyhow::bail!("scan grpc --credential-ref requires a value");
+    };
+    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
+        "--credential-ref must be an exact local ctox-secret://scope/name reference"
+    })?;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GrpcBearerCredential {
+        bearer_token: String,
+    }
+    impl Drop for GrpcBearerCredential {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.bearer_token.zeroize();
+        }
+    }
+
+    let secret = zeroize::Zeroizing::new(
+        crate::secrets::read_secret_value(root, &scope, &name)
+            .context("failed to resolve gRPC credential from CTOX Secret Store")?,
+    );
+    let mut credential: GrpcBearerCredential = serde_json::from_str(&secret).context(
+        "gRPC credential secret must be JSON with exactly one non-empty `bearer_token` string",
+    )?;
+    let token = std::mem::take(&mut credential.bearer_token);
+    let credential = ctox_appsec_pentest::NativeGrpcCredential::new(reference, token)
+        .context("gRPC bearer credential is invalid")?;
     Ok(Some(credential))
 }
 
@@ -5659,6 +5711,82 @@ mod tests {
             "ctox-secret://appsec/malformed-logic".to_string(),
         ];
         assert!(prepare_appsec_logic_bearer_credential(&root, &args)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one"));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_grpc_bearer_credentials_resolve_only_from_exact_secret_refs() {
+        let root = make_fake_ctox_root("appsec-grpc-bearer-auth");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "grpc-operator",
+            r#"{"bearer_token":"super-sensitive-grpc-token"}"#,
+            Some("test gRPC credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "scan".to_string(),
+            "grpc".to_string(),
+            "--host".to_string(),
+            "api.example.test:443".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/grpc-operator".to_string(),
+        ];
+        let credential = prepare_appsec_grpc_bearer_credential(&root, &args)
+            .unwrap()
+            .expect("native gRPC bearer credential");
+        assert!(!args.join(" ").contains("super-sensitive-grpc-token"));
+        assert!(!format!("{credential:?}").contains("super-sensitive-grpc-token"));
+
+        let invalid = vec![
+            "scan".to_string(),
+            "grpc".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/grpc-operator?leak=yes".to_string(),
+        ];
+        assert!(prepare_appsec_grpc_bearer_credential(&root, &invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("exact local"));
+        let duplicate = vec![
+            "scan".to_string(),
+            "grpc".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/grpc-operator".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/grpc-operator".to_string(),
+        ];
+        assert!(prepare_appsec_grpc_bearer_credential(&root, &duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one"));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn appsec_grpc_bearer_credentials_reject_malformed_secret_shapes() {
+        let root = make_fake_ctox_root("appsec-grpc-bearer-auth-invalid");
+        crate::secrets::write_secret_record(
+            &root,
+            "appsec",
+            "malformed-grpc",
+            r#"{"bearer_token":"token","extra":"not-allowed"}"#,
+            Some("invalid test gRPC credential".to_string()),
+            serde_json::json!({"source": "test"}),
+        )
+        .unwrap();
+        let args = vec![
+            "scan".to_string(),
+            "grpc".to_string(),
+            "--credential-ref".to_string(),
+            "ctox-secret://appsec/malformed-grpc".to_string(),
+        ];
+        assert!(prepare_appsec_grpc_bearer_credential(&root, &args)
             .unwrap_err()
             .to_string()
             .contains("exactly one"));
