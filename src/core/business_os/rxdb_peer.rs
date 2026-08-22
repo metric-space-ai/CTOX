@@ -6332,6 +6332,15 @@ pub(super) async fn incremental_upsert_projection_if_changed(
         .into_iter()
         .next();
     if let Some(existing) = existing {
+        // Native intake can discover rows written directly to the shared SQLite
+        // store before the RxDB change stream has observed them. Hydrate the
+        // document cache from the authoritative storage read so incremental_upsert
+        // does not attempt to write against an older cached revision.
+        collection
+            .doc_cache()
+            .map_err(|err| anyhow::anyhow!("load {label} document cache: {err}"))?
+            .get_cached_rx_document(&existing)
+            .map_err(|err| anyhow::anyhow!("refresh existing {label} projection cache: {err}"))?;
         if projection_document_has_valid_revision(&existing)
             && canonical_projection_document_for_compare(&existing)
                 == canonical_projection_document_for_compare(&document)
