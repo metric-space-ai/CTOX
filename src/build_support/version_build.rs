@@ -14,6 +14,18 @@ pub fn emit() {
     println!("cargo:rerun-if-env-changed=CTOX_BUILD_VERSION");
     println!("cargo:rerun-if-changed={}", repo_root.join(".git/HEAD").display());
     println!("cargo:rerun-if-changed={}", repo_root.join("Cargo.toml").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root
+            .join("src/core/business_os/business_os_schema_contract.json")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root
+            .join("src/core/business_os/business_os_schema_hashes.json")
+            .display()
+    );
 }
 
 fn repo_root() -> PathBuf {
