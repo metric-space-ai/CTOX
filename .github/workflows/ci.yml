@@ -219,6 +219,9 @@ jobs:
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml native_grpc_fixture_executes_authenticated_reflection_unary_and_streaming --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml authenticated_transport_fixture_injects_session_without_retaining_it --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml cloud_kubernetes_live_fixture_proves_auth_and_positive_negative_posture --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml mobile_artifact_inspector_decodes_android_and_ios_positive_negative_controls --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml android_binary_axml_manifest_decoder_proves_secure_controls --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml artifact_signature_verification_distinguishes_valid_invalid_and_partial --quiet
           CTOX_BROWSER_RUNTIME_LIVE_FIXTURE=1 \
             CTOX_PLAYWRIGHT_MODULE="$PWD/src/apps/business-os/node_modules/playwright/index.mjs" \
             cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml browser_runtime_live_chromium_fixture_proves_authenticated_positive_and_negative_cases --quiet
