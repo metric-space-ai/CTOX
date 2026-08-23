@@ -158,10 +158,45 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          set -euo pipefail
           brew list nmap >/dev/null 2>&1 || brew install nmap
           if [ "$APPSEC_PROFILE" = "full" ]; then
             brew list clamav >/dev/null 2>&1 || brew install clamav
           fi
+
+          native_bin="$RUNNER_TEMP/appsec-native/bin"
+          native_src="$RUNNER_TEMP/appsec-native/src"
+          mkdir -p "$native_bin" "$native_src"
+          case "$(uname -m)" in
+            arm64|aarch64)
+              dalfox_platform="macos-aarch64"
+              dalfox_sha256="37375c9c9bcc3c04b57ae53b5b8b4a2a334c456512f9e4e30e8acc992444ffe9"
+              ;;
+            x86_64)
+              dalfox_platform="macos-x86_64"
+              dalfox_sha256="f2646f9d6cb79d2026f153d6a8a08b09f19f49d96de520cad2a7e15c37515270"
+              ;;
+            *)
+              echo "Unsupported macOS architecture for Dalfox: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          dalfox_archive="$RUNNER_TEMP/dalfox-v3.1.2-${dalfox_platform}.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-${dalfox_platform}.tar.gz" \
+            --output "$dalfox_archive"
+          printf '%s  %s\n' "$dalfox_sha256" "$dalfox_archive" | shasum -a 256 --check
+          tar -xzf "$dalfox_archive" -C "$native_src"
+          install -m 0755 "$native_src/dalfox-v3.1.2-${dalfox_platform}/dalfox" "$native_bin/dalfox"
+
+          testssl_src="$native_src/testssl.sh"
+          git init "$testssl_src"
+          git -C "$testssl_src" remote add origin https://github.com/testssl/testssl.sh.git
+          git -C "$testssl_src" fetch --depth 1 origin 97763a411c525720a5f9bd9d2cded416b10f210a
+          git -C "$testssl_src" checkout --detach 97763a411c525720a5f9bd9d2cded416b10f210a
+          test "$(git -C "$testssl_src" rev-parse HEAD)" = "97763a411c525720a5f9bd9d2cded416b10f210a"
+          ln -s "$testssl_src/testssl.sh" "$native_bin/testssl.sh"
+          echo "$native_bin" >> "$GITHUB_PATH"
 
       - name: Install Windows native AppSec packages
         if: runner.os == 'Windows'
@@ -188,6 +223,7 @@ jobs:
           $nativeBin = Join-Path $nativeRoot "bin"
           $nativeSrc = Join-Path $nativeRoot "src"
           New-Item -ItemType Directory -Force -Path $nativeBin, $nativeSrc | Out-Null
+
           $dalfoxArchive = Join-Path $env:RUNNER_TEMP "dalfox-v3.1.2-windows-x86_64.zip"
           Invoke-WebRequest -Uri "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-windows-x86_64.zip" -OutFile $dalfoxArchive
           $dalfoxDigest = (Get-FileHash -Algorithm SHA256 $dalfoxArchive).Hash.ToLowerInvariant()
@@ -212,6 +248,7 @@ jobs:
           $testsslLauncher = Join-Path $nativeBin "testssl.cmd"
           @"
           @echo off
+          set "PATH=$nativeBin;%PATH%"
           "$gitBash" "$testsslSrc\testssl.sh" %*
           "@ | Set-Content -Encoding Ascii $testsslLauncher
           Add-Content -Path $env:GITHUB_PATH -Value $nativeBin
@@ -220,6 +257,73 @@ jobs:
         run: |
           cargo build --locked --manifest-path src/tools/appsec-pentest/Cargo.toml
           cargo build --locked --manifest-path src/tools/web-stack/Cargo.toml --no-default-features --bin ctox-web-stack
+
+      - name: Stage reviewed Windows testssl hexdump adapter
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml --features ci-testssl-hexdump --bin ctox-appsec-hexdump
+          cargo build --locked --manifest-path src/tools/appsec-pentest/Cargo.toml --features ci-testssl-hexdump --bin ctox-appsec-hexdump
+          $nativeBin = Join-Path $env:RUNNER_TEMP "appsec-native/bin"
+          $hexdump = Join-Path $nativeBin "hexdump.exe"
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR "debug/ctox-appsec-hexdump.exe") $hexdump
+
+          # This adapter is built from the reviewed checkout with the pinned
+          # Rust toolchain. It exists only in RUNNER_TEMP for this proof and is
+          # never installed into CTOX's managed product/runtime tool root.
+          $fixture = Join-Path $env:RUNNER_TEMP "appsec-native/hexdump-selftest.bin"
+          [IO.File]::WriteAllBytes($fixture, [Text.Encoding]::ASCII.GetBytes("CTOX"))
+          $compactUpper = (& $hexdump -v -e '16/1 "%02X"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $compactUpper -ne "43544F58") {
+            throw "Reviewed hexdump adapter failed the uppercase compact-format proof"
+          }
+          $compactLower = (& $hexdump -v -e '16/1 "%02x"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $compactLower -ne "43544f58") {
+            throw "Reviewed hexdump adapter failed the lowercase compact-format proof"
+          }
+          $commaLower = (& $hexdump -v -e '4/1 "%02x,"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $commaLower -ne "43,54,4f,58,") {
+            throw "Reviewed hexdump adapter failed the comma-format proof"
+          }
+          $spacedLower = (& $hexdump -ve '2/1 "%02x " " \n"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $spacedLower -notmatch '43 54\s+4f 58') {
+            throw "Reviewed hexdump adapter failed the spaced-line-format proof"
+          }
+          $canonical = (& $hexdump -C $fixture | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $canonical -notmatch "43 54 4f 58" -or $canonical -notmatch "CTOX") {
+            throw "Reviewed hexdump adapter failed the canonical-format proof"
+          }
+          & $hexdump -e '16/1 "%03x"' $fixture 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Reviewed hexdump adapter accepted a format outside the testssl allowlist"
+          }
+          $testsslLauncher = Join-Path $nativeBin "testssl.cmd"
+          $testsslVersion = (& $testsslLauncher --version 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $testsslVersion -notmatch 'testssl\.sh' -or $testsslVersion -notmatch '3\.2\.4') {
+            throw "Pinned testssl.sh did not pass its real Windows version probe"
+          }
+
+          New-Item -ItemType Directory -Force -Path $env:APPSEC_PROOF_ROOT | Out-Null
+          [ordered]@{
+            version = "ctox.appsec.windows_hexdump_provenance.v2"
+            ok = $true
+            scope = "ephemeral-ci-proof-only"
+            source_repository = $env:GITHUB_REPOSITORY
+            source_commit = $env:GITHUB_SHA
+            source_path = "src/tools/appsec-pentest/src/bin/ctox-appsec-hexdump.rs"
+            source_sha256 = (Get-FileHash -Algorithm SHA256 "src/tools/appsec-pentest/src/bin/ctox-appsec-hexdump.rs").Hash.ToLowerInvariant()
+            executable_sha256 = (Get-FileHash -Algorithm SHA256 $hexdump).Hash.ToLowerInvariant()
+            reviewed_testssl_commit = "97763a411c525720a5f9bd9d2cded416b10f210a"
+            supported_formats = @("-C", 'N/1 "%02X"', 'N/1 "%02x"', 'N/1 "%02x,"', 'N/1 "%02x " " \n"')
+            compact_upper_proof = $compactUpper
+            compact_lower_proof = $compactLower
+            comma_lower_proof = $commaLower
+            spaced_lower_proof = $true
+            canonical_proof = $true
+            rejects_unreviewed_formats = $true
+            testssl_version_proof = $true
+          } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $env:APPSEC_PROOF_ROOT "windows-hexdump-provenance.json")
 
       - name: Run AppSec toolchain proof
         shell: bash
@@ -360,6 +464,10 @@ jobs:
           const report = read('report.json');
           const exported = read('export.json');
           const verified = read('verify-export.json');
+          const hexdumpPath = path.join(root, 'windows-hexdump-provenance.json');
+          const hexdump = process.env.RUNNER_OS === 'Windows'
+            ? JSON.parse(fs.readFileSync(hexdumpPath, 'utf8'))
+            : null;
           const inventoryPath = path.join(root, 'runtime', 'appsec', 'default', 'tool-inventory.json');
           const inventory = JSON.parse(fs.readFileSync(inventoryPath, 'utf8'));
           const requiredTools = (inventory.tools || []).filter(tool =>
@@ -382,6 +490,21 @@ jobs:
               report: report?.ok === true && report?.report_complete === true,
               retained_export: exported?.ok === true && verified?.ok === true,
               zap_nonblocking: zap?.default_enabled === false,
+              windows_hexdump_attested: process.env.RUNNER_OS !== 'Windows'
+                || (hexdump?.ok === true
+                  && hexdump?.version === 'ctox.appsec.windows_hexdump_provenance.v2'
+                  && hexdump?.scope === 'ephemeral-ci-proof-only'
+                  && hexdump?.source_path === 'src/tools/appsec-pentest/src/bin/ctox-appsec-hexdump.rs'
+                  && /^[a-f0-9]{64}$/.test(hexdump?.source_sha256 || '')
+                  && /^[a-f0-9]{64}$/.test(hexdump?.executable_sha256 || '')
+                  && hexdump?.reviewed_testssl_commit === '97763a411c525720a5f9bd9d2cded416b10f210a'
+                  && hexdump?.compact_upper_proof === '43544F58'
+                  && hexdump?.compact_lower_proof === '43544f58'
+                  && hexdump?.comma_lower_proof === '43,54,4f,58,'
+                  && hexdump?.spaced_lower_proof === true
+                  && hexdump?.canonical_proof === true
+                  && hexdump?.rejects_unreviewed_formats === true
+                  && hexdump?.testssl_version_proof === true),
             },
             required_tools: requiredTools.map(tool => ({
               name: tool.name,
@@ -472,6 +595,7 @@ jobs:
             ${{ runner.temp }}/ctox-appsec-proof/report.json
             ${{ runner.temp }}/ctox-appsec-proof/export.json
             ${{ runner.temp }}/ctox-appsec-proof/verify-export.json
+            ${{ runner.temp }}/ctox-appsec-proof/windows-hexdump-provenance.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/appsec/**/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/install-logs/**
