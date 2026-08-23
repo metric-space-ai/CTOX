@@ -90,11 +90,16 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: "3.13"
+          # Semgrep 1.172.0's current dependency set is not importable on
+          # Python 3.13. Keep the proof on its supported, reproducible ABI.
+          python-version: "3.12"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: "1.25.x"
+          # osv-scanner 2.4.0 requires >=1.26.4; syft 1.51.0 requires
+          # >=1.26.3. GOTOOLCHAIN stays local so the workflow owns the exact
+          # compiler instead of allowing an installer-time network upgrade.
+          go-version: "1.26.4"
           check-latest: true
 
       - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
@@ -106,6 +111,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           packages=(nmap ncat ndiff curl meson ninja-build libcap-dev git ca-certificates pkg-config libssl-dev libfontconfig1-dev libpcap-dev)
           if [ "$APPSEC_PROFILE" = "full" ]; then
@@ -113,6 +119,40 @@ jobs:
           fi
           sudo apt-get install -y "${packages[@]}"
           src/scripts/install-appsec-bubblewrap.sh
+
+          native_bin="$RUNNER_TEMP/appsec-native/bin"
+          native_src="$RUNNER_TEMP/appsec-native/src"
+          mkdir -p "$native_bin" "$native_src"
+          case "$(uname -m)" in
+            x86_64)
+              dalfox_platform="linux-x86_64"
+              dalfox_sha256="ef48d30c183cead88eb89da10bdc1a7fa58a484d175319096075b470f3652fd4"
+              ;;
+            aarch64|arm64)
+              dalfox_platform="linux-aarch64"
+              dalfox_sha256="b61dc832582e738dc5b838197d28b6d0d4d33de2d849fc73741635fc380f0348"
+              ;;
+            *)
+              echo "Unsupported Linux architecture for Dalfox: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          dalfox_archive="$RUNNER_TEMP/dalfox-v3.1.2-${dalfox_platform}.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-${dalfox_platform}.tar.gz" \
+            --output "$dalfox_archive"
+          printf '%s  %s\n' "$dalfox_sha256" "$dalfox_archive" | sha256sum --check --strict
+          tar -xzf "$dalfox_archive" -C "$native_src"
+          install -m 0755 "$native_src/dalfox-v3.1.2-${dalfox_platform}/dalfox" "$native_bin/dalfox"
+
+          testssl_src="$native_src/testssl.sh"
+          git init "$testssl_src"
+          git -C "$testssl_src" remote add origin https://github.com/testssl/testssl.sh.git
+          git -C "$testssl_src" fetch --depth 1 origin 97763a411c525720a5f9bd9d2cded416b10f210a
+          git -C "$testssl_src" checkout --detach 97763a411c525720a5f9bd9d2cded416b10f210a
+          test "$(git -C "$testssl_src" rev-parse HEAD)" = "97763a411c525720a5f9bd9d2cded416b10f210a"
+          ln -s "$testssl_src/testssl.sh" "$native_bin/testssl.sh"
+          echo "$native_bin" >> "$GITHUB_PATH"
 
       - name: Install macOS native AppSec packages
         if: runner.os == 'macOS'
@@ -127,6 +167,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           choco install nmap -y --no-progress
           if ($env:APPSEC_PROFILE -eq "full") {
             choco install clamav -y --no-progress
@@ -142,6 +183,38 @@ jobs:
               Add-Content -Path $env:GITHUB_PATH -Value $candidate
             }
           }
+
+          $nativeRoot = Join-Path $env:RUNNER_TEMP "appsec-native"
+          $nativeBin = Join-Path $nativeRoot "bin"
+          $nativeSrc = Join-Path $nativeRoot "src"
+          New-Item -ItemType Directory -Force -Path $nativeBin, $nativeSrc | Out-Null
+          $dalfoxArchive = Join-Path $env:RUNNER_TEMP "dalfox-v3.1.2-windows-x86_64.zip"
+          Invoke-WebRequest -Uri "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-windows-x86_64.zip" -OutFile $dalfoxArchive
+          $dalfoxDigest = (Get-FileHash -Algorithm SHA256 $dalfoxArchive).Hash.ToLowerInvariant()
+          if ($dalfoxDigest -ne "9aac0bb85fec8710ba23f1df96de34217931dee81693503ebcf61150c4368300") {
+            throw "Dalfox archive checksum mismatch: $dalfoxDigest"
+          }
+          Expand-Archive -Path $dalfoxArchive -DestinationPath $nativeSrc -Force
+          Copy-Item (Join-Path $nativeSrc "dalfox-v3.1.2-windows-x86_64/dalfox.exe") (Join-Path $nativeBin "dalfox.exe")
+
+          $testsslSrc = Join-Path $nativeSrc "testssl.sh"
+          git init $testsslSrc
+          git -C $testsslSrc remote add origin https://github.com/testssl/testssl.sh.git
+          git -C $testsslSrc fetch --depth 1 origin 97763a411c525720a5f9bd9d2cded416b10f210a
+          git -C $testsslSrc checkout --detach 97763a411c525720a5f9bd9d2cded416b10f210a
+          if ((git -C $testsslSrc rev-parse HEAD).Trim() -ne "97763a411c525720a5f9bd9d2cded416b10f210a") {
+            throw "testssl.sh checkout does not match the reviewed commit"
+          }
+          $gitBash = Join-Path $env:ProgramFiles "Git/bin/bash.exe"
+          if (-not (Test-Path $gitBash)) {
+            throw "Git Bash is required for the pinned testssl.sh runtime"
+          }
+          $testsslLauncher = Join-Path $nativeBin "testssl.cmd"
+          @"
+          @echo off
+          "$gitBash" "$testsslSrc\testssl.sh" %*
+          "@ | Set-Content -Encoding Ascii $testsslLauncher
+          Add-Content -Path $env:GITHUB_PATH -Value $nativeBin
 
       - name: Build focused deployment audit CLIs
         run: |
