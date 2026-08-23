@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createSyncRuntime, __ctoxSyncTestHooks } from '../../shared/sync.js';
 
 const {
@@ -153,6 +154,7 @@ function createMockReplicationState(collection = 'desktop_file_chunks') {
 }
 
 function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
+  const browserToken = 'browser-role-token';
   const starts = [];
   const cancels = [];
   const db = {
@@ -194,6 +196,10 @@ function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
       transport: 'webrtc',
       sync_room: 'ctox-business-os:test',
       signaling_urls: ['ws://127.0.0.1/signaling'],
+      signaling_auth_version: 'ctox-role-bound-v1',
+      signaling_browser_token: browserToken,
+      signaling_browser_token_hash: createHash('sha256').update(browserToken).digest('hex'),
+      signaling_native_token_hash: createHash('sha256').update('distinct-native-token').digest('hex'),
     },
   });
   return { runtime, starts, cancels };
