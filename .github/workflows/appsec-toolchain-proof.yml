@@ -156,6 +156,49 @@ jobs:
             mkdir -p "$clamav_root"
             dpkg-deb --extract "$clamav_archive" "$clamav_root"
             clamav_prefix="$clamav_root/usr/local"
+            if [ ! -d "$clamav_prefix/etc/certs" ] || [ -L "$clamav_prefix/etc/certs" ]; then
+              echo "ClamAV CVD certificate directory is missing or is a symlink" >&2
+              exit 1
+            fi
+            clamav_distribution_root=$(realpath "$clamav_prefix")
+            clamav_certs_dir=$(realpath "$clamav_prefix/etc/certs")
+            if [ "$clamav_certs_dir" != "$clamav_distribution_root/etc/certs" ] || [ ! -d "$clamav_certs_dir" ]; then
+              echo "ClamAV CVD certificate directory is missing or escaped its checksum-verified distribution" >&2
+              exit 1
+            fi
+            clamav_certs_manifest="$RUNNER_TEMP/clamav-1.5.4-certs.manifest"
+            : > "$clamav_certs_manifest"
+            clamav_certs_file_count=0
+            clamav_certs_total_bytes=0
+            while IFS= read -r -d '' clamav_cert_entry; do
+              if [ -L "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains a symlink: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              if [ -d "$clamav_cert_entry" ]; then
+                continue
+              fi
+              if [ ! -f "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains an unsupported entry: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              clamav_cert_bytes=$(stat -c '%s' "$clamav_cert_entry")
+              clamav_certs_file_count=$((clamav_certs_file_count + 1))
+              clamav_certs_total_bytes=$((clamav_certs_total_bytes + clamav_cert_bytes))
+              if [ "$clamav_certs_file_count" -gt 64 ] || [ "$clamav_cert_bytes" -gt 8388608 ] || [ "$clamav_certs_total_bytes" -gt 16777216 ]; then
+                echo "ClamAV CVD certificate tree exceeds its bounded attestation contract" >&2
+                exit 1
+              fi
+              clamav_cert_relative=${clamav_cert_entry#"$clamav_certs_dir"/}
+              clamav_cert_sha256=$(sha256sum "$clamav_cert_entry" | cut -d ' ' -f 1)
+              printf '%s\0%s\0%s\0' "$clamav_cert_relative" "$clamav_cert_bytes" "$clamav_cert_sha256" >> "$clamav_certs_manifest"
+            done < <(find -P "$clamav_certs_dir" -mindepth 1 -print0 | LC_ALL=C sort -z)
+            if [ "$clamav_certs_file_count" -eq 0 ]; then
+              echo "ClamAV CVD certificate directory contains no regular files" >&2
+              exit 1
+            fi
+            clamav_certs_manifest_sha256=$(sha256sum "$clamav_certs_manifest" | cut -d ' ' -f 1)
+            export CVD_CERTS_DIR="$clamav_certs_dir"
             test -x "$clamav_prefix/bin/clamscan"
             test -x "$clamav_prefix/bin/freshclam"
             ln -s "$clamav_prefix/bin/clamscan" "$native_bin/clamscan"
@@ -176,7 +219,7 @@ jobs:
             freshclam_version_stderr="$freshclam_probe_root/version-probe.stderr"
             set +e
             freshclam_version=$(LD_LIBRARY_PATH="$clamav_library_path" \
-              "$native_bin/freshclam" "$freshclam_config_arg" --version \
+              "$native_bin/freshclam" "$freshclam_config_arg" --cvdcertsdir "$clamav_certs_dir" --version \
               2>"$freshclam_version_stderr")
             freshclam_version_exit=$?
             set -e
@@ -187,9 +230,10 @@ jobs:
                 "$freshclam_version_exit" "$freshclam_version" "$freshclam_version_stderr_tail" >&2
               exit 1
             fi
-            LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/clamscan" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/clamscan" --cvdcertsdir "$clamav_certs_dir" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
             {
               echo "LD_LIBRARY_PATH=$clamav_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              echo "CVD_CERTS_DIR=$clamav_certs_dir"
             } >> "$GITHUB_ENV"
             mkdir -p "$APPSEC_PROOF_ROOT"
             jq -n \
@@ -199,7 +243,11 @@ jobs:
               --arg freshclam_sha256 "$(sha256sum "$managed_appsec_bin/freshclam" | cut -d ' ' -f 1)" \
               --arg freshclam_version "$freshclam_version" \
               --arg clamscan_path "$(realpath "$managed_appsec_bin/clamscan")" \
-              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},managed_bin_staged:true,path_fallback_allowed:false,host_package_mutated:false,apparmor_mutated:false}' \
+              --arg certs_path "$clamav_certs_dir" \
+              --arg certs_manifest_sha256 "$clamav_certs_manifest_sha256" \
+              --argjson certs_file_count "$clamav_certs_file_count" \
+              --argjson certs_total_bytes "$clamav_certs_total_bytes" \
+              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},cvd_certificate_directory:{version:"ctox.appsec.clamav_cvd_certificate_attestation.v1",canonical_path:$certs_path,manifest_sha256:$certs_manifest_sha256,file_count:$certs_file_count,total_bytes:$certs_total_bytes,source:"same-checksum-verified-distribution",environment_variable:"CVD_CERTS_DIR",verifier_bypass_allowed:false},managed_bin_staged:true,path_fallback_allowed:false,host_package_mutated:false,apparmor_mutated:false}' \
               > "$APPSEC_PROOF_ROOT/clamav-native-provenance.json"
           fi
 
@@ -256,6 +304,49 @@ jobs:
             printf '%s\n' "$clamav_signature" | grep -F 'Developer ID Installer: Cisco (DE8Y96K9QP)'
             sudo installer -pkg "$clamav_package" -target /
             clamav_prefix="/usr/local/clamav"
+            if [ ! -d "$clamav_prefix/etc/certs" ] || [ -L "$clamav_prefix/etc/certs" ]; then
+              echo "ClamAV CVD certificate directory is missing or is a symlink" >&2
+              exit 1
+            fi
+            clamav_distribution_root=$(realpath "$clamav_prefix")
+            clamav_certs_dir=$(realpath "$clamav_prefix/etc/certs")
+            if [ "$clamav_certs_dir" != "$clamav_distribution_root/etc/certs" ] || [ ! -d "$clamav_certs_dir" ]; then
+              echo "ClamAV CVD certificate directory is missing or escaped its signed distribution" >&2
+              exit 1
+            fi
+            clamav_certs_manifest="$RUNNER_TEMP/clamav-1.5.4-certs.manifest"
+            : > "$clamav_certs_manifest"
+            clamav_certs_file_count=0
+            clamav_certs_total_bytes=0
+            while IFS= read -r -d '' clamav_cert_entry; do
+              if [ -L "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains a symlink: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              if [ -d "$clamav_cert_entry" ]; then
+                continue
+              fi
+              if [ ! -f "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains an unsupported entry: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              clamav_cert_bytes=$(stat -f '%z' "$clamav_cert_entry")
+              clamav_certs_file_count=$((clamav_certs_file_count + 1))
+              clamav_certs_total_bytes=$((clamav_certs_total_bytes + clamav_cert_bytes))
+              if [ "$clamav_certs_file_count" -gt 64 ] || [ "$clamav_cert_bytes" -gt 8388608 ] || [ "$clamav_certs_total_bytes" -gt 16777216 ]; then
+                echo "ClamAV CVD certificate tree exceeds its bounded attestation contract" >&2
+                exit 1
+              fi
+              clamav_cert_relative=${clamav_cert_entry#"$clamav_certs_dir"/}
+              clamav_cert_sha256=$(shasum -a 256 "$clamav_cert_entry" | cut -d ' ' -f 1)
+              printf '%s\0%s\0%s\0' "$clamav_cert_relative" "$clamav_cert_bytes" "$clamav_cert_sha256" >> "$clamav_certs_manifest"
+            done < <(find -s "$clamav_certs_dir" -mindepth 1 -print0)
+            if [ "$clamav_certs_file_count" -eq 0 ]; then
+              echo "ClamAV CVD certificate directory contains no regular files" >&2
+              exit 1
+            fi
+            clamav_certs_manifest_sha256=$(shasum -a 256 "$clamav_certs_manifest" | cut -d ' ' -f 1)
+            export CVD_CERTS_DIR="$clamav_certs_dir"
             test -x "$clamav_prefix/bin/clamscan"
             test -x "$clamav_prefix/bin/freshclam"
             codesign --verify --strict "$clamav_prefix/bin/clamscan"
@@ -275,7 +366,7 @@ jobs:
             freshclam_version_stderr="$freshclam_probe_root/version-probe.stderr"
             set +e
             freshclam_version=$("$managed_appsec_bin/freshclam" \
-              "$freshclam_config_arg" --version 2>"$freshclam_version_stderr")
+              "$freshclam_config_arg" --cvdcertsdir "$clamav_certs_dir" --version 2>"$freshclam_version_stderr")
             freshclam_version_exit=$?
             set -e
             freshclam_version_stderr_tail=$(tail -n 8 "$freshclam_version_stderr" | tr '\r\n' '  ' | cut -c1-1000)
@@ -285,7 +376,8 @@ jobs:
                 "$freshclam_version_exit" "$freshclam_version" "$freshclam_version_stderr_tail" >&2
               exit 1
             fi
-            "$managed_appsec_bin/clamscan" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            "$managed_appsec_bin/clamscan" --cvdcertsdir "$clamav_certs_dir" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            echo "CVD_CERTS_DIR=$clamav_certs_dir" >> "$GITHUB_ENV"
             mkdir -p "$APPSEC_PROOF_ROOT"
             jq -n \
               --arg source_url "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.macos.universal.pkg" \
@@ -295,7 +387,11 @@ jobs:
               --arg freshclam_sha256 "$(shasum -a 256 "$managed_appsec_bin/freshclam" | cut -d ' ' -f 1)" \
               --arg freshclam_version "$freshclam_version" \
               --arg clamscan_path "$(realpath "$managed_appsec_bin/clamscan")" \
-              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",installer_identity:$installer_identity,apple_notarization_verified:true,freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},managed_bin_staged:true,path_fallback_allowed:false}' \
+              --arg certs_path "$clamav_certs_dir" \
+              --arg certs_manifest_sha256 "$clamav_certs_manifest_sha256" \
+              --argjson certs_file_count "$clamav_certs_file_count" \
+              --argjson certs_total_bytes "$clamav_certs_total_bytes" \
+              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",installer_identity:$installer_identity,apple_notarization_verified:true,freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},cvd_certificate_directory:{version:"ctox.appsec.clamav_cvd_certificate_attestation.v1",canonical_path:$certs_path,manifest_sha256:$certs_manifest_sha256,file_count:$certs_file_count,total_bytes:$certs_total_bytes,source:"same-signed-checksum-verified-distribution",environment_variable:"CVD_CERTS_DIR",verifier_bypass_allowed:false},managed_bin_staged:true,path_fallback_allowed:false}' \
               > "$APPSEC_PROOF_ROOT/clamav-native-provenance.json"
           fi
 
@@ -352,6 +448,51 @@ jobs:
             Copy-Item -Path (Join-Path $clamavDistribution "*") -Destination $managedAppsecBin -Recurse -Force
             $managedClamscan = Join-Path $managedAppsecBin "clamscan.exe"
             $managedFreshclam = Join-Path $managedAppsecBin "freshclam.exe"
+            $managedClamavRoot = [IO.Path]::GetFullPath($managedAppsecBin).TrimEnd('\')
+            $clamavCertsCandidate = Join-Path $managedAppsecBin "certs"
+            if (-not (Test-Path -PathType Container $clamavCertsCandidate)) {
+              throw "ClamAV CVD certificate directory is missing from the checksum-verified distribution"
+            }
+            $clamavCertsItem = Get-Item -LiteralPath $clamavCertsCandidate -Force
+            if (($clamavCertsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "ClamAV CVD certificate directory must not be a reparse point"
+            }
+            $clamavCertsDirectory = (Resolve-Path -LiteralPath $clamavCertsCandidate).ProviderPath
+            if ($clamavCertsDirectory -ne (Join-Path $managedClamavRoot "certs")) {
+              throw "ClamAV CVD certificate directory escaped its checksum-verified distribution: $clamavCertsDirectory"
+            }
+            $clamavCertEntries = @(Get-ChildItem -LiteralPath $clamavCertsDirectory -Recurse -Force | Sort-Object FullName)
+            $clamavCertManifestLines = @()
+            $clamavCertFileCount = 0
+            [Int64]$clamavCertTotalBytes = 0
+            foreach ($clamavCertEntry in $clamavCertEntries) {
+              if (($clamavCertEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "ClamAV CVD certificate tree contains a reparse point: $($clamavCertEntry.FullName)"
+              }
+              if ($clamavCertEntry.PSIsContainer) {
+                continue
+              }
+              $clamavCertFileCount += 1
+              $clamavCertTotalBytes += $clamavCertEntry.Length
+              if ($clamavCertFileCount -gt 64 -or $clamavCertEntry.Length -gt 8388608 -or $clamavCertTotalBytes -gt 16777216) {
+                throw "ClamAV CVD certificate tree exceeds its bounded attestation contract"
+              }
+              $clamavCertRelative = [IO.Path]::GetRelativePath($clamavCertsDirectory, $clamavCertEntry.FullName).Replace('\', '/')
+              $clamavCertSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $clamavCertEntry.FullName).Hash.ToLowerInvariant()
+              $clamavCertManifestLines += "$clamavCertRelative`0$($clamavCertEntry.Length)`0$clamavCertSha256`0"
+            }
+            if ($clamavCertFileCount -eq 0) {
+              throw "ClamAV CVD certificate directory contains no regular files"
+            }
+            $clamavCertManifestBytes = [Text.Encoding]::UTF8.GetBytes(($clamavCertManifestLines -join ''))
+            $clamavCertManifestHasher = [Security.Cryptography.SHA256]::Create()
+            try {
+              $clamavCertManifestSha256 = ([BitConverter]::ToString($clamavCertManifestHasher.ComputeHash($clamavCertManifestBytes))).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $clamavCertManifestHasher.Dispose()
+            }
+            $env:CVD_CERTS_DIR = $clamavCertsDirectory
+            Add-Content -Path $env:GITHUB_ENV -Value "CVD_CERTS_DIR=$clamavCertsDirectory"
             $freshclamProbeRoot = Join-Path $env:APPSEC_PROOF_ROOT "runtime/tools/appsec/clamav-version-probe"
             $freshclamProbeDatabase = Join-Path $freshclamProbeRoot "database"
             $freshclamProbeConfig = Join-Path $freshclamProbeRoot "freshclam.conf"
@@ -364,7 +505,7 @@ jobs:
             ) | Set-Content -Path $freshclamProbeConfig -Encoding ascii
             $freshclamConfigArg = "--config-file=$freshclamProbeConfig"
             $freshclamVersionStderr = Join-Path $freshclamProbeRoot "version-probe.stderr"
-            $freshclamVersionOutput = @(& $managedFreshclam $freshclamConfigArg --version 2> $freshclamVersionStderr)
+            $freshclamVersionOutput = @(& $managedFreshclam $freshclamConfigArg --cvdcertsdir $clamavCertsDirectory --version 2> $freshclamVersionStderr)
             $freshclamVersionExit = $LASTEXITCODE
             $freshclamVersion = ($freshclamVersionOutput | Out-String).Trim()
             $freshclamVersionStderrTail = ((Get-Content -Path $freshclamVersionStderr -Tail 8 -ErrorAction SilentlyContinue | Out-String).Trim() -replace '[\r\n]+', ' | ')
@@ -375,7 +516,7 @@ jobs:
             if ($freshclamVersionExit -ne 0 -or $freshclamVersion -ne "ClamAV 1.5.4") {
               throw "FreshClam version probe failed: phase=freshclam-version-probe exit_code=$freshclamVersionExit observed_version=$freshclamVersion stderr_tail=$freshclamVersionStderrTail"
             }
-            $clamscanVersion = (& $managedClamscan --version | Out-String).Trim()
+            $clamscanVersion = (& $managedClamscan --cvdcertsdir $clamavCertsDirectory --version | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $clamscanVersion -notmatch '^ClamAV 1\.5\.4(/|$)') {
               throw "Official clamscan did not report exact version 1.5.4: $clamscanVersion"
             }
@@ -396,6 +537,16 @@ jobs:
                 canonical_path = [IO.Path]::GetFullPath($managedClamscan)
                 sha256 = (Get-FileHash -Algorithm SHA256 $managedClamscan).Hash.ToLowerInvariant()
                 version = $clamscanVersion
+              }
+              cvd_certificate_directory = [ordered]@{
+                version = "ctox.appsec.clamav_cvd_certificate_attestation.v1"
+                canonical_path = $clamavCertsDirectory
+                manifest_sha256 = $clamavCertManifestSha256
+                file_count = $clamavCertFileCount
+                total_bytes = $clamavCertTotalBytes
+                source = "same-checksum-verified-distribution"
+                environment_variable = "CVD_CERTS_DIR"
+                verifier_bypass_allowed = $false
               }
               managed_bin_staged = $true
               path_fallback_allowed = $false
