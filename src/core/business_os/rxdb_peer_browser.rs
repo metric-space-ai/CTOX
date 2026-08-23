@@ -810,6 +810,11 @@ pub(super) fn is_browser_runtime_command(command_type: &str) -> bool {
             | "browser.tab.open"
             | "browser.tab.activate"
             | "browser.tab.close"
+            | "browser.dialog.respond"
+            | "browser.permission.respond"
+            | "browser.clipboard.copy"
+            | "browser.clipboard.paste"
+            | "browser.clipboard.clear"
     )
 }
 
@@ -1231,6 +1236,38 @@ pub(super) async fn apply_browser_runtime_command(
         ),
         "browser.tab.activate" => ("tab_activate", json!({ "tabId": tab_id })),
         "browser.tab.close" => ("tab_close", json!({ "tabId": tab_id })),
+        // Ein offener Seitendialog blockiert die ferne Seite vollstaendig --
+        // ohne diese Bruecke war der Antwortknopf wirkungslos und die Sitzung
+        // stand, bis jemand sie neu startete.
+        "browser.dialog.respond" => (
+            "dialog_respond",
+            json!({
+                "accept": payload.get("accept").and_then(Value::as_bool).unwrap_or(false),
+                "value": payload.get("value").cloned().unwrap_or(Value::Null),
+            }),
+        ),
+        "browser.permission.respond" => (
+            "permission_respond",
+            json!({
+                "accept": payload.get("accept").and_then(Value::as_bool).unwrap_or(false),
+            }),
+        ),
+        // Zwischenablage. Der kopierte Text bleibt im Arbeitsspeicher der
+        // Sitzung (`LiveBrowserSession::clipboard`, mit Verfall) und wird
+        // bewusst NICHT in RxDB projiziert: Was jemand im fernen Browser
+        // kopiert, kann eine Zugangskennung sein, und replizierte Dokumente
+        // liegen auf jedem Peer. Der Speicher war fertig gebaut, nur nie
+        // angeschlossen -- die drei Knoepfe schrieben Befehle, die niemand las.
+        "browser.clipboard.copy" => ("clipboard_copy", json!({})),
+        "browser.clipboard.paste" => (
+            "clipboard_paste",
+            json!({ "value": session.clipboard().unwrap_or_default() }),
+        ),
+        "browser.clipboard.clear" => {
+            session.clear_clipboard();
+            // Kein Runner-Aufruf noetig; nav_state haelt die Antwortform gleich.
+            ("nav_state", json!({}))
+        }
         "browser.credential.fill" => {
             let fill = credential_fill
                 .as_ref()
@@ -1281,6 +1318,15 @@ pub(super) async fn apply_browser_runtime_command(
             return Err(err);
         }
     };
+
+    // Was der ferne Browser als Auswahl meldet, wird hier zur Zwischenablage
+    // dieser Sitzung -- nur im Arbeitsspeicher, damit ein kopiertes Passwort
+    // nicht ueber die Replikation auf jeden Peer wandert.
+    if command_type == "browser.clipboard.copy" {
+        if let Some(text) = op_result.get("clipboardText").and_then(Value::as_str) {
+            session.set_clipboard(text.to_string());
+        }
+    }
 
     // A failed op (e.g. invalid URL) is reported as navigation_error but does
     // not tear the session down; we still capture whatever the page shows.
