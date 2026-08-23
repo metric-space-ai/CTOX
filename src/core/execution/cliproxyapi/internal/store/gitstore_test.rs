@@ -171,7 +171,7 @@ fn missing_configured_branch_fails_without_changing_remote_head() {
     );
     assert!(missing.ensure_repository().is_err());
     let remote = Repository::open_bare(remote_path).unwrap();
-    assert_eq!(remote.head().unwrap().shorthand(), Some("trunk"));
+    assert_eq!(remote.head().unwrap().shorthand().unwrap(), "trunk");
 }
 
 #[test]

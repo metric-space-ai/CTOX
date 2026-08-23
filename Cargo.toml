@@ -41,7 +41,7 @@ crossterm = "0.28"
 # kollidiert auf Linux mit dem BoringSSL aus wreq. Die Wurzel benutzt git2 nur
 # lokal (jami_native: Repository/Sort); die einzige Kiste mit Fernzugriff
 # (cliproxyapi) deklariert git2 selbst schon ohne Vorgabemerkmale.
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 include_dir = "0.7"
 libc = "0.2"
 mailparse = "0.16"
