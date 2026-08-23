@@ -195,7 +195,7 @@ landlock = "0.4.4"
 lazy_static = "1"
 libc = "0.2.182"
 log = "0.4"
-lru = "0.16.3"
+lru = "0.18.2"
 maplit = "1.0.2"
 mime_guess = "2.0.5"
 multimap = "0.10.0"
@@ -217,8 +217,8 @@ predicates = "3"
 pretty_assertions = "1.4.1"
 pulldown-cmark = "0.10"
 rand = "0.9"
-ratatui = "0.29.0"
-ratatui-macros = "0.6.0"
+ratatui = "0.30.2"
+ratatui-macros = "0.7.2"
 regex = "1.12.3"
 regex-lite = "0.1.8"
 # rustls statt der Vorgabe: `default-tls` zieht hyper-tls -> native-tls -> openssl,
@@ -390,7 +390,6 @@ opt-level = 0
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
 crossterm = { git = "https://github.com/nornagon/crossterm", branch = "nornagon/color-query" }
-ratatui = { git = "https://github.com/nornagon/ratatui", branch = "nornagon-v0.29.0-patch" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
 rama-dns = { path = "network-proxy/patches/rama-dns" }

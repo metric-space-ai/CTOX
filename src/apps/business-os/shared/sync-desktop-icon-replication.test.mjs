@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createSyncRuntime, __ctoxSyncTestHooks } from './sync.js';
 
 const { collectionForReplication, projectDesktopIconForReplication } = __ctoxSyncTestHooks;
@@ -87,6 +88,7 @@ test('non-desktop collections retain their original collection', () => {
 });
 
 test('desktop_icons startup gives WebRTC the projected collection', async () => {
+  const browserToken = 'desktop-icon-replication-browser-token';
   const previousWindow = globalThis.window;
   globalThis.window = {
     location: { href: 'https://business-os.test/' },
@@ -132,7 +134,15 @@ test('desktop_icons startup gives WebRTC the projected collection', async () => 
   };
   const runtime = createSyncRuntime({
     db,
-    config: { transport: 'webrtc', sync_room: 'ctox-business-os:i-009', signaling_urls: ['wss://signal.test/room'] },
+    config: {
+      transport: 'webrtc',
+      sync_room: 'ctox-business-os:i-009',
+      signaling_urls: ['wss://signal.test/room'],
+      signaling_auth_version: 'ctox-role-bound-v1',
+      signaling_browser_token: browserToken,
+      signaling_browser_token_hash: createHash('sha256').update(browserToken).digest('hex'),
+      signaling_native_token_hash: createHash('sha256').update('distinct-native-token').digest('hex'),
+    },
   });
   try {
     const bridge = await runtime.startCollection('desktop_icons', { forceDirect: true, pin: false });

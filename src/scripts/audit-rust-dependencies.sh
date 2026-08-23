@@ -19,14 +19,6 @@ fi
 
 audit_args=(
   --deny unsound
-  --ignore RUSTSEC-2026-0002
-  --ignore RUSTSEC-2026-0097
-  --ignore RUSTSEC-2026-0183
-  --ignore RUSTSEC-2026-0184
-  --ignore RUSTSEC-2026-0186
-  --ignore RUSTSEC-2026-0190
-  --ignore RUSTSEC-2026-0221
-  --ignore RUSTSEC-2026-0253
 )
 
 # The XML and RSA exceptions are root-lockfile-only. Never extend them to a

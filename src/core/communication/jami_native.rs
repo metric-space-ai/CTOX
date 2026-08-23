@@ -1627,7 +1627,13 @@ fn load_git_conversation_commits(
             remote_id,
             timestamp: commit.time().seconds().to_string(),
             author_device: commit.author().name().unwrap_or("").trim().to_string(),
-            subject: commit.summary().unwrap_or("").trim().to_string(),
+            subject: commit
+                .summary()
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
         });
         if newest_first.len() >= limit {
             break;

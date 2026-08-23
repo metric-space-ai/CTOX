@@ -495,7 +495,7 @@ impl GitTokenStore {
         remote.disconnect().map_err(git_error)?;
         Ok(default
             .as_ref()
-            .and_then(|name| name.as_str())
+            .and_then(|name| name.as_str().ok())
             .and_then(|name| name.strip_prefix("refs/heads/"))
             .map(str::to_owned))
     }
@@ -934,7 +934,7 @@ fn managed_commit_snapshot(
         .map_err(git_error)?;
     let mut snapshot = BTreeMap::new();
     tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-        let Some(name) = entry.name() else {
+        let Ok(name) = entry.name() else {
             return git2::TreeWalkResult::Ok;
         };
         let path = PathBuf::from(format!("{root}{name}"));
@@ -1042,7 +1042,7 @@ fn capture_dirty_paths(
         if status.status() == Status::CURRENT {
             continue;
         }
-        let Some(path) = status.path() else {
+        let Ok(path) = status.path() else {
             continue;
         };
         let path = PathBuf::from(path);
@@ -1112,7 +1112,7 @@ fn changed_paths(repo: &Repository, old: Oid, new: Oid) -> Result<Vec<PathBuf>, 
 fn current_branch(repo: &Repository) -> Option<String> {
     repo.head()
         .ok()
-        .and_then(|head| head.shorthand().map(str::to_owned))
+        .and_then(|head| head.shorthand().ok().map(str::to_owned))
 }
 
 fn normalize_managed_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, StoreError> {
@@ -1187,7 +1187,7 @@ fn rollback_local_commit(
         let reference_name = repo
             .head()
             .ok()
-            .and_then(|head| head.name().map(str::to_owned));
+            .and_then(|head| head.name().ok().map(str::to_owned));
         if let Some(reference_name) = reference_name {
             repo.find_reference(&reference_name)
                 .and_then(|mut reference| reference.delete())

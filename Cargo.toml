@@ -41,7 +41,7 @@ crossterm = "0.28"
 # kollidiert auf Linux mit dem BoringSSL aus wreq. Die Wurzel benutzt git2 nur
 # lokal (jami_native: Repository/Sort); die einzige Kiste mit Fernzugriff
 # (cliproxyapi) deklariert git2 selbst schon ohne Vorgabemerkmale.
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 include_dir = "0.7"
 libc = "0.2"
 mailparse = "0.16"
@@ -55,7 +55,7 @@ polars = { version = "0.53.0", default-features = false, features = [
 polars-io = { version = "0.53.0", default-features = false, features = ["csv", "json", "parquet"] }
 polars-lazy = { version = "0.53.0", default-features = false, features = ["csv", "json", "parquet"] }
 polars-utils = { version = "0.53.0", default-features = false }
-ratatui = "0.29"
+ratatui = "0.30.2"
 regex = "1"
 qrcode = "0.14"
 quick-xml = "0.41"
@@ -140,7 +140,6 @@ exclude = [
 # Mirror of src/core/harness/Cargo.toml patch.crates-io so that codex-* path
 # dependencies resolve against the same forks agent-runtime uses.
 crossterm = { git = "https://github.com/nornagon/crossterm", branch = "nornagon/color-query" }
-ratatui = { git = "https://github.com/nornagon/ratatui", branch = "nornagon-v0.29.0-patch" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
 rtc-ice = { path = "src/core/rxdb/patches/rtc-ice" }
