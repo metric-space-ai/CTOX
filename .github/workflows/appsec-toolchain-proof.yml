@@ -114,9 +114,6 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           packages=(nmap ncat ndiff curl meson ninja-build libcap-dev git ca-certificates pkg-config libssl-dev libfontconfig1-dev libpcap-dev)
-          if [ "$APPSEC_PROFILE" = "full" ]; then
-            packages+=(clamav clamav-freshclam)
-          fi
           sudo apt-get install -y "${packages[@]}"
           src/scripts/install-appsec-bubblewrap.sh
 
@@ -127,10 +124,14 @@ jobs:
             x86_64)
               dalfox_platform="linux-x86_64"
               dalfox_sha256="ef48d30c183cead88eb89da10bdc1a7fa58a484d175319096075b470f3652fd4"
+              clamav_platform="x86_64"
+              clamav_sha256="28d6efc5b4423e7830c3559339552eb53870a9eac51ac4efb37d60530d329886"
               ;;
             aarch64|arm64)
               dalfox_platform="linux-aarch64"
               dalfox_sha256="b61dc832582e738dc5b838197d28b6d0d4d33de2d849fc73741635fc380f0348"
+              clamav_platform="aarch64"
+              clamav_sha256="4bdab4118e8accb02108316b996d7c14da1cccc4eea2dff7bea82109f9239d95"
               ;;
             *)
               echo "Unsupported Linux architecture for Dalfox: $(uname -m)" >&2
@@ -144,6 +145,43 @@ jobs:
           printf '%s  %s\n' "$dalfox_sha256" "$dalfox_archive" | sha256sum --check --strict
           tar -xzf "$dalfox_archive" -C "$native_src"
           install -m 0755 "$native_src/dalfox-v3.1.2-${dalfox_platform}/dalfox" "$native_bin/dalfox"
+
+          if [ "$APPSEC_PROFILE" = "full" ]; then
+            clamav_archive="$RUNNER_TEMP/clamav-1.5.4.linux.${clamav_platform}.deb"
+            clamav_root="$native_src/clamav-1.5.4"
+            curl --fail --location --silent --show-error \
+              "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.${clamav_platform}.deb" \
+              --output "$clamav_archive"
+            printf '%s  %s\n' "$clamav_sha256" "$clamav_archive" | sha256sum --check --strict
+            mkdir -p "$clamav_root"
+            dpkg-deb --extract "$clamav_archive" "$clamav_root"
+            clamav_prefix="$clamav_root/usr/local"
+            test -x "$clamav_prefix/bin/clamscan"
+            test -x "$clamav_prefix/bin/freshclam"
+            ln -s "$clamav_prefix/bin/clamscan" "$native_bin/clamscan"
+            ln -s "$clamav_prefix/bin/freshclam" "$native_bin/freshclam"
+            managed_appsec_bin="$APPSEC_PROOF_ROOT/runtime/tools/appsec/bin"
+            mkdir -p "$managed_appsec_bin"
+            ln -s "$clamav_prefix/bin/clamscan" "$managed_appsec_bin/clamscan"
+            ln -s "$clamav_prefix/bin/freshclam" "$managed_appsec_bin/freshclam"
+            clamav_library_path="$clamav_prefix/lib"
+            freshclam_version=$(LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/freshclam" --version)
+            test "$freshclam_version" = "ClamAV 1.5.4"
+            LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/clamscan" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            {
+              echo "LD_LIBRARY_PATH=$clamav_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            } >> "$GITHUB_ENV"
+            mkdir -p "$APPSEC_PROOF_ROOT"
+            jq -n \
+              --arg source_url "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.${clamav_platform}.deb" \
+              --arg archive_sha256 "$clamav_sha256" \
+              --arg freshclam_path "$(realpath "$managed_appsec_bin/freshclam")" \
+              --arg freshclam_sha256 "$(sha256sum "$managed_appsec_bin/freshclam" | cut -d ' ' -f 1)" \
+              --arg freshclam_version "$freshclam_version" \
+              --arg clamscan_path "$(realpath "$managed_appsec_bin/clamscan")" \
+              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},managed_bin_staged:true,path_fallback_allowed:false,host_package_mutated:false,apparmor_mutated:false}' \
+              > "$APPSEC_PROOF_ROOT/clamav-native-provenance.json"
+          fi
 
           testssl_src="$native_src/testssl.sh"
           git init "$testssl_src"
@@ -160,9 +198,6 @@ jobs:
         run: |
           set -euo pipefail
           brew list nmap >/dev/null 2>&1 || brew install nmap
-          if [ "$APPSEC_PROFILE" = "full" ]; then
-            brew list clamav >/dev/null 2>&1 || brew install clamav
-          fi
 
           native_bin="$RUNNER_TEMP/appsec-native/bin"
           native_src="$RUNNER_TEMP/appsec-native/src"
@@ -189,6 +224,42 @@ jobs:
           tar -xzf "$dalfox_archive" -C "$native_src"
           install -m 0755 "$native_src/dalfox-v3.1.2-${dalfox_platform}/dalfox" "$native_bin/dalfox"
 
+          if [ "$APPSEC_PROFILE" = "full" ]; then
+            clamav_package="$RUNNER_TEMP/clamav-1.5.4.macos.universal.pkg"
+            curl --fail --location --silent --show-error \
+              "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.macos.universal.pkg" \
+              --output "$clamav_package"
+            printf '%s  %s\n' "df7fa753e2f9f67f3bc99b2a40a3be7ef559088c68ad6bdf66b4b5764e965bd6" "$clamav_package" | shasum -a 256 --check
+            clamav_signature=$(pkgutil --check-signature "$clamav_package")
+            printf '%s\n' "$clamav_signature" | grep -F 'Status: signed by a developer certificate issued by Apple for distribution'
+            printf '%s\n' "$clamav_signature" | grep -F 'Notarization: trusted by the Apple notary service'
+            printf '%s\n' "$clamav_signature" | grep -F 'Developer ID Installer: Cisco (DE8Y96K9QP)'
+            sudo installer -pkg "$clamav_package" -target /
+            clamav_prefix="/usr/local/clamav"
+            test -x "$clamav_prefix/bin/clamscan"
+            test -x "$clamav_prefix/bin/freshclam"
+            codesign --verify --strict "$clamav_prefix/bin/clamscan"
+            codesign --verify --strict "$clamav_prefix/bin/freshclam"
+            managed_appsec_bin="$APPSEC_PROOF_ROOT/runtime/tools/appsec/bin"
+            mkdir -p "$managed_appsec_bin"
+            ln -s "$clamav_prefix/bin/clamscan" "$managed_appsec_bin/clamscan"
+            ln -s "$clamav_prefix/bin/freshclam" "$managed_appsec_bin/freshclam"
+            freshclam_version=$("$managed_appsec_bin/freshclam" --version)
+            test "$freshclam_version" = "ClamAV 1.5.4"
+            "$managed_appsec_bin/clamscan" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            mkdir -p "$APPSEC_PROOF_ROOT"
+            jq -n \
+              --arg source_url "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.macos.universal.pkg" \
+              --arg archive_sha256 "df7fa753e2f9f67f3bc99b2a40a3be7ef559088c68ad6bdf66b4b5764e965bd6" \
+              --arg installer_identity "Developer ID Installer: Cisco (DE8Y96K9QP)" \
+              --arg freshclam_path "$(realpath "$managed_appsec_bin/freshclam")" \
+              --arg freshclam_sha256 "$(shasum -a 256 "$managed_appsec_bin/freshclam" | cut -d ' ' -f 1)" \
+              --arg freshclam_version "$freshclam_version" \
+              --arg clamscan_path "$(realpath "$managed_appsec_bin/clamscan")" \
+              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",installer_identity:$installer_identity,apple_notarization_verified:true,freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},managed_bin_staged:true,path_fallback_allowed:false}' \
+              > "$APPSEC_PROOF_ROOT/clamav-native-provenance.json"
+          fi
+
           testssl_src="$native_src/testssl.sh"
           git init "$testssl_src"
           git -C "$testssl_src" remote add origin https://github.com/testssl/testssl.sh.git
@@ -204,14 +275,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           choco install nmap -y --no-progress
-          if ($env:APPSEC_PROFILE -eq "full") {
-            choco install clamav -y --no-progress
-          }
           $candidates = @(
             "${env:ProgramFiles(x86)}\Nmap",
-            "${env:ProgramFiles}\Nmap",
-            "${env:ProgramFiles}\ClamAV",
-            "${env:ProgramData}\chocolatey\lib\clamav\tools"
+            "${env:ProgramFiles}\Nmap"
           )
           foreach ($candidate in $candidates) {
             if (Test-Path $candidate) {
@@ -223,6 +289,62 @@ jobs:
           $nativeBin = Join-Path $nativeRoot "bin"
           $nativeSrc = Join-Path $nativeRoot "src"
           New-Item -ItemType Directory -Force -Path $nativeBin, $nativeSrc | Out-Null
+
+          if ($env:APPSEC_PROFILE -eq "full") {
+            $clamavArchive = Join-Path $env:RUNNER_TEMP "clamav-1.5.4.win.x64.zip"
+            Invoke-WebRequest -Uri "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.win.x64.zip" -OutFile $clamavArchive
+            $clamavArchiveDigest = (Get-FileHash -Algorithm SHA256 $clamavArchive).Hash.ToLowerInvariant()
+            if ($clamavArchiveDigest -ne "0d9e0228b2674137ea1a2853566c98a0278ad52ab2582c3d6dbd75373848c395") {
+              throw "ClamAV archive checksum mismatch: $clamavArchiveDigest"
+            }
+            $clamavExtract = Join-Path $nativeSrc "clamav-1.5.4"
+            Expand-Archive -Path $clamavArchive -DestinationPath $clamavExtract -Force
+            $clamavSource = Get-ChildItem -Path $clamavExtract -Recurse -File -Filter "clamscan.exe" | Select-Object -First 1
+            if ($null -eq $clamavSource) {
+              throw "Official ClamAV archive did not contain clamscan.exe"
+            }
+            $clamavDistribution = $clamavSource.Directory.FullName
+            $freshclamSource = Join-Path $clamavDistribution "freshclam.exe"
+            if (-not (Test-Path -PathType Leaf $freshclamSource)) {
+              throw "Official ClamAV archive did not place freshclam.exe beside clamscan.exe"
+            }
+            $managedAppsecBin = Join-Path $env:APPSEC_PROOF_ROOT "runtime/tools/appsec/bin"
+            New-Item -ItemType Directory -Force -Path $managedAppsecBin | Out-Null
+            Copy-Item -Path (Join-Path $clamavDistribution "*") -Destination $managedAppsecBin -Recurse -Force
+            $managedClamscan = Join-Path $managedAppsecBin "clamscan.exe"
+            $managedFreshclam = Join-Path $managedAppsecBin "freshclam.exe"
+            $freshclamVersion = (& $managedFreshclam --version | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $freshclamVersion -ne "ClamAV 1.5.4") {
+              throw "Official freshclam did not report exact version 1.5.4: $freshclamVersion"
+            }
+            $clamscanVersion = (& $managedClamscan --version | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $clamscanVersion -notmatch '^ClamAV 1\.5\.4(/|$)') {
+              throw "Official clamscan did not report exact version 1.5.4: $clamscanVersion"
+            }
+            New-Item -ItemType Directory -Force -Path $env:APPSEC_PROOF_ROOT | Out-Null
+            [ordered]@{
+              version = "ctox.appsec.clamav_native_provenance.v1"
+              ok = $true
+              scope = "ephemeral-ci-proof-only"
+              source_url = "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.win.x64.zip"
+              archive_sha256 = $clamavArchiveDigest
+              required_version = "1.5.4"
+              freshclam = [ordered]@{
+                canonical_path = [IO.Path]::GetFullPath($managedFreshclam)
+                sha256 = (Get-FileHash -Algorithm SHA256 $managedFreshclam).Hash.ToLowerInvariant()
+                version = $freshclamVersion
+              }
+              clamscan = [ordered]@{
+                canonical_path = [IO.Path]::GetFullPath($managedClamscan)
+                sha256 = (Get-FileHash -Algorithm SHA256 $managedClamscan).Hash.ToLowerInvariant()
+                version = $clamscanVersion
+              }
+              managed_bin_staged = $true
+              path_fallback_allowed = $false
+              host_package_mutated = $false
+            } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $env:APPSEC_PROOF_ROOT "clamav-native-provenance.json")
+            Add-Content -Path $env:GITHUB_PATH -Value $managedAppsecBin
+          }
 
           $dalfoxArchive = Join-Path $env:RUNNER_TEMP "dalfox-v3.1.2-windows-x86_64.zip"
           Invoke-WebRequest -Uri "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-windows-x86_64.zip" -OutFile $dalfoxArchive
@@ -596,6 +718,7 @@ jobs:
             ${{ runner.temp }}/ctox-appsec-proof/export.json
             ${{ runner.temp }}/ctox-appsec-proof/verify-export.json
             ${{ runner.temp }}/ctox-appsec-proof/windows-hexdump-provenance.json
+            ${{ runner.temp }}/ctox-appsec-proof/clamav-native-provenance.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/appsec/**/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/install-logs/**
