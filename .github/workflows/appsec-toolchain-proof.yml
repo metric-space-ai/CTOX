@@ -107,11 +107,12 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          packages=(nmap ncat ndiff bubblewrap git ca-certificates pkg-config libssl-dev libfontconfig1-dev libpcap-dev)
+          packages=(nmap ncat ndiff curl meson ninja-build libcap-dev git ca-certificates pkg-config libssl-dev libfontconfig1-dev libpcap-dev)
           if [ "$APPSEC_PROFILE" = "full" ]; then
             packages+=(clamav clamav-freshclam)
           fi
           sudo apt-get install -y "${packages[@]}"
+          src/scripts/install-appsec-bubblewrap.sh
 
       - name: Install macOS native AppSec packages
         if: runner.os == 'macOS'
