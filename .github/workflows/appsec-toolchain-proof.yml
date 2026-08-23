@@ -165,8 +165,28 @@ jobs:
             ln -s "$clamav_prefix/bin/clamscan" "$managed_appsec_bin/clamscan"
             ln -s "$clamav_prefix/bin/freshclam" "$managed_appsec_bin/freshclam"
             clamav_library_path="$clamav_prefix/lib"
-            freshclam_version=$(LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/freshclam" --version)
-            test "$freshclam_version" = "ClamAV 1.5.4"
+            freshclam_probe_root="$APPSEC_PROOF_ROOT/runtime/tools/appsec/clamav-version-probe"
+            freshclam_probe_database="$freshclam_probe_root/database"
+            freshclam_probe_config="$freshclam_probe_root/freshclam.conf"
+            mkdir -p "$freshclam_probe_database"
+            printf 'DatabaseDirectory %s\nDatabaseMirror database.clamav.net\nTestDatabases yes\n' \
+              "$freshclam_probe_database" > "$freshclam_probe_config"
+            chmod 600 "$freshclam_probe_config"
+            freshclam_config_arg="--config-file=$freshclam_probe_config"
+            freshclam_version_stderr="$freshclam_probe_root/version-probe.stderr"
+            set +e
+            freshclam_version=$(LD_LIBRARY_PATH="$clamav_library_path" \
+              "$native_bin/freshclam" "$freshclam_config_arg" --version \
+              2>"$freshclam_version_stderr")
+            freshclam_version_exit=$?
+            set -e
+            freshclam_version_stderr_tail=$(tail -n 8 "$freshclam_version_stderr" | tr '\r\n' '  ' | cut -c1-1000)
+            rm -f "$freshclam_version_stderr"
+            if [ "$freshclam_version_exit" -ne 0 ] || [ "$freshclam_version" != "ClamAV 1.5.4" ]; then
+              printf 'FreshClam version probe failed: phase=freshclam-version-probe exit_code=%s observed_version=%s stderr_tail=%s\n' \
+                "$freshclam_version_exit" "$freshclam_version" "$freshclam_version_stderr_tail" >&2
+              exit 1
+            fi
             LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/clamscan" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
             {
               echo "LD_LIBRARY_PATH=$clamav_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -244,8 +264,27 @@ jobs:
             mkdir -p "$managed_appsec_bin"
             ln -s "$clamav_prefix/bin/clamscan" "$managed_appsec_bin/clamscan"
             ln -s "$clamav_prefix/bin/freshclam" "$managed_appsec_bin/freshclam"
-            freshclam_version=$("$managed_appsec_bin/freshclam" --version)
-            test "$freshclam_version" = "ClamAV 1.5.4"
+            freshclam_probe_root="$APPSEC_PROOF_ROOT/runtime/tools/appsec/clamav-version-probe"
+            freshclam_probe_database="$freshclam_probe_root/database"
+            freshclam_probe_config="$freshclam_probe_root/freshclam.conf"
+            mkdir -p "$freshclam_probe_database"
+            printf 'DatabaseDirectory %s\nDatabaseMirror database.clamav.net\nTestDatabases yes\n' \
+              "$freshclam_probe_database" > "$freshclam_probe_config"
+            chmod 600 "$freshclam_probe_config"
+            freshclam_config_arg="--config-file=$freshclam_probe_config"
+            freshclam_version_stderr="$freshclam_probe_root/version-probe.stderr"
+            set +e
+            freshclam_version=$("$managed_appsec_bin/freshclam" \
+              "$freshclam_config_arg" --version 2>"$freshclam_version_stderr")
+            freshclam_version_exit=$?
+            set -e
+            freshclam_version_stderr_tail=$(tail -n 8 "$freshclam_version_stderr" | tr '\r\n' '  ' | cut -c1-1000)
+            rm -f "$freshclam_version_stderr"
+            if [ "$freshclam_version_exit" -ne 0 ] || [ "$freshclam_version" != "ClamAV 1.5.4" ]; then
+              printf 'FreshClam version probe failed: phase=freshclam-version-probe exit_code=%s observed_version=%s stderr_tail=%s\n' \
+                "$freshclam_version_exit" "$freshclam_version" "$freshclam_version_stderr_tail" >&2
+              exit 1
+            fi
             "$managed_appsec_bin/clamscan" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
             mkdir -p "$APPSEC_PROOF_ROOT"
             jq -n \
@@ -313,9 +352,28 @@ jobs:
             Copy-Item -Path (Join-Path $clamavDistribution "*") -Destination $managedAppsecBin -Recurse -Force
             $managedClamscan = Join-Path $managedAppsecBin "clamscan.exe"
             $managedFreshclam = Join-Path $managedAppsecBin "freshclam.exe"
-            $freshclamVersion = (& $managedFreshclam --version | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0 -or $freshclamVersion -ne "ClamAV 1.5.4") {
-              throw "Official freshclam did not report exact version 1.5.4: $freshclamVersion"
+            $freshclamProbeRoot = Join-Path $env:APPSEC_PROOF_ROOT "runtime/tools/appsec/clamav-version-probe"
+            $freshclamProbeDatabase = Join-Path $freshclamProbeRoot "database"
+            $freshclamProbeConfig = Join-Path $freshclamProbeRoot "freshclam.conf"
+            New-Item -ItemType Directory -Force -Path $freshclamProbeDatabase | Out-Null
+            $freshclamProbeDatabaseForConfig = $freshclamProbeDatabase.Replace('\', '/')
+            @(
+              "DatabaseDirectory $freshclamProbeDatabaseForConfig"
+              "DatabaseMirror database.clamav.net"
+              "TestDatabases yes"
+            ) | Set-Content -Path $freshclamProbeConfig -Encoding ascii
+            $freshclamConfigArg = "--config-file=$freshclamProbeConfig"
+            $freshclamVersionStderr = Join-Path $freshclamProbeRoot "version-probe.stderr"
+            $freshclamVersionOutput = @(& $managedFreshclam $freshclamConfigArg --version 2> $freshclamVersionStderr)
+            $freshclamVersionExit = $LASTEXITCODE
+            $freshclamVersion = ($freshclamVersionOutput | Out-String).Trim()
+            $freshclamVersionStderrTail = ((Get-Content -Path $freshclamVersionStderr -Tail 8 -ErrorAction SilentlyContinue | Out-String).Trim() -replace '[\r\n]+', ' | ')
+            Remove-Item -Force -ErrorAction SilentlyContinue $freshclamVersionStderr
+            if ($freshclamVersionStderrTail.Length -gt 1000) {
+              $freshclamVersionStderrTail = $freshclamVersionStderrTail.Substring(0, 1000)
+            }
+            if ($freshclamVersionExit -ne 0 -or $freshclamVersion -ne "ClamAV 1.5.4") {
+              throw "FreshClam version probe failed: phase=freshclam-version-probe exit_code=$freshclamVersionExit observed_version=$freshclamVersion stderr_tail=$freshclamVersionStderrTail"
             }
             $clamscanVersion = (& $managedClamscan --version | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $clamscanVersion -notmatch '^ClamAV 1\.5\.4(/|$)') {
