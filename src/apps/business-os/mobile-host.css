@@ -1,0 +1,137 @@
+/* workjet.business-os-shell.v1 — additive mobile host presentation.
+   The native host sets this attribute before any shell script executes. */
+html[data-workjet-mobile-host="true"],
+html[data-workjet-mobile-host="true"] body,
+html[data-workjet-mobile-host="true"] .app-shell {
+  width: 100%;
+  height: 100%;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+html[data-workjet-mobile-host="true"] .topbar,
+html[data-workjet-mobile-host="true"] .ctox-maintenance-banner,
+html[data-workjet-mobile-host="true"] .drawer-backdrop,
+html[data-workjet-mobile-host="true"] .drawer,
+html[data-workjet-mobile-host="true"] .shell-window-switcher,
+html[data-workjet-mobile-host="true"] .shell-notifications,
+html[data-workjet-mobile-host="true"] [data-shell-start-menu],
+html[data-workjet-mobile-host="true"] [data-chat-dock],
+html[data-workjet-mobile-host="true"] [data-taskbar] {
+  display: none !important;
+}
+
+html[data-workjet-mobile-host="true"] .workspace-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-rows: minmax(0, 1fr) !important;
+  gap: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+}
+
+html[data-workjet-mobile-host="true"] .workspace-pane-left,
+html[data-workjet-mobile-host="true"] .workspace-pane-right,
+html[data-workjet-mobile-host="true"] .workspace-col-resizer {
+  display: none !important;
+}
+
+html[data-workjet-mobile-host="true"] .workspace-pane-center {
+  grid-column: 1 !important;
+  grid-row: 1 !important;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  overflow: auto;
+}
+
+html[data-workjet-mobile-host="true"] .workspace-pane-center > [data-module-root],
+html[data-workjet-mobile-host="true"] .workspace-pane-center > .module-content {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+  border-radius: 0 !important;
+}
+
+html[data-workjet-mobile-host="true"] .shell-window-layer {
+  position: absolute;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+}
+
+html[data-workjet-mobile-host="true"] .shell-window {
+  display: none !important;
+}
+
+html[data-workjet-mobile-host="true"] .shell-window[data-workjet-mobile-active="true"] {
+  display: flex !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  pointer-events: auto;
+}
+
+html[data-workjet-mobile-host="true"] .shell-window-header,
+html[data-workjet-mobile-host="true"] .shell-window-resize {
+  display: none !important;
+}
+
+html[data-workjet-mobile-host="true"] .shell-window-content,
+html[data-workjet-mobile-host="true"] .shell-window-content > .shell-window-module-root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+
+html[data-workjet-mobile-host="true"] .shell-window-content > .shell-window-module-root {
+  grid-template-columns: minmax(0, 1fr) !important;
+  overflow: auto;
+}
+
+@media (min-width: 600px) and (max-width: 839px) {
+  html[data-workjet-mobile-host="true"] body[data-workjet-mobile-presentation="list-detail"] .shell-window-module-root {
+    grid-template-columns: minmax(0, 42fr) minmax(0, 58fr) !important;
+  }
+}
+
+@media (min-width: 840px) {
+  html[data-workjet-mobile-host="true"] body[data-workjet-mobile-presentation="list-detail"] .shell-window-module-root {
+    grid-template-columns: minmax(0, 38fr) minmax(0, 62fr) !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-workjet-mobile-host="true"] *,
+  html[data-workjet-mobile-host="true"] *::before,
+  html[data-workjet-mobile-host="true"] *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

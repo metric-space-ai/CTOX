@@ -1,0 +1,23 @@
+{
+  "type": "workjet.business-os-mobile-apps.v1",
+  "revision": "ctox-business-os-2026-08-25",
+  "apps": [
+    { "id": "ctox", "title": "CTOX Backend", "category": "System", "accent": "#2563eb", "mobilePresentation": "feed", "phoneReady": true, "tabletReady": true },
+    { "id": "tickets", "title": "Tickets", "category": "Operations", "accent": "#0f766e", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "threads", "title": "Threads", "category": "System", "accent": "#7c3aed", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "knowledge", "title": "Knowledge", "category": "Knowledge", "accent": "#0891b2", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "browser", "title": "Browser", "category": "Workspace", "accent": "#0284c7", "mobilePresentation": "canvas", "phoneReady": true, "tabletReady": true },
+    { "id": "credentials", "title": "Credentials", "category": "Security", "accent": "#475569", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "mail", "title": "Mail", "category": "Collaboration", "accent": "#2563eb", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "app-store", "title": "App Store", "category": "Development", "accent": "#db2777", "mobilePresentation": "feed", "phoneReady": true, "tabletReady": true },
+    { "id": "importer", "title": "App Importer", "category": "Development", "accent": "#ea580c", "mobilePresentation": "form", "phoneReady": true, "tabletReady": true },
+    { "id": "reports", "title": "Bugs & Features", "category": "Governance", "accent": "#ca8a04", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "appsec-pentest", "title": "Penetration Testing", "category": "Security", "accent": "#dc2626", "mobilePresentation": "canvas", "phoneReady": false, "tabletReady": true, "desktopOnly": true },
+    { "id": "coding-agents", "title": "Coding Agents", "category": "Development", "accent": "#4f46e5", "mobilePresentation": "feed", "phoneReady": true, "tabletReady": true },
+    { "id": "conversations", "title": "Conversations", "category": "Collaboration", "accent": "#7c3aed", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "customers", "title": "Kunden", "category": "Sales", "accent": "#059669", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "invoices", "title": "Rechnungen", "category": "Finance", "accent": "#16a34a", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "buchhaltung", "title": "Buchhaltung", "category": "Finance", "accent": "#15803d", "mobilePresentation": "list-detail", "phoneReady": true, "tabletReady": true },
+    { "id": "documents", "title": "Documents", "category": "Knowledge", "accent": "#2563eb", "mobilePresentation": "document", "phoneReady": true, "tabletReady": true }
+  ]
+}
