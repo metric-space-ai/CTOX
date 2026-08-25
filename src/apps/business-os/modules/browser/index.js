@@ -170,6 +170,20 @@ export async function mount(ctx) {
       });
   }
 
+  // Befund aus dem UX-Review: Ist das Browser-Fenster bereits offen, feuert
+  // die Shell fuer einen erneuten App-Start `ctox-business-os-app-launch` auf
+  // das Fenster -- und niemand hoerte zu. Der Bediener klickte in der
+  // Outbound-App auf "Im CTOX-Browser anmelden", das Fenster kam nach vorn
+  // und zeigte die alte Ansicht: das Icon wirkte tot. Der Listener reicht die
+  // Launch-Args an denselben Pfad weiter, den der Erstoeffnungsfall nimmt.
+  const onAppLaunch = (event) => {
+    const args = event?.detail?.args || event?.detail || {};
+    if (!browserSessionIdFromArgs(args)) return;
+    openRequestedBrowserSession(args);
+  };
+  ctx.host?.addEventListener?.('ctox-business-os-app-launch', onAppLaunch);
+  cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', onAppLaunch));
+
   const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', (detail = {}) => {
     const sessionId = browserSessionIdFromArgs(detail);
     if (!sessionId) return;
@@ -2501,12 +2515,23 @@ function adapterZugang(adapter) {
   if (adapter.requires_credential === false) {
     return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
   }
+  // Exakte Statuslisten -- Substring-Muster matchten `required` auch in
+  // `not_required`, und jeder Adapter ohne Anmeldepflicht stand auf
+  // "Zugang fehlt" (Review-Befund; der Server schreibt `not_required`).
   const auth = String(adapter.auth_status || '').toLowerCase();
-  if (/(ok|valid|author|ready|active|signed)/.test(auth)) {
+  if (auth === 'not_required') {
+    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
+  }
+  if (['ok', 'valid', 'ready', 'active', 'signed_in', 'authenticated',
+    'session_authenticated', 'credential_available', 'authorized'].includes(auth)) {
     return { klasse: 'is-ok', text: t('chipAuthOk', 'Zugang OK') };
   }
-  if (/(missing|required|expired|invalid|denied|logged_out)/.test(auth)) {
+  if (['missing', 'required', 'auth_required', 'credential_missing', 'expired',
+    'invalid', 'denied', 'logged_out'].includes(auth)) {
     return { klasse: 'is-error', text: t('chipAuthMissing', 'Zugang fehlt') };
+  }
+  if (['auth_requested', 'browser_session_requested'].includes(auth)) {
+    return { klasse: 'is-warn', text: t('chipAuthPending', 'Anmeldung angefordert') };
   }
   return { klasse: 'is-neutral', text: t('chipAuthUnknown', 'Zugang ungeprüft') };
 }

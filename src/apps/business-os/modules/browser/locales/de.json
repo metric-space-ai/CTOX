@@ -74,5 +74,6 @@
   "chipFnUntested": "Ungeprüft",
   "btnAdapterLogin": "Im Browser anmelden",
   "btnAdapterCheck": "Prüfen (Outbound)",
-  "adapterLoginStarted": "Sitzung zur Quelle gestartet — dort anmelden, dann in Outbound prüfen."
+  "adapterLoginStarted": "Sitzung zur Quelle gestartet — dort anmelden, dann in Outbound prüfen.",
+  "chipAuthPending": "Anmeldung angefordert"
 }

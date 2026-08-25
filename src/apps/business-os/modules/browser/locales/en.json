@@ -74,5 +74,6 @@
   "chipFnUntested": "Untested",
   "btnAdapterLogin": "Sign in via browser",
   "btnAdapterCheck": "Verify (Outbound)",
-  "adapterLoginStarted": "Session to the source started — sign in there, then verify in Outbound."
+  "adapterLoginStarted": "Session to the source started — sign in there, then verify in Outbound.",
+  "chipAuthPending": "Sign-in requested"
 }
