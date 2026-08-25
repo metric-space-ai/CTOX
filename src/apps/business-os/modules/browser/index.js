@@ -2427,10 +2427,24 @@ async function ladeScrapingAdapter(ctx, state) {
   if (state.adapterLadedauer) return state.adapterLadedauer;
   state.adapterLadedauer = (async () => {
     try {
-      if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
-        state.adapterLease = await ctx.sync.leaseCollection('outbound_research_adapters', 'browser:scraping-adapters');
+      // Die Adapter liegen je nach Installation unter verschiedenen Namen:
+      // die generische Projektion (outbound_research_adapters) ist nicht auf
+      // jeder Browser-Seite registriert, der Modul-Zwilling
+      // (thesen_outbound_adapters) schon. Erster Name mit registrierter
+      // Sammlung gewinnt -- ein stilles [] von einer unregistrierten war
+      // vorher als "keine Adapter" durchgegangen, waehrend 17 auf dem Server
+      // lagen.
+      let sammlung = null;
+      let sammlungsName = '';
+      for (const name of ['outbound_research_adapters', 'thesen_outbound_adapters']) {
+        const kandidat = browserCollection(ctx, name);
+        if (kandidat) { sammlung = kandidat; sammlungsName = name; break; }
       }
-      const rows = await readCollection(browserCollection(ctx, 'outbound_research_adapters'), {
+      if (!sammlung) throw new Error('Keine Adapter-Sammlung registriert.');
+      if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
+        state.adapterLease = await ctx.sync.leaseCollection(sammlungsName, 'browser:scraping-adapters');
+      }
+      const rows = await readCollection(sammlung, {
         limit: 200,
         sort: [{ updated_at_ms: 'desc' }],
       });
