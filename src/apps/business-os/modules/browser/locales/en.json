@@ -64,5 +64,15 @@
   "adaptersLoading": "Loading adapters …",
   "adaptersFailed": "Adapters could not be loaded: ",
   "adaptersEmpty": "No scraping adapters yet. They are created in the Outbound app under “Sources & access”.",
-  "adaptersManagedHint": "Managed in the Outbound app (“Sources & access”)."
+  "adaptersManagedHint": "Managed in the Outbound app (“Sources & access”).",
+  "chipAuthOk": "Access OK",
+  "chipAuthMissing": "Access missing",
+  "chipAuthNone": "No access needed",
+  "chipAuthUnknown": "Access unverified",
+  "chipFnOk": "Check passed",
+  "chipFnFail": "Check failed",
+  "chipFnUntested": "Untested",
+  "btnAdapterLogin": "Sign in via browser",
+  "btnAdapterCheck": "Verify (Outbound)",
+  "adapterLoginStarted": "Session to the source started — sign in there, then verify in Outbound."
 }

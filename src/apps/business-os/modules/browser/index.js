@@ -2493,17 +2493,35 @@ async function ladeScrapingAdapter(ctx, state) {
   return state.adapterLadedauer;
 }
 
-function adapterZustand(adapter) {
+// Zwei GETRENNTE Wahrheiten pro Adapter -- der Kern der Verstaendlichkeit:
+// "Zugang" (gibt es gueltige Anmeldedaten?) und "Funktion" (lief die letzte
+// Pruefung durch?). Beide in einen Topf zu werfen hiess vorher: "Zugang fehlt"
+// stand auch da, wenn der Zugang existierte und nur die Pruefung scheiterte.
+function adapterZugang(adapter) {
+  if (adapter.requires_credential === false) {
+    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
+  }
   const auth = String(adapter.auth_status || '').toLowerCase();
-  const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
+  if (/(ok|valid|author|ready|active|signed)/.test(auth)) {
+    return { klasse: 'is-ok', text: t('chipAuthOk', 'Zugang OK') };
+  }
+  if (/(missing|required|expired|invalid|denied|logged_out)/.test(auth)) {
+    return { klasse: 'is-error', text: t('chipAuthMissing', 'Zugang fehlt') };
+  }
+  return { klasse: 'is-neutral', text: t('chipAuthUnknown', 'Zugang ungeprüft') };
+}
+
+function adapterFunktion(adapter) {
   if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
-  if (auth.includes('missing') || auth.includes('required') || status.includes('auth')) {
-    return { klasse: 'is-error', text: t('adapterAuthMissing', 'Zugang fehlt') };
+  const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
+  if (/(unreachable|fail|error|blocked|captcha|timeout)/.test(status) || adapter.last_error) {
+    const grund = String(adapter.last_error || status).slice(0, 60);
+    return { klasse: 'is-warn', text: t('chipFnFail', 'Prüfung fehlgeschlagen') + (grund ? ` (${grund})` : '') };
   }
-  if (status.includes('unreachable') || status.includes('fail') || adapter.last_error) {
-    return { klasse: 'is-warn', text: t('adapterUnreachable', 'Letzte Prüfung fehlgeschlagen') };
+  if (/(ok|ready|passed|success)/.test(status)) {
+    return { klasse: 'is-ok', text: t('chipFnOk', 'Funktion geprüft') };
   }
-  return { klasse: 'is-ok', text: t('adapterReady', 'Bereit') };
+  return { klasse: 'is-neutral', text: t('chipFnUntested', 'Ungeprüft') };
 }
 
 // Eine Schiene, zwei Inhalte: Sitzungen oder Scraping-Adapter, je nach Band.
@@ -2549,27 +2567,67 @@ function renderAdapterRail(ctx, refs, state) {
   for (const adapter of state.adapters) {
     const label = String(adapter.label || adapter.source_id || adapter.id || '');
     if (suche && !label.toLowerCase().includes(suche)) continue;
-    const zustand = adapterZustand(adapter);
+    const zugang = adapterZugang(adapter);
+    const funktion = adapterFunktion(adapter);
     const karte = document.createElement('div');
     karte.className = 'browser-adapter-card';
     const kopf = document.createElement('div');
     kopf.className = 'browser-adapter-head';
     const punkt = document.createElement('span');
-    punkt.className = `browser-adapter-dot ${zustand.klasse}`;
+    punkt.className = `browser-adapter-dot ${zugang.klasse === 'is-error' ? 'is-error' : funktion.klasse}`;
     const name = document.createElement('strong');
     name.textContent = label;
     kopf.append(punkt, name);
+    const chips = document.createElement('div');
+    chips.className = 'browser-adapter-chips';
+    for (const c of [zugang, funktion]) {
+      const chip = document.createElement('span');
+      chip.className = `browser-adapter-chip ${c.klasse}`;
+      chip.textContent = c.text;
+      chips.appendChild(chip);
+    }
     const meta = document.createElement('div');
     meta.className = 'browser-adapter-meta';
     const getestet = Number(adapter.last_test?.at_ms || adapter.updated_at_ms || 0);
     const latenz = Number(adapter.latency_ms || adapter.last_test?.latency_ms || 0);
     meta.textContent = [
       String(adapter.source_id || ''),
-      zustand.text,
       getestet ? new Date(getestet).toLocaleString() : '',
       latenz ? `${latenz} ms` : '',
     ].filter(Boolean).join(' · ');
-    karte.append(kopf, meta);
+    const aktionen = document.createElement('div');
+    aktionen.className = 'browser-adapter-actions';
+    // "Direkt im Browser erledigen": Sitzung auf der Quelle starten, dort
+    // anmelden. source_id ist eine Domain, also traegt sie als Start-URL.
+    if (adapter.requires_credential !== false) {
+      const anmelden = document.createElement('button');
+      anmelden.type = 'button';
+      anmelden.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
+      anmelden.textContent = t('btnAdapterLogin', 'Im Browser anmelden');
+      anmelden.addEventListener('click', () => {
+        const url = String(adapter.url || adapter.payload?.url || `https://${adapter.source_id || ''}`);
+        dispatchBrowserCommand(ctx, state, 'browser.session.start', { url, new_session: true })
+          .then(() => {
+            ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: t('adapterLoginStarted', 'Sitzung zur Quelle gestartet — dort anmelden, dann in Outbound prüfen.') });
+            state.refresh?.();
+          })
+          .catch((error) => {
+            state.notice = `Der Vorgang konnte nicht gestartet werden: ${error?.message || error}`;
+            state.refresh?.();
+          });
+      });
+      aktionen.appendChild(anmelden);
+    }
+    if (typeof ctx.openDesktopApp === 'function') {
+      const pruefen = document.createElement('button');
+      pruefen.type = 'button';
+      pruefen.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
+      pruefen.textContent = t('btnAdapterCheck', 'Prüfen (Outbound)');
+      pruefen.addEventListener('click', () => ctx.openDesktopApp('thesen-outbound'));
+      aktionen.appendChild(pruefen);
+    }
+    karte.append(kopf, chips, meta);
+    if (aktionen.childElementCount) karte.appendChild(aktionen);
     if (adapter.last_error) {
       const fehlerzeile = document.createElement('div');
       fehlerzeile.className = 'browser-adapter-error';

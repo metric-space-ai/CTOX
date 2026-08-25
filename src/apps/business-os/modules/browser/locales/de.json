@@ -64,5 +64,15 @@
   "adaptersLoading": "Adapter werden geladen …",
   "adaptersFailed": "Adapter konnten nicht geladen werden: ",
   "adaptersEmpty": "Noch keine Scraping-Adapter. Sie entstehen in der Outbound-App unter „Quellen & Zugänge“.",
-  "adaptersManagedHint": "Verwaltet in der Outbound-App („Quellen & Zugänge“)."
+  "adaptersManagedHint": "Verwaltet in der Outbound-App („Quellen & Zugänge“).",
+  "chipAuthOk": "Zugang OK",
+  "chipAuthMissing": "Zugang fehlt",
+  "chipAuthNone": "Kein Zugang nötig",
+  "chipAuthUnknown": "Zugang ungeprüft",
+  "chipFnOk": "Funktion geprüft",
+  "chipFnFail": "Prüfung fehlgeschlagen",
+  "chipFnUntested": "Ungeprüft",
+  "btnAdapterLogin": "Im Browser anmelden",
+  "btnAdapterCheck": "Prüfen (Outbound)",
+  "adapterLoginStarted": "Sitzung zur Quelle gestartet — dort anmelden, dann in Outbound prüfen."
 }
