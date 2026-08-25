@@ -42,6 +42,10 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
 
   const openApp = (appId) => {
     if (!SAFE_ID.test(appId)) return;
+    if (appId === 'desktop') {
+      post({ type: 'shell.error', code: 'native-home-route', retryable: false });
+      return;
+    }
     const app = descriptor(appId);
     if (!app || app.desktopOnly || !app.mobilePresentation) {
       post({ type: 'shell.error', code: 'mobile-presentation-unavailable', retryable: false });
@@ -125,6 +129,7 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
       if (value?.type !== CATALOG_TYPE || !Array.isArray(value.apps) || value.apps.length > 256) {
         throw new Error('catalog invalid');
       }
+      if (value.apps.some((app) => app?.id === 'desktop')) throw new Error('catalog contains native home');
       catalog = value;
       post({ type: 'shell.ready', revision: String(value.revision || 'unknown').slice(0, 256) });
       post({ type: 'catalog.replace', catalog });

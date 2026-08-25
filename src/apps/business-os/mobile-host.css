@@ -16,6 +16,7 @@ html[data-workjet-mobile-host="true"] .drawer-backdrop,
 html[data-workjet-mobile-host="true"] .drawer,
 html[data-workjet-mobile-host="true"] .shell-window-switcher,
 html[data-workjet-mobile-host="true"] .shell-notifications,
+html[data-workjet-mobile-host="true"] .desktop-module,
 html[data-workjet-mobile-host="true"] [data-shell-start-menu],
 html[data-workjet-mobile-host="true"] [data-chat-dock],
 html[data-workjet-mobile-host="true"] [data-taskbar] {

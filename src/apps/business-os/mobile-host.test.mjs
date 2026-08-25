@@ -19,12 +19,15 @@ test('mobile host is additive and removes all desktop chrome', async () => {
     '.shell-window-header',
     '.shell-window-resize',
     '.shell-window-switcher',
+    '.desktop-module',
     '[data-chat-dock]',
     '[data-taskbar]',
   ]) {
     assert.ok(css.includes(selector), `missing mobile chrome guard for ${selector}`);
   }
   assert.match(script, /workjet\.business-os-shell\.v1/);
+  assert.match(script, /appId === 'desktop'/);
+  assert.match(script, /native-home-route/);
   assert.doesNotMatch(script, /capabilityToken|roomPassword|signalingUrls|businessRecords/);
 });
 
@@ -41,4 +44,8 @@ test('signed mobile catalog follows the canonical system-app order', async () =>
     system.apps.filter((id) => id !== 'desktop'),
   );
   assert.ok(catalog.apps.every((app) => !('iconSvg' in app) && !('iconUrl' in app)));
+  assert.ok(catalog.apps.every((app) => app.id !== 'desktop'));
+  assert.equal(catalog.apps.length, 34);
+  assert.equal(new Set(catalog.apps.map((app) => app.iconAssetId)).size, 34);
+  assert.ok(catalog.apps.every((app) => app.iconFamilyVersion === 1 && app.iconRequired === true));
 });
