@@ -339,6 +339,7 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
         }
         Some("auth") => handle_business_os_auth(root, &args[1..]),
         Some("desktop") => handle_business_os_desktop(root, &args[1..]),
+        Some("mobile-invite") => handle_business_os_mobile_invite(root, &args[1..]),
         Some("web-stack") => handle_business_os_web_stack(root, &args[1..]),
         Some("files") => handle_business_os_files(root, &args[1..]),
         Some("mcp") => handle_business_os_mcp(root, &args[1..]),
@@ -352,6 +353,37 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
             "unknown business-os command `{other}`\n\n{}",
             business_os_usage()
         ),
+    }
+}
+
+fn handle_business_os_mobile_invite(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            let ttl_seconds = flag_value(args, "--ttl-seconds")
+                .map(str::parse::<i64>)
+                .transpose()
+                .context("mobile invite --ttl-seconds must be an integer")?
+                .unwrap_or(crate::business_os::mobile_invites::DEFAULT_TTL_SECONDS);
+            print_json(&crate::business_os::mobile_invites::create(
+                root,
+                ttl_seconds,
+                flag_value(args, "--display-name"),
+            )?)
+        }
+        Some("revoke") => {
+            let invite_id = flag_value(args, "--invite-id")
+                .context("mobile invite revoke requires --invite-id")?;
+            print_json(&crate::business_os::mobile_invites::revoke(
+                root, invite_id,
+            )?)
+        }
+        Some("--help") | Some("-h") | None => {
+            println!(
+                "usage:\n  ctox business-os mobile-invite create [--ttl-seconds 300] [--display-name <name>]\n  ctox business-os mobile-invite revoke --invite-id <opaque-id>"
+            );
+            Ok(())
+        }
+        Some(other) => anyhow::bail!("unknown business-os mobile-invite command `{other}`"),
     }
 }
 

@@ -15016,6 +15016,28 @@ pub fn issue_business_os_capability_token(
     user_id: &str,
     now_ms: i64,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_until(
+        root,
+        user_id,
+        now_ms,
+        now_ms + CAPABILITY_TOKEN_TTL_MS,
+    )
+}
+
+fn issue_business_os_capability_token_until(
+    root: &Path,
+    user_id: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> anyhow::Result<(String, i64)> {
+    anyhow::ensure!(
+        expires_at_ms > now_ms,
+        "capability expiry must be in the future"
+    );
+    anyhow::ensure!(
+        expires_at_ms <= now_ms + CAPABILITY_TOKEN_TTL_MS,
+        "capability expiry exceeds the native maximum"
+    );
     // The browser resolves this token before the first WebRTC handshake. Ensure
     // deterministic baseline grants before reading capability_epoch; otherwise
     // native peer startup can insert grants moments later and invalidate the
@@ -15031,7 +15053,6 @@ pub fn issue_business_os_capability_token(
         |row| row.get(0),
     )?;
     let secret = capability_signing_secret(root)?;
-    let expires_at_ms = now_ms + CAPABILITY_TOKEN_TTL_MS;
     let token = super::capability::issue_capability_token_with_epoch(
         &secret,
         &user.id,
@@ -15128,6 +15149,47 @@ pub fn issue_business_os_capability_token_for_managed_user(
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
     issue_business_os_capability_token(root, user_id, now_ms)
+}
+
+/// Issue a dedicated managed-user capability whose signed expiry is bounded by
+/// the caller. Mobile pairing uses this to guarantee that the WebRTC token
+/// cannot outlive the short-lived invite shown in Workjet Settings.
+pub fn issue_business_os_capability_token_for_managed_user_until(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> anyhow::Result<(String, i64)> {
+    let user_id = user_id.trim();
+    anyhow::ensure!(!user_id.is_empty(), "user id is required");
+    let role = normalize_business_role(role);
+    anyhow::ensure!(
+        matches!(role.as_str(), "chef" | "admin" | "founder" | "user"),
+        "role must be chef, admin, founder, or user"
+    );
+    let conn = open_store(root)?;
+    seed_configured_business_users(&conn)?;
+    let display_name = display_name.trim();
+    let display_name = if display_name.is_empty() {
+        user_id
+    } else {
+        display_name
+    };
+    conn.execute(
+        "INSERT INTO business_users
+            (user_id, display_name, role, active, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+         ON CONFLICT(user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            role = excluded.role,
+            active = 1,
+            updated_at_ms = excluded.updated_at_ms",
+        params![user_id, display_name, role.as_str(), now_ms],
+    )?;
+    drop(conn);
+    issue_business_os_capability_token_until(root, user_id, now_ms, expires_at_ms)
 }
 
 pub(super) fn rxdb_command_session(

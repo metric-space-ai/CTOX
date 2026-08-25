@@ -18,6 +18,7 @@ mod inventory_drift_tests;
 mod invoices;
 mod iot_supervision;
 pub mod mcp_channel;
+pub mod mobile_invites;
 mod module_lifecycle;
 pub mod office_engine;
 mod person_research_command;
