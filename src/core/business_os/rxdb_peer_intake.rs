@@ -32,6 +32,7 @@ use super::store;
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rxdb::rx_database::RxDatabase;
+use rxdb::types::MangoQuery;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -754,17 +755,62 @@ async fn complete_web_stack_auth_assist(
         .await
         .map_err(|err| anyhow::anyhow!("patch browser session: {err}"))?;
 
-    let root = root.to_path_buf();
+    let root_buf = root.to_path_buf();
     let source = source_id.to_string();
     let touched = tokio::task::spawn_blocking(move || {
-        super::store_outbound_commands::outbound_mark_source_authenticated(&root, &source)
+        super::store_outbound_commands::outbound_mark_source_authenticated(&root_buf, &source)
     })
     .await
     .context("join source auth writeback")??;
+
+    // Der native Store allein reicht NICHT: die Adapter-Sammlungen werden
+    // client-seitig in RxDB rekonstruiert, nicht vom Server dorthin
+    // projiziert. Ein Schreiben nur nach business_records erreicht die
+    // Oberflaeche also nie -- gemessen: records_updated=2, Anzeige unveraendert.
+    // Deshalb hier zusaetzlich direkt in die replizierten Sammlungen.
+    let mut projected = 0usize;
+    for collection_name in ["thesen_outbound_adapters", "outbound_research_adapters"] {
+        let Some(collection) = database.collection(collection_name) else {
+            continue;
+        };
+        let docs = collection
+            .find(Some(MangoQuery {
+                selector: Some(json!({ "source_id": { "$eq": source_id } })),
+                ..Default::default()
+            }))
+            .map_err(|err| anyhow::anyhow!("query {collection_name}: {err}"))?
+            .exec(false)
+            .await
+            .map_err(|err| anyhow::anyhow!("exec {collection_name} query: {err}"))?;
+        let rows = docs.as_array().cloned().unwrap_or_default();
+        for mut doc in rows {
+            if let Some(object) = doc.as_object_mut() {
+                object.remove("_rev");
+                object.remove("_meta");
+                object.insert(
+                    "auth_status".to_string(),
+                    Value::String("session_authenticated".to_string()),
+                );
+                object.insert(
+                    "auth_authenticated_at_ms".to_string(),
+                    Value::from(now_ms() as u64),
+                );
+            }
+            incremental_upsert_document_with_envelope(
+                &collection,
+                doc,
+                "auth assist adapter patch",
+            )
+            .await
+            .map_err(|err| anyhow::anyhow!("patch {collection_name}: {err}"))?;
+            projected += 1;
+        }
+    }
     Ok(serde_json::json!({
         "session_id": session_id,
         "source_id": source_id,
         "records_updated": touched,
+        "adapters_projected": projected,
         "auth_assist_status": "completed",
     }))
 }
