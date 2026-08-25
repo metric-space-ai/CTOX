@@ -99,3 +99,42 @@
   .intake-rail { grid-column: 1; }
   .intake-main { grid-column: 1; }
 }
+
+/* Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes interaktive
+   Control erreicht das 44px-Minimum, Icon-Buttons in beiden Dimensionen,
+   Listenzeilen und das Disclosure bekommen fingerhohe Tap-Flaechen. Das
+   Spalten-Stacking steuert die @container-Regel oben (760px). */
+@media (pointer: coarse) {
+  .intake-module button,
+  .intake-module input,
+  .intake-module select,
+  .intake-module textarea {
+    min-height: 44px;
+  }
+
+  .intake-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .intake-module .ctox-pane-tab,
+  .intake-module .ctox-sort-dir {
+    min-height: 44px;
+  }
+
+  .intake-module .ctox-sort-dir {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .intake-module .ctox-list-item,
+  .intake-module .intake-row {
+    min-height: 44px;
+  }
+
+  .intake-main .ats-more > summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}

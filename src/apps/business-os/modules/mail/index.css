@@ -511,7 +511,7 @@
   .mail-content-surface-header .ctox-pane-titles { flex-basis: 128px; }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 767px) {
   .mail-module,
   .mail-module.is-inspector-open { grid-template-columns: minmax(0, 1fr); }
   .mail-sidebar { display: none; }
@@ -565,6 +565,45 @@
 @media (pointer: coarse) {
   .mail-scope-card { min-height: 44px; }
   .mail-record-row { min-height: 68px; }
+
+  /* 44px touch minimum for every interactive control (the mail module uses
+     viewport @media breakpoints, so this coarse-pointer block carries the
+     tap-target work). */
+  .mail-module button,
+  .mail-module input,
+  .mail-module select,
+  .mail-module textarea {
+    min-height: 44px;
+  }
+
+  .mail-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .mail-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  /* The 14px row checkboxes get a slightly larger box; the label keeps the
+     click routing so the padded cell stays the effective hit area. */
+  .mail-module .mail-table-check input,
+  .mail-module .mail-record-select {
+    width: 20px;
+    height: 20px;
+  }
+
+  .mail-module .mail-select-filtered {
+    min-height: 44px;
+  }
+
+  .mail-module .mail-content-editor-panel-button {
+    min-height: 44px;
+  }
+
+  .mail-module .mail-new-group-row {
+    min-height: 44px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

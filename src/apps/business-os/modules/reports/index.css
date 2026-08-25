@@ -164,9 +164,44 @@
   }
 }
 
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 767px) {
   .reports-module {
     grid-template-rows: minmax(220px, 38vh) minmax(420px, 1fr) minmax(260px, 42vh);
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, plus
+   the fixed 28px filter-tray controls and the report list rows. */
+@media (pointer: coarse) {
+  .reports-module button,
+  .reports-module input,
+  .reports-module select,
+  .reports-module textarea {
+    min-height: 44px;
+  }
+
+  .reports-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .reports-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .reports-module .reports-select {
+    height: 44px;
+  }
+
+  .reports-module .reports-sort-dir {
+    width: 44px;
+    height: 44px;
+  }
+
+  .reports-module .report-row,
+  .reports-module .report-row-compact {
+    min-height: 44px;
   }
 }
 /* ============================================================================

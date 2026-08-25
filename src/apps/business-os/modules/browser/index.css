@@ -405,7 +405,7 @@
   overflow-wrap: anywhere;
 }
 
-@container business-app-window (max-width: 640px) {
+@container business-app-window (max-width: 767px) {
   .browser-automation-overlay {
     top: 6px;
     right: 6px;
@@ -495,8 +495,9 @@
 }
 
 /* custom: Schmales Fenster / Mobil-Sheet — der Remote-Canvas bleibt die
-   Arbeitsfläche; Sitzungen sind über den Drawer erreichbar. */
-@container business-app-window (max-width: 640px) {
+   Arbeitsfläche; Sitzungen sind über den Drawer erreichbar. Grenze = die
+   shell-weite 767px-Mobile-Marke (Phase-1/2-Konvention). */
+@container business-app-window (max-width: 767px) {
   .browser-toolbar {
     gap: 3px;
     padding-inline: 4px;
@@ -513,6 +514,54 @@
   .browser-advanced-actions .ctox-button,
   .browser-advanced-actions .ctox-choice {
     flex: 1 1 auto;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum; icon-only buttons in both dimensions, plus the
+   custom tab-strip buttons and the on-canvas context menu. */
+@media (pointer: coarse) {
+  .browser-module button,
+  .browser-module input,
+  .browser-module select,
+  .browser-module textarea {
+    min-height: 44px;
+  }
+
+  .browser-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .browser-module .ctox-icon-button {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .browser-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-session {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-tab,
+  .browser-module .browser-tab-title,
+  .browser-module .browser-tab-close {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-tab-close {
+    min-width: 44px;
+  }
+
+  .browser-module .browser-context-menu button {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-advanced-actions .ctox-compact-field > .ctox-select {
+    min-height: 44px;
   }
 }
 

@@ -1611,3 +1611,48 @@ body > #sync-feedback-host-matching-view .sync-feedback-progress-bar.is-indeterm
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes interaktive
+   Control erreicht das 44px-Minimum, Icon-Buttons in beiden Dimensionen,
+   Listen-/Karten-Zeilen und das Overflow-Menue bekommen fingerhohe Flaechen.
+   Das Spalten-Stacking steuern die @container-Regeln oben (900px/820px,
+   matching-ia.css); die Overlays begrenzen sich selbst auf 100vw.
+   -------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  .module-root[data-module-root="matching"] button,
+  .module-root[data-module-root="matching"] input,
+  .module-root[data-module-root="matching"] select,
+  .module-root[data-module-root="matching"] textarea {
+    min-height: 44px;
+  }
+
+  .module-root[data-module-root="matching"] .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .module-root[data-module-root="matching"] .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .module-root[data-module-root="matching"] .matching-requirement-row,
+  .module-root[data-module-root="matching"] .matching-candidate-row,
+  .module-root[data-module-root="matching"] .source-card,
+  .module-root[data-module-root="matching"] .object-card,
+  .module-root[data-module-root="matching"] .match-item-card,
+  .module-root[data-module-root="matching"] .import-status-card {
+    min-height: 44px;
+  }
+
+  .module-root[data-module-root="matching"] .matching-overflow-item,
+  .module-root[data-module-root="matching"] .match-open-btn {
+    min-height: 44px;
+  }
+
+  .module-root[data-module-root="matching"] .ctox-sort-dir {
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

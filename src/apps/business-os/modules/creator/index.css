@@ -245,8 +245,9 @@
 }
 
 /* The kit collapses the workspace frame to one column at 760px; these are
-   the creator-specific inner adjustments for the stacked layout. */
-@container business-app-window (max-width: 760px) {
+   the creator-specific inner adjustments for the stacked layout. Boundary
+   aligned with the shell-wide 767px mobile mark (phase-1/2 convention). */
+@container business-app-window (max-width: 767px) {
   /* Keep the primary task (composer) first when the panes stack. */
   .creator-main { order: -1; }
 
@@ -262,4 +263,47 @@
   .creator-url-row { grid-template-columns: minmax(0, 1fr); }
   .creator-submit { align-items: stretch; flex-direction: column; }
   .creator-submit #btn-deploy-app { width: 100%; }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, plus
+   the example picker cells and the tiny URL-chip remove button. */
+@media (pointer: coarse) {
+  .creator-module button,
+  .creator-module input,
+  .creator-module select,
+  .creator-module textarea {
+    min-height: 44px;
+  }
+
+  .creator-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .creator-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .creator-module .creator-shard {
+    min-height: 44px;
+  }
+
+  .creator-module .creator-example {
+    min-height: 44px;
+  }
+
+  .creator-module .creator-url-chip button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The accordion summaries are the only way to reach the options/log —
+     give them a full finger-height hit area. */
+  .creator-module .creator-options summary,
+  .creator-module .creator-status-details summary,
+  .creator-module .creator-requests-details summary {
+    min-height: 44px;
+    padding: 12px 0;
+  }
 }

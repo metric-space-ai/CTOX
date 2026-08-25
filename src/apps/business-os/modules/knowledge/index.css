@@ -1135,7 +1135,10 @@
    content full-width with a back button — no cramped stacking, no wasted space.
    ========================================================================== */
 .knowledge-module .knowledge-mobile-back { display: none; }
-@container business-app-window (max-width: 640px) {
+/* Mobile boundary = the shell-wide 767px (same convention as threads phase 1).
+   The JS toggles .is-detail unconditionally; only CSS gates the single-pane
+   master-detail, so widening the container query is a pure CSS change. */
+@container business-app-window (max-width: 767px) {
   .knowledge-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -1238,4 +1241,73 @@
   background: color-mix(in srgb, var(--knowledge-accent) 14%, transparent);
   color: var(--knowledge-accent);
   font-weight: 700;
+}
+
+/* ============================================================================
+   Phase 2 — Mobile operability: 44px touch targets on coarse pointers and
+   touch equivalents for hover-only affordances.
+   ========================================================================== */
+@media (pointer: coarse) {
+  .knowledge-module button,
+  .knowledge-module input,
+  .knowledge-module select,
+  .knowledge-module textarea {
+    min-height: 44px;
+  }
+
+  .knowledge-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .knowledge-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  /* Fixed 28px controls in the advanced filter tray. */
+  .knowledge-module .knowledge-select {
+    height: 44px;
+  }
+
+  .knowledge-module .knowledge-sort-dir {
+    width: 44px;
+    height: 44px;
+  }
+
+  .knowledge-module .knowledge-filter-chips .ctox-chip,
+  .knowledge-module .table-switcher .ctox-chip,
+  .knowledge-module .knowledge-secondary-switcher .ctox-chip {
+    min-height: 44px;
+  }
+
+  .knowledge-module .bundle-select,
+  .knowledge-module .item-select,
+  .knowledge-module .runbook-item {
+    min-height: 44px;
+  }
+
+  /* Drawer action form (the shell drawer is a full-width sheet on phones):
+     its fixed 34px controls grow to the touch minimum. */
+  .knowledge-action-fields input,
+  .knowledge-action-fields select {
+    height: 44px;
+  }
+}
+
+/* No hover on touch: row action icons must be visible without a hover pass,
+   the content-panel icons get a stronger resting opacity, and the column-help
+   tooltip answers a tap (focus) instead of only hover. */
+@media (hover: none) {
+  .knowledge-module .knowledge-item .ctox-pane-icon {
+    opacity: 0.6;
+  }
+
+  .knowledge-module .knowledge-content-actions .ctox-pane-icon {
+    opacity: 0.85;
+  }
+
+  .knowledge-module .dataframe-table th .column-help:focus::after {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }

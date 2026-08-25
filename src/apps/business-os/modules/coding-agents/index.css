@@ -356,3 +356,66 @@
 
 /* In-shell, the standalone note must be invisible (file:// fallback only). */
 .ctox-standalone-note { display: none; }
+
+/* ============================================================================
+   Phone layout (Phase-1-Breakpoint 767px): the 12px resizer column goes away
+   (no touch-workable drag target), the 56px icon rail and the chat column
+   share the width directly. The right artifact pane is already hidden by the
+   860px rule above. Grid tracks are re-pinned so the center never lands on
+   an implicit track.
+   ========================================================================== */
+@container business-app-window (max-width: 767px) {
+  .coding-agents-module {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .coding-agents-module > [data-resizer] {
+    display: none !important;
+  }
+
+  .coding-agents-left { grid-column: 1; }
+  .coding-agents-center { grid-column: 2; }
+
+  .coding-agents-composer {
+    padding: 8px;
+  }
+
+  .coding-agents-chat {
+    padding: 8px;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum — including the fixed 28px rail controls (filter
+   select, sort button, composer model picker) and the app-rail rows. */
+@media (pointer: coarse) {
+  .coding-agents-module button,
+  .coding-agents-module input,
+  .coding-agents-module select,
+  .coding-agents-module textarea {
+    min-height: 44px;
+  }
+
+  .coding-agents-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .coding-agents-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .coding-agents-module .coding-agents-select,
+  .coding-agents-module .coding-agents-composer-side .ctox-select {
+    height: 44px;
+  }
+
+  .coding-agents-module .coding-agents-sort-dir {
+    width: 44px;
+    height: 44px;
+  }
+
+  .coding-agents-module .coding-agents-app-item {
+    min-height: 44px;
+  }
+}

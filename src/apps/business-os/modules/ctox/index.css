@@ -1317,6 +1317,96 @@
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Phase 2 — Mobile operability (phones). Pane stacking itself is owned by the
+   1180px/560px container queries above; this aligns the compact flow-row and
+   metric-strip geometry with the shell-wide 767px mobile boundary and pins
+   the web-stack popover to the sheet edges.
+   -------------------------------------------------------------------------- */
+@container business-app-window (max-width: 767px) {
+  .ctox-task-flow-row .ctox-task-selector {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
+  }
+
+  .ctox-metrics-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ctox-metric-card:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ctox-metric-card:nth-child(4) {
+    border-top: 1px solid var(--line);
+  }
+
+  /* Timeline detail row: label / text / meta stack instead of squeezing. The
+     panel is fixed 118px on desktop; on the sheet it must grow with its
+     content so the scrubber and detail never get clipped (the canvas well
+     above keeps the remaining 1fr). */
+  .ctox-timeline-panel {
+    height: auto;
+    min-height: 118px;
+    overflow: visible;
+  }
+
+  .ctox-timeline-detail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .ctox-web-stack-panel {
+    top: 8px;
+    right: 8px;
+    width: calc(100% - 16px);
+    max-height: 78%;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum; the 28px canvas zoom buttons, the timeline scale
+   entries and the drawer stepper rows are custom components the kit's generic
+   rules do not cover. */
+@media (pointer: coarse) {
+  .ctox-harness-app button,
+  .ctox-harness-app input,
+  .ctox-harness-app select,
+  .ctox-harness-app textarea {
+    min-height: 44px;
+  }
+
+  .ctox-harness-app .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .ctox-harness-app .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .ctox-flow-toolbar button {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .ctox-timeline-scale button {
+    min-height: 44px;
+  }
+
+  /* Taller grab area for the scrubber thumb. */
+  .ctox-timeline-panel input[type="range"] {
+    height: 32px;
+  }
+
+  /* The drawer stepper lives in the shell drawer (full-width sheet on phones);
+     its generic 44px form rule does not cover these custom grid buttons. */
+  .ctox-drawer-steps button {
+    min-height: 44px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ctox-live-chip i,
   .ctox-flow-edge.is-active-edge,
