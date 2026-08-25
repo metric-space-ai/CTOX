@@ -34,6 +34,7 @@ mod rxdb_peer_projections;
 mod rxdb_peer_tombstones;
 pub mod server;
 mod session;
+pub mod shell_update;
 pub mod store;
 mod store_appsec_commands;
 mod store_ats_commands;

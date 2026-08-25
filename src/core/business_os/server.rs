@@ -285,6 +285,9 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
 }
 
 fn resolve_business_os_app_root(root: &Path) -> PathBuf {
+    if let Ok(Some(active)) = super::shell_update::active_shell_root(root) {
+        return active;
+    }
     [
         root.join("business-os"),
         root.join("src/apps/business-os"),
@@ -534,6 +537,61 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                     Ok(payload) => respond_json_value_no_store(request, payload)?,
                     Err(error) => respond_status(request, 500, &error.to_string())?,
                 }
+            }
+        }
+        (Method::Get, "/api/business-os/shell/update/status") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                respond_json_value_no_store(
+                    request,
+                    super::shell_update::status(root, store::session_can_manage_all(&session))?,
+                )?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/check") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::check(root);
+                respond_shell_update_operation(request, root, &session, "check", result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/stage") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::stage(root);
+                respond_shell_update_operation(request, root, &session, "stage", result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/activate") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::activate(root);
+                respond_shell_update_operation(request, root, &session, "activate", result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/rollback") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::rollback(root);
+                respond_shell_update_operation(request, root, &session, "rollback", result)?;
             }
         }
         (Method::Post, "/api/business-os/ctox/tasks/update") => {
@@ -1129,6 +1187,11 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
             // and update subprocess launch. No Business OS records flow here.
             | "/api/business-os/ctox/update/check"
             | "/api/business-os/ctox/update/apply"
+            | "/api/business-os/shell/update/status"
+            | "/api/business-os/shell/update/check"
+            | "/api/business-os/shell/update/stage"
+            | "/api/business-os/shell/update/activate"
+            | "/api/business-os/shell/update/rollback"
             // Instance-scoped upgrade lease only. This endpoint never carries
             // Business OS collection records and is deliberately identical for
             // Owner/Admin and every other authenticated actor.
@@ -3842,6 +3905,30 @@ fn respond_json_value(request: Request, value: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn respond_shell_update_operation(
+    request: Request,
+    root: &Path,
+    session: &store::BusinessOsSession,
+    action: &str,
+    result: anyhow::Result<Value>,
+) -> anyhow::Result<()> {
+    let actor_id = session
+        .user
+        .as_ref()
+        .map(|user| user.id.as_str())
+        .unwrap_or("authenticated");
+    match result {
+        Ok(value) => {
+            super::shell_update::record_audit(root, action, "succeeded", actor_id)?;
+            respond_json_value_no_store(request, value)
+        }
+        Err(_) => {
+            super::shell_update::record_audit(root, action, "failed", actor_id)?;
+            respond_status(request, 500, "shell update operation failed")
+        }
+    }
+}
+
 fn respond_json_value_no_store(request: Request, value: Value) -> anyhow::Result<()> {
     let body = serde_json::to_string_pretty(&value)?;
     let mut response = Response::from_string(body);
@@ -4655,5 +4742,21 @@ mod tests {
         assert_eq!(mime_for(&PathBuf::from("logo.png")), "image/png");
         assert_eq!(mime_for(&PathBuf::from("photo.jpeg")), "image/jpeg");
         assert_eq!(mime_for(&PathBuf::from("preview.webp")), "image/webp");
+    }
+
+    #[test]
+    fn shell_update_routes_are_control_plane_only() {
+        for path in [
+            "/api/business-os/shell/update/status",
+            "/api/business-os/shell/update/check",
+            "/api/business-os/shell/update/stage",
+            "/api/business-os/shell/update/activate",
+            "/api/business-os/shell/update/rollback",
+        ] {
+            assert!(is_business_os_control_plane_path(path), "{path}");
+        }
+        assert!(!is_business_os_control_plane_path(
+            "/api/business-os/shell/update/business-records"
+        ));
     }
 }
