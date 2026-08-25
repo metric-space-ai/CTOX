@@ -316,3 +316,31 @@
 }
 .support-context-details[open] > summary { color: var(--muted); }
 .support-context-details > .ctox-card-body { padding: 0 2px 12px; }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, and
+   conversation rows keep a full finger-height hit area. The narrow-viewport
+   pane stacking itself is handled by the @container business-app-window
+   rules above (1180px/760px). */
+@media (pointer: coarse) {
+  .support-module button,
+  .support-module input,
+  .support-module select,
+  .support-module textarea {
+    min-height: 44px;
+  }
+
+  .support-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .support-module .support-conversation-list .ctox-list-item {
+    min-height: 44px;
+  }
+
+  /* Disclosure summaries are tap targets too. */
+  .support-module .support-context-details > summary {
+    min-height: 44px;
+  }
+}

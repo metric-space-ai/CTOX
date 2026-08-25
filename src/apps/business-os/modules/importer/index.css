@@ -477,7 +477,7 @@
   border-radius: 10px;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 767px) {
   .importer-module { grid-template-columns: 1fr; }
   .imp-rail {
     display: grid;
@@ -510,4 +510,34 @@
 
 @media (prefers-reduced-motion: reduce) {
   .imp-stage { animation: none; }
+}
+
+/* Mobile operability (Phase 2): the review action row wraps instead of
+   clipping on narrow phones, and coarse pointers get the 44px tap-target
+   minimum (rail stacking lives in the 767px/560px queries above). */
+@media (max-width: 767px) {
+  .imp-actions {
+    flex-wrap: wrap;
+  }
+
+  .imp-actions .ctox-button {
+    flex: 1 1 140px;
+  }
+
+  .imp-install {
+    margin-left: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  .importer-module button,
+  .importer-module input,
+  .importer-module select,
+  .importer-module textarea {
+    min-height: 44px;
+  }
+
+  .importer-module .imp-folder {
+    min-height: 64px;
+  }
 }
