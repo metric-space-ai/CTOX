@@ -1,8 +1,8 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { createCtoxLauncher } from './ctoxLauncher.js';
-import { makeIconDraggable } from './iconDrag.js?v=20260811-fremde-collection-mitladen-v106';
-import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260811-fremde-collection-mitladen-v106';
+import { makeIconDraggable } from './iconDrag.js?v=20260816-browser-sync-guards-v141';
+import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260816-browser-sync-guards-v141';
 import {
   buildQuickAppCreateCommand,
   isRuntimeInstalledApp,
@@ -1031,7 +1031,9 @@ export async function mount(ctx) {
 
   function currentGrid() {
     const surfaceWidth = refs.surface?.getBoundingClientRect?.().width || globalThis.innerWidth || 0;
-    if (surfaceWidth > 0 && surfaceWidth <= 560) {
+    // Keep in sync with the compact (touch) grid breakpoint in index.css:
+    // @media (max-width: 767px) switches icons to a scrollable flow grid.
+    if (surfaceWidth > 0 && surfaceWidth <= 767) {
       return { ...COMPACT_GRID, compact: true };
     }
     return {

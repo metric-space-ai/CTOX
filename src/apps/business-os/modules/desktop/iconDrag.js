@@ -33,6 +33,11 @@ export function makeIconDraggable(iconEl, {
   function onMouseDown(downEvent) {
     if (downEvent.button !== 0) return;
     if (shouldIgnoreActivationEvent(downEvent)) return;
+    // Compact (touch) grid mode lays icons out in a scrollable flow grid and
+    // CSS pins left/top with !important — positional dragging is meaningless
+    // there and would persist scrambled coordinates. Fall through to the
+    // plain click handler, which still selects/activates the icon.
+    if (grid.compact) return;
     downEvent.preventDefault();
 
     let dragging = false;

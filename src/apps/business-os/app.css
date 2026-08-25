@@ -7799,3 +7799,331 @@ button.shell-window-header-meta:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 .module-tab-attention[hidden] { display: none !important; }
+
+/* ============================================================================
+   Phase 1 — Mobile operability (viewport <= 767px, the shell-wide mobile
+   boundary). Everything in this block is scoped to that media query, so
+   desktop viewports (>= 768px, in particular >= 1024px) are untouched.
+   Goals:
+   - Topbar wraps into two touch-friendly rows (>=44px tap targets) and keeps
+     the open-app tab strip reachable (it scrolls horizontally inside its own
+     row instead of hiding).
+   - Windowed apps (launchesInWindow) become fullscreen sheets: pinned
+     geometry, no resize handles, 44px window controls, stacked module panes.
+   - Chat dock ("Chat-Leiste"), date pill ("Verlauf-Leiste") and chat windows
+     stay inside a 390px viewport; internal strips scroll horizontally.
+   - Drawers become full-width sheets; form controls inside get 44px targets.
+   The chat dock styles are injected at runtime by shared/business-chat.js
+   (after this stylesheet), so those overrides need !important.
+   ========================================================================== */
+@media (max-width: 767px) {
+  /* --- Shell frame: topbar grows to two rows, workspace takes the rest --- */
+  .app-shell {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  body[data-maintenance-active="true"] .app-shell {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  /* 52px action row + 48px tab row + 2x4px padding + 1px border = 109px.
+     --ctox-shell-topbar-h lives on :root so the window layer, the start menu
+     and the drawers (all siblings of the topbar, not descendants) line up
+     underneath it. */
+  :root {
+    --ctox-shell-topbar-h: 109px;
+  }
+
+  .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 52px 48px;
+    gap: 0 var(--space-2);
+    min-height: 0;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .topbar-left-group {
+    grid-column: 1;
+    grid-row: 1;
+    gap: var(--space-1);
+  }
+
+  /* The status text column yields to the tab row; warnings still surface in
+     the drawers and the maintenance banner. */
+  .topbar-status-bar {
+    display: none;
+  }
+
+  .topbar-actions {
+    grid-column: 3;
+    grid-row: 1;
+    gap: var(--space-1);
+  }
+
+  .topbar-triad-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .topbar-actions .icon-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .topbar-actions .account-button {
+    min-height: 44px;
+  }
+
+  .account-button span {
+    max-width: 28vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Open-app tabs stay reachable on phones: second topbar row, internally
+     scrollable (overflow-x:auto on .module-tabs), never widening the page. */
+  .module-nav {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+
+  .module-tabs {
+    min-height: 44px;
+  }
+
+  .module-tab {
+    min-height: 44px;
+  }
+
+  /* The macOS shell style pins the tab row to plain `center`, which clips the
+     scrolled start of an overflowing tab strip; `safe center` keeps centering
+     while it fits and scrolls correctly past the cap. */
+  :root[data-shell-style="macos"] .module-tabs {
+    justify-content: safe center;
+  }
+
+  /* --- Start menu: full-width sheet below the topbar --- */
+  .shell-start-menu-panel {
+    top: var(--ctox-shell-topbar-h, 109px);
+    left: 0;
+    right: 0;
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - var(--ctox-shell-topbar-h, 109px) - env(safe-area-inset-bottom, 0px));
+    border-radius: 0;
+  }
+
+  /* --- Windowed apps become fullscreen sheets ---
+     The window layer is anchored below the topbar, so a 100%-sized window is
+     exactly the workspace area. Inline left/top/width/height from the window
+     manager (desktop geometry or its <=600px mobile-sheet bounds) are
+     overridden; drag/resize gestures keep updating inline styles but cannot
+     move the sheet. */
+  .shell-window-layer {
+    inset: var(--ctox-shell-topbar-h, 109px) 0 0 0;
+    width: 100%;
+    height: auto;
+    min-width: 0;
+  }
+
+  .shell-window-layer > .shell-window {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-width: none !important;
+    max-height: none !important;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0 !important;
+  }
+
+  .shell-window-layer > .shell-window > .shell-window-resize {
+    display: none !important;
+  }
+
+  .shell-window-layer > .shell-window > .shell-window-header {
+    flex: 0 0 48px;
+    min-height: 48px;
+    gap: var(--space-1);
+    cursor: default;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-control {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-header-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Window content scrolls inside the sheet; optional module side panes
+     stack vertically (same anatomy as the existing <=600px mobile sheet). */
+  .shell-window-layer > .shell-window .shell-window-content {
+    scroll-padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .shell-window-layer > .shell-window .shell-window-content > .shell-window-module-root {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(200px, auto) auto;
+    align-content: start;
+    height: 100%;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+    overflow: auto;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-pane,
+  .shell-window-layer > .shell-window .shell-window-module-root > .module-content {
+    grid-column: 1;
+    width: auto;
+    min-width: 0;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-pane--left {
+    grid-row: 1;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-root > .module-content {
+    grid-row: 2;
+    height: auto;
+    min-height: min(220px, calc(100dvh - var(--ctox-shell-topbar-h, 109px) - 104px));
+    overflow: auto;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-pane--right {
+    grid-row: 3;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  /* --- Drawers: full-width sheets, touch-sized form controls --- */
+  .drawer-left,
+  .drawer-right {
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    border-radius: 0 !important;
+  }
+
+  .drawer-right.account-popover {
+    inset: calc(var(--ctox-shell-topbar-h, 109px) + 4px) 8px auto 8px !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: calc(100svh - var(--ctox-shell-topbar-h, 109px) - 16px) !important;
+  }
+
+  .drawer-bottom {
+    inset: var(--ctox-shell-topbar-h, 109px) 0 0 !important;
+    max-height: none !important;
+    border-radius: 0 !important;
+  }
+
+  .drawer :is(button, select, input, textarea) {
+    min-height: 44px;
+  }
+
+  /* --- Chat dock ("Chat-Leiste") + date pill ("Verlauf-Leiste") ---
+     Injected runtime styles outrank linked stylesheets, hence !important.
+     The dock never exceeds the viewport: fab + pill + new stay fixed, the
+     chat strip (and its nav arrows) shrink to a scrollable minmax(0, 1fr). */
+  .ctox-chat-root {
+    left: 8px !important;
+    right: 8px !important;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-root.is-collapsed {
+    right: 8px !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-dock {
+    --ctox-date-pill-width: 118px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    gap: 6px !important;
+    grid-template-columns: 76px var(--ctox-date-pill-width) 44px !important;
+  }
+
+  .ctox-chat-dock.is-collapsed {
+    width: auto !important;
+    grid-template-columns: 76px var(--ctox-date-pill-width) !important;
+  }
+
+  .ctox-chat-dock.has-visible-chats {
+    grid-template-columns: 76px var(--ctox-date-pill-width) minmax(0, 1fr) 44px !important;
+  }
+
+  .ctox-chat-dock.has-nav,
+  .ctox-chat-dock.has-many-chats {
+    grid-template-columns: 76px var(--ctox-date-pill-width) 32px minmax(0, 1fr) 32px 44px !important;
+  }
+
+  .ctox-chat-dock.has-one-chat .ctox-chat-strip,
+  .ctox-chat-dock.has-few-chats .ctox-chat-strip {
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-fab {
+    width: 76px !important;
+    min-width: 0 !important;
+    height: 44px !important;
+  }
+
+  .ctox-chat-date-pill {
+    height: 44px !important;
+    min-width: 0 !important;
+  }
+
+  .ctox-date-nav-btn {
+    width: 32px !important;
+    height: 32px !important;
+  }
+
+  .ctox-chat-nav {
+    width: 32px !important;
+    height: 44px !important;
+  }
+
+  .ctox-chat-new {
+    width: 44px !important;
+    height: 44px !important;
+  }
+
+  /* Open chat windows pin to the sheet width; only the active chat is shown
+     (switching stays on the dock strip), mirroring the side-dock pattern. */
+  .ctox-chat-stage-inner {
+    overflow: hidden !important;
+  }
+
+  .ctox-chat-window {
+    left: 8px !important;
+    right: 8px !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-window:not(.is-active) {
+    display: none !important;
+  }
+
+  .ctox-chat-busy-panel,
+  .ctox-date-workload-panel {
+    left: 0 !important;
+    width: calc(100vw - 32px) !important;
+    max-width: calc(100vw - 32px) !important;
+  }
+}

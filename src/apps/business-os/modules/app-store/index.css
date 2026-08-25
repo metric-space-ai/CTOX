@@ -872,3 +872,26 @@
    the kit default rows collapse the well and the shelf canvas ends up 1px. */
 .store-center { grid-template-rows: auto auto minmax(0, 1fr) auto; }
 .store-left { grid-template-rows: auto minmax(0, 1fr) auto; }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, and
+   category rows get a full finger-height hit area. Narrow-viewport layout
+   (stacked panes, smaller card grid) is handled by the @container
+   business-app-window rules above (900px/760px/640px/520px). */
+@media (pointer: coarse) {
+  .app-store-module button,
+  .app-store-module input,
+  .app-store-module select,
+  .app-store-module textarea {
+    min-height: 44px;
+  }
+
+  .app-store-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .app-store-module .store-category-list .ctox-list-item {
+    min-height: 44px;
+  }
+}

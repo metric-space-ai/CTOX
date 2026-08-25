@@ -336,19 +336,27 @@
   }
 }
 
-/* Touch targets on coarse pointers. */
+/* Touch targets on coarse pointers: every interactive control reaches the
+   44px minimum, icon-only pane buttons in both dimensions. */
 @media (pointer: coarse) {
   .threads-module button,
   .threads-module input,
-  .threads-module textarea {
+  .threads-module textarea,
+  .threads-module select {
     min-height: 44px;
+  }
+
+  .threads-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
   }
 }
 
-/* custom: mobile list/detail switcher — below 600px threads becomes a
-   single-pane app where JS swaps list, detail and context views via
-   .is-mobile-detail/.is-context-open; the kit has no equivalent pattern */
-@container business-app-window (max-width: 600px) {
+/* custom: mobile list/detail switcher — up to the shell-wide 767px mobile
+   boundary threads becomes a single-pane app where JS swaps list, detail and
+   context views via .is-mobile-detail/.is-context-open; the kit has no
+   equivalent pattern */
+@container business-app-window (max-width: 767px) {
   .threads-module {
     display: block;
     padding: 0 0 calc(52px + env(safe-area-inset-bottom, 0px));
@@ -421,7 +429,7 @@
   }
 
   .threads-mobile-actions button {
-    min-height: 40px;
+    min-height: 44px;
     border: 0;
     border-radius: var(--control-radius);
     background: transparent;
