@@ -46,7 +46,7 @@ du es nicht doppelt machst.
 ## 2 · AKTIVER ZUSTAND auf dieser Maschine (bitte zuerst lesen)
 
 - **Overlay auf der Produktiv-Installation:** Die 8 Shell-Dateien (Phase 1)
-  und alle 32 Modul-`index.css` sind über
+  und alle 36 Modul-`index.css` sind über
   `~/.local/lib/ctox/current/business-os/` gelegt, damit der Operator den
   Stand sofort sieht. Originale liegen als Backup unter
   `~/.local/state/ctox-mobile-handover/bos-shell-backup/`. Das Overlay wird
@@ -66,7 +66,7 @@ du es nicht doppelt machst.
 
 ## 3 · DEINE AUFGABEN (Reihenfolge = Priorität)
 
-### A · Visuelle QS-Runde über alle 32 Module (sofort startbar)
+### A · Visuelle QS-Runde über alle 36 Module (sofort startbar)
 Nur Stichproben sind visuell geprüft (desktop, threads, credentials, mail).
 Öffne jedes Modul im Simulator (Safari → `http://127.0.0.1:8799/business-os/`,
 Serve ggf. neu starten) und prüfe: nichts ragt aus dem Viewport, Listen
@@ -184,3 +184,159 @@ mtime-Abgrenzung, Balance-Check, explizite Pfad-Commits, dann
 - Koordination: Desktop-Session „workjet-0c" (SendMessage an
   `uds:/tmp/cc-socks/62630.sock`) hält apps/desktop, apps/web, apps/server,
   native/provider-gateway*; Mobile-/Business-OS-Pfade gehören diesem Strang.
+
+## 7 · Geklärte Rückfragen
+
+Diese Antworten sind Arbeitsanweisungen für die Fortsetzung. Nur Punkt 7
+benötigt eine Entscheidung des Operators.
+
+1. **SuperDoc-Toolbar per CSS-Override: erlaubt.** Der Override gehört in
+   `modules/documents/index.css`, muss streng auf den Documents-Container
+   begrenzt bleiben und darf `vendor/` nicht verändern. Das bewusst akzeptierte
+   Risiko: Ein Vendor-Update kann Klassennamen ändern. Den Override deshalb mit
+   einem kurzen Kommentar auf die verwendete SuperDoc-Version datieren.
+2. **Mail-Lücke: nur dokumentierter Folgepunkt.** Die viewport-basierten statt
+   container-basierten Queries werden in dieser mobilen QS-Runde nicht geändert,
+   weil ein mobiles Sheet die volle Viewport-Breite nutzt. Falls die QS zeigt,
+   dass auch das mobile Sheet betroffen ist, die Lücke hochstufen und als
+   eigenen kleinen Brief schneiden.
+3. **Einmaliger Secret-Transport im Deep Link: erlaubt und etabliert.** Beim
+   Import das Room-Secret sofort in Keychain/Keystore verschieben und die
+   Link-Payload danach nirgends speichern. Es darf insbesondere nicht in
+   persistierten URLs, Registry, Logs, Verlauf, Screenshots, Berichten oder
+   Receipts auftauchen. QR-Scan oder Einfügen bevorzugen; nach einem
+   Pasteboard-Import die Zwischenablage bereinigen. Invite-TTL verwenden.
+4. **Mobile-URL-Schema:** `ctox-business-os-mobile://pair` ist korrekt und frei.
+   `ctox:` bleibt dem Daemon vorbehalten. `ctox-desktop*` und `ctox-mobile*`
+   gehören zur Workjet/T3-Produktlinie und sind wegen Verwechslungsgefahr tabu.
+5. **Discovery und QS parallel ausführen.** Sobald der byte-identische
+   Discovery-Brief steht, Grok, Luna und GLM in getrennten
+   Wegwerf-Prototyp-Verzeichnissen starten. Der Brief enthält mindestens den
+   WebKit-Beweis, das Launch-Kontext-Format, den Invite-Referenzcode und die
+   Verbote aus §3C. Die Prototypen sind keine Produktionslieferung und dürfen
+   den Checkout nicht verändern. Die QS-Runde läuft währenddessen weiter.
+6. **Kanonische QS-Liste:** aus
+   `src/apps/business-os/system-apps.json` und
+   `src/apps/business-os/modules/registry.json` ableiten. Reihenfolge nach
+   Gewicht: zuerst die zehn System-Apps (`desktop`, `ctox`, `tickets`,
+   `threads`, `knowledge`, `browser`, `credentials`, `app-store`, `creator`,
+   `reports`), dann die geschäftskritischen Module (`mail`, `conversations`,
+   `customers`, `invoices`, `buchhaltung`, `documents`), danach der Rest. Pro
+   Modul Viewport, Scrollen, Formulare/Tap-Ziele und Sheet-Bedienung prüfen.
+   Ein geprüfter Leerzustand zählt bei leeren Operator-Modulen als QS.
+7. **OPERATOR-ENTSCHEIDUNG — Aufgabe B bleibt blockiert.** Die fremden
+   uncommitted Änderungen an `shared/window-manager.js` und den übrigen
+   Aug-20/21-Dateien weder committen noch verwerfen. Michael lässt sie von der
+   verursachenden Session landen oder ausdrücklich verwerfen. Erst danach darf
+   der Mobile-No-Op-Fix aus Aufgabe B beginnen.
+
+## 8 · Fortsetzung am 2026-08-25
+
+### A · Mobile-QS abgeschlossen
+
+Die vier Mobile-Commits betreffen **36**, nicht 32, eindeutige Module. Die
+ältere Zahl in §2/§3 wurde korrigiert. Geprüft wurde bei 402×874:
+
+- Live in der Operator-Shell: `desktop`, `ctox`, `tickets`, `threads`,
+  `knowledge`, `browser`, `credentials`, `app-store`, `reports`, `mail`,
+  `coding-agents`, `appsec-pentest`; Mail zusätzlich in Safari auf dem iOS-26.5-
+  Simulator.
+- Die übrigen bzw. nicht direkt aus dem Launcher erreichbaren Oberflächen als
+  statisches Modul-Markup mit den echten Shell-/Base-/Modul-Styles:
+  `buchhaltung`, `calendar`, `consent`, `conversations`, `creator`, `customers`,
+  `cv-print-builder`, `documents`, `esign`, `importer`, `intake`, `interviews`,
+  `invoices`, `iot`, `matching`, `nachweise`, `notes`, `outbound`, `placements`,
+  `research`, `shiftflow`, `spreadsheets`, `submissions`, `support`.
+
+Ergebnis: kein Seitenüberlauf; Sheet-Schließen blieb erreichbar. Die zunächst
+auffälligen Überbreiten in `matching`, `notes` und `shiftflow` sind erwartete,
+intern geschlossene Side-Panes bzw. eigene horizontale Scroll-Owner. Leere und
+statische Ladezustände wurden als solche gewertet. Die statische Prüfung ersetzt
+bei datenabhängigen Detailansichten keinen späteren echten Geräte-E2E-Test.
+
+Der bestätigte SuperDoc-Befund wurde als erlaubter Modul-CSS-Fix behoben:
+`modules/documents/index.css` überschreibt unter `pointer: coarse` die 32px-
+Toolbar von **SuperDoc 1.32.0** auf 44px, streng auf
+`.documents-superdoc-toolbar` gescoped. `vendor/superdoc.{css,mjs}` blieb
+byte-identisch. Ein Guard in `documents.test.mjs` schützt Scope, Version-Kommentar
+und Zielgröße.
+
+Verifikation:
+
+- `node --test src/apps/business-os/modules/documents/documents.test.mjs` —
+  37/37 grün; nur bereits vorhandene Duplicate-Key-Warnungen aus
+  `vendor/document-format.mjs`.
+- `node --test src/apps/business-os/modules/documents/documents-layout.browser.test.mjs`
+  — 1/1 grün.
+- `git diff --check` — grün.
+
+Offen dokumentiert, nicht Teil dieses Fixes: Browser-Long-Press/Remote-Keyboard,
+die nur im schmalen Desktop-Fenster relevante Mail-Container-Query und ein in
+der Live-Shell wiederholt sichtbarer `ctox/index.js`-Fehler beim Zugriff auf
+`executionPhase`. Letzterer liegt außerhalb des CSS-Sweeps und die betroffene
+JS-Arbeit ist fremd/dirty.
+
+### B · Weiter blockiert
+
+`shared/window-manager.js` und `shared/window-manager.test.mjs` sind weiterhin
+fremd verändert. Keine Änderung und kein Commit durch diesen Strang.
+
+### Koordination mit der parallelen „CTOX Desktop app"
+
+Der Workjet-Desktop-Worker hat seinen getrennten Packaging-Scope als
+`c805e3e35` abgeschlossen. Er änderte keine Datei unter diesem CTOX-Checkout,
+keine Mobile-/Contract-/Pairing-Datei und meldete Port 9300 wieder laufend. Es
+gab keine Überschneidung.
+
+### C · Discovery-Panel ausgewertet
+
+Byte-identischer Brief und Launchpad:
+`~/.local/state/workjet-launchpads/ctox-business-os-mobile-discovery-20260825/`
+(Brief-Commit `9fb8c27`).
+
+- **Grok 4.6:** nicht gestartet; zwei Health-Probes scheiterten reproduzierbar
+  mit `API Error: 400 unknown provider for model grok-4.6`. Kein Ersatzmodell
+  wurde stillschweigend verwendet.
+- **Luna**, Run `local-2026-08-25T092649Z-03a6c0ab-f922-40cd-a56a-9ab698d728de`:
+  isoliert und 8/8 eigene Tests grün, aber als Produktionsgrundlage verworfen
+  und `abandoned` markiert. Der Prototyp erfand `room`/`secret`/numerische TTL
+  statt des Desktop-v1-Vertrags und gab dem bestehenden WebRTC-Client das
+  Room-Passwort nicht; damit wäre kein echter Sync möglich.
+- **GLM**, Run `local-2026-08-25T092649Z-0dfc4f86-07c8-4cae-a2be-e28965007b85`:
+  Ergebnis importiert und `integrated`. Wegwerf-Prototyp unter
+  `/tmp/ctox-business-os-mobile-discovery.DPe9dx`; 9/9 Tests grün, Swift-App
+  mit Xcode 26.6 gebaut und im iOS-26.5-Simulator per synthetischem Deep Link
+  gepairt. Korrektes Invite-v1-Schema, Keychain-Grenze, opaque Registry-Refs
+  und IndexedDB-Persistenz über Relaunch wurden belegt. Android ist nur als
+  Quellarchitektur vorhanden, da Java/SDK/Gradle fehlen.
+
+Konsolidierte Empfehlung: dünne native Hosts — SwiftUI/WKWebView plus
+`WKURLSchemeHandler` und Kotlin/WebView plus `WebViewAssetLoader`; kein Expo/RN.
+Ein wechselnder Loopback-Port setzte im Versuch den IndexedDB-Zähler zurück,
+weil der Origin wechselte. Der Custom-Scheme-Handler behielt den Store und ist
+auf iOS die Primärroute; Loopback bleibt höchstens ein stabil-portiger Fallback.
+
+Pflichtkorrekturen für den Produktionsbrief gegenüber dem GLM-Prototyp:
+
+1. Das Room-Passwort nach Keychain/Keystore-Rücklesen nur in-memory und am
+   Dokumentstart injizieren bzw. beim Ausliefern von `index.html` einbetten;
+   **kein erneutes `ctox_config` mit Secret im Shell-URL-Query**.
+2. Desktop-v1-Felder exakt spiegeln (`display_name`, `sync_room`,
+   `signaling_room_password`, ISO-`expires_at`, optional Session-/Capability-
+   Material); ein gemeinsamer Fixture-Korpus muss JS, Swift und Kotlin binden.
+3. Android-Build und echter WebRTC/IndexedDB-Smoke sind ein Akzeptanzkriterium,
+   nicht nur eine Quellcode-Notiz.
+4. Die reale Shell umfasst ca. 289 MB/2058 Dateien; davon entfallen ca. 217 MB
+   auf `vendor/ctox-office`. Dies ist vor der Produktionsimplementation als
+   Paketierungsentscheidung zu klären.
+
+### Neue Operator-Entscheidungen vor dem Sol-Produktionslauf
+
+1. **Shell-Paket:** Soll v0 die vollständigen ca. 289 MB bündeln, oder darf
+   `vendor/ctox-office` als On-Demand-Resource/Play-Asset-Pack ausgelagert
+   werden? Empfehlung: schlanke Basis plus signiertes, versionsgleiches
+   On-Demand-Paket; andernfalls ist die Store-/Download-Größe ein hohes Risiko.
+2. **Plattform-Floor/Isolation:** Darf v0 iOS 17 voraussetzen und Android-Geräte
+   ohne `MULTI_PROFILE` zunächst auf genau eine gepairte Instanz begrenzen?
+   Empfehlung: ja; damit bleibt die IndexedDB-Isolation fail-closed, statt
+   Instanzdaten in einem gemeinsamen Profil zu vermischen.

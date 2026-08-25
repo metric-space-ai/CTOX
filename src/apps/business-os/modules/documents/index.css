@@ -1677,6 +1677,23 @@
     min-height: 44px;
   }
 
+  /* SuperDoc 1.32.0 ships 32px toolbar controls. Keep this vendor override
+     scoped to the Documents-owned toolbar so touch targets reach 44px while
+     vendor/superdoc.css stays byte-identical. Recheck these class names when
+     the bundled SuperDoc version changes. */
+  .documents-superdoc-toolbar .superdoc-toolbar {
+    --sd-ui-toolbar-height: 44px;
+    max-height: 144px;
+  }
+
+  .documents-superdoc-toolbar .toolbar-item {
+    min-width: 44px;
+  }
+
+  .documents-superdoc-toolbar .toolbar-dropdown-option {
+    min-height: 44px;
+  }
+
   /* Checkboxes/radios (context-mode choices) keep their box size; their
      label row is the tap target. */
   .documents-module input[type="checkbox"],
