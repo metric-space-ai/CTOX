@@ -2630,16 +2630,36 @@ function renderAdapterRail(ctx, refs, state) {
       anmelden.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
       anmelden.textContent = t('btnAdapterLogin', 'Im Browser anmelden');
       anmelden.addEventListener('click', () => {
-        const url = String(adapter.url || adapter.payload?.url || `https://${adapter.source_id || ''}`);
-        dispatchBrowserCommand(ctx, state, 'browser.session.start', { url, new_session: true })
-          .then(() => {
-            ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: t('adapterLoginStarted', 'Sitzung zur Quelle gestartet — dort anmelden, dann in Outbound prüfen.') });
-            state.refresh?.();
-          })
-          .catch((error) => {
-            state.notice = `Der Vorgang konnte nicht gestartet werden: ${error?.message || error}`;
-            state.refresh?.();
-          });
+        // Eine ANMELDE-Sitzung, keine gewoehnliche: nur mit
+        // purpose=web_stack_auth erkennt die Buehne den Vorgang und zeigt
+        // "Zugangsdaten einsetzen" und "Ich bin angemeldet" -- und nur der
+        // Sitzungspraefix browser_session_web_stack_auth_ gibt der Quelle ihr
+        // eigenes, dauerhaftes Browserprofil, in dem die Anmeldung bestehen
+        // bleibt. Ohne beides startete zwar ein Fenster, aber der Kreis liess
+        // sich nicht schliessen.
+        const quelle = String(adapter.source_id || '').trim();
+        const schluessel = quelle.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'quelle';
+        const url = String(adapter.url || adapter.payload?.url || (quelle ? `https://${quelle}` : ''));
+        if (!url) {
+          state.notice = t('adapterNoUrl', 'Für diese Quelle ist keine Adresse hinterlegt.');
+          state.refresh?.();
+          return;
+        }
+        const sessionId = `browser_session_web_stack_auth_${schluessel}_${Date.now()}`;
+        openRequestedBrowserSession({
+          session_id: sessionId,
+          tab_id: `browser_tab_${sessionId}`,
+          purpose: 'web_stack_auth',
+          target_url: url,
+          source_id: quelle,
+          allowed_domains: [quelle].filter(Boolean),
+          secret_name: String(adapter.credential_secret_name || ''),
+        });
+        ctx.notifications?.show?.({
+          type: 'info',
+          title: 'Browser',
+          message: t('adapterLoginStarted', 'Anmeldesitzung geöffnet — dort anmelden und "Ich bin angemeldet" bestätigen.'),
+        });
       });
       aktionen.appendChild(anmelden);
     }
