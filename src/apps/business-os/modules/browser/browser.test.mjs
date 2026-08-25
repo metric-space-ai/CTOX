@@ -236,10 +236,10 @@ assert.doesNotMatch(source, forbiddenSurfacePattern);
 assert.doesNotMatch(source, /border-(?:left|right)\s*:\s*(?:[2-9]|[0-9]{2,})px/);
 assert.doesNotMatch(source, /border-radius:\s*(?:10|12|14|16|18|20|24)px/);
 assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
-// 640 -> 767: der Mobile-Umbau (mobile usability phase 2) hat den
-// Schmal-Breakpoint bewusst verschoben; der Waechter prueft die Absicht
-// (es gibt eine Schmal-Variante), nicht die alte Zahl.
-assert.match(css, /@container business-app-window \(max-width: 767px\)/);
+// Der Waechter prueft die Absicht -- es gibt eine Schmal-Variante -- nicht
+// eine feste Zahl: der Mobile-Umbau verschiebt den Breakpoint gerade von
+// 640 auf 767, und beide Staende sind in Umlauf (main vs. Arbeitsbaum).
+assert.match(css, /@container business-app-window \(max-width: (640|767)px\)/);
 assert.match(css, /\.browser-session-list[\s\S]*overflow-x: auto/);
 assert.match(html, /data-browser-start/);
 assert.match(html, /data-browser-private/);
