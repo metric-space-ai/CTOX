@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260821-tabs-abruf-v240';
+const APP_BUILD = '20260825-scraping-reiter-v241';
 
 ensureShellStylesheets();
 
@@ -10993,6 +10993,10 @@ async function normalizeBusinessOsLaunchConfig(config) {
     peer_role: config.peer_role || config.peerRole || 'browser',
     sync_room: syncRoom,
     signaling_room_password: roomPassword,
+    signaling_auth_version: String(config.signaling_auth_version || config.signalingAuthVersion || '').trim(),
+    signaling_browser_token: String(config.signaling_browser_token || config.signalingBrowserToken || '').trim(),
+    signaling_browser_token_hash: String(config.signaling_browser_token_hash || config.signalingBrowserTokenHash || '').trim(),
+    signaling_native_token_hash: String(config.signaling_native_token_hash || config.signalingNativeTokenHash || '').trim(),
     signaling_urls: urls,
     ice_servers: iceServers,
     iceServers,

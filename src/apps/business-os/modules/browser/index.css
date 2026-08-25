@@ -749,3 +749,61 @@
   opacity: 1;
   background: var(--hover, #262c33);
 }
+
+/* custom: Scraping-Adapter-Schiene. Betriebszustand der Recherche-Adapter im
+   Browser-Modul; verwaltet werden sie in der Outbound-App. */
+.browser-adapter-card {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border, #333a42);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.browser-adapter-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.browser-adapter-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-adapter-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--muted, #5a646e);
+}
+
+.browser-adapter-dot.is-ok { background: var(--ok, #37b26c); }
+.browser-adapter-dot.is-warn { background: var(--warn, #d9a03f); }
+.browser-adapter-dot.is-error { background: var(--danger, #d95c4a); }
+.browser-adapter-dot.is-off { background: var(--muted, #5a646e); }
+
+.browser-adapter-meta {
+  font-size: 0.8rem;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-adapter-error {
+  font-size: 0.78rem;
+  color: var(--danger, #d95c4a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-adapter-hint {
+  padding: 0.6rem;
+  font-size: 0.78rem;
+  opacity: 0.6;
+}
