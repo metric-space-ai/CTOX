@@ -55,5 +55,14 @@
   "btnObserverRemove": "Remove observer",
   "btnClipCopy": "Copy clipboard",
   "btnClipPaste": "Paste clipboard",
-  "btnClipClear": "Clear clipboard"
+  "btnClipClear": "Clear clipboard",
+  "bandAdapters": "Scraping",
+  "adapterOff": "Disabled",
+  "adapterAuthMissing": "Access missing",
+  "adapterUnreachable": "Last check failed",
+  "adapterReady": "Ready",
+  "adaptersLoading": "Loading adapters …",
+  "adaptersFailed": "Adapters could not be loaded: ",
+  "adaptersEmpty": "No scraping adapters yet. They are created in the Outbound app under “Sources & access”.",
+  "adaptersManagedHint": "Managed in the Outbound app (“Sources & access”)."
 }

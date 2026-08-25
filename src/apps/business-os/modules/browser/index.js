@@ -55,6 +55,7 @@ export async function mount(ctx) {
     newTab: root.querySelector('[data-browser-new-tab]'),
     contextMenu: root.querySelector('[data-browser-context-menu]'),
     tabstrip: root.querySelector('[data-browser-tabstrip]'),
+    adapterCount: root.querySelector('[data-pg-count="adapters"]'),
     upload: root.querySelector('[data-browser-upload]'),
     controllerAcquire: root.querySelector('[data-browser-controller-acquire]'),
     controllerRelease: root.querySelector('[data-browser-controller-release]'),
@@ -226,11 +227,14 @@ export async function mount(ctx) {
       band: detail.band || 'all',
       filters: detail.filters || {},
     };
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
   };
   root.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
+  // Die Adapter-Lease endet mit dem Modul, sonst haelt sie die bedarfs-
+  // geladene Sammlung dauerhaft offen.
+  cleanups.push(() => { state.adapterLease?.release?.(); state.adapterLease = null; });
   refs.sessionsImport?.addEventListener('click', () => importBrowserSessions(ctx, state, refs));
   refs.sessionsExport?.addEventListener('click', () => exportBrowserSessions(state, refs));
   refs.sessionsToggle?.addEventListener('click', () => {
@@ -823,7 +827,7 @@ export async function mount(ctx) {
         filters: grammar.filters || {},
       };
     }
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
     // Auto-reveal: the remote work surface is meaningful once a session is
     // selected (visible = hasSelection && !userCollapsed). No session -> the
@@ -2411,6 +2415,128 @@ function renderSessionList(refs, sessions, tabs, activeSession) {
 // Owned sessions plus the read-only import overlay (imported entries that are
 // not already a real owned session). Imported sessions are marked and never
 // persisted — browser sessions are a read-only projection.
+// custom: Scraping-Adapter im Browser-Modul sichtbar machen.
+//
+// Die Adapter der Recherche (outbound_research_adapters) steuern Browser-
+// Laeufe, waren in der Browser-App aber unsichtbar -- es gab nicht einmal
+// einen Reiter. Verwaltet werden sie weiterhin in der Outbound-App; hier
+// steht der Betriebszustand: wer ist aktiv, wem fehlt der Zugang, wann lief
+// der letzte Test. Die Sammlung ist bedarfsgeladen, deshalb Lease statt
+// startCollection (Muster wie im App-Store-Modul).
+async function ladeScrapingAdapter(ctx, state) {
+  if (state.adapterLadedauer) return state.adapterLadedauer;
+  state.adapterLadedauer = (async () => {
+    try {
+      if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
+        state.adapterLease = await ctx.sync.leaseCollection('outbound_research_adapters', 'browser:scraping-adapters');
+      }
+      const rows = await readCollection(browserCollection(ctx, 'outbound_research_adapters'), {
+        limit: 200,
+        sort: [{ updated_at_ms: 'desc' }],
+      });
+      state.adapters = rows.filter((row) => row && row.is_deleted !== true);
+      state.adapterFehler = '';
+    } catch (error) {
+      state.adapters = state.adapters || [];
+      state.adapterFehler = String(error?.message || error);
+    } finally {
+      state.adapterLadedauer = null;
+    }
+  })();
+  return state.adapterLadedauer;
+}
+
+function adapterZustand(adapter) {
+  const auth = String(adapter.auth_status || '').toLowerCase();
+  const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
+  if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
+  if (auth.includes('missing') || auth.includes('required') || status.includes('auth')) {
+    return { klasse: 'is-error', text: t('adapterAuthMissing', 'Zugang fehlt') };
+  }
+  if (status.includes('unreachable') || status.includes('fail') || adapter.last_error) {
+    return { klasse: 'is-warn', text: t('adapterUnreachable', 'Letzte Prüfung fehlgeschlagen') };
+  }
+  return { klasse: 'is-ok', text: t('adapterReady', 'Bereit') };
+}
+
+// Eine Schiene, zwei Inhalte: Sitzungen oder Scraping-Adapter, je nach Band.
+function renderLeftRail(ctx, refs, state) {
+  if (state.leftView?.band === 'adapters') {
+    renderAdapterRail(ctx, refs, state);
+    return;
+  }
+  renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+}
+
+function renderAdapterRail(ctx, refs, state) {
+  const rail = refs.sessions;
+  if (!rail) return;
+  if (refs.adapterCount) refs.adapterCount.textContent = String((state.adapters || []).length || '');
+  if (!Array.isArray(state.adapters)) {
+    rail.replaceChildren();
+    const laden = document.createElement('div');
+    laden.className = 'ctox-empty';
+    laden.textContent = t('adaptersLoading', 'Adapter werden geladen …');
+    rail.appendChild(laden);
+    ladeScrapingAdapter(ctx, state).then(() => {
+      if (state.leftView?.band === 'adapters') renderAdapterRail(ctx, refs, state);
+    });
+    return;
+  }
+  rail.replaceChildren();
+  if (state.adapterFehler) {
+    const fehler = document.createElement('div');
+    fehler.className = 'ctox-empty';
+    fehler.textContent = t('adaptersFailed', 'Adapter konnten nicht geladen werden: ') + state.adapterFehler;
+    rail.appendChild(fehler);
+    return;
+  }
+  if (!state.adapters.length) {
+    const leer = document.createElement('div');
+    leer.className = 'ctox-empty';
+    leer.textContent = t('adaptersEmpty', 'Noch keine Scraping-Adapter. Sie entstehen in der Outbound-App unter „Quellen & Zugänge“.');
+    rail.appendChild(leer);
+    return;
+  }
+  const suche = String(state.leftView?.search || '');
+  for (const adapter of state.adapters) {
+    const label = String(adapter.label || adapter.source_id || adapter.id || '');
+    if (suche && !label.toLowerCase().includes(suche)) continue;
+    const zustand = adapterZustand(adapter);
+    const karte = document.createElement('div');
+    karte.className = 'browser-adapter-card';
+    const kopf = document.createElement('div');
+    kopf.className = 'browser-adapter-head';
+    const punkt = document.createElement('span');
+    punkt.className = `browser-adapter-dot ${zustand.klasse}`;
+    const name = document.createElement('strong');
+    name.textContent = label;
+    kopf.append(punkt, name);
+    const meta = document.createElement('div');
+    meta.className = 'browser-adapter-meta';
+    const getestet = Number(adapter.last_test?.at_ms || adapter.updated_at_ms || 0);
+    const latenz = Number(adapter.latency_ms || adapter.last_test?.latency_ms || 0);
+    meta.textContent = [
+      String(adapter.source_id || ''),
+      zustand.text,
+      getestet ? new Date(getestet).toLocaleString() : '',
+      latenz ? `${latenz} ms` : '',
+    ].filter(Boolean).join(' · ');
+    karte.append(kopf, meta);
+    if (adapter.last_error) {
+      const fehlerzeile = document.createElement('div');
+      fehlerzeile.className = 'browser-adapter-error';
+      fehlerzeile.textContent = String(adapter.last_error).slice(0, 160);
+      karte.appendChild(fehlerzeile);
+    }
+    rail.appendChild(karte);
+  }
+  const hinweis = document.createElement('div');
+  hinweis.className = 'browser-adapter-hint';
+  hinweis.textContent = t('adaptersManagedHint', 'Verwaltet in der Outbound-App („Quellen & Zugänge“).');
+  rail.appendChild(hinweis);
+}
+
 function sessionRenderList(state) {
   const owned = Array.isArray(state?.visibleSessions) ? state.visibleSessions : [];
   const ownedIds = new Set(owned.map((session) => session.id));
@@ -2717,7 +2843,7 @@ function importBrowserSessions(ctx, state, refs) {
       return;
     }
     state.importedSessions = imported;
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
     ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: `${imported.length} Sitzungen geladen (nur lokal).` });
   });
