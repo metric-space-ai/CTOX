@@ -5952,6 +5952,9 @@ const SCOPED_SYSTEM_MODULE_DB_COLLECTIONS = Object.freeze({
     'browser_tabs',
     'business_commands',
     'ctox_queue_tasks',
+    // Lesend fuer die Scraping-Leiste: welcher Adapter treibt Browser-Laeufe.
+    // Verwaltung und Schreibzugriff bleiben bei der Outbound-App.
+    'thesen_outbound_adapters',
   ]),
   creator: Object.freeze([
     'business_commands',

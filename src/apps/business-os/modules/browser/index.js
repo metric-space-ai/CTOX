@@ -2468,7 +2468,12 @@ async function ladeScrapingAdapter(ctx, state) {
         sammlung = browserCollection(ctx, 'thesen_outbound_adapters');
         sammlungsName = 'thesen_outbound_adapters';
       }
-      if (!sammlung) throw new Error('Keine Adapter-Sammlung registriert.');
+      if (!sammlung) {
+        throw new Error('Keine Adapter-Sammlung registriert (addCollections='
+          + typeof ctx.db?.addCollections
+          + ', db=' + typeof ctx.db
+          + ', vorhanden=' + kandidatenNamen.map((n) => n + ':' + !!browserCollection(ctx, n)).join(','));
+      }
       if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
         state.adapterLease = await ctx.sync.leaseCollection(sammlungsName, 'browser:scraping-adapters');
       }
