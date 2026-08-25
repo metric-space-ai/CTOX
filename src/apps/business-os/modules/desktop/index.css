@@ -83,77 +83,74 @@
   align-items: center;
   gap: 8px;
   padding: 8px 4px 10px;
-  border-radius: 16px;
+  border-radius: 18px;
   cursor: pointer;
   user-select: none;
   pointer-events: auto;
   color: var(--text);
   background: transparent;
-  border: 1px solid transparent;
-  /* GPU accelerated spring transitions */
-  transition: 
-    background-color 200ms cubic-bezier(0.25, 0.8, 0.25, 1),
-    border-color 200ms cubic-bezier(0.25, 0.8, 0.25, 1),
-    transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    box-shadow 200ms ease;
+  border: 0;
+  outline: 0;
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
   transform-origin: center bottom;
 }
 
 .desktop-icon:hover {
-  background: color-mix(in srgb, var(--surface) 18%, transparent);
-  border-color: color-mix(in srgb, var(--line) 20%, transparent);
-  transform: scale(1.05) translateY(-3px);
-  box-shadow: 
-    0 6px 16px rgba(0, 0, 0, 0.04),
-    0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  background: transparent;
+  transform: translateY(-2px);
+  box-shadow: none;
 }
 
 .desktop-icon.selected {
-  background: color-mix(in srgb, var(--accent-soft) 55%, rgba(255, 255, 255, 0.08));
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  box-shadow: 
-    0 6px 18px rgba(0, 0, 0, 0.06),
-    0 0 0 1px color-mix(in srgb, var(--accent) 15%, transparent) inset,
-    0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  background: transparent;
+  box-shadow: none;
 }
 
 .desktop-icon.dragging {
   opacity: 0.85;
-  background: color-mix(in srgb, var(--surface) 25%, transparent);
-  border-color: color-mix(in srgb, var(--line) 30%, transparent);
+  background: transparent;
   transform: scale(0.96) rotate(-2deg) !important;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.12) !important;
+  box-shadow: none !important;
   z-index: 1000 !important;
 }
 
-/* Unified High-End Glassmorphic Icon Tiles */
+/* App artwork is the icon. Do not wrap it in a second glass/card surface. */
 .desktop-icon .desktop-icon-glyph {
   width: 56px;
   height: 56px;
   display: grid;
   place-items: center;
   border-radius: 16px;
-  /* Pure uniform premium frosted glass */
-  background: color-mix(in srgb, var(--surface) 22%, transparent) !important;
-  backdrop-filter: blur(12px) saturate(120%) !important;
-  -webkit-backdrop-filter: blur(12px) saturate(120%) !important;
-  border: 1px solid color-mix(in srgb, var(--line) 20%, transparent) !important;
-  box-shadow: 
-    0 4px 14px rgba(0, 0, 0, 0.04),
-    0 1px 0 rgba(255, 255, 255, 0.05) inset !important;
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  outline: 0 solid transparent;
+  outline-offset: 3px;
+  transition: transform 180ms ease, filter 180ms ease, outline-color 120ms ease !important;
   color: var(--text);
 }
 
 .desktop-icon:hover .desktop-icon-glyph {
-  background: color-mix(in srgb, var(--surface) 35%, transparent) !important;
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent) !important;
-  transform: scale(1.08) translateY(-2px) !important;
-  box-shadow: 
-    0 8px 24px rgba(0, 0, 0, 0.08),
-    0 0 12px color-mix(in srgb, var(--accent) 15%, transparent) !important;
+  background: transparent !important;
+  transform: scale(1.06) !important;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.18));
+  box-shadow: none !important;
 }
 
+.desktop-icon.selected .desktop-icon-glyph,
+.desktop-icon:focus-visible .desktop-icon-glyph {
+  outline-width: 2px;
+  outline-color: color-mix(in srgb, var(--accent) 78%, white 12%);
+}
+
+.desktop-icon .desktop-icon-glyph > svg {
+  width: 48px;
+  height: 48px;
+  max-width: 100%;
+  max-height: 100%;
+}
 
 /* Elegant Label Typography - prevents ugly wrapping by increasing spacing */
 .desktop-icon .desktop-icon-label {
@@ -188,10 +185,7 @@
   transition: color 200ms ease, background-color 200ms ease, border-color 200ms ease;
 }
 
-.desktop-icon.selected .desktop-icon-label {
-  background: color-mix(in srgb, var(--accent) 15%, rgba(0, 0, 0, 0.15));
-  border-color: color-mix(in srgb, var(--accent) 25%, transparent);
-}
+.desktop-icon.selected .desktop-icon-label { background: transparent; border-color: transparent; }
 
 .desktop-icon-empty {
   position: absolute;
@@ -449,7 +443,7 @@
 @media (max-width: 767px) {
   .desktop-module {
     --desktop-icon-cell-w: 88px;
-    --desktop-icon-cell-h: 100px;
+    --desktop-icon-cell-h: 116px;
     --desktop-icon-padding: 12px;
   }
 
@@ -458,9 +452,9 @@
     left: auto !important;
     top: auto !important;
     width: 80px;
-    height: 92px;
-    gap: 6px;
-    padding: 6px 2px 8px;
+    height: 108px;
+    gap: 8px;
+    padding: 6px 2px 10px;
     border-radius: 12px;
   }
 
@@ -483,9 +477,14 @@
   }
 
   .desktop-icon .desktop-icon-glyph {
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+  }
+
+  .desktop-icon .desktop-icon-glyph > svg {
     width: 44px;
     height: 44px;
-    border-radius: 12px;
   }
 
   .desktop-icon .desktop-icon-label {
@@ -567,34 +566,24 @@ body[data-active-module="desktop"] .topbar {
   opacity: 0.5;
 }
 
-/* Desktop icon tiles: deeper frost, a real top light edge and a softer
-   shadow so they sit in the wallpaper like glass pebbles. */
+/* The CTOX wallpaper must not re-introduce a nested icon tile. */
 :root[data-shell-style="ctox"] .desktop-icon .desktop-icon-glyph {
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--surface) 32%, transparent) !important;
-  backdrop-filter: blur(18px) saturate(160%) !important;
-  -webkit-backdrop-filter: blur(18px) saturate(160%) !important;
-  border: 1px solid color-mix(in srgb, var(--line) 36%, transparent) !important;
-  box-shadow:
-    0 10px 26px rgba(0, 0, 0, 0.1),
-    0 1px 0 rgba(255, 255, 255, 0.4) inset !important;
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 
 :root[data-shell-style="ctox"] .desktop-icon:hover .desktop-icon-glyph {
-  background: color-mix(in srgb, var(--surface) 44%, transparent) !important;
-  border-color: color-mix(in srgb, var(--accent) 42%, transparent) !important;
-  box-shadow:
-    0 14px 32px rgba(0, 0, 0, 0.14),
-    0 0 18px color-mix(in srgb, var(--accent) 22%, transparent),
-    0 1px 0 rgba(255, 255, 255, 0.5) inset !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 :root[data-shell-style="ctox"][data-theme="dark"] .desktop-icon .desktop-icon-glyph {
-  background: color-mix(in srgb, var(--surface) 30%, transparent) !important;
-  border-color: color-mix(in srgb, var(--line) 30%, transparent) !important;
-  box-shadow:
-    0 12px 28px rgba(0, 0, 0, 0.36),
-    0 1px 0 rgba(255, 255, 255, 0.09) inset !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 
 /* Labels must survive the aurora: a two-stop shadow in the theme's deep

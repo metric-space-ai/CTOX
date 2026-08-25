@@ -33,12 +33,12 @@ const DESKTOP_ICON_PERSISTED_FIELDS = new Set([
   'updated_at_ms',
 ]);
 const DEFAULT_GRID = { cellW: 104, cellH: 120, offset: 24 };
-const COMPACT_GRID = { cellW: 88, cellH: 100, offset: 12 };
+const COMPACT_GRID = { cellW: 88, cellH: 116, offset: 12 };
 const ICON_METRICS = {
   width: 96,
   height: 104,
   compactWidth: 80,
-  compactHeight: 96,
+  compactHeight: 108,
 };
 
 const FALLBACK_LABELS = {
