@@ -123,7 +123,7 @@
 }
 
 /* ---- Narrow windows: stack the two panes, drop the resizer. ---- */
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 767px) {
   .placements-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(180px, 34vh) minmax(320px, 1fr);
@@ -140,5 +140,35 @@
   .placements-left,
   .placements-center {
     grid-column: 1;
+  }
+}
+
+/* ---- Touch targets on coarse pointers (phone/tablet): every interactive
+   control reaches the 44px minimum; the disclosure summary gets a full
+   finger-height hit area. ---- */
+@media (pointer: coarse) {
+  .placements-module button,
+  .placements-module input,
+  .placements-module select,
+  .placements-module textarea {
+    min-height: 44px;
+  }
+
+  .placements-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .placements-module .ctox-pane-tab,
+  .placements-module .ctox-list-item,
+  .placements-row-compact,
+  .placements-shard {
+    min-height: 44px;
+  }
+
+  .placements-module .ats-more > summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
   }
 }

@@ -1094,3 +1094,135 @@
     box-shadow: none;
   }
 }
+
+/* Phone sheet (container <= 767px): the <= 920px block already stacks the
+   sidebar card strip above the stage and turns the split vertical. What
+   remains for touch operability: >=44px tap targets, the correction-field
+   editor rail goes full-width above the document (its 286-330px side column
+   would leave the sheet ~90px of preview), the candidate strip cards fit
+   the viewport, and the print document's fixed mm columns (46mm avatar,
+   38/42mm fact columns) reflow so the A4 preview never forces sideways
+   scrolling of the whole pane. */
+@container business-app-window (max-width: 767px) {
+  .cv-print-builder .ctox-button,
+  .cv-print-builder .ctox-run-control,
+  .cv-print-builder .ctox-pane-icon,
+  .cv-print-builder .ctox-icon-button,
+  .cv-print-builder .ctox-sort-dir {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .cv-print-builder .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .cv-print-builder .ctox-input,
+  .cv-print-builder .ctox-select,
+  .cv-print-builder textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .cv-task-link {
+    height: auto;
+    min-height: 44px;
+    max-width: 100%;
+  }
+
+  /* Candidate strip: one card per swipe, always inside the viewport. */
+  .cv-candidate-list {
+    grid-auto-columns: minmax(230px, 78vw);
+  }
+
+  /* Editor rail above the document, capped so the sheet stays visible. */
+  .cv-print-workarea.has-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cv-field-editor {
+    position: relative;
+    max-height: 44vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--hairline, var(--line));
+  }
+
+  .cv-editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cv-editor-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .cv-editor-row > label {
+    grid-column: 2;
+  }
+
+  /* A4 preview: shrink the fixed print geometry so 100% width fits. */
+  .cv-q-head,
+  .cv-minimal-head {
+    padding: 20px 18px 10px;
+  }
+
+  .cv-q-body {
+    padding: 0 18px 14px;
+  }
+
+  .cv-minimal-body,
+  .cv-classic-body {
+    padding: 16px 18px 24px;
+  }
+
+  .cv-classic-head {
+    padding: 22px 18px 16px;
+  }
+
+  .cv-print-head {
+    padding: 20px 18px 14px;
+  }
+
+  .cv-modern-body {
+    padding: 18px;
+  }
+
+  .cv-q-foot {
+    padding: 8px 18px 14px;
+  }
+
+  .cv-minimal-facts {
+    margin-inline: 18px;
+  }
+
+  .cv-q-profile {
+    grid-template-columns: 30mm minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .cv-q-avatar {
+    width: 30mm;
+    height: 30mm;
+    font-size: 22px;
+  }
+
+  .cv-q-facts div,
+  .cv-q-methods div,
+  .cv-q-entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2mm;
+  }
+
+  .cv-print-head,
+  .cv-q-head,
+  .cv-minimal-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cv-print-logo {
+    justify-self: start;
+  }
+
+  .cv-print-name {
+    font-size: 24px;
+  }
+}

@@ -2177,3 +2177,85 @@
 .research-metric-progress-bar-fill.warn {
   background: var(--research-warn);
 }
+
+/* ----------------------------------------------------------------------------
+   Phone layout (≤767px container): the reports explorer sidebar/viewer split
+   (240px + 1fr, viewport-height derived) stacks vertically with natural
+   heights; the wide evidence table keeps scrolling inside its own host
+   (.research-table-host, min-width 1060px) — never the page.
+   -------------------------------------------------------------------------- */
+@container business-app-window (max-width: 767px) {
+  .explorer-layout,
+  .research-center-body.has-hidden-map .explorer-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    height: auto;
+    min-height: 0;
+  }
+
+  .explorer-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--research-line);
+    padding-right: 0;
+    padding-bottom: 8px;
+    max-height: 30vh;
+  }
+
+  .explorer-viewer {
+    padding: 0 4px;
+  }
+
+  /* Wide measurement-mode tabs shrink so at least two fit the viewport. */
+  .research-measurement-mode .ctox-pane-tab {
+    min-width: 0;
+  }
+
+  .research-counted-tab {
+    min-width: 108px;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   in the module reaches the 44px minimum — source-card action buttons (28px
+   desktop), report list items, task/rank rows and the graph overlay rails. */
+@media (pointer: coarse) {
+  .research-module button,
+  .research-module input:not([type="checkbox"]):not([type="radio"]),
+  .research-module select,
+  .research-module textarea,
+  .research-module summary {
+    min-height: 44px;
+  }
+
+  .research-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .research-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .research-task-item,
+  .research-rank-row,
+  .research-knowledge-list button,
+  .doc-item {
+    min-height: 44px;
+  }
+
+  .research-source-card-btn {
+    height: auto;
+    min-height: 44px;
+  }
+
+  .research-graph-tool,
+  .research-graph-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .research-graph-detail,
+  .research-graph-detail button {
+    height: 44px;
+  }
+}
