@@ -340,3 +340,57 @@ Pflichtkorrekturen für den Produktionsbrief gegenüber dem GLM-Prototyp:
    ohne `MULTI_PROFILE` zunächst auf genau eine gepairte Instanz begrenzen?
    Empfehlung: ja; damit bleibt die IndexedDB-Isolation fail-closed, statt
    Instanzdaten in einem gemeinsamen Profil zu vermischen.
+
+## 9 · Mobile-v0 implementiert
+
+Die beiden Entscheidungen aus §8 sind umgesetzt: `vendor/ctox-office` liegt
+außerhalb der Basis-Shell in einem versionsgleichen On-Demand-Paket. iOS setzt
+17+ voraus; Android akzeptiert **keinen** Ein-Instanz-Fallback, sondern weist
+WebViews ohne `MULTI_PROFILE` fail-closed als nicht unterstützt ab.
+
+Der neue, eigenständige Scope liegt unter
+`src/apps/business-os-mobile/`, ergänzt um
+`.github/workflows/business-os-mobile-ci.yml` und
+`docs/ctox-business-os-mobile.md`. Enthalten sind:
+
+- SwiftUI/WKWebView mit `WKURLSchemeHandler`, identifiziertem Data Store je
+  Instanz, Keychain, VisionKit und ODR-/Debug-Office-Provider;
+- Kotlin/WebViewAssetLoader mit `MULTI_PROFILE`, Keystore, CameraX/ML Kit und
+  PAD-/Debug-Office-Provider;
+- der gemeinsame Invite-v1-Fixture-Korpus, Shell-/Office-Staging mit
+  `ctox.mobile.shell-pack.v1`, Invite-Link-/QR-Helper und Secret-/Datenpfad-
+  Guards;
+- adaptive native Oberflächen für Phone, Tablet-Portrait **3:4** und
+  Tablet-Landscape **4:3**. iPad nutzt eine Split-View; Android begrenzt die
+  Instanzliste auf lesbare Breite, lässt dem WebView aber den vollen Viewport.
+
+Sicherheitskorrekturen aus der Sol-Prüfung: ausschließlich `wss:`, Capability-
+Ablauf nie nach Invite-Ablauf, script-sichere Launch-JSON-Injektion, atomarer
+Re-Pair-Secret-Swap, opaque Registry-Referenzen und abbrechbare iOS-Office-
+Hashprüfung außerhalb des Main Actors. Secret-Payloads erscheinen weder in
+URLs noch Registry, Logs, Verlauf, Reports, Screenshots oder Snapshots.
+
+Workjet-Evidenz: Sol-Briefs `5e73240` und Tablet-Addendum `671ee76`, Sol-Run
+`local-2026-08-25T100633Z-6153c233-1a97-493f-b478-46862061c8ba`; Kimi-Brief
+`311ba19`, Kimi-Run
+`local-2026-08-25T113531Z-1f0cf5b6-806a-46bb-b053-5f642c0be7ca`. Beide
+Ergebnisse wurden importiert und als integriert markiert. Der parallele
+Workjet-Desktop-Scope blieb getrennt und ist dort als `c805e3e35` gelandet.
+
+Lokale Abnahme am 25.08.2026:
+
+- Shared: 39/39 Tests, Static Guard und Secret-Canary grün;
+- Shell-Pack: 774 Office-Dateien verifiziert, Office aus Basis ausgeschlossen;
+- Swift-Core: 4/4 Tests grün;
+- vollständiger iOS-Simulator-App-Build grün; iPad Pro 13-inch (M5) in
+  2064×2752 (3:4) ohne Letterboxing, Clipping oder unerreichbare Primäraktion;
+- Android `testDebugUnitTest assembleDebug` mit isoliertem API-35-SDK grün
+  (4/4 Kotlin-Tests und unsigned Debug-APK). Mobile-CI installiert denselben
+  SDK-Floor, startet zusätzlich Phone plus Nexus 9 und erzwingt/prüft
+  Landscape 4:3.
+
+Nicht geändert wurden die fremden Window-Manager-, Documents-JS-,
+Spreadsheets-JS- und CLI-Einstiegsdateien. Aufgabe B bleibt daher bis zur
+Operator-Freigabe unverändert blockiert. Store-Einreichung,
+Produktionssignierung und der spätere rückwärtskompatible CLI-Befehl
+`ctox business-os mobile invite` sind ausdrücklich nicht Teil dieser v0.

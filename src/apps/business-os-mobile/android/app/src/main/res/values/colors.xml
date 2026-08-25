@@ -1,0 +1,7 @@
+<resources>
+<color name="ctox_text_secondary">#5A6B72</color>
+<color name="ctox_destructive">#B3261E</color>
+<color name="ctox_row_background">#FFFFFF</color>
+<color name="ctox_row_outline">#1A000A0E</color>
+<color name="ctox_office_surface">#EDF2F4</color>
+</resources>
