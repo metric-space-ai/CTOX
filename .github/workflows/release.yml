@@ -445,6 +445,8 @@ jobs:
           path: ctox-desktop-windows-x64.msi
 
   build-business-os-desktop:
+    # Legacy donor only. The canonical user-facing desktop app ships from metric-space-ai/workjet.
+    if: ${{ false }}
     needs: business-os-production-gate
     strategy:
       fail-fast: false
@@ -752,7 +754,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [business-os-production-gate, build-desktop-macos, build-desktop-linux, build-desktop-windows, build-business-os-desktop, build-ctox]
+    needs: [business-os-production-gate, build-desktop-macos, build-desktop-linux, build-desktop-windows, build-ctox]
     runs-on: ubuntu-latest
     name: Create GitHub Release
 

@@ -13,7 +13,7 @@
 [Project page](https://metric-space-ai.github.io/ctox/)
 &middot; [Documentation](https://metric-space-ai.github.io/ctox/docs.html)
 &middot; [CLI reference](https://metric-space-ai.github.io/ctox/cli.html)
-&middot; [Business OS Desktop Beta](https://ctox.dev/downloads/business-os-desktop)
+&middot; [Workjet](https://github.com/metric-space-ai/workjet)
 &middot; [Harness guide](HARNESS.md)
 &middot; [Releases](https://github.com/metric-space-ai/ctox/releases)
 
@@ -46,8 +46,9 @@ change is versioned and reversible.
   `Qwen/Qwen3.6-27B` on CUDA). Configured in the TUI; credentials live in the
   CTOX secret store. The authenticated CTOX proxy discovers its available
   model IDs from its OpenAI-compatible `GET /v1/models` endpoint.
-- **Cross-platform** — macOS, Linux, Windows. An optional Desktop app (beta)
-  installs and manages local and remote instances.
+- **Cross-platform** — macOS, Linux, Windows. The user-facing desktop and
+  mobile product is [Workjet](https://github.com/metric-space-ai/workjet);
+  CTOX remains the backend installed and managed by Workjet.
 
 ## Installation
 
@@ -59,15 +60,12 @@ Installer flags, model setup examples, and update commands
 (`ctox upgrade --stable`) are documented in the
 [installation docs](https://metric-space-ai.github.io/ctox/docs.html#install).
 
-### Business OS Desktop Beta
+### Workjet
 
-The signed Desktop beta connects managed ctox.dev tenants, manual WebRTC
-pairings, local CTOX installations, and SSH-managed hosts from one launcher.
-Use the [Desktop download page](https://ctox.dev/downloads/business-os-desktop)
-for macOS and Linux packages. Windows is distributed through the
-[Microsoft Store](https://apps.microsoft.com/detail/9NHZ1TZF3V94) after Store
-certification; the `.appx` attached to the GitHub prerelease is the Store
-submission package, not an unsigned replacement installer.
+[Workjet](https://github.com/metric-space-ai/workjet) is the only supported
+user-facing app for Coding and Business OS on desktop and mobile. The former
+Business OS Electron client in this repository is retained only as a migration
+donor and is not a release target. See [the product matrix](docs/product-matrix.md).
 
 ## Quick start
 

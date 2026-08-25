@@ -1,4 +1,9 @@
-# CTOX Business OS Desktop Beta
+# Legacy CTOX Business OS Desktop donor
+
+> **Not a product or release target.** The supported desktop and mobile app is
+> **Workjet** from `metric-space-ai/workjet`. This Electron source is retained
+> only as a migration donor until Workjet reaches the documented parity gates.
+> Do not publish, rename, or present it as the current Workjet app.
 
 Electron beta target for the CTOX Business OS desktop experience.
 
