@@ -2436,9 +2436,37 @@ async function ladeScrapingAdapter(ctx, state) {
       // lagen.
       let sammlung = null;
       let sammlungsName = '';
-      for (const name of ['outbound_research_adapters', 'thesen_outbound_adapters']) {
+      const kandidatenNamen = ['outbound_research_adapters', 'thesen_outbound_adapters'];
+      for (const name of kandidatenNamen) {
         const kandidat = browserCollection(ctx, name);
         if (kandidat) { sammlung = kandidat; sammlungsName = name; break; }
+      }
+      if (!sammlung && typeof ctx.db?.addCollections === 'function') {
+        // Das Schema der Sammlung registriert normalerweise die Outbound-App
+        // -- aber nur, wenn ihr Fenster in DIESER Seiten-Sitzung schon offen
+        // war. Darauf darf der Reiter nicht angewiesen sein. addCollections
+        // ueberspringt Vorhandenes (shared/db.js), also ist die Selbst-
+        // registrierung gefahrlos, wenn die Outbound-App zuerst da war; sonst
+        // traegt dieses lose Schema (additionalProperties) die Leseansicht.
+        await ctx.db.addCollections({
+          thesen_outbound_adapters: {
+            schema: {
+              title: 'thesen_outbound_adapters',
+              version: 0,
+              primaryKey: 'id',
+              type: 'object',
+              additionalProperties: true,
+              properties: {
+                id: { type: 'string', maxLength: 200 },
+                updated_at_ms: { type: 'number', multipleOf: 1, minimum: 0, maximum: 9007199254740991 },
+              },
+              required: ['id'],
+              indexes: ['updated_at_ms'],
+            },
+          },
+        });
+        sammlung = browserCollection(ctx, 'thesen_outbound_adapters');
+        sammlungsName = 'thesen_outbound_adapters';
       }
       if (!sammlung) throw new Error('Keine Adapter-Sammlung registriert.');
       if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
