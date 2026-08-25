@@ -7,6 +7,8 @@ import test from "node:test";
 import { generateInstallManifest, INSTALL_MANIFEST_SCHEMA } from "./generate-install-manifest.mjs";
 
 const filenames = [
+  "install.sh",
+  "install.ps1",
   "ctox-macos-arm64.tar.gz",
   "ctox-macos-x64.tar.gz",
   "ctox-linux-arm64.tar.gz",
@@ -29,6 +31,8 @@ test("emits a deterministic five-platform CTOX install manifest", async () => {
     assert.equal(manifest.schema, INSTALL_MANIFEST_SCHEMA);
     assert.equal(manifest.release, "v1.2.3");
     assert.equal(manifest.artifacts.length, 5);
+    assert.match(manifest.bootstrap.windows.url, /install\.ps1$/);
+    assert.match(manifest.bootstrap.windows.sha256, /^[a-f0-9]{64}$/);
     assert.deepEqual(
       manifest.artifacts.map(({ platform, arch }) => `${platform}/${arch}`),
       ["macos/arm64", "macos/x64", "linux/arm64", "linux/x64", "windows/x64"],

@@ -283,7 +283,7 @@ fn main() -> anyhow::Result<()> {
     let _arg0_dispatch = ctox_arg0::arg0_dispatch();
     raise_open_file_limit();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let root = resolve_workspace_root()?;
+    let root = resolve_explicit_or_workspace_root(&args)?;
     if args.first().map(String::as_str) == Some("__native-qwen3-embedding-service") {
         return handle_native_qwen3_embedding_service(&args[1..]);
     }
@@ -340,7 +340,8 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
         match first {
             // Recovery / inspection commands — must work even when the
             // runtime DB is wedged.
-            "upgrade" | "update" | "version" | "status" | "doctor" | "mailserver" | "appsec" => {
+            "upgrade" | "update" | "version" | "status" | "doctor" | "service" | "mailserver"
+            | "appsec" => {
                 return true;
             }
             // Agent-facing web-stack calls persist their evidence in the
@@ -596,6 +597,24 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
         },
         Some("service") => {
             let flags: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            #[cfg(windows)]
+            if flags.contains(&"--windows-service") {
+                return service::windows_service::run_dispatcher(root);
+            }
+            #[cfg(windows)]
+            if args.get(1).map(String::as_str) == Some("install") {
+                let status = service::windows_service::install_current_executable(root)?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                return Ok(());
+            }
+            #[cfg(windows)]
+            if args.get(1).map(String::as_str) == Some("status") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&service::windows_service::status()?)?
+                );
+                return Ok(());
+            }
             let foreground = flags.contains(&"--foreground");
             if !foreground {
                 anyhow::bail!(
@@ -4406,6 +4425,19 @@ fn resolve_workspace_root() -> anyhow::Result<PathBuf> {
     Ok(current_dir)
 }
 
+fn resolve_explicit_or_workspace_root(args: &[String]) -> anyhow::Result<PathBuf> {
+    let Some(explicit) = find_flag_value(args, "--root") else {
+        return resolve_workspace_root();
+    };
+    let explicit = PathBuf::from(explicit);
+    anyhow::ensure!(
+        looks_like_ctox_root(&explicit),
+        "--root does not point to a CTOX source or binary-bundle root: {}",
+        explicit.display()
+    );
+    Ok(explicit)
+}
+
 fn openrouter_tool_smoke_json(root: &Path, args: &[String]) -> anyhow::Result<serde_json::Value> {
     let model = find_flag_value(args, "--model").unwrap_or("deepseek/deepseek-v4-flash");
     let requested_tool_choice = find_flag_value(args, "--tool-choice").unwrap_or("all");
@@ -4725,13 +4757,17 @@ fn resolve_runtime_ctox_root(current_exe: &Path, home_dir: Option<&Path>) -> Opt
 }
 
 fn looks_like_ctox_root(candidate: &Path) -> bool {
-    let has_entrypoint =
-        candidate.join("src/main.rs").is_file() || candidate.join("src/core/main.rs").is_file();
-    candidate.join("Cargo.toml").is_file()
-        && has_entrypoint
+    let source_checkout = (candidate.join("src/main.rs").is_file()
+        || candidate.join("src/core/main.rs").is_file())
         && candidate
             .join("contracts/history/creation-ledger.md")
-            .is_file()
+            .is_file();
+    let binary_bundle = candidate
+        .join("contracts/binary_bundle_manifest.txt")
+        .is_file()
+        && candidate.join("src/apps/business-os/index.html").is_file()
+        && (candidate.join("bin/ctox").is_file() || candidate.join("bin/ctox.exe").is_file());
+    candidate.join("Cargo.toml").is_file() && (source_checkout || binary_bundle)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -5009,7 +5045,8 @@ mod tests {
         persist_appsec_command_expected_artifact, persist_runtime_turn_timeout,
         record_appsec_stage_artifact_bindings, record_appsec_stage_session_bindings,
         resolve_appsec_stage_command_placeholders, resolve_chat_attachment_paths,
-        resolve_runtime_ctox_root, run_projected_appsec_command, validated_workspace_root_override,
+        resolve_explicit_or_workspace_root, resolve_runtime_ctox_root,
+        run_projected_appsec_command, validated_workspace_root_override,
         AppsecStageExecutionContext,
     };
     use crate::execution::models::runtime_env;
@@ -5184,6 +5221,28 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         assert!(!looks_like_ctox_root(&root));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn accepts_explicit_binary_bundle_root_for_windows_service_launch() {
+        let root = unique_test_dir("binary-bundle-root");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("contracts")).unwrap();
+        fs::create_dir_all(root.join("src/apps/business-os")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'\n").unwrap();
+        fs::write(root.join("bin/ctox.exe"), "fixture").unwrap();
+        fs::write(root.join("contracts/binary_bundle_manifest.txt"), "fixture").unwrap();
+        fs::write(root.join("src/apps/business-os/index.html"), "fixture").unwrap();
+
+        let args = vec![
+            "service".to_string(),
+            "--windows-service".to_string(),
+            "--root".to_string(),
+            root.to_string_lossy().to_string(),
+        ];
+        assert_eq!(resolve_explicit_or_workspace_root(&args).unwrap(), root);
 
         cleanup_test_dir(&root);
     }

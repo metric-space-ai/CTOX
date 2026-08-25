@@ -37,6 +37,14 @@ export async function generateInstallManifest({ artifactsDir, tag, repository, o
     throw new Error("artifactsDir, tag, repository and output are required");
   }
   const releaseBase = `https://github.com/${repository}/releases/download/${encodeURIComponent(tag)}`;
+  const bootstrap = {};
+  for (const [platform, filename] of [["unix", "install.sh"], ["windows", "install.ps1"]]) {
+    bootstrap[platform] = {
+      filename,
+      url: `${releaseBase}/${filename}`,
+      sha256: await sha256(path.join(artifactsDir, filename)),
+    };
+  }
   const artifacts = [];
   for (const [platform, arch, filename] of TARGETS) {
     const filePath = path.join(artifactsDir, filename);
@@ -60,6 +68,7 @@ export async function generateInstallManifest({ artifactsDir, tag, repository, o
       businessOsDataPlane: "rxdb-webrtc",
       httpDataBridge: false,
     },
+    bootstrap,
     artifacts,
   };
   await writeFile(output, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");

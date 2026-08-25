@@ -2455,6 +2455,23 @@ fn normalize_state_token(value: &str) -> String {
 }
 
 pub fn start_background(root: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let windows_status = crate::service::windows_service::status()?;
+        if windows_status.installed {
+            crate::service::windows_service::start()?;
+            for _ in 0..200 {
+                thread::sleep(Duration::from_millis(300));
+                if service_status_snapshot(root)?.running {
+                    return Ok(format!(
+                        "CTOX service enabled and started via Windows SCM on {}",
+                        service_listen_addr(root)
+                    ));
+                }
+            }
+            anyhow::bail!("CTOX Windows service did not become healthy within 60 seconds");
+        }
+    }
     let _systemd_cache_guard = SystemdCacheInvalidator;
     if let Some(systemd) = systemd_unit_status(root)? {
         if systemd.active {
@@ -2628,6 +2645,23 @@ pub fn stop_background_guarded(root: &Path, force: bool) -> Result<String> {
 }
 
 pub fn stop_background(root: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let windows_status = crate::service::windows_service::status()?;
+        if windows_status.installed {
+            if !windows_status.running {
+                return Ok("CTOX Windows service is already stopped.".to_string());
+            }
+            crate::service::windows_service::stop()?;
+            for _ in 0..100 {
+                thread::sleep(Duration::from_millis(150));
+                if !crate::service::windows_service::status()?.running {
+                    return Ok("CTOX Windows service stopped.".to_string());
+                }
+            }
+            anyhow::bail!("CTOX Windows service did not stop within 15 seconds");
+        }
+    }
     let _systemd_cache_guard = SystemdCacheInvalidator;
     let preflight_backend_shutdown_error = supervisor::shutdown_persistent_backends(root)
         .err()
@@ -2762,9 +2796,15 @@ pub fn stop_background(root: &Path) -> Result<String> {
         }
     }
     if let Some(pid) = read_pid_file(root) {
+        #[cfg(unix)]
         let status = Command::new("kill")
             .arg("-TERM")
             .arg(pid.to_string())
+            .status()
+            .with_context(|| format!("failed to signal CTOX service pid {pid}"))?;
+        #[cfg(windows)]
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
             .status()
             .with_context(|| format!("failed to signal CTOX service pid {pid}"))?;
         if !status.success() {
@@ -2804,6 +2844,16 @@ pub fn stop_background(root: &Path) -> Result<String> {
         "CTOX service stop did not complete cleanly: {}",
         service_shutdown_residue(root)?.join("; ")
     )
+}
+
+#[cfg(windows)]
+pub fn request_windows_service_shutdown(root: &Path) -> Result<()> {
+    let url = format!("{}/ctox/service/stop", service_base_url(root));
+    ureq::post(&url)
+        .set("content-type", "application/json")
+        .send_string("{}")
+        .with_context(|| format!("failed to request CTOX service shutdown via {url}"))?;
+    Ok(())
 }
 
 pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {

@@ -2667,11 +2667,16 @@ fn fetch_remote_release(
 }
 
 fn target_bundle_asset_name() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    target_bundle_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn target_bundle_asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
         ("linux", "x86_64") => Some("ctox-linux-x64.tar.gz"),
         ("linux", "aarch64") => Some("ctox-linux-arm64.tar.gz"),
         ("macos", "x86_64") => Some("ctox-macos-x64.tar.gz"),
         ("macos", "aarch64") => Some("ctox-macos-arm64.tar.gz"),
+        ("windows", "x86_64") => Some("ctox-windows-x64.zip"),
         _ => None,
     }
 }
@@ -2771,7 +2776,7 @@ fn extract_bundle_to_root(archive_path: &Path, destination_root: &Path) -> Resul
     ensure_release_slot(destination_root, true)?;
     ensure_dir(destination_root)?;
     let status = Command::new("tar")
-        .arg("-xzf")
+        .arg(if cfg!(windows) { "-xf" } else { "-xzf" })
         .arg(archive_path)
         .arg("-C")
         .arg(destination_root)
@@ -4555,6 +4560,19 @@ mod tests {
             state_root: root.join("state"),
             cache_root: root.join("cache"),
         }
+    }
+
+    #[test]
+    fn release_bundle_matrix_includes_windows() {
+        assert_eq!(
+            target_bundle_asset_name_for("windows", "x86_64"),
+            Some("ctox-windows-x64.zip")
+        );
+        assert_eq!(
+            target_bundle_asset_name_for("macos", "aarch64"),
+            Some("ctox-macos-arm64.tar.gz")
+        );
+        assert_eq!(target_bundle_asset_name_for("windows", "aarch64"), None);
     }
 
     #[test]
