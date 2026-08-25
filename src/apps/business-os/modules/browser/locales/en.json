@@ -76,5 +76,6 @@
   "btnAdapterCheck": "Verify (Outbound)",
   "adapterLoginStarted": "Sign-in session opened — sign in there, then confirm “I am signed in”.",
   "chipAuthPending": "Sign-in requested",
-  "adapterNoUrl": "No address is configured for this source."
+  "adapterNoUrl": "No address is configured for this source.",
+  "adapterLoginUnavailable": "Sign-in session is not available right now."
 }

@@ -184,6 +184,12 @@ export async function mount(ctx) {
   ctx.host?.addEventListener?.('ctox-business-os-app-launch', onAppLaunch);
   cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', onAppLaunch));
 
+  // Die Adapter-Leiste wird ausserhalb dieses Scopes gebaut und braucht denselben
+  // Weg in eine Anmeldesitzung -- ohne diese Bruecke lief ihr Klick in einen
+  // ReferenceError und tat sichtbar nichts.
+  state.openAuthSession = openRequestedBrowserSession;
+  cleanups.push(() => { state.openAuthSession = null; });
+
   const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', (detail = {}) => {
     const sessionId = browserSessionIdFromArgs(detail);
     if (!sessionId) return;
@@ -2646,7 +2652,12 @@ function renderAdapterRail(ctx, refs, state) {
           return;
         }
         const sessionId = `browser_session_web_stack_auth_${schluessel}_${Date.now()}`;
-        openRequestedBrowserSession({
+        if (typeof state.openAuthSession !== 'function') {
+          state.notice = t('adapterLoginUnavailable', 'Anmeldesitzung ist gerade nicht verfügbar.');
+          state.refresh?.();
+          return;
+        }
+        state.openAuthSession({
           session_id: sessionId,
           tab_id: `browser_tab_${sessionId}`,
           purpose: 'web_stack_auth',
