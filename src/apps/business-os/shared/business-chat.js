@@ -3912,8 +3912,9 @@ function installChatStyles() {
       grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, auto) 28px 34px;
     }
     .ctox-chat-dock.has-many-chats {
-      grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, 1fr) 28px 34px;
-      width: 100%;
+      grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, min(420px, 40dvw)) 28px 34px;
+      width: max-content;
+      max-width: min(860px, calc(100dvw - 132px));
     }
     .ctox-chat-dock.has-one-chat .ctox-chat-strip {
       width: 148px;
@@ -5620,13 +5621,13 @@ function installChatStyles() {
         justify-content: flex-start !important;
         gap: 6px !important;
         overflow-x: auto !important;
-        width: 100% !important;
-        max-width: 100% !important;
+        width: max-content !important;
+        max-width: calc(100vw - 16px) !important;
         box-sizing: border-box !important;
         scrollbar-width: none !important;
       }
       .ctox-chat-dock.has-many-chats {
-        width: 100% !important;
+        width: min(860px, calc(100vw - 16px)) !important;
       }
       .ctox-chat-dock::-webkit-scrollbar {
         display: none !important;

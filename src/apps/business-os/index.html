@@ -83,10 +83,20 @@
           <div class="topbar-status-bar">
             <button class="ctox-shell-warning" type="button" data-ctox-shell-warning hidden data-shell-t="ctoxNotWorking">CTOX Verbindung prüfen</button>
             <button class="ctox-shell-warning" type="button" data-recovery-warning hidden data-shell-t="recoveryExport">Recovery exportieren</button>
-            <span class="brand-status" data-status-text>Starting native runtime</span>
-            <div class="ctox-version-line" data-ctox-version hidden>
-              <span data-ctox-version-label></span>
-              <button class="ctox-update-button" type="button" data-ctox-update-button hidden></button>
+            <span class="brand-status" data-status-text aria-live="polite">Starting native runtime</span>
+            <div class="ctox-version-line shell-release-line" data-shell-release>
+              <span data-shell-version-label>v—</span>
+              <button class="ctox-update-button shell-release-status" type="button" data-shell-release-status data-state="checking" aria-label="Shell-Status" aria-expanded="false">
+                <span aria-hidden="true" data-shell-release-icon>…</span>
+              </button>
+              <section class="shell-release-panel" data-shell-release-panel hidden>
+                <strong>Business-OS-Shell</strong>
+                <dl>
+                  <div><dt>Version</dt><dd data-shell-release-panel-version>—</dd></div>
+                  <div><dt>Kanal</dt><dd data-shell-release-panel-channel>—</dd></div>
+                  <div><dt>Status</dt><dd data-shell-release-panel-state>Prüfung läuft</dd></div>
+                </dl>
+              </section>
             </div>
           </div>
         </div>
@@ -146,7 +156,7 @@
                 <circle cx="50" cy="50" r="10" fill="url(#logoGrad)" />
               </svg>
             </div>
-            <h2 class="startup-title">CTOX Business OS</h2>
+            <h2 class="startup-title">Workjet Business OS</h2>
             <div class="startup-progress-container">
               <div class="startup-progress-bar" id="startup-progress-bar"></div>
             </div>
@@ -195,6 +205,7 @@
     </div>
     <aside class="shell-notifications" data-shell-notifications aria-live="polite" aria-label="Benachrichtigungen" data-shell-t-aria="notificationsAria"></aside>
 
+  <script type="module" src="shared/shell-release-status.js?v=20260826-shell-release-v2"></script>
   <script type="module" src="mobile-host.js?v=20260825-native-shell-v1"></script>
   <script type="module" src="app.js?v=20260825-scraping-reiter-v241"></script>
   </body>

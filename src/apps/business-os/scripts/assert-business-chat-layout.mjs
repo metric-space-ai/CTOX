@@ -28,10 +28,12 @@ rejectMatch(dockRule, /(?:^|\n)\s*width:\s*100%;/, 'Default chat dock must not s
 expect(manyChatsDockRule, 'Missing .ctox-chat-dock.has-many-chats CSS rule');
 expectIncludes(
   manyChatsDockRule,
-  'grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, 1fr) 28px 34px;',
-  'Many-chat dock must reserve flexible full-width space for scrollable tabs'
+  'grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, min(420px, 40dvw)) 28px 34px;',
+  'Many-chat dock must reserve a bounded scrollable tab strip'
 );
-expectIncludes(manyChatsDockRule, 'width: 100%;', 'Only many-chat dock should span the available shell width');
+expectIncludes(manyChatsDockRule, 'width: max-content;', 'Many-chat dock must remain content-sized');
+expectIncludes(manyChatsDockRule, 'max-width: min(860px, calc(100dvw - 132px));', 'Many-chat dock must preserve free desktop docking space');
+rejectMatch(manyChatsDockRule, /(?:^|\n)\s*width:\s*100%;/, 'Many-chat dock must never paint to the right edge');
 expect(oneChatStripRule, 'Missing one-chat compact strip rule');
 expectIncludes(oneChatStripRule, 'width: 148px;', 'One-chat strip must have stable compact width');
 expect(fewChatsStripRule, 'Missing few-chat strip rule');
@@ -44,7 +46,7 @@ expectIncludes(source, "openChats.length > 1 && openChats.length < MANY_CHAT_THR
 expectIncludes(source, "openChats.length >= MANY_CHAT_THRESHOLD ? 'has-many-chats' : ''", 'Many-chat mode must not activate before high tab counts');
 expectIncludes(source, 'function selectVisibleChats(openChats, activeChat)', 'Busy days must not render every chat tab/window');
 expectIncludes(source, 'const expandedChats = openChats.filter((chat) => !chat.minimized);', 'Minimized chats must be removed from the rendered window set');
-expectIncludes(source, 'const visibleWindowChats = selectVisibleChats(expandedChats, activeExpandedChat);', 'Chat tabs and rendered windows must be selected independently');
+expectIncludes(source, 'const visibleWindowChats = stageWindowChats(activeExpandedChat);', 'Only the active expanded chat may own the stage');
 expectIncludes(
   source,
   'const windowShapeUnchanged = existingWindows.length === visibleWindowChats.length',
@@ -65,7 +67,7 @@ expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskSta
 expectIncludes(source, '`is-task-${taskState}`', 'Chat chips must include task-state classes');
 expectIncludes(source, '.ctox-chat-chip.is-minimized:not(.is-task-idle)', 'Minimized non-idle chats must keep visible status styling');
 expectIncludes(source, 'function chatDateAriaLabel(dateStr, total = 0)', 'Date history control needs a clear accessible label');
-expectIncludes(source, '<span class="ctox-date-scope">Verlauf</span>', 'Date control must visibly explain it is chat history');
+expectIncludes(source, "<span class=\"ctox-date-scope\">${chatUiIsGerman() ? 'Verlauf' : 'History'}</span>", 'Date control must visibly explain it is chat history');
 expectIncludes(source, 'chatBusyPanel({ chats: openChats, selectedDate, state })', 'Busy days need a filterable list panel');
 expectIncludes(source, 'data-chat-list-filter="source"', 'Busy-day list must include source filtering');
 expectIncludes(source, 'data-chat-list-filter="group"', 'Busy-day list must include grouping control');

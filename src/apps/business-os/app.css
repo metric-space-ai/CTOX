@@ -453,6 +453,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .topbar-status-bar {
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -460,14 +461,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .topbar-status-bar .brand-status {
-  color: var(--muted);
-  font-size: var(--fs-meta);
-  line-height: var(--lh-tight);
-  font-weight: 500;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: none;
 }
 
 .ctox-version-line {
@@ -475,7 +469,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  max-width: 220px;
+  max-width: 132px;
   color: color-mix(in srgb, var(--muted) 86%, transparent);
   font-size: var(--fs-micro);
   line-height: 1.2;
@@ -491,6 +485,54 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.shell-release-line {
+  position: relative;
+}
+
+.shell-release-status {
+  width: 20px;
+  min-width: 20px;
+  max-width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.shell-release-status[data-state="current"] { color: var(--success); }
+.shell-release-status[data-state="available"],
+.shell-release-status[data-state="ready"] { color: var(--accent); }
+.shell-release-status[data-state="checking"],
+.shell-release-status[data-state="download"],
+.shell-release-status[data-state="verify"] { color: var(--muted); }
+.shell-release-status[data-state="failed"],
+.shell-release-status[data-state="incompatible"],
+.shell-release-status[data-state="recovery"] { color: var(--danger); }
+.shell-release-status[data-state="blocked"],
+.shell-release-status[data-state="restart"],
+.shell-release-status[data-state="rollback"] { color: var(--warning); }
+
+.shell-release-panel {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 10px);
+  left: 0;
+  width: 240px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--panel-radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+}
+
+.shell-release-panel[hidden] { display: none; }
+.shell-release-panel strong { font-size: var(--fs-sm); }
+.shell-release-panel dl { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; }
+.shell-release-panel dl > div { display: flex; justify-content: space-between; gap: var(--space-3); }
+.shell-release-panel dt { color: var(--muted); }
+.shell-release-panel dd { margin: 0; text-align: right; }
 
 .ctox-update-button {
   appearance: none;
@@ -8056,8 +8098,8 @@ button.shell-window-header-meta:focus-visible,
 
   .ctox-chat-dock {
     --ctox-date-pill-width: 118px !important;
-    width: 100% !important;
-    max-width: 100% !important;
+    width: max-content !important;
+    max-width: calc(100vw - 16px) !important;
     gap: 6px !important;
     grid-template-columns: 76px var(--ctox-date-pill-width) 44px !important;
   }
@@ -8074,6 +8116,7 @@ button.shell-window-header-meta:focus-visible,
   .ctox-chat-dock.has-nav,
   .ctox-chat-dock.has-many-chats {
     grid-template-columns: 76px var(--ctox-date-pill-width) 32px minmax(0, 1fr) 32px 44px !important;
+    width: min(860px, calc(100vw - 16px)) !important;
   }
 
   .ctox-chat-dock.has-one-chat .ctox-chat-strip,
