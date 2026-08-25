@@ -36,6 +36,11 @@ async function makeFixture() {
     await mkdir(join(sourceRoot, tree), { recursive: true });
     await writeFile(join(sourceRoot, tree, 'runtime.txt'), `${tree}\n`);
   }
+  await mkdir(join(sourceRoot, 'installed-modules', 'tenant-local'), { recursive: true });
+  await writeFile(
+    join(sourceRoot, 'installed-modules', 'tenant-local', 'index.js'),
+    'throw new Error("instance-local module must not ship");\n',
+  );
 
   await mkdir(join(sourceRoot, 'vendor', 'library'), { recursive: true });
   await writeFile(join(sourceRoot, 'vendor', 'library', 'LICENSE'), 'Representative runtime license\n');
@@ -170,6 +175,7 @@ test('deterministic builds have byte-identical archives and complete sorted inve
       'modules/example/nested/fixture.json',
       'modules/example/tests/hidden.js',
       'modules/example/node_modules/dependency/index.js',
+      'installed-modules/tenant-local/index.js',
       'shared/qa/matrix.json',
       'shared/scripts/generate.mjs',
       'rxdb/build-output/state.json',

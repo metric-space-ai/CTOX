@@ -27,7 +27,6 @@ export const RUNTIME_TREES = Object.freeze([
   'app-starter',
   'assets',
   'desktop-apps',
-  'installed-modules',
   'modules',
   'office-engine',
   'public',
