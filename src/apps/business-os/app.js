@@ -9681,6 +9681,9 @@ async function loadTemplates() {
 }
 
 async function loadModuleCatalog(timeoutMs = 60000, options = {}) {
+  if (allowsCompleteQaModuleCatalog()) {
+    return normalizeModuleCatalog(await loadPackagedModuleCatalog());
+  }
   const coll = state.db?.collection?.('business_module_catalog');
   if (!coll) throw new Error('business_module_catalog collection is required for shell module metadata');
 

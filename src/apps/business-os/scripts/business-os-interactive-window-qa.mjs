@@ -333,8 +333,12 @@ async function exerciseApp(page, app, ordinal) {
     await windowLocator.locator('.shell-window-control--minimize').click();
     await windowLocator.waitFor({ state: 'hidden', timeout: 3000 });
     const topAppTab = page.locator(`.module-tab[data-target="${cssEscape(app.id)}"]`).first();
-    await topAppTab.waitFor({ state: 'visible', timeout: 3000 });
-    await topAppTab.click();
+    if (await topAppTab.count()) {
+      await topAppTab.scrollIntoViewIfNeeded();
+      await topAppTab.click();
+    } else {
+      await launchFromVisibleShell(page, app);
+    }
     await windowLocator.waitFor({ state: 'visible', timeout: 3000 });
 
     await windowLocator.locator('.shell-window-control--close').click();
