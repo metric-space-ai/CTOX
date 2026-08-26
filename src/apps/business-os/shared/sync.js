@@ -91,6 +91,7 @@ const MODULE_EXPLICIT_START_COLLECTIONS = new Set([
 // zum Dauerlauf wird.
 const UNREGISTERED_SWEEP_DELAY_MS = 3000;
 const UNREGISTERED_SWEEP_RETRY_MS = 15000;
+const STALLED_RECONNECT_MIN_AGE_MS = 30000;
 const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
 const DESKTOP_ICON_SAFE_FIELDS = new Set([
@@ -368,6 +369,13 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           || isHealthyCollectionStatus(current.status);
         return !healthy;
       });
+      const stalledReconnects = [...activeCollections].filter((collection) => (
+        isStalledReconnectingCollection(
+          diagnostics.collections[collection],
+          Date.now(),
+          STALLED_RECONNECT_MIN_AGE_MS,
+        )
+      ));
       for (const collection of stuck) {
         if (stopped) return;
         try {
@@ -375,6 +383,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         } catch (error) {
           recordCollection(collection, { lastError: serializeError(error) });
         }
+      }
+      // Event-driven recovery is still the fast path. This heartbeat is the
+      // bounded safety net for a bridge whose peer disappeared while its
+      // one-shot restart timer was already consumed. Measured after a native
+      // peer restart: ctox_queue_tasks remained on the old peer session for
+      // more than a minute while every other collection had reconnected; the
+      // existing manual restart repaired it immediately. Route the stale
+      // collection back through the shared room repair cycle so circuit
+      // breaking, retry limits and healthy-collection isolation still apply.
+      if (stalledReconnects.length) {
+        scheduleRestartOfUnhealthyCollections(stalledReconnects[0], 0);
       }
       scheduleUnregisteredCollectionSweep(UNREGISTERED_SWEEP_RETRY_MS);
     }, delayMs);
@@ -2701,6 +2720,20 @@ function isHealthyCollectionStatus(status) {
   return ['connected', 'running', 'reused'].includes(String(status || '').trim());
 }
 
+function isStalledReconnectingCollection(
+  current,
+  nowMs = Date.now(),
+  minimumAgeMs = STALLED_RECONNECT_MIN_AGE_MS,
+) {
+  if (!current || typeof current !== 'object') return false;
+  const status = String(current.connectionStatus || current.status || '').trim();
+  if (!['reconnecting', 'restarting'].includes(status)) return false;
+  if (current.lastError?.retryable === false) return false;
+  const reconnectingAtMs = Date.parse(String(current.reconnectingSince || ''));
+  if (!Number.isFinite(reconnectingAtMs)) return false;
+  return Number(nowMs) - reconnectingAtMs >= Math.max(0, Number(minimumAgeMs) || 0);
+}
+
 function classifySignalingControlPlaneError(error) {
   if (!error || typeof error !== 'object') return null;
   const source = error?.detail && typeof error.detail === 'object' ? error.detail : error;
@@ -2972,6 +3005,7 @@ export const __ctoxSyncTestHooks = {
   boundedCollectionStartQueueStep,
   repairRestartBatch,
   applyRoomRepairCycleOutcome,
+  isStalledReconnectingCollection,
   resetRoomCircuitState,
   collectionForReplication,
   projectDesktopIconForReplication,

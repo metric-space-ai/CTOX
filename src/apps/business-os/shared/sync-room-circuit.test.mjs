@@ -7,9 +7,31 @@ import { __ctoxSyncTestHooks } from './sync.js';
 const {
   applyRoomRepairCycleOutcome,
   boundedCollectionStartQueueStep,
+  isStalledReconnectingCollection,
   moduleSyncCollections,
   repairRestartBatch,
 } = __ctoxSyncTestHooks;
+
+test('stalled reconnects re-enter the bounded room repair cycle', () => {
+  const now = Date.parse('2026-08-26T03:20:00.000Z');
+  assert.equal(isStalledReconnectingCollection({
+    connectionStatus: 'reconnecting',
+    reconnectingSince: '2026-08-26T03:19:29.000Z',
+  }, now, 30_000), true);
+  assert.equal(isStalledReconnectingCollection({
+    connectionStatus: 'reconnecting',
+    reconnectingSince: '2026-08-26T03:19:45.000Z',
+  }, now, 30_000), false);
+  assert.equal(isStalledReconnectingCollection({
+    connectionStatus: 'connected',
+    reconnectingSince: '2026-08-26T03:00:00.000Z',
+  }, now, 30_000), false);
+  assert.equal(isStalledReconnectingCollection({
+    connectionStatus: 'reconnecting',
+    reconnectingSince: '2026-08-26T03:00:00.000Z',
+    lastError: { retryable: false },
+  }, now, 30_000), false);
+});
 
 test('browser live compatibility collections start only after direct-live fallback', () => {
   assert.deepEqual(
