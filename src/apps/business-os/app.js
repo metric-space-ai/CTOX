@@ -1757,7 +1757,7 @@ function deriveOwnerLabel(ownerId) {
 function moduleDisplayTitleFor(moduleId) {
   if (!moduleId) return '';
   const mod = state.modules?.find((entry) => entry.id === moduleId);
-  return mod?.title || '';
+  return moduleDisplayTitle(mod || { id: moduleId });
 }
 
 const SNAP_KEY_MAP = {
@@ -7257,7 +7257,11 @@ function normalizeModuleLayout(layout, modules) {
 }
 
 function moduleDisplayTitle(mod) {
-  return state.moduleLayout?.labels?.[mod.id] || mod.title || mod.id;
+  if (!mod?.id) return '';
+  return state.moduleLayout?.labels?.[mod.id]
+    || shellText('moduleTitles')?.[mod.id]
+    || mod.title
+    || mod.id;
 }
 
 function draggedModuleId(event) {

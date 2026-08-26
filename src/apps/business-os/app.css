@@ -766,9 +766,11 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .module-tabs.is-scrollable {
-  /* Fade the trailing edge so overflow is discoverable without a scrollbar. */
-  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
-  mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  /* Keep both continuation edges legible. A short one-sided fade looked like
+     a clipped label on phones and did not communicate that the row scrolls. */
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 30px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 30px), transparent 100%);
+  padding-inline: 12px;
 }
 
 .module-tabs:empty {
@@ -8204,6 +8206,14 @@ button.shell-window-header-meta:focus-visible,
     width: 44px;
     min-width: 44px;
     height: 44px;
+  }
+
+  /* A phone/tablet app is already a full-screen sheet. Desktop caption
+     actions are misleading there; retain one touch-sized close action while
+     desktop/web continue to expose minimize, maximize/restore and close. */
+  .shell-window-layer > .shell-window .shell-window-control--minimize,
+  .shell-window-layer > .shell-window .shell-window-control--maximize {
+    display: none;
   }
 
   .shell-window-layer > .shell-window .shell-window-header-action {

@@ -20,6 +20,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const businessOsRoot = resolve(here, '..');
 const appSource = readFileSync(resolve(businessOsRoot, 'app.js'), 'utf8');
+const appCss = readFileSync(resolve(businessOsRoot, 'app.css'), 'utf8');
 const windowManagerSource = readFileSync(resolve(here, 'window-manager.js'), 'utf8');
 const registry = JSON.parse(readFileSync(resolve(businessOsRoot, 'modules/registry.json'), 'utf8'));
 const systemApps = JSON.parse(readFileSync(resolve(businessOsRoot, 'system-apps.json'), 'utf8'));
@@ -94,6 +95,19 @@ test('the shared shell window always exposes one draggable chrome and all three 
   assert.match(windowManagerSource, /else if \(action === 'minimize'\) minimize\(win\.id\)/);
   assert.match(windowManagerSource, /else if \(action === 'maximize'\) toggleMaximize\(win\.id\)/);
   assert.match(windowManagerSource, /setChromeLayout[\s\S]{0,500}renderControls\(/);
+});
+
+test('mobile sheets keep one close action while desktop retains the complete window contract', () => {
+  assert.match(appCss, /@media \(max-width: 767px\)[\s\S]*\.shell-window-control--minimize,[\s\S]*\.shell-window-control--maximize[\s\S]*display: none/);
+  assert.doesNotMatch(appCss, /\.shell-window-control--close[^{}]*\{[^}]*display:\s*none/);
+});
+
+test('public shell titles are localized before registry implementation names are exposed', () => {
+  assert.match(appSource, /shellText\('moduleTitles'\)\?\.\[mod\.id\]/);
+  assert.match(appSource, /documents:\s*'Dokumente'/);
+  assert.match(appSource, /documents:\s*'Documents'/);
+  assert.match(appSource, /spreadsheets:\s*'Tabellen'/);
+  assert.match(appSource, /spreadsheets:\s*'Spreadsheets'/);
 });
 
 test('all app launch routes converge on the shared window manager', () => {
