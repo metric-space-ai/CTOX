@@ -27,8 +27,9 @@ inbound Internet IP. HTTP is allowed for local development, static serving, and
 diagnostics, but it is not the primary communication model for remote clients.
 
 The default local product shape is **CTOX instance webserver + Business OS Web
-App**, with CTOX Desktop acting only as the connector/forwarder to the selected
-instance. A separate Electron wrapper is not the default runtime.
+App**, with Workjet Desktop acting only as the connector/forwarder to the
+selected instance. “CTOX Desktop” is a legacy name and is not a release target.
+A separate Electron wrapper is not the default runtime.
 
 ## Sync Priority
 
@@ -36,7 +37,7 @@ instance. A separate Electron wrapper is not the default runtime.
    clients, the CTOX desktop app, and the CTOX instance peer.
 2. CTOX instance serves the app shell and owns command validation, session
    validation, and authoritative writes.
-3. CTOX Desktop forwards or opens the selected instance URL after the user is
+3. Workjet Desktop forwards or opens the selected instance URL after the user is
    connected/authenticated.
 
 There is no HTTP pull/push or command bridge for Business OS module data. If
@@ -46,7 +47,7 @@ ready instead of loading fallback data through HTTP.
 This keeps the app useful when:
 
 - Multiple clients attach to the same CTOX-managed business instance.
-- CTOX Desktop connects to a local or remote CTOX instance and opens/forwards
+- Workjet Desktop connects to a local or remote CTOX instance and opens/forwards
   the instance-owned Business OS URL.
 - The CTOX instance is behind NAT, a residential connection, a firewall, or a
   private network without public inbound ports.
@@ -149,7 +150,7 @@ instance version.
 ## Optional Electron Wrapper
 
 An Electron wrapper may still be useful later for distribution scenarios where a
-client should run Business OS without the CTOX Desktop app. It must remain a
+client should run Business OS without Workjet Desktop. It must remain a
 thin optional adapter around the same static `business-os/` files and must not
 become the primary architecture.
 

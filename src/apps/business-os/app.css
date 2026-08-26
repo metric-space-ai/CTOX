@@ -590,6 +590,21 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   box-shadow: none;
 }
 
+.shell-release-panel-actions {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.shell-release-panel-actions:empty {
+  display: none;
+}
+
+.shell-release-panel-actions .ctox-shell-warning {
+  max-width: 100%;
+  margin: 0;
+}
+
 .topbar-status-bar .ctox-shell-warning--danger {
   border-color: color-mix(in srgb, var(--danger) 55%, transparent);
   background: var(--danger-soft);

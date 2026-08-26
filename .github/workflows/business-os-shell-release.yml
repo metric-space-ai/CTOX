@@ -62,6 +62,11 @@ jobs:
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os
 
+      - name: Enforce Workjet product identity
+        run: |
+          node src/apps/business-os/scripts/assert-workjet-branding.mjs
+          node src/apps/business-os/scripts/assert-shell-release-chrome.mjs
+
       - name: Build shell artifact
         env:
           SHELL_VERSION: ${{ steps.identity.outputs.version }}

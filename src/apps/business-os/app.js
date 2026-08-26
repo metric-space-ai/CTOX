@@ -9485,7 +9485,7 @@ function readInjectedDesktopSession() {
     ...session,
     user: {
       id: user.id || 'ctox-desktop',
-      display_name: user.display_name || user.name || user.id || 'CTOX Desktop',
+      display_name: user.display_name || user.name || user.id || 'Workjet',
       role,
       is_admin: roleCanAdmin(role),
       ...user,
