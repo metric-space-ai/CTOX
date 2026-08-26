@@ -270,6 +270,25 @@ fn compatible(manifest: &ReleaseManifest) -> Result<bool> {
     Ok(current >= minimum && maximum.is_none_or(|maximum| current <= maximum))
 }
 
+fn phase_after_check(
+    state: &ShellUpdateState,
+    offered_version: &str,
+    is_compatible: bool,
+) -> &'static str {
+    if !is_compatible {
+        "incompatible"
+    } else if state.active_version.as_deref() != Some(offered_version) {
+        "available"
+    } else if state.phase == "restart_required" || state.health == "pending_restart" {
+        // A release check is not proof that the newly selected slot was served
+        // by a restarted backend. Keep the explicit restart gate until
+        // `active_shell_root` verifies and consumes the slot on server start.
+        "restart_required"
+    } else {
+        "current"
+    }
+}
+
 fn resolve_release() -> Result<ReleaseManifest> {
     let channel_bytes = fetch(CHANNEL_URL, MAX_CHANNEL_BYTES)?;
     let channel: ChannelPointer = serde_json::from_slice(&channel_bytes)?;
@@ -596,14 +615,8 @@ pub fn check(root: &Path) -> Result<serde_json::Value> {
             state.last_checked_at = Some(Utc::now().to_rfc3339());
             state.latest_compatible_version =
                 is_compatible.then(|| manifest.payload.version.clone());
-            state.phase = if state.latest_compatible_version.is_none() {
-                "incompatible"
-            } else if state.active_version.as_deref() == Some(manifest.payload.version.as_str()) {
-                "current"
-            } else {
-                "available"
-            }
-            .to_owned();
+            state.phase =
+                phase_after_check(&state, &manifest.payload.version, is_compatible).to_owned();
             write_state(root, &state)?;
             Ok(public_status(&state, true))
         }
@@ -680,6 +693,12 @@ pub fn activate(root: &Path) -> Result<serde_json::Value> {
         .context("no staged shell release")?;
     let slot = slots_root(root).join(&version);
     verify_slot(&slot, Some(&version))?;
+    apply_activation(&mut state, version);
+    write_state(root, &state)?;
+    Ok(public_status(&state, true))
+}
+
+fn apply_activation(state: &mut ShellUpdateState, version: String) {
     state.previous_slot = state.current_slot.take();
     state.current_slot = Some(version.clone());
     state.active_version = Some(version);
@@ -688,8 +707,6 @@ pub fn activate(root: &Path) -> Result<serde_json::Value> {
     state.phase = "restart_required".to_owned();
     state.health = "pending_restart".to_owned();
     state.rollback_active = false;
-    write_state(root, &state)?;
-    Ok(public_status(&state, true))
 }
 
 pub fn rollback(root: &Path) -> Result<serde_json::Value> {
@@ -700,6 +717,12 @@ pub fn rollback(root: &Path) -> Result<serde_json::Value> {
         .context("no previous shell slot")?;
     let previous_path = slots_root(root).join(&previous);
     verify_slot(&previous_path, Some(&previous))?;
+    apply_rollback(&mut state, previous);
+    write_state(root, &state)?;
+    Ok(public_status(&state, true))
+}
+
+fn apply_rollback(state: &mut ShellUpdateState, previous: String) {
     let current = state.current_slot.replace(previous.clone());
     state.previous_slot = current;
     state.active_version = Some(previous);
@@ -707,8 +730,6 @@ pub fn rollback(root: &Path) -> Result<serde_json::Value> {
     state.health = "pending_restart".to_owned();
     state.rollback_active = true;
     state.last_activated_at = Some(Utc::now().to_rfc3339());
-    write_state(root, &state)?;
-    Ok(public_status(&state, true))
 }
 
 pub fn active_shell_root(root: &Path) -> Result<Option<PathBuf>> {
@@ -734,6 +755,46 @@ pub fn active_shell_root(root: &Path) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_manifest(
+        ctox_min_version: &str,
+        ctox_max_version: Option<&str>,
+        signing_key_id: &str,
+    ) -> ReleaseManifest {
+        ReleaseManifest {
+            payload: ReleasePayload {
+                r#type: "ctox.business-os-shell.release.v2".to_owned(),
+                version: "1.2.3".to_owned(),
+                channel: "stable".to_owned(),
+                source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                published_at: "2026-08-26T00:00:00Z".to_owned(),
+                artifact: Artifact {
+                    url: "https://example.invalid/shell.tar.gz".to_owned(),
+                    size: 1,
+                    sha256: "00".repeat(32),
+                    content_type: "application/gzip".to_owned(),
+                },
+                compatibility: Compatibility {
+                    workjet_min_version: "0.0.0".to_owned(),
+                    workjet_max_version: None,
+                    ctox_min_version: ctox_min_version.to_owned(),
+                    ctox_max_version: ctox_max_version.map(str::to_owned),
+                    shell_protocol: "ctox-business-os-shell-v2".to_owned(),
+                },
+                files: vec![ReleaseFile {
+                    path: "index.html".to_owned(),
+                    size: 1,
+                    sha256: sha256(b"x"),
+                }],
+                provenance: Provenance {
+                    embedded_manifest_sha256: "00".repeat(32),
+                    sbom_url: "https://example.invalid/sbom.json".to_owned(),
+                },
+                signing_key_id: signing_key_id.to_owned(),
+            },
+            signature: "00".repeat(64),
+        }
+    }
 
     #[test]
     fn state_is_persisted_in_the_typed_business_os_store() -> Result<()> {
@@ -775,6 +836,139 @@ mod tests {
         verify_tar_header(&header)?;
         header[0] = 1;
         assert!(verify_tar_header(&header).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn release_signatures_and_unknown_keys_fail_closed() {
+        let unknown = sample_manifest("0.0.0", None, "shell-unknown");
+        let error = verify_signature(
+            &unknown.payload,
+            &unknown.signature,
+            &unknown.payload.signing_key_id,
+        )
+        .expect_err("unknown key must fail");
+        assert!(format!("{error:#}").contains("shell-release-unknown-key"));
+
+        let tampered = sample_manifest("0.0.0", None, "shell-current-2026-08");
+        let error = verify_signature(
+            &tampered.payload,
+            &tampered.signature,
+            &tampered.payload.signing_key_id,
+        )
+        .expect_err("invalid signature must fail");
+        assert!(format!("{error:#}").contains("shell-release-invalid-signature"));
+    }
+
+    #[test]
+    fn compatibility_honours_minimum_and_maximum_ctox_versions() -> Result<()> {
+        assert!(compatible(&sample_manifest(
+            "0.0.0",
+            None,
+            "shell-current-2026-08"
+        ))?);
+        assert!(!compatible(&sample_manifest(
+            "999.0.0",
+            None,
+            "shell-current-2026-08"
+        ))?);
+        assert!(!compatible(&sample_manifest(
+            "0.0.0",
+            Some("0.0.0"),
+            "shell-current-2026-08"
+        ))?);
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_rejects_duplicates_and_unsafe_paths() {
+        let mut duplicate = sample_manifest("0.0.0", None, "shell-current-2026-08");
+        duplicate
+            .payload
+            .files
+            .push(duplicate.payload.files[0].clone());
+        assert!(verify_release_inventory(&duplicate).is_err());
+
+        let mut unsafe_path = sample_manifest("0.0.0", None, "shell-current-2026-08");
+        unsafe_path.payload.files[0].path = "../index.html".to_owned();
+        assert!(verify_release_inventory(&unsafe_path).is_err());
+    }
+
+    #[test]
+    fn release_check_never_clears_the_restart_gate() {
+        let mut state = ShellUpdateState {
+            active_version: Some("1.2.3".to_owned()),
+            phase: "restart_required".to_owned(),
+            health: "pending_restart".to_owned(),
+            ..ShellUpdateState::default()
+        };
+        assert_eq!(phase_after_check(&state, "1.2.3", true), "restart_required");
+        state.phase = "current".to_owned();
+        state.health = "healthy".to_owned();
+        assert_eq!(phase_after_check(&state, "1.2.3", true), "current");
+        assert_eq!(phase_after_check(&state, "1.2.4", true), "available");
+        assert_eq!(phase_after_check(&state, "1.2.4", false), "incompatible");
+    }
+
+    #[test]
+    fn activation_and_rollback_preserve_two_atomic_slots() {
+        let mut state = ShellUpdateState {
+            active_version: Some("1.0.0".to_owned()),
+            current_slot: Some("1.0.0".to_owned()),
+            desired_version: Some("1.1.0".to_owned()),
+            phase: "ready".to_owned(),
+            health: "healthy".to_owned(),
+            ..ShellUpdateState::default()
+        };
+        apply_activation(&mut state, "1.1.0".to_owned());
+        assert_eq!(state.active_version.as_deref(), Some("1.1.0"));
+        assert_eq!(state.current_slot.as_deref(), Some("1.1.0"));
+        assert_eq!(state.previous_slot.as_deref(), Some("1.0.0"));
+        assert_eq!(state.phase, "restart_required");
+        assert_eq!(state.health, "pending_restart");
+
+        apply_rollback(&mut state, "1.0.0".to_owned());
+        assert_eq!(state.active_version.as_deref(), Some("1.0.0"));
+        assert_eq!(state.current_slot.as_deref(), Some("1.0.0"));
+        assert_eq!(state.previous_slot.as_deref(), Some("1.1.0"));
+        assert!(state.rollback_active);
+    }
+
+    #[test]
+    fn failed_slot_verification_never_changes_the_active_slot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let state = ShellUpdateState {
+            active_version: Some("1.0.0".to_owned()),
+            current_slot: Some("1.0.0".to_owned()),
+            desired_version: Some("1.1.0".to_owned()),
+            phase: "ready".to_owned(),
+            health: "healthy".to_owned(),
+            ..ShellUpdateState::default()
+        };
+        write_state(temp.path(), &state)?;
+        fs::create_dir_all(slots_root(temp.path()).join("1.1.0"))?;
+        fs::write(
+            slots_root(temp.path()).join("1.1.0/index.html"),
+            b"tampered",
+        )?;
+        assert!(activate(temp.path()).is_err());
+        let persisted = read_state(temp.path())?;
+        assert_eq!(persisted.active_version.as_deref(), Some("1.0.0"));
+        assert_eq!(persisted.current_slot.as_deref(), Some("1.0.0"));
+        assert_eq!(persisted.desired_version.as_deref(), Some("1.1.0"));
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_staging_directory_is_never_an_active_slot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let staging = slots_root(temp.path()).join(".stage-interrupted");
+        fs::create_dir_all(&staging)?;
+        fs::write(staging.join("index.html"), b"partial")?;
+        let state = read_state(temp.path())?;
+        assert!(state.active_version.is_none());
+        assert!(state.current_slot.is_none());
+        assert_eq!(public_status(&state, true)["phase"], "recovery");
         Ok(())
     }
 }
