@@ -358,6 +358,15 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
             {
                 return true;
             }
+            // Workjet's authenticated device-pairing control plane owns the
+            // operation evidence. Opening the daemon-owned SQLite turn ledger
+            // in the short-lived CLI child can block behind the service and
+            // outlive the HTTP request deadline.
+            "business-os" | "business"
+                if args.get(1).map(String::as_str) == Some("mobile-invite") =>
+            {
+                return true;
+            }
             // Browser-backed Business OS web-stack commands are routed to
             // the running daemon over the typed service IPC channel. The
             // caller may be a read-only worker sandbox and must not attempt
@@ -5067,6 +5076,20 @@ mod tests {
             .map(str::to_string)
             .collect::<Vec<_>>();
         assert!(!super::skips_cli_turn_ledger(&inspect));
+    }
+
+    #[test]
+    fn mobile_invite_skips_daemon_owned_turn_ledger() {
+        for args in [
+            vec!["business-os", "mobile-invite", "create", "--ttl-seconds", "300"],
+            vec!["business-os", "mobile-invite", "revoke", "--invite-id", "opaque-id"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(
+                super::skips_cli_turn_ledger(&args),
+                "device pairing must not contend with the daemon turn ledger: {args:?}"
+            );
+        }
     }
 
     #[test]
