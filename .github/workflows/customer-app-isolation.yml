@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT OR AGPL-3.0-only
+name: Customer App Isolation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+      - name: Reject customer applications in shared source and releases
+        run: |
+          node --test src/apps/business-os/scripts/assert-customer-app-isolation.test.mjs
+          node src/apps/business-os/scripts/assert-customer-app-isolation.mjs "$GITHUB_WORKSPACE"

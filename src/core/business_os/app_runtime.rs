@@ -847,19 +847,28 @@ fn strip_rxdb_meta(mut value: Value) -> Value {
 fn load_runtime_manifest(root: &Path, module_id: &str) -> anyhow::Result<(Value, PathBuf)> {
     let app_root = runtime_app_root(root);
     let candidates = [
-        app_root
-            .join("installed-modules")
-            .join(module_id)
-            .join("module.json"),
-        app_root
-            .join("local-modules")
-            .join(module_id)
-            .join("module.json"),
-        root.join("src/apps/business-os/modules")
-            .join(module_id)
-            .join("module.json"),
+        (
+            app_root
+                .join("installed-modules")
+                .join(module_id)
+                .join("module.json"),
+            false,
+        ),
+        (
+            app_root
+                .join("local-modules")
+                .join(module_id)
+                .join("module.json"),
+            false,
+        ),
+        (
+            root.join("src/apps/business-os/modules")
+                .join(module_id)
+                .join("module.json"),
+            true,
+        ),
     ];
-    for path in candidates {
+    for (path, global_source) in candidates {
         if !path.is_file() {
             continue;
         }
@@ -871,6 +880,15 @@ fn load_runtime_manifest(root: &Path, module_id: &str) -> anyhow::Result<(Value,
             value.get("id").and_then(Value::as_str) == Some(module_id),
             "app_action_not_registered: module id mismatch"
         );
+        let module_dir = path
+            .parent()
+            .context("app_action_not_registered: manifest has no module directory")?;
+        if global_source {
+            super::customer_apps::authorize_global_module(module_dir, &value)
+        } else {
+            super::customer_apps::authorize_runtime_module(root, module_dir, &value)
+        }
+        .map_err(|_| anyhow::anyhow!("app_action_not_registered: module is not authorized"))?;
         return Ok((value, path));
     }
     anyhow::bail!("app_action_not_registered: module `{module_id}` is not installed")
@@ -1161,5 +1179,30 @@ mod tests {
             original
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn customer_marked_global_source_module_is_not_loaded_for_actions() {
+        let root = tempfile::tempdir().expect("test root");
+        let module_dir = root
+            .path()
+            .join("src/apps/business-os/modules/customer-source");
+        fs::create_dir_all(&module_dir).expect("source module directory");
+        fs::write(
+            module_dir.join("module.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "customer-source",
+                "distribution": "customer"
+            }))
+            .expect("manifest json"),
+        )
+        .expect("source module manifest");
+
+        let error = load_runtime_manifest(root.path(), "customer-source")
+            .expect_err("customer-marked source module must be denied");
+        assert_eq!(
+            error.to_string(),
+            "app_action_not_registered: module is not authorized"
+        );
     }
 }

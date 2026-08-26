@@ -665,7 +665,7 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 request,
                 &serde_json::json!({
                     "ok": true,
-                    "modules": load_module_manifests(app_root, &installed_app_root)?,
+                    "modules": load_module_manifests(root, app_root, &installed_app_root)?,
                     "governance": store::module_governance_map(root, &session)?
                 }),
             )?;
@@ -812,15 +812,14 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
         }
         (Method::Get, "/api/business-os/sync/config") => {
             let session = request_session(root, &request);
-            let turn_session = session
-                .user
-                .as_ref()
-                .map(|user| user.id.clone())
-                .unwrap_or_else(|| "browser".to_owned());
-            respond_json(
-                request,
-                &store::sync_config_for_browser(root, &turn_session)?,
-            )?;
+            if let Some(turn_session) = authenticated_sync_config_session_id(&session) {
+                respond_sensitive_json(
+                    request,
+                    &store::sync_config_for_browser(root, &turn_session)?,
+                )?;
+            } else {
+                respond_status(request, 401, "login required")?;
+            }
         }
         (Method::Post, "/api/business-os/sync/native-peer/restart") => {
             if std::env::var_os("CTOX_BUSINESS_OS_ENABLE_SMOKE_CONTROLS").is_none() {
@@ -1304,6 +1303,14 @@ fn request_session(root: &Path, request: &Request) -> store::BusinessOsSession {
     // localhost-only control-plane fetches. Treat that signed token as an API
     // session, then let the normal route-level role checks decide access.
     session_from_capability_bearer(root, auth_header.as_deref()).unwrap_or(session)
+}
+
+fn authenticated_sync_config_session_id(session: &store::BusinessOsSession) -> Option<String> {
+    session
+        .authenticated
+        .then(|| session.user.as_ref().map(|user| user.id.clone()))
+        .flatten()
+        .filter(|user_id| !user_id.trim().is_empty())
 }
 
 fn session_from_capability_bearer(
@@ -2269,6 +2276,7 @@ fn respond_redirect_with_cookie(
 }
 
 fn load_module_manifests(
+    root: &Path,
     source_app_root: &Path,
     installed_app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -2287,7 +2295,14 @@ fn load_module_manifests(
             }
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-            let mut manifest: ModuleManifest = serde_json::from_str(&text)
+            let manifest_value: Value = serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+            if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value)
+                .is_err()
+            {
+                continue;
+            }
+            let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
                 .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
             manifest.manifest_sha256 = hex_sha256(text.as_bytes());
             manifest.local_manifest_path = path.display().to_string();
@@ -2312,13 +2327,13 @@ fn load_module_manifests(
             manifests.push(manifest);
         }
     }
-    for manifest in load_installed_module_manifests(installed_app_root)? {
+    for manifest in load_installed_module_manifests(root, installed_app_root)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
         manifests.push(manifest);
     }
-    for manifest in load_local_module_manifests(installed_app_root)? {
+    for manifest in load_local_module_manifests(root, installed_app_root)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
@@ -2333,7 +2348,10 @@ fn load_module_manifests(
     Ok(manifests)
 }
 
-fn load_installed_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleManifest>> {
+fn load_installed_module_manifests(
+    root: &Path,
+    app_root: &Path,
+) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("installed-modules");
     let mut manifests = Vec::new();
     if !modules_root.is_dir() {
@@ -2350,7 +2368,14 @@ fn load_installed_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Module
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.manifest_sha256 = hex_sha256(text.as_bytes());
         manifest.local_manifest_path = path.display().to_string();
@@ -2372,7 +2397,10 @@ fn load_installed_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Module
     Ok(manifests)
 }
 
-fn load_local_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleManifest>> {
+fn load_local_module_manifests(
+    root: &Path,
+    app_root: &Path,
+) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("local-modules");
     let mut manifests = Vec::new();
     if !modules_root.is_dir() {
@@ -2389,7 +2417,14 @@ fn load_local_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleMani
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.manifest_sha256 = hex_sha256(text.as_bytes());
         manifest.local_manifest_path = path.display().to_string();
@@ -3664,6 +3699,10 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
     {
         return respond_status(request, 403, "forbidden");
     }
+    if !runtime_module_static_authorized(root, rel) {
+        // Do not reveal whether a customer package exists on this instance.
+        return respond_status(request, 404, "not found");
+    }
     let file = resolve_business_os_static_file(root, app_root, rel);
     let target = if file.is_dir() {
         file.join("index.html")
@@ -3717,6 +3756,49 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         respond_static_success(request, &bytes, mime, cache_control, None)?;
     }
     Ok(())
+}
+
+fn runtime_module_static_authorized(root: &Path, rel: &str) -> bool {
+    let mut parts = rel.split('/');
+    let source = parts.next().unwrap_or_default();
+    if source == "modules" {
+        let module_id = parts.next().unwrap_or_default();
+        if module_id.is_empty() {
+            return false;
+        }
+        let module_dir = match store::resolve_business_os_app_root(root) {
+            Ok(app_root) => app_root.join("modules").join(module_id),
+            Err(_) => return false,
+        };
+        let manifest = fs::read(module_dir.join("module.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        return manifest.is_some_and(|manifest| {
+            super::customer_apps::authorize_global_module(&module_dir, &manifest).is_ok()
+        });
+    }
+    if !matches!(source, "installed-modules" | "local-modules") {
+        return true;
+    }
+    let module_id = parts.next().unwrap_or_default();
+    if module_id.is_empty() {
+        return false;
+    }
+    let source_root = resolve_business_os_installed_app_root(root).join(source);
+    let module_dir = source_root.join(module_id);
+    let contained = fs::canonicalize(&source_root)
+        .ok()
+        .zip(fs::canonicalize(&module_dir).ok())
+        .is_some_and(|(root, module)| module.starts_with(root));
+    if !contained {
+        return false;
+    }
+    let manifest = fs::read(module_dir.join("module.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    manifest.is_some_and(|manifest| {
+        super::customer_apps::authorize_runtime_module(root, &module_dir, &manifest).is_ok()
+    })
 }
 
 fn inject_launch_context(
@@ -3893,6 +3975,20 @@ fn read_json(request: &mut Request) -> anyhow::Result<Value> {
 
 fn respond_json<T: Serialize>(request: Request, value: &T) -> anyhow::Result<()> {
     respond_json_value(request, serde_json::to_value(value)?)
+}
+
+fn respond_sensitive_json<T: Serialize>(request: Request, value: &T) -> anyhow::Result<()> {
+    let body = serde_json::to_string_pretty(value)?;
+    let mut response = Response::from_string(body);
+    response.add_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+    response.add_header(Header::from_bytes("Cache-Control", "no-store, max-age=0").unwrap());
+    response.add_header(Header::from_bytes("Pragma", "no-cache").unwrap());
+    response.add_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap());
+    // Deliberately no permissive CORS header: sync credentials are consumed by
+    // the same-origin shell or authenticated native clients only.
+    add_common_response_headers(&mut response);
+    request.respond(response)?;
+    Ok(())
 }
 
 fn respond_json_value(request: Request, value: Value) -> anyhow::Result<()> {
@@ -4244,6 +4340,7 @@ mod tests {
         for (directory, id, scope) in [
             ("installed-modules", "public-addon", "installed"),
             ("local-modules", "private-addon", "local"),
+            ("installed-modules", "rem-unbound", "installed"),
         ] {
             let dir = runtime_root.join(directory).join(id);
             fs::create_dir_all(&dir)?;
@@ -4257,7 +4354,7 @@ mod tests {
             )?;
         }
 
-        let modules = load_module_manifests(&source_root, &runtime_root)?;
+        let modules = load_module_manifests(temp.path(), &source_root, &runtime_root)?;
         let by_id = modules
             .into_iter()
             .map(|module| (module.id.clone(), module))
@@ -4267,6 +4364,10 @@ mod tests {
                 .get("ctox")
                 .map(|module| module.install_scope.as_str()),
             Some("core")
+        );
+        assert!(
+            !by_id.contains_key("rem-unbound"),
+            "customer apps without an instance-bound signature must not enter the catalog"
         );
         assert_eq!(
             by_id
@@ -4288,6 +4389,56 @@ mod tests {
         );
         assert!(!by_id.contains_key("marketplace-research"));
         assert!(!by_id.contains_key("rogue-system"));
+        Ok(())
+    }
+
+    #[test]
+    fn customer_module_static_assets_fail_closed_without_valid_binding() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("runtime"))?;
+        fs::write(
+            root.path().join("runtime/business-os-instance-id"),
+            "biz_local\n",
+        )?;
+        let private = root
+            .path()
+            .join("runtime/business-os/installed-modules/rem-private");
+        fs::create_dir_all(&private)?;
+        fs::write(
+            private.join("module.json"),
+            br#"{"id":"rem-private","version":"1.0.0"}"#,
+        )?;
+        fs::write(private.join("index.js"), "private")?;
+        assert!(!runtime_module_static_authorized(
+            root.path(),
+            "installed-modules/rem-private/index.js"
+        ));
+
+        let public = root
+            .path()
+            .join("runtime/business-os/installed-modules/public-app");
+        fs::create_dir_all(&public)?;
+        fs::write(
+            public.join("module.json"),
+            br#"{"id":"public-app","version":"1.0.0"}"#,
+        )?;
+        fs::write(public.join("index.js"), "public")?;
+        assert!(runtime_module_static_authorized(
+            root.path(),
+            "installed-modules/public-app/index.js"
+        ));
+
+        let source_root = root.path().join("src/apps/business-os");
+        fs::create_dir_all(source_root.join("modules/rem-source"))?;
+        fs::write(source_root.join("index.html"), "shell")?;
+        fs::write(
+            source_root.join("modules/rem-source/module.json"),
+            br#"{"id":"rem-source","version":"1.0.0"}"#,
+        )?;
+        assert!(!runtime_module_static_authorized(
+            root.path(),
+            "modules/rem-source/index.js"
+        ));
         Ok(())
     }
 
@@ -4399,6 +4550,40 @@ mod tests {
         assert_eq!(context.get("session"), Some(&expected_session));
         assert_eq!(context.get("config"), Some(&Value::Null));
         assert_eq!(context.get("designTemplates"), Some(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn sync_config_requires_an_authenticated_named_session() {
+        let unauthenticated = store::BusinessOsSession {
+            ok: true,
+            authenticated: false,
+            auth_required: true,
+            user: None,
+            login_url: None,
+            reason: Some("missing".to_owned()),
+        };
+        assert_eq!(
+            authenticated_sync_config_session_id(&unauthenticated),
+            None
+        );
+
+        let authenticated = store::BusinessOsSession {
+            ok: true,
+            authenticated: true,
+            auth_required: true,
+            user: Some(store::BusinessOsSessionUser {
+                id: "user-opaque".to_owned(),
+                display_name: "User".to_owned(),
+                role: "member".to_owned(),
+                is_admin: false,
+            }),
+            login_url: None,
+            reason: None,
+        };
+        assert_eq!(
+            authenticated_sync_config_session_id(&authenticated).as_deref(),
+            Some("user-opaque")
+        );
     }
 
     #[test]

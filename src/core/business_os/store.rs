@@ -1625,7 +1625,7 @@ pub fn migrate_legacy_module_lifecycle_authority(
 ) -> anyhow::Result<Value> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let modules = load_module_manifests(&app_root, &installed_app_root)?;
+    let modules = load_module_manifests(root, &app_root, &installed_app_root)?;
     let mut conn = open_store(root)?;
     let existing_evidence = conn
         .query_row(
@@ -2703,7 +2703,7 @@ fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow
     if module_id.is_empty() {
         return Ok(false);
     }
-    let manifests = load_module_manifests(&app_root, &installed_app_root)?;
+    let manifests = load_module_manifests(root, &app_root, &installed_app_root)?;
     let Some(manifest) = manifests.iter().find(|manifest| manifest.id == module_id) else {
         return Ok(false);
     };
@@ -4297,7 +4297,7 @@ fn desktop_file_generation_chunk_id_bounds(file_id: &str, generation_id: &str) -
     (prefix.clone(), format!("{prefix}`"))
 }
 
-pub(super) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
     let mut candidates = Vec::new();
     if root
         .file_name()
@@ -4320,7 +4320,7 @@ pub(super) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBu
         .context("Business OS app root not found")
 }
 
-pub(super) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
+pub(crate) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
     if root
         .file_name()
         .and_then(|name| name.to_str())
@@ -4340,6 +4340,7 @@ pub(super) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
 }
 
 pub(super) fn load_module_manifests(
+    root: &Path,
     source_app_root: &Path,
     installed_app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -4358,7 +4359,14 @@ pub(super) fn load_module_manifests(
             }
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-            let mut manifest: ModuleManifest = serde_json::from_str(&text)
+            let manifest_value: Value = serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+            if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value)
+                .is_err()
+            {
+                continue;
+            }
+            let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
                 .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
             manifest.manifest_sha256 = hex_sha256(text.as_bytes());
             manifest.asset_revision = module_asset_revision(&entry.path())?;
@@ -4382,13 +4390,13 @@ pub(super) fn load_module_manifests(
             manifests.push(manifest);
         }
     }
-    for manifest in load_installed_module_manifests(installed_app_root)? {
+    for manifest in load_installed_module_manifests(root, installed_app_root)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
         manifests.push(manifest);
     }
-    for manifest in load_local_module_manifests(installed_app_root, true)? {
+    for manifest in load_local_module_manifests(root, installed_app_root, true)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
@@ -4408,7 +4416,7 @@ pub(super) fn load_module_manifests(
 /// executable SQL mappings.
 pub(crate) fn local_external_data_source_declarations(root: &Path) -> anyhow::Result<Vec<Value>> {
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let manifests = load_local_module_manifests(&installed_app_root, false)?;
+    let manifests = load_local_module_manifests(root, &installed_app_root, false)?;
     let mut declarations = Vec::new();
     for manifest in manifests {
         let mut source_values = manifest.external_data_sources;
@@ -4457,6 +4465,7 @@ pub(crate) fn local_external_data_source_declarations(root: &Path) -> anyhow::Re
 
 /// Loads operator-owned local modules; app-store lifecycle never manages them (`deletable=false`).
 fn load_local_module_manifests(
+    root: &Path,
     app_root: &Path,
     enrich: bool,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -4476,7 +4485,14 @@ fn load_local_module_manifests(
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.local_manifest_path = path.display().to_string();
         if enrich {
@@ -4523,7 +4539,10 @@ pub(super) fn ensure_local_icon_manifest_value(manifest: &mut Value, module_dir:
     }
 }
 
-pub(super) fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Value>> {
+pub(super) fn load_marketplace_module_manifests(
+    _root: &Path,
+    app_root: &Path,
+) -> anyhow::Result<Vec<Value>> {
     let modules_root = app_root.join("modules");
     let mut marketplace = Vec::new();
     if !modules_root.is_dir() {
@@ -4542,6 +4561,9 @@ pub(super) fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Resu
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
         let mut manifest_value: Value = serde_json::from_str(&text)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value).is_err() {
+            continue;
+        }
         let manifest: ModuleManifest = serde_json::from_value(manifest_value.clone())?;
         let scope = module_install_scope(&manifest);
         if scope != "store" {
@@ -22138,16 +22160,41 @@ fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
     std::fs::create_dir_all(&runtime)
         .with_context(|| format!("failed to create runtime dir {}", runtime.display()))?;
     let path = runtime.join("business-os-instance-id");
-    if path.is_file() {
+    if path.exists() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "Business OS instance identity is not a protected regular file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            anyhow::ensure!(
+                metadata.permissions().mode() & 0o022 == 0,
+                "Business OS instance identity is writable by group or other users"
+            );
+        }
         let value = std::fs::read_to_string(&path)?;
         let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
+        anyhow::ensure!(!trimmed.is_empty(), "Business OS instance identity is empty");
+        return Ok(trimmed.to_string());
     }
     let id = format!("biz_{}", Uuid::new_v4());
-    std::fs::write(&path, format!("{id}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let temporary = runtime.join(format!(".business-os-instance-id-{}.tmp", Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("failed to create {}", temporary.display()))?;
+    std::io::Write::write_all(&mut file, format!("{id}\n").as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &path)
+        .with_context(|| format!("failed to publish {}", path.display()))?;
     Ok(id)
 }
 
@@ -22235,6 +22282,26 @@ fn room_secret_id(value: &str) -> String {
 pub(super) mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_instance_identity_is_private_and_rejects_symlinks() -> anyhow::Result<()> {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempdir()?;
+        let id = stable_instance_id(root.path())?;
+        assert!(id.starts_with("biz_"));
+        let identity = root.path().join("runtime/business-os-instance-id");
+        assert_eq!(fs::metadata(&identity)?.permissions().mode() & 0o077, 0);
+        assert_eq!(stable_instance_id(root.path())?, id);
+
+        fs::remove_file(&identity)?;
+        let target = root.path().join("runtime/other-instance-id");
+        fs::write(&target, "biz_other\n")?;
+        symlink(&target, &identity)?;
+        assert!(stable_instance_id(root.path()).is_err());
+        Ok(())
+    }
 
     fn research_csv_output(table_key: &'static str) -> SystematicResearchCsvOutput {
         SystematicResearchCsvOutput {
@@ -24632,7 +24699,7 @@ pub(super) mod tests {
             }))?,
         )?;
 
-        let manifests = load_local_module_manifests(&app_root, false)?;
+        let manifests = load_local_module_manifests(root.path(), &app_root, false)?;
         assert_eq!(manifests.len(), 1);
         assert!(manifests[0].asset_revision.is_empty());
         assert!(manifests[0].manifest_sha256.is_empty());
@@ -28332,8 +28399,8 @@ pub(super) mod tests {
 
     #[test]
     fn source_core_manifests_match_canonical_system_app_manifest() -> anyhow::Result<()> {
-        let modules_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/apps/business-os/modules");
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let modules_root = repository_root.join("src/apps/business-os/modules");
         let mut manifest_ids = BTreeSet::new();
         for entry in fs::read_dir(&modules_root)? {
             let path = entry?.path().join("module.json");
@@ -28349,6 +28416,7 @@ pub(super) mod tests {
         assert_eq!(canonical_ids.len(), 10);
         assert_eq!(manifest_ids, canonical_ids);
         let marketplace = load_marketplace_module_manifests(
+            repository_root,
             modules_root.parent().context("Business OS source root")?,
         )?;
         assert_eq!(marketplace.len(), 24);

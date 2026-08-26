@@ -11,6 +11,7 @@ import {
   RUNTIME_TREES,
   SHELL_SCHEMA,
   MAX_RUNTIME_FILE_BYTES,
+  assertNoCustomerReleaseContent,
   buildShellArtifact,
   commitStagedOutputs,
   createDeterministicGzip,
@@ -143,6 +144,25 @@ test('exclusion policy retains runtime notices while removing non-runtime conten
   assert.equal(isExcludedRuntimePath('shared/runtime.spec.mjs'), true);
   assert.equal(isExcludedRuntimePath('rxdb/cache-output', { directory: true }), true);
   assert.equal(isExcludedRuntimePath('rxdb/CLAUDE.md'), true);
+});
+
+test('global shell releases reject customer-bound modules and runtime state', () => {
+  const bytes = (value) => Buffer.from(JSON.stringify(value));
+  assert.throws(
+    () => assertNoCustomerReleaseContent([{ path: 'modules/rem-private/module.json', data: bytes({ id: 'rem-private' }) }]),
+    /private instance-bound distribution/,
+  );
+  assert.throws(
+    () => assertNoCustomerReleaseContent([{ path: 'modules/private/module.json', data: bytes({ id: 'private', distribution: 'customer' }) }]),
+    /private instance-bound distribution/,
+  );
+  assert.throws(
+    () => assertNoCustomerReleaseContent([{ path: 'installed-modules/private/index.js', data: Buffer.from('') }]),
+    /must not ship/,
+  );
+  assert.doesNotThrow(() => assertNoCustomerReleaseContent([
+    { path: 'modules/tickets/module.json', data: bytes({ id: 'tickets', distribution: 'public' }) },
+  ]));
 });
 
 test('deterministic builds have byte-identical archives and complete sorted inventories', async () => {

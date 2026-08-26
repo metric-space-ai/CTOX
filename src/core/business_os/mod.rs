@@ -8,8 +8,9 @@ mod browser_control;
 mod browser_runtime;
 mod capability;
 mod command_plane;
-pub mod decision_hub;
 mod control_command_types;
+mod customer_apps;
+pub mod decision_hub;
 mod desktop_files;
 mod external_sql_sync;
 mod hashing;
@@ -55,6 +56,20 @@ pub use browser_control::browser_context_capture;
 pub(crate) use browser_control::browser_session_automation as run_browser_session_automation;
 pub use browser_control::browser_session_status;
 pub use browser_control::BrowserContextCaptureRequest;
+pub fn audit_customer_apps(root: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    let entries = customer_apps::audit_runtime_customer_apps(root)?;
+    let blocked = entries
+        .iter()
+        .filter(|entry| entry.status == "blocked")
+        .count();
+    Ok(serde_json::json!({
+        "type": "ctox.business-os.customer-app-audit.v1",
+        "ok": blocked == 0,
+        "read_only": true,
+        "blocked": blocked,
+        "entries": entries,
+    }))
+}
 pub(crate) use browser_runtime::BrowserSessionAutomationRequest;
 pub use rxdb_peer::enqueue_business_command_document;
 pub use rxdb_peer::native_peer_status;

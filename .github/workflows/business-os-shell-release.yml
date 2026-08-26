@@ -64,6 +64,7 @@ jobs:
 
       - name: Enforce Workjet product identity
         run: |
+          node src/apps/business-os/scripts/assert-customer-app-isolation.mjs "$GITHUB_WORKSPACE"
           node src/apps/business-os/scripts/assert-workjet-branding.mjs
           node src/apps/business-os/scripts/assert-shell-release-chrome.mjs
 

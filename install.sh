@@ -2167,6 +2167,12 @@ sync_business_os_shell_assets() {
 
   [[ -d "$source_business_os_root" ]] || return 0
 
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'error: Node.js is required to verify the Business OS customer-app release boundary\n' >&2
+    return 1
+  fi
+  node "$source_business_os_root/scripts/assert-customer-app-isolation.mjs" "$source_root"
+
   mkdir -p "$state_business_os_root"
   # Runtime-installed and operator-owned apps are tenant state. Shell upgrades
   # must neither delete them nor replace them with files from a new release.
@@ -2265,6 +2271,8 @@ setup_managed_install() {
     --exclude='.codex' \
     --exclude='archive' \
     --exclude='output' \
+    --exclude='src/apps/business-os/installed-modules/***' \
+    --exclude='src/apps/business-os/local-modules/***' \
     --exclude='src/core/communication/whatsapp_rust/Cargo.lock' \
     --exclude='src/tools/pdf-parse/tests/fixtures/samples/public' \
     "$source_root/" "$release_dir/"

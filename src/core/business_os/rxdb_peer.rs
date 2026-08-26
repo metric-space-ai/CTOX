@@ -7774,7 +7774,7 @@ fn runtime_module_collection_entries_for_root(root: &Path) -> Vec<RuntimeModuleC
                 continue;
             }
             for collection_entry in
-                module_dir_collection_entries(&module_dir, require_installed_marker)
+                module_dir_collection_entries(root, &module_dir, require_installed_marker)
             {
                 if static_collections.contains_key(&collection_entry.name)
                     || !seen.insert(collection_entry.name.clone())
@@ -7788,8 +7788,11 @@ fn runtime_module_collection_entries_for_root(root: &Path) -> Vec<RuntimeModuleC
     collected
 }
 
-fn runtime_installed_module_collection_schemas(module_dir: &Path) -> Vec<(String, RxJsonSchema)> {
-    module_dir_collection_entries(module_dir, true)
+fn runtime_installed_module_collection_schemas(
+    root: &Path,
+    module_dir: &Path,
+) -> Vec<(String, RxJsonSchema)> {
+    module_dir_collection_entries(root, module_dir, true)
         .into_iter()
         .map(|entry| (entry.name, entry.schema))
         .collect()
@@ -7799,8 +7802,8 @@ fn runtime_installed_module_collection_schemas(module_dir: &Path) -> Vec<(String
 /// git-ignored) load their collection schemas exactly like installed modules
 /// but carry no runtime-installed marker — dropping the directory IS the
 /// install. Completes the local-modules discovery from commit 8741c150.
-fn local_module_collection_schemas(module_dir: &Path) -> Vec<(String, RxJsonSchema)> {
-    module_dir_collection_entries(module_dir, false)
+fn local_module_collection_schemas(root: &Path, module_dir: &Path) -> Vec<(String, RxJsonSchema)> {
+    module_dir_collection_entries(root, module_dir, false)
         .into_iter()
         .map(|entry| (entry.name, entry.schema))
         .collect()
@@ -7917,12 +7920,12 @@ fn runtime_module_migration_strategies_for_collection(
 }
 
 fn module_dir_collection_entries(
+    root: &Path,
     module_dir: &Path,
     require_installed_marker: bool,
 ) -> Vec<RuntimeModuleCollectionEntry> {
     let manifest_path = module_dir.join("module.json");
-    let schema_path = module_dir.join("collections.schema.json");
-    if !manifest_path.is_file() || !schema_path.is_file() {
+    if !manifest_path.is_file() {
         return Vec::new();
     }
     let manifest = match read_json_file(&manifest_path) {
@@ -7935,6 +7938,17 @@ fn module_dir_collection_entries(
             return Vec::new();
         }
     };
+    if let Err(err) = super::customer_apps::authorize_runtime_module(root, module_dir, &manifest) {
+        eprintln!(
+            "[business-os] skipping runtime module schema {}: module admission denied: {err:#}",
+            module_dir.display()
+        );
+        return Vec::new();
+    }
+    let schema_path = module_dir.join("collections.schema.json");
+    if !schema_path.is_file() {
+        return Vec::new();
+    }
     if require_installed_marker && !manifest_value_is_runtime_installed_for_native_peer(&manifest) {
         return Vec::new();
     }
@@ -10303,6 +10317,48 @@ pub(in crate::business_os) mod tests {
         assert_eq!(schema.version, 0);
         assert_eq!(schema.primary_key.primary_field(), "id");
         assert_eq!(schema.schema_type, "object");
+        Ok(())
+    }
+
+    #[test]
+    fn unbound_customer_runtime_module_schema_is_not_discovered() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let module_dir = temp
+            .path()
+            .join("runtime/business-os/installed-modules/rem-private");
+        fs::create_dir_all(&module_dir)?;
+        fs::write(
+            module_dir.join("module.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "rem-private",
+                "entry": "installed-modules/rem-private/index.html",
+                "install_scope": "installed",
+                "distribution": "customer",
+                "collections": ["rem_private_records"]
+            }))?,
+        )?;
+        fs::write(
+            module_dir.join("collections.schema.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_format": "ctox-business-os-module-collections-v1",
+                "collections": {
+                    "rem_private_records": {
+                        "primaryKey": "id",
+                        "properties": {
+                            "id": { "type": "string", "maxLength": 120 },
+                            "title": { "type": "string" }
+                        },
+                        "required": ["id"]
+                    }
+                }
+            }))?,
+        )?;
+
+        let entries = runtime_module_collection_entries_for_root(temp.path());
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.name == "rem_private_records"));
+        assert!(!collection_creators_for_root(temp.path()).contains_key("rem_private_records"));
         Ok(())
     }
 

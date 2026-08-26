@@ -376,6 +376,36 @@ export async function collectRuntimePayload(sourceRoot) {
   return { directories, files };
 }
 
+export function assertNoCustomerReleaseContent(files) {
+  for (const file of files) {
+    const path = validateRelativePath(file.path);
+    if (path.startsWith('installed-modules/') || path.startsWith('local-modules/')) {
+      throw new Error(`Customer/runtime state must not ship in a shell release: ${path}`);
+    }
+    if (path.endsWith('/customer-app-binding.json')) {
+      throw new Error(`Customer bindings must not ship in a global shell release: ${path}`);
+    }
+    const match = /^modules\/([^/]+)\/module\.json$/.exec(path);
+    if (!match) continue;
+    const moduleId = match[1].toLowerCase();
+    let manifest;
+    try {
+      manifest = JSON.parse(file.data.toString('utf8'));
+    } catch {
+      throw new Error(`Module manifest is not valid JSON: ${path}`);
+    }
+    const declared = [manifest.distribution, manifest.audience, manifest.visibility]
+      .map((value) => String(value || '').trim().toLowerCase());
+    const customerScoped = declared.some((value) => ['customer', 'customer-private', 'private-customer'].includes(value))
+      || Boolean(String(manifest.customer_id || manifest.customerId || '').trim())
+      || moduleId.startsWith('rem-')
+      || moduleId.startsWith('thesen-');
+    if (customerScoped) {
+      throw new Error(`Customer module must stay in private instance-bound distribution: ${path}`);
+    }
+  }
+}
+
 export function createEmbeddedManifest({ version, sourceCommit, archiveRoot, files }) {
   validateSemVer(version);
   validateSourceCommit(sourceCommit);
@@ -438,6 +468,7 @@ export async function buildShellArtifact({ sourceRoot, outputDir, version, sourc
   const manifestFilename = `${archiveRoot}.manifest.json`;
   const checksumFilename = `${archiveFilename}.sha256`;
   const payload = await collectRuntimePayload(sourceRoot);
+  assertNoCustomerReleaseContent(payload.files);
   const embeddedManifest = createEmbeddedManifest({ version, sourceCommit, archiveRoot, files: payload.files });
   const embeddedManifestBytes = Buffer.from(`${JSON.stringify(embeddedManifest, null, 2)}\n`);
 

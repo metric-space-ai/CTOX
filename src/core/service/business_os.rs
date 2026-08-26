@@ -341,6 +341,10 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
         Some("desktop") => handle_business_os_desktop(root, &args[1..]),
         Some("mobile-invite") => handle_business_os_mobile_invite(root, &args[1..]),
         Some("shell-update") => handle_business_os_shell_update(root, &args[1..]),
+        Some("customer-apps") => match args.get(1).map(String::as_str) {
+            None | Some("audit") => print_json(&crate::business_os::audit_customer_apps(root)?),
+            Some(other) => anyhow::bail!("unknown business-os customer-apps command `{other}`"),
+        },
         Some("web-stack") => handle_business_os_web_stack(root, &args[1..]),
         Some("files") => handle_business_os_files(root, &args[1..]),
         Some("mcp") => handle_business_os_mcp(root, &args[1..]),

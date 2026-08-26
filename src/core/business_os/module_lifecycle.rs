@@ -845,6 +845,7 @@ fn load_desktop_file_bytes(root: &Path, file_id: &str) -> anyhow::Result<Vec<u8>
 }
 
 pub(super) fn load_installed_module_manifests(
+    root: &Path,
     app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("installed-modules");
@@ -863,7 +864,14 @@ pub(super) fn load_installed_module_manifests(
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.manifest_sha256 = hex_sha256(text.as_bytes());
         manifest.asset_revision = module_asset_revision(&entry.path())?;
@@ -1085,6 +1093,7 @@ fn install_template_module(
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
 
     let activation = (|| -> anyhow::Result<()> {
+        super::customer_apps::authorize_runtime_module(root, &staging, &manifest_value)?;
         // CTOX Marketplace apps are authored against the catalog contract and
         // then rewritten to an installed runtime path. Validate them with the
         // dedicated catalog-installed profile; the stricter generated-app
@@ -1893,6 +1902,7 @@ pub fn install_app_module(
         )
         .with_context(|| format!("Failed to rewrite staged manifest for {module_id}"))?;
 
+        super::customer_apps::authorize_runtime_module(root, &staging, &manifest)?;
         validate_staged_catalog_module(root, &module_id, &staging)?;
 
         activate_staged_module_directory(&staging, &dest_dir, &backup)

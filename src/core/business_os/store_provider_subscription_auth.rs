@@ -1569,7 +1569,7 @@ fn repair_orphan_private_app_responsibility(
 fn current_business_os_module_ids(root: &Path) -> anyhow::Result<BTreeSet<String>> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let modules = load_module_manifests(&app_root, &installed_app_root)?;
+    let modules = load_module_manifests(root, &app_root, &installed_app_root)?;
     Ok(modules.into_iter().map(|manifest| manifest.id).collect())
 }
 
