@@ -996,13 +996,13 @@ function settingsTemplate({
       <mark class="role-badge">${escapeHtml(roleDisplayName(role))}</mark>
     </section>
 
-    <nav class="settings-tabs" aria-label="Settings Bereiche">
+    <nav class="settings-tabs" aria-label="Einstellungsbereiche">
       ${tabButton('runtime', 'Runtime', tab)}
-      ${tabButton('channels', 'Channels', tab)}
+      ${tabButton('channels', 'Kanäle', tab)}
       ${tabButton('sync', 'Sync', tab)}
       ${branding?.canManage ? tabButton('appearance', 'Design', tab) : ''}
       ${isAdmin ? tabButton('mcp', 'MCP', tab) : ''}
-      ${tabButton('users', 'Nutzer', tab)}
+      ${tabButton('users', 'Team', tab)}
       ${isAdmin ? tabButton('activity', 'Aktivität', tab) : ''}
       ${canOpenAdmin ? tabButton('admin', 'Module', tab) : ''}
     </nav>
@@ -1028,8 +1028,8 @@ function settingsTemplate({
     </div>
 
     <footer class="settings-footer">
-      <button class="text-button" type="button" data-open-account-settings>Account</button>
-      <button class="text-button" type="button" data-logout-settings>Logout</button>
+      <button class="text-button" type="button" data-open-account-settings>Konto</button>
+      <button class="text-button" type="button" data-logout-settings>Abmelden</button>
       ${commandStatus ? `<span class="settings-status">${escapeHtml(commandStatus)}</span>` : ''}
     </footer>
   `;
@@ -1152,7 +1152,7 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
         <label><span>Context</span><select data-runtime-context ${canManage ? '' : 'disabled'}>
           ${option('256k', '256k', runtimeContextValue(runtime.context))}
         </select></label>
-        <label><span>Max Run</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
+        <label><span>Maximale Laufzeit (Sekunden)</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
         ${usesApiKey ? `<label><span>${escapeHtml(auth.api_key_name || 'API Key')}</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'gespeichert - leer lassen' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
       </div>
       ${usesSubscription ? subscriptionStatus(auth, canManage, subscriptionAuth) : ''}
@@ -1178,20 +1178,20 @@ function syncPanel(syncConfig, isAdmin) {
   const urls = syncConfig?.signaling_urls || [];
   return `
     <section class="settings-section">
-      <header><h3>Business OS Hosting</h3><span>App Server gehört zur CTOX Instanz.</span></header>
+      <header><h3>Business-OS-Hosting</h3><span>Der App-Server gehört zur CTOX-Instanz.</span></header>
       <dl class="settings-kv">
-        ${kv('App Hosting', syncConfig?.app_hosting || 'ctox_instance_webserver')}
-        ${kv('Sync Mode', syncConfig?.sync_mode || 'p2p-first')}
+        ${kv('App-Hosting', syncConfig?.app_hosting || 'ctox_instance_webserver')}
+        ${kv('Sync-Modus', syncConfig?.sync_mode || 'p2p-first')}
         ${kv('Transport', syncConfig?.transport || 'webrtc')}
-        ${kv('Peer Role', syncConfig?.peer_role || 'ctox_instance')}
-        ${kv('Instance', syncConfig?.instance_id || '-')}
+        ${kv('Peer-Rolle', syncConfig?.peer_role || 'ctox_instance')}
+        ${kv('Instanz', syncConfig?.instance_id || '-')}
       </dl>
     </section>
     <section class="settings-section">
-      <header><h3>WebRTC Signaling</h3><span>${escapeHtml(isAdmin ? 'Änderungen werden als CTOX Task angelegt.' : 'Nur lesbar.')}</span></header>
+      <header><h3>WebRTC-Signalisierung</h3><span>${escapeHtml(isAdmin ? 'Änderungen werden als CTOX-Task angelegt.' : 'Nur lesbar.')}</span></header>
       <div class="settings-grid is-one">
-        <label><span>Room</span><input data-sync-room value="${escapeAttr(syncConfig?.sync_room || '')}" ${isAdmin ? '' : 'disabled'} /></label>
-        <label><span>Signaling URLs</span><textarea data-sync-signaling ${isAdmin ? '' : 'disabled'}>${escapeHtml(urls.join('\n'))}</textarea></label>
+        <label><span>Raum</span><input data-sync-room aria-label="WebRTC-Raum" title="${escapeAttr(syncConfig?.sync_room || '')}" value="${escapeAttr(syncConfig?.sync_room || '')}" ${isAdmin ? '' : 'disabled'} /></label>
+        <label><span>Signalisierungs-URLs</span><textarea data-sync-signaling aria-label="WebRTC-Signalisierungs-URLs" title="${escapeAttr(urls.join('\n'))}" ${isAdmin ? '' : 'disabled'}>${escapeHtml(urls.join('\n'))}</textarea></label>
       </div>
       ${isAdmin ? `<button class="text-button settings-primary" type="button" data-settings-command="sync">Sync Konfiguration an CTOX geben</button>` : ''}
     </section>
@@ -1215,12 +1215,13 @@ function appearancePanel(branding = {}) {
         ${kv('Dark Tokens', String(Object.keys(document.dark || {}).length))}
       </dl>
       <div class="settings-grid is-one">
-        <label><span>Branding JSON</span><textarea data-branding-json rows="14" spellcheck="false">${escapeHtml(jsonText)}</textarea></label>
+        <label><span>Branding-JSON</span><textarea data-branding-json rows="14" spellcheck="false" aria-describedby="branding-json-help">${escapeHtml(jsonText)}</textarea></label>
       </div>
+      <p class="settings-note" id="branding-json-help">Das JSON wird vor dem Import vollständig validiert. Fehler verändern das aktive Branding nicht.</p>
       <div class="runtime-actions">
         <button class="text-button settings-primary" type="button" data-branding-save ${branding.loading ? 'disabled' : ''}>Branding importieren</button>
         <button class="text-button" type="button" data-branding-refresh ${branding.loading ? 'disabled' : ''}>Neu laden</button>
-        <button class="text-button" type="button" data-branding-reset ${branding.loading ? 'disabled' : ''}>CTOX Default</button>
+        <button class="text-button settings-reset" type="button" data-branding-reset ${branding.loading ? 'disabled' : ''}>CTOX-Standard wiederherstellen</button>
       </div>
       ${branding.error ? `<p class="settings-note">${escapeHtml(branding.error)}</p>` : ''}
     </section>
@@ -1257,7 +1258,7 @@ function mcpPanel(mcp = {}) {
         <button class="text-button settings-primary" type="button" data-mcp-refresh ${mcp.loading ? 'disabled' : ''}>MCP Status laden</button>
         ${info ? `<button class="text-button" type="button" data-mcp-copy="managedEndpoint">Managed Endpoint kopieren</button>` : ''}
       </div>
-      ${mcp.error ? `<p class="settings-note">${escapeHtml(mcp.error)}</p>` : ''}
+      ${mcp.error ? `<p class="settings-alert" role="alert">${escapeHtml(mcpErrorMessage(mcp.error))}</p>` : ''}
       ${copied ? `<p class="settings-note">${escapeHtml(copied === 'failed' ? 'Kopieren fehlgeschlagen.' : 'In die Zwischenablage kopiert.')}</p>` : ''}
       ${managed && !managedReady ? `<p class="settings-note">Managed MCP ist ${escapeHtml(managedStatus)}. Agent Tokens werden im ctox.dev Dashboard rotiert.</p>` : ''}
     </section>
@@ -1289,6 +1290,14 @@ function mcpEffectiveStatus(info, error) {
   return String(info.status || 'Status unbekannt');
 }
 
+function mcpErrorMessage(error) {
+  const message = String(error?.message || error || '').trim();
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return 'Der MCP-Status konnte nicht geladen werden. Verbindung prüfen und erneut versuchen.';
+  }
+  return message || 'Der MCP-Status konnte nicht geladen werden.';
+}
+
 function mcpStatusLabel(info, error) {
   if (error) return 'Nicht verbunden.';
   if (!info) return 'Noch nicht geladen.';
@@ -1318,7 +1327,7 @@ function usersPanel(user, role, isAdmin, users, canManageUsers) {
   const roleOptions = assignableRolesForActor(role);
   return `
     <section class="settings-section">
-      <header><h3>Aktive Sitzung</h3><span>${escapeHtml(roleDisplayName(role))} Session</span></header>
+      <header><h3>Aktive Sitzung</h3><span>Rolle: ${escapeHtml(roleDisplayName(role))}</span></header>
       <table class="settings-table">
         <tbody>
           <tr><th>Teammitglied</th><td>${escapeHtml(user.display_name || user.id || '-')}</td></tr>
@@ -1328,7 +1337,7 @@ function usersPanel(user, role, isAdmin, users, canManageUsers) {
       </table>
     </section>
     <section class="settings-section">
-      <header><h3>Team & Zugaenge</h3><span>${escapeHtml(canManageUsers ? 'Persistenter Business-OS Team Store.' : 'Nur eigene Sitzung sichtbar.')}</span></header>
+      <header><h3>Team & Zugänge</h3><span>${escapeHtml(canManageUsers ? 'Persistenter Business-OS-Team-Speicher.' : 'Nur eigene Sitzung sichtbar.')}</span></header>
       <table class="settings-table">
         <thead><tr><th>Teammitglied</th><th>Rolle</th><th>Status</th></tr></thead>
         <tbody>
@@ -1336,16 +1345,16 @@ function usersPanel(user, role, isAdmin, users, canManageUsers) {
             <tr>
               <td>${escapeHtml(row.display_name || row.id)}</td>
               <td>${escapeHtml(roleDisplayName(row.role || 'user'))}</td>
-              <td>${escapeHtml(row.active === false ? 'inaktiv' : 'aktiv')}</td>
+              <td><span class="settings-status-badge" data-state="${row.active === false ? 'inactive' : 'active'}">${escapeHtml(row.active === false ? 'Inaktiv' : 'Aktiv')}</span></td>
             </tr>
           `).join('')}
         </tbody>
       </table>
       ${canManageUsers ? `
         <div class="settings-user-form">
-          <input data-user-id placeholder="team-id" />
-          <input data-user-name placeholder="Anzeigename" />
-          <select data-user-role>
+          <input data-user-id aria-label="Team-ID" placeholder="team-id" />
+          <input data-user-name aria-label="Anzeigename" placeholder="Anzeigename" />
+          <select data-user-role aria-label="Rolle">
             ${roleOptions.map((option) => `<option value="${escapeAttr(option)}">${escapeHtml(roleDisplayName(option))}</option>`).join('')}
           </select>
           <button class="text-button settings-primary" type="button" data-user-save>Nutzer speichern</button>
@@ -1370,14 +1379,14 @@ function activityPanel(activity = {}) {
         <button class="text-button settings-primary" type="button" data-activity-refresh ${activity.loading ? 'disabled' : ''}>Neu laden</button>
       </div>
       ${activity.error ? `<p class="settings-note">${escapeHtml(activity.error)}</p>` : ''}
-      ${events.length ? `
+      ${activity.loading ? '<p class="settings-loading" role="status">Aktivität wird geladen…</p>' : events.length ? `
         <table class="settings-table">
           <thead><tr><th>Ereignis</th><th>Ausgeführt von</th><th>Zeit</th></tr></thead>
           <tbody>
             ${events.map(activityRow).join('')}
           </tbody>
         </table>
-      ` : `<p class="settings-note">${escapeHtml(activity.loaded ? 'Noch keine Aktivität.' : 'Noch nicht geladen.')}</p>`}
+      ` : `<p class="settings-note">${escapeHtml(activity.loaded ? 'Noch keine Aktivität.' : 'Aktivität wurde noch nicht geladen.')}</p>`}
     </section>
   `;
 }
@@ -1695,7 +1704,7 @@ function moduleRow(mod, editingModuleId, permissions) {
 	        ${supportHtml}
 	        ${permissions.isAdmin ? `
 	          <div class="module-admin-actions">
-	            <input data-founder-user="${escapeAttr(mod.id)}" placeholder="team user-id" />
+	            <input data-founder-user="${escapeAttr(mod.id)}" aria-label="Verantwortliche Team-ID für ${escapeAttr(mod.title || mod.id)}" placeholder="Team-ID" />
 	            <button class="text-button" type="button" data-founder-save="${escapeAttr(mod.id)}">Verantwortliche:n zuweisen</button>
 	          </div>
 	        ` : ''}
@@ -3696,7 +3705,7 @@ function channelsHubPanel(state) {
   return `
     <section class="settings-section channels-hub">
       <header>
-        <h3>Kommunikations-Channels</h3>
+        <h3>Kommunikationskanäle</h3>
         <span>Hier richtest du ein, über welche Kanäle CTOX für dich kommuniziert.</span>
       </header>
       <div class="channels-hub-list">

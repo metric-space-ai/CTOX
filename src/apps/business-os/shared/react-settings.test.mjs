@@ -336,7 +336,7 @@ function baseTemplate(overrides = {}) {
 
 test('settings user tab renders business-facing role labels', () => {
   const html = baseTemplate();
-  assert.match(html, /Team & Zugaenge/);
+  assert.match(html, /Team & Zugänge/);
   assert.match(html, /Teammitglied/);
   assert.match(html, /App-Verantwortliche:r/);
   assert.match(html, /Owner/);
@@ -367,11 +367,11 @@ test('compact settings tabs expose their complete labels on hover and to assisti
   const html = baseTemplate({ tab: 'runtime' });
   const expectedTabs = [
     ['runtime', 'Runtime'],
-    ['channels', 'Channels'],
+    ['channels', 'Kanäle'],
     ['sync', 'Sync'],
     ['appearance', 'Design'],
     ['mcp', 'MCP'],
-    ['users', 'Nutzer'],
+    ['users', 'Team'],
     ['activity', 'Aktivität'],
     ['admin', 'Module'],
   ];

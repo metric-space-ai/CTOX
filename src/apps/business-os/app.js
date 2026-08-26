@@ -7948,7 +7948,7 @@ function renderProfileDrawer() {
   body.innerHTML = `
     <header class="drawer-header-row">
       <div>
-        <h2>Account</h2>
+        <h2>Konto</h2>
         <p>${escapeHtml(user.display_name || user.id || 'CTOX User')} · ${escapeHtml(roleDisplayName(role))}</p>
       </div>
       <button class="icon-button" type="button" data-close-account aria-label="${escapeHtml(shellText('windowClose'))}">×</button>
@@ -7972,7 +7972,7 @@ function renderProfileDrawer() {
       </label>
       <div class="account-actions">
         <button class="text-button account-primary" type="submit">Speichern</button>
-        <button class="text-button" type="button" data-logout>Logout</button>
+        <button class="text-button" type="button" data-logout>Abmelden</button>
       </div>
       <small data-profile-status>Anzeigename wird im Team gespeichert. Sprache bleibt lokal und wird beim Laden der Module angewendet.</small>
     </form>
@@ -11508,7 +11508,7 @@ function createStartMenuElement() {
           <circle cx="11" cy="11" r="8"></circle>
           <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
         </svg>
-        <input type="text" class="start-menu-search-input" placeholder="${shellLang() === 'de' ? 'Suche nach Apps...' : 'Search apps...'}" />
+        <input type="text" class="start-menu-search-input" aria-label="${shellLang() === 'de' ? 'Apps suchen' : 'Search apps'}" placeholder="${shellLang() === 'de' ? 'Suche nach Apps...' : 'Search apps...'}" />
       </div>
     </header>
     <div class="start-menu-body"></div>
