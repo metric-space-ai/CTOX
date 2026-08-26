@@ -529,18 +529,6 @@ body[data-active-module="desktop"] .topbar {
    genuinely specific to this shell style.
    ========================================================================== */
 
-:root[data-shell-style="ctox"] .desktop-icon .desktop-icon-glyph {
-  border-radius: var(--panel-radius);
-  border: 1px solid var(--hairline, var(--line));
-  background: var(--surface);
-  box-shadow: none;
-}
-
-:root[data-shell-style="ctox"] .desktop-icon:hover .desktop-icon-glyph {
-  border-color: var(--accent);
-  background: var(--surface-2);
-}
-
 :root[data-shell-style="ctox"] .desktop-hero-widget {
   border-radius: var(--panel-radius);
   border: 1px solid var(--hairline, var(--line));

@@ -41,7 +41,7 @@ const DEFAULT_GRID = { cellW: 104, cellH: 120, offset: 24 };
 const COMPACT_GRID = { cellW: 88, cellH: 116, offset: 12 };
 const ICON_METRICS = {
   width: 96,
-  height: 104,
+  height: 116,
   compactWidth: 80,
   compactHeight: 108,
 };
@@ -534,8 +534,11 @@ export async function mount(ctx) {
       glyphEl.textContent = doc.glyph || launcher.glyphFor(targetModule);
     }
     
-    el.querySelector('.desktop-icon-label').textContent = doc.label || titleForModule(doc.target_module);
-    el.title = doc.label || titleForModule(doc.target_module);
+    const label = desktopIconLabel(doc);
+    el.querySelector('.desktop-icon-label').textContent = label;
+    el.title = label;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', label);
     el.tabIndex = 0;
 
     el.addEventListener('keydown', (event) => {
@@ -1008,6 +1011,17 @@ export async function mount(ctx) {
   function titleForModule(moduleId) {
     const entry = launcher.entries().find((mod) => mod.id === moduleId);
     return entry?.title || moduleId || '';
+  }
+
+  function desktopIconLabel(doc) {
+    const targetModule = String(doc?.target_module || '').trim();
+    const persisted = String(doc?.label || '').trim();
+    // Preserve explicit user renames. Only migrate the historical technical
+    // launcher label, which otherwise reads like a second product app.
+    if (targetModule === 'ctox' && (!persisted || persisted === 'CTOX')) {
+      return 'CTOX Backend';
+    }
+    return persisted || titleForModule(targetModule);
   }
 
   function composeCommandToast(doc) {
