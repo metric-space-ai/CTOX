@@ -295,3 +295,10 @@ test('selecting a booking page is an in-place class flip, never a list rebuild',
   // must not trigger it.
   assert.doesNotMatch(selectFn[0], /renderLeftList\(/);
 });
+
+test('calendar does not advertise an unavailable public booking route', async () => {
+  const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(js, /window\.location\.origin\}\/book\//);
+  assert.doesNotMatch(js, /href="\$\{publicUrl\}"/);
+  assert.match(js, /Nicht veröffentlicht/);
+});
