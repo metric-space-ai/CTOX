@@ -46,9 +46,9 @@ SPDX-Inventar sowie Release- und Channel-Signaturen. Am 2026-08-26 waren alle
 Layout-Guard, 49 Business-Chat-Verhaltenstests und zwei Shell-Status-Tests
 geprüft.
 
-## Aktueller Stable v0.1.6
+## Historischer Stable v0.1.6
 
-Der aktuelle signierte Stable-Pointer zeigt auf `business-os-shell-v0.1.6`
+Der damalige signierte Stable-Pointer zeigte auf `business-os-shell-v0.1.6`
 und CTOX-Commit `cf2c63285f844acc73b82bca429e907d7faf5687`.
 GitHub-Actions-Lauf `32926668617` hat Build, fokussierte Artefakttests,
 SHA-256-Prüfung, SPDX-SBOM, Signatur, Release-Upload und Pointer-Publikation
@@ -91,6 +91,54 @@ endeten `completed`; es wurde kein HTTP-Business-Datenfallback verwendet.
 Die fokussierte lokale Suite war mit 65 Shell-/Chat-/Reconnect-Tests und zwölf
 Artefakt-/SBOM-/Signaturtests grün. Im realen Workjet-CDP-Target wurden keine
 neuen Console-, Page-, Request- oder HTTP-Fehler beobachtet.
+
+## Aktueller Stable v0.1.9
+
+Der aktuelle signierte Stable-Pointer zeigt auf `business-os-shell-v0.1.9`
+und CTOX-Commit `08f07261cadbcd2733ee3da2af3badedeb6edec0`.
+GitHub-Actions-Lauf `32930025575` hat Build, Artefakttests, SHA-256-Prüfung,
+SPDX-SBOM, Signatur, Release-Upload und Pointer-Publikation erfolgreich
+abgeschlossen.
+
+- Veröffentlichung: `2026-08-26T06:23:07+02:00`
+- Release-Manifest-SHA-256: `c48cf990704310fc270bac8061360ccd5d92ed1f6411e7d11fe986dfd00f8901`
+- Stable-Pointer-SHA-256: `8b86d295840c9992258cdf71be63c4f1291ea0ac32a59445106fbaf3875b1755`
+- Artefakt-SHA-256: `6913da4ddd9cf711336c90e9e5789903748a68dcc63f81639a22ab75b4dfb3f2`
+- Artefaktgröße: 122284998 Bytes
+- Inventar: 1651 reguläre Dateien
+- Signing-Key-ID: `shell-current-2026-08`
+- Kompatibilität: Workjet ab 0.0.33, CTOX ab 0.3.22,
+  `workjet.business-os-shell.v1`
+
+v0.1.7 vervollständigte das sichtbare Release-Statuspanel. v0.1.8 band dessen
+Health-Anzeige an den live gemessenen Datenpfad. v0.1.9 repariert außerdem
+abgelaufene Demand-Leases: Collections, die diagnostisch weiterhin aktiv sind,
+aber aus der kurzlebigen Active-Set-Projektion gefallen waren, werden erneut in
+den begrenzten Repair-Pfad aufgenommen.
+
+## Reale v0.1.9-Abnahme
+
+Die lokale CTOX-Instanz läuft atomar im aktiven v0.1.9-Slot. Workjet zeigt nach
+einem echten Fleet-Check CTOX `0.3.22`, Shell `v0.1.9`, Angebot `v0.1.9`,
+Health `healthy` und Status `Aktuell`. Der Header enthält ausschließlich
+`v0.1.9` und das Statussymbol; das Panel zeigt aktuelle/angebotene Version,
+Kanal, Health, Veröffentlichungszeit, Kompatibilität, letzte Prüfung und die
+zulässige Aktion.
+
+Bei laufendem Guest wurde der CTOX-Service neu gestartet. Der native Peer
+wechselte von einer alten auf eine neue Session und alle zehn aktiven
+RxDB/WebRTC-Collections verbanden sich wieder. Anschließend wurde über den
+authentifizierten Business-Command-Pfad eine Workspace-Branding-Änderung
+projiziert und wieder auf `Meridian Supply Co.` zurückgesetzt. Beide Commands
+endeten `completed`; auch die Demand-Collection `ctox_queue_tasks` kehrte nach
+dem kurzzeitigen Reconnect in den Zustand `connected` zurück. Es gab keinen
+HTTP-Business-Datenfallback sowie keine neuen Guest-Console-, Page-, Request-
+oder HTTP-Fehler.
+
+Nicht administrierbare Remote-Instanzen wurden nicht verändert. Workjet weist
+sie sichtbar als blockiert aus; sie zählen nicht als aktuell. Ein realer
+GPU3-Canary bleibt bis zur expliziten Registrierung als SSH-verwaltetes Ziel
+und zur Host-Key-/Adminfreigabe ein Operator-Trigger.
 
 ## Instanz-Lifecycle
 
