@@ -43,7 +43,7 @@
 
 /* custom: Sitzungs-Shards im Well — reiner Selektor: Titel + eine gedämpfte
    Meta-Zeile. Auswahl = Akzent-Füllung + flacher 2px-Balken über ::before
-   (aus dem Kit über .ctox-list-item.is-selected). Kompakte Listen-Ansicht
+   (aus dem Kit über .ctox-list-item.is-selected). Kompakte Listenansicht
    reduziert nur die Innenabstände. */
 .browser-session-rail {
   display: grid;

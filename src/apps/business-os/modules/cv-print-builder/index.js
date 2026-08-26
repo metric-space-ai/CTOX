@@ -1,6 +1,6 @@
 import {
   readStoredFileFromDemandChunks,
-} from '../../shared/file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const BUILD = '20260721-ia-grammar-v30';
 const MODULE_ID = 'cv-print-builder';
@@ -172,7 +172,7 @@ function applyStaticLocale(host) {
     ['Neuer CV', 'New CV'], ['Profile importieren', 'Import profiles'], ['Profile importieren (JSON)', 'Import profiles (JSON)'],
     ['Profile exportieren', 'Export profiles'], ['Profile exportieren (JSON)', 'Export profiles (JSON)'],
     ['Alle reparsen', 'Reparse all'], ['Alle CV-PDFs erneut parsen', 'Reparse all CV PDFs'],
-    ['Filter', 'Filter'], ['Darstellung', 'View'], ['Shard-Ansicht', 'Shard view'], ['Listen-Ansicht', 'List view'],
+    ['Filter', 'Filter'], ['Darstellung', 'View'], ['Kachelansicht', 'Card view'], ['Listenansicht', 'List view'],
     ['Filter zurücksetzen', 'Reset filters'], ['Sortieren', 'Sort'], ['Template filtern', 'Filter by template'],
     ['Status-Ansichten', 'Status views'],
   ]);

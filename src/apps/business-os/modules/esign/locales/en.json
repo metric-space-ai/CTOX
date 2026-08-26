@@ -1,6 +1,6 @@
 {
-  "title": "E-Signatur",
-  "subtitle": "Generische Signatur-Anfragen: Dokument an Unterzeichner routen und Status verfolgen.",
+  "title": "E-Signature",
+  "subtitle": "Generic signature requests: route documents to signers and track status.",
   "add": "Create",
   "empty": "No entries yet.",
   "kicker": "E-SIGNATURE",

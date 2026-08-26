@@ -2809,8 +2809,8 @@ function campaignColumnMarkup() {
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search value="${escapeHtml(state.campaignSearch)}" placeholder="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}" aria-label="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}">
         <div class="ctox-view-toggle" role="group" aria-label="${escapeHtml(t('view', 'Darstellung'))}">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeHtml(t('cardsView', 'Shard-Ansicht'))}" title="${escapeHtml(t('cardsView', 'Shard-Ansicht'))}">${cardsViewIcon()}</button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeHtml(t('listView', 'Listen-Ansicht'))}" title="${escapeHtml(t('listView', 'Listen-Ansicht'))}">${listViewIcon()}</button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeHtml(t('cardsView', 'Kachelansicht'))}" title="${escapeHtml(t('cardsView', 'Kachelansicht'))}">${cardsViewIcon()}</button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeHtml(t('listView', 'Listenansicht'))}" title="${escapeHtml(t('listView', 'Listenansicht'))}">${listViewIcon()}</button>
         </div>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="${escapeHtml(t('filter', 'Filter'))}" title="${escapeHtml(t('filter', 'Filter'))}">${filterIcon()}</button>
       </div>
