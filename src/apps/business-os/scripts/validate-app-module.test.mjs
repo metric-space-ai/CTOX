@@ -938,11 +938,11 @@ function writeSourceModule(root, moduleId, overrides = {}) {
   writeInstalledModule(root, 'duplicatefunction', {
     indexJs: [
       "import { buildFollowUpCommand } from './core/automation.mjs';",
-      'function renderDetail(record) { return record?.title || ""; }',
       'export async function mount(ctx) {',
       "  ctx.host.innerHTML = await fetch(new URL('./index.html', import.meta.url)).then((res) => res.text());",
       "  const records = ctx.db.collection('duplicatefunction_records');",
       '  void records;',
+      '  function renderDetail(record) { return record?.title || ""; }',
       '  function renderDetail() {',
       '    return renderDetail({ title: "Demo" });',
       '  }',
@@ -1249,6 +1249,123 @@ function writeSourceModule(root, moduleId, overrides = {}) {
   const result = JSON.parse(run.stdout);
   assert.match(result.failures.join('\n'), /forbidden key sql/);
   assert.match(result.failures.join('\n'), /op is unsupported/);
+}
+
+{
+  const root = makeWorkspace();
+  const moduleId = 'auditscenarios';
+  writeInstalledModule(root, moduleId);
+  const scenarioPath = join(
+    root,
+    'runtime/business-os/installed-modules',
+    moduleId,
+    'tests/audit-scenarios.json',
+  );
+  writeJson(scenarioPath, {
+    version: 'ctox.business_os.app_audit_scenarios.v1',
+    scenarios: [{
+      id: 'primary-workflow',
+      steps: [{ op: 'click', target: { action: 'create-record' } }],
+    }],
+  });
+  const valid = runValidator(root, moduleId, '--installed', '--json');
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+  assert.equal(
+    JSON.parse(valid.stdout).checks.find((check) => check.name === 'app_audit_scenarios')?.ok,
+    true,
+  );
+
+  writeJson(scenarioPath, {
+    version: 'ctox.business_os.app_audit_scenarios.v1',
+    scenarios: [{
+      id: 'unsafe',
+      steps: [{ op: 'click', target: { selector: 'body *' }, script: 'alert(1)' }],
+    }],
+  });
+  const invalid = runValidator(root, moduleId, '--installed', '--json');
+  assert.notEqual(invalid.status, 0);
+  assert.match(JSON.parse(invalid.stdout).failures.join('\n'), /unsupported key script/);
+}
+
+{
+  const root = makeWorkspace();
+  const moduleId = 'datasetaction';
+  const dir = writeSourceModule(root, moduleId, {
+    manifest: { collections: [] },
+    indexHtml: [
+      '<main class="source-module">',
+      '  <div data-browser-context-menu>',
+      '    <button type="button" data-browser-context-action="back">Back</button>',
+      '    <button type="button" data-browser-context-action="forward">Forward</button>',
+      '  </div>',
+      '</main>',
+      '',
+    ].join('\n'),
+    indexJs: [
+      'export async function mount(ctx) {',
+      "  ctx.host.innerHTML = await fetch(new URL('./index.html', import.meta.url)).then((res) => res.text());",
+      "  ctx.host.addEventListener('click', (event) => {",
+      "    const item = event.target.closest('[data-browser-context-action]');",
+      '    if (!item) return;',
+      "    if (item.dataset.browserContextAction === 'back') item.remove();",
+      '  });',
+      '  return () => { ctx.host.replaceChildren(); };',
+      '}',
+      '',
+    ].join('\n'),
+  });
+  writeJson(join(dir, 'collections.schema.json'), {
+    schema_format: 'ctox-business-os-module-collections-v1',
+    collections: {},
+  });
+  writeFileSync(join(dir, 'schema.js'), 'export const collections = {};\n');
+  const run = runValidator(root, moduleId, '--source');
+  assert.equal(run.status, 0, `${run.stderr}\n${run.stdout}`);
+}
+
+{
+  const root = makeWorkspace();
+  const moduleId = 'scopedfunctions';
+  writeSourceModule(root, moduleId, {
+    manifest: { collections: [] },
+    indexJs: [
+      'function first() {',
+      '  function renderAccounts() {}',
+      '  return renderAccounts;',
+      '}',
+      'function second() {',
+      '  function renderAccounts() {}',
+      '  return renderAccounts;',
+      '}',
+      'export async function mount(ctx) {',
+      '  ctx.host.textContent = "Ready";',
+      '  return () => { ctx.host.replaceChildren(); };',
+      '}',
+      '',
+    ].join('\n'),
+  });
+  const run = runValidator(root, moduleId, '--source');
+  assert.equal(run.status, 0, `${run.stderr}\n${run.stdout}`);
+}
+
+{
+  const root = makeWorkspace();
+  const moduleId = 'duplicatefunctions';
+  writeSourceModule(root, moduleId, {
+    manifest: { collections: [] },
+    indexJs: [
+      'function renderAccounts() {}',
+      'function renderAccounts() {}',
+      'export async function mount(ctx) {',
+      '  ctx.host.textContent = "Ready";',
+      '  return () => { ctx.host.replaceChildren(); };',
+      '}',
+      '',
+    ].join('\n'),
+  });
+  const run = runValidator(root, moduleId, '--source');
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /declares function renderAccounts more than once \(lines 1, 2\)/);
 }
 
 console.log('[validate-app-module.test] OK');
