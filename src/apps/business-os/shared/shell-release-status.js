@@ -15,6 +15,27 @@ const STATUS_COPY = Object.freeze({
   recovery: ['!', 'Recovery-Shell'],
 });
 
+const HEALTH_COPY = Object.freeze({
+  healthy: 'Gesund',
+  degraded: 'Beeinträchtigt',
+  unknown: 'Unbekannt',
+});
+
+const ACTION_COPY = Object.freeze({
+  current: 'Keine Aktion erforderlich',
+  checking: 'Vorgang läuft',
+  available: 'In Workjet → Business OS → Updates aktualisieren',
+  download: 'Vorgang läuft',
+  verify: 'Vorgang läuft',
+  ready: 'In Workjet → Business OS → Updates aktivieren',
+  restart: 'Workjet oder CTOX neu starten',
+  failed: 'In Workjet → Business OS → Updates erneut versuchen',
+  incompatible: 'Kompatible Version wählen',
+  blocked: 'Administratorzugriff herstellen',
+  rollback: 'In Workjet → Business OS → Updates prüfen',
+  recovery: 'In Workjet → Business OS → Updates wiederherstellen',
+});
+
 export function shellChannel(version) {
   const value = String(version || '');
   if (value.includes('-nightly.')) return 'nightly';
@@ -32,6 +53,28 @@ export function normalizeShellUpdateStatus(value) {
   return Object.hasOwn(STATUS_COPY, state) ? state : 'failed';
 }
 
+export function formatShellTimestamp(value) {
+  if (typeof value !== 'string' || value.length > 64) return '—';
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return '—';
+  return new Intl.DateTimeFormat('de-DE', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(timestamp));
+}
+
+export function formatShellCompatibility(value) {
+  if (typeof value !== 'object' || value === null) return '—';
+  const semver = (candidate) => normalizeShellVersion(candidate);
+  const workjetMin = semver(value.workjetMinVersion);
+  const workjetMax = value.workjetMaxVersion === null ? '' : semver(value.workjetMaxVersion);
+  const ctoxMin = semver(value.ctoxMinVersion);
+  const ctoxMax = value.ctoxMaxVersion === null ? '' : semver(value.ctoxMaxVersion);
+  if (!workjetMin || !ctoxMin || (value.workjetMaxVersion !== null && !workjetMax) || (value.ctoxMaxVersion !== null && !ctoxMax)) return '—';
+  const range = (label, min, max) => `${label} ≥${min}${max ? ` ≤${max}` : ''}`;
+  return `${range('Workjet', workjetMin, workjetMax)} · ${range('CTOX', ctoxMin, ctoxMax)}`;
+}
+
 function render(root, detail) {
   const version = normalizeShellVersion(detail?.version);
   const state = normalizeShellUpdateStatus(detail?.state);
@@ -43,8 +86,15 @@ function render(root, detail) {
   statusButton.title = stateLabel;
   statusButton.querySelector('[data-shell-release-icon]').textContent = icon;
   root.querySelector('[data-shell-release-panel-version]').textContent = version ? `v${version}` : 'Recovery-Shell';
+  const offeredVersion = normalizeShellVersion(detail?.offeredVersion);
+  root.querySelector('[data-shell-release-panel-offered]').textContent = offeredVersion ? `v${offeredVersion}` : '—';
   root.querySelector('[data-shell-release-panel-channel]').textContent = channel;
   root.querySelector('[data-shell-release-panel-state]').textContent = stateLabel;
+  root.querySelector('[data-shell-release-panel-health]').textContent = HEALTH_COPY[detail?.health] || HEALTH_COPY.unknown;
+  root.querySelector('[data-shell-release-panel-published]').textContent = formatShellTimestamp(detail?.publishedAt);
+  root.querySelector('[data-shell-release-panel-compatibility]').textContent = formatShellCompatibility(detail?.compatibility);
+  root.querySelector('[data-shell-release-panel-checked]').textContent = formatShellTimestamp(detail?.lastCheckedAt);
+  root.querySelector('[data-shell-release-panel-action]').textContent = ACTION_COPY[state];
 }
 
 async function loadEmbeddedIdentity() {

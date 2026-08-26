@@ -2,7 +2,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizeShellUpdateStatus, normalizeShellVersion, shellChannel } from './shell-release-status.js';
+import {
+  formatShellCompatibility,
+  formatShellTimestamp,
+  normalizeShellUpdateStatus,
+  normalizeShellVersion,
+  shellChannel,
+} from './shell-release-status.js';
 
 test('shell identity stays short and channel-aware', () => {
   assert.equal(normalizeShellVersion('v1.2.3'), '1.2.3');
@@ -17,4 +23,19 @@ test('all public update states are accepted and unknown values fail closed', () 
     assert.equal(normalizeShellUpdateStatus(state), state);
   }
   assert.equal(normalizeShellUpdateStatus('surprise'), 'failed');
+});
+
+test('release details render only validated bounded metadata', () => {
+  assert.match(formatShellTimestamp('2026-08-26T05:29:12+02:00'), /2026/);
+  assert.equal(formatShellTimestamp('not-a-date'), '—');
+  assert.equal(
+    formatShellCompatibility({
+      workjetMinVersion: '0.0.33',
+      workjetMaxVersion: null,
+      ctoxMinVersion: '0.3.22',
+      ctoxMaxVersion: '0.4.0',
+    }),
+    'Workjet ≥0.0.33 · CTOX ≥0.3.22 ≤0.4.0',
+  );
+  assert.equal(formatShellCompatibility({ workjetMinVersion: '<script>', ctoxMinVersion: '0.3.22' }), '—');
 });

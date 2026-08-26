@@ -518,7 +518,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   z-index: 120;
   top: calc(100% + 10px);
   left: 0;
-  width: 240px;
+  width: min(360px, calc(100vw - 32px));
   padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--panel-radius);
@@ -532,7 +532,12 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 .shell-release-panel dl { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; }
 .shell-release-panel dl > div { display: flex; justify-content: space-between; gap: var(--space-3); }
 .shell-release-panel dt { color: var(--muted); }
-.shell-release-panel dd { margin: 0; text-align: right; }
+.shell-release-panel dd {
+  max-width: 230px;
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 
 .ctox-update-button {
   appearance: none;
