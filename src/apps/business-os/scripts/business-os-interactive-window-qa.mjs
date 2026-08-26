@@ -134,7 +134,7 @@ try {
   }
 
   const fatalConsole = report.consoleEvents.filter((event) => (
-    ['error', 'pageerror', 'requestfailed'].includes(event.type)
+    ['error', 'pageerror', 'requestfailed', 'http-error'].includes(event.type)
   ));
   for (const event of fatalConsole) {
     report.failures.push({ scope: 'browser', message: `${event.type}: ${event.text}` });
@@ -288,7 +288,7 @@ async function exerciseApp(page, app, ordinal) {
     }, app.id, { timeout: 3000 });
     const maximized = await collectWindowGeometry(page, app.id);
     assertWindowInsideViewport(maximized, failures, 'maximized');
-    const maximizedControl = await windowLocator.locator('.shell-window-control--maximize').evaluate((button) => ({
+    const maximizedControl = await evaluateLocator(windowLocator.locator('.shell-window-control--maximize'), (button) => ({
       label: button.getAttribute('aria-label'),
       glyph: button.textContent,
       windowClass: button.closest('.shell-window')?.className || '',
@@ -311,7 +311,7 @@ async function exerciseApp(page, app, ordinal) {
         && element.querySelector('.shell-window-control--maximize')?.getAttribute('aria-label') === 'Maximieren';
     }, app.id, { timeout: 3000 });
     const restored = await collectWindowGeometry(page, app.id);
-    const restoredControl = await windowLocator.locator('.shell-window-control--maximize').evaluate((button) => ({
+    const restoredControl = await evaluateLocator(windowLocator.locator('.shell-window-control--maximize'), (button) => ({
       label: button.getAttribute('aria-label'),
       glyph: button.textContent,
       windowClass: button.closest('.shell-window')?.className || '',
@@ -390,9 +390,11 @@ async function exerciseMobileApp(page, app, ordinal) {
 
     const geometry = await collectWindowGeometry(page, app.id);
     assertWindowInsideViewport(geometry, failures, 'mobile app');
-    const mobileSheet = await mobileWindow.evaluate((element) => element.classList.contains('is-mobile-sheet'));
+    const mobileSheet = await evaluateLocator(mobileWindow, (element) => (
+      element.classList.contains('is-mobile-sheet')
+    ));
     if (!mobileSheet) failures.push('window did not switch to mobile-sheet presentation');
-    const headerOverflow = await mobileWindow.locator('[data-window-header]').evaluate((header) => (
+    const headerOverflow = await evaluateLocator(mobileWindow.locator('[data-window-header]'), (header) => (
       header.scrollWidth > header.clientWidth + 2
     ));
     if (headerOverflow) failures.push('window header overflows horizontally');
@@ -482,7 +484,7 @@ async function waitForAppContent(page, windowLocator, appId) {
 }
 
 async function dragResize(page, windowLocator, direction, delta) {
-  const before = await windowLocator.evaluate((element) => {
+  const before = await evaluateLocator(windowLocator, (element) => {
     const rect = element.getBoundingClientRect();
     const win = globalThis.ctoxBusinessOsSmoke?.state?.windowManager?.listWindows?.()
       .find((entry) => entry.id === element.id);
@@ -504,7 +506,7 @@ async function dragResize(page, windowLocator, direction, delta) {
   await page.mouse.move(start.x + delta.x, start.y + delta.y, { steps: 8 });
   await page.mouse.up();
   await page.waitForTimeout(80);
-  const after = await windowLocator.evaluate((element) => {
+  const after = await evaluateLocator(windowLocator, (element) => {
     const rect = element.getBoundingClientRect();
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   });
@@ -586,7 +588,7 @@ async function dragWindowHeader(page, windowLocator, target) {
 }
 
 async function readWindowDragState(windowLocator) {
-  return windowLocator.evaluate((element) => {
+  return evaluateLocator(windowLocator, (element) => {
     const rect = element.getBoundingClientRect();
     const workspace = document.querySelector('.workspace-frame')?.getBoundingClientRect();
     return {
@@ -658,7 +660,7 @@ async function collectWindowGeometry(page, appId) {
 async function exerciseFirstPaneResizer(page, windowLocator) {
   const handle = windowLocator.locator('.ctox-column-resizer[data-resizer-var]:visible').first();
   if (!await handle.count()) return null;
-  const details = await handle.evaluate((node) => {
+  const details = await evaluateLocator(handle, (node) => {
     const frame = node.closest('[data-resize-frame]');
     const cssVar = node.dataset.resizerVar;
     const side = node.dataset.resizer === 'right' ? 'right' : 'left';
@@ -676,7 +678,7 @@ async function exerciseFirstPaneResizer(page, windowLocator) {
   await page.waitForTimeout(50);
   await page.mouse.up();
   await page.waitForTimeout(80);
-  const after = await handle.evaluate((node, cssVar) => Number.parseFloat(
+  const after = await evaluateLocator(handle, (node, cssVar) => Number.parseFloat(
     getComputedStyle(node.closest('[data-resize-frame]')).getPropertyValue(cssVar),
   ), details.cssVar);
   return { ...details, after };
@@ -736,7 +738,7 @@ async function exerciseWindowHeaderActions(page, windowLocator) {
     x: Math.round(contextBox.x + Math.min(contextBox.width / 2, 24)),
     y: Math.round(contextBox.y + Math.min(contextBox.height / 2, 24)),
   };
-  result.context = await contextTarget.evaluate((target, point) => {
+  result.context = await evaluateLocator(contextTarget, (target, point) => {
     const state = globalThis.ctoxBusinessOsSmoke?.state;
     const moduleId = target.closest('[data-module-root]')?.dataset?.moduleRoot || state?.activeModule?.id;
     const mod = state?.modules?.find?.((item) => item.id === moduleId) || state?.activeModule;
@@ -867,7 +869,7 @@ async function inspectDesktopLabels(page) {
 }
 
 async function inspectMobilePaneAccess(windowLocator) {
-  return windowLocator.evaluate(async (windowElement) => {
+  return evaluateLocator(windowLocator, async (windowElement) => {
     const frame = windowElement.querySelector('[data-resize-frame]');
     if (!frame) return null;
     const panes = [...frame.children].filter((node) => {
@@ -973,10 +975,23 @@ async function closeWindowByOwner(page, appId) {
 function attachDiagnostics(page) {
   page.on('console', (message) => {
     if (['error', 'warning'].includes(message.type())) {
-      report.consoleEvents.push({ type: message.type(), text: message.text() });
+      report.consoleEvents.push({
+        type: message.type(),
+        text: message.text(),
+        url: message.location()?.url || '',
+      });
     }
   });
   page.on('pageerror', (error) => report.consoleEvents.push({ type: 'pageerror', text: error?.stack || String(error) }));
+  page.on('response', (response) => {
+    if (response.status() >= 400) {
+      report.consoleEvents.push({
+        type: 'http-error',
+        text: `${response.status()} ${response.request().method()} ${response.url()}`,
+        url: response.url(),
+      });
+    }
+  });
   page.on('requestfailed', (request) => report.consoleEvents.push({
     type: request.failure()?.errorText === 'net::ERR_ABORTED'
       ? 'expected-abort'
@@ -1036,6 +1051,16 @@ function roundedRect(rect) {
     right: Math.round(rect.right),
     bottom: Math.round(rect.bottom),
   };
+}
+
+async function evaluateLocator(locator, pageFunction, arg, timeout = 5000) {
+  const element = await locator.elementHandle({ timeout });
+  if (!element) throw new Error('QA locator did not resolve to an element');
+  try {
+    return await element.evaluate(pageFunction, arg);
+  } finally {
+    await element.dispose();
+  }
 }
 
 function resolvePlaywrightModule() {
