@@ -40,6 +40,8 @@ async function makeFixture() {
   await mkdir(join(sourceRoot, 'ui-contract', 'v1'), { recursive: true });
   await writeFile(join(sourceRoot, 'ui-contract', 'v1', 'workjet-ui-contract.css'), ':root {}\n');
   await writeFile(join(sourceRoot, 'ui-contract', 'v1', 'workjet-ui-contract.json'), '{"schema":"workjet.ui.contract.v1"}\n');
+  await mkdir(join(sourceRoot, 'public', 'calendar-booking'), { recursive: true });
+  await writeFile(join(sourceRoot, 'public', 'calendar-booking', 'index.html'), 'unwired public intake must not ship\n');
   await mkdir(join(sourceRoot, 'installed-modules', 'tenant-local'), { recursive: true });
   await writeFile(
     join(sourceRoot, 'installed-modules', 'tenant-local', 'index.js'),
@@ -142,6 +144,8 @@ test('exclusion policy retains runtime notices while removing non-runtime conten
   assert.equal(isExcludedRuntimePath('vendor/library/provenance.json'), false);
   assert.equal(isExcludedRuntimePath('modules/appsec-pentest/appsec-pentest.js'), false);
   assert.equal(isExcludedRuntimePath('shared/shell-release-status.js'), false);
+  assert.equal(isExcludedRuntimePath('public/calendar-booking', { directory: true }), true);
+  assert.equal(isExcludedRuntimePath('public/calendar-booking/index.html'), true);
   assert.equal(isExcludedRuntimePath('modules/example/tests', { directory: true }), true);
   assert.equal(isExcludedRuntimePath('modules/example/node_modules/pkg.js'), true);
   assert.equal(isExcludedRuntimePath('shared/runtime.spec.mjs'), true);
@@ -192,6 +196,7 @@ test('deterministic builds have byte-identical archives and complete sorted inve
     assert.ok(paths.includes(`${root}/vendor/library/provenance.json`));
     assert.ok(paths.includes(`${root}/shared/contest.js`));
     assert.ok(paths.includes(`${root}/ctox-shell-manifest.json`));
+    assert.ok(!paths.includes(`${root}/public/calendar-booking/index.html`));
     for (const excluded of [
       'modules/example/nested/runtime.test.mjs',
       'modules/example/nested/runtime.spec.mjs',

@@ -81,6 +81,9 @@ const EXCLUDED_DIRECTORIES = new Set([
   'tmp',
   'temp',
 ]);
+const EXCLUDED_UNWIRED_RUNTIME_PREFIXES = Object.freeze([
+  'public/calendar-booking',
+]);
 const GENERATED_DIRECTORY = /^(?:build|release|cache|local[-_]?state)(?:[._-].*)?$/i;
 const GENERATED_FILE_TOKEN = /(?:^|[._-])(?:build|release|cache|local[-_]?state)(?:[._-]|$)/i;
 const REQUIRED_RUNTIME_PATHS = new Set([
@@ -132,6 +135,9 @@ export function validateRelativePath(relativePath) {
 
 export function isExcludedRuntimePath(relativePath, { directory = false } = {}) {
   validateRelativePath(relativePath);
+  if (EXCLUDED_UNWIRED_RUNTIME_PREFIXES.some((prefix) => (
+    relativePath === prefix || relativePath.startsWith(`${prefix}/`)
+  ))) return true;
   const segments = relativePath.split('/');
   const basename = segments.at(-1);
   const lowerSegments = segments.map((segment) => segment.toLowerCase());
