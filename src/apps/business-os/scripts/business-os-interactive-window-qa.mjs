@@ -80,6 +80,8 @@ try {
   await waitForShell(page);
   await closeAllWindows(page);
   await page.waitForTimeout(250);
+  await waitForShell(page);
+  await installQaCollectionGrants(page, selectedApps);
 
   report.shell = await collectShellGeometry(page);
   assertShellGeometry(report.shell, 'initial shell');
@@ -479,12 +481,37 @@ async function waitForAppContent(page, windowLocator, appId) {
     const content = win?.querySelector('[data-window-content]');
     if (!content) return false;
     const moduleRoot = content.querySelector('.shell-window-module-root[data-module-root]');
+    // A recovery surface contains a button and meaningful text, but it is not
+    // a successfully mounted app. Treat it as terminal so the caller can
+    // report the real module error instead of accepting it as valid content.
+    if (moduleRoot?.dataset.moduleLoadFailed === 'true' || content.querySelector('.shell-app-recovery')) {
+      return true;
+    }
     if (moduleRoot && moduleRoot.dataset.moduleReady !== 'true') return false;
     // Decorative/skeleton SVGs must not make an app look ready. Wait for
     // operable content, an explicit module root, or meaningful text instead.
     const meaningful = content.querySelectorAll('button,input,select,textarea,table,canvas,iframe').length;
     return meaningful > 0 || (content.textContent || '').trim().length > 12;
   }, appId, { timeout: 30000 });
+  const loadFailure = await evaluateLocator(windowLocator, (win) => {
+    const content = win.querySelector('[data-window-content]');
+    const moduleRoot = content?.querySelector('.shell-window-module-root[data-module-root]');
+    const recovery = content?.querySelector('.shell-app-recovery');
+    if (moduleRoot?.dataset.moduleLoadFailed !== 'true' && !recovery) return null;
+    return {
+      title: recovery?.querySelector('strong')?.textContent?.trim() || '',
+      body: recovery?.querySelector('span')?.textContent?.trim() || '',
+      diagnostic: globalThis.ctoxBusinessOsSmoke?.state?.qaModuleMountFailures?.[
+        moduleRoot?.dataset.moduleRoot || ''
+      ] || null,
+    };
+  });
+  if (loadFailure) {
+    const diagnostic = loadFailure.diagnostic?.message
+      ? ` (${loadFailure.diagnostic.message})`
+      : '';
+    throw new Error(`App ${appId} mounted its recovery surface: ${loadFailure.title || loadFailure.body || 'unknown module load failure'}${diagnostic}`);
+  }
 }
 
 async function dragResize(page, windowLocator, direction, delta) {
@@ -951,7 +978,10 @@ function assertNoInteractiveOverlap(shell, failures) {
 
 async function waitForShell(page) {
   await page.waitForFunction(() => {
-    const state = globalThis.ctoxBusinessOsSmoke?.state || globalThis.CTOX_BUSINESS_OS_APP;
+    const params = new URLSearchParams(location.search);
+    const smokeState = globalThis.ctoxBusinessOsSmoke?.state;
+    if (params.has('rxdbSmoke') && !smokeState) return false;
+    const state = smokeState || globalThis.CTOX_BUSINESS_OS_APP;
     return document.body?.dataset?.authState !== 'locked'
       && state?.windowManager
       && Array.isArray(state?.modules)
@@ -965,6 +995,61 @@ async function closeAllWindows(page) {
   await page.waitForFunction(() => (
     (globalThis.ctoxBusinessOsSmoke?.state?.windowManager?.listWindows?.() || []).length === 0
   ), null, { timeout: 5000 }).catch(() => {});
+}
+
+async function installQaCollectionGrants(page, apps) {
+  const appIds = apps.map((app) => app.id);
+  await page.waitForFunction((selectedIds) => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has('rxdbSmoke') || params.get('qaCatalog') !== 'all-source') {
+      throw new Error('Collection fixture grants require rxdbSmoke + qaCatalog=all-source');
+    }
+    const state = globalThis.ctoxBusinessOsSmoke?.state;
+    if (!state) {
+      delete globalThis.__ctoxQaSmokeStableAt;
+      return false;
+    }
+    globalThis.__ctoxQaSmokeStableAt ||= performance.now();
+    if (performance.now() - globalThis.__ctoxQaSmokeStableAt < 2000) return false;
+    const actorId = String(state.session?.user?.id || '').trim();
+    if (!actorId) throw new Error('Business OS smoke session has no actor id');
+    const selected = new Set(selectedIds);
+    const collections = new Set(
+      (state.modules || [])
+        .filter((mod) => selected.has(String(mod?.id || '')))
+        .flatMap((mod) => Array.isArray(mod?.collections) ? mod.collections : [])
+        .map((name) => String(name || '').trim())
+        .filter(Boolean),
+    );
+    const existing = state.governance?.permission_model?.explicit_grants || [];
+    const qaGrants = [];
+    for (const collection of collections) {
+      for (const permission of ['data.read', 'data.write']) {
+        qaGrants.push({
+          grant_id: `qa.${permission}.${collection}`,
+          subject_type: 'user',
+          subject_id: actorId,
+          permission,
+          scope_type: 'collection',
+          scope_id: collection,
+          active: true,
+        });
+      }
+    }
+    state.governance = state.governance || {};
+    state.governance.permission_model = {
+      ...(state.governance.permission_model || {}),
+      explicit_grants: [
+        ...existing.filter((grant) => !String(grant?.grant_id || '').startsWith('qa.')),
+        ...qaGrants,
+      ],
+    };
+    globalThis.__ctoxQaCollectionGrantsReady = true;
+    return true;
+  }, appIds, {
+    timeout: readyTimeoutMs,
+    polling: 100,
+  });
 }
 
 async function closeWindowByOwner(page, appId) {

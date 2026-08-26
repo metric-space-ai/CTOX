@@ -4223,6 +4223,17 @@ async function openWindowedModule(mod, options = {}) {
       return null;
     }
     console.error(`[module-window:${mod.id}] mount failed:`, error);
+    if (new URLSearchParams(window.location.search).has('rxdbSmoke')) {
+      // The interactive QA runner needs the caught exception to distinguish a
+      // real app mount from the user-facing recovery surface. Keep the detail
+      // inside the explicit smoke fixture; production users only see the
+      // sanitized recovery copy below.
+      state.qaModuleMountFailures = state.qaModuleMountFailures || {};
+      state.qaModuleMountFailures[mod.id] = {
+        message: String(error?.message || error || 'unknown module mount failure'),
+        stack: String(error?.stack || ''),
+      };
+    }
     root.dataset.moduleLoadFailed = 'true';
     renderWindowAppRecovery(content, {
       title: moduleDisplayTitle(mod),
