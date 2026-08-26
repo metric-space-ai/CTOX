@@ -1449,6 +1449,25 @@ pub fn native_peer_maintenance_health(root: &Path) -> (bool, bool) {
     (process_alive, replication_up)
 }
 
+fn heartbeat_replication_signal(heartbeat: Option<&Value>, key: &str) -> bool {
+    heartbeat
+        .and_then(|value| value.pointer(&format!("/replicationSignals/{key}")))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn heartbeat_critical_task_alive(heartbeat: Option<&Value>, task_name: &str) -> bool {
+    heartbeat
+        .and_then(|value| value.get("criticalTasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|task| {
+                task.get("name").and_then(Value::as_str) == Some(task_name)
+                    && task.get("alive").and_then(Value::as_bool) == Some(true)
+            })
+        })
+}
+
 pub fn native_peer_status(root: &Path) -> Value {
     let circuit_breaker = native_peer_circuit_snapshot();
     let circuit_open = circuit_breaker.get("state").and_then(Value::as_str) == Some("open");
@@ -1466,7 +1485,7 @@ pub fn native_peer_status(root: &Path) -> Value {
         .and_then(|peer| peer._pools.first())
         .map(|pool| pool.connection_handler.frame_transport_status_json())
         .unwrap_or(Value::Null);
-    let command_consumer_alive = active_peer
+    let local_command_consumer_alive = active_peer
         .as_ref()
         .is_some_and(|peer| !peer._command_consumer.is_finished());
     let in_process_started = lifecycle.supervisor_active;
@@ -1509,6 +1528,50 @@ pub fn native_peer_status(root: &Path) -> Value {
                 .and_then(|value| value.get("replicationUp"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
+    };
+    // `ctox business-os rxdb status` normally runs in a short-lived CLI
+    // process, not inside the supervised service that owns `current_peer()`.
+    // In that case every detailed stage must come from the service's fresh
+    // heartbeat. Falling back only for `replicationUp` produced the impossible
+    // status "replication up, but no socket/auth/data channel".
+    let heartbeat_owned = !lifecycle.running && heartbeat_running;
+    let signaling_socket_connected = if lifecycle.running {
+        transport
+            .get("signalingSocketConnected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    } else {
+        heartbeat_owned
+            && (heartbeat_replication_signal(heartbeat.as_ref(), "signalingSocketConnected")
+                || heartbeat_replication_signal(heartbeat.as_ref(), "signalingJoinAccepted"))
+    };
+    let signaling_join_accepted = if lifecycle.running {
+        lifecycle.signaling_join_accepted
+    } else {
+        heartbeat_owned && heartbeat_replication_signal(heartbeat.as_ref(), "signalingJoinAccepted")
+    };
+    let data_channel_open = if lifecycle.running {
+        lifecycle.data_channel_open
+    } else {
+        heartbeat_owned && heartbeat_replication_signal(heartbeat.as_ref(), "dataChannelOpen")
+    };
+    let peer_authenticated = if lifecycle.running {
+        transport
+            .get("peerCount")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            > 0
+    } else {
+        heartbeat_owned
+            && (heartbeat_replication_signal(heartbeat.as_ref(), "peerAuthenticated")
+                || (replication_up && data_channel_open))
+    };
+    let command_consumer_alive = if lifecycle.running {
+        local_command_consumer_alive
+    } else {
+        heartbeat_owned
+            && (heartbeat_replication_signal(heartbeat.as_ref(), "commandConsumerAlive")
+                || heartbeat_critical_task_alive(heartbeat.as_ref(), "business_commands"))
     };
     let health_errors = if circuit_open {
         vec![native_peer_health_error(
@@ -1595,12 +1658,10 @@ pub fn native_peer_status(root: &Path) -> Value {
         "command_plane": command_plane_status(root),
         "health_stages": {
             "process_alive": running,
-            "signaling_socket_connected": transport
-                .get("signalingSocketConnected").and_then(Value::as_bool).unwrap_or(false),
-            "signaling_join_accepted": lifecycle.signaling_join_accepted,
-            "peer_authenticated": transport
-                .get("peerCount").and_then(Value::as_u64).unwrap_or_default() > 0,
-            "data_channel_open": lifecycle.data_channel_open,
+            "signaling_socket_connected": signaling_socket_connected,
+            "signaling_join_accepted": signaling_join_accepted,
+            "peer_authenticated": peer_authenticated,
+            "data_channel_open": data_channel_open,
             "command_consumer_alive": command_consumer_alive,
             "last_command_ingestion_progress_ms": COMMAND_PLANE_METRICS.last_processed_at_ms.load(Ordering::Relaxed),
             "projection_outbox": crate::mission::channels::business_command_core_diagnostics(root)
@@ -3437,6 +3498,14 @@ fn write_native_peer_heartbeat(
         .as_ref()
         .map(|peer| peer.task_liveness_json())
         .unwrap_or_else(|| Value::Array(Vec::new()));
+    let transport = active_peer
+        .as_ref()
+        .and_then(|peer| peer._pools.first())
+        .map(|pool| pool.connection_handler.frame_transport_status_json())
+        .unwrap_or(Value::Null);
+    let command_consumer_alive = active_peer
+        .as_ref()
+        .is_some_and(|peer| !peer._command_consumer.is_finished());
     let payload = json!({
         "version": NATIVE_PEER_STATUS_VERSION,
         "running": native_peer_heartbeat_running(&lifecycle),
@@ -3451,8 +3520,13 @@ fn write_native_peer_heartbeat(
         "lifecyclePhase": lifecycle.phase,
         "replicationSignals": {
             "poolCreated": active_peer.as_ref().is_some_and(|peer| !peer._pools.is_empty()),
+            "signalingSocketConnected": transport
+                .get("signalingSocketConnected").and_then(Value::as_bool).unwrap_or(false),
             "signalingJoinAccepted": lifecycle.signaling_join_accepted,
+            "peerAuthenticated": transport
+                .get("peerCount").and_then(Value::as_u64).unwrap_or_default() > 0,
             "dataChannelOpen": lifecycle.data_channel_open,
+            "commandConsumerAlive": command_consumer_alive,
             "criticalTasksAlive": critical_tasks_alive,
         },
         "circuitBreaker": native_peer_circuit_snapshot(),
@@ -11216,11 +11290,21 @@ pub(in crate::business_os) mod tests {
             serde_json::to_vec(&json!({
                 "version": NATIVE_PEER_STATUS_VERSION,
                 "running": true,
-                "replicationUp": false,
+                "replicationUp": true,
                 "pid": 1,
                 "peer_session_id": "rxdb-rs-test",
                 "updated_at_ms": now_ms() as u64,
                 "database_path": database_path.display().to_string(),
+                "replicationSignals": {
+                    "poolCreated": true,
+                    "signalingSocketConnected": true,
+                    "signalingJoinAccepted": true,
+                    "peerAuthenticated": true,
+                    "dataChannelOpen": true,
+                    "commandConsumerAlive": true,
+                    "criticalTasksAlive": true,
+                },
+                "criticalTasks": [{"name": "business_commands", "alive": true}],
                 "performance": native_peer_performance_snapshot(),
             }))
             .expect("serialize heartbeat"),
@@ -11230,6 +11314,20 @@ pub(in crate::business_os) mod tests {
         let status = native_peer_status(root.path());
         assert_eq!(status["running"], true);
         assert_eq!(status["heartbeat"]["fresh"], true);
+        assert_eq!(status["replicationUp"], true);
+        for stage in [
+            "signaling_socket_connected",
+            "signaling_join_accepted",
+            "peer_authenticated",
+            "data_channel_open",
+            "command_consumer_alive",
+        ] {
+            assert_eq!(
+                status.pointer(&format!("/health_stages/{stage}")),
+                Some(&Value::Bool(true)),
+                "fresh service heartbeat must populate external CLI stage {stage}"
+            );
+        }
         assert_eq!(status["peer_session_id"], "rxdb-rs-test");
         assert_eq!(
             status
