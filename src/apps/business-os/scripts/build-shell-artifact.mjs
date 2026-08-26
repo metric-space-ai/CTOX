@@ -36,6 +36,7 @@ export const RUNTIME_TREES = Object.freeze([
   'shared',
   'template-store',
   'themes',
+  'ui-contract',
   'vendor',
 ]);
 export const MAX_RUNTIME_FILE_COUNT = 20_000;
@@ -84,6 +85,10 @@ const GENERATED_DIRECTORY = /^(?:build|release|cache|local[-_]?state)(?:[._-].*)
 const GENERATED_FILE_TOKEN = /(?:^|[._-])(?:build|release|cache|local[-_]?state)(?:[._-]|$)/i;
 const REQUIRED_RUNTIME_PATHS = new Set([
   'shared/shell-release-status.js',
+]);
+const REQUIRED_PAYLOAD_FILES = Object.freeze([
+  'ui-contract/v1/workjet-ui-contract.css',
+  'ui-contract/v1/workjet-ui-contract.json',
 ]);
 
 export function validateSemVer(version) {
@@ -373,6 +378,12 @@ export async function collectRuntimePayload(sourceRoot) {
 
   files.sort((left, right) => comparePaths(left.path, right.path));
   directories.sort(comparePaths);
+  const payloadPaths = new Set(files.map((file) => file.path));
+  for (const relativePath of REQUIRED_PAYLOAD_FILES) {
+    if (!payloadPaths.has(relativePath)) {
+      throw new Error(`Required runtime file is missing: ${relativePath}`);
+    }
+  }
   return { directories, files };
 }
 

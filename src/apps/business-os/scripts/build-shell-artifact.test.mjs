@@ -37,6 +37,9 @@ async function makeFixture() {
     await mkdir(join(sourceRoot, tree), { recursive: true });
     await writeFile(join(sourceRoot, tree, 'runtime.txt'), `${tree}\n`);
   }
+  await mkdir(join(sourceRoot, 'ui-contract', 'v1'), { recursive: true });
+  await writeFile(join(sourceRoot, 'ui-contract', 'v1', 'workjet-ui-contract.css'), ':root {}\n');
+  await writeFile(join(sourceRoot, 'ui-contract', 'v1', 'workjet-ui-contract.json'), '{"schema":"workjet.ui.contract.v1"}\n');
   await mkdir(join(sourceRoot, 'installed-modules', 'tenant-local'), { recursive: true });
   await writeFile(
     join(sourceRoot, 'installed-modules', 'tenant-local', 'index.js'),
@@ -269,6 +272,21 @@ test('missing required runtime entries fail without final or partial outputs', a
     await assert.rejects(
       buildShellArtifact({ sourceRoot, outputDir, version: '1.0.0', sourceCommit: SOURCE_COMMIT }),
       /Required runtime file is missing: index.html/,
+    );
+    await assert.rejects(readdir(outputDir), { code: 'ENOENT' });
+  } finally {
+    await cleanup(fixtureRoot);
+  }
+});
+
+test('shared Workjet UI contract is mandatory in every shell payload', async () => {
+  const { fixtureRoot, sourceRoot } = await makeFixture();
+  try {
+    await rm(join(sourceRoot, 'ui-contract', 'v1', 'workjet-ui-contract.css'));
+    const outputDir = join(fixtureRoot, 'missing-contract-output');
+    await assert.rejects(
+      buildShellArtifact({ sourceRoot, outputDir, version: '1.0.0', sourceCommit: SOURCE_COMMIT }),
+      /Required runtime file is missing: ui-contract\/v1\/workjet-ui-contract\.css/,
     );
     await assert.rejects(readdir(outputDir), { code: 'ENOENT' });
   } finally {
