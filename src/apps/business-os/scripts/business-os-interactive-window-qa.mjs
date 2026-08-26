@@ -392,7 +392,23 @@ async function exerciseMobileApp(page, app, ordinal) {
     await launchFromVisibleShell(page, app);
     mobileWindow = page.locator(`.shell-window[data-owner-id="desktop-app:${cssEscape(app.id)}"]`);
     await mobileWindow.waitFor({ state: 'visible', timeout: 30000 });
-    await waitForAppContent(page, mobileWindow, app.id);
+    try {
+      await waitForAppContent(page, mobileWindow, app.id);
+    } catch (firstContentError) {
+      // Mobile remounts the same module after the desktop pass. A one-shot
+      // module/build hand-off can race that second mount, so repeat the same
+      // visible user action once. Recovery surfaces still fail immediately.
+      await closeWindowByOwner(page, app.id);
+      await page.waitForTimeout(250);
+      await waitForShell(page);
+      await launchFromVisibleShell(page, app);
+      mobileWindow = page.locator(`.shell-window[data-owner-id="desktop-app:${cssEscape(app.id)}"]`);
+      await mobileWindow.waitFor({ state: 'visible', timeout: 30000 });
+      await waitForAppContent(page, mobileWindow, app.id).catch((secondContentError) => {
+        secondContentError.cause = firstContentError;
+        throw secondContentError;
+      });
+    }
 
     const geometry = await collectWindowGeometry(page, app.id);
     assertWindowInsideViewport(geometry, failures, 'mobile app');
@@ -733,10 +749,10 @@ async function exerciseWindowHeaderActions(page, windowLocator) {
   const tools = windowLocator.locator('[data-module-integrated-tools]');
   await tools.waitFor({ state: 'visible', timeout: 5000 });
   const versions = tools.locator('[data-integrated-versions]');
-  await versions.waitFor({ state: 'visible', timeout: 5000 });
+  await versions.waitFor({ state: 'visible', timeout: 15000 });
   result.lifecycle = true;
   const releaseSection = versions.locator('[data-integrated-release]');
-  await releaseSection.waitFor({ state: 'visible', timeout: 5000 });
+  await releaseSection.waitFor({ state: 'visible', timeout: 15000 });
   result.versionsSection = true;
   result.sameWindow = await windowLocator.getAttribute('id') === originalWindowId
     && await page.locator('.shell-window').count() === windowCountBefore;

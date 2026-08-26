@@ -31,3 +31,9 @@ test('module mount diagnostics remain smoke-only and production recovery copy st
   assert.match(shellSource, /state\.qaModuleMountFailures\[mod\.id\]/);
   assert.match(shellSource, /renderWindowAppRecovery\(content/);
 });
+
+test('interactive QA retries one transient mobile remount and lets lifecycle data settle', () => {
+  assert.match(qaSource, /Mobile remounts the same module after the desktop pass/);
+  assert.match(qaSource, /secondContentError\.cause = firstContentError/);
+  assert.match(qaSource, /releaseSection\.waitFor\(\{ state: 'visible', timeout: 15000 \}\)/);
+});
