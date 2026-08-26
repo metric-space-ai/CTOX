@@ -205,7 +205,7 @@ test('presentation layer stays compact and shell-native', async () => {
   assert.match(css, /\.reports-module\.is-actions-hidden[\s\S]*grid-template-columns: var\(--ctox-left-width, 320px\) 12px minmax\(0, 1fr\)/);
   assert.match(css, /\.reports-module[^\{]*\[data-resizer\][\s\S]*display: none !important/);
   assert.match(css, /@container business-app-window \(max-width: 1180px\)/);
-  assert.match(css, /@container business-app-window \(max-width: 760px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 767px\)/);
   // Decorative helpers from the previous layout are gone — the icon button's
   // aria-label/title is the single source of the accessible name.
   assert.doesNotMatch(css, /\.reports-sr-only/);
