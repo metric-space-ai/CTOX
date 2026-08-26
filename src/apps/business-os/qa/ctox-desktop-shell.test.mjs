@@ -10,6 +10,7 @@ const css = readFileSync(join(businessOsDir, 'themes', 'ctox-desktop-shell.css')
 const appCss = readFileSync(join(businessOsDir, 'app.css'), 'utf8');
 const baseCss = readFileSync(join(businessOsDir, 'shared', 'base.css'), 'utf8');
 const chatJs = readFileSync(join(businessOsDir, 'shared', 'business-chat.js'), 'utf8');
+const appJs = readFileSync(join(businessOsDir, 'app.js'), 'utf8');
 const indexHtml = readFileSync(join(businessOsDir, 'index.html'), 'utf8');
 const html = readFileSync(join(qaDir, 'ctox-desktop-shell.html'), 'utf8');
 const js = readFileSync(join(qaDir, 'ctox-desktop-shell.js'), 'utf8');
@@ -153,6 +154,23 @@ test('an empty chat stage collapses to zero height', () => {
   assert.match(chatJs, /\.ctox-chat-stage-inner\.is-empty \{[^}]*padding-bottom: 0;/);
   assert.match(chatJs, /\.ctox-chat-stage-inner:not\(\.is-empty\) \{/,
     'the narrow breakpoint must exempt the empty stage instead of out-shouting it');
+});
+
+test('a scrubbed Workjet launch remains reloadable without storing another secret', () => {
+  assert.match(appJs, /const CTOX_WORKSPACE_SCOPE_HINT_KEY = 'workjet\.businessOs\.workspaceScope';/);
+  assert.match(appJs, /sessionStorage\.setItem\(CTOX_WORKSPACE_SCOPE_HINT_KEY, instanceId\)/);
+  assert.match(appJs, /sessionStorage\.getItem\(CTOX_WORKSPACE_SCOPE_HINT_KEY\)/);
+  assert.doesNotMatch(
+    appJs,
+    /sessionStorage\.setItem\([^\n]*(?:room_password|signaling_room_password|capability_token)/,
+    'session storage may carry the opaque workspace hint, never pairing material',
+  );
+});
+
+test('the static Workjet shell never probes a nonexistent HTTP maintenance plane', () => {
+  assert.match(appJs, /if \(isWorkjetStaticShellLaunch\(\)\) \{[\s\S]*?return;[\s\S]*?\}/);
+  assert.match(appJs, /'local_daemon',[\s\S]*?'ssh_managed',[\s\S]*?'pairing_invite'/);
+  assert.match(appJs, /fetchBusinessOsControlJson\('\/api\/business-os\/ctox\/maintenance'\)/);
 });
 
 // Responsive behaviour is the shell's, and there is exactly one of it. The

@@ -110,6 +110,10 @@ function fetchPackagedModuleRegistry() {
 }
 const CTOX_MAINTENANCE_LEASE_KEY = 'ctox.businessOs.maintenanceLease';
 const CTOX_MAINTENANCE_CLIENT_KEY = 'ctox.businessOs.maintenanceClient';
+// The hint contains only the opaque instance id, never room credentials. It
+// lets a Workjet WebContents reload find the instance-scoped pairing record
+// after the sensitive launch query has been scrubbed.
+const CTOX_WORKSPACE_SCOPE_HINT_KEY = 'workjet.businessOs.workspaceScope';
 const CTOX_UPDATE_CHECK_POLL_MS = 30 * 60 * 1000;
 const SYNC_RECOVERY_REPAIR_DELAY_MS = 15000;
 const SHELL_IMPORT_TIMEOUT_MS = 45000;
@@ -471,6 +475,9 @@ function currentWorkspaceStorageScope() {
     launchConfigForPageSession?.instanceId,
     urlConfig?.instance_id,
     urlConfig?.instanceId,
+    (() => {
+      try { return sessionStorage.getItem(CTOX_WORKSPACE_SCOPE_HINT_KEY); } catch { return ''; }
+    })(),
     root.CTOX_BUSINESS_OS_CONFIG?.instance_id,
     root.CTOX_BUSINESS_OS_CONFIG?.instanceId,
     root.ctoxBusinessOsLaunch?.config?.instance_id,
@@ -8696,6 +8703,14 @@ function scheduleMaintenancePoll() {
 
 function startMaintenanceMonitor() {
   if (state.maintenanceTimer) window.clearTimeout(state.maintenanceTimer);
+  // A verified shell served by Workjet has no CTOX HTTP control plane by
+  // design. Backend and shell updates are owned by Workjet's Main process;
+  // probing a same-origin `/api` route here only creates a misleading 403/404.
+  // Business records still use the native RxDB/WebRTC channel below.
+  if (isWorkjetStaticShellLaunch()) {
+    applyMaintenanceState(normalizeMaintenancePayload(null));
+    return;
+  }
   els.maintenanceBanner?.querySelector('[data-maintenance-retry]')?.addEventListener('click', () => {
     refreshMaintenanceStatus({ retry: true }).then(scheduleMaintenancePoll);
   });
@@ -8707,6 +8722,17 @@ function startMaintenanceMonitor() {
     }
   });
   refreshMaintenanceStatus().then(scheduleMaintenancePoll);
+}
+
+function isWorkjetStaticShellLaunch() {
+  const source = String(launchConfigForPageSession?.desktop_instance?.source || '').trim();
+  const loopback = ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
+  return loopback && [
+    'local_daemon',
+    'ssh_managed',
+    'pairing_invite',
+    'manual_pairing',
+  ].includes(source);
 }
 
 async function refreshMaintenanceStatus(options = {}) {
@@ -10821,6 +10847,8 @@ function readStoredPairingConfig() {
 
 function writeStoredPairingConfig(config) {
   try {
+    const instanceId = storageScopeSegment(config?.instance_id || config?.instanceId, '');
+    if (instanceId) sessionStorage.setItem(CTOX_WORKSPACE_SCOPE_HINT_KEY, instanceId);
     writeScopedLocalStorage(PAIRING_CONFIG_KEY, JSON.stringify({ ...config, source: 'stored' }), {
       actor: false,
     });
@@ -10831,6 +10859,7 @@ function clearStoredPairingConfig() {
   try {
     removeScopedLocalStorage(PAIRING_CONFIG_KEY, { actor: false });
     localStorage.removeItem(PAIRING_CONFIG_KEY);
+    sessionStorage.removeItem(CTOX_WORKSPACE_SCOPE_HINT_KEY);
   } catch {}
 }
 
