@@ -7,16 +7,10 @@
    card grid, the card internals, the install-progress button, the lifecycle
    status dot, the retail-box shelf, and the sync/loading indicator. */
 
-/* Module-local special: purple "local app" badge accent (light + dark
-   literals; everything else derives from the shell tokens). */
+/* Local-app state stays on the module's Development category accent. */
 .app-store-module[data-app-store-root] {
-  --app-store-local-accent: #7c3aed;
-  --app-store-local-ink: #6d28d9;
-}
-
-:root[data-theme="dark"] .app-store-module[data-app-store-root] {
-  --app-store-local-accent: #a855f7;
-  --app-store-local-ink: #c4b5fd;
+  --app-store-local-accent: var(--app-accent);
+  --app-store-local-ink: var(--app-accent-foreground);
 }
 
 /* --- Sidebar layout glue (kit .ctox-pane-body > flex column) --- */

@@ -38,14 +38,9 @@
   grid-row: 1 / -1;
 }
 
-/* Module special: "feature" badge role on top of the shared .ctox-badge —
-   the shell has no matching semantic token (dark value below). */
+/* Feature badges use the module's Governance category accent. */
 .reports-module {
-  --reports-feature: #1d6fa8;
-}
-
-:root[data-theme="dark"] .reports-module {
-  --reports-feature: #8dc4f0;
+  --reports-feature: var(--app-accent);
 }
 
 .reports-module .ctox-badge.is-feature {
