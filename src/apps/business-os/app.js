@@ -9280,6 +9280,23 @@ async function loadLaunchContext() {
     }
     return;
   }
+  // Workjet serves verified immutable shell assets from a local static origin
+  // and supplies the short-lived desktop invite through `ctox_config`. That
+  // origin intentionally has no HTTP data or control proxy. Resolve the invite
+  // before trying the hosted-shell control endpoint so desktop launches stay
+  // RxDB/WebRTC-only and do not fail against the static server's 403 boundary.
+  const pairedConfig = await readBusinessOsLaunchConfig();
+  if (pairedConfig) {
+    window.CTOX_BUSINESS_OS_CONFIG = pairedConfig;
+    window.CTOX_BUSINESS_OS_SESSION = pairedConfig.session
+      && typeof pairedConfig.session === 'object'
+      ? pairedConfig.session
+      : await loadSession();
+    if (!Array.isArray(window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES)) {
+      window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES = [];
+    }
+    return;
+  }
   let payload;
   try {
     payload = await fetchBusinessOsControlJson('/api/business-os/launch-context');
