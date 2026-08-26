@@ -1,0 +1,241 @@
+{
+  "schema": "workjet.ui.contract.snapshot-source.v1",
+  "sourcePath": "packages/workjet-ui-contract/src/contract.json",
+  "sourceSha256": "b4104488841e0dc21a27ab52106babe846c49009183c4a55fe9637865bb76432",
+  "payload": {
+    "schema": "workjet.ui.contract.v1",
+    "version": 1,
+    "product": "Workjet",
+    "themes": {
+      "light": {
+        "surfaces": {
+          "canvas": "#fcfcfc",
+          "chrome": "#fcfcfc",
+          "surface": "#ffffff",
+          "raised": "#fcfcfc",
+          "overlay": "#ffffff",
+          "sunken": "#f4f4f5"
+        },
+        "text": {
+          "primary": "#27272a",
+          "secondary": "#52525b",
+          "muted": "#71717b",
+          "onAccent": "#ffffff"
+        },
+        "borders": {
+          "subtle": "#f4f4f5",
+          "default": "#e4e4e7",
+          "strong": "#d4d4d8"
+        },
+        "accent": {
+          "value": "#1b4ed8",
+          "foreground": "#ffffff",
+          "soft": "#e0e6f7",
+          "focus": "#1b4ed8"
+        }
+      },
+      "dark": {
+        "surfaces": {
+          "canvas": "#0a0a0a",
+          "chrome": "#0a0a0a",
+          "surface": "#111111",
+          "raised": "#141414",
+          "overlay": "#191919",
+          "sunken": "#0f0f0f"
+        },
+        "text": {
+          "primary": "#f5f5f5",
+          "secondary": "#d4d4d8",
+          "muted": "#818181",
+          "onAccent": "#ffffff"
+        },
+        "borders": {
+          "subtle": "#141414",
+          "default": "#191919",
+          "strong": "#343434"
+        },
+        "accent": {
+          "value": "#346bf1",
+          "foreground": "#ffffff",
+          "soft": "#16264f",
+          "focus": "#346bf1"
+        }
+      }
+    },
+    "typography": {
+      "fontFamily": {
+        "sans": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif",
+        "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+      },
+      "scale": {
+        "micro": {
+          "fontSize": 11,
+          "lineHeight": 14
+        },
+        "caption": {
+          "fontSize": 12,
+          "lineHeight": 16
+        },
+        "label": {
+          "fontSize": 13,
+          "lineHeight": 17
+        },
+        "body": {
+          "fontSize": 16,
+          "lineHeight": 23
+        },
+        "headline": {
+          "fontSize": 18,
+          "lineHeight": 23
+        },
+        "title": {
+          "fontSize": 21,
+          "lineHeight": 28
+        },
+        "display": {
+          "fontSize": 30,
+          "lineHeight": 36
+        }
+      },
+      "weights": {
+        "regular": 400,
+        "medium": 500,
+        "semibold": 600,
+        "bold": 700
+      },
+      "tracking": {
+        "tight": "-0.02em",
+        "normal": "0em",
+        "wide": "0.02em"
+      }
+    },
+    "spacing": {
+      "0": 0,
+      "1": 4,
+      "2": 8,
+      "3": 12,
+      "4": 16,
+      "5": 20,
+      "6": 24,
+      "8": 32,
+      "10": 40,
+      "12": 48
+    },
+    "radii": {
+      "none": 0,
+      "control": 6,
+      "panel": 10,
+      "card": 14,
+      "pill": 999
+    },
+    "focus": {
+      "outlineWidth": 2,
+      "outlineOffset": 2,
+      "ringAlpha": 0.24,
+      "minContrastRatio": 3
+    },
+    "elevation": {
+      "none": "none",
+      "low": "0 1px 2px rgb(0 0 0 / 0.08)",
+      "panel": "0 4px 12px rgb(0 0 0 / 0.12)",
+      "overlay": "0 16px 44px rgb(0 0 0 / 0.18)"
+    },
+    "categories": {
+      "System": {
+        "accent": "#2563eb",
+        "foreground": "#ffffff"
+      },
+      "Workspace": {
+        "accent": "#0284c7",
+        "foreground": "#111827"
+      },
+      "Operations": {
+        "accent": "#0f766e",
+        "foreground": "#ffffff"
+      },
+      "Knowledge": {
+        "accent": "#0891b2",
+        "foreground": "#111827"
+      },
+      "Security": {
+        "accent": "#475569",
+        "foreground": "#ffffff"
+      },
+      "Collaboration": {
+        "accent": "#7c3aed",
+        "foreground": "#ffffff"
+      },
+      "Development": {
+        "accent": "#4f46e5",
+        "foreground": "#ffffff"
+      },
+      "Governance": {
+        "accent": "#ca8a04",
+        "foreground": "#111827"
+      },
+      "Finance": {
+        "accent": "#16a34a",
+        "foreground": "#111827"
+      },
+      "Productivity": {
+        "accent": "#d97706",
+        "foreground": "#111827"
+      },
+      "Sales": {
+        "accent": "#059669",
+        "foreground": "#111827"
+      },
+      "Recruiting": {
+        "accent": "#db2777",
+        "foreground": "#ffffff"
+      },
+      "Research": {
+        "accent": "#6366f1",
+        "foreground": "#ffffff"
+      },
+      "Analytics": {
+        "accent": "#15803d",
+        "foreground": "#ffffff"
+      }
+    },
+    "vocabulary": {
+      "userTerms": [
+        "Workjet",
+        "Workspace",
+        "App",
+        "Settings",
+        "Appearance",
+        "Light",
+        "Dark",
+        "Category",
+        "Focus",
+        "Surface",
+        "Accent",
+        "Search",
+        "Open",
+        "Close",
+        "Save",
+        "Cancel",
+        "Back",
+        "More"
+      ],
+      "forbiddenTerms": [
+        "daemon",
+        "RxDB",
+        "WebRTC",
+        "DataChannel",
+        "replication",
+        "tenant",
+        "module catalog",
+        "internal module",
+        "runtime store",
+        "control plane",
+        "peer session"
+      ],
+      "forbiddenPatterns": [
+        "\\b(?:daemon|RxDB|WebRTC|DataChannel)\\b",
+        "\\b(?:tenant|replication|control plane)\\b"
+      ]
+    }
+  }
+}
