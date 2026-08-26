@@ -2,6 +2,12 @@
 
 const MODES = new Set(['window', 'maximized', 'focus']);
 
+// The desktop is the Business OS shell surface itself. It owns the landing
+// surface, taskbar/dock, and global chrome; every other module is an app and
+// must be hosted by the shared shell-window manager, even when its manifest is
+// legacy, runtime-installed, or imported from an older catalog.
+export const SHELL_SURFACE_MODULE_ID = 'desktop';
+
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -20,6 +26,10 @@ function legacyIsFullWorkspace(moduleDef) {
     || moduleDef?.layout?.fullFrame === true;
 }
 
+export function isShellSurfaceModule(moduleDef) {
+  return String(moduleDef?.id || '').trim() === SHELL_SURFACE_MODULE_ID;
+}
+
 export function resolvePresentation(moduleDef = {}) {
   const source = moduleDef.presentation && typeof moduleDef.presentation === 'object'
     ? moduleDef.presentation
@@ -27,7 +37,7 @@ export function resolvePresentation(moduleDef = {}) {
   const explicitMode = MODES.has(source.default_mode) ? source.default_mode : '';
   const legacyWindowed = legacyIsWindowed(moduleDef);
   const legacyFullWorkspace = legacyIsFullWorkspace(moduleDef);
-  const defaultMode = explicitMode || (legacyWindowed ? 'window' : 'workspace');
+  const defaultMode = explicitMode || (isShellSurfaceModule(moduleDef) ? 'workspace' : 'window');
   const requestedModes = Array.isArray(source.supported_modes)
     ? source.supported_modes.filter((mode) => MODES.has(mode))
     : [];
@@ -57,9 +67,12 @@ export function resolvePresentation(moduleDef = {}) {
 }
 
 export function launchesInWindow(moduleDef) {
-  return resolvePresentation(moduleDef).defaultMode !== 'workspace';
+  return !isShellSurfaceModule(moduleDef);
 }
 
 export function usesLegacyWorkspace(moduleDef) {
-  return resolvePresentation(moduleDef).legacy.fullWorkspace;
+  // The shell surface is identified by its reserved id, not by a mutable
+  // catalog field. This keeps a partially projected/runtime desktop record
+  // from falling through into the pane mount path.
+  return isShellSurfaceModule(moduleDef);
 }

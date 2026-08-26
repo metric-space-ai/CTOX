@@ -5092,7 +5092,11 @@ async function openModule(moduleId, options = {}) {
     }
     return;
   }
-  if (moduleLaunchesAsDesktopApp(mod) && !options.asModule) {
+  // Every Business OS app is hosted by the shared window manager. The former
+  // direct-mount escape hatch allowed legacy/runtime/imported modules to bypass
+  // the common drag region and window controls; keep the shell surface
+  // (`desktop`) as the only full-workspace route.
+  if (moduleLaunchesAsDesktopApp(mod)) {
     const fallbackId = visibleModuleFallbackId(mod.id);
     const launchArgs = {
       ...currentHashArgsForModule(mod.id),

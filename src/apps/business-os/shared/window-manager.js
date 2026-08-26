@@ -42,8 +42,19 @@ function prefersReducedMotion() {
   }
 }
 
+// Every app window gets this exact action set from the shared shell chrome.
+// The visual order may follow the selected desktop style, but no app may
+// remove an action or provide a second, partial control strip.
+export const SHELL_WINDOW_CONTROL_ACTIONS = Object.freeze([
+  'minimize',
+  'maximize',
+  'close',
+]);
+
+export const SHELL_WINDOW_CHROME_VERSION = 'shared-v1';
+
 const CONTROL_KINDS_BY_STYLE = {
-  windows: ['minimize', 'maximize', 'close'],
+  windows: SHELL_WINDOW_CONTROL_ACTIONS,
   macos: ['close', 'minimize', 'maximize'],
 };
 
@@ -116,6 +127,7 @@ export function createWindowManager({
     chromeLayout = next;
     for (const win of windows) {
       renderControls(win.element.querySelector('.shell-window-controls'), chromeLayout, translate);
+      assertShellWindowChrome(win.element);
       updateMaximizeControl(win, translate);
     }
   }
@@ -335,6 +347,8 @@ export function createWindowManager({
     const winEl = document.createElement('section');
     winEl.className = 'shell-window';
     winEl.id = id;
+    winEl.dataset.shellWindow = 'true';
+    winEl.dataset.shellWindowChrome = SHELL_WINDOW_CHROME_VERSION;
     if (ownerId) winEl.dataset.ownerId = ownerId;
     winEl.style.transition = 'none';
 
@@ -359,11 +373,11 @@ export function createWindowManager({
     winEl.style.top = `${baseY}px`;
 
     winEl.innerHTML = `
-      <header class="shell-window-header" data-window-header>
+      <header class="shell-window-header" data-window-header data-window-drag-region>
         <div class="shell-window-title" data-window-title></div>
         <div class="shell-window-meta" data-window-meta></div>
         <div class="shell-window-actions" data-window-actions></div>
-        <div class="shell-window-controls" data-window-controls></div>
+        <div class="shell-window-controls" data-window-controls data-window-control-strip></div>
       </header>
       <div class="shell-window-content" data-window-content></div>
       ${RESIZE_HANDLES.map((dir) => `<div class="shell-window-resize shell-window-resize--${dir}" data-window-resize="${dir}"></div>`).join('')}
@@ -378,6 +392,7 @@ export function createWindowManager({
     renderHeaderItems(winEl.querySelector('[data-window-actions]'), options.headerActions, 'action');
     const controlsEl = winEl.querySelector('[data-window-controls]');
     renderControls(controlsEl, chromeLayout, translate);
+    assertShellWindowChrome(winEl);
 
     setTimeout(() => { winEl.style.transition = ''; }, 50);
     windowLayer.appendChild(winEl);
@@ -469,6 +484,17 @@ export function createWindowManager({
       },
       setAlwaysOnTop: (flag) => setAlwaysOnTop(id, flag),
       snapTo: (zone) => snapTo(id, zone),
+      minimize: () => minimize(id),
+      maximize: () => {
+        const current = windows.find((entry) => entry.id === id);
+        if (current && current.state !== 'maximized') toggleMaximize(id);
+      },
+      restore: () => {
+        const current = windows.find((entry) => entry.id === id);
+        if (!current) return;
+        if (current.state === 'minimized') focus(id);
+        else if (current.state === 'maximized') toggleMaximize(id);
+      },
     };
   }
 
@@ -694,10 +720,10 @@ export function createWindowManager({
 
   function bindControls(win) {
     win.element.querySelector('[data-window-controls]').addEventListener('click', (event) => {
-      const btn = event.target.closest('[data-action]');
+      const btn = event.target.closest('[data-window-control]');
       if (!btn) return;
       event.stopPropagation();
-      const action = btn.dataset.action;
+      const action = btn.dataset.windowControl;
       if (action === 'close') destroy(win.id);
       else if (action === 'minimize') minimize(win.id);
       else if (action === 'maximize') toggleMaximize(win.id);
@@ -786,7 +812,7 @@ export function createWindowManager({
   }
 
   function makeDraggable(win) {
-    const header = win.element.querySelector('[data-window-header]');
+    const header = win.element.querySelector('[data-window-drag-region]');
     if (!header) return;
     header.addEventListener('mousedown', (downEvent) => {
       if (downEvent.button !== 0) return;
@@ -1116,6 +1142,22 @@ export function createWindowManager({
   };
 }
 
+function assertShellWindowChrome(winEl) {
+  const dragRegion = winEl?.querySelector('[data-window-drag-region]');
+  const controls = winEl?.querySelectorAll('[data-window-control]') || [];
+  const actions = new Set(Array.from(controls).map((control) => control.dataset.windowControl));
+  const complete = controls.length === SHELL_WINDOW_CONTROL_ACTIONS.length
+    && SHELL_WINDOW_CONTROL_ACTIONS.every((action) => actions.has(action));
+  const operable = Array.from(controls).every((control) => (
+    control.tagName === 'BUTTON'
+    && control.type === 'button'
+    && String(control.getAttribute('aria-label') || '').trim().length > 0
+  ));
+  if (!dragRegion || !winEl?.querySelector('[data-window-control-strip]') || !complete || !operable) {
+    throw new Error('windowManager: shared shell chrome requires a drag region and minimize/maximize/close controls');
+  }
+}
+
 function renderControls(controlsEl, layout, translate) {
   if (!controlsEl) return;
   controlsEl.innerHTML = '';
@@ -1124,6 +1166,7 @@ function renderControls(controlsEl, layout, translate) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.dataset.action = kind;
+    btn.dataset.windowControl = kind;
     btn.className = `shell-window-control shell-window-control--${kind}`;
     const labelKey = `window${kind[0].toUpperCase()}${kind.slice(1)}`;
     btn.setAttribute('aria-label', translate(labelKey, kind));
@@ -1136,7 +1179,7 @@ function updateMaximizeControl(win, translate) {
   if (!win?.element) return;
   const maximized = win.state === 'maximized';
   win.element.classList.toggle('is-maximized', maximized);
-  const button = win.element.querySelector('[data-window-controls] [data-action="maximize"]');
+  const button = win.element.querySelector('[data-window-controls] [data-window-control="maximize"]');
   if (!button) return;
   button.textContent = maximized ? CONTROL_GLYPHS.restore : CONTROL_GLYPHS.maximize;
   button.setAttribute(
