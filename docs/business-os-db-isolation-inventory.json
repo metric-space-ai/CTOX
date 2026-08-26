@@ -127,9 +127,9 @@
       "title": "Coding Agents",
       "manifest_path": "src/apps/business-os/modules/coding-agents/module.json",
       "source_path": "src/apps/business-os/modules/coding-agents",
-      "install_scope": "store",
+      "install_scope": "core",
       "distribution": "catalog-module",
-      "default_installed": false,
+      "default_installed": true,
       "classification": "catalog-user-module",
       "isolation_status": "guarded-facade-migrated",
       "owner": "business-os-platform",
@@ -198,29 +198,6 @@
         "uses_cached_db_handle": false
       },
       "notes": "Mail resolves only its manifest-declared communication and outbound collections through ctx.db.collection(name). The browser app filters assigned/shared mailbox accounts and campaign membership for UX, while write permission checks and every approval/send transition remain server-authoritative through the native Outbound command bus. No HTTP business-data path or raw database access is used."
-    },
-    "creator": {
-      "title": "App Creator",
-      "manifest_path": "src/apps/business-os/modules/creator/module.json",
-      "source_path": "src/apps/business-os/modules/creator",
-      "install_scope": "core",
-      "distribution": "system-module",
-      "default_installed": true,
-      "classification": "internal-builder-tool",
-      "isolation_status": "internal-scoped-exception-tested",
-      "owner": "business-os-platform",
-      "review_by": "2026-07-31",
-      "db_access": {
-        "uses_raw_db": false,
-        "uses_collection_property_access": false,
-        "uses_collections_proxy": false,
-        "uses_cached_db_handle": false
-      },
-      "scoped_collections": [
-        "business_commands",
-        "business_module_catalog"
-      ],
-      "notes": "Scoped internal exception: Creator now resolves business_module_catalog and business_commands through the scoped system facade, while generated apps continue to use guarded data grants. Browser/Rust dynamic-app smoke denies the registered foreign ctox_runtime_settings collection through collection(), property, raw and collections access and checks the permission/capability facade contract."
     },
     "credentials": {
       "title": "Credentials",
