@@ -53,6 +53,12 @@ export function normalizeShellUpdateStatus(value) {
   return Object.hasOwn(STATUS_COPY, state) ? state : 'failed';
 }
 
+export function normalizeShellHealth(value, runtimeStatus = '') {
+  if (runtimeStatus === 'ready') return 'healthy';
+  if (runtimeStatus === 'failed') return 'degraded';
+  return Object.hasOwn(HEALTH_COPY, value) ? value : 'unknown';
+}
+
 export function formatShellTimestamp(value) {
   if (typeof value !== 'string' || value.length > 64) return '—';
   const timestamp = Date.parse(value);
@@ -90,7 +96,8 @@ function render(root, detail) {
   root.querySelector('[data-shell-release-panel-offered]').textContent = offeredVersion ? `v${offeredVersion}` : '—';
   root.querySelector('[data-shell-release-panel-channel]').textContent = channel;
   root.querySelector('[data-shell-release-panel-state]').textContent = stateLabel;
-  root.querySelector('[data-shell-release-panel-health]').textContent = HEALTH_COPY[detail?.health] || HEALTH_COPY.unknown;
+  const runtimeStatus = globalThis.CTOX_BUSINESS_OS_APP?.dataPlaneReadyStatus;
+  root.querySelector('[data-shell-release-panel-health]').textContent = HEALTH_COPY[normalizeShellHealth(detail?.health, runtimeStatus)];
   root.querySelector('[data-shell-release-panel-published]').textContent = formatShellTimestamp(detail?.publishedAt);
   root.querySelector('[data-shell-release-panel-compatibility]').textContent = formatShellCompatibility(detail?.compatibility);
   root.querySelector('[data-shell-release-panel-checked]').textContent = formatShellTimestamp(detail?.lastCheckedAt);
@@ -112,18 +119,27 @@ function start() {
   if (!root) return;
   const button = root.querySelector('[data-shell-release-status]');
   const panel = root.querySelector('[data-shell-release-panel]');
+  let lastDetail = { version: '', channel: 'recovery', state: 'recovery' };
   button.addEventListener('click', () => {
     panel.hidden = !panel.hidden;
     button.setAttribute('aria-expanded', String(!panel.hidden));
+    if (!panel.hidden) render(root, lastDetail);
   });
   document.addEventListener('click', (event) => {
     if (root.contains(event.target)) return;
     panel.hidden = true;
     button.setAttribute('aria-expanded', 'false');
   });
-  window.addEventListener('workjet:shell-update-status', (event) => render(root, event.detail));
-  loadEmbeddedIdentity().then((identity) => render(root, identity)).catch(() => {
-    render(root, { version: '', channel: 'recovery', state: 'recovery' });
+  window.addEventListener('workjet:shell-update-status', (event) => {
+    lastDetail = event.detail;
+    render(root, lastDetail);
+  });
+  loadEmbeddedIdentity().then((identity) => {
+    lastDetail = identity;
+    render(root, lastDetail);
+  }).catch(() => {
+    lastDetail = { version: '', channel: 'recovery', state: 'recovery' };
+    render(root, lastDetail);
   });
 }
 

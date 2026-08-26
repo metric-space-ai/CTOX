@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   formatShellCompatibility,
   formatShellTimestamp,
+  normalizeShellHealth,
   normalizeShellUpdateStatus,
   normalizeShellVersion,
   shellChannel,
@@ -38,4 +39,11 @@ test('release details render only validated bounded metadata', () => {
     'Workjet ≥0.0.33 · CTOX ≥0.3.22 ≤0.4.0',
   );
   assert.equal(formatShellCompatibility({ workjetMinVersion: '<script>', ctoxMinVersion: '0.3.22' }), '—');
+});
+
+test('the running data plane overrides stale lifecycle health without inventing readiness', () => {
+  assert.equal(normalizeShellHealth('degraded', 'ready'), 'healthy');
+  assert.equal(normalizeShellHealth('healthy', 'failed'), 'degraded');
+  assert.equal(normalizeShellHealth('healthy', 'pending'), 'healthy');
+  assert.equal(normalizeShellHealth('surprise', 'pending'), 'unknown');
 });
