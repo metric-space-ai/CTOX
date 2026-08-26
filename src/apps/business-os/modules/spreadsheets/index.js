@@ -672,7 +672,7 @@ function validateSpreadsheetLineage(ingestion = {}) {
   if (ingestion.kind !== RESEARCH_GENERATED_KIND) return { valid: true, message: '' };
   return {
     valid: false,
-    message: 'Research-derived spreadsheets must be admitted by the verified local Business OS command path before they can be opened as evidence.',
+    message: 'Research-derived spreadsheets must be admitted by the verified local native Business OS command path before they can be opened as evidence.',
   };
 }
 
@@ -1974,6 +1974,11 @@ async function dispatchSpreadsheetsContextChat(state, context, message, mode = '
     if (status) status.textContent = state.t('chatNotReady', 'Chat ist noch nicht bereit.');
     return;
   }
+  const openBusinessChat = state.ctx?.openBusinessChat || state.ctx?.businessChat?.open;
+  if (typeof openBusinessChat !== 'function') {
+    if (status) status.textContent = state.t('chatNotReady', 'Chat ist noch nicht bereit.');
+    return;
+  }
   if (status) status.textContent = state.t('chatOpening', 'Öffne Chat...');
   const titlePrefix = safeMode === 'app'
     ? 'Spreadsheets App modifizieren'
@@ -1987,36 +1992,41 @@ async function dispatchSpreadsheetsContextChat(state, context, message, mode = '
       ? `Beantworte die folgende Frage ausschließlich lesend. Nutze nur vorhandene Daten und Kontext; führe keine Änderungen an Daten, Records, Dateien oder der App aus. Antworte knapp und direkt.\n\n${trimmed}`
       : trimmed;
 
-  window.dispatchEvent(new CustomEvent('ctox-business-os-chat-submit', {
-    detail: {
-      text: trimmed,
-      module: 'spreadsheets',
-      source_title: 'Spreadsheets',
-      command_type: safeMode === 'app' ? 'ctox.business_os.app.modify' : 'business_os.chat.task',
-      record_id: safeMode === 'app' ? 'spreadsheets' : (record?.id || 'spreadsheets'),
+  openBusinessChat({
+    text: trimmed,
+    draft: trimmed,
+    module: 'spreadsheets',
+    source_module: 'spreadsheets',
+    source_title: 'Spreadsheets',
+    action: 'context-chat',
+    reuseActive: false,
+    command_type: safeMode === 'app' ? 'ctox.business_os.app.modify' : 'business_os.chat.task',
+    record_id: safeMode === 'app' ? 'spreadsheets' : (record?.id || 'spreadsheets'),
+    title,
+    command_title: title,
+    instruction,
+    mode: safeMode,
+    target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
+    payload: {
       title,
       instruction,
-      payload: {
-        title,
-        instruction,
-        prompt: trimmed,
-        user_message: trimmed,
-        mode: safeMode,
-        target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
-        selected_spreadsheet: record,
-        context,
-        thread_key: 'business-os/spreadsheets',
-      },
-      client_context: {
-        action: 'context-chat',
-        mode: safeMode,
-        column: context.column,
-        record_type: context.record_type,
-        spreadsheet_id: record?.id || '',
-        filename: record?.filename || '',
-      },
+      prompt: trimmed,
+      user_message: trimmed,
+      mode: safeMode,
+      target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
+      selected_spreadsheet: record,
+      context,
+      thread_key: 'business-os/spreadsheets',
     },
-  }));
+    client_context: {
+      action: 'context-chat',
+      mode: safeMode,
+      column: context.column,
+      record_type: context.record_type,
+      spreadsheet_id: record?.id || '',
+      filename: record?.filename || '',
+    },
+  });
   hideSpreadsheetsContextMenu(state);
 }
 

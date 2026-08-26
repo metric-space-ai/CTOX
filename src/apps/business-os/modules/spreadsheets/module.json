@@ -16,6 +16,7 @@
     "left": "spreadsheet navigation and explorer",
     "center": "Spreadsheet viewer/editor workbench",
     "right": "spreadsheet runbooks and automation prompts",
+    "third_pane_justification": "Runbooks and automation prompts are actionable context for the selected spreadsheet, so they belong beside the workbench in wide mode; the pane is hidden by default and opens through the center-header toggle, then stacks below the grid in compact layouts.",
     "drawers": {
       "left": "spreadsheet metadata and import settings",
       "right": "runbook details and generated commands",
