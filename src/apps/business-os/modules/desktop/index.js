@@ -9,8 +9,13 @@ import {
   moduleRenamePayload,
   nextQuickAppIdentity,
 } from './appCommands.js';
+import {
+  applyWorkjetCategory,
+  normalizeWorkjetCategory,
+  workjetCategoryForModule,
+} from '../../shared/workjet-theme.js?v=20260826-workjet-ui-contract-v1';
 
-const STYLE_BUILD = '20260716-label-clamp-v2';
+const STYLE_BUILD = '20260826-workjet-ui-contract-v1';
 const LAYOUT_DOC_ID = 'layout';
 const ICON_POSITION_CACHE_KEY = 'ctox.businessOs.desktopIconPositions';
 const DESKTOP_SYNC_COLLECTIONS = Object.freeze([
@@ -155,6 +160,7 @@ export async function mount(ctx) {
     widgetSyncDetail: root.querySelector('[data-widget-sync-detail]'),
     widgetSyncFill: root.querySelector('[data-widget-sync-fill]'),
   };
+  applyWorkjetCategory(refs.root, workjetCategoryForModule(ctx.module));
 
   const initialModules = Array.isArray(ctx.modules) ? ctx.modules : await loadModuleRegistry();
   let launcher = createLauncher(initialModules);
@@ -412,6 +418,12 @@ export async function mount(ctx) {
     });
   }
 
+  function categoryForLauncherEntry(entry) {
+    return entry?.kind === 'module'
+      ? workjetCategoryForModule(entry)
+      : normalizeWorkjetCategory(entry?.category);
+  }
+
   function subscribeModuleCatalogChanges() {
     if (!ctx.eventBus?.on) return () => {};
     const token = ctx.eventBus.on('modules:changed', (payload = {}) => {
@@ -463,6 +475,7 @@ export async function mount(ctx) {
         return [
           value.id, value.label, value.glyph, value.target_module, value.target_type,
           value.x, value.y, value.pinned, value.hidden, value.sort_index,
+          categoryForLauncherEntry(launcher.entries().find((entry) => entry.id === value.target_module)),
         ];
       }),
     ]);
@@ -509,6 +522,10 @@ export async function mount(ctx) {
     
     const glyphEl = el.querySelector('.desktop-icon-glyph');
     const targetModule = doc.target_module || '';
+    applyWorkjetCategory(
+      el,
+      categoryForLauncherEntry(launcher.entries().find((entry) => entry.id === targetModule)),
+    );
     const resolveSvgIcon = typeof ctx.getSvgIcon === 'function' ? ctx.getSvgIcon : getFallbackSvgIcon;
     const svgIcon = resolveSvgIcon(targetModule, 28);
     if (svgIcon) {

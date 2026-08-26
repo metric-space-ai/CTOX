@@ -551,3 +551,34 @@ body[data-active-module="desktop"] .topbar {
 :root[data-shell-style="ctox"] .desktop-hero-widget:hover {
   border-color: var(--line);
 }
+
+/* Workjet contract integration: the desktop canvas and shared header stay
+   neutral in both themes. Category color is reserved for a selected/focused
+   icon or a live status indicator, so a populated desktop does not become a
+   rainbow of persistent module accents. */
+body[data-active-module="desktop"] .topbar {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--surface) !important;
+  border-bottom: 1px solid var(--line) !important;
+  box-shadow: none !important;
+}
+
+.desktop-icon[data-workjet-category]:is(.selected, :focus-visible) .desktop-icon-glyph {
+  border-color: var(--shell-category-accent) !important;
+  color: var(--shell-category-accent);
+}
+
+.desktop-icon[data-workjet-category]:is(.selected, :focus-visible) .desktop-icon-label {
+  color: var(--shell-category-accent);
+}
+
+.desktop-module[data-workjet-category] .widget-status {
+  border-color: color-mix(in srgb, var(--shell-category-accent) 34%, var(--line));
+  background: color-mix(in srgb, var(--shell-category-soft) 76%, var(--surface));
+}
+
+.desktop-module[data-workjet-category] .status-pulse,
+.desktop-module[data-workjet-category] .status-pulse::after {
+  background: var(--shell-category-accent);
+}

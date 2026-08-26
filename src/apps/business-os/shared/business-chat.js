@@ -6,6 +6,10 @@ import {
   sha256Hex,
 } from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
 import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+import {
+  normalizeWorkjetCategory,
+  workjetCategoryStyle,
+} from './workjet-theme.js?v=20260826-workjet-ui-contract-v1';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -766,6 +770,14 @@ function setStyleIfChanged(element, prop, value) {
   return true;
 }
 
+function setInlineStyleIfChanged(element, value) {
+  if (!element?.style) return false;
+  const next = String(value ?? '');
+  if (element.style.cssText === next) return false;
+  element.style.cssText = next;
+  return true;
+}
+
 function stageWindowChats(activeExpandedChat) {
   return activeExpandedChat ? [activeExpandedChat] : [];
 }
@@ -870,6 +882,15 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       const chatId = chip.dataset.chatFocus;
       const chat = openChats.find(c => c.id === chatId);
       if (chat) {
+        const category = chatWorkjetCategory(chat);
+        const categoryChanged = setDatasetIfChanged(chip, 'workjetCategory', category);
+        if (categoryChanged) {
+          if (typeof chip.getAttribute === 'function') {
+            if (setAttrIfChanged(chip, 'style', chatWorkjetCategoryStyleText(category))) inPlaceDomChanged = true;
+          } else if (setInlineStyleIfChanged(chip, chatWorkjetCategoryStyleText(category))) {
+            inPlaceDomChanged = true;
+          }
+        }
         const taskState = getTaskState(chat);
         const status = chatDockStatusText(chat, taskState);
         const aria = chatDockAriaLabel(chat, status);
@@ -908,6 +929,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     let messagesDomChanged = false;
     existingWindows.forEach((win, idx) => {
       const chat = visibleWindowChats[idx];
+      const category = chatWorkjetCategory(chat);
       const relation = idx < activeIndex ? 'left' : idx > activeIndex ? 'right' : 'center';
       const taskState = getTaskState(chat);
 
@@ -920,6 +942,14 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         `is-task-${taskState}`,
       ].filter(Boolean).join(' ');
       if (setClassNameIfChanged(win, nextWindowClass)) inPlaceDomChanged = true;
+      const categoryChanged = setDatasetIfChanged(win, 'workjetCategory', category);
+      if (categoryChanged) {
+        if (typeof win.getAttribute === 'function') {
+          if (setAttrIfChanged(win, 'style', chatWorkjetCategoryStyleText(category))) inPlaceDomChanged = true;
+        } else if (setInlineStyleIfChanged(win, chatWorkjetCategoryStyleText(category))) {
+          inPlaceDomChanged = true;
+        }
+      }
       if (setDatasetIfChanged(win, 'chatRel', relation)) inPlaceDomChanged = true;
       // Interactive tabindex/aria-hidden churn is only needed when the active
       // window actually changes. Re-applying it every tick was pure DOM noise.
@@ -1773,8 +1803,26 @@ export function renderChatAgentScopeHtml(contextMeta = {}) {
   return renderGlobalCtoxAgentScopeHtml({ view });
 }
 
+function chatWorkjetCategory(chat) {
+  return normalizeWorkjetCategory(
+    chat?.contextMeta?.workjet_category || chat?.contextMeta?.workjetCategory,
+  );
+}
+
+function chatWorkjetCategoryStyleText(category) {
+  const style = workjetCategoryStyle(category);
+  return [
+    `--shell-category-accent:${style.accent}`,
+    `--shell-category-foreground:${style.foreground}`,
+    `--shell-category-soft:${style.soft}`,
+    `--shell-category-border:${style.border}`,
+  ].join(';');
+}
+
 function chatWindow(chat, activeId, relation = 'center') {
   const moduleName = chat.contextMeta?.module || 'ctox';
+  const category = chatWorkjetCategory(chat);
+  const categoryStyleText = chatWorkjetCategoryStyleText(category);
   const taskState = getTaskState(chat);
   const isFuture = chat.createdAt > Date.now();
   const agentScopeHtml = renderChatAgentScopeHtml(chat.contextMeta);
@@ -1955,7 +2003,7 @@ function chatWindow(chat, activeId, relation = 'center') {
   }
 
   return `
-    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}">
+    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}">
       <header>
         <button class="ctox-chat-title" type="button" data-chat-title="${escapeAttr(chat.id)}">
           <div style="display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 0;">
@@ -2409,10 +2457,12 @@ function chatDockItem(chat, activeId) {
   const taskState = getTaskState(chat);
   const status = chatDockStatusText(chat, taskState);
   const moduleName = chat.contextMeta?.module || 'ctox';
+  const category = chatWorkjetCategory(chat);
+  const categoryStyleText = chatWorkjetCategoryStyleText(category);
   const markHtml = chatChipMarkHtml(taskState);
 
   return `
-    <button class="${chatDockClassName(chat, activeId, taskState)}" type="button" data-chat-focus="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" aria-label="${escapeAttr(chatDockAriaLabel(chat, status))}" title="${escapeAttr(chatDockAriaLabel(chat, status))}">
+    <button class="${chatDockClassName(chat, activeId, taskState)}" type="button" data-chat-focus="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" aria-label="${escapeAttr(chatDockAriaLabel(chat, status))}" title="${escapeAttr(chatDockAriaLabel(chat, status))}">
       ${markHtml}
       <span class="ctox-chat-chip-copy">
         <strong>${escapeHtml(chat.title || 'CTOX')}</strong>
@@ -3320,6 +3370,11 @@ function chatContextMetaFromDetail(detail = {}) {
     instruction: detail.instruction || '',
     inbound_channel: detail.inbound_channel || detail.inboundChannel || '',
     command_type: detail.command_type || detail.commandType || '',
+    workjet_category: detail.workjet_category
+      || detail.workjetCategory
+      || clientContext.workjet_category
+      || clientContext.workjetCategory
+      || '',
     payload,
     client_context: clientContext,
   };
@@ -3894,12 +3949,12 @@ function installChatStyles() {
       width: max-content;
       max-width: 100%;
       padding: 6px;
-      border: 1px solid color-mix(in srgb, var(--line) 35%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 35%, transparent);
-      backdrop-filter: blur(20px) saturate(180%);
-      -webkit-backdrop-filter: blur(20px) saturate(180%);
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+      border: 1px solid var(--line);
+      border-radius: var(--control-radius);
+      background: var(--surface-2);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      box-shadow: var(--workjet-shadow-panel, var(--shadow-md));
       transition: border-color var(--motion-slow) var(--ease-spring), box-shadow var(--motion-slow) var(--ease-spring);
     }
     .ctox-chat-dock:hover {
@@ -4219,12 +4274,12 @@ function installChatStyles() {
       grid-template-rows: auto auto auto minmax(0, 1fr);
       gap: 10px;
       padding: var(--space-3);
-      border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 88%, transparent);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
-      box-shadow: 0 20px 52px rgba(0, 0, 0, 0.22);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg));
       color: var(--text);
       z-index: 70;
     }
@@ -4237,12 +4292,12 @@ function installChatStyles() {
       display: grid;
       gap: 10px;
       padding: var(--space-3);
-      border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 90%, transparent);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
-      box-shadow: 0 20px 52px rgba(0, 0, 0, 0.22);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg));
       color: var(--text);
       z-index: 71;
     }
@@ -4522,40 +4577,8 @@ function installChatStyles() {
       cursor: pointer;
       animation: ctoxChipSlideIn var(--motion-slow) var(--ease-spring) both;
       transition: transform var(--motion-slow) var(--ease-spring), background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-spring);
-      --accent: var(--theme-accent, #10b981);
-      --accent-soft: var(--theme-accent-soft, rgba(16, 185, 129, 0.12));
-    }
-    .ctox-chat-chip[data-chat-module="ctox"] {
-      --accent: #10b981 !important;
-      --accent-soft: rgba(16, 185, 129, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="documents"] {
-      --accent: #3b82f6 !important;
-      --accent-soft: rgba(59, 130, 246, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="knowledge"] {
-      --accent: #a855f7 !important;
-      --accent-soft: rgba(168, 85, 247, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="research"] {
-      --accent: #06b6d4 !important;
-      --accent-soft: rgba(6, 182, 212, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="matching"] {
-      --accent: #f59e0b !important;
-      --accent-soft: rgba(245, 158, 11, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="reports"] {
-      --accent: #ef4444 !important;
-      --accent-soft: rgba(239, 68, 68, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="conversations"] {
-      --accent: #6366f1 !important;
-      --accent-soft: rgba(99, 102, 241, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="outbound"] {
-      --accent: #f43f5e !important;
-      --accent-soft: rgba(244, 63, 94, 0.12) !important;
+      --accent: var(--shell-category-accent, var(--workjet-accent, #1b4ed8));
+      --accent-soft: var(--shell-category-soft, var(--workjet-accent-soft, #e0e6f7));
     }
     .ctox-chat-chip.is-task-running {
       --status-color: var(--accent);
@@ -4608,9 +4631,9 @@ function installChatStyles() {
       background: color-mix(in srgb, var(--status-color) 18%, var(--surface-2)) !important;
     }
     .ctox-chat-chip.is-expanded:not(.is-active) {
-      border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-      background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
-      color: color-mix(in srgb, var(--text) 95%, var(--accent));
+      border-color: color-mix(in srgb, var(--line) 45%, transparent);
+      background: var(--surface-2);
+      color: var(--text);
       opacity: 0.96;
     }
     .ctox-chat-chip.is-active {
@@ -4783,14 +4806,14 @@ function installChatStyles() {
       overflow: hidden;
       box-sizing: border-box;
       max-width: min(440px, calc(100dvw - 24px));
-      border: 1px solid color-mix(in srgb, var(--line) 25%, transparent);
-      border-radius: 16px;
-      background: color-mix(in srgb, var(--surface) 94%, transparent);
-      backdrop-filter: blur(24px) saturate(180%);
-      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
       color: var(--text);
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
-      font-family: var(--font-family, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg));
+      font-family: var(--font-sans, var(--workjet-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif));
       font-size: var(--fs-sm);
       line-height: 1.4;
       animation: ctoxChatSlideIn var(--motion-slow) var(--ease-spring);
@@ -4804,42 +4827,10 @@ function installChatStyles() {
         border-color var(--motion-slow) var(--ease-standard),
         box-shadow var(--motion-slow) var(--ease-standard),
         filter var(--motion-slow) var(--ease-standard);
-      --accent: var(--theme-accent, #10b981);
-      --accent-soft: var(--theme-accent-soft, rgba(16, 185, 129, 0.12));
+      --accent: var(--shell-category-accent, var(--workjet-accent, #1b4ed8));
+      --accent-soft: var(--shell-category-soft, var(--workjet-accent-soft, #e0e6f7));
       transform-style: preserve-3d;
       backface-visibility: hidden;
-    }
-    .ctox-chat-window[data-chat-module="ctox"] {
-      --accent: #10b981 !important;
-      --accent-soft: rgba(16, 185, 129, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="documents"] {
-      --accent: #3b82f6 !important;
-      --accent-soft: rgba(59, 130, 246, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="knowledge"] {
-      --accent: #a855f7 !important;
-      --accent-soft: rgba(168, 85, 247, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="research"] {
-      --accent: #06b6d4 !important;
-      --accent-soft: rgba(6, 182, 212, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="matching"] {
-      --accent: #f59e0b !important;
-      --accent-soft: rgba(245, 158, 11, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="reports"] {
-      --accent: #ef4444 !important;
-      --accent-soft: rgba(239, 68, 68, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="conversations"] {
-      --accent: #6366f1 !important;
-      --accent-soft: rgba(99, 102, 241, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="outbound"] {
-      --accent: #f43f5e !important;
-      --accent-soft: rgba(244, 63, 94, 0.12) !important;
     }
     .ctox-chat-window:not(.is-active) {
       opacity: 0;
@@ -4984,8 +4975,8 @@ function installChatStyles() {
       animation: ctoxPulseQueued 2s infinite ease-in-out;
     }
     .ctox-chat-window.is-task-success {
-      border-color: #10b981 !important;
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.2), 0 0 20px rgba(16, 185, 129, 0.35) !important;
+      border-color: var(--success, var(--accent)) !important;
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg)), 0 0 20px color-mix(in srgb, var(--success, var(--accent)) 35%, transparent) !important;
     }
     .ctox-chat-window.is-task-failed {
       animation: ctoxPulseFailed 2.5s infinite ease-in-out;
@@ -4996,8 +4987,8 @@ function installChatStyles() {
       align-items: center;
       justify-content: space-between;
       gap: var(--space-2);
-      border-bottom: 1px solid color-mix(in srgb, var(--line) 30%, transparent);
-      background: color-mix(in srgb, var(--surface) 20%, transparent);
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
       padding: 0 6px 0 10px;
       height: 38px;
       min-width: 0;

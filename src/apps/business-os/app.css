@@ -3,29 +3,29 @@
    down in this file or in module CSS — tests/business-os guard enforces this. */
 :root {
   color-scheme: light;
-  --bg: var(--ctox-host-bg, oklch(0.965 0.006 235));
-  --surface: var(--ctox-host-surface, oklch(0.987 0.005 235));
-  --surface-2: var(--ctox-host-surface-2, oklch(0.94 0.009 238));
-  --line: var(--ctox-host-line, oklch(0.8 0.014 235));
-  --text: var(--ctox-host-text, oklch(0.22 0.015 235));
-  --text-strong: var(--ctox-host-text-strong, oklch(0.14 0.018 235));
-  --muted: var(--ctox-host-muted, oklch(0.435 0.017 235));
-  --accent: var(--ctox-host-accent, oklch(0.48 0.115 215));
+  --bg: var(--ctox-host-bg, #fcfcfc);
+  --surface: var(--ctox-host-surface, #ffffff);
+  --surface-2: var(--ctox-host-surface-2, #fcfcfc);
+  --line: var(--ctox-host-line, #e4e4e7);
+  --text: var(--ctox-host-text, #52525b);
+  --text-strong: var(--ctox-host-text-strong, #27272a);
+  --muted: var(--ctox-host-muted, #71717b);
+  --accent: var(--ctox-host-accent, #1b4ed8);
   --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
-  --accent-soft: var(--ctox-host-accent-soft, oklch(0.9 0.04 215));
+  --accent-soft: var(--ctox-host-accent-soft, #e0e6f7);
   --danger: oklch(0.56 0.13 28);
   --shadow: 0 8px 24px oklch(0.22 0.015 235 / 0.12);
   --shadow-sm: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
   --shadow-md: 0 4px 12px oklch(0.22 0.015 235 / 0.12);
   --shadow-lg: 0 8px 24px oklch(0.22 0.015 235 / 0.18);
-  --hairline: var(--ctox-host-hairline, oklch(0.8 0.014 235 / 0.62));
+  --hairline: var(--ctox-host-hairline, #e4e4e7);
   --panel-radius: 6px;
   --control-radius: 4px;
   --panel-shadow: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
   /* Kit additions: raised step above --surface-2 (active segments, hovered
      chips in dark surfaces) and the softer content radius for callouts,
      choice rows and code blocks. Consumed by shared/base.css. */
-  --surface-3: var(--ctox-host-surface-3, oklch(0.996 0.002 235));
+  --surface-3: var(--ctox-host-surface-3, #ffffff);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
@@ -45,7 +45,7 @@
   /* CTOX shell-style elevation ladder: desktop sits one tonal step below
      window surfaces so stacked windows read as physical layers. Consumed
      only by the :root[data-shell-style="ctox"] chrome layer at file end. */
-  --shell-desktop-bg: oklch(0.882 0.024 240);
+  --shell-desktop-bg: #fcfcfc;
   --win-radius: 16px;
   --win-border: color-mix(in srgb, var(--line) 92%, transparent);
   --win-border-focus: color-mix(in srgb, var(--accent) 62%, var(--line));
@@ -53,8 +53,8 @@
      loader) and the theme-calibrated inner light edges consumed by the ctox
      chrome layer at file end. Dark edge values live on the dark :root. */
   --brand-whatsapp: #25d366;
-  --startup-gradient-from: #10b981;
-  --startup-gradient-to: #06b6d4;
+  --startup-gradient-from: #1b4ed8;
+  --startup-gradient-to: #346bf1;
   --chrome-edge-header: rgba(255, 255, 255, 0.75);
   --chrome-edge-header-focus: rgba(255, 255, 255, 0.8);
   --chrome-edge-island: rgba(255, 255, 255, 0.55);
@@ -73,7 +73,7 @@
     0 2px 6px oklch(0.22 0.015 235 / 0.14),
     0 26px 60px oklch(0.22 0.015 235 / 0.24),
     0 56px 112px oklch(0.22 0.015 235 / 0.14);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-sans);
   /* No synthesised bold/italic and no subpixel smoothing: the flat design has
@@ -85,28 +85,28 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: var(--ctox-host-bg, #0f1216);
-  --surface: var(--ctox-host-surface, #151920);
-  --surface-2: var(--ctox-host-surface-2, #1b2029);
-  --line: var(--ctox-host-line, #2d343e);
-  --text: var(--ctox-host-text, #e6e9eb);
-  --text-strong: var(--ctox-host-text-strong, #ffffff);
-  --muted: var(--ctox-host-muted, #a0a9b1);
-  --accent: var(--ctox-host-accent, #72b8aa);
-  --accent-foreground: var(--ctox-host-accent-foreground, #08110f);
-  --accent-soft: var(--ctox-host-accent-soft, rgba(108, 184, 170, 0.16));
+  --bg: var(--ctox-host-bg, #0a0a0a);
+  --surface: var(--ctox-host-surface, #111111);
+  --surface-2: var(--ctox-host-surface-2, #141414);
+  --line: var(--ctox-host-line, #191919);
+  --text: var(--ctox-host-text, #d4d4d8);
+  --text-strong: var(--ctox-host-text-strong, #f5f5f5);
+  --muted: var(--ctox-host-muted, #818181);
+  --accent: var(--ctox-host-accent, #346bf1);
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, #16264f);
   --danger: #e06b60;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.42);
-  --hairline: var(--ctox-host-hairline, #262d35);
+  --hairline: var(--ctox-host-hairline, #191919);
   --panel-radius: 6px;
   --control-radius: 4px;
   --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
   /* Kit additions: raised step above --surface-2 (active segments) and the
      softer content radius. Consumed by shared/base.css. */
-  --surface-3: var(--ctox-host-surface-3, #232b36);
+  --surface-3: var(--ctox-host-surface-3, #191919);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
@@ -114,10 +114,10 @@
   --shell-app-bg: var(--bg);
   --shell-control-bg: var(--surface-2);
   --shell-topbar-shadow: none;
-  --shell-desktop-bg: #0a0e15;
+  --shell-desktop-bg: #0a0a0a;
   --win-radius: 16px;
-  --win-border: #363d47;
-  --win-border-focus: color-mix(in srgb, var(--accent) 68%, #363d47);
+  --win-border: #343434;
+  --win-border-focus: color-mix(in srgb, var(--accent) 68%, #343434);
   --chrome-edge-header: rgba(255, 255, 255, 0.06);
   --chrome-edge-header-focus: rgba(255, 255, 255, 0.08);
   --chrome-edge-island: rgba(255, 255, 255, 0.07);
@@ -7928,6 +7928,86 @@ button.shell-window-header-meta:focus-visible,
 .ctox-record-approval-copy { display: grid; gap: 1px; min-width: 0; }
 .ctox-record-approval-copy strong { font-size: var(--fs-meta); letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent); }
 .ctox-record-approval-copy span { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* Workjet UI contract integration ----------------------------------------
+   The contract stylesheet owns the palette and category vocabulary. Shell
+   chrome stays on the neutral canvas/surface pair; a category is introduced
+   only by an active/focused target or a live status treatment. */
+.app-shell {
+  background: var(--workjet-surface-canvas, var(--bg));
+}
+
+:root[data-shell-style="ctox"] .app-shell {
+  background: var(--workjet-surface-canvas, var(--bg)) !important;
+}
+
+:root .topbar {
+  background: var(--workjet-surface-chrome, var(--surface)) !important;
+  border-bottom-color: var(--workjet-border-default, var(--line)) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+:root[data-shell-style="ctox"] .topbar {
+  margin: 0;
+  border-radius: 0;
+  background: var(--workjet-surface-chrome, var(--surface)) !important;
+  border-color: var(--workjet-border-default, var(--line)) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+[data-workjet-category] {
+  --shell-category-accent: var(--workjet-category-imported-accent);
+  --shell-category-foreground: var(--workjet-category-imported-accent-foreground);
+  --shell-category-soft: var(--workjet-category-imported-accent-soft);
+  --shell-category-border: var(--workjet-category-imported-accent-border);
+}
+
+:root [data-workjet-category].module-tab[aria-current="page"] {
+  background: var(--shell-category-soft) !important;
+  border-color: var(--shell-category-border) !important;
+  box-shadow: inset 0 -2px 0 var(--shell-category-accent) !important;
+  color: var(--shell-category-accent) !important;
+}
+
+:root [data-workjet-category].module-tab[aria-current="page"] .module-tab-icon {
+  border-color: var(--shell-category-border);
+  background: color-mix(in srgb, var(--shell-category-soft) 72%, var(--surface));
+  color: var(--shell-category-accent);
+}
+
+:root [data-workjet-category].shell-window.is-focused {
+  border-color: var(--shell-category-accent) !important;
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 1px color-mix(in srgb, var(--shell-category-accent) 30%, transparent) !important;
+}
+
+:root [data-workjet-category].shell-window.is-focused .shell-window-header {
+  background: color-mix(in srgb, var(--shell-category-soft) 42%, var(--surface-2)) !important;
+  border-bottom-color: var(--shell-category-border) !important;
+}
+
+:root [data-workjet-category].shell-window.is-focused .shell-window-title {
+  color: var(--shell-category-accent) !important;
+}
+
+:root [data-workjet-category].start-menu-item:focus-within {
+  background: var(--shell-category-soft) !important;
+}
+
+:root [data-workjet-category].start-menu-item:focus-within .start-menu-item-icon {
+  border-color: var(--shell-category-border) !important;
+  background: color-mix(in srgb, var(--shell-category-soft) 74%, var(--surface)) !important;
+  color: var(--shell-category-accent) !important;
+}
+
+:root [data-workjet-category].start-menu-item:focus-within .start-menu-item-label {
+  color: var(--shell-category-accent) !important;
+}
 .ctox-record-approval-actions { display: flex; gap: var(--space-1); flex: 0 0 auto; }
 .ctox-record-approval-actions .is-confirm { color: var(--accent); }
 .ctox-record-approval-actions .is-danger { color: var(--danger); }

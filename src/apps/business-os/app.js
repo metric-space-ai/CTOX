@@ -58,6 +58,13 @@ import {
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
 } from './shared/taskbar-pins.js?v=20260816-browser-sync-guards-v141';
+import {
+  applyWorkjetCategory,
+  normalizeWorkjetCategory,
+  WORKJET_CATEGORY_IDS,
+  workjetCategoryForModule,
+  workjetCategoryForTarget,
+} from './shared/workjet-theme.js?v=20260826-workjet-ui-contract-v1';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -73,6 +80,7 @@ const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
 const APP_BUILD = '20260825-scraping-reiter-v241';
+const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
 
@@ -142,6 +150,7 @@ let criticalSyncCollectionsBundleChecked = false;
 function ensureShellStylesheets() {
   if (typeof document === 'undefined') return;
   for (const href of [
+    `ui-contract/v1/workjet-ui-contract.css?v=${WORKJET_UI_CONTRACT_BUILD}`,
     `app.css?v=${APP_BUILD}`,
     `shared/base.css?v=${APP_BUILD}`,
   ]) {
@@ -3868,6 +3877,7 @@ const DESKTOP_APPS = [
     id: 'explorer',
     title: 'Files',
     glyph: '📁',
+    category: 'workspace',
     defaultWidth: 720,
     defaultHeight: 460,
     loader: () => import(`./desktop-apps/explorer/app.js?v=${APP_BUILD}`),
@@ -3876,6 +3886,7 @@ const DESKTOP_APPS = [
     id: 'code-editor',
     title: 'Source Editor',
     glyph: '⌘',
+    category: 'development',
     defaultWidth: 980,
     defaultHeight: 640,
     loader: () => import(`./desktop-apps/code-editor/app.js?v=${APP_BUILD}`),
@@ -3884,6 +3895,7 @@ const DESKTOP_APPS = [
     id: 'file-viewer',
     title: 'File Viewer',
     glyph: '◫',
+    category: 'workspace',
     defaultWidth: 760,
     defaultHeight: 560,
     loader: () => import(`./desktop-apps/file-viewer/app.js?v=${APP_BUILD}`),
@@ -3915,6 +3927,7 @@ function listDesktopApps() {
       id: app.id,
       title: app.title,
       glyph: app.glyph,
+      category: app.category || 'imported',
       defaultWidth: app.defaultWidth,
       defaultHeight: app.defaultHeight,
       minWidth: app.minWidth,
@@ -3943,6 +3956,7 @@ function desktopAppDescriptorForModule(mod) {
     id: mod.id,
     title: moduleDisplayTitle(mod),
     glyph: taskbarMarkForModule(mod),
+    category: workjetCategoryForModule(mod),
     defaultWidth: presentation.initialSize.width,
     defaultHeight: presentation.initialSize.height,
     minWidth: presentation.minimumSize.width,
@@ -4039,6 +4053,7 @@ async function openDesktopApp(appId, options = {}) {
     minHeight: options.minHeight || entry.minHeight,
     ownerId: `desktop-app:${entry.id}`,
   });
+  applyWorkjetCategory(win.element, entry.category || 'imported');
   let teardown = null;
   try {
     const moduleDef = state.modules.find((item) => item.id === appId);
@@ -4139,6 +4154,7 @@ async function openWindowedModule(mod, options = {}) {
     ownerId: `desktop-app:${mod.id}`,
     ...windowHeaderOptionsForModule(mod),
   });
+  applyWorkjetCategory(win.element, descriptor.category);
   // Apply the declared presentation before the asynchronous module mount.
   // Shell controls are interactive as soon as the window exists; applying the
   // initial mode after mount could undo a user's maximize/restore click when a
@@ -4332,7 +4348,14 @@ function dispatchDesktopAppLaunch(win, appId, args = {}) {
 }
 
 function openBusinessChat(detail = {}) {
-  window.dispatchEvent(new CustomEvent('ctox-business-os-chat-open', { detail }));
+  const moduleId = detail.module || detail.source_module || '';
+  const sourceModule = state.modules?.find?.((moduleDef) => moduleDef.id === moduleId);
+  const category = detail.workjet_category
+    || detail.workjetCategory
+    || workjetCategoryForModule(sourceModule);
+  window.dispatchEvent(new CustomEvent('ctox-business-os-chat-open', {
+    detail: { ...detail, workjet_category: category },
+  }));
 }
 
 function applyShellTheme(theme, options = {}) {
@@ -4585,6 +4608,7 @@ function renderModuleTab(target, options = {}) {
   button.dataset.module = target.kind === 'module' ? target.id : '';
   button.dataset.target = target.id;
   button.dataset.targetKind = target.kind;
+  applyWorkjetCategory(button, target.category || workjetCategoryForTarget(target));
   if (options.pinned) button.dataset.pinned = 'true';
   if (options.temporary) button.dataset.temporary = 'true';
   if (target.kind === 'app' && desktopAppIsFocused(target.id)) button.dataset.running = 'focused';
@@ -4655,6 +4679,7 @@ function renderLegacyModuleTab(mod, options = {}) {
   button.className = 'module-tab';
   button.type = 'button';
   button.dataset.module = mod.id;
+  applyWorkjetCategory(button, workjetCategoryForModule(mod));
   const svgHtml = getRegisteredSvgIcon(mod.id, 16, 1.8);
   button.innerHTML = `
     <span class="module-tab-icon" aria-hidden="true">${svgHtml || escapeHtml(taskbarMarkForModule(mod))}${mod.id === 'threads' ? '<span class="module-tab-attention" data-threads-attention hidden></span>' : ''}</span>
@@ -4715,6 +4740,7 @@ function listLaunchTargets(kind = '') {
       kind: 'module',
       title: moduleDisplayTitle(mod),
       glyph: taskbarMarkForModule(mod),
+      category: workjetCategoryForModule(mod),
       module: mod,
     }));
   const appTargets = listDesktopApps()
@@ -4723,6 +4749,7 @@ function listLaunchTargets(kind = '') {
       kind: 'app',
       title: app.title,
       glyph: app.glyph,
+      category: workjetCategoryForTarget({ kind: 'app', app }),
       app,
     }));
   const targetsById = new Map();
@@ -6780,6 +6807,8 @@ async function submitBusinessChatTask(moduleLike, options = {}) {
       source: clientContext.source || 'business-os-business-chat-facade',
       module: moduleId,
       source_module: moduleId,
+      workjet_category: clientContext.workjet_category
+        || workjetCategoryForModule(moduleLike || state.modules?.find?.((moduleDef) => moduleDef.id === moduleId)),
       surface: clientContext.surface || options.surface || `${moduleId}.business_chat.submit_task`,
       record_id: recordId,
       thread_key: threadKey,
@@ -11422,35 +11451,34 @@ const DESKTOP_APP_SVGS = {
   creator: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="svg-icon svg-creator"><defs><linearGradient id="grad-creator-start" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f59e0b" /><stop offset="100%" stop-color="#ea580c" /></linearGradient></defs><circle cx="12" cy="12" r="3" stroke="url(#grad-creator-start)"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="url(#grad-creator-start)"></path></svg>`
 };
 
-const LAUNCHER_CATEGORIES = [
-  {
-    id: 'system',
-    name: '🧠 System',
-    matchIds: ['ctox', 'tickets', 'app-store', 'coding-agents']
+const LAUNCHER_CATEGORY_LABELS = Object.freeze({
+  workspace: { de: '🗂️ Arbeitsbereich', en: '🗂️ Workspace' },
+  collaboration: { de: '🤝 Zusammenarbeit', en: '🤝 Collaboration' },
+  productivity: { de: '⚡ Produktivität', en: '⚡ Productivity' },
+  development: { de: '🛠️ Entwicklung', en: '🛠️ Development' },
+  engineering: { de: '⚙️ Engineering', en: '⚙️ Engineering' },
+  knowledge: { de: '📚 Wissen', en: '📚 Knowledge' },
+  research: { de: '🔍 Recherche', en: '🔍 Research' },
+  sales: { de: '📈 Vertrieb', en: '📈 Sales' },
+  recruiting: { de: '👥 Recruiting', en: '👥 Recruiting' },
+  finance: { de: '€ Finanzen', en: '€ Finance' },
+  operations: { de: '📋 Betrieb', en: '📋 Operations' },
+  governance: { de: '⚖️ Governance', en: '⚖️ Governance' },
+  security: { de: '🔒 Sicherheit', en: '🔒 Security' },
+  analytics: { de: '◌ Analytics', en: '◌ Analytics' },
+  system: { de: '🧠 System', en: '🧠 System' },
+  imported: { de: '◫ Weitere Apps', en: '◫ Other apps' },
+});
+
+const LAUNCHER_CATEGORIES = WORKJET_CATEGORY_IDS.map((id) => ({
+  id,
+  // Resolved lazily: module-level evaluation would freeze the boot-time
+  // language and keep stale labels after a live language switch.
+  get name() {
+    const labels = LAUNCHER_CATEGORY_LABELS[id] || LAUNCHER_CATEGORY_LABELS.imported;
+    return labels[shellLang()] || labels.en;
   },
-  {
-    id: 'productivity',
-    // Resolved lazily: module-level evaluation would freeze the boot-time
-    // language and keep stale labels after a live language switch.
-    get name() { return shellLang() === 'de' ? '⚡ Produktivität' : '⚡ Productivity'; },
-    matchIds: ['explorer', 'notizen', 'notes', 'spreadsheets', 'documents', 'calendar', 'conversations']
-  },
-  {
-    id: 'management',
-    name: '📋 Management',
-    matchIds: ['reports', 'shiftflow', 'buchhaltung', 'outbound']
-  },
-  {
-    id: 'recherche',
-    get name() { return shellLang() === 'de' ? '🔍 Recherche & Daten' : '🔍 Web & Data'; },
-    matchIds: ['research', 'matching', 'knowledge']
-  },
-  {
-    id: 'development',
-    get name() { return shellLang() === 'de' ? '🛠️ Entwicklung' : '🛠️ Development'; },
-    matchIds: ['code-editor', 'importer']
-  }
-];
+}));
 
 function toggleStartMenu(event) {
   if (event) {
@@ -11606,7 +11634,9 @@ function filterStartMenu(panel, query) {
   // Otherwise, render categorized layout
   const renderedIds = new Set();
   LAUNCHER_CATEGORIES.forEach(cat => {
-    const catTargets = filtered.filter(target => cat.matchIds.includes(target.id));
+    const catTargets = filtered.filter((target) => (
+      normalizeWorkjetCategory(target.category) === cat.id
+    ));
     if (catTargets.length === 0) return;
 
     const categoryContainer = document.createElement('div');
@@ -11671,6 +11701,7 @@ function buildStartMenuItem(target) {
   el.className = 'start-menu-item';
   el.dataset.target = target.id;
   el.dataset.targetKind = target.kind;
+  applyWorkjetCategory(el, target.category || workjetCategoryForTarget(target));
 
   const pinned = isTaskbarPinned(target.id);
   const iconMarkup = getLauncherIconSvg(target);
