@@ -137,6 +137,7 @@ test('exclusion policy retains runtime notices while removing non-runtime conten
   assert.equal(isExcludedRuntimePath('vendor/library/THIRD_PARTY_NOTICES.md'), false);
   assert.equal(isExcludedRuntimePath('vendor/library/provenance.json'), false);
   assert.equal(isExcludedRuntimePath('modules/appsec-pentest/appsec-pentest.js'), false);
+  assert.equal(isExcludedRuntimePath('shared/shell-release-status.js'), false);
   assert.equal(isExcludedRuntimePath('modules/example/tests', { directory: true }), true);
   assert.equal(isExcludedRuntimePath('modules/example/node_modules/pkg.js'), true);
   assert.equal(isExcludedRuntimePath('shared/runtime.spec.mjs'), true);

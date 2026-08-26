@@ -21,6 +21,8 @@ export const ROOT_RUNTIME_FILES = Object.freeze([
   'index.html',
   'app.js',
   'app.css',
+  'mobile-host.css',
+  'mobile-host.js',
   'system-apps.json',
 ]);
 export const RUNTIME_TREES = Object.freeze([
@@ -80,6 +82,9 @@ const EXCLUDED_DIRECTORIES = new Set([
 ]);
 const GENERATED_DIRECTORY = /^(?:build|release|cache|local[-_]?state)(?:[._-].*)?$/i;
 const GENERATED_FILE_TOKEN = /(?:^|[._-])(?:build|release|cache|local[-_]?state)(?:[._-]|$)/i;
+const REQUIRED_RUNTIME_PATHS = new Set([
+  'shared/shell-release-status.js',
+]);
 
 export function validateSemVer(version) {
   if (typeof version !== 'string' || !STRICT_SEMVER.test(version)) {
@@ -135,6 +140,7 @@ export function isExcludedRuntimePath(relativePath, { directory = false } = {}) 
   }
   if (basename === '.DS_Store' || PACKAGE_LOCKS.has(basename.toLowerCase())) return true;
   if (/^(?:agents|claude)(?:\..*)?$/i.test(basename)) return true;
+  if (!directory && REQUIRED_RUNTIME_PATHS.has(relativePath)) return false;
   if (!directory && RUNTIME_NOTICE_FILE.test(basename)) return false;
   if (!directory && (TEST_FILE_TOKEN.test(basename) || GENERATED_FILE_TOKEN.test(basename))) return true;
   return false;
