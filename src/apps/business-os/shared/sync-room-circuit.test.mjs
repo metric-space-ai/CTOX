@@ -9,6 +9,7 @@ const {
   boundedCollectionStartQueueStep,
   isStalledReconnectingCollection,
   moduleSyncCollections,
+  repairCandidateCollectionNames,
   repairRestartBatch,
 } = __ctoxSyncTestHooks;
 
@@ -31,6 +32,17 @@ test('stalled reconnects re-enter the bounded room repair cycle', () => {
     reconnectingSince: '2026-08-26T03:00:00.000Z',
     lastError: { retryable: false },
   }, now, 30_000), false);
+});
+
+test('expired demand leases do not hide active reconnecting bridges from repair', () => {
+  assert.deepEqual(
+    repairCandidateCollectionNames(new Set(['business_commands']), {
+      business_commands: { active: true, connectionStatus: 'connected' },
+      ctox_queue_tasks: { active: true, connectionStatus: 'reconnecting' },
+      dormant: { active: false, connectionStatus: 'reconnecting' },
+    }).sort(),
+    ['business_commands', 'ctox_queue_tasks'],
+  );
 });
 
 test('browser live compatibility collections start only after direct-live fallback', () => {

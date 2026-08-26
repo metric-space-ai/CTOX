@@ -369,7 +369,11 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           || isHealthyCollectionStatus(current.status);
         return !healthy;
       });
-      const stalledReconnects = [...activeCollections].filter((collection) => (
+      const repairCandidates = repairCandidateCollectionNames(
+        activeCollections,
+        diagnostics.collections,
+      );
+      const stalledReconnects = repairCandidates.filter((collection) => (
         isStalledReconnectingCollection(
           diagnostics.collections[collection],
           Date.now(),
@@ -422,7 +426,10 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         roomCircuit.nextProbeAtMs = 0;
         roomCircuit.updatedAtMs = Date.now();
       }
-      const collections = [...activeCollections].filter(collectionNeedsRestart);
+      const collections = repairCandidateCollectionNames(
+        activeCollections,
+        diagnostics.collections,
+      ).filter(collectionNeedsRestart);
       let nextDelay = 0;
       repairCycleInProgress = true;
       try {
@@ -439,7 +446,11 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         emitDiagnostic({ phase: 'failed', lastError: restartSerialized });
       } finally {
         repairCycleInProgress = false;
-        if (!stopped && [...activeCollections].some(collectionNeedsRestart)) {
+        if (
+          !stopped
+          && repairCandidateCollectionNames(activeCollections, diagnostics.collections)
+            .some(collectionNeedsRestart)
+        ) {
           scheduleRestartOfUnhealthyCollections(triggerCollection, nextDelay || ROOM_RETRY_BASE_MS);
         }
       }
@@ -2734,6 +2745,19 @@ function isStalledReconnectingCollection(
   return Number(nowMs) - reconnectingAtMs >= Math.max(0, Number(minimumAgeMs) || 0);
 }
 
+function repairCandidateCollectionNames(activeCollections, collectionDiagnostics = {}) {
+  const candidates = new Set(activeCollections || []);
+  for (const [collection, current] of Object.entries(collectionDiagnostics || {})) {
+    // Demand-only leases may expire while an already-open bridge is still
+    // marked active and reconnecting. Such a bridge disappeared from the
+    // activeCollections Set and therefore from every repair batch, even though
+    // the diagnostic state proved it still needed a peer. Keep the candidate
+    // set aligned with the runtime's own active marker.
+    if (current?.active === true) candidates.add(collection);
+  }
+  return [...candidates];
+}
+
 function classifySignalingControlPlaneError(error) {
   if (!error || typeof error !== 'object') return null;
   const source = error?.detail && typeof error.detail === 'object' ? error.detail : error;
@@ -3006,6 +3030,7 @@ export const __ctoxSyncTestHooks = {
   repairRestartBatch,
   applyRoomRepairCycleOutcome,
   isStalledReconnectingCollection,
+  repairCandidateCollectionNames,
   resetRoomCircuitState,
   collectionForReplication,
   projectDesktopIconForReplication,
