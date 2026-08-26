@@ -69,10 +69,10 @@ test('the host layer stays scoped to the desktop host attribute', () => {
 });
 
 // The whole point of the change this file guards: the desktop-adapted design
-// IS the product design. The host layer may only relax sizing constraints that
-// exist because the guest is an Electron WebContentsView and not a browser
-// tab. The moment it declares a colour, a radius, a font or a shadow again,
-// browser and desktop have started drifting into two products.
+// IS the product design. The host layer may only change structural layout that
+// follows from embedding the guest in Workjet. The moment it declares a colour,
+// a radius, a font or a shadow again, browser and desktop have started drifting
+// into two products.
 test('the host layer declares no design of its own', () => {
   const declarations = stripComments(css)
     .split('}')
@@ -84,6 +84,7 @@ test('the host layer declares no design of its own', () => {
   assert.ok(declarations.length > 0, 'host layer should still declare something');
 
   const allowedProperties = new Set([
+    'display', 'grid-template-rows', 'inset',
     'width', 'min-width', 'max-width',
     'height', 'min-height', 'max-height',
   ]);
@@ -91,7 +92,7 @@ test('the host layer declares no design of its own', () => {
     const property = declaration.slice(0, declaration.indexOf(':')).trim();
     assert.ok(
       allowedProperties.has(property),
-      `host layer may only relax sizing, found "${property}" in "${declaration}"`,
+      `host layer may only control embedded structure, found "${property}" in "${declaration}"`,
     );
   }
 
@@ -103,6 +104,32 @@ test('the host layer declares no design of its own', () => {
   assert.doesNotMatch(cssRules, /gradient\s*\(/i);
   assert.doesNotMatch(cssRules, /url\s*\(/i);
   assert.doesNotMatch(cssRules, /(?:https?:)?\/\//i);
+});
+
+test('the signed desktop guest cannot render a second global menu', () => {
+  assert.match(
+    cssRules,
+    /html\[data-desktop-host="ctox"\] \.topbar,\s*html\[data-desktop-host="ctox"\] \.ctox-maintenance-banner,\s*html\[data-desktop-host="ctox"\] \.shell-start-menu-panel\s*\{[^}]*display:\s*none;/,
+    'the desktop host must suppress the shell topbar, status chrome and start menu',
+  );
+  assert.match(
+    cssRules,
+    /html\[data-desktop-host="ctox"\] \.app-shell\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\);/,
+    'the app canvas must reclaim the row formerly reserved for global chrome',
+  );
+  assert.match(indexHtmlMarkup, /<header class="topbar">/,
+    'standalone browser presentation must retain the normal shell topbar');
+  assert.match(indexHtmlMarkup, /data-shell-start/,
+    'standalone browser presentation must retain the normal start-menu entry');
+});
+
+test('desktop host keeps app canvas, windows and owned chat outside the chrome suppression rule', () => {
+  assert.doesNotMatch(cssRules, /(?:\.workspace-frame|\.workspace-pane-center|\[data-module-host\]|\.ctox-chat-(?:root|dock))[^,{]*\{[^}]*display:\s*none/);
+  assert.match(
+    cssRules,
+    /html\[data-desktop-host="ctox"\] \.shell-window-layer\s*\{[^}]*inset:\s*0;[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*height:\s*100%;/,
+    'app windows must use the full embedded host canvas after the topbar is removed',
+  );
 });
 
 // It was linked from nowhere before, which is exactly how a browser tenant and

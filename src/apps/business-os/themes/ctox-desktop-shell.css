@@ -28,8 +28,9 @@
  *       fallback palette. Nothing is duplicated and nothing is overridden.
  *
  *   (b) HOST-STRUCTURAL — rules that only make sense while the document is
- *       embedded as an Electron WebContentsView. That is what remains below,
- *       and it is all one idea: the guest is not a browser tab.
+ *       embedded as an Electron WebContentsView. That is what remains below:
+ *       the guest is an app canvas inside a host that already owns global
+ *       product navigation.
  *
  * ---------------------------------------------------------------------------
  * WHY THE RULES BELOW ARE (b)
@@ -45,6 +46,13 @@
  *    where a 360px floor produces horizontal overflow instead of the responsive
  *    collapse the shell already implements. The guest floors at 0 and lets the
  *    existing breakpoints do their work.
+ *
+ * 3. Global chrome ownership. Workjet already renders the product switcher,
+ *    instance navigation and Settings. Rendering the Business OS topbar or
+ *    its start menu inside the signed guest creates a second global menu.
+ *    The desktop host therefore receives only the app canvas, shell-owned app
+ *    windows and the shell-owned chat dock. Standalone browser and mobile
+ *    hosts do not set this attribute and retain their normal presentation.
  *
  * The responsive behaviour itself is NOT duplicated here. The shell's own
  * @media cascade and its `business-app-window` container queries already
@@ -72,10 +80,24 @@ html[data-desktop-host="ctox"] body {
 }
 
 html[data-desktop-host="ctox"] .app-shell {
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
   min-width: 0;
   max-width: 100%;
   height: 100%;
   min-height: 0;
   max-height: none;
+}
+
+html[data-desktop-host="ctox"] .topbar,
+html[data-desktop-host="ctox"] .ctox-maintenance-banner,
+html[data-desktop-host="ctox"] .shell-start-menu-panel {
+  display: none;
+}
+
+html[data-desktop-host="ctox"] .shell-window-layer {
+  inset: 0;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
 }
