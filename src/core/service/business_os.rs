@@ -340,6 +340,7 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
         Some("auth") => handle_business_os_auth(root, &args[1..]),
         Some("desktop") => handle_business_os_desktop(root, &args[1..]),
         Some("mobile-invite") => handle_business_os_mobile_invite(root, &args[1..]),
+        Some("shell-update") => handle_business_os_shell_update(root, &args[1..]),
         Some("web-stack") => handle_business_os_web_stack(root, &args[1..]),
         Some("files") => handle_business_os_files(root, &args[1..]),
         Some("mcp") => handle_business_os_mcp(root, &args[1..]),
@@ -353,6 +354,46 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
             "unknown business-os command `{other}`\n\n{}",
             business_os_usage()
         ),
+    }
+}
+
+fn handle_business_os_shell_update(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let result = match action {
+        "status" => crate::business_os::shell_update::status(root, true),
+        "check" => crate::business_os::shell_update::check(root),
+        "stage" => crate::business_os::shell_update::stage(root),
+        "activate" => crate::business_os::shell_update::activate(root),
+        "rollback" => crate::business_os::shell_update::rollback(root),
+        "--help" | "-h" => {
+            println!("usage: ctox business-os shell-update [status|check|stage|activate|rollback]");
+            return Ok(());
+        }
+        other => anyhow::bail!("unknown business-os shell-update command `{other}`"),
+    };
+    match result {
+        Ok(value) => {
+            if action != "status" {
+                crate::business_os::shell_update::record_audit(
+                    root,
+                    action,
+                    "succeeded",
+                    "local-cli",
+                )?;
+            }
+            print_json(&value)
+        }
+        Err(error) => {
+            if action != "status" {
+                crate::business_os::shell_update::record_audit(
+                    root,
+                    action,
+                    "failed",
+                    "local-cli",
+                )?;
+            }
+            Err(error)
+        }
     }
 }
 
