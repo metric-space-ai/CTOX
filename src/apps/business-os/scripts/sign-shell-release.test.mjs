@@ -32,7 +32,7 @@ function fixture() {
     signingKeyId: 'shell-current-2026-08',
     privateKeyBase64,
     compatibility: {
-      workjetMinVersion: '0.1.0',
+      workjetMinVersion: '0.0.33',
       workjetMaxVersion: null,
       ctoxMinVersion: '0.3.22',
       ctoxMaxVersion: null,

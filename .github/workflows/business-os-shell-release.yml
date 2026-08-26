@@ -110,7 +110,7 @@ jobs:
             --sbom-url "$base_url/ctox-business-os-shell-${SHELL_VERSION}.spdx.json" \
             --signing-key-id "$SHELL_SIGNING_KEY_ID" \
             --private-key-base64 "$SHELL_SIGNING_KEY" \
-            --workjet-min "0.1.0" \
+            --workjet-min "0.0.33" \
             --ctox-min "0.3.22"
 
       - name: Upload shell release files
