@@ -1470,7 +1470,7 @@ export async function mount(ctx) {
       if (command && TERMINAL_COMMAND_STATUSES.has(command.status)) return command;
       await sleep(250);
     }
-    throw new Error(`Mail command ${commandId} was not acknowledged by the native peer.`);
+    throw new Error(`Mail command ${commandId} was not acknowledged by the local service.`);
   }
 
   async function projectCommandResult(result) {

@@ -1188,10 +1188,10 @@ function syncPanel(syncConfig, isAdmin) {
       </dl>
     </section>
     <section class="settings-section">
-      <header><h3>WebRTC-Signalisierung</h3><span>${escapeHtml(isAdmin ? 'Änderungen werden als CTOX-Task angelegt.' : 'Nur lesbar.')}</span></header>
+      <header><h3>Verbindungsdienst</h3><span>${escapeHtml(isAdmin ? 'Änderungen werden als CTOX-Task angelegt.' : 'Nur lesbar.')}</span></header>
       <div class="settings-grid is-one">
-        <label><span>Raum</span><input data-sync-room aria-label="WebRTC-Raum" title="${escapeAttr(syncConfig?.sync_room || '')}" value="${escapeAttr(syncConfig?.sync_room || '')}" ${isAdmin ? '' : 'disabled'} /></label>
-        <label><span>Signalisierungs-URLs</span><textarea data-sync-signaling aria-label="WebRTC-Signalisierungs-URLs" title="${escapeAttr(urls.join('\n'))}" ${isAdmin ? '' : 'disabled'}>${escapeHtml(urls.join('\n'))}</textarea></label>
+        <label><span>Verbindungsraum</span><input data-sync-room aria-label="Verbindungsraum" title="${escapeAttr(syncConfig?.sync_room || '')}" value="${escapeAttr(syncConfig?.sync_room || '')}" ${isAdmin ? '' : 'disabled'} /></label>
+        <label><span>Verbindungs-URLs</span><textarea data-sync-signaling aria-label="Verbindungs-URLs" title="${escapeAttr(urls.join('\n'))}" ${isAdmin ? '' : 'disabled'}>${escapeHtml(urls.join('\n'))}</textarea></label>
       </div>
       ${isAdmin ? `<button class="text-button settings-primary" type="button" data-settings-command="sync">Sync Konfiguration an CTOX geben</button>` : ''}
     </section>
@@ -3537,7 +3537,7 @@ const CHANNEL_DEFINITIONS = [
     id: 'teams',
     title: 'MS Teams',
     dot: '#5059c9',
-    short: 'Microsoft Teams via Graph-API. OAuth-Login mit deinem Tenant.',
+    short: 'Microsoft Teams via Graph-API. OAuth-Login mit deiner Organisation.',
   },
   {
     id: 'slack',
@@ -3655,7 +3655,7 @@ const BOT_CHAT_CHANNELS = {
       ['homeserverUrl', 'Homeserver URL', 'url', 'https://matrix.example.org'],
       ['accessToken', 'Access Token', 'password', ''],
       ['userId', 'User-ID', 'text', '@ctox:example.org'],
-      ['roomIds', 'Room-IDs', 'text', '!room:example.org'],
+      ['roomIds', 'Verbindungs-IDs', 'text', '!channel:example.org'],
     ],
   },
   mattermost: {
@@ -4113,7 +4113,7 @@ function jamiWizard(state) {
       body: `
         <div class="channels-testing">
           <div class="channels-testing-step is-active">⏳ Jami-Account wird erzeugt…</div>
-          <small class="channels-form-note">CTOX-Core ruft den Jami-Daemon. Das dauert wenige Sekunden.</small>
+          <small class="channels-form-note">CTOX verbindet den Jami-Dienst. Das dauert wenige Sekunden.</small>
         </div>
         ${errorBlock}
       `,
@@ -4188,7 +4188,7 @@ function emailWizard(state) {
       body: `
         <div class="channels-testing">
           <div class="channels-testing-step is-active">⏳ CTOX testet IMAP + SMTP …</div>
-          <small class="channels-form-note">Backend ruft <code>email_native::test()</code> via <code>RxDB-Command ctox.channel.test</code>.</small>
+          <small class="channels-form-note">Backend führt den Verbindungstest aus.</small>
         </div>
       `,
     });
@@ -4242,7 +4242,7 @@ function emailProviderForm(state) {
         </label>
         ${state.data?.emailCustomApp ? `
           <label class="channels-field">
-            <span>Tenant-ID</span>
+            <span>Organisations-ID</span>
             <input type="text" data-channel-input="email:tenantId" placeholder="00000000-0000-0000-0000-000000000000" />
           </label>
           <label class="channels-field">
@@ -4332,20 +4332,20 @@ function teamsWizard(state) {
         <div class="channels-explain">
           <p>CTOX verbindet sich mit Teams über die <strong>Microsoft Graph API</strong>. Es gibt zwei unterstützte Modi:</p>
           <ul class="channels-explain-list">
-            <li><strong>Service-Principal</strong> (empfohlen für Produktion): eine Azure-AD-App mit Tenant-ID, Client-ID und Client-Secret. Dein Admin registriert die App einmalig und du trägst die Werte hier ein.</li>
+            <li><strong>Service-Principal</strong> (empfohlen für Produktion): eine Azure-AD-App mit Organisations-ID, Client-ID und Client-Secret. Dein Admin registriert die App einmalig und du trägst die Werte hier ein.</li>
             <li><strong>Benutzerkonto (ROPC)</strong>: Microsoft-365-Benutzername + Passwort. Funktioniert nur ohne MFA und nutzt Microsofts öffentlichen Office-Client. Eher für Test-Setups.</li>
           </ul>
           <label class="channels-toggle">
             <input type="checkbox" data-channel-input="teams:customApp" ${customApp ? 'checked' : ''} />
-            <span>Service-Principal-Modus (Tenant + Client-ID + Secret)</span>
+            <span>Service-Principal-Modus (Organisation + Client-ID + Secret)</span>
           </label>
           ${customApp ? `
-            <label class="channels-field"><span>Tenant-ID</span><input type="text" data-channel-input="teams:tenantId" placeholder="00000000-0000-0000-0000-000000000000" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
+            <label class="channels-field"><span>Organisations-ID</span><input type="text" data-channel-input="teams:tenantId" placeholder="00000000-0000-0000-0000-000000000000" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
             <label class="channels-field"><span>Client-ID</span><input type="text" data-channel-input="teams:clientId" value="${escapeHtml(state.data?.teamsClientId || '')}" /></label>
             <label class="channels-field"><span>Client-Secret</span><input type="password" data-channel-input="teams:clientSecret" /></label>
             <small class="channels-form-note">Mit diesen Werten ruft CTOX <code>acquire_app_token</code> (Client-Credentials-Flow) gegen <code>login.microsoftonline.com</code> auf.</small>
           ` : `
-            <label class="channels-field"><span>Tenant-ID (optional)</span><input type="text" data-channel-input="teams:tenantId" placeholder="leer → organizations" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
+            <label class="channels-field"><span>Organisations-ID (optional)</span><input type="text" data-channel-input="teams:tenantId" placeholder="leer → organizations" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
             <label class="channels-field"><span>Microsoft-Account</span><input type="email" data-channel-input="teams:username" placeholder="name@firma.de" value="${escapeHtml(state.data?.teamsUsername || '')}" /></label>
             <label class="channels-field"><span>Passwort</span><input type="password" data-channel-input="teams:password" /></label>
             <small class="channels-form-note">ROPC-Flow über Microsofts öffentlichen Office-Client. <strong>Bei aktivierter MFA scheitert dieser Modus</strong> — dann musst du Service-Principal nutzen.</small>
@@ -4364,7 +4364,7 @@ function teamsWizard(state) {
       body: `
         <div class="channels-testing">
           <div class="channels-testing-step is-active">⏳ CTOX testet Graph-API …</div>
-          <small class="channels-form-note">Backend ruft <code>teams_native::test()</code> via <code>RxDB-Command ctox.channel.test</code>.</small>
+          <small class="channels-form-note">Backend führt den Verbindungstest aus.</small>
         </div>
         ${errorBlock}
       `,
@@ -4379,7 +4379,7 @@ function teamsWizard(state) {
       <div class="channels-confirm">
         <div class="channels-confirm-icon channels-confirm-icon--ok">✓</div>
         <h4>Teams ist verbunden</h4>
-        <div class="channels-confirm-detail"><span>Tenant</span><strong>${escapeHtml(tenantLabel)}</strong></div>
+        <div class="channels-confirm-detail"><span>Organisation</span><strong>${escapeHtml(tenantLabel)}</strong></div>
         ${testResult?.ok !== undefined ? `<div class="channels-confirm-detail"><span>Graph-API</span><strong>${testResult.ok ? 'OK' : 'Fehler'}</strong></div>` : ''}
       </div>
     `,

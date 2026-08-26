@@ -672,7 +672,7 @@ function validateSpreadsheetLineage(ingestion = {}) {
   if (ingestion.kind !== RESEARCH_GENERATED_KIND) return { valid: true, message: '' };
   return {
     valid: false,
-    message: 'Research-derived spreadsheets must be admitted by the native Business OS command path before they can be opened as evidence.',
+    message: 'Research-derived spreadsheets must be admitted by the verified local Business OS command path before they can be opened as evidence.',
   };
 }
 

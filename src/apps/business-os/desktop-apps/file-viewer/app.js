@@ -155,11 +155,11 @@ async function waitForReplicationBridge(bridge, collection, timeoutMs = 20000) {
     await Promise.race([
       wait(),
       delay(timeoutMs).then(() => {
-        throw new Error(`${collection} replication did not become ready in time`);
+        throw new Error(`${collection} data did not become ready in time`);
       }),
     ]);
   } catch (error) {
-    throw new Error(`RxDB WebRTC konnte ${collection} nicht synchronisieren: ${error?.message || error}`);
+    throw new Error(`Daten für ${collection} konnten nicht synchronisiert werden: ${error?.message || error}`);
   }
 }
 
@@ -188,7 +188,7 @@ async function waitForCommandReplication(ctx, commandId, timeoutMs = 30000) {
     }
     await delay(300);
   }
-  throw new Error(`RxDB WebRTC hat den Materialize-Befehl nicht an CTOX repliziert: ${lastCommand?.status || 'missing'}`);
+  throw new Error(`Der Materialize-Befehl wurde nicht an CTOX übertragen: ${lastCommand?.status || 'missing'}`);
 }
 
 function shouldRestartSyncCollection(ctx, collection) {
@@ -229,7 +229,7 @@ async function waitForMaterializedFileProjection(ctx, fileId, timeoutMs = 90000)
     }
     await delay(300);
   }
-  throw new Error(`RxDB WebRTC hat die materialisierte Datei nicht in den Browser repliziert: state=${lastFileState || 'missing'}, generation=${lastGenerationId || 'missing'}`);
+  throw new Error(`Die materialisierte Datei wurde nicht im Browser bereitgestellt: state=${lastFileState || 'missing'}, generation=${lastGenerationId || 'missing'}`);
 }
 
 async function nudgeFileProjectionSync(ctx) {
@@ -263,7 +263,7 @@ async function waitForStoredFile(ctx, fileId, mimeType, commandId = '', options 
       await delay(300);
     }
   }
-  throw new Error('Dateiinhalt wurde nicht über RxDB repliziert.');
+  throw new Error('Dateiinhalt konnte nicht geladen werden.');
 }
 
 async function renderBlob(container, objectUrl, blob, name, mimeType) {

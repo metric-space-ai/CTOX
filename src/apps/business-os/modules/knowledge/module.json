@@ -1,7 +1,7 @@
 {
   "id": "knowledge",
   "title": "Knowledge",
-  "description": "Native CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
+  "description": "CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
   "entry": "modules/knowledge/index.html",
   "collections": [
     "business_commands",

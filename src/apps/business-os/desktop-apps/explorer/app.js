@@ -1173,7 +1173,7 @@ async function waitForReplicationBridge(bridge, collection, timeoutMs = 20000) {
   await Promise.race([
     wait(),
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`${collection} replication did not become ready in time`)), timeoutMs);
+      setTimeout(() => reject(new Error(`${collection} data did not become ready in time`)), timeoutMs);
     }),
   ]);
 }

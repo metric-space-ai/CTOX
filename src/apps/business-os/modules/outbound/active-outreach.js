@@ -1031,7 +1031,7 @@ function formatTimestamp(ms) {
 
 async function dispatchOutboundCommand(type, recordId, payload, options = {}) {
   if (!stateRef.ctx?.commandBus?.dispatch) {
-    throw new Error('RxDB command bus is not available');
+    throw new Error('The local command service is not available.');
   }
   const commandId = `cmd_${type.replaceAll('.', '_')}_${crypto.randomUUID()}`;
   const command = {
@@ -1070,7 +1070,7 @@ async function waitForOutboundCommandProjection(commandId, timeoutMs) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`Outbound command ${commandId} was not acknowledged by the native RxDB peer (last status: ${lastStatus || 'missing'}).`);
+  throw new Error(`Outbound command ${commandId} was not acknowledged by the local service (last status: ${lastStatus || 'missing'}).`);
 }
 
 async function projectOutboundCommandResult(command) {

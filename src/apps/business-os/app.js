@@ -704,7 +704,7 @@ const shellMessages = {
     collection: 'Collection',
     activity: 'Aktivität',
     agentContext: 'Agent-Kontext',
-    webrtcSync: 'WebRTC-Sync',
+    webrtcSync: 'Datenabgleich',
     ctoxNotWorking: 'CTOX Verbindung prüfen',
     recoveryExport: 'Recovery exportieren',
     recoveryPassphrase: 'Passwort für den verschlüsselten Recovery-Export (mindestens 8 Zeichen)',
@@ -764,7 +764,7 @@ const shellMessages = {
     openWindowsAria: 'Offene Fenster',
     startupStarting: 'System wird gestartet...',
     startupFailedTitle: 'System-Start fehlgeschlagen',
-    startupFailedBody: 'Bei der Verbindung zum lokalen Daten-Netzwerk ist ein schwerwiegender Fehler aufgetreten. Der lokale RxDB-Catalog-Sync meldet:',
+    startupFailedBody: 'Bei der Verbindung zum lokalen Daten-Netzwerk ist ein schwerwiegender Fehler aufgetreten. Die lokale Datenverbindung meldet:',
     startupRetry: 'Erneut versuchen',
     gateSubtitle: 'Melden Sie sich an, um eine Verbindung zur ctox-Instanz herzustellen.',
     gateUser: 'Benutzer',
@@ -782,7 +782,7 @@ const shellMessages = {
     bootDatastore: 'Lokaler Datenspeicher wird geladen...',
     bootWorkspace: 'Workspace wird vorbereitet...',
     bootApps: 'Ihre Anwendungen werden vorbereitet...',
-    bootCatalog: 'Modulkatalog wird synchronisiert...',
+    bootCatalog: 'Apps werden synchronisiert...',
     bootOptimize: 'Lokaler Datenspeicher wird optimiert...',
     bootReady: 'Workspace ist bereit. CTOX wird gestartet...',
     bootDbConfig: 'Datenspeicher-Konfiguration wird vorbereitet...',
@@ -823,7 +823,7 @@ const shellMessages = {
     collection: 'Collection',
     activity: 'Activity',
     agentContext: 'Agent context',
-    webrtcSync: 'WebRTC sync',
+    webrtcSync: 'Data sync',
     ctoxNotWorking: 'Check CTOX connection',
     recoveryExport: 'Export recovery',
     recoveryPassphrase: 'Passphrase for the encrypted recovery export (at least 8 characters)',
@@ -883,7 +883,7 @@ const shellMessages = {
     openWindowsAria: 'Open windows',
     startupStarting: 'Starting system...',
     startupFailedTitle: 'System startup failed',
-    startupFailedBody: 'A fatal error occurred while connecting to the local data network. The local RxDB catalog sync reports:',
+    startupFailedBody: 'A fatal error occurred while connecting to the local data network. The local data connection reports:',
     startupRetry: 'Retry',
     gateSubtitle: 'Sign in to connect to the ctox instance.',
     gateUser: 'User',
@@ -901,7 +901,7 @@ const shellMessages = {
     bootDatastore: 'Loading local datastore...',
     bootWorkspace: 'Preparing workspace...',
     bootApps: 'Preparing your applications...',
-    bootCatalog: 'Syncing module catalog...',
+    bootCatalog: 'Syncing apps...',
     bootOptimize: 'Optimizing local datastore...',
     bootReady: 'Workspace ready. Starting CTOX...',
     bootDbConfig: 'Preparing datastore configuration...',
@@ -3072,7 +3072,7 @@ async function repairRecoveringDataPlane() {
     const collections = [...new Set(affectedCollections)];
     if (!collections.length) return;
     console.warn('[business-os] restarting stalled RxDB/WebRTC collections');
-    setStatus('RxDB/WebRTC wird neu verbunden');
+    setStatus('Datenverbindung wird neu verbunden');
     await state.sync.restartCollections(collections);
     if (state.activeModule) {
       state.activeModuleSyncLease = startModuleSync(state.activeModule);
@@ -5431,7 +5431,7 @@ async function recoverFromLocalRxDbSchemaDrift(error) {
     sessionStorage.setItem(RXDB_SCHEMA_REPAIR_KEY, repairToken);
   } catch {}
   console.warn('[business-os] local RxDB schema repair triggered; rebuilding browser cache', error);
-  setStatus('Lokale RxDB wird neu aufgebaut');
+  setStatus('Lokale Datenverbindung wird neu aufgebaut');
   try { await state.sync?.stop?.(); } catch (stopError) { console.warn('[business-os] sync stop before schema repair failed', stopError); }
   try { await state.db?.close?.(); } catch (closeError) { console.warn('[business-os] db close before schema repair failed', closeError); }
   try {
@@ -5670,7 +5670,7 @@ function createModuleContext(mod, overrides = {}) {
         const collections = Array.isArray(mod.collections) ? mod.collections.filter(Boolean) : [];
         const bridges = await Promise.all(collections.map((collection) => state.sync?.startCollection?.(collection)));
         if (collections.length && bridges.some((bridge) => !bridge)) {
-          throw new Error('app collection replication is unavailable');
+          throw new Error('App-Daten konnten nicht bereitgestellt werden.');
         }
         const readiness = bridges
           .map((bridge, index) => ({ replication: bridge?.state, collection: collections[index] }))
@@ -5692,7 +5692,7 @@ function createModuleContext(mod, overrides = {}) {
               if (visible) return;
               await new Promise((resolve) => window.setTimeout(resolve, 100));
             }
-            throw new Error(`native app collection ${collection} did not become visible`);
+            throw new Error(`App-Daten für ${collection} wurden nicht sichtbar`);
           });
         if (!readiness.length) return;
         let timeoutId = 0;
@@ -9906,7 +9906,7 @@ function getOfflineFallbackCatalog() {
     {
       "id": "app-store",
       "title": "App Store",
-      "description": "CTOX GitHub module catalog to discover repository apps, create apps from templates, and manage local Business OS installations.",
+      "description": "CTOX GitHub app catalog to discover repository apps, create apps from templates, and manage local Business OS installations.",
       "entry": "modules/app-store/index.html",
       "collections": [
         "business_commands",
@@ -10117,7 +10117,7 @@ function getOfflineFallbackCatalog() {
         "security"
       ],
       "store": {
-        "summary": "Write-only credentials manager backed by the encrypted CTOX secret store. Set, rotate and remove provider credentials; values never leave the daemon.",
+        "summary": "Write-only credentials manager backed by the encrypted CTOX credential store. Set, rotate and remove provider credentials; values remain on the selected backend.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/credentials",
         "installable": false,
@@ -10226,7 +10226,7 @@ function getOfflineFallbackCatalog() {
     {
       "id": "knowledge",
       "title": "Knowledge",
-      "description": "Native CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
+      "description": "CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and dataframes.",
       "entry": "modules/knowledge/index.html",
       "collections": [
         "business_commands",
@@ -10434,7 +10434,7 @@ function getOfflineFallbackCatalog() {
     {
       "id": "tickets",
       "title": "Tickets",
-      "description": "Native CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
+      "description": "CTOX ticket operations for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
       "entry": "modules/tickets/index.html",
       "collections": [
         "ctox_ticket_items",
@@ -10472,7 +10472,7 @@ function getOfflineFallbackCatalog() {
         "support"
       ],
       "store": {
-        "summary": "Read-only CTOX ticket operations app over native RxDB/WebRTC ticket projections.",
+        "summary": "Read-only CTOX ticket operations app with synchronized ticket data.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/tickets",
         "installable": false,
@@ -11077,7 +11077,7 @@ async function normalizeBusinessOsLaunchConfig(config) {
 async function deriveSyncRoomFromPassword(instanceId, roomPassword) {
   if (!instanceId || !roomPassword) return '';
   if (!globalThis.crypto?.subtle || typeof TextEncoder === 'undefined') {
-    throw new Error('Business OS pairing requires WebCrypto to derive the WebRTC room from the room password.');
+    throw new Error('Business OS pairing requires secure browser cryptography to set up the connection.');
   }
   const bytes = new TextEncoder().encode(roomPassword);
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
@@ -11238,12 +11238,12 @@ function getFriendlyErrorMessage(error) {
     const instanceName = String((launchConfigForPageSession || readUrlPairingConfig())?.desktop_instance?.display_name || 'Die gewählte Instanz').trim();
     title = `${instanceName} konnte nicht geladen werden`;
     description = 'Die Anmeldung bei ctox.dev war erfolgreich, aber der Startlink enthält keine von der CTOX-Instanz signierte Datenberechtigung. Deshalb wurde der verwaltete Workspace sicher gestoppt.';
-    advice = 'Die ctox.dev-Desktop-Schnittstelle muss einen kurzlebigen nativen Capability-Token für diese Instanz ausstellen. Eine lokale Ersatzoberfläche wird nicht verwendet.';
+    advice = 'Die ctox.dev-Desktop-Schnittstelle muss einen kurzlebigen Berechtigungsschlüssel für diese Instanz ausstellen. Eine lokale Ersatzoberfläche wird nicht verwendet.';
   } else if (isManagedCollectionAuthorizationError(error)) {
     const instanceName = String((launchConfigForPageSession || readUrlPairingConfig())?.desktop_instance?.display_name || 'Die gewählte Instanz').trim();
     title = `${instanceName} konnte nicht geladen werden`;
     description = 'Die CTOX-Instanz hat den Zugriff auf die benötigten Business-OS-Daten abgelehnt. Der verwaltete Workspace wurde deshalb sicher gestoppt.';
-    advice = 'Bitte die native Capability-Ausstellung und die Collection-Berechtigungen dieser ctox.dev-Verbindung prüfen. Eine lokale Ersatzoberfläche wird nicht verwendet.';
+    advice = 'Bitte die Berechtigungen dieser ctox.dev-Verbindung prüfen. Eine lokale Ersatzoberfläche wird nicht verwendet.';
   } else if (msg.includes('WebCrypto') || msg.includes('subtle') || !globalThis.crypto?.subtle) {
     title = 'Sicherer Kontext erforderlich (WebCrypto fehlt)';
     description = 'Safari blockiert notwendige Verschlüsselungsfunktionen, wenn die Seite über die IP-Adresse "127.0.0.1" geladen wird.';
@@ -11274,8 +11274,8 @@ function getFriendlyErrorMessage(error) {
     advice = 'Bitte versuchen Sie es erneut. Wenn die Meldung bleibt, muss die Instanz mit den aktuellen Business-OS-Assets synchronisiert werden.';
   } else if (msg.includes('NetworkError') || msg.includes('Failed to fetch') || msg.includes('signaling')) {
     title = 'Netzwerkverbindung fehlgeschlagen';
-    description = 'Eine Netzwerk- oder WebRTC-Verbindung konnte nicht aufgebaut werden.';
-    advice = 'Bitte versuchen Sie es erneut. Wenn die Meldung bleibt, prüfen Sie die Instanzdienste und die Erreichbarkeit des Signaling-Servers.';
+    description = 'Eine Netzwerk- oder Datenverbindung konnte nicht aufgebaut werden.';
+    advice = 'Bitte versuchen Sie es erneut. Wenn die Meldung bleibt, prüfen Sie die Instanzdienste und die Erreichbarkeit des Verbindungsdienstes.';
   }
 
   return { title, description, advice };
@@ -11301,7 +11301,7 @@ function isLocalRxDbStartupError(error) {
 
 async function resetLocalRxDbBeforeStartupRetry(error) {
   if (!isLocalRxDbStartupError(error)) return false;
-  setStatus('Lokale RxDB wird neu synchronisiert');
+  setStatus('Lokale Datenverbindung wird neu synchronisiert');
   try { sessionStorage.removeItem(RXDB_SCHEMA_REPAIR_KEY); } catch {}
   try { await state.sync?.stop?.(); } catch (stopError) { console.warn('[business-os] sync stop before startup retry reset failed', stopError); }
   try { await state.db?.close?.(); } catch (closeError) { console.warn('[business-os] db close before startup retry reset failed', closeError); }
@@ -11386,7 +11386,7 @@ function showStartupError(error) {
         return;
       }
       retryBtn.textContent = isLocalRxDbStartupError(error)
-        ? 'Lokale RxDB wird neu synchronisiert...'
+        ? 'Lokale Datenverbindung wird neu synchronisiert...'
         : 'Wird neu geladen...';
       await resetLocalRxDbBeforeStartupRetry(error);
       window.location.reload();

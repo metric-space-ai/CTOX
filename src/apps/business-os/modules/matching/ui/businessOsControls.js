@@ -1448,7 +1448,7 @@ function renderConfigureDrawer(column) {
       <textarea class="drawer-code" rows="14" spellcheck="false">${escapeDrawerHtml(JSON.stringify(config.schema, null, 2))}</textarea>
     </label>
     <label class="drawer-field">
-      <span>RxDB Stammdaten JSON</span>
+      <span>Stammdaten-JSON</span>
       <textarea class="drawer-code" rows="12" spellcheck="false">${escapeDrawerHtml(JSON.stringify(storageConfig, null, 2))}</textarea>
     </label>
     <label class="drawer-field">

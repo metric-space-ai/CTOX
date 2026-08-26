@@ -500,7 +500,7 @@ async function saveReport() {
         screenshotInfo = await client.saveBugReportScreenshot(id, attachment.compositeDataUrl);
       } catch (err) {
         console.warn("[bugReporter] screenshot chunking failed", err);
-        throw new Error("Screenshot konnte nicht in RxDB-Chunks gespeichert werden.");
+        throw new Error("Screenshot konnte nicht in lokalen Dateiblöcken gespeichert werden.");
       }
     }
 

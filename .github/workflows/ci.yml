@@ -247,12 +247,14 @@ jobs:
           node --check src/apps/business-os/scripts/assert-command-consumer-inventory.mjs
           node --check src/apps/business-os/scripts/assert-production-release-docs.mjs
           node --check src/apps/business-os/scripts/assert-security-privacy-signoff.mjs
+          node --check src/apps/business-os/scripts/audit-business-os-content.mjs
           node src/apps/business-os/scripts/assert-rxdb-only.mjs
           node src/apps/business-os/scripts/assert-module-conformance.mjs
           node src/apps/business-os/scripts/assert-command-consumer-inventory.mjs
           node src/apps/business-os/scripts/assert-production-release-docs.mjs
           node src/apps/business-os/scripts/assert-security-privacy-signoff.mjs --self-test
           node src/apps/business-os/scripts/assert-security-privacy-signoff.mjs
+          node src/apps/business-os/scripts/audit-business-os-content.mjs
           node src/apps/business-os/scripts/assert-sync-error-classification.mjs
           node src/apps/business-os/scripts/assert-module-context-contract.mjs
           node src/apps/business-os/scripts/assert-file-viewer-integrity.mjs

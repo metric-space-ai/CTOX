@@ -1,7 +1,7 @@
 {
   "id": "calendar",
   "title": "Kalender",
-  "description": "Mac/Outlook-style calendar with native booking links and availability scheduling.",
+  "description": "Mac/Outlook-style calendar with integrated booking links and availability scheduling.",
   "entry": "modules/calendar/index.html",
   "collections": [
     "business_commands",
@@ -33,7 +33,7 @@
     "scheduler"
   ],
   "store": {
-    "summary": "Local-first spatial calendar app with native booking pages, slot reservations, and recurrence rules.",
+    "summary": "Local-first spatial calendar app with integrated booking pages, slot reservations, and recurrence rules.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/calendar",
     "installable": true,

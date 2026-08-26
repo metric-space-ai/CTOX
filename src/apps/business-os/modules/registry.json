@@ -47,7 +47,7 @@
     {
       "id": "app-store",
       "title": "App Store",
-      "description": "CTOX GitHub module catalog to discover repository apps, create apps from templates, and manage local Business OS installations.",
+      "description": "CTOX App Store to discover repository apps, create apps from templates, and manage local Business OS installations.",
       "entry": "modules/app-store/index.html",
       "collections": [
         "business_commands",
@@ -319,7 +319,7 @@
     {
       "id": "calendar",
       "title": "Kalender",
-      "description": "Mac/Outlook-style calendar with native booking links and availability scheduling.",
+      "description": "Mac/Outlook-style calendar with integrated booking links and availability scheduling.",
       "entry": "modules/calendar/index.html",
       "collections": [
         "business_commands",
@@ -350,7 +350,7 @@
         "scheduler"
       ],
       "store": {
-        "summary": "Local-first spatial calendar app with native booking pages, slot reservations, and recurrence rules.",
+        "summary": "Local-first spatial calendar app with integrated booking pages, slot reservations, and recurrence rules.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/calendar",
         "installable": true,
@@ -722,7 +722,7 @@
         "security"
       ],
       "store": {
-        "summary": "Write-only credentials manager backed by the encrypted CTOX secret store. Set, rotate and remove provider credentials; values never leave the daemon.",
+        "summary": "Write-only credentials manager backed by the encrypted CTOX secret store. Set, rotate and remove provider credentials; values never leave the local service.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/credentials",
         "installable": false,
@@ -831,7 +831,7 @@
     {
       "id": "customers",
       "title": "Kunden",
-      "description": "Native CRM-App für Bestandskunden, Kontakte, Opportunities, Aufgaben, Notizen, Aktivitäten und Outbound-Handoffs.",
+      "description": "CRM-App für Bestandskunden, Kontakte, Opportunities, Aufgaben, Notizen, Aktivitäten und Outbound-Handoffs.",
       "entry": "modules/customers/index.html",
       "collections": [
         "business_commands",
@@ -967,7 +967,7 @@
     {
       "id": "documents",
       "title": "CTOX Documents",
-      "description": "Native DOCX workspace with the CTOX Documents fork, explorer, versions, and CTOX runbooks.",
+      "description": "DOCX workspace with the CTOX Documents fork, explorer, versions, and CTOX runbooks.",
       "entry": "modules/documents/index.html",
       "collections": [
         "business_commands",
@@ -1002,7 +1002,7 @@
         "runbooks"
       ],
       "store": {
-        "summary": "DOCX and Markdown workspace with the CTOX Documents ESM fork, native Rust roundtrip, versions, blob chunks, and automation runbooks.",
+        "summary": "DOCX and Markdown workspace with the CTOX Documents ESM fork, verified local roundtrip, versions, blob chunks, and automation runbooks.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/documents",
         "installable": true,
@@ -1362,7 +1362,7 @@
     {
       "id": "knowledge",
       "title": "Knowledge",
-      "description": "Native CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
+      "description": "CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
       "entry": "modules/knowledge/index.html",
       "collections": [
         "business_commands",
@@ -1956,7 +1956,7 @@
     {
       "id": "spreadsheets",
       "title": "CTOX Spreadsheets",
-      "description": "Native XLSX workspace with the CTOX Spreadsheets fork, explorer, versions, and CTOX runbooks.",
+      "description": "XLSX workspace with the CTOX Spreadsheets fork, explorer, versions, and CTOX runbooks.",
       "entry": "modules/spreadsheets/index.html",
       "collections": [
         "business_commands",
@@ -1988,7 +1988,7 @@
         "runbooks"
       ],
       "store": {
-        "summary": "XLSX spreadsheet workspace with the CTOX Spreadsheets ESM fork, native Rust roundtrip, versions, and automation runbooks.",
+        "summary": "XLSX spreadsheet workspace with the CTOX Spreadsheets ESM fork, verified local roundtrip, versions, and automation runbooks.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/spreadsheets",
         "installable": true,
@@ -2080,7 +2080,7 @@
     {
       "id": "support",
       "title": "Support",
-      "description": "Native CTOX Support Desk for omnichannel support queues, customer context, ticket links, SLA, macros, and CTOX Harness-assisted drafts.",
+      "description": "CTOX Support Desk for omnichannel support queues, customer context, ticket links, SLA, macros, and CTOX Harness-assisted drafts.",
       "entry": "modules/support/index.html",
       "collections": [
         "business_commands",
@@ -2134,7 +2134,7 @@
         "agent"
       ],
       "store": {
-        "summary": "CTOX-native support desk layered over communication, ticket, customer, and harness projections.",
+        "summary": "CTOX support desk layered over communication, ticket, customer, and harness projections.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/support",
         "installable": true,
@@ -2241,7 +2241,7 @@
     {
       "id": "tickets",
       "title": "Tickets",
-      "description": "Native CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
+      "description": "CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
       "entry": "modules/tickets/index.html",
       "collections": [
         "ctox_ticket_items",
@@ -2279,7 +2279,7 @@
         "support"
       ],
       "store": {
-        "summary": "Read-only CTOX ticket operations app over native RxDB/WebRTC ticket projections.",
+        "summary": "Read-only CTOX ticket operations app over synchronized ticket projections.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/tickets",
         "installable": false,

@@ -117,6 +117,7 @@ jobs:
           node --check src/apps/business-os/scripts/assert-module-conformance.mjs
           node --check src/apps/business-os/scripts/assert-production-release-docs.mjs
           node --check src/apps/business-os/scripts/assert-security-privacy-signoff.mjs
+          node --check src/apps/business-os/scripts/audit-business-os-content.mjs
           node src/apps/business-os/scripts/assert-rxdb-only.mjs
           node src/apps/business-os/scripts/assert-module-conformance.mjs
           node src/core/rxdb/tools/assert_sync_production_readiness_95.js
@@ -135,6 +136,7 @@ jobs:
           node src/apps/business-os/scripts/assert-production-release-docs.mjs
           node src/apps/business-os/scripts/assert-security-privacy-signoff.mjs --self-test
           node src/apps/business-os/scripts/assert-security-privacy-signoff.mjs
+          node src/apps/business-os/scripts/audit-business-os-content.mjs
           SMOKE_MATRIX_SELF_TEST=1 node src/core/rxdb/tools/browser_rust_smoke_matrix.js
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon
           cargo test --locked --bin ctox business_os --quiet

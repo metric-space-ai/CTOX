@@ -355,7 +355,7 @@ const CAMPAIGN_IDEA_TEMPLATES = Object.freeze({
     {
       id: 'en-mail-property-management',
       title: 'Property managers for owner portal',
-      text: 'I want to email property management companies with 500 to 5,000 units in Germany and sell an owner and tenant portal. Please focus on firms with many service requests, document workflows, or visible modernization initiatives.',
+      text: 'I want to email property management companies with 500 to 5,000 units in Germany and sell an owner and resident portal. Please focus on firms with many service requests, document workflows, or visible modernization initiatives.',
     },
     {
       id: 'en-mail-manufacturing-qm',
@@ -415,7 +415,7 @@ const CAMPAIGN_IDEA_TEMPLATES = Object.freeze({
     {
       id: 'en-letter-hotels',
       title: 'Hotels by letter',
-      text: 'I want to send physical letters to owner-managed hotels and introduce a solution for guest communication, upselling, and review management. Please prepare printable letters and let the user manually mark which hotels were actually mailed.',
+      text: 'I want to send physical letters to owner-managed hotels and introduce a solution for visitor communication, upselling, and review management. Please prepare printable letters and let the user manually mark which hotels were actually mailed.',
     },
     {
       id: 'en-mail-consulting-partners',
@@ -968,7 +968,7 @@ function slugId(value) {
 
 async function knowledgeCommand(args) {
   if (!state.ctx?.commandBus?.dispatch) {
-    throw new Error('RxDB command bus is not available');
+    throw new Error('The local command service is not available.');
   }
   const commandId = `cmd_knowledge_${crypto.randomUUID()}`;
   const dispatched = await state.ctx.commandBus.dispatch({
@@ -6660,7 +6660,7 @@ function campaignSetupPrompt(campaign, commandId, template) {
     'Nicht verhandelbar:',
     '- Keine Nachricht senden.',
     '- Keine E-Mail, keinen Brief und keine externe HTTP-Integration ausloesen.',
-    '- Alle Daten- und App-Aenderungen nur ueber CTOX Business OS Commands/RxDB zurueckschreiben.',
+    '- Alle Daten- und App-Aenderungen nur ueber den CTOX Business-OS-Befehlspfad zurueckschreiben.',
     '- Outbound-Kommunikation bleibt approval-gated.',
     '- Wenn ein Wunsch nicht durch vorhandene Outbound-Settings abbildbar ist, schreibe ihn als konkreten App-Extension-Request in den Writeback.',
     '',

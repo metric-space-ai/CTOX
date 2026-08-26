@@ -1,7 +1,7 @@
 {
   "id": "tickets",
   "title": "Tickets",
-  "description": "Native CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
+  "description": "CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
   "entry": "modules/tickets/index.html",
   "collections": [
     "ctox_ticket_items",
@@ -39,7 +39,7 @@
     "support"
   ],
   "store": {
-    "summary": "Read-only CTOX ticket operations app over native RxDB/WebRTC ticket projections.",
+    "summary": "Read-only CTOX ticket operations app over synchronized ticket projections.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/tickets",
     "installable": false,
