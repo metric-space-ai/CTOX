@@ -140,6 +140,53 @@ sie sichtbar als blockiert aus; sie zählen nicht als aktuell. Ein realer
 GPU3-Canary bleibt bis zur expliziten Registrierung als SSH-verwaltetes Ziel
 und zur Host-Key-/Adminfreigabe ein Operator-Trigger.
 
+## Aktueller Stable v0.1.10
+
+Der aktuelle signierte Stable-Pointer zeigt auf `business-os-shell-v0.1.10`
+und CTOX-Commit `486f50105662ee90431dcef7430fd7a2ff28d29f`.
+GitHub-Actions-Lauf `32938137492` hat Artefakttests, Branding-/Chrome-Guards,
+SHA-256-Prüfung, SPDX-SBOM, Ed25519-Signatur, Release-Upload und Pointer-
+Publikation erfolgreich abgeschlossen.
+
+- Veröffentlichung: `2026-08-26T08:24:19+02:00`
+- Release-v2-Manifest-SHA-256: `8045da5f9b02b10539f963cb804fe1c413d6763171d5f6f8bc0c824c7917458d`
+- Stable-Pointer-SHA-256: `397c41a501c9e0ec37579d50b115e25d10950a7f39be61e20a8efafff9675c5c`
+- Artefakt-SHA-256: `bddf8e506b8573b0e8ed875e4a9e8493a7fdf36e5fefe68d91abd8d115df9a63`
+- Artefaktgröße: 122286557 Bytes
+- Inventar: 1651 reguläre Dateien
+- Signing-Key-ID: `shell-current-2026-08`
+- Kompatibilität: Workjet ab 0.0.33, CTOX ab 0.3.22,
+  `workjet.business-os-shell.v1`
+
+v0.1.10 verschärft die sichtbare Workjet-Produktidentität im Release-Workflow,
+reduziert die Shell-Kopfleiste auf kurze Version plus genau eine Statusaktion
+und hält Connection-/Recovery-Aktionen innerhalb des Statuspanels. Der atomare
+Lifecycle bewahrt außerdem `restart_required`, bis der neue Slot beim
+Serverstart verifiziert und konsumiert wurde; fehlgeschlagene Slot-Verifikation
+verändert weder current- noch previous-Slot.
+
+## Reale v0.1.10-Abnahme
+
+Workjet zeigte für die lokale CTOX-Instanz zunächst v0.1.9 und das kompatible
+Stable-Angebot v0.1.10. Die Desktop-Fleet-Aktion lud das 122286557-Byte-
+Artefakt, verifizierte und aktivierte Slot v0.1.10. Nach einem echten CTOX-
+Service- und Workjet-Neustart lieferte der Backend-Server ausdrücklich
+`runtime/business-os-shell/slots/0.1.10`; Workjet öffnete den Guest mit
+`v0.1.10` und Status `Aktuell`.
+
+Das Fleet-Inventar zeigt anschließend `healthy`, CTOX `0.3.22`, Shell/Angebot
+`v0.1.10`, Kanal `stable` und `Aktuell`. Der native Status bestätigt
+`replicationUp=true`, authentifizierten Peer, offenen Data Channel und null
+Health-Fehler. Der App-Katalog erschien nach RxDB/WebRTC-Resynchronisation
+wieder vollständig. Es wurde kein HTTP-Business-Datenfallback verwendet.
+
+Die lokale Rust-Shell-Lifecycle-Suite ist 10/10 grün; die Artefakt-/SBOM-/
+Signatursuite ist 13/13 grün. Der breite Browser-RxDB-Lauf bestand 99 Tests;
+drei im parallelen fremden Dirty-Stand veränderte Inventory-/Command-Plane-
+Smokes blieben rot und zwei Cross-Process-Smokes wurden mangels gebautem Wire-
+Daemon übersprungen. Diese fünf Fälle wurden nicht als Release-Nachweis
+verwendet; die echte lokale Datenplane-Probe ist grün.
+
 ## Instanz-Lifecycle
 
 CTOX speichert Shell-Zustand in der vorhandenen SQLite-Runtime: aktiver Kanal,
