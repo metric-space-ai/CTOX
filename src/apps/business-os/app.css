@@ -3,29 +3,29 @@
    down in this file or in module CSS — tests/business-os guard enforces this. */
 :root {
   color-scheme: light;
-  --bg: oklch(0.965 0.006 235);
-  --surface: oklch(0.987 0.005 235);
-  --surface-2: oklch(0.94 0.009 238);
-  --line: oklch(0.8 0.014 235);
-  --text: oklch(0.22 0.015 235);
-  --text-strong: oklch(0.14 0.018 235);
-  --muted: oklch(0.435 0.017 235);
-  --accent: oklch(0.48 0.115 215);
-  --accent-foreground: #ffffff;
-  --accent-soft: oklch(0.9 0.04 215);
+  --bg: var(--ctox-host-bg, oklch(0.965 0.006 235));
+  --surface: var(--ctox-host-surface, oklch(0.987 0.005 235));
+  --surface-2: var(--ctox-host-surface-2, oklch(0.94 0.009 238));
+  --line: var(--ctox-host-line, oklch(0.8 0.014 235));
+  --text: var(--ctox-host-text, oklch(0.22 0.015 235));
+  --text-strong: var(--ctox-host-text-strong, oklch(0.14 0.018 235));
+  --muted: var(--ctox-host-muted, oklch(0.435 0.017 235));
+  --accent: var(--ctox-host-accent, oklch(0.48 0.115 215));
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, oklch(0.9 0.04 215));
   --danger: oklch(0.56 0.13 28);
   --shadow: 0 8px 24px oklch(0.22 0.015 235 / 0.12);
   --shadow-sm: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
   --shadow-md: 0 4px 12px oklch(0.22 0.015 235 / 0.12);
   --shadow-lg: 0 8px 24px oklch(0.22 0.015 235 / 0.18);
-  --hairline: color-mix(in srgb, var(--line) 62%, transparent);
-  --panel-radius: 4px;
-  --control-radius: 3px;
+  --hairline: var(--ctox-host-hairline, oklch(0.8 0.014 235 / 0.62));
+  --panel-radius: 6px;
+  --control-radius: 4px;
   --panel-shadow: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
   /* Kit additions: raised step above --surface-2 (active segments, hovered
      chips in dark surfaces) and the softer content radius for callouts,
      choice rows and code blocks. Consumed by shared/base.css. */
-  --surface-3: oklch(0.996 0.002 235);
+  --surface-3: var(--ctox-host-surface-3, oklch(0.996 0.002 235));
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
@@ -85,28 +85,28 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0f1216;
-  --surface: #151920;
-  --surface-2: #1b2029;
-  --line: #2d343e;
-  --text: #e6e9eb;
-  --text-strong: #ffffff;
-  --muted: #a0a9b1;
-  --accent: #72b8aa;
-  --accent-foreground: #08110f;
-  --accent-soft: rgba(108, 184, 170, 0.16);
+  --bg: var(--ctox-host-bg, #0f1216);
+  --surface: var(--ctox-host-surface, #151920);
+  --surface-2: var(--ctox-host-surface-2, #1b2029);
+  --line: var(--ctox-host-line, #2d343e);
+  --text: var(--ctox-host-text, #e6e9eb);
+  --text-strong: var(--ctox-host-text-strong, #ffffff);
+  --muted: var(--ctox-host-muted, #a0a9b1);
+  --accent: var(--ctox-host-accent, #72b8aa);
+  --accent-foreground: var(--ctox-host-accent-foreground, #08110f);
+  --accent-soft: var(--ctox-host-accent-soft, rgba(108, 184, 170, 0.16));
   --danger: #e06b60;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.42);
-  --hairline: #262d35;
-  --panel-radius: 4px;
-  --control-radius: 3px;
+  --hairline: var(--ctox-host-hairline, #262d35);
+  --panel-radius: 6px;
+  --control-radius: 4px;
   --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
   /* Kit additions: raised step above --surface-2 (active segments) and the
      softer content radius. Consumed by shared/base.css. */
-  --surface-3: #232b36;
+  --surface-3: var(--ctox-host-surface-3, #232b36);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
