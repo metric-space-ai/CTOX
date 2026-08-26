@@ -137,61 +137,133 @@
     "overlay": "0 16px 44px rgb(0 0 0 / 0.18)"
   },
   "categories": {
-    "System": {
-      "accent": "#2563eb",
-      "foreground": "#ffffff"
-    },
     "Workspace": {
-      "accent": "#0284c7",
-      "foreground": "#111827"
-    },
-    "Operations": {
-      "accent": "#0f766e",
-      "foreground": "#ffffff"
-    },
-    "Knowledge": {
-      "accent": "#0891b2",
-      "foreground": "#111827"
-    },
-    "Security": {
-      "accent": "#475569",
-      "foreground": "#ffffff"
+      "accent": "#2563eb",
+      "foreground": "#ffffff",
+      "softLight": "#dbeafe",
+      "softDark": "#172554",
+      "borderLight": "#93c5fd",
+      "borderDark": "#1d4ed8"
     },
     "Collaboration": {
-      "accent": "#7c3aed",
-      "foreground": "#ffffff"
+      "accent": "#0891b2",
+      "foreground": "#111827",
+      "softLight": "#cffafe",
+      "softDark": "#083344",
+      "borderLight": "#67e8f9",
+      "borderDark": "#0e7490"
+    },
+    "Productivity": {
+      "accent": "#0ea5e9",
+      "foreground": "#111827",
+      "softLight": "#e0f2fe",
+      "softDark": "#082f49",
+      "borderLight": "#7dd3fc",
+      "borderDark": "#0369a1"
     },
     "Development": {
       "accent": "#4f46e5",
-      "foreground": "#ffffff"
+      "foreground": "#ffffff",
+      "softLight": "#e0e7ff",
+      "softDark": "#1e1b4b",
+      "borderLight": "#a5b4fc",
+      "borderDark": "#4338ca"
     },
-    "Governance": {
-      "accent": "#ca8a04",
-      "foreground": "#111827"
+    "Engineering": {
+      "accent": "#7c3aed",
+      "foreground": "#ffffff",
+      "softLight": "#ede9fe",
+      "softDark": "#2e1065",
+      "borderLight": "#c4b5fd",
+      "borderDark": "#6d28d9"
     },
-    "Finance": {
-      "accent": "#16a34a",
-      "foreground": "#111827"
+    "Knowledge": {
+      "accent": "#9333ea",
+      "foreground": "#ffffff",
+      "softLight": "#f3e8ff",
+      "softDark": "#3b0764",
+      "borderLight": "#d8b4fe",
+      "borderDark": "#7e22ce"
     },
-    "Productivity": {
-      "accent": "#d97706",
-      "foreground": "#111827"
+    "Research": {
+      "accent": "#0d9488",
+      "foreground": "#111827",
+      "softLight": "#ccfbf1",
+      "softDark": "#042f2e",
+      "borderLight": "#5eead4",
+      "borderDark": "#0f766e"
     },
     "Sales": {
       "accent": "#059669",
-      "foreground": "#111827"
+      "foreground": "#111827",
+      "softLight": "#d1fae5",
+      "softDark": "#022c22",
+      "borderLight": "#6ee7b7",
+      "borderDark": "#047857"
     },
     "Recruiting": {
       "accent": "#db2777",
-      "foreground": "#ffffff"
+      "foreground": "#ffffff",
+      "softLight": "#fce7f3",
+      "softDark": "#500724",
+      "borderLight": "#f9a8d4",
+      "borderDark": "#be185d"
     },
-    "Research": {
-      "accent": "#6366f1",
-      "foreground": "#ffffff"
+    "Finance": {
+      "accent": "#d97706",
+      "foreground": "#111827",
+      "softLight": "#fef3c7",
+      "softDark": "#451a03",
+      "borderLight": "#fcd34d",
+      "borderDark": "#b45309"
+    },
+    "Operations": {
+      "accent": "#ea580c",
+      "foreground": "#111827",
+      "softLight": "#ffedd5",
+      "softDark": "#431407",
+      "borderLight": "#fdba74",
+      "borderDark": "#c2410c"
+    },
+    "Governance": {
+      "accent": "#0f766e",
+      "foreground": "#ffffff",
+      "softLight": "#ccfbf1",
+      "softDark": "#042f2e",
+      "borderLight": "#5eead4",
+      "borderDark": "#115e59"
+    },
+    "Security": {
+      "accent": "#dc2626",
+      "foreground": "#ffffff",
+      "softLight": "#fee2e2",
+      "softDark": "#450a0a",
+      "borderLight": "#fca5a5",
+      "borderDark": "#b91c1c"
     },
     "Analytics": {
-      "accent": "#15803d",
-      "foreground": "#ffffff"
+      "accent": "#6366f1",
+      "foreground": "#ffffff",
+      "softLight": "#e0e7ff",
+      "softDark": "#1e1b4b",
+      "borderLight": "#a5b4fc",
+      "borderDark": "#4f46e5"
+    },
+    "System": {
+      "accent": "#64748b",
+      "foreground": "#ffffff",
+      "softLight": "#e2e8f0",
+      "softDark": "#1e293b",
+      "borderLight": "#94a3b8",
+      "borderDark": "#475569"
+    },
+    "Imported": {
+      "accent": "#71717a",
+      "foreground": "#ffffff",
+      "softLight": "#e4e4e7",
+      "softDark": "#27272a",
+      "borderLight": "#a1a1aa",
+      "borderDark": "#52525b"
     }
   },
   "vocabulary": {
@@ -219,6 +291,12 @@
       "daemon",
       "RxDB",
       "WebRTC",
+      "Guest",
+      "Sidecar",
+      "Native",
+      "Binary",
+      "Room",
+      "Signaling",
       "DataChannel",
       "replication",
       "tenant",
@@ -229,13 +307,13 @@
       "peer session"
     ],
     "forbiddenPatterns": [
-      "\\b(?:daemon|RxDB|WebRTC|DataChannel)\\b",
+      "\\b(?:daemon|RxDB|WebRTC|DataChannel|Guest|Sidecar|Native|Binary|Room|Signaling)\\b",
       "\\b(?:tenant|replication|control plane)\\b"
     ]
   },
   "provenance": {
     "sourcePath": "packages/workjet-ui-contract/src/contract.json",
-    "sourceSha256": "b4104488841e0dc21a27ab52106babe846c49009183c4a55fe9637865bb76432",
+    "sourceSha256": "6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6",
     "generator": "src/apps/business-os/scripts/generate-workjet-ui-contract-snapshot.mjs"
   }
 }

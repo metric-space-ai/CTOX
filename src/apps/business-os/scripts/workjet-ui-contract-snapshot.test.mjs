@@ -83,7 +83,24 @@ test("every category has an explicit derived foreground and a matching CSS varia
   const { payload } = result.source;
   const categories = Object.entries(payload.categories);
 
-  assert.equal(categories.length, 14);
+  assert.deepEqual(categories.map(([category]) => category), [
+    "Workspace",
+    "Collaboration",
+    "Productivity",
+    "Development",
+    "Engineering",
+    "Knowledge",
+    "Research",
+    "Sales",
+    "Recruiting",
+    "Finance",
+    "Operations",
+    "Governance",
+    "Security",
+    "Analytics",
+    "System",
+    "Imported",
+  ]);
   assert.equal(new Set(categories.map(([category]) => category)).size, categories.length);
 
   for (const [category, token] of categories) {
@@ -95,7 +112,16 @@ test("every category has an explicit derived foreground and a matching CSS varia
     const slug = category.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     assert.match(result.css, new RegExp(`--workjet-category-${slug}-accent:\\s*${token.accent}`));
     assert.match(result.css, new RegExp(`--workjet-category-${slug}-accent-foreground:\\s*${token.foreground}`));
+    assert.match(result.css, new RegExp(`--workjet-category-${slug}-accent-soft:\\s*${token.softLight}`));
+    assert.match(result.css, new RegExp(`--workjet-category-${slug}-accent-border:\\s*${token.borderLight}`));
+    assert.match(result.css, new RegExp(`--workjet-category-${slug}-accent-soft:\\s*${token.softDark}`));
+    assert.match(result.css, new RegExp(`--workjet-category-${slug}-accent-border:\\s*${token.borderDark}`));
   }
+
+  assert.equal(payload.categories.Workspace.accent, "#2563eb");
+  assert.equal(payload.categories.Engineering.accent, "#7c3aed");
+  assert.equal(payload.categories.Security.accent, "#dc2626");
+  assert.equal(payload.categories.Imported.accent, "#71717a");
 });
 
 test("type rhythm, focus, elevation, and vocabulary remain contract data", async () => {

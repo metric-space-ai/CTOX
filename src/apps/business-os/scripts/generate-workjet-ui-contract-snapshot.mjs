@@ -112,6 +112,8 @@ const sharedCss = (payload) => {
     const slug = cssSlug(category);
     lines.push(`  --workjet-category-${slug}-accent: ${accent.accent};`);
     lines.push(`  --workjet-category-${slug}-accent-foreground: ${accent.foreground};`);
+    lines.push(`  --workjet-category-${slug}-accent-soft: ${accent.softLight};`);
+    lines.push(`  --workjet-category-${slug}-accent-border: ${accent.borderLight};`);
   }
   return lines.join("\n");
 };
@@ -124,6 +126,15 @@ export const renderSnapshotCss = (payload, sourceSha256) => [
   "}",
   themeCss(':root, :root[data-theme="light"]', "light", payload.themes.light),
   themeCss(':root[data-theme="dark"]', "dark", payload.themes.dark),
+  ':root[data-theme="dark"] {',
+  ...Object.entries(payload.categories).flatMap(([category, accent]) => {
+    const slug = cssSlug(category);
+    return [
+      `  --workjet-category-${slug}-accent-soft: ${accent.softDark};`,
+      `  --workjet-category-${slug}-accent-border: ${accent.borderDark};`,
+    ];
+  }),
+  '}',
   "",
 ].join("\n");
 
