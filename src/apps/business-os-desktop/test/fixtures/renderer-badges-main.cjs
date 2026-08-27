@@ -171,7 +171,8 @@ app.whenReady().then(async () => {
         document.getElementById("pairing-display-name").value = "Manual P2P";
         document.getElementById("pairing-signaling-url").value = "wss://signaling.ctox.dev";
         document.getElementById("pairing-sync-room").value = "ctox-business-os:manual:room";
-        document.getElementById("pairing-room-secret").value = "manual-room-secret";
+        document.getElementById("pairing-browser-token").value = "manual-browser-token";
+        document.getElementById("pairing-native-token-hash").value = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         document.getElementById("pairing-capability-token").value = "manual-capability-token";
         document.getElementById("connection-invite").requestSubmit();
       })();
@@ -321,7 +322,10 @@ app.whenReady().then(async () => {
           instance_id: "paired_lab",
           sync_room: "ctox-business-os:paired_lab:room",
           signaling_urls: ["wss://signaling.ctox.dev"],
-          signaling_room_password: "rotated-room-secret",
+          signaling_auth_version: "ctox-role-bound-v1",
+          signaling_browser_token: "rotated-browser-token",
+          signaling_browser_token_hash: "63491fc181188a4935759c478e942476e98faf34e496c8b647e825280c09b06d",
+          signaling_native_token_hash: "74ef19c0df699b05c0cf1cb2bfafccfe3f2186563b240c13b18914f72b2f3b0b",
           transport: "webrtc",
           expires_at: "2099-01-01T00:00:00.000Z"
         });
@@ -391,10 +395,11 @@ app.whenReady().then(async () => {
         && connectionRequests.inviteImport.length === 1
         && connectionRequests.manualPairing.length === 1
         && connectionRequests.manualPairing[0].syncRoom === "ctox-business-os:manual:room"
-        && connectionRequests.manualPairing[0].roomSecretLength === 18
+        && connectionRequests.manualPairing[0].browserTokenLength === 20
+        && connectionRequests.manualPairing[0].nativeTokenHashLength === 64
         && !JSON.stringify(connectionRequests).includes("login-secret")
         && !JSON.stringify(connectionRequests).includes("sudo-secret")
-        && !JSON.stringify(connectionRequests).includes("manual-room-secret")
+        && !JSON.stringify(connectionRequests).includes("manual-browser-token")
         && quickSwitchFocused === true
         && activateRequests.map((request) => request.source).join("|") === "ctox_dev|ssh_managed|pairing_invite"
         && activateRequests.every((request) => request.dataPlane === "rxdb-webrtc")

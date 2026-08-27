@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { __browserTestHooks } from './index.js';
 
+assert.deepEqual(
+  __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
+  ['outbound_research_adapters', 'thesen_outbound_adapters'],
+  'the scraping rail loads core and tenant-local adapter collections together',
+);
+
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');
 assert.equal(__browserTestHooks.normalizeUrl('http://localhost:3000/path'), 'http://localhost:3000/path');
 assert.equal(__browserTestHooks.normalizeUrl(''), 'https://example.com');
@@ -236,7 +242,10 @@ assert.doesNotMatch(source, forbiddenSurfacePattern);
 assert.doesNotMatch(source, /border-(?:left|right)\s*:\s*(?:[2-9]|[0-9]{2,})px/);
 assert.doesNotMatch(source, /border-radius:\s*(?:10|12|14|16|18|20|24)px/);
 assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
-assert.match(css, /@container business-app-window \(max-width: 640px\)/);
+// Der Waechter prueft die Absicht -- es gibt eine Schmal-Variante -- nicht
+// eine feste Zahl: der Mobile-Umbau verschiebt den Breakpoint gerade von
+// 640 auf 767, und beide Staende sind in Umlauf (main vs. Arbeitsbaum).
+assert.match(css, /@container business-app-window \(max-width: (640|767)px\)/);
 assert.match(css, /\.browser-session-list[\s\S]*overflow-x: auto/);
 assert.match(html, /data-browser-start/);
 assert.match(html, /data-browser-private/);

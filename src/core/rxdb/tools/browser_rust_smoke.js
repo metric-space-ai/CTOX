@@ -7604,7 +7604,7 @@ function ensureCtoxSmokeBinary() {
       ? {
           kind: officeRestartKind,
           canonical: Array.from(fs.readFileSync(path.join(root, `tests/fixtures/office/${officeRestartKind}/edit-save.${officeRestartKind === 'document' ? 'docx' : 'xlsx'}`))),
-          editor: Array.from(fs.readFileSync(path.join(root, `output/playwright/ctox-office/rust/${officeRestartKind}.edit-save/ctox-rust.Editor.bin`))),
+          editor: Array.from(fs.readFileSync(path.join(root, `tests/fixtures/office/${officeRestartKind}/edit-save.editor.bin`))),
         }
       : null;
     // Backlog OS-C3/SYNC-02: the two-browser modes drive a second isolated

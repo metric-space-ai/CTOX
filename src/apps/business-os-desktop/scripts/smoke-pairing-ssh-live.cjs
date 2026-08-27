@@ -72,9 +72,9 @@ async function main() {
         allowPeerStatusInvite: options.allowPeerStatusInvite,
       });
       assert.notEqual(
-        rotatedInviteResult.invite.signaling_room_password,
-        initialInviteResult.invite.signaling_room_password,
-        "remote peer rotate must change the room secret",
+        rotatedInviteResult.invite.signaling_browser_token,
+        initialInviteResult.invite.signaling_browser_token,
+        "remote peer rotate must change the browser signaling credential",
       );
       const rotatedInstance = await source.rotateInvite(instance.id, JSON.stringify(rotatedInviteResult.invite));
       assert.equal(rotatedInstance.id, instance.id, "rotated invite must keep the same desktop instance id");
@@ -84,7 +84,7 @@ async function main() {
         inviteSource: rotatedInviteResult.source,
         remoteInviteCliAvailable: rotatedInviteResult.remoteInviteCliAvailable,
         syncRoomChanged: rotatedInviteResult.invite.sync_room !== initialInviteResult.invite.sync_room,
-        roomSecretChanged: true,
+        browserCredentialChanged: true,
         activePeerSessionChanged: peerSessionId(rotatedStatus) !== peerSessionId(initialStatus),
         nativePeerAvailable: Boolean(rotatedStatus.native_rxdb_peer_available),
         nativePeerRunning: Boolean(rotatedStatus.native_rxdb_peer_status?.running),
@@ -99,7 +99,11 @@ async function main() {
       await source.revokeInstance(instance.id);
       revoked = true;
       assert.equal(registry.instances.length, 0, "local pairing revoke must remove registry instance");
-      assert.equal(await secretStore.get(instance.pairing.secretRef), "", "local pairing revoke must delete room secret");
+      assert.equal(
+        await secretStore.get(instance.pairing.secretRef),
+        "",
+        "local pairing revoke must delete the browser signaling credential",
+      );
     }
 
     const evidence = {
@@ -131,7 +135,7 @@ async function main() {
     const evidenceText = JSON.stringify(evidence, null, 2);
     const allSecrets = [
       password,
-      initialInviteResult.invite.signaling_room_password,
+      initialInviteResult.invite.signaling_browser_token,
       ...(rotated ? [await secretStore.get(instance.pairing.secretRef)] : []),
     ].filter(Boolean);
     for (const secret of allSecrets) {
@@ -241,7 +245,10 @@ function inviteFromPeerStatus(status, displayName, ttlHours) {
     instance_id: String(status.instance_id || "").trim(),
     sync_room: String(status.sync_room || "").trim(),
     signaling_urls: Array.isArray(status.signaling_urls) ? status.signaling_urls : [],
-    signaling_room_password: String(status.signaling_room_password || "").trim(),
+    signaling_auth_version: String(status.signaling_auth_version || "").trim(),
+    signaling_browser_token: String(status.signaling_browser_token || "").trim(),
+    signaling_browser_token_hash: String(status.signaling_browser_token_hash || "").trim(),
+    signaling_native_token_hash: String(status.signaling_native_token_hash || "").trim(),
     transport: "webrtc",
     expires_at: expiresAt,
     data_plane: "rxdb-webrtc",
@@ -262,7 +269,11 @@ function assertPairingLaunch(launch, invite) {
   assert.equal(launch.ctoxConfig.transport, "webrtc");
   assert.equal(launch.ctoxConfig.sync_room, invite.sync_room);
   assert.deepEqual(launch.ctoxConfig.signaling_urls, invite.signaling_urls);
-  assert.equal(launch.ctoxConfig.signaling_room_password, invite.signaling_room_password);
+  assert.equal(launch.ctoxConfig.signaling_auth_version, invite.signaling_auth_version);
+  assert.equal(launch.ctoxConfig.signaling_browser_token, invite.signaling_browser_token);
+  assert.equal(launch.ctoxConfig.signaling_browser_token_hash, invite.signaling_browser_token_hash);
+  assert.equal(launch.ctoxConfig.signaling_native_token_hash, invite.signaling_native_token_hash);
+  assert.equal("signaling_room_password" in launch.ctoxConfig, false);
   assert.equal(launch.ctoxConfig.http_bridge_available, false);
 }
 

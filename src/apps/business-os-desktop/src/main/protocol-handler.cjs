@@ -61,7 +61,7 @@ async function handleDesktopProtocolUrl(rawUrl, handlers, options = {}) {
   const confirmAction = typeof options.confirmAction === "function" ? options.confirmAction : null;
   if (parsed.action === "pair") {
     // A pair link from any web page would otherwise silently import an
-    // attacker-controlled invite (writing a sync room + room password) and open
+    // attacker-controlled invite (writing a sync room + browser credential) and open
     // it. Require explicit user confirmation before touching the registry/keychain.
     if (confirmAction && !(await confirmAction({ action: "pair", payload: parsed.payload, rawUrl }))) {
       return { ok: false, declined: true, action: "pair" };

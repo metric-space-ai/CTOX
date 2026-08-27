@@ -62,7 +62,7 @@ async function main() {
     assert.equal(instance.healthSummary?.dataPlane, "rxdb-webrtc");
     assert.equal(instance.healthSummary?.httpDataProxy, false);
     assert.equal(secrets.size, 2);
-    assert.equal(JSON.stringify(registry).includes("bundled-room-secret"), false);
+    assert.equal(JSON.stringify(registry).includes("bundled-browser-token"), false);
 
     const mixedList = await sourceManager().listInstances();
     assert.deepEqual(
@@ -78,7 +78,8 @@ async function main() {
     const launch = await sourceManager().getLaunchConfig(restartedList[0]);
     assert.equal(launch.ctoxConfig.transport, "webrtc");
     assert.equal(launch.ctoxConfig.http_bridge_available, false);
-    assert.equal(launch.ctoxConfig.signaling_room_password, "bundled-room-secret");
+    assert.equal(launch.ctoxConfig.signaling_browser_token, "bundled-browser-token");
+    assert.equal("signaling_room_password" in launch.ctoxConfig, false);
     assert.equal(launch.ctoxConfig.session.capability_token, "bundled-native-capability");
     assert.ok(String(launch.ctoxConfig.sync_room || "").startsWith("ctox-business-os:"));
 
@@ -119,7 +120,10 @@ function writeBundledCtoxHelper(helperPath) {
     "  console.log(JSON.stringify({",
     "    instance_id: 'bundled-local',",
     "    sync_room: 'ctox-business-os:bundled-local:room',",
-    "    signaling_room_password: 'bundled-room-secret',",
+    "    signaling_auth_version: 'ctox-role-bound-v1',",
+    "    signaling_browser_token: 'bundled-browser-token',",
+    "    signaling_browser_token_hash: '1a094815204adb218868bc15e310f51121bcc092df43576e80b5ee7cd9663fe6',",
+    "    signaling_native_token_hash: '30b31e41ac2f60799c757854e19fdf0da40d6b1f7ca19e39e13424005e73ce8e',",
     "    signaling_urls: ['wss://signaling.ctox.dev'],",
     "    native_rxdb_peer_available: true",
     "  }));",
@@ -129,7 +133,8 @@ function writeBundledCtoxHelper(helperPath) {
     "  console.log(JSON.stringify({",
     "    type: 'ctox-business-os-invite', version: 1, display_name: 'Bundled Local',",
     "    instance_id: 'bundled-local', sync_room: 'ctox-business-os:bundled-local:room',",
-    "    signaling_room_password: 'bundled-room-secret', signaling_urls: ['wss://signaling.ctox.dev'],",
+    "    signaling_auth_version: 'ctox-role-bound-v1', signaling_browser_token: 'bundled-browser-token',",
+    "    signaling_browser_token_hash: '1a094815204adb218868bc15e310f51121bcc092df43576e80b5ee7cd9663fe6', signaling_native_token_hash: '30b31e41ac2f60799c757854e19fdf0da40d6b1f7ca19e39e13424005e73ce8e', signaling_urls: ['wss://signaling.ctox.dev'],",
     "    transport: 'webrtc', expires_at: '2099-01-01T00:00:00.000Z',",
     "    session: { authenticated: true, capability_token: 'bundled-native-capability', capability_expires_at_ms: 4070908800000, user: { id: 'desktop-owner', display_name: 'Desktop Owner', role: 'chef' } }",
     "  }));",

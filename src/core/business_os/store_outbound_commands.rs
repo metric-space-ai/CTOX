@@ -10548,3 +10548,63 @@ mod tests {
         Ok(())
     }
 }
+
+/// Markiert alle Quellen-/Adapter-Records dieser Quelle als angemeldet.
+///
+/// Der Login-Rueckweg: nach "Ich bin angemeldet" bekommt jeder business_record,
+/// der diese `source_id` beschreibt, `auth_status = session_authenticated` --
+/// in der generischen Sammlung `outbound_research_adapters` UND im Modul-
+/// Zwilling `thesen_outbound_adapters`, den die Oberflaeche wirklich liest.
+/// Damit schliesst sich zugleich die Zwei-Wahrheiten-Luecke: der Server, der
+/// bisher nur die generische Sammlung schrieb, spiegelt die Wahrheit hier in
+/// beide. Gibt die Zahl der geaenderten Records zurueck.
+pub(super) fn outbound_mark_source_authenticated(
+    root: &Path,
+    source_id: &str,
+) -> anyhow::Result<usize> {
+    let source = source_id.trim();
+    anyhow::ensure!(!source.is_empty(), "source_id is required");
+    let conn = open_store(root)?;
+    let now = now_ms() as i64;
+    let mut touched = 0usize;
+    for collection in ["outbound_research_adapters", "thesen_outbound_adapters"] {
+        let mut rows = conn.prepare(
+            "SELECT record_id, payload_json FROM business_records
+             WHERE collection = ?1 AND deleted = 0",
+        )?;
+        let matches: Vec<(String, Value)> = rows
+            .query_map([collection], |row| {
+                let id: String = row.get(0)?;
+                let raw: String = row.get(1)?;
+                Ok((id, raw))
+            })?
+            .filter_map(Result::ok)
+            .filter_map(|(id, raw)| {
+                serde_json::from_str::<Value>(&raw)
+                    .ok()
+                    .map(|doc| (id, doc))
+            })
+            .filter(|(_, doc)| {
+                let sid = doc
+                    .get("source_id")
+                    .or_else(|| doc.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                sid == source
+            })
+            .collect();
+        drop(rows);
+        for (record_id, mut doc) in matches {
+            if let Some(object) = doc.as_object_mut() {
+                object.insert(
+                    "auth_status".to_string(),
+                    Value::String("session_authenticated".to_string()),
+                );
+                object.insert("auth_authenticated_at_ms".to_string(), Value::from(now));
+            }
+            upsert_business_record(&conn, collection, &record_id, now, doc)?;
+            touched += 1;
+        }
+    }
+    Ok(touched)
+}

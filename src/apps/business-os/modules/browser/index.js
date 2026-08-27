@@ -21,6 +21,10 @@ const BROWSER_SYNC_COLLECTIONS = [
   'browser_sessions',
   'browser_tabs',
 ];
+const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
+  'outbound_research_adapters',
+  'thesen_outbound_adapters',
+]);
 
 export async function mount(ctx) {
   await ensureStyles();
@@ -55,6 +59,7 @@ export async function mount(ctx) {
     newTab: root.querySelector('[data-browser-new-tab]'),
     contextMenu: root.querySelector('[data-browser-context-menu]'),
     tabstrip: root.querySelector('[data-browser-tabstrip]'),
+    adapterCount: root.querySelector('[data-pg-count="adapters"]'),
     upload: root.querySelector('[data-browser-upload]'),
     controllerAcquire: root.querySelector('[data-browser-controller-acquire]'),
     controllerRelease: root.querySelector('[data-browser-controller-release]'),
@@ -169,6 +174,26 @@ export async function mount(ctx) {
       });
   }
 
+  // Befund aus dem UX-Review: Ist das Browser-Fenster bereits offen, feuert
+  // die Shell fuer einen erneuten App-Start `ctox-business-os-app-launch` auf
+  // das Fenster -- und niemand hoerte zu. Der Bediener klickte in der
+  // Outbound-App auf "Im CTOX-Browser anmelden", das Fenster kam nach vorn
+  // und zeigte die alte Ansicht: das Icon wirkte tot. Der Listener reicht die
+  // Launch-Args an denselben Pfad weiter, den der Erstoeffnungsfall nimmt.
+  const onAppLaunch = (event) => {
+    const args = event?.detail?.args || event?.detail || {};
+    if (!browserSessionIdFromArgs(args)) return;
+    openRequestedBrowserSession(args);
+  };
+  ctx.host?.addEventListener?.('ctox-business-os-app-launch', onAppLaunch);
+  cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', onAppLaunch));
+
+  // Die Adapter-Leiste wird ausserhalb dieses Scopes gebaut und braucht denselben
+  // Weg in eine Anmeldesitzung -- ohne diese Bruecke lief ihr Klick in einen
+  // ReferenceError und tat sichtbar nichts.
+  state.openAuthSession = openRequestedBrowserSession;
+  cleanups.push(() => { state.openAuthSession = null; });
+
   const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', (detail = {}) => {
     const sessionId = browserSessionIdFromArgs(detail);
     if (!sessionId) return;
@@ -226,11 +251,17 @@ export async function mount(ctx) {
       band: detail.band || 'all',
       filters: detail.filters || {},
     };
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
   };
   root.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
+  // Die Adapter-Lease endet mit dem Modul, sonst haelt sie die bedarfs-
+  // geladene Sammlung dauerhaft offen.
+  cleanups.push(() => {
+    for (const lease of state.adapterLeases || []) lease?.release?.();
+    state.adapterLeases = [];
+  });
   refs.sessionsImport?.addEventListener('click', () => importBrowserSessions(ctx, state, refs));
   refs.sessionsExport?.addEventListener('click', () => exportBrowserSessions(state, refs));
   refs.sessionsToggle?.addEventListener('click', () => {
@@ -823,7 +854,7 @@ export async function mount(ctx) {
         filters: grammar.filters || {},
       };
     }
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
     // Auto-reveal: the remote work surface is meaningful once a session is
     // selected (visible = hasSelection && !userCollapsed). No session -> the
@@ -2411,6 +2442,239 @@ function renderSessionList(refs, sessions, tabs, activeSession) {
 // Owned sessions plus the read-only import overlay (imported entries that are
 // not already a real owned session). Imported sessions are marked and never
 // persisted — browser sessions are a read-only projection.
+// custom: Scraping-Adapter im Browser-Modul sichtbar machen.
+//
+// Die Adapter der Recherche (outbound_research_adapters) steuern Browser-
+// Laeufe, waren in der Browser-App aber unsichtbar -- es gab nicht einmal
+// einen Reiter. Verwaltet werden sie weiterhin in der Outbound-App; hier
+// steht der Betriebszustand: wer ist aktiv, wem fehlt der Zugang, wann lief
+// der letzte Test. Die Sammlung ist bedarfsgeladen, deshalb Lease statt
+// startCollection (Muster wie im App-Store-Modul).
+async function ladeScrapingAdapter(ctx, state) {
+  if (state.adapterLadedauer) return state.adapterLadedauer;
+  state.adapterLadedauer = (async () => {
+    const rows = [];
+    const errors = [];
+    state.adapterLeases ||= [];
+    for (const collectionName of SCRAPING_ADAPTER_COLLECTIONS) {
+      try {
+        const collection = browserCollection(ctx, collectionName);
+        if (!collection) throw new Error('Sammlung ist für das Browser-Modul nicht freigegeben');
+        if (typeof ctx.sync?.leaseCollection === 'function') {
+          const lease = await ctx.sync.leaseCollection(
+            collectionName,
+            `browser:scraping-adapters:${collectionName}`,
+          );
+          if (lease) state.adapterLeases.push(lease);
+        }
+        const collectionRows = await readCollection(collection, {
+          limit: 200,
+          sort: [{ updated_at_ms: 'desc' }],
+        });
+        rows.push(...collectionRows.map((row) => ({ ...row, adapter_collection: collectionName })));
+      } catch (error) {
+        errors.push(`${collectionName}: ${String(error?.message || error)}`);
+      }
+    }
+    const deduplicated = new Map();
+    for (const row of rows) {
+      if (!row || row.is_deleted === true) continue;
+      deduplicated.set(`${row.adapter_collection}:${row.id || row.source_id}`, row);
+    }
+    state.adapters = [...deduplicated.values()];
+    state.adapterFehler = errors.length === SCRAPING_ADAPTER_COLLECTIONS.length
+      ? errors.join(' | ')
+      : '';
+    state.adapterLadedauer = null;
+  })();
+  return state.adapterLadedauer;
+}
+
+// Zwei GETRENNTE Wahrheiten pro Adapter -- der Kern der Verstaendlichkeit:
+// "Zugang" (gibt es gueltige Anmeldedaten?) und "Funktion" (lief die letzte
+// Pruefung durch?). Beide in einen Topf zu werfen hiess vorher: "Zugang fehlt"
+// stand auch da, wenn der Zugang existierte und nur die Pruefung scheiterte.
+function adapterZugang(adapter) {
+  if (adapter.requires_credential === false) {
+    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
+  }
+  // Exakte Statuslisten -- Substring-Muster matchten `required` auch in
+  // `not_required`, und jeder Adapter ohne Anmeldepflicht stand auf
+  // "Zugang fehlt" (Review-Befund; der Server schreibt `not_required`).
+  const auth = String(adapter.auth_status || '').toLowerCase();
+  if (auth === 'not_required') {
+    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
+  }
+  if (['ok', 'valid', 'ready', 'active', 'signed_in', 'authenticated',
+    'session_authenticated', 'credential_available', 'authorized'].includes(auth)) {
+    return { klasse: 'is-ok', text: t('chipAuthOk', 'Zugang OK') };
+  }
+  if (['missing', 'required', 'auth_required', 'credential_missing', 'expired',
+    'invalid', 'denied', 'logged_out'].includes(auth)) {
+    return { klasse: 'is-error', text: t('chipAuthMissing', 'Zugang fehlt') };
+  }
+  if (['auth_requested', 'browser_session_requested'].includes(auth)) {
+    return { klasse: 'is-warn', text: t('chipAuthPending', 'Anmeldung angefordert') };
+  }
+  return { klasse: 'is-neutral', text: t('chipAuthUnknown', 'Zugang ungeprüft') };
+}
+
+function adapterFunktion(adapter) {
+  if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
+  const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
+  if (/(unreachable|fail|error|blocked|captcha|timeout)/.test(status) || adapter.last_error) {
+    const grund = String(adapter.last_error || status).slice(0, 60);
+    return { klasse: 'is-warn', text: t('chipFnFail', 'Prüfung fehlgeschlagen') + (grund ? ` (${grund})` : '') };
+  }
+  if (/(ok|ready|passed|success)/.test(status)) {
+    return { klasse: 'is-ok', text: t('chipFnOk', 'Funktion geprüft') };
+  }
+  return { klasse: 'is-neutral', text: t('chipFnUntested', 'Ungeprüft') };
+}
+
+// Eine Schiene, zwei Inhalte: Sitzungen oder Scraping-Adapter, je nach Band.
+function renderLeftRail(ctx, refs, state) {
+  if (state.leftView?.band === 'adapters') {
+    renderAdapterRail(ctx, refs, state);
+    return;
+  }
+  renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+}
+
+function renderAdapterRail(ctx, refs, state) {
+  const rail = refs.sessions;
+  if (!rail) return;
+  if (refs.adapterCount) refs.adapterCount.textContent = String((state.adapters || []).length || '');
+  if (!Array.isArray(state.adapters)) {
+    rail.replaceChildren();
+    const laden = document.createElement('div');
+    laden.className = 'ctox-empty';
+    laden.textContent = t('adaptersLoading', 'Adapter werden geladen …');
+    rail.appendChild(laden);
+    ladeScrapingAdapter(ctx, state).then(() => {
+      if (state.leftView?.band === 'adapters') renderAdapterRail(ctx, refs, state);
+    });
+    return;
+  }
+  rail.replaceChildren();
+  if (state.adapterFehler) {
+    const fehler = document.createElement('div');
+    fehler.className = 'ctox-empty';
+    fehler.textContent = t('adaptersFailed', 'Adapter konnten nicht geladen werden: ') + state.adapterFehler;
+    rail.appendChild(fehler);
+    return;
+  }
+  if (!state.adapters.length) {
+    const leer = document.createElement('div');
+    leer.className = 'ctox-empty';
+    leer.textContent = t('adaptersEmpty', 'Noch keine Scraping-Adapter. Sie entstehen in der Outbound-App unter „Quellen & Zugänge“.');
+    rail.appendChild(leer);
+    return;
+  }
+  const suche = String(state.leftView?.search || '');
+  for (const adapter of state.adapters) {
+    const label = String(adapter.label || adapter.source_id || adapter.id || '');
+    if (suche && !label.toLowerCase().includes(suche)) continue;
+    const zugang = adapterZugang(adapter);
+    const funktion = adapterFunktion(adapter);
+    const karte = document.createElement('div');
+    karte.className = 'browser-adapter-card';
+    const kopf = document.createElement('div');
+    kopf.className = 'browser-adapter-head';
+    const punkt = document.createElement('span');
+    punkt.className = `browser-adapter-dot ${zugang.klasse === 'is-error' ? 'is-error' : funktion.klasse}`;
+    const name = document.createElement('strong');
+    name.textContent = label;
+    kopf.append(punkt, name);
+    const chips = document.createElement('div');
+    chips.className = 'browser-adapter-chips';
+    for (const c of [zugang, funktion]) {
+      const chip = document.createElement('span');
+      chip.className = `browser-adapter-chip ${c.klasse}`;
+      chip.textContent = c.text;
+      chips.appendChild(chip);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'browser-adapter-meta';
+    const getestet = Number(adapter.last_test?.at_ms || adapter.updated_at_ms || 0);
+    const latenz = Number(adapter.latency_ms || adapter.last_test?.latency_ms || 0);
+    meta.textContent = [
+      String(adapter.source_id || ''),
+      getestet ? new Date(getestet).toLocaleString() : '',
+      latenz ? `${latenz} ms` : '',
+    ].filter(Boolean).join(' · ');
+    const aktionen = document.createElement('div');
+    aktionen.className = 'browser-adapter-actions';
+    // "Direkt im Browser erledigen": Sitzung auf der Quelle starten, dort
+    // anmelden. source_id ist eine Domain, also traegt sie als Start-URL.
+    if (adapter.requires_credential !== false) {
+      const anmelden = document.createElement('button');
+      anmelden.type = 'button';
+      anmelden.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
+      anmelden.textContent = t('btnAdapterLogin', 'Im Browser anmelden');
+      anmelden.addEventListener('click', () => {
+        // Eine ANMELDE-Sitzung, keine gewoehnliche: nur mit
+        // purpose=web_stack_auth erkennt die Buehne den Vorgang und zeigt
+        // "Zugangsdaten einsetzen" und "Ich bin angemeldet" -- und nur der
+        // Sitzungspraefix browser_session_web_stack_auth_ gibt der Quelle ihr
+        // eigenes, dauerhaftes Browserprofil, in dem die Anmeldung bestehen
+        // bleibt. Ohne beides startete zwar ein Fenster, aber der Kreis liess
+        // sich nicht schliessen.
+        const quelle = String(adapter.source_id || '').trim();
+        const schluessel = quelle.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'quelle';
+        const url = String(adapter.url || adapter.payload?.url || (quelle ? `https://${quelle}` : ''));
+        if (!url) {
+          state.notice = t('adapterNoUrl', 'Für diese Quelle ist keine Adresse hinterlegt.');
+          state.refresh?.();
+          return;
+        }
+        const sessionId = `browser_session_web_stack_auth_${schluessel}_${Date.now()}`;
+        if (typeof state.openAuthSession !== 'function') {
+          state.notice = t('adapterLoginUnavailable', 'Anmeldesitzung ist gerade nicht verfügbar.');
+          state.refresh?.();
+          return;
+        }
+        state.openAuthSession({
+          session_id: sessionId,
+          tab_id: `browser_tab_${sessionId}`,
+          purpose: 'web_stack_auth',
+          target_url: url,
+          source_id: quelle,
+          allowed_domains: [quelle].filter(Boolean),
+          secret_name: String(adapter.credential_secret_name || ''),
+        });
+        ctx.notifications?.show?.({
+          type: 'info',
+          title: 'Browser',
+          message: t('adapterLoginStarted', 'Anmeldesitzung geöffnet — dort anmelden und "Ich bin angemeldet" bestätigen.'),
+        });
+      });
+      aktionen.appendChild(anmelden);
+    }
+    if (typeof ctx.openDesktopApp === 'function') {
+      const pruefen = document.createElement('button');
+      pruefen.type = 'button';
+      pruefen.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
+      pruefen.textContent = t('btnAdapterCheck', 'Prüfen (Outbound)');
+      pruefen.addEventListener('click', () => ctx.openDesktopApp('thesen-outbound'));
+      aktionen.appendChild(pruefen);
+    }
+    karte.append(kopf, chips, meta);
+    if (aktionen.childElementCount) karte.appendChild(aktionen);
+    if (adapter.last_error) {
+      const fehlerzeile = document.createElement('div');
+      fehlerzeile.className = 'browser-adapter-error';
+      fehlerzeile.textContent = String(adapter.last_error).slice(0, 160);
+      karte.appendChild(fehlerzeile);
+    }
+    rail.appendChild(karte);
+  }
+  const hinweis = document.createElement('div');
+  hinweis.className = 'browser-adapter-hint';
+  hinweis.textContent = t('adaptersManagedHint', 'Verwaltet in der Outbound-App („Quellen & Zugänge“).');
+  rail.appendChild(hinweis);
+}
+
 function sessionRenderList(state) {
   const owned = Array.isArray(state?.visibleSessions) ? state.visibleSessions : [];
   const ownedIds = new Set(owned.map((session) => session.id));
@@ -2717,7 +2981,7 @@ function importBrowserSessions(ctx, state, refs) {
       return;
     }
     state.importedSessions = imported;
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), ctx);
+    renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
     ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: `${imported.length} Sitzungen geladen (nur lokal).` });
   });
@@ -3465,6 +3729,7 @@ function escapeHtml(value) {
 }
 
 export const __browserTestHooks = {
+  SCRAPING_ADAPTER_COLLECTIONS,
   normalizeUrl,
   browserSessionIdFromArgs,
   formatBytes,

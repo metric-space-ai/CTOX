@@ -36,12 +36,14 @@ manager behavior.
   including `ctox-rxdb-browser-v1` and `ctox-file-chunks-v1`.
 - Native signaling metadata: `client=ctox-business-os-native`,
   `role=ctox_instance`, `instance_id`, `protocol=ctox-rxdb-protocol-v1`, a
-  short-lived room-password-derived token, and repeated `cap` values including
-  `ctox-rxdb-native-v1` and `ctox-file-chunks-v1`.
-- Control-plane-capable browser and native peers both include the same
-  room-password-derived token plus bounded `token_iat`/`token_exp` values. The
-  Signaling server rejects missing or mismatched `ctox-rxdb-protocol-v1`
-  metadata before peers can join Business OS rooms.
+  native-only random credential from the CTOX secret store, and repeated `cap`
+  values including `ctox-rxdb-native-v1` and `ctox-file-chunks-v1`.
+- Browser and native peers use distinct role-bound credentials. Both carry
+  `auth_version=ctox-role-bound-v1`, the two SHA-256 commitments, and bounded
+  `token_iat`/`token_exp` values. The browser payload contains only its own
+  credential; it never contains the room password or native credential. The
+  Signaling server rejects missing or mismatched role/protocol metadata before
+  peers can join Business OS rooms.
 - ICE configuration: optional `ice_servers` / `iceServers` from the launch
   config, passed into the native WebRTC peer setup
 
@@ -52,9 +54,9 @@ receive its launch-only session and sync configuration through
 `window.CTOX_BUSINESS_OS_SESSION` and `window.CTOX_BUSINESS_OS_CONFIG` injected
 into `index.html`. In web-deploy mode, the same WebRTC contract is read from a
 paired browser config instead: URL parameter `ctox_config` (base64url JSON),
-explicit `sync_room` + `signaling_url` URL parameters, `instance_id` +
-`room_password` + `signaling_url`, or the persisted
-`ctox.businessOs.pairingConfig` localStorage entry. Collection sync starts
+explicit `sync_room` + `signaling_url` plus the browser-role token and both
+commitments, or the persisted `ctox.businessOs.pairingConfig` localStorage
+entry on local/file surfaces. Collection sync starts
 WebRTC replication whenever the contract has `transport: "webrtc"`, a
 resolved `sync_room`, and at least one signaling URL. The one-time
 `native_rxdb_peer_available` status bit is diagnostic only and does not disable
@@ -62,10 +64,10 @@ WebRTC startup in the browser. There is no browser-side `/rxdb/pull` or
 `/rxdb/push` transport fallback.
 
 When a pairing config arrives through URL parameters, Business OS persists the
-normalized config and immediately removes `ctox_config`, room password, and
-signaling parameters from the address bar with `history.replaceState`. This
-keeps the launch URL shareable only for the initial handoff and avoids leaving
-the room password in browser history after the WebRTC/RxDB contract is loaded.
+normalized config and immediately removes `ctox_config`, browser credentials,
+commitments, legacy room-password aliases, and signaling parameters from the
+address bar with `history.replaceState`. This keeps the launch URL shareable
+only for the initial handoff and avoids leaving credentials in browser history.
 
 The supported deployment shapes share this same data plane:
 
@@ -73,10 +75,10 @@ The supported deployment shapes share this same data plane:
   inject the launch context directly.
 - CTOX behind a managed `*.ctox.dev` subdomain uses that subdomain for hosting
   and launch context, but the collections still replicate through WebRTC.
-- CTOX behind NAT or on a local machine does not need an inbound IP path. The
-  browser receives a pairing config with signaling URL, instance id, and the
-  room password; both peers derive the same non-guessable room and connect
-  outbound to signaling.
+- CTOX behind NAT or on a local machine does not need an inbound IP path. CTOX
+  derives the non-guessable room server-side; the browser receives that room,
+  its browser-only signaling credential and the two commitments, then both
+  peers connect outbound to signaling.
 
 If CTOX itself cannot host the browser shell, `ctox.dev` or the desktop app may
 serve the same static Business OS assets and pass `ctox_config` into the URL.

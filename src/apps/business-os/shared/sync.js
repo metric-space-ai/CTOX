@@ -454,7 +454,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260822-await-peer-v187');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260827-role-bound-schema-v188');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1432,7 +1432,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260822-await-peer-v187');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260827-role-bound-schema-v188');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -2976,6 +2976,7 @@ export const __ctoxSyncTestHooks = {
   resetRoomCircuitState,
   collectionForReplication,
   projectDesktopIconForReplication,
+  signalingUrlWithBrowserMetadata,
 };
 
 function replicationIoMessageFor(code) {
@@ -3097,59 +3098,86 @@ function firstSignalingUrl(config) {
 }
 
 async function signalingUrlWithBrowserMetadata(rawUrl, config) {
+  let url;
   try {
-    const url = new URL(rawUrl, window.location.href);
-    if (url.hostname === 'signaling.ctox.dev' && ['/', '/signal'].includes(url.pathname)) {
-      url.pathname = '/v2';
-    }
-    const preserved = [...url.searchParams.entries()]
-      .filter(([key]) => ![
-        'client', 'role', 'instance_id', 'protocol', 'cap', 'token', 'token_iat', 'token_exp',
-        'auth_version', 'browser_token_hash', 'native_token_hash',
-      ].includes(key));
-    url.search = '';
-    for (const [key, value] of preserved) url.searchParams.append(key, value);
-    url.searchParams.set('client', 'ctox-business-os-browser');
-    url.searchParams.set('role', 'browser');
-    const instanceId = String(config?.instance_id || config?.instanceId || '').trim()
-      || String(config?.sync_room || '').replace(/^ctox-business-os:/, '').split(':')[0];
-    if (instanceId) url.searchParams.set('instance_id', instanceId);
-    url.searchParams.set('protocol', CTOX_RXDB_PROTOCOL);
-    const token = String(config?.signaling_browser_token || config?.signalingBrowserToken || '').trim()
-      || await signalingTokenFromRoomPassword(config?.signaling_room_password || config?.room_password || '');
-    if (token) {
-      const issuedAt = Math.floor(Date.now() / 1000);
-      url.searchParams.set('token', token);
-      url.searchParams.set('token_iat', String(issuedAt));
-      url.searchParams.set('token_exp', String(issuedAt + 24 * 60 * 60));
-    }
-    const authVersion = String(config?.signaling_auth_version || config?.signalingAuthVersion || '').trim();
-    const browserTokenHash = String(config?.signaling_browser_token_hash || config?.signalingBrowserTokenHash || '').trim();
-    const nativeTokenHash = String(config?.signaling_native_token_hash || config?.signalingNativeTokenHash || '').trim();
-    if (authVersion && browserTokenHash && nativeTokenHash) {
-      url.searchParams.set('auth_version', authVersion);
-      url.searchParams.set('browser_token_hash', browserTokenHash);
-      url.searchParams.set('native_token_hash', nativeTokenHash);
-    }
-    for (const capability of CTOX_BROWSER_CAPABILITIES) {
-      url.searchParams.append('cap', capability);
-    }
-    return url.toString();
+    url = new URL(rawUrl, globalThis.window?.location?.href || 'http://localhost/');
   } catch {
-    return rawUrl;
+    throw new Error('Business OS WebRTC sync requires a valid signaling URL');
   }
+  if (!['ws:', 'wss:'].includes(url.protocol)) {
+    throw new Error('Business OS WebRTC sync requires a ws(s) signaling URL');
+  }
+  const loopbackHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname.toLowerCase());
+  if (url.protocol !== 'wss:' && !loopbackHost) {
+    throw new Error('Business OS WebRTC sync requires TLS for non-loopback signaling');
+  }
+  if (url.username || url.password) {
+    throw new Error('Business OS WebRTC sync signaling URLs must not contain userinfo credentials');
+  }
+  if (url.hostname === 'signaling.ctox.dev' && ['/', '/signal'].includes(url.pathname)) {
+    url.pathname = '/v2';
+  }
+  const preserved = [...url.searchParams.entries()]
+    .filter(([key]) => ![
+      'client', 'role', 'instance_id', 'protocol', 'cap', 'token', 'token_iat', 'token_exp',
+      'auth_version', 'browser_token_hash', 'native_token_hash',
+      'signaling_browser_token', 'signalingBrowserToken',
+      'signaling_room_password', 'signalingRoomPassword', 'room_password', 'roomPassword',
+    ].includes(key));
+  url.search = '';
+  for (const [key, value] of preserved) url.searchParams.append(key, value);
+  url.searchParams.set('client', 'ctox-business-os-browser');
+  url.searchParams.set('role', 'browser');
+  const instanceId = String(config?.instance_id || config?.instanceId || '').trim()
+    || String(config?.sync_room || '').replace(/^ctox-business-os:/, '').split(':')[0];
+  if (instanceId) url.searchParams.set('instance_id', instanceId);
+  url.searchParams.set('protocol', CTOX_RXDB_PROTOCOL);
+
+  // Browser signaling is a distinct role-bound credential. Never reconstruct
+  // it from the native room password: that would re-expand a leaked browser
+  // bootstrap into the native peer's long-lived authority.
+  const token = String(config?.signaling_browser_token || config?.signalingBrowserToken || '').trim();
+  if (!token) {
+    throw new Error('Business OS WebRTC sync requires an explicit browser signaling token');
+  }
+  const authVersion = String(config?.signaling_auth_version || config?.signalingAuthVersion || '').trim();
+  const browserTokenHash = String(config?.signaling_browser_token_hash || config?.signalingBrowserTokenHash || '').trim();
+  const nativeTokenHash = String(config?.signaling_native_token_hash || config?.signalingNativeTokenHash || '').trim();
+  if (
+    authVersion !== 'ctox-role-bound-v1'
+    || !/^[a-f0-9]{64}$/.test(browserTokenHash)
+    || !/^[a-f0-9]{64}$/.test(nativeTokenHash)
+    || browserTokenHash === nativeTokenHash
+  ) {
+    throw new Error('Business OS WebRTC sync requires valid role-bound signaling commitments');
+  }
+  const actualBrowserTokenHash = await sha256Hex(token);
+  if (actualBrowserTokenHash !== browserTokenHash) {
+    throw new Error('Business OS WebRTC sync browser signaling token does not match its commitment');
+  }
+
+  const issuedAt = Math.floor(Date.now() / 1000);
+  url.searchParams.set('token', token);
+  url.searchParams.set('token_iat', String(issuedAt));
+  url.searchParams.set('token_exp', String(issuedAt + 24 * 60 * 60));
+  url.searchParams.set('auth_version', authVersion);
+  url.searchParams.set('browser_token_hash', browserTokenHash);
+  url.searchParams.set('native_token_hash', nativeTokenHash);
+  for (const capability of CTOX_BROWSER_CAPABILITIES) {
+    url.searchParams.append('cap', capability);
+  }
+  return url.toString();
 }
 
-async function signalingTokenFromRoomPassword(roomPassword) {
-  const password = String(roomPassword || '').trim();
-  if (!password) return '';
+async function sha256Hex(value) {
   const cryptoApi = globalThis.crypto;
   const subtle = cryptoApi?.subtle;
-  if (!subtle || typeof TextEncoder !== 'function') return '';
-  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(password));
+  if (!subtle || typeof TextEncoder !== 'function') {
+    throw new Error('Business OS WebRTC sync requires Web Crypto for signaling credential verification');
+  }
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(value));
   const bytes = Array.from(new Uint8Array(digest));
-  const base64 = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  return base64.slice(0, 32);
+  return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 // SYNC-30: fetch a fresh ICE server list (incl. newly-minted ephemeral TURN

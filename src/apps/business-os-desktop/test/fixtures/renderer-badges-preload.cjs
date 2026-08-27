@@ -93,7 +93,8 @@ contextBridge.exposeInMainWorld("ctoxDesktop", {
       displayName: options.displayName,
       syncRoom: options.syncRoom,
       signalingUrl: options.signalingUrl,
-      roomSecretLength: String(options.roomSecret || "").length,
+      browserTokenLength: String(options.browserToken || "").length,
+      nativeTokenHashLength: String(options.nativeTokenHash || "").length,
     });
     return { ok: true };
   },

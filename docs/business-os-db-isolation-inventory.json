@@ -81,7 +81,8 @@
         "browser_sessions",
         "browser_tabs",
         "business_commands",
-        "ctox_queue_tasks"
+        "ctox_queue_tasks",
+        "thesen_outbound_adapters"
       ],
       "notes": "Scoped system exception: Browser resolves browser_sessions, browser_tabs, browser_frames, browser_input_events, business_commands and ctox_queue_tasks only through the scoped system facade. Browser/Rust dynamic-app smoke denies the registered foreign business_module_catalog collection through collection(), property, raw and collections access and checks the permission/capability facade contract."
     },
