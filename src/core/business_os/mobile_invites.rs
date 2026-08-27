@@ -28,6 +28,8 @@ fn ensure_table(conn: &rusqlite::Connection) -> anyhow::Result<()> {
             created_at_ms INTEGER NOT NULL,
             expires_at_ms INTEGER NOT NULL,
             revoked_at_ms INTEGER,
+            redeemed_at_ms INTEGER,
+            display_name TEXT NOT NULL DEFAULT 'Workjet Gerät',
             device_pairing_id TEXT,
             device_id TEXT,
             proof_key_thumbprint TEXT,
@@ -39,6 +41,8 @@ fn ensure_table(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         );",
     )?;
     for (column, definition) in [
+        ("redeemed_at_ms", "INTEGER"),
+        ("display_name", "TEXT NOT NULL DEFAULT 'Workjet Gerät'"),
         ("device_pairing_id", "TEXT"),
         ("device_id", "TEXT"),
         ("proof_key_thumbprint", "TEXT"),
@@ -170,14 +174,13 @@ pub fn create(
     let invite_id = random_invite_id()?;
     let invite_id_hash = invite_hash(&invite_id);
     let user_id = format!("workjet-mobile-invite-{}", &invite_id_hash[..24]);
-    let (capability_token, capability_expires_at_ms) =
-        super::store::issue_business_os_capability_token_for_managed_user_until_with_binding(
+    let (_capability_token, capability_expires_at_ms) =
+        super::store::issue_business_os_capability_token_for_managed_user_with_binding(
             root,
             &user_id,
             "Workjet Mobile",
             "user",
             created_at_ms,
-            expires_at_ms,
             device_binding,
         )?;
     let config = super::store::sync_config(root)?;
@@ -212,13 +215,14 @@ pub fn create(
         tx.execute(
             "INSERT INTO business_mobile_invites
                 (invite_id_hash, user_id, created_at_ms, expires_at_ms, revoked_at_ms,
-                 device_pairing_id, device_id, proof_key_thumbprint)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
+                 redeemed_at_ms, display_name, device_pairing_id, device_id, proof_key_thumbprint)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8)",
             params![
                 invite_id_hash,
                 user_id,
                 created_at_ms,
                 expires_at_ms,
+                display_name,
                 device_binding.map(|binding| binding.device_pairing_id.as_str()),
                 device_binding.map(|binding| binding.device_id.as_str()),
                 device_binding.map(|binding| binding.proof_key_thumbprint.as_str()),
@@ -253,7 +257,9 @@ pub fn create(
         "session": {
             "authenticated": true,
             "source": "mobile_invite",
-            "capability_token": capability_token,
+            // Compact one-time WebRTC bootstrap secret. CTOX persists only its
+            // SHA-256 hash and binds it to the native device proof on first use.
+            "capability_token": invite_id.clone(),
             "capability_expires_at_ms": capability_expires_at_ms,
             "user": {
                 "id": user_id,
@@ -274,6 +280,262 @@ pub fn create(
         "inviteId": invite_id,
         "invite": invite,
         "expiresAt": expires_at
+    }))
+}
+
+/// Bind a one-time QR invite to the first P-256 key that proves possession on
+/// the native WebRTC channel. Once redeemed, the invite expiry no longer
+/// controls reconnects; revocation and the signed capability epoch do. This is
+/// deliberately native/store local: Cloudflare signaling never sees or stores
+/// the durable Device-to-Instance edge.
+pub(super) fn authorize_or_bind_device_proof(
+    root: &Path,
+    user_id: &str,
+    proof_key_thumbprint: &str,
+    at_ms: i64,
+) -> bool {
+    let Ok(binding) = device_binding(
+        Some(proof_key_thumbprint),
+        Some(proof_key_thumbprint),
+        Some(proof_key_thumbprint),
+    )
+    .and_then(|value| value.context("device proof binding is missing")) else {
+        return false;
+    };
+    let Ok(mut conn) = super::store::open_store(root) else {
+        return false;
+    };
+    if ensure_table(&conn).is_err() {
+        return false;
+    }
+    let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) else {
+        return false;
+    };
+    let row = tx
+        .query_row(
+            "SELECT expires_at_ms, revoked_at_ms, proof_key_thumbprint
+             FROM business_mobile_invites
+             WHERE user_id=?1",
+            params![user_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional();
+    let Ok(Some((expires_at_ms, revoked_at_ms, stored_thumbprint))) = row else {
+        return false;
+    };
+    if revoked_at_ms.is_some() {
+        return false;
+    }
+    if let Some(stored_thumbprint) = stored_thumbprint {
+        if stored_thumbprint != binding.proof_key_thumbprint {
+            return false;
+        }
+        return tx.commit().is_ok();
+    }
+    if at_ms >= expires_at_ms {
+        return false;
+    }
+    let prior_user_id = tx
+        .query_row(
+            "SELECT user_id FROM business_mobile_invites
+             WHERE device_pairing_id=?1
+               AND user_id<>?2
+               AND revoked_at_ms IS NULL",
+            params![binding.device_pairing_id, user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional();
+    let Ok(prior_user_id) = prior_user_id else {
+        return false;
+    };
+    if let Some(prior_user_id) = prior_user_id {
+        if tx
+            .execute(
+                "UPDATE business_mobile_invites
+                 SET revoked_at_ms=?2
+                 WHERE user_id=?1 AND revoked_at_ms IS NULL",
+                params![prior_user_id, at_ms],
+            )
+            .is_err()
+            || tx
+                .execute(
+                    "UPDATE business_users
+                     SET active=0, capability_epoch=capability_epoch+1, updated_at_ms=?2
+                     WHERE user_id=?1 AND active=1",
+                    params![prior_user_id, at_ms],
+                )
+                .is_err()
+        {
+            return false;
+        }
+    }
+    let Ok(updated) = tx.execute(
+        "UPDATE business_mobile_invites
+         SET redeemed_at_ms=?2,
+             device_pairing_id=?3,
+             device_id=?4,
+             proof_key_thumbprint=?5
+         WHERE user_id=?1
+           AND revoked_at_ms IS NULL
+           AND proof_key_thumbprint IS NULL
+           AND expires_at_ms>?2",
+        params![
+            user_id,
+            at_ms,
+            binding.device_pairing_id,
+            binding.device_id,
+            binding.proof_key_thumbprint,
+        ],
+    ) else {
+        return false;
+    };
+    updated == 1 && tx.commit().is_ok()
+}
+
+pub(super) fn mobile_invite_requires_device_proof(root: &Path, user_id: &str) -> bool {
+    let Ok(conn) = super::store::open_store(root) else {
+        return false;
+    };
+    if ensure_table(&conn).is_err() {
+        return false;
+    }
+    conn.query_row(
+        "SELECT 1 FROM business_mobile_invites WHERE user_id=?1 AND revoked_at_ms IS NULL",
+        params![user_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+pub(super) fn is_active_paired_device_user(root: &Path, user_id: &str) -> bool {
+    let Ok(conn) = super::store::open_store(root) else {
+        return false;
+    };
+    if ensure_table(&conn).is_err() {
+        return false;
+    }
+    conn.query_row(
+        "SELECT 1 FROM business_mobile_invites
+         WHERE user_id=?1 AND revoked_at_ms IS NULL AND proof_key_thumbprint IS NOT NULL",
+        params![user_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+pub(super) fn claims_for_webrtc_invite_secret(
+    root: &Path,
+    invite_secret: &str,
+    at_ms: i64,
+) -> Option<super::capability::CapabilityClaims> {
+    let invite_secret = invite_secret.trim();
+    if invite_secret.len() != 43
+        || !invite_secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    let conn = super::store::open_store(root).ok()?;
+    ensure_table(&conn).ok()?;
+    type InviteClaimsRow = (
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<InviteClaimsRow> = conn
+        .query_row(
+            "SELECT i.user_id, u.role, u.capability_epoch,
+                    i.created_at_ms, i.expires_at_ms,
+                    i.device_pairing_id, i.device_id, i.proof_key_thumbprint
+             FROM business_mobile_invites i
+             JOIN business_users u ON u.user_id=i.user_id
+             WHERE i.invite_id_hash=?1
+               AND i.revoked_at_ms IS NULL
+               AND u.active=1",
+            params![invite_hash(invite_secret)],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()?;
+    let (user_id, role, actor_epoch, issued_at_ms, expires_at_ms, pairing, device, proof) = row?;
+    let device_binding = match (pairing, device, proof) {
+        (None, None, None) => {
+            if expires_at_ms <= at_ms {
+                return None;
+            }
+            None
+        }
+        (Some(device_pairing_id), Some(device_id), Some(proof_key_thumbprint)) => {
+            Some(super::capability::CapabilityDeviceBinding {
+                device_pairing_id,
+                device_id,
+                proof_key_thumbprint,
+            })
+        }
+        _ => return None,
+    };
+    Some(super::capability::CapabilityClaims {
+        user_id,
+        role,
+        actor_epoch,
+        issued_at_ms,
+        expires_at_ms,
+        device_binding,
+    })
+}
+
+pub fn list_device_bindings(root: &Path) -> anyhow::Result<Value> {
+    let conn = super::store::open_store(root)?;
+    ensure_table(&conn)?;
+    let mut statement = conn.prepare(
+        "SELECT device_pairing_id, device_id, display_name, created_at_ms, redeemed_at_ms
+         FROM business_mobile_invites
+         WHERE revoked_at_ms IS NULL AND proof_key_thumbprint IS NOT NULL
+         ORDER BY COALESCE(redeemed_at_ms, created_at_ms) DESC",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "deviceId": row.get::<_, String>(1)?,
+                "displayName": row.get::<_, String>(2)?,
+                "createdAtMs": row.get::<_, i64>(3)?,
+                "pairedAtMs": row.get::<_, Option<i64>>(4)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(json!({
+        "schema": "ctox.workjet-device-bindings.v1",
+        "bindings": rows,
     }))
 }
 
@@ -350,7 +612,7 @@ pub(super) fn is_active_device_binding(
     root: &Path,
     user_id: &str,
     binding: &super::capability::CapabilityDeviceBinding,
-    at_ms: i64,
+    _at_ms: i64,
 ) -> bool {
     let Ok(conn) = super::store::open_store(root) else {
         return false;
@@ -365,14 +627,12 @@ pub(super) fn is_active_device_binding(
            AND device_pairing_id=?2
            AND device_id=?3
            AND proof_key_thumbprint=?4
-           AND revoked_at_ms IS NULL
-           AND expires_at_ms>?5",
+           AND revoked_at_ms IS NULL",
         params![
             user_id,
             binding.device_pairing_id,
             binding.device_id,
             binding.proof_key_thumbprint,
-            at_ms,
         ],
         |_| Ok(()),
     )
@@ -384,7 +644,10 @@ pub(super) fn is_active_device_binding(
 
 #[cfg(test)]
 mod tests {
-    use super::{create, device_binding, revoke, revoke_by_device_pairing_id};
+    use super::{
+        authorize_or_bind_device_proof, create, device_binding, list_device_bindings, revoke,
+        revoke_by_device_pairing_id,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -395,10 +658,15 @@ mod tests {
         let token = invite["session"]["capability_token"]
             .as_str()
             .expect("capability token");
+        assert_eq!(token.len(), 43, "QR bootstrap secret must stay compact");
+        assert!(!token.contains('.'));
         assert_eq!(invite["data_plane"], "rxdb-webrtc");
         assert_eq!(invite["http_bridge_available"], false);
         assert_eq!(invite["session"]["user"]["role"], "user");
-        assert!(super::super::store::verify_capability_role(root.path(), token).is_some());
+        assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), token).is_some()
+        );
 
         let invite_id = created["inviteId"].as_str().expect("invite id");
         assert_eq!(
@@ -409,7 +677,9 @@ mod tests {
             revoke(root.path(), invite_id)?,
             serde_json::json!({ "revoked": true })
         );
-        assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), token).is_none()
+        );
         assert_eq!(
             revoke(root.path(), "unknown-invite")?,
             serde_json::json!({ "revoked": true })
@@ -422,6 +692,133 @@ mod tests {
         let root = tempdir().unwrap();
         assert!(create(root.path(), 59, None, None).is_err());
         assert!(create(root.path(), 3_601, None, None).is_err());
+    }
+
+    #[test]
+    fn qr_invite_binds_only_on_native_proof_and_survives_qr_expiry() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created = create(root.path(), 300, Some("Fold 8"), None)?;
+        let invite = &created["invite"];
+        let user_id = invite["session"]["user"]["id"].as_str().expect("user id");
+        let token = invite["session"]["capability_token"]
+            .as_str()
+            .expect("capability token");
+        let thumbprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+        // The QR grant is never a usable HTTP bearer, even before redemption.
+        assert!(super::super::store::verify_unbound_capability_actor(root.path(), token).is_none());
+        assert!(authorize_or_bind_device_proof(
+            root.path(),
+            user_id,
+            thumbprint,
+            super::now_ms(),
+        ));
+
+        let conn = super::super::store::open_store(root.path())?;
+        conn.execute(
+            "UPDATE business_mobile_invites SET expires_at_ms=0 WHERE user_id=?1",
+            rusqlite::params![user_id],
+        )?;
+        drop(conn);
+
+        // The short QR lifetime limits first use only. A bound device reconnects
+        // with the same key until the durable Device-to-Instance edge or actor
+        // capability epoch is revoked.
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), token).is_some()
+        );
+        assert!(super::super::store::verify_unbound_capability_actor(root.path(), token).is_none());
+        assert!(authorize_or_bind_device_proof(
+            root.path(),
+            user_id,
+            thumbprint,
+            super::now_ms(),
+        ));
+        assert!(!authorize_or_bind_device_proof(
+            root.path(),
+            user_id,
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            super::now_ms(),
+        ));
+        assert_eq!(
+            list_device_bindings(root.path())?["bindings"][0]["displayName"],
+            "Fold 8"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expired_unbound_qr_invite_cannot_create_a_device_edge() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created = create(root.path(), 300, None, None)?;
+        let user_id = created["invite"]["session"]["user"]["id"]
+            .as_str()
+            .expect("user id");
+        let conn = super::super::store::open_store(root.path())?;
+        conn.execute(
+            "UPDATE business_mobile_invites SET expires_at_ms=0 WHERE user_id=?1",
+            rusqlite::params![user_id],
+        )?;
+        drop(conn);
+        assert!(!authorize_or_bind_device_proof(
+            root.path(),
+            user_id,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            super::now_ms(),
+        ));
+        assert_eq!(
+            list_device_bindings(root.path())?["bindings"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repairing_the_same_device_atomically_rotates_its_instance_edge() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let thumbprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let first = create(root.path(), 300, Some("Fold 8"), None)?;
+        let first_user_id = first["invite"]["session"]["user"]["id"]
+            .as_str()
+            .expect("first user id");
+        let first_secret = first["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("first secret");
+        assert!(authorize_or_bind_device_proof(
+            root.path(),
+            first_user_id,
+            thumbprint,
+            super::now_ms(),
+        ));
+
+        let second = create(root.path(), 300, Some("Fold 8 re-paired"), None)?;
+        let second_user_id = second["invite"]["session"]["user"]["id"]
+            .as_str()
+            .expect("second user id");
+        let second_secret = second["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("second secret");
+        assert!(authorize_or_bind_device_proof(
+            root.path(),
+            second_user_id,
+            thumbprint,
+            super::now_ms(),
+        ));
+
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), first_secret)
+                .is_none()
+        );
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), second_secret)
+                .is_some()
+        );
+        let bindings = list_device_bindings(root.path())?;
+        assert_eq!(bindings["bindings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(bindings["bindings"][0]["displayName"], "Fold 8 re-paired");
+        Ok(())
     }
 
     #[test]
@@ -442,18 +839,28 @@ mod tests {
         let token = created["invite"]["session"]["capability_token"]
             .as_str()
             .expect("token");
-        assert!(super::super::store::verify_capability_role(root.path(), token).is_some());
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), token).is_some()
+        );
         let rotated = create(root.path(), 300, None, Some(&binding))?;
         let rotated_token = rotated["invite"]["session"]["capability_token"]
             .as_str()
             .expect("rotated token");
-        assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
-        assert!(super::super::store::verify_capability_role(root.path(), rotated_token).is_some());
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), token).is_none()
+        );
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), rotated_token)
+                .is_some()
+        );
         assert_eq!(
             revoke_by_device_pairing_id(root.path(), "pairing-1")?,
             serde_json::json!({ "revoked": true })
         );
-        assert!(super::super::store::verify_capability_role(root.path(), rotated_token).is_none());
+        assert!(
+            super::super::store::verified_webrtc_capability_claims(root.path(), rotated_token)
+                .is_none()
+        );
         Ok(())
     }
 

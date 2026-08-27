@@ -73,6 +73,8 @@ const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 const DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 export const CTOX_BROWSER_LIVE_CAPABILITY = 'ctox-browser-live-v1';
 const CTOX_BROWSER_LIVE_CHANNEL = 'ctox-browser-live-v1';
+export const CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY = 'ctox-workjet-device-control-v1';
+const CTOX_WORKJET_DEVICE_CONTROL_CHANNEL = 'ctox.workjet.device.v1';
 
 const BROWSER_CAPABILITIES = [
   'ctox-rxdb-browser-v1',
@@ -87,6 +89,7 @@ const BROWSER_CAPABILITIES = [
   CTOX_PRESENCE_CAPABILITY,
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
   CTOX_BROWSER_LIVE_CAPABILITY,
+  CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY,
 ];
 
 // Presence is optional on the wire: a native peer that predates
@@ -521,6 +524,7 @@ class SharedRoomPeer {
     // dedicated SCTP stream in the initial SDP. Live input/JPEG traffic then
     // cannot be stranded behind collection replication on the rxdb channel.
     this.peer.openAuxChannel('', CTOX_BROWSER_LIVE_CHANNEL, { ordered: true });
+    this.peer.openAuxChannel('', CTOX_WORKJET_DEVICE_CONTROL_CHANNEL, { ordered: true });
     this.demandTransport.attach(this.peer);
     this.peer.on('error', (event) => this.fanout('error', event.detail || event));
     this.peer.on('transport-status', (event) => this.fanout('transport-status', event.detail || event));
@@ -1081,6 +1085,15 @@ class CtoxWebRtcReplicationState {
       return this.peer.requestAuxiliary(
         negotiated.peerId,
         CTOX_BROWSER_LIVE_CHANNEL,
+        String(method || ''),
+        [params],
+        timeoutMs,
+      );
+    }
+    if (String(method || '') === 'ctox.workjet.device.v1') {
+      return this.peer.requestAuxiliary(
+        negotiated.peerId,
+        CTOX_WORKJET_DEVICE_CONTROL_CHANNEL,
         String(method || ''),
         [params],
         timeoutMs,

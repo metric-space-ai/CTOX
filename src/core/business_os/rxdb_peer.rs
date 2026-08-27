@@ -81,6 +81,9 @@ pub(super) use super::rxdb_peer_projections::{
 use super::rxdb_peer_projections::{
     chat_tracking_batch_document_lookup_count, reset_chat_tracking_batch_document_lookups,
 };
+use super::rxdb_peer_workjet_devices::{
+    handle_workjet_device_webrtc_request, WORKJET_DEVICE_WEBRTC_METHOD,
+};
 use super::store;
 use crate::command_lifecycle::generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
 use crate::mission::channels;
@@ -728,16 +731,49 @@ fn validate_device_bound_peer_session(
         // still deny protected data when no capability is captured.
         return Accept;
     };
-    let Some(claims) = store::verified_capability_claims(root, token) else {
+    let Some(claims) = store::verified_webrtc_capability_claims(root, token) else {
         return Reject;
     };
-    let Some(binding) = claims.device_binding else {
-        return Accept;
+    let mobile_invite_requires_proof =
+        super::mobile_invites::mobile_invite_requires_device_proof(root, &claims.user_id);
+    let Some(binding) = claims.device_binding.as_ref() else {
+        if mobile_invite_requires_proof {
+            // First use of a QR invite must complete the native nonce proof.
+            // The browser-initiated probe is answered only far enough for the
+            // native peer to issue that nonce; it may not capture the token.
+            if expected_nonce.is_none() {
+                return Defer;
+            }
+        } else {
+            return Accept;
+        }
+        return validate_and_bind_mobile_device_proof(
+            root,
+            &claims.user_id,
+            protocol,
+            expected_nonce,
+            None,
+        );
     };
+    validate_and_bind_mobile_device_proof(
+        root,
+        &claims.user_id,
+        protocol,
+        expected_nonce,
+        Some(&binding.proof_key_thumbprint),
+    )
+}
+
+fn validate_and_bind_mobile_device_proof(
+    root: &Path,
+    user_id: &str,
+    protocol: &Value,
+    expected_nonce: Option<&str>,
+    expected_thumbprint: Option<&str>,
+) -> WebRTCPeerSessionValidation {
+    use WebRTCPeerSessionValidation::{Accept, Defer, Reject};
+
     let Some(expected_nonce) = expected_nonce else {
-        // The browser-initiated passive probe cannot prove possession of a
-        // nonce the native side has not issued yet. Answer it, but do not let
-        // the replication layer capture the bound token.
         return Defer;
     };
     let Some(proof) = protocol.pointer("/peerSession/deviceProof") else {
@@ -754,7 +790,7 @@ fn validate_device_bound_peer_session(
     let Some((public_key, thumbprint)) = p256_public_key_and_thumbprint(jwk) else {
         return Reject;
     };
-    if thumbprint != binding.proof_key_thumbprint {
+    if expected_thumbprint.is_some_and(|expected| expected != thumbprint.as_str()) {
         return Reject;
     }
     let Some(signature) = proof
@@ -777,6 +813,14 @@ fn validate_device_bound_peer_session(
         .verify(expected_nonce.as_bytes(), &signature)
         .is_err()
     {
+        return Reject;
+    }
+    if !super::mobile_invites::authorize_or_bind_device_proof(
+        root,
+        user_id,
+        &thumbprint,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
         return Reject;
     }
     Accept
@@ -820,6 +864,7 @@ const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-checkpoint-epoch-v1",
     "ctox-checkpoint-generation-v2",
     "ctox-app-runtime-v1",
+    "ctox-workjet-device-control-v1",
     CTOX_COMMAND_LIFECYCLE_CAPABILITY,
 ];
 /// Standby reconciliation is a safety net, not the normal data path. Runtime
@@ -2712,7 +2757,7 @@ async fn run_native_peer(
             if store::collection_authz_enabled(&root) {
                 let authz_root = root.clone();
                 Some(std::sync::Arc::new(move |token: &str, collection: &str| {
-                    store::capability_allows_collection_permission(
+                    store::webrtc_capability_allows_collection_permission(
                         &authz_root,
                         token,
                         collection,
@@ -2815,6 +2860,17 @@ async fn run_native_peer(
                                 params,
                             )
                             .await
+                        })
+                    }),
+                );
+                let workjet_device_root = root.clone();
+                pool.set_auxiliary_request_handler(
+                    WORKJET_DEVICE_WEBRTC_METHOD,
+                    Arc::new(move |_peer_identity, capability_token, params| {
+                        let root = workjet_device_root.clone();
+                        Box::pin(async move {
+                            handle_workjet_device_webrtc_request(&root, &capability_token, params)
+                                .await
                         })
                     }),
                 );

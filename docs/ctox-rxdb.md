@@ -858,7 +858,7 @@ success. `ctox.module.set_visible` is the first registered two-step saga
 (runtime visibility then RxDB catalog projection) and restores the original
 visibility if projection fails.
 
-### 9.1 Device-bound managed mobile grants
+### 9.1 Device-bound Workjet grants
 
 `ctox business-os mobile-invite create` remains backward-compatible when no
 device flags are supplied. A managed Workjet pairing supplies all three flags
@@ -874,6 +874,15 @@ The tuple is persisted in nullable columns on `business_mobile_invites` and is
 also HMAC-bound into the capability (`device_pairing_id`, `device_id`, and
 `cnf.jkt`). Existing rows and ordinary Business OS capabilities remain
 unbound. A bound capability is never accepted as an HTTP Bearer session.
+
+The unified Workjet QR flow intentionally starts unbound because the desktop
+does not know the phone's key before it scans the code. The first native
+DataChannel handshake must complete the nonce-bound proof below before the
+peer captures the token. CTOX then atomically binds that invite's unique user
+to the P-256 thumbprint. The QR expiry limits this first use only. Reconnects
+are authorized by the still-active Device-to-Instance edge, the actor's native
+capability epoch, and a fresh proof; revoking either the edge or actor epoch
+fails closed. The interactive token's normal expiry is never relaxed for HTTP.
 
 On WebRTC, the native peer puts a fresh 32-byte base64url nonce in its outbound
 `ctoxProtocol.peerSession.deviceProofNonce`. The browser calls exactly this
@@ -903,6 +912,39 @@ before the native peer captures the capability or starts replication. An
 unbound legacy token needs no proof and keeps the existing path. This is an
 authentication extension inside the existing DataChannel handshake, not an
 HTTP data bridge.
+
+### 9.2 Workjet device control is an auxiliary WebRTC method
+
+Device invitation and binding management use the existing authenticated
+RxDB/WebRTC connection. The multiplexed native peer registers exactly one
+auxiliary method, `ctox.workjet.device.v1`. Its single parameter is an exact
+`WorkjetDeviceWebRtcRequestV1` object with one of these actions; unknown fields
+and actions are rejected. Native results are validated and serialized through
+the untagged `WorkjetDeviceWebRtcResponseV1` envelope before they cross the
+DataChannel:
+
+| action | fields | result |
+|---|---|---|
+| `invite.create` | `ttlSeconds?`, `displayName?` | the existing versioned Workjet/Business-OS invite envelope, returned only on the DataChannel |
+| `invite.revoke` | `inviteId` | `{ revoked: true }` |
+| `binding.list` | none | `ctox.workjet-device-bindings.v1` with non-secret device metadata |
+| `binding.revoke` | `bindingId` | `{ revoked: true }` |
+
+The shell exposes this method as
+`globalThis.workjetBusinessOsDeviceControl(request)` and the native
+mobile host forwards the same request through the bounded
+`device.control`/`device.control.result` lifecycle bridge. Invite secrets are
+never written to RxDB, HTTP, logs, reports, or the binding list. Cloudflare WSS
+is used only by the normal WebRTC signaling exchange; it does not implement
+this method and stores no device edge.
+
+`invite.create` places only a 32-byte base64url bootstrap secret in the invite's
+`session.capability_token`; CTOX stores only its SHA-256 hash. The secret is not
+an HTTP bearer. Before first-use expiry it resolves to the pending actor only
+inside the native WebRTC verifier. A successful nonce/P-256 proof atomically
+adds the device id and proof-key thumbprint to the invite row. Later reconnects
+require that exact active Device-to-Instance edge; revoke disables both the row
+and actor epoch. This keeps the QR compact without an online reference service.
 
 ## 10. Build & release
 

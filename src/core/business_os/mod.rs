@@ -33,6 +33,7 @@ mod rxdb_peer_intake;
 mod rxdb_peer_intake_state;
 mod rxdb_peer_projections;
 mod rxdb_peer_tombstones;
+mod rxdb_peer_workjet_devices;
 pub mod server;
 mod session;
 pub mod shell_update;

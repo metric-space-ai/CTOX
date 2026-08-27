@@ -117,6 +117,18 @@ pub fn verify_capability_token(
     token: &str,
     now_ms: i64,
 ) -> Option<CapabilityClaims> {
+    let claims = verify_capability_token_allow_expired(secret, token)?;
+    (now_ms < claims.expires_at_ms).then_some(claims)
+}
+
+/// Verify the signature and parse the complete capability without applying its
+/// interactive-session expiry. This is intentionally crate-local: only the
+/// native WebRTC peer may use it, and only after it has independently checked
+/// the durable device binding plus the nonce-bound P-256 proof of possession.
+pub(super) fn verify_capability_token_allow_expired(
+    secret: &[u8],
+    token: &str,
+) -> Option<CapabilityClaims> {
     let (payload_b64, sig_b64) = token.split_once('.')?;
     let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
@@ -124,9 +136,6 @@ pub fn verify_capability_token(
     hmac::verify(&key, payload_b64.as_bytes(), &sig).ok()?;
     let payload: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload_b64).ok()?).ok()?;
     let expires_at_ms = payload.get("exp").and_then(Value::as_i64)?;
-    if now_ms >= expires_at_ms {
-        return None;
-    }
     let device_pairing_id = payload.get("device_pairing_id").and_then(Value::as_str);
     let device_id = payload.get("device_id").and_then(Value::as_str);
     let proof_key_thumbprint = payload.pointer("/cnf/jkt").and_then(Value::as_str);
@@ -249,6 +258,10 @@ mod tests {
     fn expired_token_is_rejected() {
         let token = issue_capability_token(SECRET, "chef1", "chef", NOW - 2 * HOUR, NOW - HOUR);
         assert!(verify_capability_token(SECRET, &token, NOW).is_none());
+        let signed = verify_capability_token_allow_expired(SECRET, &token)
+            .expect("native WebRTC verifier may inspect a correctly signed expired assertion");
+        assert_eq!(signed.user_id, "chef1");
+        assert_eq!(signed.expires_at_ms, NOW - HOUR);
     }
 
     #[test]

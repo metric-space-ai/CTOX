@@ -6582,6 +6582,42 @@ function createLiveSyncFacade({ host = null } = {}) {
   };
 }
 
+const WORKJET_DEVICE_CONTROL_ACTIONS = new Set([
+  'invite.create',
+  'invite.revoke',
+  'binding.list',
+  'binding.revoke',
+]);
+
+globalThis.workjetBusinessOsDeviceControl = async (request) => {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('Workjet device request must be an object.');
+  }
+  const action = String(request.action || '');
+  if (!WORKJET_DEVICE_CONTROL_ACTIONS.has(action)) {
+    throw new TypeError('Workjet device action is unsupported.');
+  }
+  const allowedKeys = action === 'invite.create'
+    ? ['action', 'ttlSeconds', 'displayName']
+    : action === 'invite.revoke'
+      ? ['action', 'inviteId']
+      : action === 'binding.revoke'
+        ? ['action', 'bindingId']
+        : ['action'];
+  if (Object.keys(request).some((key) => !allowedKeys.includes(key))) {
+    throw new TypeError('Workjet device request contains an unsupported field.');
+  }
+  if (typeof state.sync?.requestNative !== 'function') {
+    const error = new Error('CTOX WebRTC device control is unavailable.');
+    error.code = 'ctox_webrtc_unavailable';
+    throw error;
+  }
+  return state.sync.requestNative('ctox.workjet.device.v1', request, {
+    requiredCapability: 'ctox-workjet-device-control-v1',
+    timeoutMs: 10_000,
+  });
+};
+
 function createLiveCommandBusFacade() {
   const requireCommandBus = () => {
     if (!state.commandBus) throw new Error('Business OS command bus is not ready.');

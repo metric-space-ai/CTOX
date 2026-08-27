@@ -9033,6 +9033,8 @@ var LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 var DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 var CTOX_BROWSER_LIVE_CAPABILITY = "ctox-browser-live-v1";
 var CTOX_BROWSER_LIVE_CHANNEL = "ctox-browser-live-v1";
+var CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY = "ctox-workjet-device-control-v1";
+var CTOX_WORKJET_DEVICE_CONTROL_CHANNEL = "ctox.workjet.device.v1";
 var BROWSER_CAPABILITIES = [
   "ctox-rxdb-browser-v1",
   "ctox-file-chunks-v1",
@@ -9045,7 +9047,8 @@ var BROWSER_CAPABILITIES = [
   CTOX_QUERY_FETCH_CAPABILITY,
   CTOX_PRESENCE_CAPABILITY,
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
-  CTOX_BROWSER_LIVE_CAPABILITY
+  CTOX_BROWSER_LIVE_CAPABILITY,
+  CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY
 ];
 function remoteSupportsPresence(remoteProtocol) {
   if (!remoteProtocol || typeof remoteProtocol !== "object") return false;
@@ -9387,6 +9390,7 @@ var SharedRoomPeer = class {
       }
     });
     this.peer.openAuxChannel("", CTOX_BROWSER_LIVE_CHANNEL, { ordered: true });
+    this.peer.openAuxChannel("", CTOX_WORKJET_DEVICE_CONTROL_CHANNEL, { ordered: true });
     this.demandTransport.attach(this.peer);
     this.peer.on("error", (event) => this.fanout("error", event.detail || event));
     this.peer.on("transport-status", (event) => this.fanout("transport-status", event.detail || event));
@@ -9860,6 +9864,15 @@ var CtoxWebRtcReplicationState = class {
       return this.peer.requestAuxiliary(
         negotiated.peerId,
         CTOX_BROWSER_LIVE_CHANNEL,
+        String(method || ""),
+        [params],
+        timeoutMs
+      );
+    }
+    if (String(method || "") === "ctox.workjet.device.v1") {
+      return this.peer.requestAuxiliary(
+        negotiated.peerId,
+        CTOX_WORKJET_DEVICE_CONTROL_CHANNEL,
         String(method || ""),
         [params],
         timeoutMs
