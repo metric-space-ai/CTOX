@@ -48,7 +48,7 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260816-browser-sync-guards-v141';
+} from './shared/maintenance-state.js?v=20260828-terminal-maintenance-v142';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260827-role-bound-browser-config-v254';
+const APP_BUILD = '20260828-terminal-maintenance-v255';
 
 ensureShellStylesheets();
 
@@ -8718,7 +8718,7 @@ async function refreshMaintenanceStatus(options = {}) {
     const payload = await fetchBusinessOsControlJson('/api/business-os/ctox/maintenance');
     const next = normalizeMaintenancePayload(payload, { rememberedLeaseId });
     if (next.active && next.leaseId) rememberMaintenanceLease(next.leaseId);
-    if (!payload.active && ['completed', 'rolled_back'].includes(next.status)) {
+    if (!payload.active && ['completed', 'rolled_back', 'failed'].includes(next.status)) {
       rememberMaintenanceLease('');
       applyMaintenanceState(normalizeMaintenancePayload(payload));
       if (next.status === 'rolled_back') {
