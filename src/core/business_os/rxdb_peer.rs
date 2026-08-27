@@ -856,6 +856,7 @@ fn native_peer_bring_up_failure(message: String) -> anyhow::Error {
 const CTOX_RXDB_PROTOCOL: &str = "ctox-rxdb-protocol-v1";
 const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-control-plane-v1",
+    "ctox-role-bound-signaling-v1",
     "ctox-rxdb-native-v1",
     "ctox-file-chunks-v1",
     "ctox-schema-hash-v1",
@@ -2603,6 +2604,9 @@ async fn run_native_peer(
         anyhow::bail!("Business OS native RxDB peer requires a signaling URL");
     }
     let peer_session_id = format!("rxdb-rs-{}", Uuid::new_v4().simple());
+    let mut sync_config = store::sync_config(&root)?;
+    let stable_native_peer_id = sync_config.peer_id.clone();
+    let signaling_auth = store::signaling_auth_config(&root, &signaling_room_password)?;
     // The provider re-derives the URLs — including fresh `token_iat`/
     // `token_exp` — on EVERY signaling (re)connect attempt. Baking the token
     // window in once meant that after >24h uptime any socket drop became a
@@ -2612,18 +2616,13 @@ async fn run_native_peer(
     let signaling_url_provider = native_signaling_url_provider(
         signaling_base_urls.clone(),
         sync_room.clone(),
-        signaling_room_password.clone(),
-        peer_session_id.clone(),
+        stable_native_peer_id,
+        signaling_auth,
     );
-    let ice_servers = {
-        let mut sync = store::sync_config(&root)?;
-        // Mint an ephemeral TURN credential for the native peer too (no-op unless
-        // a TURN URL + secret are configured). Re-derived on each peer bring-up.
-        if let Some(turn) = store::ephemeral_turn_server(&root, &peer_session_id) {
-            sync.ice_servers.push(turn);
-        }
-        ice_servers_from_sync_config(&sync.ice_servers)
-    };
+    if let Some(turn) = store::ephemeral_turn_server(&root, &peer_session_id) {
+        sync_config.ice_servers.push(turn);
+    }
+    let ice_servers = ice_servers_from_sync_config(&sync_config.ice_servers);
     let database_path = store::rxdb_store_path(&root);
     // Publish process liveness before opening or repairing the potentially
     // large SQLite store. SQLite has to parse the complete schema on first
@@ -3470,14 +3469,14 @@ type NativeSignalingClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 fn native_signaling_url_provider(
     base_urls: Vec<String>,
     sync_room: String,
-    signaling_room_password: String,
     native_peer_id: String,
+    signaling_auth: store::BusinessOsSignalingAuthConfig,
 ) -> NativeSignalingUrlProvider {
     native_signaling_url_provider_with_clock(
         base_urls,
         sync_room,
-        signaling_room_password,
         native_peer_id,
+        signaling_auth,
         Arc::new(current_unix_seconds),
     )
 }
@@ -3485,8 +3484,8 @@ fn native_signaling_url_provider(
 fn native_signaling_url_provider_with_clock(
     base_urls: Vec<String>,
     sync_room: String,
-    signaling_room_password: String,
     native_peer_id: String,
+    signaling_auth: store::BusinessOsSignalingAuthConfig,
     clock: NativeSignalingClock,
 ) -> NativeSignalingUrlProvider {
     Arc::new(move || {
@@ -3497,8 +3496,8 @@ fn native_signaling_url_provider_with_clock(
                 signaling_url_with_native_metadata_at(
                     base_url,
                     &sync_room,
-                    &signaling_room_password,
                     &native_peer_id,
+                    &signaling_auth,
                     issued_at,
                 )
             })
@@ -3509,13 +3508,16 @@ fn native_signaling_url_provider_with_clock(
 fn signaling_url_with_native_metadata_at(
     raw_url: &str,
     sync_room: &str,
-    signaling_room_password: &str,
     native_peer_id: &str,
+    signaling_auth: &store::BusinessOsSignalingAuthConfig,
     issued_at: u64,
 ) -> String {
     let Ok(mut url) = Url::parse(raw_url) else {
         return raw_url.to_string();
     };
+    if url.host_str() == Some("signaling.ctox.dev") && matches!(url.path(), "/" | "/signal") {
+        url.set_path("/v2");
+    }
     let existing = url
         .query_pairs()
         .filter(|(key, _)| {
@@ -3529,6 +3531,9 @@ fn signaling_url_with_native_metadata_at(
                     | "token"
                     | "token_iat"
                     | "token_exp"
+                    | "auth_version"
+                    | "browser_token_hash"
+                    | "native_token_hash"
             )
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -3556,14 +3561,15 @@ fn signaling_url_with_native_metadata_at(
             query.append_pair("instance_id", instance_id);
         }
         query.append_pair("protocol", CTOX_RXDB_PROTOCOL);
-        if let Some(token) = signaling_token_from_room_password(signaling_room_password) {
-            query.append_pair("token", &token);
-            query.append_pair("token_iat", &issued_at.to_string());
-            query.append_pair(
-                "token_exp",
-                &(issued_at + SIGNALING_TOKEN_TTL_SECONDS).to_string(),
-            );
-        }
+        query.append_pair("token", &signaling_auth.native_token);
+        query.append_pair("token_iat", &issued_at.to_string());
+        query.append_pair(
+            "token_exp",
+            &(issued_at + SIGNALING_TOKEN_TTL_SECONDS).to_string(),
+        );
+        query.append_pair("auth_version", signaling_auth.version);
+        query.append_pair("browser_token_hash", &signaling_auth.browser_token_hash);
+        query.append_pair("native_token_hash", &signaling_auth.native_token_hash);
         for capability in CTOX_NATIVE_CAPABILITIES {
             query.append_pair("cap", capability);
         }
@@ -3576,15 +3582,6 @@ fn current_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
-}
-
-fn signaling_token_from_room_password(room_password: &str) -> Option<String> {
-    let password = room_password.trim();
-    if password.is_empty() {
-        return None;
-    }
-    let digest = sha2::Sha256::digest(password.as_bytes());
-    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)[..32].to_string())
 }
 
 fn instance_id_from_sync_room(sync_room: &str) -> Option<&str> {
@@ -11827,17 +11824,24 @@ pub(in crate::business_os) mod tests {
 
     #[test]
     fn native_signaling_provider_rederives_urls_for_every_reconnect() {
+        let root = tempfile::tempdir().expect("test root");
+        let signaling_auth =
+            store::signaling_auth_config(root.path(), "room-password").expect("signaling auth");
+        let expected_native_token = signaling_auth.native_token.clone();
+        let expected_browser_hash = signaling_auth.browser_token_hash.clone();
+        let expected_native_hash = signaling_auth.native_token_hash.clone();
         let clock_value = Arc::new(AtomicU64::new(1_000));
         let clock_value_for_provider = Arc::clone(&clock_value);
         let provider = native_signaling_url_provider_with_clock(
             vec!["wss://signaling.ctox.dev?foo=bar&role=browser".to_string()],
             "ctox-business-os:inst_123:roomhash".to_string(),
-            "room-password".to_string(),
-            "rxdb-rs-test-peer".to_string(),
+            "ctox-core-test-peer".to_string(),
+            signaling_auth,
             Arc::new(move || clock_value_for_provider.fetch_add(60, Ordering::SeqCst)),
         );
         let first_attempt = provider();
         let parsed = Url::parse(&first_attempt[0]).expect("metadata url parses");
+        assert_eq!(parsed.path(), "/v2");
         assert_eq!(
             parsed
                 .query_pairs()
@@ -11852,7 +11856,7 @@ pub(in crate::business_os) mod tests {
                 .find(|(key, _)| key == "client")
                 .unwrap()
                 .1,
-            "rxdb-rs-test-peer"
+            "ctox-core-test-peer"
         );
         assert_eq!(
             parsed
@@ -11860,7 +11864,7 @@ pub(in crate::business_os) mod tests {
                 .find(|(key, _)| key == "native_peer_id")
                 .unwrap()
                 .1,
-            "rxdb-rs-test-peer"
+            "ctox-core-test-peer"
         );
         assert_eq!(
             parsed
@@ -11879,11 +11883,21 @@ pub(in crate::business_os) mod tests {
             "inst_123"
         );
         let query_pairs = parsed.query_pairs().into_owned().collect::<HashMap<_, _>>();
-        let expected_token =
-            signaling_token_from_room_password("room-password").expect("room password token");
         assert_eq!(
             query_pairs.get("token").map(String::as_str),
-            Some(expected_token.as_str())
+            Some(expected_native_token.as_str())
+        );
+        assert_eq!(
+            query_pairs.get("auth_version").map(String::as_str),
+            Some(store::BUSINESS_OS_SIGNALING_AUTH_VERSION)
+        );
+        assert_eq!(
+            query_pairs.get("browser_token_hash").map(String::as_str),
+            Some(expected_browser_hash.as_str())
+        );
+        assert_eq!(
+            query_pairs.get("native_token_hash").map(String::as_str),
+            Some(expected_native_hash.as_str())
         );
         let issued_at = query_pairs
             .get("token_iat")

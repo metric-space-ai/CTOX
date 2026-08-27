@@ -156,6 +156,9 @@ const VOLATILE_SIGNALING_QUERY_PARAMS = new Set([
   'token',
   'token_iat',
   'token_exp',
+  'auth_version',
+  'browser_token_hash',
+  'native_token_hash',
 ]);
 
 function sharedRoomPeerKey(signalingUrl, room) {

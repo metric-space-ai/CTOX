@@ -73,6 +73,9 @@ const TERMINAL_SIGNALING_REJECTION_CODES = new Set([
   'protocol_missing',
   'protocol_mismatch',
   'instance_mismatch',
+  'role_auth_missing',
+  'role_auth_binding_invalid',
+  'role_credential_invalid',
   'peer_revoked',
   'role_mismatch',
   'token_invalid',
@@ -829,13 +832,10 @@ export class CtoxWebRtcNativePeer {
       }
       this.pruneStaleNativeCandidateConnections(descriptors);
       const expectedNativePeerId = String(this.options.expectedNativePeerId || '').trim();
-      const hasExpectedDescriptor = Boolean(expectedNativePeerId) && descriptors.some((descriptor) => (
-        this.peerMatchesExpectedNativePeerId(descriptor.peerId, descriptor)
-      ));
       for (const descriptor of descriptors) {
         const remotePeerId = descriptor.peerId;
         if (!remotePeerId) continue;
-        if (hasExpectedDescriptor && !this.peerMatchesExpectedNativePeerId(remotePeerId, descriptor)) {
+        if (expectedNativePeerId && !this.peerMatchesExpectedNativePeerId(remotePeerId, descriptor)) {
           this.removeConnection(remotePeerId, 'signaling-non-target-native-peer');
           continue;
         }
@@ -1945,7 +1945,10 @@ export class CtoxWebRtcNativePeer {
     const peerId = String(remotePeerId || '');
     if (!peerId || peerId === this.currentSignalingPeerId()) return false;
     const metadata = this.peerMetadata.get(peerId);
-    if (this.peerMatchesExpectedNativePeerId(peerId, metadata)) return true;
+    const expectedNativePeerId = String(this.options.expectedNativePeerId || '').trim();
+    if (expectedNativePeerId) {
+      return this.peerMatchesExpectedNativePeerId(peerId, metadata);
+    }
     if (this.nativeCandidateConnectionCount(peerId) > 0) return false;
     return this.isNativePeerCandidate(peerId, metadata);
   }

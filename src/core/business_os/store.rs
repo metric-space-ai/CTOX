@@ -152,7 +152,7 @@ pub use super::session::{BusinessOsSession, BusinessOsSessionUser};
 
 pub(super) const STORE_FILE: &str = "business-os.sqlite3";
 pub(super) const RXDB_STORE_FILE: &str = "business-os-rxdb.sqlite3";
-const DEFAULT_SIGNALING_URL: &str = "wss://signaling.ctox.dev";
+const DEFAULT_SIGNALING_URL: &str = "wss://signaling.ctox.dev/v2";
 const DEFAULT_STUN_URL: &str = "stun:stun.l.google.com:19302";
 const BUSINESS_OS_SIGNALING_URLS_FILE: &str = "business-os-signaling-urls.json";
 pub(super) const DOCUMENT_BLOB_CHUNK_SIZE: usize = 256_000;
@@ -180,6 +180,7 @@ const CHATGPT_AUTH_SECRET_NAME: &str = "chatgpt_subscription_auth_json";
 const CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID: &str = "codex-instance-primary";
 pub(super) const BUSINESS_OS_SECRET_SCOPE: &str = "business-os";
 const BUSINESS_OS_ROOM_PASSWORD_SECRET_NAME: &str = "webrtc_room_password";
+const BUSINESS_OS_SIGNALING_NATIVE_TOKEN_SECRET_NAME: &str = "webrtc_native_signaling_token";
 const BUSINESS_OS_TURN_SECRET_NAME: &str = "webrtc_turn_secret";
 const BUSINESS_OS_TURN_URL_KEY: &str = "CTOX_BUSINESS_OS_TURN_URL";
 const BUSINESS_OS_TURN_SECRET_NAME_KEY: &str = "CTOX_BUSINESS_OS_TURN_SECRET_NAME";
@@ -456,6 +457,10 @@ pub struct BusinessOsSyncConfig {
     pub peer_role: &'static str,
     pub sync_room: String,
     pub signaling_room_password: String,
+    pub signaling_auth_version: &'static str,
+    pub signaling_browser_token: String,
+    pub signaling_browser_token_hash: String,
+    pub signaling_native_token_hash: String,
     pub signaling_urls: Vec<String>,
     pub signaling_urls_source: &'static str,
     pub ice_servers: Vec<Value>,
@@ -481,6 +486,15 @@ pub(crate) struct BusinessOsSyncConnectionConfig {
     pub(crate) signaling_room_password: String,
     pub(crate) signaling_urls: Vec<String>,
     pub(crate) signaling_urls_source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BusinessOsSignalingAuthConfig {
+    pub(crate) version: &'static str,
+    pub(crate) browser_token: String,
+    pub(crate) browser_token_hash: String,
+    pub(crate) native_token: String,
+    pub(crate) native_token_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
