@@ -1321,7 +1321,9 @@ fn session_from_capability_bearer(
         .map(str::trim)?
         .strip_prefix("Bearer ")
         .map(str::trim)?;
-    let (id, role) = store::verify_capability_actor(root, token)?;
+    // Bound mobile grants require a fresh WebRTC device proof and must never
+    // degrade into ordinary HTTP bearer credentials.
+    let (id, role) = store::verify_unbound_capability_actor(root, token)?;
     let role = policy::normalize_role(&role);
     let session = store::BusinessOsSession {
         ok: true,
@@ -4648,6 +4650,31 @@ mod tests {
         assert_eq!(user.id, "admin@example.com");
         assert_eq!(user.display_name, "Admin User");
         assert_eq!(user.role, "admin");
+    }
+
+    #[test]
+    fn device_bound_capability_cannot_downgrade_to_http_bearer() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let binding = super::super::mobile_invites::device_binding(
+            Some("pairing-http-test"),
+            Some("device-http-test"),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        )
+        .expect("binding")
+        .expect("bound");
+        let created = super::super::mobile_invites::create(
+            root.path(),
+            300,
+            Some("HTTP downgrade test"),
+            Some(&binding),
+        )
+        .expect("invite");
+        let token = created["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("token");
+        assert!(store::verify_capability_actor(root.path(), token).is_some());
+        let auth_header = format!("Bearer {token}");
+        assert!(session_from_capability_bearer(root.path(), Some(&auth_header)).is_none());
     }
 
     #[test]

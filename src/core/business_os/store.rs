@@ -14867,7 +14867,18 @@ pub fn verify_capability_actor(root: &Path, token: &str) -> Option<(String, Stri
     verified_capability_claims(root, token).map(|claims| (claims.user_id, claims.role))
 }
 
-fn verified_capability_claims(
+/// HTTP bearer authentication is deliberately limited to legacy unbound
+/// capabilities. Device-bound mobile grants are usable only after WebRTC PoP.
+pub fn verify_unbound_capability_actor(root: &Path, token: &str) -> Option<(String, String)> {
+    verified_capability_claims(root, token).and_then(|claims| {
+        claims
+            .device_binding
+            .is_none()
+            .then_some((claims.user_id, claims.role))
+    })
+}
+
+pub(super) fn verified_capability_claims(
     root: &Path,
     token: &str,
 ) -> Option<super::capability::CapabilityClaims> {
@@ -14876,7 +14887,8 @@ fn verified_capability_claims(
         return None;
     }
     let secret = capability_signing_secret(root).ok()?;
-    let claims = super::capability::verify_capability_token(&secret, token, now_ms() as i64)?;
+    let now = now_ms() as i64;
+    let claims = super::capability::verify_capability_token(&secret, token, now)?;
     let (role, epoch): (String, i64) = with_store_connection(root, |conn| {
         conn.query_row(
             "SELECT role, capability_epoch
@@ -14893,6 +14905,11 @@ fn verified_capability_claims(
         || epoch != claims.actor_epoch
     {
         return None;
+    }
+    if let Some(binding) = &claims.device_binding {
+        if !super::mobile_invites::is_active_device_binding(root, &claims.user_id, binding, now) {
+            return None;
+        }
     }
     Some(claims)
 }
@@ -15052,6 +15069,22 @@ fn issue_business_os_capability_token_until(
     now_ms: i64,
     expires_at_ms: i64,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+fn issue_business_os_capability_token_until_with_binding(
+    root: &Path,
+    user_id: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
     anyhow::ensure!(
         expires_at_ms > now_ms,
         "capability expiry must be in the future"
@@ -15075,13 +15108,14 @@ fn issue_business_os_capability_token_until(
         |row| row.get(0),
     )?;
     let secret = capability_signing_secret(root)?;
-    let token = super::capability::issue_capability_token_with_epoch(
+    let token = super::capability::issue_capability_token_with_epoch_and_binding(
         &secret,
         &user.id,
         &normalize_business_role(&user.role),
         actor_epoch,
         now_ms,
         expires_at_ms,
+        device_binding,
     );
     Ok((token, expires_at_ms))
 }
@@ -15184,6 +15218,26 @@ pub fn issue_business_os_capability_token_for_managed_user_until(
     now_ms: i64,
     expires_at_ms: i64,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_for_managed_user_until_with_binding(
+        root,
+        user_id,
+        display_name,
+        role,
+        now_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+pub fn issue_business_os_capability_token_for_managed_user_until_with_binding(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
     let user_id = user_id.trim();
     anyhow::ensure!(!user_id.is_empty(), "user id is required");
     let role = normalize_business_role(role);
@@ -15211,7 +15265,13 @@ pub fn issue_business_os_capability_token_for_managed_user_until(
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
     drop(conn);
-    issue_business_os_capability_token_until(root, user_id, now_ms, expires_at_ms)
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        expires_at_ms,
+        device_binding,
+    )
 }
 
 pub(super) fn rxdb_command_session(

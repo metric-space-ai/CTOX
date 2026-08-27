@@ -79,6 +79,7 @@ const BROWSER_CAPABILITIES = [
   'ctox-file-chunks-v1',
   'ctox-schema-hash-v1',
   'ctox-peer-session-v1',
+  'ctox-device-proof-v1',
   'ctox-checkpoint-epoch-v1',
   CTOX_CHECKPOINT_GENERATION_CAPABILITY,
   CTOX_APP_RUNTIME_CAPABILITY,
@@ -507,7 +508,7 @@ class SharedRoomPeer {
       iceServersRefreshUrl: this.iceServersRefreshUrl,
       refreshIceServers: this.refreshIceServers,
       expectedNativePeerId: this.expectedNativePeerId || '',
-      protocolPayload: async ({ collection } = {}) => this.buildProtocolPayload(collection),
+      protocolPayload: async ({ collection, params } = {}) => this.buildProtocolPayload(collection, params),
       requestHandlers: {
         masterChangesSince: async ({ params, peerId, collection }) =>
           this.routeMasterChangesSince(collection, params, peerId),
@@ -687,7 +688,7 @@ class SharedRoomPeer {
     }
   }
 
-  async buildProtocolPayload(collection) {
+  async buildProtocolPayload(collection, params = []) {
     // Resolve the protocol payload for the collection the remote asked about
     // (multiplex), or the representative when none was tagged.
     const registration = (collection && this.collections.get(collection))
@@ -700,7 +701,10 @@ class SharedRoomPeer {
         capabilities: BROWSER_CAPABILITIES,
       });
     }
-    const payload = await registration.state.buildProtocolPayload();
+    const deviceProofNonce = Array.isArray(params)
+      ? params[0]?.peerSession?.deviceProofNonce
+      : null;
+    const payload = await registration.state.buildProtocolPayload(deviceProofNonce);
     // Phase 3 schema-validation hardening: under multiplex the handshake runs
     // ONCE off the representative collection, so attach the per-collection
     // schema-hash map for EVERY collection on this connection. The remote
@@ -1178,13 +1182,14 @@ class CtoxWebRtcReplicationState {
     this.error$.next(error);
   }
 
-  async buildProtocolPayload() {
+  async buildProtocolPayload(deviceProofNonce = null) {
     const checkpoint = await this.collection.storageCollection.replicationCheckpointStatus(this.schemaHashValue);
     // #12c: attach the browser's CTOX capability token so the native (master)
     // peer can bind this peer to its role for per-collection read authz. Best
     // effort — a missing/failed token simply omits the field (native treats it
     // as least privilege). Never let token resolution break the handshake.
     const capabilityToken = await resolveCapabilityToken(this.ctox);
+    const deviceProof = await resolveDeviceProof(this.ctox, deviceProofNonce);
     return buildProtocolPayload({
       collectionName: this.collection.name,
       schemaVersion: this.collection.schema.version,
@@ -1196,6 +1201,7 @@ class CtoxWebRtcReplicationState {
       role: 'browser',
       capabilities: BROWSER_CAPABILITIES,
       capabilityToken: typeof capabilityToken === 'string' ? capabilityToken : null,
+      deviceProof,
     });
   }
 
@@ -2688,6 +2694,28 @@ async function resolveCapabilityToken(ctox = {}) {
     }
   }
   return typeof source === 'string' && source.trim() ? source.trim() : null;
+}
+
+export async function resolveDeviceProof(ctox = {}, nonce = null) {
+  const cleanNonce = typeof nonce === 'string' ? nonce.trim() : '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(cleanNonce)) return null;
+  const provider = ctox?.deviceProofProvider;
+  if (typeof provider !== 'function') return null;
+  try {
+    // The provider boundary is intentionally nonce-only. Workjet owns the
+    // hardware/private key and returns only a signature plus public JWK.
+    const response = await provider(cleanNonce);
+    return {
+      version: 'ctox-device-proof-v1',
+      nonce: cleanNonce,
+      publicJwk: response?.publicJwk,
+      signature: response?.signature,
+    };
+  } catch {
+    // Legacy unbound sessions can continue. Bound capabilities fail closed in
+    // the native validator because their proof is absent.
+    return null;
+  }
 }
 
 // SYNC-12: decode the permission-relevant claims from a capability token WITHOUT

@@ -93,6 +93,9 @@ use notify::Watcher;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use rxdb::plugins::replication_webrtc::index_mod::auxiliary_request_metrics_snapshot;
+use rxdb::plugins::replication_webrtc::webrtc_types::{
+    WebRTCPeerSessionValidation, WebRTCPeerSessionValidator,
+};
 use rxdb::plugins::replication_webrtc::{
     file_fetch_handler::FileRange, CollectionAuthzHook, CollectionEagerPullHook,
     CollectionLiveChangeHook, DocumentReadAuthzHook, DocumentWriteAuthzHook, RTCIceServer,
@@ -695,6 +698,110 @@ enum NativePeerExit {
 /// that produced the canonical zombie (heartbeat "running", zero replication,
 /// no retry). See docs/ctox-rxdb.md §4.
 const NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS: u64 = 20;
+const DEVICE_PROOF_VERSION: &str = "ctox-device-proof-v1";
+
+fn validate_device_bound_peer_session(
+    root: &Path,
+    protocol: &Value,
+    expected_nonce: Option<&str>,
+) -> WebRTCPeerSessionValidation {
+    use WebRTCPeerSessionValidation::{Accept, Defer, Reject};
+
+    let Some(session_id) = protocol
+        .pointer("/peerSession/sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Reject;
+    };
+    if store::is_business_peer_revoked(root, session_id) {
+        return Reject;
+    }
+    let Some(token) = protocol
+        .pointer("/peerSession/capabilityToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        // Preserve the legacy least-privilege handshake. Collection hooks
+        // still deny protected data when no capability is captured.
+        return Accept;
+    };
+    let Some(claims) = store::verified_capability_claims(root, token) else {
+        return Reject;
+    };
+    let Some(binding) = claims.device_binding else {
+        return Accept;
+    };
+    let Some(expected_nonce) = expected_nonce else {
+        // The browser-initiated passive probe cannot prove possession of a
+        // nonce the native side has not issued yet. Answer it, but do not let
+        // the replication layer capture the bound token.
+        return Defer;
+    };
+    let Some(proof) = protocol.pointer("/peerSession/deviceProof") else {
+        return Reject;
+    };
+    if proof.get("version").and_then(Value::as_str) != Some(DEVICE_PROOF_VERSION)
+        || proof.get("nonce").and_then(Value::as_str) != Some(expected_nonce)
+    {
+        return Reject;
+    }
+    let Some(jwk) = proof.get("publicJwk") else {
+        return Reject;
+    };
+    let Some((public_key, thumbprint)) = p256_public_key_and_thumbprint(jwk) else {
+        return Reject;
+    };
+    if thumbprint != binding.proof_key_thumbprint {
+        return Reject;
+    }
+    let Some(signature) = proof
+        .get("signature")
+        .and_then(Value::as_str)
+        .and_then(|value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+        })
+        .filter(|value| value.len() == 64)
+    else {
+        return Reject;
+    };
+    let public_key = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::ECDSA_P256_SHA256_FIXED,
+        public_key,
+    );
+    if public_key
+        .verify(expected_nonce.as_bytes(), &signature)
+        .is_err()
+    {
+        return Reject;
+    }
+    Accept
+}
+
+fn p256_public_key_and_thumbprint(jwk: &Value) -> Option<(Vec<u8>, String)> {
+    if jwk.get("kty").and_then(Value::as_str) != Some("EC")
+        || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
+    {
+        return None;
+    }
+    let x = jwk.get("x").and_then(Value::as_str)?;
+    let y = jwk.get("y").and_then(Value::as_str)?;
+    let decoder = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let x_bytes = decoder.decode(x).ok().filter(|value| value.len() == 32)?;
+    let y_bytes = decoder.decode(y).ok().filter(|value| value.len() == 32)?;
+    let mut public_key = Vec::with_capacity(65);
+    public_key.push(0x04);
+    public_key.extend_from_slice(&x_bytes);
+    public_key.extend_from_slice(&y_bytes);
+    // RFC 7638 requires lexicographic member order and no whitespace.
+    let canonical = format!(r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#);
+    let digest = ring::digest::digest(&ring::digest::SHA256, canonical.as_bytes());
+    Some((public_key, decoder.encode(digest.as_ref())))
+}
 
 fn native_peer_bring_up_failure(message: String) -> anyhow::Error {
     // Returning an error is the policy: the supervisor owns the retry. This
@@ -709,6 +816,7 @@ const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-file-chunks-v1",
     "ctox-schema-hash-v1",
     "ctox-peer-session-v1",
+    "ctox-device-proof-v1",
     "ctox-checkpoint-epoch-v1",
     "ctox-checkpoint-generation-v2",
     "ctox-app-runtime-v1",
@@ -2589,10 +2697,14 @@ async fn run_native_peer(
             std::sync::Arc::new(move |peer_id: &String| {
                 !store::is_business_peer_revoked(&signaling_revocation_root, peer_id)
             });
-        let session_revocation_root = root.clone();
-        let is_peer_session_valid: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> =
-            std::sync::Arc::new(move |session_id: &str| {
-                !store::is_business_peer_revoked(&session_revocation_root, session_id)
+        let session_validation_root = root.clone();
+        let is_peer_session_valid: WebRTCPeerSessionValidator =
+            std::sync::Arc::new(move |protocol: &Value, expected_nonce: Option<&str>| {
+                validate_device_bound_peer_session(
+                    &session_validation_root,
+                    protocol,
+                    expected_nonce,
+                )
             });
         // Server-authoritative exact per-collection read authz. Missing,
         // expired, revoked, or stale-epoch capabilities fail closed.
@@ -9139,6 +9251,88 @@ pub(in crate::business_os) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn bound_peer_capability_requires_fresh_matching_p256_proof() -> anyhow::Result<()> {
+        use ring::signature::KeyPair as _;
+
+        let root = tempfile::tempdir()?;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &rng,
+        )
+        .map_err(|_| anyhow::anyhow!("generate test P-256 key"))?;
+        let key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8.as_ref(),
+            &rng,
+        )
+        .map_err(|_| anyhow::anyhow!("parse test P-256 key"))?;
+        let public_key = key_pair.public_key().as_ref();
+        anyhow::ensure!(public_key.len() == 65 && public_key[0] == 0x04);
+        let encoder = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let public_jwk = json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": encoder.encode(&public_key[1..33]),
+            "y": encoder.encode(&public_key[33..65]),
+        });
+        let (_, thumbprint) =
+            p256_public_key_and_thumbprint(&public_jwk).expect("valid public JWK");
+        let binding = super::super::mobile_invites::device_binding(
+            Some("pairing-pop-test"),
+            Some("device-pop-test"),
+            Some(&thumbprint),
+        )?
+        .expect("binding");
+        let created = super::super::mobile_invites::create(
+            root.path(),
+            300,
+            Some("PoP test"),
+            Some(&binding),
+        )?;
+        let token = created["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("token");
+        let nonce = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        let mut protocol = json!({
+            "peerSession": {
+                "sessionId": "browser:test-room",
+                "capabilityToken": token,
+            }
+        });
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, None),
+            WebRTCPeerSessionValidation::Defer
+        );
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, Some(nonce)),
+            WebRTCPeerSessionValidation::Reject
+        );
+        let signature = key_pair
+            .sign(&rng, nonce.as_bytes())
+            .map_err(|_| anyhow::anyhow!("sign test nonce"))?;
+        protocol["peerSession"]["deviceProof"] = json!({
+            "version": DEVICE_PROOF_VERSION,
+            "nonce": nonce,
+            "publicJwk": public_jwk,
+            "signature": encoder.encode(signature.as_ref()),
+        });
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, Some(nonce)),
+            WebRTCPeerSessionValidation::Accept
+        );
+        assert_eq!(
+            validate_device_bound_peer_session(
+                root.path(),
+                &protocol,
+                Some("mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm")
+            ),
+            WebRTCPeerSessionValidation::Reject
+        );
+        Ok(())
+    }
 
     #[test]
     fn reconciliation_startup_delays_are_staggered_after_control_plane() {

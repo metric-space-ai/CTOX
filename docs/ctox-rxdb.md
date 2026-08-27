@@ -858,6 +858,52 @@ success. `ctox.module.set_visible` is the first registered two-step saga
 (runtime visibility then RxDB catalog projection) and restores the original
 visibility if projection fails.
 
+### 9.1 Device-bound managed mobile grants
+
+`ctox business-os mobile-invite create` remains backward-compatible when no
+device flags are supplied. A managed Workjet pairing supplies all three flags
+together: `--device-pairing-id`, `--device-id`, and
+`--proof-key-thumbprint` (the 43-character base64url RFC 7638 SHA-256
+thumbprint of a P-256 public JWK). Partial tuples are rejected. The issuer JSON
+echoes the adapter acknowledgement as `businessOsInstanceId`, `grantId`,
+`deviceId`, `proofKeyThumbprint`, `expiresAt`, and `invite`; it never contains
+the P-256 private key. Revocation accepts either the opaque invite id or,
+additively, `--device-pairing-id`.
+
+The tuple is persisted in nullable columns on `business_mobile_invites` and is
+also HMAC-bound into the capability (`device_pairing_id`, `device_id`, and
+`cnf.jkt`). Existing rows and ordinary Business OS capabilities remain
+unbound. A bound capability is never accepted as an HTTP Bearer session.
+
+On WebRTC, the native peer puts a fresh 32-byte base64url nonce in its outbound
+`ctoxProtocol.peerSession.deviceProofNonce`. The browser calls exactly this
+host boundary:
+
+```js
+Object.defineProperty(globalThis, 'ctoxWorkjetDeviceProofProvider', {
+  value: async (nonce) => ({
+    publicJwk: { kty: 'EC', crv: 'P-256', x, y },
+    signature,
+  }),
+  writable: false,
+  configurable: false,
+  enumerable: false,
+});
+```
+
+`signature` is base64url without padding of the 64-byte IEEE-P1363 P-256
+ECDSA/SHA-256 signature over the UTF-8 bytes of `nonce`. Workjet must keep the
+private key in its native key store; the callback exposes only the signature
+and public JWK. The shell sanitizes those two public values into
+`peerSession.deviceProof`. The callback is invoked once per native challenge,
+including every reconnect, and its result is never cached. A rejection or
+exception is treated like a missing proof. Missing provider, wrong key thumbprint, malformed
+signature, missing/stale nonce, revoked tuple, or partial claims fail closed
+before the native peer captures the capability or starts replication. An
+unbound legacy token needs no proof and keeps the existing path. This is an
+authentication extension inside the existing DataChannel handshake, not an
+HTTP data bridge.
+
 ## 10. Build & release
 
 `dist/ctox-rxdb-js.mjs` is **built** from `src/index.mjs` with a pinned
@@ -873,10 +919,10 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
 ```
 
 **Cache-buster discipline.** The bundle is imported with a `?v=` query in
-exactly two places, which must always carry the **identical** value:
+exactly three places, which must always carry the **identical** value:
 
 - `src/apps/business-os/shared/db.js` (`RXDB_BUNDLE_URL`)
-- `src/apps/business-os/shared/sync.js` (fallback dynamic import)
+- `src/apps/business-os/shared/sync.js` (two fallback dynamic imports)
 
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
@@ -885,9 +931,9 @@ facade, so it carries no buster and is no longer checked by the guard.
 
 A mismatch makes the browser load a **second copy of the bundle** — two
 module graphs, two shared-room-peer registries, duplicate peers in the room.
-After any `src/` change: rebuild dist with the command above **and** bump the
-buster in both files (current value at the time of writing:
-`20260717-hlc-pull-gate-v66`).
+After any `src/` change: rebuild dist with the command above **and** bump all
+three occurrences (current value at the time of writing:
+`20260827-device-proof-v185`).
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build
 anything: it verifies the manifest identity (name/public name,
@@ -923,6 +969,7 @@ not noise — never delete or weaken a test to make the suite pass.*
 | `data-plane-guard-smoke` | **Guard (ratchet):** WebRTC-only, package-manager-free, env-toggle-free data plane; new forbidden occurrences fail, allowlist changes require an architecture decision recorded here. |
 | `demand-loader-smoke` | Window cache hit/miss, single remote fetch, dedup. |
 | `demand-loading-transport-smoke` | `replicateWebRTC` builds the demand transport; request/chunk correlation. |
+| `device-proof-smoke` | Native nonce-only Workjet callback boundary, public-only proof sanitizing, and no software-key fallback. |
 | `end-to-end-loop-smoke` | Full V1.5 demand-loading loop. |
 | `error-classification-corpus-smoke` | Shared corpus for the load-bearing error$ cascade order (control-plane → schema → IO → shutdown → lifecycle → blip → generic), incl. order-pin cases; the rxdb-rs twin keeps `ctox_rxdb_*` codes aligned with the generated contract. |
 | `eviction-scheduler-smoke` | Sidecar eviction over budget. |

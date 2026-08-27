@@ -20,14 +20,17 @@
 
 use super::protocol_contract_generated;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use parking_lot::Mutex;
+use rand::RngCore;
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_stream::StreamExt;
@@ -50,9 +53,9 @@ use crate::plugins::replication_webrtc::webrtc_helper::{
     is_master_in_webrtc_replication, send_message_and_await_answer,
 };
 use crate::plugins::replication_webrtc::webrtc_types::{
-    WebRTCConnectionHandler, WebRTCDocumentFilter, WebRTCMessage, WebRTCPeerSessionValidator,
-    WebRTCPeerValidator, WebRTCResponse, WebRTCWireFrame, CTOX_BROWSER_INPUT_RESPONSE_COLLECTION,
-    CTOX_BROWSER_LIVE_RESPONSE_COLLECTION,
+    WebRTCConnectionHandler, WebRTCDocumentFilter, WebRTCMessage, WebRTCPeerSessionValidation,
+    WebRTCPeerSessionValidator, WebRTCPeerValidator, WebRTCResponse, WebRTCWireFrame,
+    CTOX_BROWSER_INPUT_RESPONSE_COLLECTION, CTOX_BROWSER_LIVE_RESPONSE_COLLECTION,
 };
 use crate::plugins::utils::utils_string::random_token;
 use crate::replication_protocol::index_mod::rx_storage_instance_to_replication_handler;
@@ -100,6 +103,7 @@ const CTOX_RXDB_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-replication-handshake-v1",
     "ctox-schema-hash-v1",
     "ctox-peer-session-v1",
+    "ctox-device-proof-v1",
     "ctox-checkpoint-epoch-v1",
     CTOX_CHECKPOINT_GENERATION_CAPABILITY,
     CTOX_APP_RUNTIME_CAPABILITY,
@@ -953,6 +957,10 @@ where
     let request_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let peer_session_id = tuning.peer_session_id.clone();
     let is_peer_session_valid = tuning.is_peer_session_valid.clone();
+    // When a validator is installed, no data-plane RPC is served until that
+    // peer has completed an accepted ctoxProtocol round. This makes a deferred
+    // bound token fail closed even when legacy collection authz is disabled.
+    let authenticated_peers = Arc::new(Mutex::new(HashSet::<H::Peer>::new()));
     let pool = RxWebRTCReplicationPool::<H>::new_multi(
         collections.clone(),
         Arc::clone(&connection_handler),
@@ -971,9 +979,11 @@ where
     }
     {
         let pool_clone = Arc::clone(&pool);
+        let authenticated_peers = Arc::clone(&authenticated_peers);
         let mut disc_stream = connection_handler.disconnect_stream();
         let t = tokio::spawn(async move {
             while let Some(peer) = disc_stream.next().await {
+                authenticated_peers.lock().remove(&peer);
                 pool_clone.remove_peer(&peer).await;
             }
         });
@@ -989,6 +999,7 @@ where
         let storage_token = storage_token.clone();
         let peer_session_id = peer_session_id.clone();
         let is_peer_session_valid = is_peer_session_valid.clone();
+        let authenticated_peers = Arc::clone(&authenticated_peers);
         let mut msg_stream = connection_handler.message_stream();
         let t = tokio::spawn(async move {
             while let Some(item) = msg_stream.next().await {
@@ -997,6 +1008,25 @@ where
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
                     break;
+                }
+                if is_peer_session_valid.is_some()
+                    && !matches!(item.message.method.as_str(), "ctoxProtocol" | "token")
+                    && !authenticated_peers.lock().contains(&item.peer)
+                {
+                    let response = WebRTCResponse {
+                        id: item.message.id,
+                        result: Value::Null,
+                        error: Some("peer_authentication_required".to_string()),
+                        collection: item.message.collection,
+                    };
+                    if let Err(error) = handler
+                        .send(&item.peer, WebRTCWireFrame::Response(response))
+                        .await
+                    {
+                        pool_clone.error_subject.next(error);
+                    }
+                    handler.close_peer(&item.peer).await;
+                    continue;
                 }
                 if item.message.method == super::query_fetch_handler::query_fetch_method() {
                     let registry = Arc::clone(&pool_clone.query_fetch_registry);
@@ -1156,6 +1186,7 @@ where
                 let storage_token = storage_token.clone();
                 let peer_session_id = peer_session_id.clone();
                 let is_peer_session_valid = is_peer_session_valid.clone();
+                let authenticated_peers = Arc::clone(&authenticated_peers);
                 pool_clone.spawn_tracked(async move {
                     if pool_task
                         .canceled
@@ -1165,22 +1196,25 @@ where
                     }
                     let frame_collection = item.message.collection.clone();
                     if item.message.method == "ctoxProtocol" {
+                        let mut may_capture_capability = true;
                         if let Some(check) = &is_peer_session_valid {
-                            let remote_session_id = item
+                            let remote_protocol = item
                                 .message
                                 .params
                                 .first()
-                                .and_then(|payload| payload.pointer("/peerSession/sessionId"))
-                                .and_then(Value::as_str)
-                                .map(str::trim)
-                                .filter(|session_id| !session_id.is_empty());
-                            let accepted =
-                                remote_session_id.is_some_and(|session_id| check(session_id));
-                            if !accepted {
+                                .unwrap_or(&Value::Null);
+                            match check(remote_protocol, None) {
+                                WebRTCPeerSessionValidation::Accept => {
+                                    authenticated_peers.lock().insert(item.peer.clone());
+                                }
+                                WebRTCPeerSessionValidation::Defer => {
+                                    may_capture_capability = false;
+                                }
+                                WebRTCPeerSessionValidation::Reject => {
                                 let response = WebRTCResponse {
                                     id: item.message.id,
                                     result: Value::Null,
-                                    error: Some("peer_revoked".to_string()),
+                                        error: Some("peer_authentication_failed".to_string()),
                                     collection: frame_collection,
                                 };
                                 if let Err(error) = handler_task
@@ -1191,9 +1225,11 @@ where
                                 }
                                 handler_task.close_peer(&item.peer).await;
                                 return;
+                                }
                             }
                         }
-                        if let Some(token) = item
+                        if may_capture_capability {
+                            if let Some(token) = item
                             .message
                             .params
                             .first()
@@ -1203,6 +1239,7 @@ where
                             .filter(|token| !token.is_empty())
                         {
                             handler_task.set_peer_capability_token(&item.peer, token.to_string());
+                            }
                         }
                     }
                     let result = match item.message.method.as_str() {
@@ -1406,6 +1443,7 @@ where
                 let request_flag = request_flag.clone();
                 let peer_session_id = peer_session_id.clone();
                 let is_peer_session_valid = is_peer_session_valid.clone();
+                let authenticated_peers = Arc::clone(&authenticated_peers);
                 let tuning = tuning.clone();
                 let peer_for_tracking = peer.clone();
                 let handshake_task = tokio::spawn(async move {
@@ -1428,7 +1466,7 @@ where
                     let local_flag = pool_clone.query_fetch_registry.is_feature_enabled();
                     let local_room_payload = pool_clone.protocol_room_payload().await;
                     let local_collection_schemas = local_room_payload.collection_schemas.clone();
-                    let local_protocol = ctox_protocol_response_with_flag(
+                    let mut local_protocol = ctox_protocol_response_with_flag(
                         &representative,
                         peer_session_id.as_deref(),
                         local_flag,
@@ -1437,6 +1475,9 @@ where
                         Some(&storage_token),
                     )
                     .await;
+                    let device_proof_nonce = fresh_device_proof_nonce();
+                    local_protocol["peerSession"]["deviceProofNonce"] =
+                        Value::String(device_proof_nonce.clone());
                     let protocol_response = match send_message_and_await_answer(
                         Arc::clone(&handler),
                         peer.clone(),
@@ -1464,21 +1505,14 @@ where
                         }
                     };
                     if let Some(check) = &is_peer_session_valid {
-                        let remote_session_id = protocol_response
-                            .result
-                            .pointer("/peerSession/sessionId")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|session_id| !session_id.is_empty());
-                        let accepted =
-                            remote_session_id.is_some_and(|session_id| check(session_id));
-                        if !accepted {
+                        if check(&protocol_response.result, Some(&device_proof_nonce))
+                            != WebRTCPeerSessionValidation::Accept
+                        {
                             pool_clone.error_subject.next(new_rx_error(
                                 "RC_WEBRTC_PEER",
                                 Some(serde_json::json!({
-                                    "code": "peer_revoked",
-                                    "message": "remote peerSession.sessionId is missing or revoked",
-                                    "peerSessionId": remote_session_id,
+                                    "code": "peer_authentication_failed",
+                                    "message": "remote peerSession or device proof is invalid",
                                 })),
                             ));
                             handler.close_peer(&peer).await;
@@ -1550,6 +1584,12 @@ where
                         .filter(|token| !token.is_empty())
                     {
                         handler.set_peer_capability_token(&peer, token.to_string());
+                    }
+                    // Open the data plane only after PoP/session admission,
+                    // protocol/schema validation, and capability capture have
+                    // all completed for this handshake.
+                    if is_peer_session_valid.is_some() {
+                        authenticated_peers.lock().insert(peer.clone());
                     }
 
                     // 2. Token handshake.
@@ -1777,6 +1817,12 @@ where
     }
 
     Ok(pool)
+}
+
+fn fresh_device_proof_nonce() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Phase 3: the collection-qualified `masterChangeStream$` response id. Each
@@ -3672,8 +3718,15 @@ mod tests {
         let collection =
             crate::rx_collection::test_support::test_collection_named("revoked_inbound").await;
         let handler = MockHandler::new();
-        let validator: WebRTCPeerSessionValidator =
-            StdArc::new(|session_id| session_id != "revoked-browser-device");
+        let validator: WebRTCPeerSessionValidator = StdArc::new(|payload, _| {
+            match payload
+                .pointer("/peerSession/sessionId")
+                .and_then(Value::as_str)
+            {
+                Some("revoked-browser-device") | None => WebRTCPeerSessionValidation::Reject,
+                Some(_) => WebRTCPeerSessionValidation::Accept,
+            }
+        });
         let pool = replicate_web_rtc_multi_with_validators(
             vec![StdArc::clone(&collection)],
             StdArc::clone(&handler),
@@ -3706,7 +3759,10 @@ mod tests {
             .find(|response| response.id == "revoked-request")
             .expect("revocation response sent");
         assert_eq!(response.result, Value::Null);
-        assert_eq!(response.error.as_deref(), Some("peer_revoked"));
+        assert_eq!(
+            response.error.as_deref(),
+            Some("peer_authentication_failed")
+        );
         assert_eq!(response.collection.as_deref(), Some("revoked_inbound"));
         assert_eq!(
             handler.closed_peers.lock().as_slice(),
@@ -3725,7 +3781,17 @@ mod tests {
         let collection =
             crate::rx_collection::test_support::test_collection_named("missing_session").await;
         let handler = MockHandler::new();
-        let validator: WebRTCPeerSessionValidator = StdArc::new(|_| true);
+        let validator: WebRTCPeerSessionValidator = StdArc::new(|payload, _| {
+            if payload
+                .pointer("/peerSession/sessionId")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                WebRTCPeerSessionValidation::Accept
+            } else {
+                WebRTCPeerSessionValidation::Reject
+            }
+        });
         let pool = replicate_web_rtc_multi_with_validators(
             vec![StdArc::clone(&collection)],
             StdArc::clone(&handler),
@@ -3753,7 +3819,10 @@ mod tests {
             .find(|response| response.id == "missing-request")
             .expect("missing session rejection sent");
         assert_eq!(response.result, Value::Null);
-        assert_eq!(response.error.as_deref(), Some("peer_revoked"));
+        assert_eq!(
+            response.error.as_deref(),
+            Some("peer_authentication_failed")
+        );
         assert_eq!(
             handler.closed_peers.lock().as_slice(),
             &["missing-session-peer".to_string()]
@@ -3766,8 +3835,17 @@ mod tests {
         let collection =
             crate::rx_collection::test_support::test_collection_named("accepted_inbound").await;
         let handler = MockHandler::new();
-        let validator: WebRTCPeerSessionValidator =
-            StdArc::new(|session_id| session_id == "accepted-browser-device");
+        let validator: WebRTCPeerSessionValidator = StdArc::new(|payload, _| {
+            if payload
+                .pointer("/peerSession/sessionId")
+                .and_then(Value::as_str)
+                == Some("accepted-browser-device")
+            {
+                WebRTCPeerSessionValidation::Accept
+            } else {
+                WebRTCPeerSessionValidation::Reject
+            }
+        });
         let pool = replicate_web_rtc_multi_with_validators(
             vec![StdArc::clone(&collection)],
             StdArc::clone(&handler),
@@ -3808,6 +3886,77 @@ mod tests {
             Some("native-session")
         );
         assert!(handler.closed_peers.lock().is_empty());
+        pool.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_bound_session_cannot_send_data_before_native_challenge() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("deferred_bound").await;
+        let handler = MockHandler::new();
+        let validator: WebRTCPeerSessionValidator = StdArc::new(|_, expected_nonce| {
+            if expected_nonce.is_none() {
+                WebRTCPeerSessionValidation::Defer
+            } else {
+                WebRTCPeerSessionValidation::Reject
+            }
+        });
+        let pool = replicate_web_rtc_multi_with_validators(
+            vec![StdArc::clone(&collection)],
+            StdArc::clone(&handler),
+            None,
+            Some(validator),
+            Some("proof-room".to_string()),
+            Some(StdArc::<str>::from("native-session")),
+        )
+        .await
+        .expect("bring up pool with proof validator");
+
+        handler.inject_message(
+            "bound-peer",
+            ctox_protocol_frame_with_session(
+                "deferred-protocol",
+                "deferred_bound",
+                Some("browser:proof-room"),
+            ),
+        );
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if handler
+                .sent_responses()
+                .iter()
+                .any(|response| response.id == "deferred-protocol")
+            {
+                break;
+            }
+        }
+        handler.inject_message(
+            "bound-peer",
+            master_changes_since_frame("premature-read", "deferred_bound"),
+        );
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if handler
+                .sent_responses()
+                .iter()
+                .any(|response| response.id == "premature-read")
+            {
+                break;
+            }
+        }
+        let response = handler
+            .sent_responses()
+            .into_iter()
+            .find(|response| response.id == "premature-read")
+            .expect("premature data request rejected");
+        assert_eq!(
+            response.error.as_deref(),
+            Some("peer_authentication_required")
+        );
+        assert!(handler
+            .closed_peers
+            .lock()
+            .contains(&"bound-peer".to_string()));
         pool.cancel().await;
     }
 
@@ -4007,8 +4156,15 @@ mod tests {
         let collection =
             crate::rx_collection::test_support::test_collection_named("revoked_outbound").await;
         let handler = MockHandler::new();
-        let validator: WebRTCPeerSessionValidator =
-            StdArc::new(|session_id| session_id != "revoked-browser-device");
+        let validator: WebRTCPeerSessionValidator = StdArc::new(|payload, _| {
+            match payload
+                .pointer("/peerSession/sessionId")
+                .and_then(Value::as_str)
+            {
+                Some("revoked-browser-device") | None => WebRTCPeerSessionValidation::Reject,
+                Some(_) => WebRTCPeerSessionValidation::Accept,
+            }
+        });
         let pool = replicate_web_rtc_multi_with_validators(
             vec![StdArc::clone(&collection)],
             StdArc::clone(&handler),
@@ -4067,7 +4223,7 @@ mod tests {
         assert_eq!(error.code(), "RC_WEBRTC_PEER");
         assert_eq!(
             error.parameters().get("code").and_then(Value::as_str),
-            Some("peer_revoked")
+            Some("peer_authentication_failed")
         );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline && handler.closed_peers.lock().is_empty() {

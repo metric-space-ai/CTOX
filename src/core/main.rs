@@ -5083,6 +5083,24 @@ mod tests {
         for args in [
             vec!["business-os", "mobile-invite", "create", "--ttl-seconds", "300"],
             vec!["business-os", "mobile-invite", "revoke", "--invite-id", "opaque-id"],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "create",
+                "--device-pairing-id",
+                "pairing-id",
+                "--device-id",
+                "device-id",
+                "--proof-key-thumbprint",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "revoke",
+                "--device-pairing-id",
+                "pairing-id",
+            ],
         ] {
             let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
             assert!(

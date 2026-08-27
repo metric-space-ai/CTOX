@@ -21,6 +21,16 @@ use base64::Engine as _;
 use ring::hmac;
 use serde_json::Value;
 
+/// Optional proof-of-possession binding carried by managed mobile grants.
+/// The `cnf.jkt` value is the RFC 7638 thumbprint of the device's P-256 public
+/// key. The private key never enters CTOX or the browser runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDeviceBinding {
+    pub device_pairing_id: String,
+    pub device_id: String,
+    pub proof_key_thumbprint: String,
+}
+
 /// The verified contents of a capability token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityClaims {
@@ -29,6 +39,7 @@ pub struct CapabilityClaims {
     pub actor_epoch: i64,
     pub issued_at_ms: i64,
     pub expires_at_ms: i64,
+    pub device_binding: Option<CapabilityDeviceBinding>,
 }
 
 /// Issue an HMAC-SHA256 capability token of the form
@@ -55,13 +66,42 @@ pub fn issue_capability_token_with_epoch(
     issued_at_ms: i64,
     expires_at_ms: i64,
 ) -> String {
-    let payload = serde_json::json!({
+    issue_capability_token_with_epoch_and_binding(
+        secret,
+        user_id,
+        role,
+        actor_epoch,
+        issued_at_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+/// Issue a capability token with an optional all-or-none managed-device
+/// binding. Ordinary Business OS sessions continue to use unbound tokens.
+pub fn issue_capability_token_with_epoch_and_binding(
+    secret: &[u8],
+    user_id: &str,
+    role: &str,
+    actor_epoch: i64,
+    issued_at_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&CapabilityDeviceBinding>,
+) -> String {
+    let mut payload = serde_json::json!({
         "uid": user_id,
         "role": role,
         "epoch": actor_epoch,
         "iat": issued_at_ms,
         "exp": expires_at_ms,
     });
+    if let Some(binding) = device_binding {
+        payload["device_pairing_id"] = Value::String(binding.device_pairing_id.clone());
+        payload["device_id"] = Value::String(binding.device_id.clone());
+        payload["cnf"] = serde_json::json!({
+            "jkt": binding.proof_key_thumbprint,
+        });
+    }
     let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap_or_default());
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let sig = hmac::sign(&key, payload_b64.as_bytes());
@@ -87,12 +127,32 @@ pub fn verify_capability_token(
     if now_ms >= expires_at_ms {
         return None;
     }
+    let device_pairing_id = payload.get("device_pairing_id").and_then(Value::as_str);
+    let device_id = payload.get("device_id").and_then(Value::as_str);
+    let proof_key_thumbprint = payload.pointer("/cnf/jkt").and_then(Value::as_str);
+    let device_binding = match (device_pairing_id, device_id, proof_key_thumbprint) {
+        (None, None, None) => None,
+        (Some(device_pairing_id), Some(device_id), Some(proof_key_thumbprint))
+            if !device_pairing_id.is_empty()
+                && !device_id.is_empty()
+                && !proof_key_thumbprint.is_empty() =>
+        {
+            Some(CapabilityDeviceBinding {
+                device_pairing_id: device_pairing_id.to_string(),
+                device_id: device_id.to_string(),
+                proof_key_thumbprint: proof_key_thumbprint.to_string(),
+            })
+        }
+        // A signed-but-partial binding is malformed, never an unbound token.
+        _ => return None,
+    };
     Some(CapabilityClaims {
         user_id: payload.get("uid").and_then(Value::as_str)?.to_string(),
         role: payload.get("role").and_then(Value::as_str)?.to_string(),
         actor_epoch: payload.get("epoch").and_then(Value::as_i64).unwrap_or(0),
         issued_at_ms: payload.get("iat").and_then(Value::as_i64).unwrap_or(0),
         expires_at_ms,
+        device_binding,
     })
 }
 
@@ -112,12 +172,61 @@ mod tests {
         assert_eq!(claims.role, "chef");
         assert_eq!(claims.actor_epoch, 7);
         assert_eq!(claims.expires_at_ms, NOW + HOUR);
+        assert_eq!(claims.device_binding, None);
+    }
+
+    #[test]
+    fn device_binding_round_trips_as_tuple_and_cnf_jkt() {
+        let binding = CapabilityDeviceBinding {
+            device_pairing_id: "pairing-1".to_string(),
+            device_id: "device-1".to_string(),
+            proof_key_thumbprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+        };
+        let token = issue_capability_token_with_epoch_and_binding(
+            SECRET,
+            "mobile-1",
+            "user",
+            3,
+            NOW,
+            NOW + HOUR,
+            Some(&binding),
+        );
+        let (payload, _) = token.split_once('.').expect("token");
+        let payload: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        assert_eq!(payload["device_pairing_id"], "pairing-1");
+        assert_eq!(payload["device_id"], "device-1");
+        assert_eq!(payload["cnf"]["jkt"], binding.proof_key_thumbprint);
+        assert_eq!(
+            verify_capability_token(SECRET, &token, NOW)
+                .unwrap()
+                .device_binding,
+            Some(binding)
+        );
     }
 
     #[test]
     fn wrong_secret_is_rejected() {
         let token = issue_capability_token(SECRET, "chef1", "chef", NOW, NOW + HOUR);
         assert!(verify_capability_token(b"other-secret", &token, NOW).is_none());
+    }
+
+    #[test]
+    fn signed_partial_device_binding_is_rejected_not_downgraded() {
+        let payload = serde_json::json!({
+            "uid": "mobile-1",
+            "role": "user",
+            "epoch": 1,
+            "iat": NOW,
+            "exp": NOW + HOUR,
+            "device_id": "device-only",
+        });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let key = hmac::Key::new(hmac::HMAC_SHA256, SECRET);
+        let signature = URL_SAFE_NO_PAD.encode(hmac::sign(&key, payload_b64.as_bytes()).as_ref());
+        assert!(
+            verify_capability_token(SECRET, &format!("{payload_b64}.{signature}"), NOW).is_none()
+        );
     }
 
     #[test]
