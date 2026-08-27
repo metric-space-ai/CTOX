@@ -248,7 +248,10 @@ pub fn create(
         "sync_room": config.sync_room,
         "native_peer_id": config.native_peer_id,
         "signaling_urls": config.signaling_urls,
-        "signaling_room_password": config.signaling_room_password,
+        "signaling_auth_version": config.signaling_auth_version,
+        "signaling_browser_token": config.signaling_browser_token,
+        "signaling_browser_token_hash": config.signaling_browser_token_hash,
+        "signaling_native_token_hash": config.signaling_native_token_hash,
         "transport": "webrtc",
         "expires_at": expires_at,
         "data_plane": "rxdb-webrtc",
@@ -662,6 +665,22 @@ mod tests {
         assert!(!token.contains('.'));
         assert_eq!(invite["data_plane"], "rxdb-webrtc");
         assert_eq!(invite["http_bridge_available"], false);
+        assert_eq!(invite["signaling_auth_version"], "ctox-role-bound-v1");
+        assert_eq!(
+            invite["signaling_browser_token"].as_str().map(str::len),
+            Some(43)
+        );
+        assert_eq!(
+            invite["signaling_browser_token_hash"]
+                .as_str()
+                .map(str::len),
+            Some(64)
+        );
+        assert_eq!(
+            invite["signaling_native_token_hash"].as_str().map(str::len),
+            Some(64)
+        );
+        assert!(invite.get("signaling_room_password").is_none());
         assert_eq!(invite["session"]["user"]["role"], "user");
         assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
         assert!(
