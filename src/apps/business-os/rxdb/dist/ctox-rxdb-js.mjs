@@ -7274,6 +7274,7 @@ function createQueryDemandLoader({
   );
   const inflightByFingerprint = /* @__PURE__ */ new Map();
   const coordinatedByFingerprint = /* @__PURE__ */ new Map();
+  let nextRequestSequence = 0;
   const resolvingByInput = /* @__PURE__ */ new Map();
   return {
     async resolveQuery(query, { window: window2 } = {}) {
@@ -7294,16 +7295,33 @@ function createQueryDemandLoader({
       const existingInvocation = resolvingByInput.get(inputKey);
       if (existingInvocation) {
         bumpStatus(status, "queryFetchDedupHitCount");
-        return existingInvocation;
+        return existingInvocation.job;
       }
+      const requestId = `${collectionName}|query|${clock()}|${nextRequestSequence += 1}`;
+      const invocationEntry = {
+        job: null,
+        requestId,
+        fingerprint: null,
+        cancelledReason: null,
+        rejectCancellation: null
+      };
+      const cancellationPromise = new Promise((_, reject) => {
+        invocationEntry.rejectCancellation = reject;
+      });
+      cancellationPromise.catch(() => {
+      });
       const invocationJob = (async () => {
         const fingerprint = await queryFingerprint(fingerprintInput);
+        invocationEntry.fingerprint = fingerprint;
+        throwIfQueryCancelled(invocationEntry);
         const sidecarKey = [collectionName, fingerprint, normalizedWindow.offset, normalizedWindow.limit];
         const cached = await sidecar.getQueryWindow(sidecarKey);
+        throwIfQueryCancelled(invocationEntry);
         const cachedDocumentsAvailable = await queryWindowDocumentsAvailable(
           storageCollection,
           cached?.documentIds
         );
+        throwIfQueryCancelled(invocationEntry);
         if (cached && (cached.complete || cached.everCompleted) && !cachedDocumentsAvailable) {
           await sidecar.invalidateQueryWindow(sidecarKey);
           cached.complete = false;
@@ -7334,24 +7352,27 @@ function createQueryDemandLoader({
           }
           bumpStatus(status, "queryFetchInFlight", 1);
           v15Log("fetch:start", { collection: collectionName, fingerprint, offset: normalizedWindow.offset, limit: normalizedWindow.limit });
-          const requestId = `${dedupKey}|${clock()}`;
+          throwIfQueryCancelled(invocationEntry);
           const job = (async () => {
             const startedAt = clock();
             try {
-              const result = await requestQueryFetch({
-                requestId,
-                databaseName: storageCollection?.databaseName ?? null,
-                collectionName,
-                schemaVersion: schemaVersion ?? 0,
-                queryFingerprint: fingerprint,
-                query: {
-                  selector: query?.selector ?? {},
-                  sort: normalizeSort(query?.sort),
-                  limit: query?.limit,
-                  skip: query?.skip
-                },
-                window: normalizedWindow
-              });
+              const result = await Promise.race([
+                requestQueryFetch({
+                  requestId,
+                  databaseName: storageCollection?.databaseName ?? null,
+                  collectionName,
+                  schemaVersion: schemaVersion ?? 0,
+                  queryFingerprint: fingerprint,
+                  query: {
+                    selector: query?.selector ?? {},
+                    sort: normalizeSort(query?.sort),
+                    limit: query?.limit,
+                    skip: query?.skip
+                  },
+                  window: normalizedWindow
+                }),
+                cancellationPromise
+              ]);
               await materializeChunks(storageCollection, result.documents || [], resolveReplicationOrigin());
               const documentIds = (result.documents || []).map(extractId).filter(Boolean);
               await sidecar.upsertQueryWindow({
@@ -7484,11 +7505,13 @@ function createQueryDemandLoader({
         }
         return coordinatedFetchJob();
       })();
-      resolvingByInput.set(inputKey, invocationJob);
+      invocationEntry.job = invocationJob;
+      resolvingByInput.set(inputKey, invocationEntry);
       try {
         return await invocationJob;
       } finally {
-        if (resolvingByInput.get(inputKey) === invocationJob) resolvingByInput.delete(inputKey);
+        if (resolvingByInput.get(inputKey)?.job === invocationJob) resolvingByInput.delete(inputKey);
+        invocationEntry.rejectCancellation = null;
       }
     },
     inflightSize() {
@@ -7521,15 +7544,32 @@ function createQueryDemandLoader({
     // primary store so the next fetch starts from a clean slate (no orphans).
     async abortAllInFlight(reason = "reconnect") {
       const cancelled = [];
+      const cancellationTargets = /* @__PURE__ */ new Map();
+      for (const entry of resolvingByInput.values()) {
+        cancellationTargets.set(entry.requestId, entry.fingerprint);
+        if (!entry.cancelledReason) {
+          entry.cancelledReason = reason;
+          const error = createQueryCancelledError(reason);
+          entry.rejectCancellation?.(error);
+        }
+        try {
+          entry.job?.catch?.(() => {
+          });
+        } catch {
+        }
+      }
       for (const [dedupKey, entry] of inflightByFingerprint.entries()) {
         const { job, requestId } = entry;
         const [, fingerprint] = dedupKey.split("|");
-        cancelled.push({ dedupKey, fingerprint });
+        cancellationTargets.set(requestId, fingerprint);
         try {
           job.catch?.(() => {
           });
         } catch {
         }
+      }
+      for (const [requestId, fingerprint] of cancellationTargets.entries()) {
+        if (fingerprint) cancelled.push({ requestId, fingerprint });
         if (typeof requestCancel === "function") {
           try {
             await requestCancel({ requestId, fingerprint, reason });
@@ -7730,6 +7770,16 @@ function bumpStatus(status, field, delta = 1) {
 }
 function isQueryCancelledError(error) {
   return error?.code === "QUERY_CANCELLED" || String(error?.message || "").includes("QUERY_CANCELLED");
+}
+function createQueryCancelledError(reason) {
+  const error = new Error(`QUERY_CANCELLED: ${reason}`);
+  error.code = "QUERY_CANCELLED";
+  error.retryable = false;
+  return error;
+}
+function throwIfQueryCancelled(invocationEntry) {
+  if (!invocationEntry.cancelledReason) return;
+  throw createQueryCancelledError(invocationEntry.cancelledReason);
 }
 var v15LogSink = null;
 function setV15LogSink(fn) {
