@@ -497,6 +497,18 @@ pub(crate) struct BusinessOsSignalingAuthConfig {
     pub(crate) native_token_hash: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BusinessOsMobileInviteSyncConfig {
+    pub(crate) instance_id: String,
+    pub(crate) sync_room: String,
+    pub(crate) native_peer_id: String,
+    pub(crate) signaling_urls: Vec<String>,
+    pub(crate) signaling_auth_version: &'static str,
+    pub(crate) signaling_browser_token: String,
+    pub(crate) signaling_browser_token_hash: String,
+    pub(crate) signaling_native_token_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BusinessOsUser {
     pub id: String,

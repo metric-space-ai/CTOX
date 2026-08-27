@@ -183,7 +183,10 @@ pub fn create(
             created_at_ms,
             device_binding,
         )?;
-    let config = super::store::sync_config(root)?;
+    // This path also runs inside the native WebRTC peer. It must not call the
+    // full sync status projection, which recursively inspects the active peer
+    // and can hold the auxiliary response past the browser's RPC deadline.
+    let config = super::store::mobile_invite_sync_config(root)?;
     let mut conn = super::store::open_store(root)?;
     ensure_table(&conn)?;
     let persistence_result = (|| -> rusqlite::Result<()> {

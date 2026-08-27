@@ -533,6 +533,28 @@ pub fn sync_config(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
     })
 }
 
+/// Builds only the immutable connection material required by a short-lived
+/// Workjet device invite. Unlike `sync_config`, this deliberately does not
+/// inspect the running native peer or transport status: invite creation can
+/// itself execute inside that peer's auxiliary request handler, where a
+/// recursive liveness snapshot would contend with the response path.
+pub(crate) fn mobile_invite_sync_config(
+    root: &Path,
+) -> anyhow::Result<BusinessOsMobileInviteSyncConfig> {
+    let connection = sync_connection_config(root)?;
+    let signaling_auth = signaling_auth_config(root, &connection.signaling_room_password)?;
+    Ok(BusinessOsMobileInviteSyncConfig {
+        native_peer_id: format!("ctox-core-{}", short_hash(&connection.instance_id)),
+        instance_id: connection.instance_id,
+        sync_room: connection.sync_room,
+        signaling_urls: connection.signaling_urls,
+        signaling_auth_version: signaling_auth.version,
+        signaling_browser_token: signaling_auth.browser_token,
+        signaling_browser_token_hash: signaling_auth.browser_token_hash,
+        signaling_native_token_hash: signaling_auth.native_token_hash,
+    })
+}
+
 pub(crate) const BUSINESS_OS_SIGNALING_AUTH_VERSION: &str = "ctox-role-bound-v1";
 
 pub(crate) fn signaling_auth_config(
