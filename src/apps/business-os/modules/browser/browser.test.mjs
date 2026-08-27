@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { __browserTestHooks } from './index.js';
 
+assert.deepEqual(
+  __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
+  ['outbound_research_adapters', 'thesen_outbound_adapters'],
+  'the scraping rail loads core and tenant-local adapter collections together',
+);
+
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');
 assert.equal(__browserTestHooks.normalizeUrl('http://localhost:3000/path'), 'http://localhost:3000/path');
 assert.equal(__browserTestHooks.normalizeUrl(''), 'https://example.com');

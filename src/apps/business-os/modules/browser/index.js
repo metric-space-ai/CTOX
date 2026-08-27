@@ -21,6 +21,10 @@ const BROWSER_SYNC_COLLECTIONS = [
   'browser_sessions',
   'browser_tabs',
 ];
+const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
+  'outbound_research_adapters',
+  'thesen_outbound_adapters',
+]);
 
 export async function mount(ctx) {
   await ensureStyles();
@@ -254,7 +258,10 @@ export async function mount(ctx) {
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
   // Die Adapter-Lease endet mit dem Modul, sonst haelt sie die bedarfs-
   // geladene Sammlung dauerhaft offen.
-  cleanups.push(() => { state.adapterLease?.release?.(); state.adapterLease = null; });
+  cleanups.push(() => {
+    for (const lease of state.adapterLeases || []) lease?.release?.();
+    state.adapterLeases = [];
+  });
   refs.sessionsImport?.addEventListener('click', () => importBrowserSessions(ctx, state, refs));
   refs.sessionsExport?.addEventListener('click', () => exportBrowserSessions(state, refs));
   refs.sessionsToggle?.addEventListener('click', () => {
@@ -2446,37 +2453,39 @@ function renderSessionList(refs, sessions, tabs, activeSession) {
 async function ladeScrapingAdapter(ctx, state) {
   if (state.adapterLadedauer) return state.adapterLadedauer;
   state.adapterLadedauer = (async () => {
-    try {
-      // Die Adapter liegen je nach Installation unter verschiedenen Namen.
-      // Beide dürfen ausschließlich über den vom Shell-Gate bereitgestellten
-      // Modul-Handle aufgelöst werden; das Modul darf keine Collections am
-      // ungescopten RxDB-Objekt nachregistrieren.
-      let sammlung = null;
-      let sammlungsName = '';
-      const kandidatenNamen = ['outbound_research_adapters', 'thesen_outbound_adapters'];
-      for (const name of kandidatenNamen) {
-        const kandidat = browserCollection(ctx, name);
-        if (kandidat) { sammlung = kandidat; sammlungsName = name; break; }
+    const rows = [];
+    const errors = [];
+    state.adapterLeases ||= [];
+    for (const collectionName of SCRAPING_ADAPTER_COLLECTIONS) {
+      try {
+        const collection = browserCollection(ctx, collectionName);
+        if (!collection) throw new Error('Sammlung ist für das Browser-Modul nicht freigegeben');
+        if (typeof ctx.sync?.leaseCollection === 'function') {
+          const lease = await ctx.sync.leaseCollection(
+            collectionName,
+            `browser:scraping-adapters:${collectionName}`,
+          );
+          if (lease) state.adapterLeases.push(lease);
+        }
+        const collectionRows = await readCollection(collection, {
+          limit: 200,
+          sort: [{ updated_at_ms: 'desc' }],
+        });
+        rows.push(...collectionRows.map((row) => ({ ...row, adapter_collection: collectionName })));
+      } catch (error) {
+        errors.push(`${collectionName}: ${String(error?.message || error)}`);
       }
-      if (!sammlung) {
-        throw new Error('Keine freigegebene Adapter-Sammlung registriert (vorhanden='
-          + kandidatenNamen.map((n) => n + ':' + !!browserCollection(ctx, n)).join(',') + ')');
-      }
-      if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
-        state.adapterLease = await ctx.sync.leaseCollection(sammlungsName, 'browser:scraping-adapters');
-      }
-      const rows = await readCollection(sammlung, {
-        limit: 200,
-        sort: [{ updated_at_ms: 'desc' }],
-      });
-      state.adapters = rows.filter((row) => row && row.is_deleted !== true);
-      state.adapterFehler = '';
-    } catch (error) {
-      state.adapters = state.adapters || [];
-      state.adapterFehler = String(error?.message || error);
-    } finally {
-      state.adapterLadedauer = null;
     }
+    const deduplicated = new Map();
+    for (const row of rows) {
+      if (!row || row.is_deleted === true) continue;
+      deduplicated.set(`${row.adapter_collection}:${row.id || row.source_id}`, row);
+    }
+    state.adapters = [...deduplicated.values()];
+    state.adapterFehler = errors.length === SCRAPING_ADAPTER_COLLECTIONS.length
+      ? errors.join(' | ')
+      : '';
+    state.adapterLadedauer = null;
   })();
   return state.adapterLadedauer;
 }
@@ -3720,6 +3729,7 @@ function escapeHtml(value) {
 }
 
 export const __browserTestHooks = {
+  SCRAPING_ADAPTER_COLLECTIONS,
   normalizeUrl,
   browserSessionIdFromArgs,
   formatBytes,
