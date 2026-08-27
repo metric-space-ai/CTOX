@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260825-anmeldesitzung-v253';
+const APP_BUILD = '20260827-role-bound-browser-config-v254';
 
 ensureShellStylesheets();
 
@@ -10751,11 +10751,7 @@ function readUrlPairingConfig() {
   const syncRoom = params.get('sync_room') || params.get('syncRoom');
   const signaling = params.get('signaling_url') || params.get('signalingUrl');
   const instanceId = params.get('instance_id') || params.get('instanceId');
-  const roomPassword = params.get('room_password')
-    || params.get('roomPassword')
-    || params.get('signaling_room_password')
-    || params.get('signalingRoomPassword');
-  if ((!syncRoom && (!instanceId || !roomPassword)) || !signaling) return null;
+  if (!syncRoom || !signaling) return null;
   return {
     ok: true,
     source: 'url',
@@ -10766,7 +10762,10 @@ function readUrlPairingConfig() {
     native_peer_id: params.get('native_peer_id') || params.get('nativePeerId') || '',
     peer_role: 'browser',
     sync_room: syncRoom,
-    signaling_room_password: roomPassword || '',
+    signaling_auth_version: params.get('signaling_auth_version') || params.get('signalingAuthVersion') || '',
+    signaling_browser_token: params.get('signaling_browser_token') || params.get('signalingBrowserToken') || '',
+    signaling_browser_token_hash: params.get('signaling_browser_token_hash') || params.get('signalingBrowserTokenHash') || '',
+    signaling_native_token_hash: params.get('signaling_native_token_hash') || params.get('signalingNativeTokenHash') || '',
     signaling_urls: signaling.split(',').map((item) => item.trim()).filter(Boolean),
     transport: 'webrtc',
     http_bridge_available: false,
@@ -10795,10 +10794,13 @@ function assertManagedDesktopCapability(config) {
 
 function readStoredPairingConfig() {
   try {
-    const raw = readScopedLocalStorage(PAIRING_CONFIG_KEY, {
-      actor: false,
-      legacyFallback: true,
-    });
+    // Pairing state contains the browser-role signaling credential. Keep it
+    // only for this page session so a later browser process/profile cannot
+    // recover it from persistent localStorage. Legacy persistent copies may
+    // contain the former native room password and are removed fail-closed.
+    removeScopedLocalStorage(PAIRING_CONFIG_KEY, { actor: false });
+    localStorage.removeItem(PAIRING_CONFIG_KEY);
+    const raw = sessionStorage.getItem(scopedStorageKey(PAIRING_CONFIG_KEY, { actor: false }));
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -10807,14 +10809,14 @@ function readStoredPairingConfig() {
 
 function writeStoredPairingConfig(config) {
   try {
-    writeScopedLocalStorage(PAIRING_CONFIG_KEY, JSON.stringify({ ...config, source: 'stored' }), {
-      actor: false,
-    });
+    const key = scopedStorageKey(PAIRING_CONFIG_KEY, { actor: false });
+    sessionStorage.setItem(key, JSON.stringify({ ...config, source: 'stored' }));
   } catch {}
 }
 
 function clearStoredPairingConfig() {
   try {
+    sessionStorage.removeItem(scopedStorageKey(PAIRING_CONFIG_KEY, { actor: false }));
     removeScopedLocalStorage(PAIRING_CONFIG_KEY, { actor: false });
     localStorage.removeItem(PAIRING_CONFIG_KEY);
   } catch {}
@@ -10836,6 +10838,14 @@ function scrubPairingConfigFromUrl() {
       'roomPassword',
       'signaling_room_password',
       'signalingRoomPassword',
+      'signaling_auth_version',
+      'signalingAuthVersion',
+      'signaling_browser_token',
+      'signalingBrowserToken',
+      'signaling_browser_token_hash',
+      'signalingBrowserTokenHash',
+      'signaling_native_token_hash',
+      'signalingNativeTokenHash',
       'peer_id',
       'peerId',
       'native_peer_id',
@@ -10954,15 +10964,7 @@ async function normalizeBusinessOsLaunchConfig(config) {
     ? config.signaling_urls
     : (Array.isArray(config.signalingUrls) ? config.signalingUrls : []);
   const instanceId = String(config.instance_id || config.instanceId || '').trim();
-  const roomPassword = String(
-    config.signaling_room_password
-      || config.signalingRoomPassword
-      || config.room_password
-      || config.roomPassword
-      || ''
-  ).trim();
-  const explicitSyncRoom = String(config.sync_room || config.syncRoom || '').trim();
-  const syncRoom = explicitSyncRoom || await deriveSyncRoomFromPassword(instanceId, roomPassword);
+  const syncRoom = String(config.sync_room || config.syncRoom || '').trim();
   const urls = signalingUrls.map((url) => String(url || '').trim()).filter(Boolean);
   if (!syncRoom || !urls.length) return null;
   // A pairing payload (`?ctox_config=`, `desktop invite`) carries the room and
@@ -10995,7 +10997,6 @@ async function normalizeBusinessOsLaunchConfig(config) {
     native_peer_id: config.native_peer_id || config.nativePeerId || '',
     peer_role: config.peer_role || config.peerRole || 'browser',
     sync_room: syncRoom,
-    signaling_room_password: roomPassword,
     signaling_auth_version: String(config.signaling_auth_version || config.signalingAuthVersion || '').trim(),
     signaling_browser_token: String(config.signaling_browser_token || config.signalingBrowserToken || '').trim(),
     signaling_browser_token_hash: String(config.signaling_browser_token_hash || config.signalingBrowserTokenHash || '').trim(),
@@ -11025,17 +11026,6 @@ async function normalizeBusinessOsLaunchConfig(config) {
       : null,
     source: config.source || 'injected',
   };
-}
-
-async function deriveSyncRoomFromPassword(instanceId, roomPassword) {
-  if (!instanceId || !roomPassword) return '';
-  if (!globalThis.crypto?.subtle || typeof TextEncoder === 'undefined') {
-    throw new Error('Business OS pairing requires WebCrypto to derive the WebRTC room from the room password.');
-  }
-  const bytes = new TextEncoder().encode(roomPassword);
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-  const secretId = base64UrlEncode(new Uint8Array(digest)).slice(0, 22);
-  return `ctox-business-os:${instanceId}:${secretId}`;
 }
 
 function base64UrlEncode(bytes) {

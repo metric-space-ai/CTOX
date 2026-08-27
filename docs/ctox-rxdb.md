@@ -349,8 +349,9 @@ documents is `runtime/business-os-rxdb.sqlite3` as above.
 - **Signaling URL, browser:** `sync.js::signalingUrlWithBrowserMetadata` sets
   `client=ctox-business-os-browser`, `role=browser`, `instance_id`,
   `protocol=ctox-rxdb-protocol-v1`, `cap=` for each browser capability, and a
-  a browser-only token = first 32 chars of base64url(SHA-256(room password))
-  with `token_iat`/`token_exp` (24 h TTL).
+  separate browser-role token with `token_iat`/`token_exp` (24 h TTL). The
+  browser verifies that token against its SHA-256 commitment and fails closed
+  if the explicit token or either role commitment is absent.
 - **Signaling URL, native:** `rxdb_peer.rs::signaling_url_with_native_metadata`
   uses the stable `ctox-core-{instance hash}` identity,
   `role=ctox_instance`, and a separate random credential persisted only in

@@ -572,16 +572,17 @@ async function importInviteConnection(event) {
     displayName: document.getElementById("pairing-display-name").value,
     syncRoom: document.getElementById("pairing-sync-room").value,
     signalingUrl: document.getElementById("pairing-signaling-url").value,
-    roomSecret: document.getElementById("pairing-room-secret").value,
+    browserToken: document.getElementById("pairing-browser-token").value,
+    nativeTokenHash: document.getElementById("pairing-native-token-hash").value,
     capabilityToken: document.getElementById("pairing-capability-token").value,
   });
   if (!rawInvite && state.pairingRotationTarget) {
     setConnectionStatus("Füge für die Rotation eine vollständige Desktop-Einladung ein.", "error");
     return;
   }
-  if (!rawInvite && (!manual.displayName || !manual.syncRoom || !manual.signalingUrl || !manual.roomSecret || !manual.capabilityToken)) {
+  if (!rawInvite && (!manual.displayName || !manual.syncRoom || !manual.signalingUrl || !manual.browserToken || !manual.nativeTokenHash || !manual.capabilityToken)) {
     manualPairingFields.open = true;
-    setConnectionStatus("Gib Einladung oder Anzeigename, Signaling-URL, Sync Room, Room-Passwort und Zugangs-Token vollständig an.", "error");
+    setConnectionStatus("Gib Einladung oder Anzeigename, Signaling-URL, Sync Room, Browser-Signaling-Token, Native Token-Commitment und Zugangs-Token vollständig an.", "error");
     return;
   }
   await runConnectionTask(state.pairingRotationTarget ? "Pairing wird rotiert …" : "Einladung wird importiert …", async () => {
@@ -592,7 +593,8 @@ async function importInviteConnection(event) {
     } else {
       await window.ctoxDesktop.importManualPairing(manual);
     }
-    document.getElementById("pairing-room-secret").value = "";
+    document.getElementById("pairing-browser-token").value = "";
+    document.getElementById("pairing-native-token-hash").value = "";
     document.getElementById("pairing-capability-token").value = "";
     await finishConnection(state.pairingRotationTarget ? "Pairing rotiert." : "Einladung importiert.");
   });

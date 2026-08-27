@@ -2,10 +2,24 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const { createDefaultRegistry } = require("../src/main/registry.cjs");
 const { PairingInviteInstanceSource } = require("../src/main/sources.cjs");
 const { parseInvitePayload } = require("../src/common/invites.cjs");
 const { stableId } = require("../src/common/instance-model.cjs");
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function roleBoundAuth(browserToken) {
+  return {
+    signaling_auth_version: "ctox-role-bound-v1",
+    signaling_browser_token: browserToken,
+    signaling_browser_token_hash: sha256(browserToken),
+    signaling_native_token_hash: sha256(`native:${browserToken}`),
+  };
+}
 
 test("manual pairing import stores secret material outside registry", async () => {
   let registry = createDefaultRegistry();
@@ -25,7 +39,8 @@ test("manual pairing import stores secret material outside registry", async () =
     displayName: "Kunde X",
     syncRoom: "ctox-business-os:kunde-x",
     signalingUrl: "wss://signaling.ctox.dev",
-    roomSecret: "room-secret",
+    browserToken: "room-secret",
+    nativeTokenHash: sha256("native:room-secret"),
   });
   assert.equal(instance.source, "pairing_invite");
   assert.equal(JSON.stringify(registry).includes("room-secret"), false);
@@ -40,7 +55,7 @@ test("desktop CLI invite contract imports through JSON and desktop link", () => 
     instance_id: "cli_lab",
     sync_room: "ctox-business-os:cli_lab:room",
     signaling_urls: ["wss://signaling.ctox.dev"],
-    signaling_room_password: "room-secret",
+    ...roleBoundAuth("room-secret"),
     transport: "webrtc",
     expires_at: "2099-01-01T00:00:00.000Z",
     data_plane: "rxdb-webrtc",
@@ -82,7 +97,7 @@ test("desktop invite keeps capability outside registry and injects it into launc
     instance_id: "authorized-lab",
     sync_room: "ctox-business-os:authorized-lab:room",
     signaling_urls: ["wss://signaling.ctox.dev"],
-    signaling_room_password: "room-secret",
+    ...roleBoundAuth("room-secret"),
     transport: "webrtc",
     expires_at: "2099-01-01T00:00:00.000Z",
     session: {
@@ -120,7 +135,7 @@ test("pairing rotation replaces only matching invite secret and revoke clears lo
     instance_id: "cli_lab",
     sync_room: "ctox-business-os:cli_lab:room",
     signaling_urls: ["wss://signaling.ctox.dev"],
-    signaling_room_password: "old-room-secret",
+    ...roleBoundAuth("old-room-secret"),
     transport: "webrtc",
     expires_at: "2099-01-01T00:00:00.000Z",
   }));
@@ -132,7 +147,7 @@ test("pairing rotation replaces only matching invite secret and revoke clears lo
     instance_id: "cli_lab",
     sync_room: "ctox-business-os:cli_lab:rotated-room",
     signaling_urls: ["wss://signaling.ctox.dev", "wss://backup.signaling.ctox.dev"],
-    signaling_room_password: "new-room-secret",
+    ...roleBoundAuth("new-room-secret"),
     transport: "webrtc",
     expires_at: "2099-01-01T00:00:00.000Z",
   }));
@@ -140,7 +155,8 @@ test("pairing rotation replaces only matching invite secret and revoke clears lo
   assert.equal(JSON.stringify(registry).includes("new-room-secret"), false);
   assert.equal(secrets.get(rotated.pairing.secretRef), "new-room-secret");
   const launch = await source.getLaunchConfig(instance.id);
-  assert.equal(launch.ctoxConfig.signaling_room_password, "new-room-secret");
+  assert.equal(launch.ctoxConfig.signaling_browser_token, "new-room-secret");
+  assert.equal("signaling_room_password" in launch.ctoxConfig, false);
   assert.deepEqual(launch.ctoxConfig.signaling_urls, [
     "wss://signaling.ctox.dev",
     "wss://backup.signaling.ctox.dev",
@@ -154,7 +170,7 @@ test("pairing rotation replaces only matching invite secret and revoke clears lo
       instance_id: "other_lab",
       sync_room: "ctox-business-os:other_lab:room",
       signaling_urls: ["wss://signaling.ctox.dev"],
-      signaling_room_password: "other-secret",
+      ...roleBoundAuth("other-secret"),
       transport: "webrtc",
       expires_at: "2099-01-01T00:00:00.000Z",
     })),
@@ -206,7 +222,7 @@ test("pairing rotation migrates legacy sync-room-scoped ids", async () => {
     instance_id: "cli_lab",
     sync_room: "ctox-business-os:cli_lab:new-room",
     signaling_urls: ["wss://signaling.ctox.dev"],
-    signaling_room_password: "new-room-secret",
+    ...roleBoundAuth("new-room-secret"),
     transport: "webrtc",
     expires_at: "2099-01-01T00:00:00.000Z",
   }));

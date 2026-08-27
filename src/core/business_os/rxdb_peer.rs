@@ -3347,6 +3347,12 @@ fn signaling_url_with_native_metadata_at(
                     | "auth_version"
                     | "browser_token_hash"
                     | "native_token_hash"
+                    | "signaling_browser_token"
+                    | "signalingBrowserToken"
+                    | "signaling_room_password"
+                    | "signalingRoomPassword"
+                    | "room_password"
+                    | "roomPassword"
             )
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))

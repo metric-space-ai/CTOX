@@ -127,8 +127,9 @@ app.whenReady().then(async () => {
         signalingUrlCount: Array.isArray(launchConfig.ctoxConfig.signaling_urls)
           ? launchConfig.ctoxConfig.signaling_urls.length
           : 0,
-        hasRoomPassword: Boolean(launchConfig.ctoxConfig.signaling_room_password),
-        roomPasswordIsRedacted: isRedactedMarker(launchConfig.ctoxConfig.signaling_room_password),
+        hasBrowserCredential: Boolean(launchConfig.ctoxConfig.signaling_browser_token),
+        browserCredentialIsRedacted: isRedactedMarker(launchConfig.ctoxConfig.signaling_browser_token),
+        hasLegacyRoomPassword: "signaling_room_password" in launchConfig.ctoxConfig,
         syncRoomIsRedacted: isRedactedMarker(launchConfig.ctoxConfig.sync_room),
         signalingUrlRedactedMarkerCount: (launchConfig.ctoxConfig.signaling_urls || [])
           .filter(isRedactedMarker).length,
@@ -482,7 +483,13 @@ async function captureRenderedLaunchPage(window) {
         const signalingUrls = Array.isArray(decoded?.signaling_urls)
           ? decoded.signaling_urls
           : (Array.isArray(decoded?.signalingUrls) ? decoded.signalingUrls : []);
-        const roomPassword = String(decoded?.signaling_room_password || decoded?.signalingRoomPassword || decoded?.room_password || decoded?.roomPassword || "");
+        const browserCredential = String(decoded?.signaling_browser_token || decoded?.signalingBrowserToken || "");
+        const hasLegacyRoomPassword = [
+          "signaling_room_password",
+          "signalingRoomPassword",
+          "room_password",
+          "roomPassword",
+        ].some((key) => Object.prototype.hasOwnProperty.call(decoded || {}, key));
         const redactedMarkerCount = (rawJson.match(/<redacted>|\\[redacted\\]/gi) || []).length;
         return {
           ok: true,
@@ -490,9 +497,10 @@ async function captureRenderedLaunchPage(window) {
           hasSyncRoom: Boolean(decoded?.sync_room || decoded?.syncRoom),
           signalingUrlCount: signalingUrls.length,
           signalingUrlRedactedMarkerCount: signalingUrls.filter((url) => /<redacted>|\\[redacted\\]/i.test(String(url || ""))).length,
-          hasRoomPassword: Boolean(roomPassword),
-          roomPasswordLength: roomPassword.length,
-          roomPasswordIsRedacted: /<redacted>|\\[redacted\\]/i.test(roomPassword),
+          hasBrowserCredential: Boolean(browserCredential),
+          browserCredentialLength: browserCredential.length,
+          browserCredentialIsRedacted: /<redacted>|\\[redacted\\]/i.test(browserCredential),
+          hasLegacyRoomPassword,
           hasSession: Boolean(decoded?.session?.authenticated),
           source: String(decoded?.source || ""),
           redactedMarkerCount
@@ -860,7 +868,8 @@ async function exerciseSessionRotation({
       signalingUrlCount: Array.isArray(relaunchConfig.ctoxConfig.signaling_urls)
         ? relaunchConfig.ctoxConfig.signaling_urls.length
         : 0,
-      hasRoomPassword: Boolean(relaunchConfig.ctoxConfig.signaling_room_password),
+      hasBrowserCredential: Boolean(relaunchConfig.ctoxConfig.signaling_browser_token),
+      hasLegacyRoomPassword: "signaling_room_password" in relaunchConfig.ctoxConfig,
       expiresAt: relaunchConfig.expiresAt || "",
     },
     finalLogout,
