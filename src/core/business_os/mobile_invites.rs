@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(invite["signaling_auth_version"], "ctox-role-bound-v1");
         assert_eq!(
             invite["signaling_browser_token"].as_str().map(str::len),
-            Some(43)
+            Some(32)
         );
         assert_eq!(
             invite["signaling_browser_token_hash"]
