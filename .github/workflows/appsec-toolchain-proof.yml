@@ -300,8 +300,20 @@ jobs:
             printf '%s  %s\n' "df7fa753e2f9f67f3bc99b2a40a3be7ef559088c68ad6bdf66b4b5764e965bd6" "$clamav_package" | shasum -a 256 --check
             clamav_signature=$(pkgutil --check-signature "$clamav_package")
             printf '%s\n' "$clamav_signature" | grep -F 'Status: signed by a developer certificate issued by Apple for distribution'
-            printf '%s\n' "$clamav_signature" | grep -F 'Notarization: trusted by the Apple notary service'
             printf '%s\n' "$clamav_signature" | grep -F 'Developer ID Installer: Cisco (DE8Y96K9QP)'
+            clamav_notarization_log="$RUNNER_TEMP/clamav-1.5.4-notarization.log"
+            set +e
+            spctl --assess --type install --verbose=4 "$clamav_package" \
+              >"$clamav_notarization_log" 2>&1
+            clamav_notarization_exit=$?
+            set -e
+            clamav_notarization_tail=$(tail -n 8 "$clamav_notarization_log" | tr '\r\n' '  ' | cut -c1-1000)
+            rm -f "$clamav_notarization_log"
+            if [ "$clamav_notarization_exit" -ne 0 ]; then
+              printf 'ClamAV package notarization failed: phase=macos-gatekeeper-assessment exit_code=%s output_tail=%s\n' \
+                "$clamav_notarization_exit" "$clamav_notarization_tail" >&2
+              exit 1
+            fi
             sudo installer -pkg "$clamav_package" -target /
             clamav_prefix="/usr/local/clamav"
             if [ ! -d "$clamav_prefix/etc/certs" ] || [ -L "$clamav_prefix/etc/certs" ]; then
@@ -930,6 +942,7 @@ jobs:
             ${{ runner.temp }}/ctox-appsec-proof/clamav-native-provenance.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/appsec/**/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/*.json
+            ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/install-provenance/**
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/install-logs/**
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/templates/**/.ctox-data-bundle.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/wordlists/**/.ctox-data-bundle.json
