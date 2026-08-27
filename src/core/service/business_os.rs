@@ -527,7 +527,10 @@ fn build_desktop_invite(root: &Path, args: &[String]) -> anyhow::Result<serde_js
         "sync_room": config.sync_room,
         "native_peer_id": config.native_peer_id,
         "signaling_urls": config.signaling_urls,
-        "signaling_room_password": config.signaling_room_password,
+        "signaling_auth_version": config.signaling_auth_version,
+        "signaling_browser_token": config.signaling_browser_token,
+        "signaling_browser_token_hash": config.signaling_browser_token_hash,
+        "signaling_native_token_hash": config.signaling_native_token_hash,
         "transport": "webrtc",
         "expires_at": expires_at,
         "data_plane": "rxdb-webrtc",
@@ -7793,11 +7796,32 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .map(|urls| !urls.is_empty())
             .unwrap_or(false));
+        assert!(invite.get("signaling_room_password").is_none());
+        assert_eq!(
+            invite
+                .get("signaling_auth_version")
+                .and_then(serde_json::Value::as_str),
+            Some("ctox-role-bound-v1")
+        );
         assert!(!invite
-            .get("signaling_room_password")
+            .get("signaling_browser_token")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .is_empty());
+        assert_eq!(
+            invite
+                .get("signaling_browser_token_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(64)
+        );
+        assert_eq!(
+            invite
+                .get("signaling_native_token_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(64)
+        );
         assert!(!invite
             .pointer("/session/capability_token")
             .and_then(serde_json::Value::as_str)

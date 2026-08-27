@@ -1,6 +1,7 @@
 "use strict";
 
 const { execFile, spawn } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -183,6 +184,28 @@ function forceWebrtcLaunchConfig(config) {
   return next;
 }
 
+function assertBrowserRoleLaunchConfig(config) {
+  for (const key of ["signaling_room_password", "signalingRoomPassword", "room_password", "roomPassword"]) {
+    if (String(config?.[key] || "").trim()) {
+      throw new Error("browser launch config must not contain the native room password");
+    }
+  }
+  const browserToken = String(config?.signaling_browser_token || config?.signalingBrowserToken || "").trim();
+  const browserTokenHash = String(config?.signaling_browser_token_hash || config?.signalingBrowserTokenHash || "").trim();
+  const nativeTokenHash = String(config?.signaling_native_token_hash || config?.signalingNativeTokenHash || "").trim();
+  const authVersion = String(config?.signaling_auth_version || config?.signalingAuthVersion || "").trim();
+  const actualBrowserTokenHash = createHash("sha256").update(browserToken).digest("hex");
+  if (authVersion !== "ctox-role-bound-v1"
+    || !browserToken
+    || !/^[a-f0-9]{64}$/.test(browserTokenHash)
+    || !/^[a-f0-9]{64}$/.test(nativeTokenHash)
+    || browserTokenHash === nativeTokenHash
+    || actualBrowserTokenHash !== browserTokenHash) {
+    throw new Error("browser launch config needs valid role-bound signaling credentials");
+  }
+  return config;
+}
+
 function selectCtoxDevLaunchUrl(rawLaunchUrl, ctoxConfig, shellUrl = "", desktopInstance = null) {
   const launchUrl = String(rawLaunchUrl || "").trim();
   if (!launchUrl) throw new Error("ctox.dev launch config is missing launchUrl");
@@ -192,6 +215,7 @@ function selectCtoxDevLaunchUrl(rawLaunchUrl, ctoxConfig, shellUrl = "", desktop
     if (!packedConfig || typeof packedConfig !== "object") {
       throw new Error("ctox.dev packed launch config could not be decoded");
     }
+    assertBrowserRoleLaunchConfig(packedConfig);
     return buildLaunchUrl(
       String(shellUrl || launchUrl),
       withManagedDesktopInstance(packedConfig, desktopInstance),
@@ -204,7 +228,7 @@ function selectCtoxDevLaunchUrl(rawLaunchUrl, ctoxConfig, shellUrl = "", desktop
   // the shell. The desktop already has a complete, short-lived WebRTC pairing
   // config, so launch the public app shell and keep each tenant's IndexedDB in
   // its isolated Electron partition. No account cookie is copied across sessions.
-  return buildLaunchUrl(String(shellUrl || launchUrl), ctoxConfig);
+  return buildLaunchUrl(String(shellUrl || launchUrl), assertBrowserRoleLaunchConfig(ctoxConfig));
 }
 
 function withManagedDesktopInstance(config, desktopInstance) {
@@ -272,6 +296,8 @@ function containsRedactedPairingSecret(value) {
     config.signalingRoomPassword,
     config.room_password,
     config.roomPassword,
+    config.signaling_browser_token,
+    config.signalingBrowserToken,
     ...signalingUrls,
   ];
   return pairingValues.some((entry) => /<redacted>|\[redacted\]/i.test(String(entry || "")));
@@ -1383,13 +1409,23 @@ function instanceFromPeerStatus(peerStatus, options) {
   const signalingUrls = Array.isArray(peerStatus.signaling_urls)
     ? peerStatus.signaling_urls.map((url) => String(url).trim()).filter(Boolean)
     : [];
-  const roomPassword = String(peerStatus.signaling_room_password || "").trim();
+  const browserToken = String(peerStatus.signaling_browser_token || "").trim();
+  const authVersion = String(peerStatus.signaling_auth_version || "").trim();
+  const browserTokenHash = String(peerStatus.signaling_browser_token_hash || "").trim();
+  const nativeTokenHash = String(peerStatus.signaling_native_token_hash || "").trim();
   if (!syncRoom.startsWith("ctox-business-os:")) throw new Error("peer status sync_room must start with ctox-business-os:");
   if (signalingUrls.length === 0) throw new Error("peer status needs signaling_urls");
-  if (!roomPassword) throw new Error("peer status needs signaling_room_password");
+  if (!browserToken) throw new Error("peer status needs signaling_browser_token");
+  if (authVersion !== "ctox-role-bound-v1"
+    || !/^[a-f0-9]{64}$/.test(browserTokenHash)
+    || !/^[a-f0-9]{64}$/.test(nativeTokenHash)
+    || browserTokenHash === nativeTokenHash
+    || createHash("sha256").update(browserToken).digest("hex") !== browserTokenHash) {
+    throw new Error("peer status needs valid role-bound signaling commitments");
+  }
   const instanceId = String(peerStatus.instance_id || syncRoom.split(":")[1] || "").trim();
   const id = `${instanceIdPrefix(options.source)}:${stableId([options.source, instanceId, syncRoom])}`;
-  const secretRef = `keychain://ctox-business-os-desktop/${id}/room`;
+  const secretRef = `keychain://ctox-business-os-desktop/${id}/signaling-browser`;
   const capabilityToken = String(peerStatus?.session?.capability_token || peerStatus?.capability_token || "").trim();
   const authorizationRef = capabilityToken
     ? `keychain://ctox-business-os-desktop/${id}/authorization`
@@ -1412,6 +1448,9 @@ function instanceFromPeerStatus(peerStatus, options) {
     pairing: {
       syncRoom,
       signalingUrls,
+      authVersion,
+      browserCommitmentSha256: browserTokenHash,
+      nativeCommitmentSha256: nativeTokenHash,
       secretRef,
       authorizationRef,
       capabilityExpiresAtMs,
@@ -1429,7 +1468,7 @@ function instanceFromPeerStatus(peerStatus, options) {
   return {
     instance,
     secretMaterial: [
-      { ref: secretRef, value: roomPassword },
+      { ref: secretRef, value: browserToken },
       ...(authorizationRef ? [{ ref: authorizationRef, value: capabilityToken }] : []),
     ],
   };

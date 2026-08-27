@@ -3107,6 +3107,13 @@ async function signalingUrlWithBrowserMetadata(rawUrl, config) {
   if (!['ws:', 'wss:'].includes(url.protocol)) {
     throw new Error('Business OS WebRTC sync requires a ws(s) signaling URL');
   }
+  const loopbackHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname.toLowerCase());
+  if (url.protocol !== 'wss:' && !loopbackHost) {
+    throw new Error('Business OS WebRTC sync requires TLS for non-loopback signaling');
+  }
+  if (url.username || url.password) {
+    throw new Error('Business OS WebRTC sync signaling URLs must not contain userinfo credentials');
+  }
   if (url.hostname === 'signaling.ctox.dev' && ['/', '/signal'].includes(url.pathname)) {
     url.pathname = '/v2';
   }
@@ -3114,6 +3121,8 @@ async function signalingUrlWithBrowserMetadata(rawUrl, config) {
     .filter(([key]) => ![
       'client', 'role', 'instance_id', 'protocol', 'cap', 'token', 'token_iat', 'token_exp',
       'auth_version', 'browser_token_hash', 'native_token_hash',
+      'signaling_browser_token', 'signalingBrowserToken',
+      'signaling_room_password', 'signalingRoomPassword', 'room_password', 'roomPassword',
     ].includes(key));
   url.search = '';
   for (const [key, value] of preserved) url.searchParams.append(key, value);

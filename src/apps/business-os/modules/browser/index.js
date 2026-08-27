@@ -2447,13 +2447,10 @@ async function ladeScrapingAdapter(ctx, state) {
   if (state.adapterLadedauer) return state.adapterLadedauer;
   state.adapterLadedauer = (async () => {
     try {
-      // Die Adapter liegen je nach Installation unter verschiedenen Namen:
-      // die generische Projektion (outbound_research_adapters) ist nicht auf
-      // jeder Browser-Seite registriert, der Modul-Zwilling
-      // (thesen_outbound_adapters) schon. Erster Name mit registrierter
-      // Sammlung gewinnt -- ein stilles [] von einer unregistrierten war
-      // vorher als "keine Adapter" durchgegangen, waehrend 17 auf dem Server
-      // lagen.
+      // Die Adapter liegen je nach Installation unter verschiedenen Namen.
+      // Beide dürfen ausschließlich über den vom Shell-Gate bereitgestellten
+      // Modul-Handle aufgelöst werden; das Modul darf keine Collections am
+      // ungescopten RxDB-Objekt nachregistrieren.
       let sammlung = null;
       let sammlungsName = '';
       const kandidatenNamen = ['outbound_research_adapters', 'thesen_outbound_adapters'];
@@ -2461,38 +2458,9 @@ async function ladeScrapingAdapter(ctx, state) {
         const kandidat = browserCollection(ctx, name);
         if (kandidat) { sammlung = kandidat; sammlungsName = name; break; }
       }
-      if (!sammlung && typeof ctx.db?.addCollections === 'function') {
-        // Das Schema der Sammlung registriert normalerweise die Outbound-App
-        // -- aber nur, wenn ihr Fenster in DIESER Seiten-Sitzung schon offen
-        // war. Darauf darf der Reiter nicht angewiesen sein. addCollections
-        // ueberspringt Vorhandenes (shared/db.js), also ist die Selbst-
-        // registrierung gefahrlos, wenn die Outbound-App zuerst da war; sonst
-        // traegt dieses lose Schema (additionalProperties) die Leseansicht.
-        await ctx.db.addCollections({
-          thesen_outbound_adapters: {
-            schema: {
-              title: 'thesen_outbound_adapters',
-              version: 0,
-              primaryKey: 'id',
-              type: 'object',
-              additionalProperties: true,
-              properties: {
-                id: { type: 'string', maxLength: 200 },
-                updated_at_ms: { type: 'number', multipleOf: 1, minimum: 0, maximum: 9007199254740991 },
-              },
-              required: ['id'],
-              indexes: ['updated_at_ms'],
-            },
-          },
-        });
-        sammlung = browserCollection(ctx, 'thesen_outbound_adapters');
-        sammlungsName = 'thesen_outbound_adapters';
-      }
       if (!sammlung) {
-        throw new Error('Keine Adapter-Sammlung registriert (addCollections='
-          + typeof ctx.db?.addCollections
-          + ', db=' + typeof ctx.db
-          + ', vorhanden=' + kandidatenNamen.map((n) => n + ':' + !!browserCollection(ctx, n)).join(','));
+        throw new Error('Keine freigegebene Adapter-Sammlung registriert (vorhanden='
+          + kandidatenNamen.map((n) => n + ':' + !!browserCollection(ctx, n)).join(',') + ')');
       }
       if (!state.adapterLease && typeof ctx.sync?.leaseCollection === 'function') {
         state.adapterLease = await ctx.sync.leaseCollection(sammlungsName, 'browser:scraping-adapters');

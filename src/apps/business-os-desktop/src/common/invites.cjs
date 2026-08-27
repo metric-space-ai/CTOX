@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const { normalizeInstance, stableId } = require("./instance-model.cjs");
 
 function parseInvitePayload(rawInvite, now = new Date()) {
@@ -32,9 +33,16 @@ function validateInvite(invite, now = new Date()) {
   if (!Array.isArray(invite.signaling_urls) || invite.signaling_urls.length === 0) {
     throw new Error("invite needs signaling_urls");
   }
-  if (!String(invite.signaling_room_password || "").trim()) {
-    throw new Error("invite needs signaling_room_password");
+  const browserToken = String(invite.signaling_browser_token || "").trim();
+  const browserTokenHash = String(invite.signaling_browser_token_hash || "").trim();
+  const nativeTokenHash = String(invite.signaling_native_token_hash || "").trim();
+  if (invite.signaling_auth_version !== "ctox-role-bound-v1") throw new Error("invite needs role-bound signaling auth");
+  if (!browserToken) throw new Error("invite needs signaling_browser_token");
+  if (!/^[a-f0-9]{64}$/.test(browserTokenHash) || !/^[a-f0-9]{64}$/.test(nativeTokenHash)) {
+    throw new Error("invite signaling commitments must be lowercase SHA-256 values");
   }
+  if (browserTokenHash === nativeTokenHash) throw new Error("invite signaling role commitments must be distinct");
+  if (sha256(browserToken) !== browserTokenHash) throw new Error("invite browser signaling token does not match its commitment");
   if (invite.transport && invite.transport !== "webrtc") throw new Error("invite transport must be webrtc");
   if (invite.expires_at && Date.parse(invite.expires_at) <= now.getTime()) {
     throw new Error("invite is expired");
@@ -50,7 +58,7 @@ function instanceFromInvite(invite) {
   validateInvite(invite);
   const instanceId = String(invite.instance_id || invite.sync_room.split(":")[1] || invite.display_name).trim();
   const id = `paired:${stableId(["pairing_invite", instanceId])}`;
-  const secretRef = `keychain://ctox-business-os-desktop/${id}/room`;
+  const secretRef = `keychain://ctox-business-os-desktop/${id}/signaling-browser`;
   const capabilityToken = inviteCapabilityToken(invite);
   const authorizationRef = capabilityToken
     ? `keychain://ctox-business-os-desktop/${id}/authorization`
@@ -66,6 +74,9 @@ function instanceFromInvite(invite) {
     pairing: {
       syncRoom: invite.sync_room,
       signalingUrls: invite.signaling_urls,
+      authVersion: invite.signaling_auth_version,
+      browserCommitmentSha256: invite.signaling_browser_token_hash,
+      nativeCommitmentSha256: invite.signaling_native_token_hash,
       secretRef,
       authorizationRef,
       capabilityExpiresAtMs,
@@ -82,7 +93,7 @@ function instanceFromInvite(invite) {
   return {
     instance,
     secretMaterial: [
-      { ref: secretRef, value: invite.signaling_room_password },
+      { ref: secretRef, value: invite.signaling_browser_token },
       ...(authorizationRef ? [{ ref: authorizationRef, value: capabilityToken }] : []),
     ],
   };
@@ -91,7 +102,8 @@ function instanceFromInvite(invite) {
 function manualPairingToInvite(options = {}) {
   const displayName = String(options.displayName || "").trim();
   const syncRoom = String(options.syncRoom || "").trim();
-  const roomPassword = String(options.roomSecret || options.signalingRoomPassword || "").trim();
+  const browserToken = String(options.browserToken || options.signalingBrowserToken || "").trim();
+  const nativeTokenHash = String(options.nativeTokenHash || options.signalingNativeTokenHash || "").trim();
   const signalingUrls = normalizeSignalingUrls(options.signalingUrls || options.signalingUrl);
   if (!displayName) throw new Error("manual pairing displayName is required");
   const invite = {
@@ -101,7 +113,10 @@ function manualPairingToInvite(options = {}) {
     instance_id: String(options.instanceId || displayName).trim(),
     sync_room: syncRoom,
     signaling_urls: signalingUrls,
-    signaling_room_password: roomPassword,
+    signaling_auth_version: "ctox-role-bound-v1",
+    signaling_browser_token: browserToken,
+    signaling_browser_token_hash: sha256(browserToken),
+    signaling_native_token_hash: nativeTokenHash,
     transport: "webrtc",
     expires_at: "2999-01-01T00:00:00.000Z",
     ...(String(options.capabilityToken || "").trim()
@@ -121,6 +136,10 @@ function manualPairingToInvite(options = {}) {
   };
   validateInvite(invite);
   return invite;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(String(value || "")).digest("hex");
 }
 
 function inviteCapabilityToken(invite) {

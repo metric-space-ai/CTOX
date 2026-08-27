@@ -16,11 +16,16 @@ const config = {
   signaling_native_token_hash: sha256('distinct-native-token'),
 };
 
-const signalingUrl = new URL(await signalingUrlWithBrowserMetadata('wss://signaling.ctox.dev/?token=legacy', config));
+const signalingUrl = new URL(await signalingUrlWithBrowserMetadata(
+  'wss://signaling.ctox.dev/?token=legacy&room_password=must-not-survive&signaling_browser_token=must-not-survive',
+  config,
+));
 assert(signalingUrl.pathname === '/v2', 'production signaling path must be /v2');
 assert(signalingUrl.searchParams.get('token') === browserToken, 'explicit browser token must replace URL credentials');
 assert(signalingUrl.searchParams.get('role') === 'browser', 'signaling role must remain browser');
 assert(signalingUrl.searchParams.get('auth_version') === 'ctox-role-bound-v1', 'role-bound auth version is missing');
+assert(!signalingUrl.searchParams.has('room_password'), 'legacy room password query material must be stripped');
+assert(!signalingUrl.searchParams.has('signaling_browser_token'), 'bootstrap browser credentials must not survive as duplicate query fields');
 
 await assertRejects(
   () => signalingUrlWithBrowserMetadata('wss://signaling.ctox.dev/?token=legacy', {
@@ -40,6 +45,18 @@ await assertRejects(
 await assertRejects(
   () => signalingUrlWithBrowserMetadata('https://signaling.ctox.dev/v2', config),
   /ws\(s\) signaling URL/,
+);
+await assertRejects(
+  () => signalingUrlWithBrowserMetadata('ws://signaling.example.test/v2', config),
+  /requires TLS/,
+);
+await assertRejects(
+  () => signalingUrlWithBrowserMetadata('wss://user:password@signaling.example.test/v2', config),
+  /userinfo credentials/,
+);
+assert(
+  new URL(await signalingUrlWithBrowserMetadata('ws://127.0.0.1:8787/v2', config)).protocol === 'ws:',
+  'loopback development signaling may use ws',
 );
 
 console.log('browser signaling token fail-closed smoke OK');

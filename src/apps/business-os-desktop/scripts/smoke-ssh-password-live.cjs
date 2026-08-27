@@ -151,11 +151,13 @@ async function main() {
       assert.ok(launch.ctoxConfig.sync_room.startsWith("ctox-business-os:"), "launch sync_room must be CTOX Business OS");
       assert.ok(Array.isArray(launch.ctoxConfig.signaling_urls), "launch signaling_urls must be an array");
       assert.ok(launch.ctoxConfig.signaling_urls.length > 0, "launch needs at least one signaling URL");
-      assert.ok(launch.ctoxConfig.signaling_room_password, "launch needs a room password from SecretStore");
+      assert.equal(launch.ctoxConfig.signaling_auth_version, "ctox-role-bound-v1");
+      assert.ok(launch.ctoxConfig.signaling_browser_token, "launch needs a browser signaling credential from SecretStore");
+      assert.equal("signaling_room_password" in launch.ctoxConfig, false);
       assert.equal(
-        JSON.stringify(registry).includes(launch.ctoxConfig.signaling_room_password),
+        JSON.stringify(registry).includes(launch.ctoxConfig.signaling_browser_token),
         false,
-        "registry leaked signaling room password",
+        "registry leaked the browser signaling credential",
       );
       attachEvidence = {
         instanceId: instance.id,
@@ -210,8 +212,8 @@ async function main() {
     if (options.attach) {
       for (const ref of createdSecretRefs) {
         const secret = await secretStore.get(ref);
-        assert.ok(secret, `expected room secret for ${ref}`);
-        assert.equal(evidenceText.includes(secret), false, "live smoke evidence leaked room secret");
+        assert.ok(secret, `expected secret material for ${ref}`);
+        assert.equal(evidenceText.includes(secret), false, "live smoke evidence leaked secret material");
       }
     }
     console.log(evidenceText);

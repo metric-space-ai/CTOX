@@ -2,6 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -11,11 +12,38 @@ const {
   assertLocalCtoxRoot,
   buildLocalCommandOptions,
   buildLocalPeerArgs,
+  instanceFromPeerStatus,
   localCtoxBinaryCandidates,
   normalizeLocalInstallOptions,
   normalizeLocalProfile,
   resolveLocalCtoxBinary,
 } = require("../src/main/sources.cjs");
+
+function roleBoundPeerFields(browserToken) {
+  return {
+    signaling_auth_version: "ctox-role-bound-v1",
+    signaling_browser_token: browserToken,
+    signaling_browser_token_hash: createHash("sha256").update(browserToken).digest("hex"),
+    signaling_native_token_hash: createHash("sha256").update(`native:${browserToken}`).digest("hex"),
+  };
+}
+
+test("peer status rejects a browser credential that does not match its commitment", () => {
+  assert.throws(
+    () => instanceFromPeerStatus({
+      instance_id: "mismatch",
+      sync_room: "ctox-business-os:mismatch:room",
+      signaling_urls: ["wss://signaling.ctox.dev"],
+      ...roleBoundPeerFields("expected-browser-token"),
+      signaling_browser_token: "substituted-browser-token",
+    }, {
+      source: "local_daemon",
+      displayName: "Mismatch",
+      connection: { ctoxRoot: "/tmp/ctox-mismatch" },
+    }),
+    /valid role-bound signaling commitments/,
+  );
+});
 
 test("local install options use the bundled installer and a user-local CTOX binary", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ctox-desktop-local-installer-"));
@@ -131,7 +159,7 @@ test("local daemon attach stores metadata only and builds webrtc launch", async 
       runEnsureCommand: async (profile) => ({
         instance_id: "local-instance",
         sync_room: "ctox-business-os:local-instance:abc",
-        signaling_room_password: "local-room-secret",
+        ...roleBoundPeerFields("local-browser-token"),
         signaling_urls: ["wss://signaling.ctox.dev"],
         native_rxdb_peer_available: true,
         profile,
@@ -148,7 +176,7 @@ test("local daemon attach stores metadata only and builds webrtc launch", async 
   assert.equal(instance.connection.ctoxBinary, "ctox");
   assert.equal(instance.connection.ctoxRoot, "/Users/example/CTOX");
   assert.equal(registry.instances.length, 1);
-  assert.equal(JSON.stringify(registry).includes("local-room-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("local-browser-token"), false);
   assert.equal(secrets.size, 1);
 
   const launch = await source.getLaunchConfig(instance.id);
@@ -179,7 +207,7 @@ test("local fresh install runs installer then registers the ensured peer", async
       runEnsureCommand: async (profile) => ({
         instance_id: "installed-local",
         sync_room: "ctox-business-os:installed-local:room",
-        signaling_room_password: "installed-room-secret",
+        ...roleBoundPeerFields("installed-browser-token"),
         signaling_urls: ["wss://signaling.ctox.dev"],
         native_rxdb_peer_available: true,
         profile,
@@ -198,7 +226,7 @@ test("local fresh install runs installer then registers the ensured peer", async
   assert.equal(result.instance.connection.ctoxBinary, installedCtoxBinary);
   assert.equal(installs.length, 1);
   assert.equal(registry.instances.length, 1);
-  assert.equal(JSON.stringify(registry).includes("installed-room-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("installed-browser-token"), false);
 });
 
 test("local daemon attach survives app restart without ctox.dev account", async () => {
@@ -223,7 +251,7 @@ test("local daemon attach survives app restart without ctox.dev account", async 
       runEnsureCommand: async (profile) => ({
         instance_id: "restart-local",
         sync_room: "ctox-business-os:restart-local:room",
-        signaling_room_password: "restart-room-secret",
+        ...roleBoundPeerFields("restart-browser-token"),
         signaling_urls: ["wss://signaling.ctox.dev"],
         native_rxdb_peer_available: true,
         profile,
@@ -236,7 +264,7 @@ test("local daemon attach survives app restart without ctox.dev account", async 
     ctoxRoot: path.join(tempRoot, "ctox-root"),
   });
   assert.equal(attached.source, "local_daemon");
-  assert.equal(JSON.stringify(loadRegistry(registryPath)).includes("restart-room-secret"), false);
+  assert.equal(JSON.stringify(loadRegistry(registryPath)).includes("restart-browser-token"), false);
   assert.equal(secrets.size, 1);
 
   registry = loadRegistry(registryPath);
@@ -253,7 +281,8 @@ test("local daemon attach survives app restart without ctox.dev account", async 
 
   const launch = await restartedSource.getLaunchConfig(attached.id);
   assert.equal(launch.ctoxConfig.transport, "webrtc");
-  assert.equal(launch.ctoxConfig.signaling_room_password, "restart-room-secret");
+  assert.equal(launch.ctoxConfig.signaling_browser_token, "restart-browser-token");
+  assert.equal("signaling_room_password" in launch.ctoxConfig, false);
   assert.equal(launch.ctoxConfig.http_bridge_available, false);
 
   await restartedSource.removeInstance(attached.id);

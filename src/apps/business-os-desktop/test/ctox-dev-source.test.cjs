@@ -2,10 +2,23 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const {
   CtoxDevInstanceSource,
   normalizeCtoxDevSessionPackage,
 } = require("../src/main/sources.cjs");
+
+function roleBoundConfig(overrides = {}, browserToken = "managed-browser-token") {
+  return {
+    transport: "webrtc",
+    http_bridge_available: false,
+    signaling_auth_version: "ctox-role-bound-v1",
+    signaling_browser_token: browserToken,
+    signaling_browser_token_hash: createHash("sha256").update(browserToken).digest("hex"),
+    signaling_native_token_hash: createHash("sha256").update(`native:${browserToken}`).digest("hex"),
+    ...overrides,
+  };
+}
 
 test("normalizes ctox.dev session package into managed instances", () => {
   const instances = normalizeCtoxDevSessionPackage({
@@ -72,11 +85,7 @@ test("ctox.dev source consumes launch token and launch config endpoints", async 
         assert.equal(options.method, "POST");
         return jsonResponse({
           launchUrl: "https://acme.ctox.dev/",
-          pairingConfig: {
-            transport: "webrtc",
-            http_bridge_available: false,
-            sync_room: "ctox-business-os:skf",
-          },
+          pairingConfig: roleBoundConfig({ sync_room: "ctox-business-os:skf" }),
         });
       }
       throw new Error(`unexpected URL ${url}`);
@@ -88,23 +97,16 @@ test("ctox.dev source consumes launch token and launch config endpoints", async 
   assert.equal(launchUrl.origin, "https://ctox.dev");
   assert.equal(launchUrl.pathname, "/business-os/");
   assert.equal(launchUrl.searchParams.has("ctox_config"), true);
-  assert.deepEqual(decodeCtoxConfig(launchUrl), {
-    transport: "webrtc",
-    http_bridge_available: false,
-    sync_room: "ctox-business-os:skf",
-  });
+  assert.deepEqual(decodeCtoxConfig(launchUrl), roleBoundConfig({ sync_room: "ctox-business-os:skf" }));
   assert.equal(launch.ctoxConfig.http_bridge_available, false);
   assert.equal(calls.length, 2);
 });
 
 test("ctox.dev source preserves server-packed launch URL when pairing metadata is redacted", async () => {
-  const packedConfig = {
-    transport: "webrtc",
-    http_bridge_available: false,
+  const packedConfig = roleBoundConfig({
     sync_room: "ctox-business-os:skf:real-room",
-    signaling_room_password: "real-room-secret",
     signaling_urls: ["wss://signaling.ctox.dev/?token=real-token"],
-  };
+  });
   const source = new CtoxDevInstanceSource({
     baseUrl: "https://ctox.dev",
     fetchImpl: async (url) => {
@@ -117,7 +119,7 @@ test("ctox.dev source preserves server-packed launch URL when pairing metadata i
           transport: "webrtc",
           http_bridge_available: false,
           sync_room: "<redacted>",
-          signaling_room_password: "<redacted>",
+          signaling_browser_token: "<redacted>",
           signaling_urls: ["wss://signaling.ctox.dev/?token=<redacted>"],
         },
       });
@@ -129,18 +131,15 @@ test("ctox.dev source preserves server-packed launch URL when pairing metadata i
   assert.equal(launchUrl.origin, "https://ctox.dev");
   assert.equal(launchUrl.pathname, "/business-os/");
   assert.deepEqual(decodeCtoxConfig(launchUrl), packedConfig);
-  assert.equal(launch.ctoxConfig.signaling_room_password, "<redacted>");
+  assert.equal(launch.ctoxConfig.signaling_browser_token, "<redacted>");
 });
 
 test("ctox.dev managed launch carries the selected workspace identity into the bundled shell", async () => {
-  const packedConfig = {
-    transport: "webrtc",
-    http_bridge_available: false,
+  const packedConfig = roleBoundConfig({
     sync_room: "ctox-business-os:skf:real-room",
-    signaling_room_password: "real-room-secret",
     signaling_urls: ["wss://signaling.ctox.dev/?token=real-token"],
     session: { capability_token: "native-signed-capability" },
-  };
+  });
   const source = new CtoxDevInstanceSource({
     baseUrl: "https://ctox.dev",
     shellUrl: "http://127.0.0.1:8765/",
@@ -154,7 +153,7 @@ test("ctox.dev managed launch carries the selected workspace identity into the b
           transport: "webrtc",
           http_bridge_available: false,
           sync_room: "<redacted>",
-          signaling_room_password: "<redacted>",
+          signaling_browser_token: "<redacted>",
         },
       });
     },
@@ -187,13 +186,11 @@ test("ctox.dev source ignores redaction markers outside pairing fields", async (
       }
       return jsonResponse({
         launchUrl: "https://legacy.ctox.dev/",
-        pairingConfig: {
-          transport: "webrtc",
+        pairingConfig: roleBoundConfig({
           sync_room: "ctox-business-os:skf",
-          signaling_room_password: "room-secret",
           signaling_urls: ["wss://signaling.ctox.dev"],
           session: { diagnostic: "<redacted>" },
-        },
+        }),
       });
     },
   });
@@ -216,7 +213,7 @@ test("ctox.dev source rejects redacted pairing metadata without a packed launch 
         pairingConfig: {
           transport: "webrtc",
           sync_room: "<redacted>",
-          signaling_room_password: "<redacted>",
+          signaling_browser_token: "<redacted>",
         },
       });
     },
@@ -290,11 +287,9 @@ test("ctox.dev source requests a fresh launch token for each activation", async 
       launchUrls.push([url, options.method]);
       return jsonResponse({
         launchUrl: "https://acme.ctox.dev/",
-        pairingConfig: {
-          transport: "webrtc",
-          http_bridge_available: false,
+        pairingConfig: roleBoundConfig({
           epoch: tokenCounter,
-        },
+        }),
       });
     },
   });
