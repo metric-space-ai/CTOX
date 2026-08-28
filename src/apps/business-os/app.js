@@ -8451,10 +8451,23 @@ async function registerCustomModuleIcons() {
   const { registerSvgIcon } = await loadShellIconsModule();
   if (!Array.isArray(state.modules)) return;
   for (const mod of state.modules) {
-    const svgIcon = await resolveModuleIconSvg(mod);
-    if (svgIcon) {
-      registerSvgIcon(mod.id, svgIcon);
+    const inlineSvg = inlineModuleIconSvg(mod);
+    if (inlineSvg) {
+      registerSvgIcon(mod.id, inlineSvg);
+      continue;
     }
+    // External icons are optional decoration. A slow or wedged asset request
+    // must never hold the whole workspace bootstrap before renderTabs() and
+    // the desktop become interactive. resolveModuleIconSvg() already caches
+    // the in-flight promise, so overlapping catalog refreshes still issue at
+    // most one request per module.
+    void resolveModuleIconSvg(mod)
+      .then((svgIcon) => {
+        if (svgIcon) registerSvgIcon(mod.id, svgIcon);
+      })
+      .catch((error) => {
+        console.warn(`[business-os] optional module icon unavailable: ${mod.id}`, error);
+      });
   }
 }
 
