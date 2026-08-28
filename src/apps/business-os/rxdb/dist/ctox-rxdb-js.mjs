@@ -236,7 +236,9 @@ var CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   user_thread_messages: "3e9ac54c218496245fdeaa9e8cd6f2f649455448703bada2ac290a1de4fd7646",
   user_thread_states: "71e70b8a2e44bd2b851b24fde40a5b4cd42cd9e0b6158525055a9c04743de9eb",
   user_threads: "97a226600a64559f18c795e6a6c39b56e478d455bc5ce1485b714e1d13c2e5cb",
-  workjet_computers: "039a86246af89f137f1a9646cd6f58b9200c1203175a7c9671a440f8919c2250"
+  workjet_computers: "039a86246af89f137f1a9646cd6f58b9200c1203175a7c9671a440f8919c2250",
+  workjet_projects: "16bf130df1fb7883a21198744dd3f5c2c0ecd621e39355b6f0d875d59cbe9a0e",
+  workjet_working_copies: "a2e418eafc2ee8900b9d1422dbcfb68dfd4b542226ec022b26c2484837cf0e08"
 });
 function canonicalJson(value) {
   return JSON.stringify(sortCanonical(value));

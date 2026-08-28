@@ -245,6 +245,10 @@ const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
     // Workjet computer assignment is mutated only by policy-gated native
     // business commands and projected back through RxDB/WebRTC.
     "workjet_computers",
+    // Workjet project identity and local checkout bindings are native-authored
+    // through exact business_commands; peers render their projections only.
+    "workjet_projects",
+    "workjet_working_copies",
 ];
 
 /// A collection whose documents are server-authored (native core writes them,
