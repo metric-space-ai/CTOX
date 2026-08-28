@@ -4554,9 +4554,11 @@ pub fn execute_action(
         "requires_confirmation": proposal.confirmation_required,
         "confirmation_state": confirmation_state_as_str(&context.confirmation_state),
         "proposal_only": false,
-        "mcp_tool": &context.tool,
-        "writeback_contract": writeback_contract
+        "mcp_tool": &context.tool
     });
+    if !writeback_contract.is_empty() {
+        client_context["writeback_contract"] = serde_json::json!(writeback_contract);
+    }
     if let Some(key) = person_research_key {
         client_context["idempotency_key"] = serde_json::json!(key);
     }
