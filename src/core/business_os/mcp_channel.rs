@@ -11783,20 +11783,36 @@ mod tests {
             }
         });
         let context = test_context("business_os.execute_action");
-        let first = execute_action(
-            root,
-            &context,
-            "thesen-outbound",
-            "web_stack.person_research",
-            &args,
-        )?;
-        let second = execute_action(
-            root,
-            &context,
-            "thesen-outbound",
-            "web_stack.person_research",
-            &args,
-        )?;
+        let (first, second) = std::thread::scope(|scope| {
+            let first_context = context.clone();
+            let first_args = args.clone();
+            let first = scope.spawn(|| {
+                execute_action(
+                    root,
+                    &first_context,
+                    "thesen-outbound",
+                    "web_stack.person_research",
+                    &first_args,
+                )
+            });
+            let second_context = context.clone();
+            let second_args = args.clone();
+            let second = scope.spawn(|| {
+                execute_action(
+                    root,
+                    &second_context,
+                    "thesen-outbound",
+                    "web_stack.person_research",
+                    &second_args,
+                )
+            });
+            (
+                first.join().expect("first execute thread"),
+                second.join().expect("second execute thread"),
+            )
+        });
+        let first = first?;
+        let second = second?;
         assert_eq!(first.command_id, second.command_id);
         assert_eq!(
             second.client_context["writeback_contract"],
