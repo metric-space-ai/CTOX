@@ -19,6 +19,39 @@ assert.deepEqual(
   ['outbound_research_adapters', 'thesen_outbound_adapters'],
   'the scraping rail loads core and tenant-local adapter collections together',
 );
+assert.deepEqual(
+  __browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
+  ['thesen_outbound_sources'],
+  'the adapter rail reconciles activation with the source-owned setting',
+);
+assert.deepEqual(
+  __browserTestHooks.mergeScrapingAdapterSource(
+    { id: 'adapter_x', source_id: 'x.example', enabled: false, status: 'test_ok' },
+    { id: 'x.example', enabled: true, label: 'X', url: 'https://x.example/' },
+  ),
+  {
+    id: 'adapter_x',
+    source_id: 'x.example',
+    enabled: true,
+    status: 'test_ok',
+    label: 'X',
+    url: 'https://x.example/',
+    requires_credential: undefined,
+    credential_secret_name: undefined,
+  },
+  'source activation wins without overwriting the adapter execution status',
+);
+
+{
+  const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
+  assert.match(css, /\.browser-toolbar\s*\{[^}]*flex-wrap:\s*nowrap/s);
+  assert.match(css, /\.browser-address-form\s*\{[^}]*width:\s*0/s);
+  assert.match(
+    css,
+    /@container business-app-window \(max-width: 767px\)[\s\S]*\.browser-status-strip\s*\{[^}]*display:\s*grid/s,
+    'the narrow toolbar keeps the hamburger and visible connection status in one row',
+  );
+}
 
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');
 assert.equal(__browserTestHooks.normalizeUrl('http://localhost:3000/path'), 'http://localhost:3000/path');

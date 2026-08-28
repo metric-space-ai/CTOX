@@ -279,6 +279,16 @@
   gap: 4px;
   flex: 1 1 auto;
   min-width: 0;
+  width: 0;
+}
+
+/* The shared toolbar wraps by default. A browser address bar is a single
+   control row; allowing its intrinsic grid width to wrap expanded the toolbar
+   beyond a 640px app window and pushed controls outside the visible window. */
+.browser-toolbar {
+  width: 100%;
+  overflow: hidden;
+  flex-wrap: nowrap;
 }
 
 /* custom: Statusleiste unter der Adresszeile — Kit-Badge plus gekürzter
@@ -522,8 +532,14 @@
   }
 
   .browser-status-strip {
-    display: none;
+    display: grid;
+    flex: 0 0 auto;
+    grid-template-columns: auto;
+    max-width: 118px;
+    padding-inline-start: 0;
   }
+
+  .browser-status-strip [data-browser-status-title] { display: none; }
 
   .browser-address-form {
     grid-template-columns: minmax(90px, 1fr) 30px 34px;
