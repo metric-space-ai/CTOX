@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { __browserTestHooks } from './index.js';
+import { collections, migrationStrategies } from './schema.js';
+
+assert.equal(
+  collections.thesen_outbound_adapters.version,
+  1,
+  'tenant adapter schema changes must advance the RxDB collection version',
+);
+assert.equal(
+  typeof migrationStrategies.thesen_outbound_adapters?.[1],
+  'function',
+  'existing tenant adapters must migrate instead of disabling the collection with DB6',
+);
 
 assert.deepEqual(
   __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,

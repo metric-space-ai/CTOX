@@ -16,7 +16,7 @@ const RXDB_RESET_TIMEOUT_MS = 5000;
 const INDEXEDDB_PREFLIGHT_TIMEOUT_MS = 8000;
 const RXDB_MODULE_IMPORT_TIMEOUT_MS = 8000;
 const RXDB_CREATE_DATABASE_TIMEOUT_MS = 8000;
-const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-workjet-projects-v194';
+const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-thesen-adapter-schema-v195';
 const DEMAND_CACHE_MIGRATION = 'sellify-demand-cache-v1';
 const SELLIFY_DEMAND_CACHE_COLLECTIONS = Object.freeze([
   'sellify_activities',

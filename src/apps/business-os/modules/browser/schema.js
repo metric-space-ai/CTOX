@@ -181,7 +181,7 @@ const browserInputEventSchema = {
 // declared database-handle grant, so the manifest and schema must agree or the
 // shell cannot enforce the module's collection boundary.
 const thesenOutboundAdapterSchema = {
-  version: 0,
+  version: 1,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -228,4 +228,5 @@ export const migrationStrategies = {
   browser_tabs: { 1: retainV0BrowserDocument },
   browser_frames: { 1: retainV0BrowserDocument },
   browser_input_events: { 1: retainV0BrowserDocument },
+  thesen_outbound_adapters: { 1: retainV0BrowserDocument },
 };
