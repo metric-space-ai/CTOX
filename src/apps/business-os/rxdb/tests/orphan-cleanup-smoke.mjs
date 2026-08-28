@@ -49,18 +49,32 @@ await storage.bulkWrite([
 assert(storage.docs.size === 4, 'baseline: 4 docs present');
 
 let cancelCalled = 0;
+let fetchStarted = 0;
 const loader = createQueryDemandLoader({
   storageCollection: storage,
   sidecar,
   collectionName: 'business_records',
   schemaVersion: 1,
-  requestQueryFetch: () => new Promise(() => {}),
+  requestQueryFetch: () => {
+    fetchStarted += 1;
+    return new Promise(() => {});
+  },
   requestCancel: async () => { cancelCalled += 1; },
 });
 
 // Inject a fake in-flight entry whose fingerprint matches the orphan window.
 loader.resolveQuery({ selector: { module: 'x' } }).catch(() => {});
-await new Promise((r) => setTimeout(r, 5));
+// Wait for the asynchronous resolver to register its in-flight request before
+// exercising abort. A fixed 5ms delay races under CPU load (for example while
+// a release build is linking) and can abort before there is anything to
+// cancel, which tests scheduler timing instead of orphan cleanup.
+const inflightDeadline = Date.now() + 1_000;
+while (fetchStarted === 0 && Date.now() < inflightDeadline) {
+  await new Promise((r) => setTimeout(r, 5));
+}
+assert(fetchStarted > 0, 'remote fetch started before abort');
+await Promise.resolve();
+assert(loader.inflightSize() > 0, 'in-flight request registered before abort');
 // Force the fingerprint to match by clearing and re-priming the in-flight
 // map via the same dedupKey scheme. For this test it's enough to call the
 // abort path directly; the loader holds the in-flight entry from above.

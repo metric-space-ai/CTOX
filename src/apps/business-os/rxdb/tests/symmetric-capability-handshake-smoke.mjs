@@ -1,5 +1,12 @@
 import { replicationWebRtcTestInternals } from '../src/replication-webrtc.mjs';
 import { CtoxWebRtcNativePeer } from '../src/webrtc-native.mjs';
+import { webcrypto } from 'node:crypto';
+
+// Node 18 does not expose WebCrypto globally unless started with an opt-in
+// flag. Production browsers do, and newer Node releases do; install the native
+// Node implementation here so the server-side release gate exercises the same
+// random-id path instead of failing before the handshake assertion.
+globalThis.crypto ??= webcrypto;
 
 const SharedRoomPeer = replicationWebRtcTestInternals.getSharedRoomPeerClass();
 const shared = new SharedRoomPeer({

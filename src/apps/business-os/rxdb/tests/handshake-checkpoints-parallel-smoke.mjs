@@ -19,6 +19,7 @@ const shared = new SharedRoomPeer({
 let releaseAllStarted;
 const allStarted = new Promise((resolve) => { releaseAllStarted = resolve; });
 const checkpointStarts = [];
+let representativePayloadBuilds = 0;
 
 for (const name of names) {
   shared.collections.set(name, {
@@ -44,6 +45,7 @@ for (const name of names) {
         },
       },
       async buildProtocolPayload() {
+        representativePayloadBuilds += 1;
         return {
           protocol: 'ctox-rxdb-protocol-v1',
           capabilities: [],
@@ -55,13 +57,19 @@ for (const name of names) {
   });
 }
 
-const payload = await Promise.race([
-  shared.buildProtocolPayload(),
+const firstBuild = shared.buildProtocolPayload();
+const symmetricBuild = shared.buildProtocolPayload('business_records');
+const [payload, symmetricPayload] = await Promise.race([
+  Promise.all([firstBuild, symmetricBuild]),
   delay(500).then(() => {
     throw new Error(`checkpoint collection did not run concurrently; started ${checkpointStarts.map((entry) => entry.name).join(',')}`);
   }),
 ]);
 
+assert(payload !== symmetricPayload, 'each protocol request keeps its collection-specific envelope');
+assert(payload.collection?.name === 'business_commands', 'representative request keeps the representative collection');
+assert(symmetricPayload.collection?.name === 'business_records', 'symmetric request keeps the requested collection');
+assert(representativePayloadBuilds === 2, 'each collection-specific envelope is built once');
 assert(checkpointStarts.length === names.length, 'all checkpoint reads started before any completed');
 for (const name of names) {
   assert(payload.collectionSchemas?.[name]?.schemaHash === `hash-${name}`, `${name}: schema hash included`);

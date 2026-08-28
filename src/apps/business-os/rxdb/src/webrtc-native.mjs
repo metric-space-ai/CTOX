@@ -45,6 +45,7 @@ const CTOX_REPLICATION_CHANNEL_LABELS = new Set([
   CTOX_REPLICATION_CHANNEL_LABEL,
   'rxdb',
 ]);
+const CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD = 'ctox.outbound.sellify_lookup.v1';
 const MAX_PEER_SEND_QUEUE_FRAMES = 1024;
 const MAX_PEER_SEND_QUEUE_BYTES = 16 * 1024 * 1024;
 const FAIR_SEND_SCHEDULE = ['high', 'high', 'high', 'high', 'normal', 'normal', 'low'];
@@ -702,7 +703,10 @@ export class CtoxWebRtcNativePeer {
       this.pending.set(id, { resolve, reject, timer, method, peerId: remotePeerId });
       const frame = { id, method, params };
       if (collection) frame.collection = collection;
-      const sendPromise = method === 'ctox.browser.live.v1'
+      const sendPromise = (
+        method === 'ctox.browser.live.v1'
+        || method === CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD
+      )
         ? this.sendImmediateControlFrame(remotePeerId, frame)
         : Promise.resolve(this.send(remotePeerId, frame));
       sendPromise.then((sent) => {
