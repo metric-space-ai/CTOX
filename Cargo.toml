@@ -145,6 +145,10 @@ ratatui = { git = "https://github.com/nornagon/ratatui", branch = "nornagon-v0.2
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
 rtc-ice = { path = "src/core/rxdb/patches/rtc-ice" }
+# Polars 0.53 requires object_store 0.13.x. Keep that reviewed API while
+# replacing its vulnerable quick-xml 0.39 dependency with the compatible 0.41
+# release. Remove this local patch once Polars can consume object_store 0.14+.
+object_store = { path = "src/tools/object-store-patched" }
 # rama 0.3.0-alpha.4 still pins vulnerable hickory 0.25. Keep the alpha API
 # while using the fixed hickory 0.26 resolver until the pinned Rust toolchain
 # can consume rama 0.4.
