@@ -9537,12 +9537,8 @@ var SharedRoomPeer = class {
     const acquireCollectionMapsBuild = () => {
       let build = this.protocolCollectionMapsBuildPromise;
       if (!build) {
-        build = Promise.all([
-          this.collectCollectionSchemas(),
-          this.collectCollectionCheckpoints()
-        ]).then(([collectionSchemas, collectionCheckpoints]) => ({
-          collectionSchemas,
-          collectionCheckpoints
+        build = this.collectCollectionSchemas().then((collectionSchemas) => ({
+          collectionSchemas
         }));
         this.protocolCollectionMapsBuildPromise = build;
       }
@@ -9555,7 +9551,6 @@ var SharedRoomPeer = class {
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;
-        payload.collectionCheckpoints = maps.collectionCheckpoints;
       } finally {
         if (this.protocolCollectionMapsBuildPromise === collectionMapsBuild) {
           this.protocolCollectionMapsBuildPromise = null;

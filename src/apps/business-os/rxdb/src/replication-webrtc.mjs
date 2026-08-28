@@ -734,12 +734,18 @@ class SharedRoomPeer {
     const acquireCollectionMapsBuild = () => {
       let build = this.protocolCollectionMapsBuildPromise;
       if (!build) {
-        build = Promise.all([
-          this.collectCollectionSchemas(),
-          this.collectCollectionCheckpoints(),
-        ]).then(([collectionSchemas, collectionCheckpoints]) => ({
+        // The native CTOX peer is always master when the remote role is the
+        // Business OS browser. It validates the browser's collectionSchemas,
+        // but never consumes browser collectionCheckpoints. Reading every
+        // IndexedDB checkpoint here made the symmetric ctoxProtocol response
+        // take longer than the native 60 s handshake on production rooms with
+        // ~192 collections. Native therefore never advanced to its token
+        // request and the browser retried forever. Keep the browser response
+        // authoritative for schema compatibility while leaving checkpoint
+        // evidence in the native->browser payload, where remoteProtocolForCollection
+        // actually consumes it for fork catch-up validity.
+        build = this.collectCollectionSchemas().then((collectionSchemas) => ({
           collectionSchemas,
-          collectionCheckpoints,
         }));
         this.protocolCollectionMapsBuildPromise = build;
       }
@@ -764,7 +770,6 @@ class SharedRoomPeer {
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;
-        payload.collectionCheckpoints = maps.collectionCheckpoints;
       } finally {
         if (this.protocolCollectionMapsBuildPromise === collectionMapsBuild) {
           this.protocolCollectionMapsBuildPromise = null;

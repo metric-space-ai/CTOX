@@ -29,7 +29,7 @@ releaseRepresentative();
 const payload = await payloadBuild;
 assert(payload.collectionSchemas?.business_commands?.schemaHash === 'hash-business_commands', 'representative schema is present');
 assert(payload.collectionSchemas?.thesen_outbound_adapters?.schemaHash === 'hash-thesen_outbound_adapters', 'late schema is present');
-assert(payload.collectionCheckpoints?.thesen_outbound_adapters?.collection === 'thesen_outbound_adapters', 'late checkpoint is present');
+assert(payload.collectionCheckpoints == null, 'browser symmetric response omits unused checkpoint map');
 
 console.log('ctox-rxdb handshake collection-registration race smoke OK');
 
