@@ -189,6 +189,7 @@ export const replicationWebRtcTestInternals = Object.freeze({
   shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
+  protocolHandshakeIsMultiplexed,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -198,6 +199,17 @@ export const replicationWebRtcTestInternals = Object.freeze({
   getSharedRoomPeerClass: () => SharedRoomPeer,
   getReplicationStateClass: () => CtoxWebRtcReplicationState,
 });
+
+function protocolHandshakeIsMultiplexed(collectionCount, localProtocol, remoteProtocol) {
+  const advertisedCollectionCount = (protocol) => (
+    protocol?.collectionSchemas && typeof protocol.collectionSchemas === 'object'
+      ? Object.keys(protocol.collectionSchemas).length
+      : 0
+  );
+  return collectionCount > 1
+    || advertisedCollectionCount(localProtocol) > 1
+    || advertisedCollectionCount(remoteProtocol) > 1;
+}
 
 function isTransientSharedPeerError(error) {
   const message = String(error?.message || error || '');
@@ -719,20 +731,23 @@ class SharedRoomPeer {
         capabilities: BROWSER_CAPABILITIES,
       });
     }
-    let collectionMapsBuild = null;
-    if (this.collections.size > 1) {
-      collectionMapsBuild = this.protocolCollectionMapsBuildPromise;
-      if (!collectionMapsBuild) {
-        collectionMapsBuild = Promise.all([
+    const acquireCollectionMapsBuild = () => {
+      let build = this.protocolCollectionMapsBuildPromise;
+      if (!build) {
+        build = Promise.all([
           this.collectCollectionSchemas(),
           this.collectCollectionCheckpoints(),
         ]).then(([collectionSchemas, collectionCheckpoints]) => ({
           collectionSchemas,
           collectionCheckpoints,
         }));
-        this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
+        this.protocolCollectionMapsBuildPromise = build;
       }
-    }
+      return build;
+    };
+    let collectionMapsBuild = this.collections.size > 1
+      ? acquireCollectionMapsBuild()
+      : null;
     const payload = await registration.state.buildProtocolPayload();
     // Phase 3 schema-validation hardening: under multiplex the handshake runs
     // ONCE off the representative collection, so attach the per-collection
@@ -740,6 +755,12 @@ class SharedRoomPeer {
     // validates each entry individually instead of skipping schema validation.
     // Single-collection rooms omit the map (payload stays legacy-identical).
     if (this.collections.size > 1) {
+      // Runtime-installed collections can register while the representative
+      // payload above awaits IndexedDB. The method may therefore enter as a
+      // single-collection room and become multiplexed before this branch. Do
+      // not await the initial null snapshot: acquire a current map build for
+      // the expanded room.
+      collectionMapsBuild ||= acquireCollectionMapsBuild();
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;
@@ -874,7 +895,17 @@ class SharedRoomPeer {
     );
     const normalizedRemoteProtocol = normalizeRemoteProtocol(remoteProtocol);
     if (!this.isPeerOpen(peerId)) return null;
-    const multiplexed = this.collections.size > 1;
+    // Startup is asymmetric: the browser can begin negotiation with its first
+    // collection while the native peer already advertises the complete room.
+    // Looking only at the browser's current registration count misclassifies
+    // that handshake as single-collection and compares unrelated representative
+    // envelopes (for example thesen_outbound_leads vs desktop_files). Treat the
+    // room as multiplexed whenever EITHER payload advertises multiple schemas.
+    const multiplexed = protocolHandshakeIsMultiplexed(
+      this.collections.size,
+      localProtocol,
+      normalizedRemoteProtocol,
+    );
     try {
       assertCompatibleProtocol(localProtocol, normalizedRemoteProtocol, {
         requiredCapabilities: CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
