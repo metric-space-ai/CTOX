@@ -7523,6 +7523,76 @@ mod tests {
     }
 
     #[test]
+    fn query_records_merges_browser_only_rxdb_rows_with_mcp_upserts() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_module(root, "customers", "Customers", &["customer_accounts"])?;
+        seed_default_mcp_admin(root)?;
+        let rxdb = store::rxdb_store_path(root);
+        if let Some(parent) = rxdb.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let rxdb_conn = rusqlite::Connection::open(&rxdb)?;
+        rxdb_conn.execute_batch(
+            "CREATE TABLE ctox_business_os__customer_accounts__v0 (
+                id TEXT PRIMARY KEY NOT NULL,
+                revision TEXT,
+                deleted INTEGER NOT NULL,
+                lastWriteTime REAL NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )?;
+        rxdb_conn.execute(
+            "INSERT INTO ctox_business_os__customer_accounts__v0
+                (id, revision, deleted, lastWriteTime, data)
+             VALUES (?1, ?2, 0, ?3, ?4)",
+            rusqlite::params![
+                "acct_browser",
+                "1-browser",
+                42.0_f64,
+                serde_json::json!({
+                    "id": "acct_browser",
+                    "name": "Browser Account",
+                    "status": "active",
+                    "updated_at_ms": 42
+                })
+                .to_string()
+            ],
+        )?;
+        drop(rxdb_conn);
+
+        upsert_record(
+            root,
+            &test_context("business_os.upsert_record"),
+            &serde_json::json!({
+                "collection": "customer_accounts",
+                "record_id": "acct_mcp",
+                "record": {
+                    "id": "acct_mcp",
+                    "name": "MCP Account",
+                    "status": "active"
+                }
+            }),
+        )?;
+
+        let records = query_records(
+            root,
+            &test_context("business_os.query_records"),
+            "customer_accounts",
+            Some(10),
+        )?;
+        let ids = records
+            .items
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(records.count, 2);
+        assert!(ids.contains("acct_browser"));
+        assert!(ids.contains("acct_mcp"));
+        Ok(())
+    }
+
+    #[test]
     fn upsert_record_persists_app_data_for_admin_mcp_actor() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();

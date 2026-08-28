@@ -9908,7 +9908,7 @@ pub fn pull_latest_collection_records(
         _ => {}
     }
     let limit = limit.unwrap_or(500).clamp(1, 2_000);
-    let documents = with_store_connection(root, |conn| {
+    let business_documents = with_store_connection(root, |conn| {
         let mut statement = conn.prepare(
             "SELECT record_id, deleted, updated_at_ms, payload_json
              FROM business_records
@@ -9937,13 +9937,44 @@ pub fn pull_latest_collection_records(
         }
         Ok(documents)
     })?;
-    if documents.is_empty() {
-        if let Some(rxdb_projection) =
-            pull_rxdb_collection_table_records(root, collection, 0, limit)?
-        {
-            return Ok(rxdb_projection);
+    // Browser-originated records live in the native RxDB store, whereas MCP
+    // upserts are also projected into `business_records`. Reading only the
+    // latter as soon as its first row exists hides every browser-only record in
+    // the same collection. Merge both durable stores by id and keep the newest
+    // representation so one server-side upsert cannot collapse a full app
+    // collection to the handful of MCP-written rows.
+    let rxdb_documents = pull_latest_rxdb_collection_table_documents(root, collection, limit)?;
+    let mut documents_by_id = HashMap::<String, Value>::new();
+    for document in business_documents.into_iter().chain(rxdb_documents) {
+        let Some(record_id) = document
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        let replace = documents_by_id
+            .get(&record_id)
+            .is_none_or(|current| record_updated_at_ms(&document) > record_updated_at_ms(current));
+        if replace {
+            documents_by_id.insert(record_id, document);
         }
     }
+    let mut documents = documents_by_id.into_values().collect::<Vec<_>>();
+    documents.sort_by(|left, right| {
+        record_updated_at_ms(right)
+            .cmp(&record_updated_at_ms(left))
+            .then_with(|| {
+                right
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .cmp(left.get("id").and_then(Value::as_str).unwrap_or_default())
+            })
+    });
+    documents.truncate(limit);
     Ok(serde_json::json!({
         "ok": true,
         "collection": collection,
@@ -9951,6 +9982,63 @@ pub fn pull_latest_collection_records(
         "count": documents.len(),
         "since_ms": 0
     }))
+}
+
+fn record_updated_at_ms(record: &Value) -> i64 {
+    record
+        .get("updated_at_ms")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            record
+                .get("_meta")
+                .and_then(|meta| meta.get("lwt"))
+                .and_then(Value::as_f64)
+                .map(|value| value as i64)
+        })
+        .unwrap_or(0)
+}
+
+fn pull_latest_rxdb_collection_table_documents(
+    root: &Path,
+    collection: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<Value>> {
+    if !is_safe_rxdb_collection_name(collection) {
+        anyhow::bail!("invalid collection name `{collection}`");
+    }
+    let path = rxdb_store_path(root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&path)?;
+    for version in (0..=1).rev() {
+        let table = format!("ctox_business_os__{collection}__v{version}");
+        if !rxdb_table_exists_cached(&path, &conn, &table)? {
+            continue;
+        }
+        let mut statement = conn.prepare(&format!(
+            "SELECT id, data
+             FROM {table}
+             ORDER BY CAST(COALESCE(json_extract(data, '$.updated_at_ms'), lastWriteTime, 0) AS INTEGER) DESC, id DESC
+             LIMIT ?1"
+        ))?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut documents = Vec::new();
+        for row in rows {
+            let (id, data) = row?;
+            let mut document = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
+            if let Some(object) = document.as_object_mut() {
+                object
+                    .entry("id".to_string())
+                    .or_insert_with(|| Value::String(id));
+            }
+            documents.push(document);
+        }
+        return Ok(documents);
+    }
+    Ok(Vec::new())
 }
 
 pub fn pull_business_command_status_record(
