@@ -63,6 +63,10 @@ assert(
   'the shell exposes the bounded Workjet device-control facade',
 );
 assert(
+  app.includes('await completeWorkjetPairingRedirect()'),
+  'the authenticated web shell must complete ctox.dev pairing through its live CTOX guest',
+);
+assert(
   mobileHost.includes("command.type === 'device.control'"),
   'the mobile lifecycle bridge accepts the bounded control message',
 );
@@ -74,11 +78,14 @@ assert(
 const joined = [
   sourceWindow(replicationSource, "String(method || '') === 'ctox.workjet.device.v1'", 900),
   sourceWindow(app, 'globalThis.workjetBusinessOsDeviceControl', 1_400),
+  sourceWindow(app, 'async function completeWorkjetPairingRedirect', 1_600),
   sourceWindow(mobileHost, "command.type === 'device.control'", 1_000),
 ].join('\n');
 assert(!/\/api\/workjet\/device/u.test(joined), 'device control must not call an HTTP API');
 assert(!/https?:\/\//u.test(joined), 'device control must not contain a network HTTP origin');
 assert(!/ManagedRelay|EnvironmentHttp|Clerk|relay\.t3/iu.test(joined), 'legacy remote transports are forbidden');
+assert(!/\bfetch\s*\(/u.test(sourceWindow(app, 'async function completeWorkjetPairingRedirect', 1_600)),
+  'the ctox.dev handoff must create the invite through WebRTC, never HTTP');
 
 console.log('CTOX Workjet device control WebRTC-only smoke OK');
 

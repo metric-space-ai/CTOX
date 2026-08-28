@@ -1023,6 +1023,7 @@ async function bootstrap() {
   });
   await resetBusinessDataPlaneForBuildIfNeeded(syncConfig);
   await openBusinessDataPlane(syncConfig);
+  if (await completeWorkjetPairingRedirect()) return;
 
   setStartupProgress(70, shellText('bootWorkspace'));
   let modules;
@@ -6617,6 +6618,54 @@ globalThis.workjetBusinessOsDeviceControl = async (request) => {
     timeoutMs: 10_000,
   });
 };
+
+function encodeWorkjetPairingPayload(invite) {
+  const compact = [
+    'w2',
+    invite.display_name,
+    invite.instance_id,
+    invite.sync_room,
+    invite.native_peer_id,
+    invite.signaling_urls,
+    invite.signaling_auth_version,
+    invite.signaling_browser_token,
+    invite.signaling_browser_token_hash,
+    invite.signaling_native_token_hash,
+    invite.expires_at,
+    invite.session?.capability_token,
+    invite.session?.capability_expires_at_ms,
+    invite.session?.user?.id,
+    invite.session?.user?.display_name,
+    invite.session?.user?.role,
+    invite.session?.source,
+  ];
+  const bytes = new TextEncoder().encode(JSON.stringify(compact));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/u, '');
+}
+
+async function completeWorkjetPairingRedirect() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('workjet_pairing') !== '1') return false;
+  params.delete('workjet_pairing');
+  try {
+    const result = await globalThis.workjetBusinessOsDeviceControl({
+      action: 'invite.create',
+      ttlSeconds: 300,
+      displayName: document.title || 'Workjet',
+    });
+    const payload = encodeWorkjetPairingPayload(result?.invite);
+    if (!payload || payload.length > 2300) throw new Error('Workjet pairing payload is invalid.');
+    location.replace(`workjet://pair?payload=${encodeURIComponent(payload)}`);
+    return true;
+  } catch (error) {
+    params.set('workjet_pairing_failed', '1');
+    history.replaceState(null, '', `${location.pathname}?${params.toString()}${location.hash}`);
+    console.error('[business-os] Workjet pairing redirect failed', error);
+    return false;
+  }
+}
 
 function createLiveCommandBusFacade() {
   const requireCommandBus = () => {
