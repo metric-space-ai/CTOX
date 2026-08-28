@@ -1,0 +1,62 @@
+name: MiltonTicket customer app binding
+
+on:
+  push:
+    branches:
+      - codex/miltonticket-customer-binding
+
+permissions:
+  contents: read
+
+jobs:
+  sign-binding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sign instance-bound customer app payload
+        env:
+          CUSTOMER_APP_SIGNING_KEY: ${{ secrets.CTOX_BUSINESS_OS_SHELL_SIGNING_KEY_PKCS8_BASE64 }}
+        run: |
+          test -n "$CUSTOMER_APP_SIGNING_KEY"
+          mkdir -p artifacts/miltonticket
+          node --input-type=module <<'NODE'
+          import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+          import { writeFile } from 'node:fs/promises';
+
+          const expectedPublicKey = 'MCowBQYDK2VwAyEAZECH2XB0VlZWQ7zUzoChyiRkKtfGNK9HmSMvZQuwGjk=';
+          const privateKey = createPrivateKey({
+            key: Buffer.from(process.env.CUSTOMER_APP_SIGNING_KEY, 'base64'),
+            format: 'der',
+            type: 'pkcs8'
+          });
+          const actualPublicKey = createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).toString('base64');
+          if (actualPublicKey !== expectedPublicKey) throw new Error('Configured signer does not match the trusted CTOX customer-app current key.');
+
+          const payload = {
+            type: 'ctox.business-os.customer-app-binding.v1',
+            customerId: 'e6c656ee-ee52-4372-9d98-a2080468918c',
+            moduleId: 'thesen-outbound',
+            allowedInstanceIds: ['biz_038e8f80-49aa-48ff-be8b-243b71397aa3'],
+            packageVersion: '0.5.3',
+            packageSha256: '851e85050676db62a6bc106fa1155ce92cedb0516fc069cafb3ce13678910b4a',
+            signingKeyId: 'customer-app-current-2026-08'
+          };
+          const canonicalPayload = Buffer.from(JSON.stringify(payload));
+          const signature = sign(null, canonicalPayload, privateKey);
+          if (!verify(null, canonicalPayload, createPublicKey(privateKey), signature)) throw new Error('Binding signature self-check failed.');
+          await writeFile(
+            'artifacts/miltonticket/customer-app-binding.json',
+            `${JSON.stringify({ ...payload, signature: signature.toString('hex') }, null, 2)}\n`,
+            { mode: 0o600 }
+          );
+          NODE
+
+      - name: Upload detached binding
+        uses: actions/upload-artifact@v4
+        with:
+          name: miltonticket-customer-app-binding
+          path: artifacts/miltonticket/customer-app-binding.json
+          if-no-files-found: error
+          retention-days: 1
