@@ -1,9 +1,9 @@
 pub fn rxdb_store_path(root: &Path) -> PathBuf {
-    root.join("runtime").join(RXDB_STORE_FILE)
+    crate::paths::runtime_dir(root).join(RXDB_STORE_FILE)
 }
 
 pub fn status(root: &Path) -> anyhow::Result<BusinessOsStatus> {
-    let path = root.join("runtime").join(STORE_FILE);
+    let path = crate::paths::runtime_dir(root).join(STORE_FILE);
     let ctox_service = Some(cheap_ctox_service_status(root));
     let sync_config = sync_config(root)?;
     Ok(BusinessOsStatus {
@@ -493,14 +493,11 @@ fn build_sync_connection_config(root: &Path) -> anyhow::Result<BusinessOsSyncCon
 
 pub fn sync_config(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
     let connection = sync_connection_config(root)?;
+    let signaling_auth = signaling_auth_config(root, &connection.signaling_room_password)?;
     let peer_id = format!("ctox-core-{}", short_hash(&connection.instance_id));
     let native_rxdb_peer_available = super::rxdb_peer::is_native_peer_running_for_root(root);
     let native_rxdb_peer_status = super::rxdb_peer::native_peer_status(root);
-    let native_peer_id = native_rxdb_peer_status
-        .get("peer_session_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let native_peer_id = peer_id.clone();
     let ice_servers = ice_servers_config(root);
     let ice_diagnostics = ice_diagnostics(&ice_servers);
     Ok(BusinessOsSyncConfig {
@@ -509,6 +506,10 @@ pub fn sync_config(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
         sync_mode: "p2p-first",
         sync_room: connection.sync_room,
         signaling_room_password: connection.signaling_room_password,
+        signaling_auth_version: signaling_auth.version,
+        signaling_browser_token: signaling_auth.browser_token,
+        signaling_browser_token_hash: signaling_auth.browser_token_hash,
+        signaling_native_token_hash: signaling_auth.native_token_hash,
         instance_id: connection.instance_id,
         peer_id,
         native_peer_id,
@@ -530,6 +531,94 @@ pub fn sync_config(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
         native_rxdb_peer_status,
         module_allowlist: business_os_module_allowlist(root),
     })
+}
+
+/// Builds only the immutable connection material required by a short-lived
+/// Workjet device invite. Unlike `sync_config`, this deliberately does not
+/// inspect the running native peer or transport status: invite creation can
+/// itself execute inside that peer's auxiliary request handler, where a
+/// recursive liveness snapshot would contend with the response path.
+pub(crate) fn mobile_invite_sync_config(
+    root: &Path,
+) -> anyhow::Result<BusinessOsMobileInviteSyncConfig> {
+    let connection = sync_connection_config(root)?;
+    let signaling_auth = signaling_auth_config(root, &connection.signaling_room_password)?;
+    Ok(BusinessOsMobileInviteSyncConfig {
+        native_peer_id: format!("ctox-core-{}", short_hash(&connection.instance_id)),
+        instance_id: connection.instance_id,
+        sync_room: connection.sync_room,
+        signaling_urls: connection.signaling_urls,
+        signaling_auth_version: signaling_auth.version,
+        signaling_browser_token: signaling_auth.browser_token,
+        signaling_browser_token_hash: signaling_auth.browser_token_hash,
+        signaling_native_token_hash: signaling_auth.native_token_hash,
+    })
+}
+
+pub(crate) const BUSINESS_OS_SIGNALING_AUTH_VERSION: &str = "ctox-role-bound-v1";
+
+pub(crate) fn signaling_auth_config(
+    root: &Path,
+    room_password: &str,
+) -> anyhow::Result<BusinessOsSignalingAuthConfig> {
+    let browser_token = signaling_token_from_room_password(room_password)
+        .ok_or_else(|| anyhow::anyhow!("Business OS signaling room password is missing"))?;
+    let native_token = business_os_native_signaling_token(root)?;
+    Ok(BusinessOsSignalingAuthConfig {
+        version: BUSINESS_OS_SIGNALING_AUTH_VERSION,
+        browser_token_hash: signaling_token_hash(&browser_token),
+        native_token_hash: signaling_token_hash(&native_token),
+        browser_token,
+        native_token,
+    })
+}
+
+pub(crate) fn signaling_token_from_room_password(room_password: &str) -> Option<String> {
+    let password = room_password.trim();
+    if password.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(password.as_bytes());
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)[..32].to_string())
+}
+
+fn signaling_token_hash(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn business_os_native_signaling_token(root: &Path) -> anyhow::Result<String> {
+    static TOKEN_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _token_init_guard = TOKEN_INIT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native signaling token initialization lock poisoned"))?;
+
+    if let Ok(value) = crate::secrets::read_secret_value(
+        root,
+        BUSINESS_OS_SECRET_SCOPE,
+        BUSINESS_OS_SIGNALING_NATIVE_TOKEN_SECRET_NAME,
+    ) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+    }
+
+    let mut bytes = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("failed to generate native signaling token"))?;
+    let generated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    crate::secrets::write_secret_record(
+        root,
+        BUSINESS_OS_SECRET_SCOPE,
+        BUSINESS_OS_SIGNALING_NATIVE_TOKEN_SECRET_NAME,
+        &generated,
+        Some("Business OS native-only WebRTC signaling credential".to_owned()),
+        serde_json::json!({"source": "business_os_sync_config", "auto_managed": true}),
+    )?;
+    Ok(generated)
 }
 
 pub fn sync_config_for_browser(

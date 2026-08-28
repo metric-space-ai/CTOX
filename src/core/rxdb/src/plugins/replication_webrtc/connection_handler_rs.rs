@@ -2744,7 +2744,10 @@ impl PeerConnectionEventHandler for RsPeerConnectionEvents {
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
         let label = data_channel.label().await.unwrap_or_default();
-        if label == "ctox-browser-live-v1" {
+        if matches!(
+            label.as_str(),
+            "ctox-browser-live-v1" | "ctox.workjet.device.v1"
+        ) {
             install_auxiliary_data_channel(
                 Arc::clone(&self.handler),
                 self.remote_peer_id.clone(),

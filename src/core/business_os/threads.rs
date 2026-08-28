@@ -220,7 +220,7 @@ pub(super) fn may_accept_peer_write(root: &Path, token: &str, collection: &str) 
     // Commands receive a second, command-specific authorization when the
     // native consumer accepts the document. The peer still needs an exact
     // data.write grant to put anything onto the replicated command bus.
-    store::capability_allows_collection_permission(
+    store::webrtc_capability_allows_collection_permission(
         root,
         token,
         collection,
@@ -269,7 +269,7 @@ pub(super) fn may_replicate_document(
     collection: &str,
     document: &Value,
 ) -> bool {
-    let Some((user_id, role)) = store::verify_capability_actor(root, token) else {
+    let Some((user_id, role)) = store::verify_webrtc_capability_actor(root, token) else {
         return false;
     };
     let collection_read_allowed = collection_read_allowed_for_actor(root, token, collection, &role);
@@ -288,7 +288,7 @@ pub(super) fn replication_document_filter(
     token: &str,
     collection: &str,
 ) -> Arc<dyn Fn(&Value) -> bool + Send + Sync> {
-    let Some((user_id, role)) = store::verify_capability_actor(root, token) else {
+    let Some((user_id, role)) = store::verify_webrtc_capability_actor(root, token) else {
         return Arc::new(|_| false);
     };
     let collection_read_allowed = collection_read_allowed_for_actor(root, token, collection, &role);
@@ -321,7 +321,7 @@ fn collection_read_allowed_for_actor(
     {
         return true;
     }
-    store::capability_allows_collection_permission(
+    store::webrtc_capability_allows_collection_permission(
         root,
         token,
         collection,
@@ -391,9 +391,25 @@ pub(super) fn may_accept_peer_document_write(
     collection: &str,
     document: &Value,
 ) -> bool {
-    let Some((user_id, role)) = store::verify_capability_actor(root, token) else {
+    let Some((user_id, role)) = store::verify_webrtc_capability_actor(root, token) else {
         return false;
     };
+    if collection == "business_commands" {
+        let client_context = document.get("client_context").and_then(|value| {
+            if let Some(encoded) = value.as_str() {
+                serde_json::from_str::<Value>(encoded).ok()
+            } else {
+                Some(value.clone())
+            }
+        });
+        let command_token = client_context
+            .as_ref()
+            .and_then(|value| value.get("capability_token"))
+            .and_then(Value::as_str);
+        if command_token != Some(token) {
+            return false;
+        }
+    }
     if !is_browser_collection(collection) {
         if let Some(owner_field) = per_user_owner_field(collection) {
             return per_user_document_write_allowed(
@@ -6572,7 +6588,10 @@ mod tests {
         drop(conn);
 
         let open = project_app_relevance(temp.path(), &[("kundenpipeline_entscheidungen", 0)], 50)?;
-        assert!(open.changed_count > 0, "an open decision must raise a thread");
+        assert!(
+            open.changed_count > 0,
+            "an open decision must raise a thread"
+        );
         let (_, thread_id) = open
             .projections
             .iter()

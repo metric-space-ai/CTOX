@@ -152,7 +152,7 @@ pub use super::session::{BusinessOsSession, BusinessOsSessionUser};
 
 pub(super) const STORE_FILE: &str = "business-os.sqlite3";
 pub(super) const RXDB_STORE_FILE: &str = "business-os-rxdb.sqlite3";
-const DEFAULT_SIGNALING_URL: &str = "wss://signaling.ctox.dev";
+const DEFAULT_SIGNALING_URL: &str = "wss://signaling.ctox.dev/v2";
 const DEFAULT_STUN_URL: &str = "stun:stun.l.google.com:19302";
 const BUSINESS_OS_SIGNALING_URLS_FILE: &str = "business-os-signaling-urls.json";
 pub(super) const DOCUMENT_BLOB_CHUNK_SIZE: usize = 256_000;
@@ -180,6 +180,7 @@ const CHATGPT_AUTH_SECRET_NAME: &str = "chatgpt_subscription_auth_json";
 const CODEX_INSTANCE_SUBSCRIPTION_ACCOUNT_ID: &str = "codex-instance-primary";
 pub(super) const BUSINESS_OS_SECRET_SCOPE: &str = "business-os";
 const BUSINESS_OS_ROOM_PASSWORD_SECRET_NAME: &str = "webrtc_room_password";
+const BUSINESS_OS_SIGNALING_NATIVE_TOKEN_SECRET_NAME: &str = "webrtc_native_signaling_token";
 const BUSINESS_OS_TURN_SECRET_NAME: &str = "webrtc_turn_secret";
 const BUSINESS_OS_TURN_URL_KEY: &str = "CTOX_BUSINESS_OS_TURN_URL";
 const BUSINESS_OS_TURN_SECRET_NAME_KEY: &str = "CTOX_BUSINESS_OS_TURN_SECRET_NAME";
@@ -456,6 +457,10 @@ pub struct BusinessOsSyncConfig {
     pub peer_role: &'static str,
     pub sync_room: String,
     pub signaling_room_password: String,
+    pub signaling_auth_version: &'static str,
+    pub signaling_browser_token: String,
+    pub signaling_browser_token_hash: String,
+    pub signaling_native_token_hash: String,
     pub signaling_urls: Vec<String>,
     pub signaling_urls_source: &'static str,
     pub ice_servers: Vec<Value>,
@@ -481,6 +486,27 @@ pub(crate) struct BusinessOsSyncConnectionConfig {
     pub(crate) signaling_room_password: String,
     pub(crate) signaling_urls: Vec<String>,
     pub(crate) signaling_urls_source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BusinessOsSignalingAuthConfig {
+    pub(crate) version: &'static str,
+    pub(crate) browser_token: String,
+    pub(crate) browser_token_hash: String,
+    pub(crate) native_token: String,
+    pub(crate) native_token_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BusinessOsMobileInviteSyncConfig {
+    pub(crate) instance_id: String,
+    pub(crate) sync_room: String,
+    pub(crate) native_peer_id: String,
+    pub(crate) signaling_urls: Vec<String>,
+    pub(crate) signaling_auth_version: &'static str,
+    pub(crate) signaling_browser_token: String,
+    pub(crate) signaling_browser_token_hash: String,
+    pub(crate) signaling_native_token_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1554,8 +1580,7 @@ fn with_store_connection<T>(
 }
 
 pub(super) fn business_os_store_path(root: &Path) -> PathBuf {
-    let runtime = root.join("runtime");
-    runtime.join(STORE_FILE)
+    crate::paths::runtime_dir(root).join(STORE_FILE)
 }
 
 fn open_store_connection(path: &Path) -> anyhow::Result<Connection> {
@@ -14867,7 +14892,17 @@ pub fn verify_capability_actor(root: &Path, token: &str) -> Option<(String, Stri
     verified_capability_claims(root, token).map(|claims| (claims.user_id, claims.role))
 }
 
-fn verified_capability_claims(
+/// HTTP bearer authentication is deliberately limited to legacy unbound
+/// capabilities. Device-bound mobile grants are usable only after WebRTC PoP.
+pub fn verify_unbound_capability_actor(root: &Path, token: &str) -> Option<(String, String)> {
+    verified_capability_claims(root, token).and_then(|claims| {
+        (claims.device_binding.is_none()
+            && !super::mobile_invites::mobile_invite_requires_device_proof(root, &claims.user_id))
+        .then_some((claims.user_id, claims.role))
+    })
+}
+
+pub(super) fn verified_capability_claims(
     root: &Path,
     token: &str,
 ) -> Option<super::capability::CapabilityClaims> {
@@ -14876,7 +14911,15 @@ fn verified_capability_claims(
         return None;
     }
     let secret = capability_signing_secret(root).ok()?;
-    let claims = super::capability::verify_capability_token(&secret, token, now_ms() as i64)?;
+    let now = now_ms() as i64;
+    let claims = super::capability::verify_capability_token(&secret, token, now)?;
+    validate_capability_claims_against_store(root, claims)
+}
+
+fn validate_capability_claims_against_store(
+    root: &Path,
+    claims: super::capability::CapabilityClaims,
+) -> Option<super::capability::CapabilityClaims> {
     let (role, epoch): (String, i64) = with_store_connection(root, |conn| {
         conn.query_row(
             "SELECT role, capability_epoch
@@ -14894,7 +14937,50 @@ fn verified_capability_claims(
     {
         return None;
     }
+    if let Some(binding) = &claims.device_binding {
+        if !super::mobile_invites::is_active_device_binding(
+            root,
+            &claims.user_id,
+            binding,
+            now_ms() as i64,
+        ) {
+            return None;
+        }
+    }
     Some(claims)
+}
+
+/// WebRTC sessions belonging to a durably paired Workjet device are authorized
+/// by their revocable Device-to-Instance edge and nonce-bound P-256 proof, not
+/// by the short interactive capability lifetime. A compact invite secret is
+/// resolved only against its native hash record; ordinary sessions keep the
+/// signed actor assertion. HTTP callers can never use this verifier.
+pub(super) fn verified_webrtc_capability_claims(
+    root: &Path,
+    token: &str,
+) -> Option<super::capability::CapabilityClaims> {
+    if let Some(claims) = verified_capability_claims(root, token) {
+        return Some(claims);
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some(claims) =
+        super::mobile_invites::claims_for_webrtc_invite_secret(root, token, now_ms() as i64)
+    {
+        return validate_capability_claims_against_store(root, claims);
+    }
+    let secret = capability_signing_secret(root).ok()?;
+    let claims = super::capability::verify_capability_token_allow_expired(&secret, token)?;
+    if !super::mobile_invites::is_active_paired_device_user(root, &claims.user_id) {
+        return None;
+    }
+    validate_capability_claims_against_store(root, claims)
+}
+
+pub(super) fn verify_webrtc_capability_actor(root: &Path, token: &str) -> Option<(String, String)> {
+    verified_webrtc_capability_claims(root, token).map(|claims| (claims.user_id, claims.role))
 }
 
 pub(super) fn capability_allows_collection_permission(
@@ -14915,12 +15001,47 @@ pub(super) fn capability_allows_collection_permission(
     .unwrap_or(false)
 }
 
+pub(super) fn webrtc_capability_allows_collection_permission(
+    root: &Path,
+    token: &str,
+    collection: &str,
+    permission: BusinessOsPermission,
+) -> bool {
+    let Some(claims) = verified_webrtc_capability_claims(root, token) else {
+        return false;
+    };
+    let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
+    let scope = BusinessOsScope::collection(collection.trim());
+    with_store_connection(root, |conn| {
+        evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
+    })
+    .map(|decision| decision.allowed)
+    .unwrap_or(false)
+}
+
 pub(super) fn capability_allows_workspace_permission(
     root: &Path,
     token: &str,
     permission: BusinessOsPermission,
 ) -> bool {
     let Some(claims) = verified_capability_claims(root, token) else {
+        return false;
+    };
+    let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
+    let scope = BusinessOsScope::workspace();
+    with_store_connection(root, |conn| {
+        evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
+    })
+    .map(|decision| decision.allowed)
+    .unwrap_or(false)
+}
+
+pub(super) fn webrtc_capability_allows_workspace_permission(
+    root: &Path,
+    token: &str,
+    permission: BusinessOsPermission,
+) -> bool {
+    let Some(claims) = verified_webrtc_capability_claims(root, token) else {
         return false;
     };
     let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
@@ -15052,6 +15173,22 @@ fn issue_business_os_capability_token_until(
     now_ms: i64,
     expires_at_ms: i64,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+fn issue_business_os_capability_token_until_with_binding(
+    root: &Path,
+    user_id: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
     anyhow::ensure!(
         expires_at_ms > now_ms,
         "capability expiry must be in the future"
@@ -15075,13 +15212,14 @@ fn issue_business_os_capability_token_until(
         |row| row.get(0),
     )?;
     let secret = capability_signing_secret(root)?;
-    let token = super::capability::issue_capability_token_with_epoch(
+    let token = super::capability::issue_capability_token_with_epoch_and_binding(
         &secret,
         &user.id,
         &normalize_business_role(&user.role),
         actor_epoch,
         now_ms,
         expires_at_ms,
+        device_binding,
     );
     Ok((token, expires_at_ms))
 }
@@ -15173,16 +15311,13 @@ pub fn issue_business_os_capability_token_for_managed_user(
     issue_business_os_capability_token(root, user_id, now_ms)
 }
 
-/// Issue a dedicated managed-user capability whose signed expiry is bounded by
-/// the caller. Mobile pairing uses this to guarantee that the WebRTC token
-/// cannot outlive the short-lived invite shown in Workjet Settings.
-pub fn issue_business_os_capability_token_for_managed_user_until(
+pub fn issue_business_os_capability_token_for_managed_user_with_binding(
     root: &Path,
     user_id: &str,
     display_name: &str,
     role: &str,
     now_ms: i64,
-    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
 ) -> anyhow::Result<(String, i64)> {
     let user_id = user_id.trim();
     anyhow::ensure!(!user_id.is_empty(), "user id is required");
@@ -15211,7 +15346,80 @@ pub fn issue_business_os_capability_token_for_managed_user_until(
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
     drop(conn);
-    issue_business_os_capability_token_until(root, user_id, now_ms, expires_at_ms)
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        now_ms + CAPABILITY_TOKEN_TTL_MS,
+        device_binding,
+    )
+}
+
+/// Issue a dedicated managed-user capability whose signed expiry is bounded by
+/// the caller. Mobile pairing uses this to guarantee that the WebRTC token
+/// cannot outlive the short-lived invite shown in Workjet Settings.
+pub fn issue_business_os_capability_token_for_managed_user_until(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_for_managed_user_until_with_binding(
+        root,
+        user_id,
+        display_name,
+        role,
+        now_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+pub fn issue_business_os_capability_token_for_managed_user_until_with_binding(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
+    let user_id = user_id.trim();
+    anyhow::ensure!(!user_id.is_empty(), "user id is required");
+    let role = normalize_business_role(role);
+    anyhow::ensure!(
+        matches!(role.as_str(), "chef" | "admin" | "founder" | "user"),
+        "role must be chef, admin, founder, or user"
+    );
+    let conn = open_store(root)?;
+    seed_configured_business_users(&conn)?;
+    let display_name = display_name.trim();
+    let display_name = if display_name.is_empty() {
+        user_id
+    } else {
+        display_name
+    };
+    conn.execute(
+        "INSERT INTO business_users
+            (user_id, display_name, role, active, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+         ON CONFLICT(user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            role = excluded.role,
+            active = 1,
+            updated_at_ms = excluded.updated_at_ms",
+        params![user_id, display_name, role.as_str(), now_ms],
+    )?;
+    drop(conn);
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        expires_at_ms,
+        device_binding,
+    )
 }
 
 pub(super) fn rxdb_command_session(
@@ -15342,7 +15550,13 @@ fn rxdb_session_from_command(
         .get("capability_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
-        .and_then(|token| verified_capability_claims(root, token));
+        .and_then(|token| {
+            if matches!(&command.origin, CommandOrigin::ReplicatedPeer) {
+                verified_webrtc_capability_claims(root, token)
+            } else {
+                verified_capability_claims(root, token)
+            }
+        });
 
     let (id, role, display_name) = if let Some(claims) = verified {
         (claims.user_id, claims.role, display_name)
@@ -22176,7 +22390,10 @@ fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
         }
         let value = std::fs::read_to_string(&path)?;
         let trimmed = value.trim();
-        anyhow::ensure!(!trimmed.is_empty(), "Business OS instance identity is empty");
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "Business OS instance identity is empty"
+        );
         return Ok(trimmed.to_string());
     }
     let id = format!("biz_{}", Uuid::new_v4());

@@ -404,32 +404,80 @@ fn handle_business_os_shell_update(root: &Path, args: &[String]) -> anyhow::Resu
 fn handle_business_os_mobile_invite(root: &Path, args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("create") => {
+            validate_mobile_invite_flags(
+                &args[1..],
+                &[
+                    "--ttl-seconds",
+                    "--display-name",
+                    "--device-pairing-id",
+                    "--device-id",
+                    "--proof-key-thumbprint",
+                ],
+            )?;
             let ttl_seconds = flag_value(args, "--ttl-seconds")
                 .map(str::parse::<i64>)
                 .transpose()
                 .context("mobile invite --ttl-seconds must be an integer")?
                 .unwrap_or(crate::business_os::mobile_invites::DEFAULT_TTL_SECONDS);
+            let binding = crate::business_os::mobile_invites::device_binding(
+                flag_value(args, "--device-pairing-id"),
+                flag_value(args, "--device-id"),
+                flag_value(args, "--proof-key-thumbprint"),
+            )?;
             print_json(&crate::business_os::mobile_invites::create(
                 root,
                 ttl_seconds,
                 flag_value(args, "--display-name"),
+                binding.as_ref(),
             )?)
         }
         Some("revoke") => {
-            let invite_id = flag_value(args, "--invite-id")
-                .context("mobile invite revoke requires --invite-id")?;
-            print_json(&crate::business_os::mobile_invites::revoke(
-                root, invite_id,
-            )?)
+            validate_mobile_invite_flags(&args[1..], &["--invite-id", "--device-pairing-id"])?;
+            match (
+                flag_value(args, "--invite-id"),
+                flag_value(args, "--device-pairing-id"),
+            ) {
+                (Some(invite_id), None) => print_json(
+                    &crate::business_os::mobile_invites::revoke(root, invite_id)?,
+                ),
+                (None, Some(device_pairing_id)) => print_json(
+                    &crate::business_os::mobile_invites::revoke_by_device_pairing_id(
+                        root,
+                        device_pairing_id,
+                    )?,
+                ),
+                _ => anyhow::bail!(
+                    "mobile invite revoke requires exactly one of --invite-id or --device-pairing-id"
+                ),
+            }
         }
         Some("--help") | Some("-h") | None => {
             println!(
-                "usage:\n  ctox business-os mobile-invite create [--ttl-seconds 300] [--display-name <name>]\n  ctox business-os mobile-invite revoke --invite-id <opaque-id>"
+                "usage:\n  ctox business-os mobile-invite create [--ttl-seconds 300] [--display-name <name>] [--device-pairing-id <id> --device-id <id> --proof-key-thumbprint <base64url-sha256>]\n  ctox business-os mobile-invite revoke (--invite-id <opaque-id> | --device-pairing-id <id>)"
             );
             Ok(())
         }
         Some(other) => anyhow::bail!("unknown business-os mobile-invite command `{other}`"),
     }
+}
+
+fn validate_mobile_invite_flags(args: &[String], allowed: &[&str]) -> anyhow::Result<()> {
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        anyhow::ensure!(
+            allowed.contains(&flag),
+            "unknown business-os mobile-invite flag `{flag}`"
+        );
+        let value = args
+            .get(index + 1)
+            .map(String::as_str)
+            .filter(|value| !value.starts_with("--"))
+            .with_context(|| format!("mobile invite {flag} requires a value"))?;
+        anyhow::ensure!(!value.is_empty(), "mobile invite {flag} requires a value");
+        index += 2;
+    }
+    Ok(())
 }
 
 fn handle_business_os_backup(root: &Path, args: &[String]) -> anyhow::Result<()> {

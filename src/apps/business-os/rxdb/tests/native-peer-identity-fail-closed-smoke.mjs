@@ -1,0 +1,45 @@
+import { CtoxWebRtcNativePeer } from '../src/webrtc-native.mjs';
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const expectedNativePeerId = 'ctox-core-stable-instance';
+const peer = new CtoxWebRtcNativePeer({
+  signalingUrl: 'wss://signaling.invalid',
+  room: 'ctox-business-os:instance:room',
+  expectedNativePeerId,
+});
+peer.setLocalSignalingPeerId('browser-self');
+peer.rememberPeerMetadata('attacker-peer', {
+  role: 'ctox_instance',
+  client: 'attacker-controlled-native-label',
+});
+assert(peer.shouldConnectToRemotePeer('attacker-peer') === false, 'unexpected native peer accepted');
+
+let connectionAttempts = 0;
+peer.ensureConnection = () => { connectionAttempts += 1; };
+peer.handleSignalingMessage(JSON.stringify({
+  type: 'joined',
+  peers: [{ peerId: 'attacker-peer', role: 'ctox_instance', client: 'attacker-controlled-native-label' }],
+}));
+assert(connectionAttempts === 0, 'presence must fail closed while the expected peer is absent');
+
+peer.rememberPeerMetadata('server-assigned-native-peer', {
+  role: 'ctox_instance',
+  client: expectedNativePeerId,
+});
+assert(peer.shouldConnectToRemotePeer('server-assigned-native-peer') === true, 'expected peer rejected');
+
+let authError = null;
+peer.on('error', (event) => { authError = event.detail || event; });
+peer.handleSignalingMessage(JSON.stringify({
+  type: 'ctoxError',
+  scope: 'control-plane',
+  code: 'role_credential_invalid',
+  reason: 'role-bound signaling credential invalid',
+}));
+assert(authError?.retryable === false, 'role credential rejection must be terminal');
+assert(peer.closed === true, 'terminal rejection must stop reconnect attempts');
+
+console.log('Native peer identity fail-closed smoke OK');

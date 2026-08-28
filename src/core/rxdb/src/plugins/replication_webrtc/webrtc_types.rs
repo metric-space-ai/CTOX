@@ -254,10 +254,24 @@ pub trait WebRTCConnectionHandler: Send + Sync {
 /// Signaling-peer admission predicate shared by WebRTC replication options.
 pub type WebRTCPeerValidator<P> = Arc<dyn Fn(&P) -> bool + Send + Sync>;
 
-/// Stable `ctoxProtocol.peerSession.sessionId` admission predicate. Unlike the
-/// signaling peer id, this identity survives socket reconnects and can back
-/// durable browser-device revocation.
-pub type WebRTCPeerSessionValidator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// Result of validating a full `ctoxProtocol.peerSession` envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebRTCPeerSessionValidation {
+    /// The session and any device proof are valid; its capability may be
+    /// captured for collection authorization.
+    Accept,
+    /// The session is not revoked, but a bound capability needs the native
+    /// peer's fresh challenge. Answer the passive probe without capturing it;
+    /// the native outbound challenge round will decide.
+    Defer,
+    /// The session, capability, or proof is invalid. Close the peer.
+    Reject,
+}
+
+/// Server-authoritative admission predicate for the full ctoxProtocol payload.
+/// `expected_nonce` is present only for the native-initiated challenge round.
+pub type WebRTCPeerSessionValidator =
+    Arc<dyn Fn(&Value, Option<&str>) -> WebRTCPeerSessionValidation + Send + Sync>;
 
 /// Per-peer document visibility predicate shared by replication and query fetch.
 pub type WebRTCDocumentFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;

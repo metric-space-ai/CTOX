@@ -359,6 +359,10 @@ export function buildProtocolPayload({
   // bind this peer to its server-authenticated role and authorize per-collection
   // reads. Omitted when absent so the legacy handshake stays byte-identical.
   capabilityToken = null,
+  // Optional proof response for a native-issued nonce. The browser only
+  // carries a public JWK and signature returned by the native Workjet bridge;
+  // private key material is never accepted or serialized here.
+  deviceProof = null,
   // Phase 3 schema-validation hardening: the per-collection schema-hash map
   // for EVERY collection multiplexed on this one connection. Keyed by
   // collection name. The room handshake runs once off a single representative
@@ -385,6 +389,10 @@ export function buildProtocolPayload({
   if (cleanCapabilityToken) {
     peerSession.capabilityToken = cleanCapabilityToken;
   }
+  const proof = normalizeDeviceProof(deviceProof);
+  if (proof) {
+    peerSession.deviceProof = proof;
+  }
   return {
     protocol: CTOX_RXDB_PROTOCOL,
     checkpoint: checkpointEvidence,
@@ -409,6 +417,32 @@ export function buildProtocolPayload({
       ...CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
       ...capabilities,
     ])).sort(),
+  };
+}
+
+function normalizeDeviceProof(proof) {
+  if (!proof || typeof proof !== 'object') return null;
+  const nonce = typeof proof.nonce === 'string' ? proof.nonce.trim() : '';
+  const signature = typeof proof.signature === 'string' ? proof.signature.trim() : '';
+  const jwk = proof.publicJwk;
+  const x = typeof jwk?.x === 'string' ? jwk.x.trim() : '';
+  const y = typeof jwk?.y === 'string' ? jwk.y.trim() : '';
+  if (
+    proof.version !== 'ctox-device-proof-v1'
+    || !/^[A-Za-z0-9_-]{43}$/.test(nonce)
+    || !/^[A-Za-z0-9_-]{86}$/.test(signature)
+    || jwk?.kty !== 'EC'
+    || jwk?.crv !== 'P-256'
+    || !/^[A-Za-z0-9_-]{43}$/.test(x)
+    || !/^[A-Za-z0-9_-]{43}$/.test(y)
+  ) {
+    return null;
+  }
+  return {
+    version: 'ctox-device-proof-v1',
+    nonce,
+    publicJwk: { kty: 'EC', crv: 'P-256', x, y },
+    signature,
   };
 }
 

@@ -111,6 +111,20 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
       globalThis.dispatchEvent(new CustomEvent('workjet-business-os-action', {
         detail: { appId: command.appId, actionId: command.actionId },
       }));
+      return;
+    }
+    if (command.type === 'device.control' && allowedKeys(command, ['protocol', 'type', 'requestId', 'request'])) {
+      if (!SAFE_ID.test(command.requestId) || typeof globalThis.workjetBusinessOsDeviceControl !== 'function') return;
+      Promise.resolve(globalThis.workjetBusinessOsDeviceControl(command.request))
+        .then((result) => post({ type: 'device.control.result', requestId: command.requestId, result }))
+        .catch((error) => post({
+          type: 'device.control.result',
+          requestId: command.requestId,
+          error: {
+            code: String(error?.code || 'device-control-failed').slice(0, 128),
+            message: String(error?.message || 'Device control failed.').slice(0, 512),
+          },
+        }));
     }
   };
 

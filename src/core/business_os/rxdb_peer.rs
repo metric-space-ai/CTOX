@@ -81,6 +81,9 @@ pub(super) use super::rxdb_peer_projections::{
 use super::rxdb_peer_projections::{
     chat_tracking_batch_document_lookup_count, reset_chat_tracking_batch_document_lookups,
 };
+use super::rxdb_peer_workjet_devices::{
+    handle_workjet_device_webrtc_request, WORKJET_DEVICE_WEBRTC_METHOD,
+};
 use super::store;
 use crate::command_lifecycle::generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
 use crate::mission::channels;
@@ -93,6 +96,9 @@ use notify::Watcher;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use rxdb::plugins::replication_webrtc::index_mod::auxiliary_request_metrics_snapshot;
+use rxdb::plugins::replication_webrtc::webrtc_types::{
+    WebRTCPeerSessionValidation, WebRTCPeerSessionValidator,
+};
 use rxdb::plugins::replication_webrtc::{
     file_fetch_handler::FileRange, CollectionAuthzHook, CollectionEagerPullHook,
     CollectionLiveChangeHook, DocumentReadAuthzHook, DocumentWriteAuthzHook, RTCIceServer,
@@ -695,6 +701,151 @@ enum NativePeerExit {
 /// that produced the canonical zombie (heartbeat "running", zero replication,
 /// no retry). See docs/ctox-rxdb.md §4.
 const NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS: u64 = 20;
+const DEVICE_PROOF_VERSION: &str = "ctox-device-proof-v1";
+
+fn validate_device_bound_peer_session(
+    root: &Path,
+    protocol: &Value,
+    expected_nonce: Option<&str>,
+) -> WebRTCPeerSessionValidation {
+    use WebRTCPeerSessionValidation::{Accept, Defer, Reject};
+
+    let Some(session_id) = protocol
+        .pointer("/peerSession/sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Reject;
+    };
+    if store::is_business_peer_revoked(root, session_id) {
+        return Reject;
+    }
+    let Some(token) = protocol
+        .pointer("/peerSession/capabilityToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        // Preserve the legacy least-privilege handshake. Collection hooks
+        // still deny protected data when no capability is captured.
+        return Accept;
+    };
+    let Some(claims) = store::verified_webrtc_capability_claims(root, token) else {
+        return Reject;
+    };
+    let mobile_invite_requires_proof =
+        super::mobile_invites::mobile_invite_requires_device_proof(root, &claims.user_id);
+    let Some(binding) = claims.device_binding.as_ref() else {
+        if mobile_invite_requires_proof {
+            // First use of a QR invite must complete the native nonce proof.
+            // The browser-initiated probe is answered only far enough for the
+            // native peer to issue that nonce; it may not capture the token.
+            if expected_nonce.is_none() {
+                return Defer;
+            }
+        } else {
+            return Accept;
+        }
+        return validate_and_bind_mobile_device_proof(
+            root,
+            &claims.user_id,
+            protocol,
+            expected_nonce,
+            None,
+        );
+    };
+    validate_and_bind_mobile_device_proof(
+        root,
+        &claims.user_id,
+        protocol,
+        expected_nonce,
+        Some(&binding.proof_key_thumbprint),
+    )
+}
+
+fn validate_and_bind_mobile_device_proof(
+    root: &Path,
+    user_id: &str,
+    protocol: &Value,
+    expected_nonce: Option<&str>,
+    expected_thumbprint: Option<&str>,
+) -> WebRTCPeerSessionValidation {
+    use WebRTCPeerSessionValidation::{Accept, Defer, Reject};
+
+    let Some(expected_nonce) = expected_nonce else {
+        return Defer;
+    };
+    let Some(proof) = protocol.pointer("/peerSession/deviceProof") else {
+        return Reject;
+    };
+    if proof.get("version").and_then(Value::as_str) != Some(DEVICE_PROOF_VERSION)
+        || proof.get("nonce").and_then(Value::as_str) != Some(expected_nonce)
+    {
+        return Reject;
+    }
+    let Some(jwk) = proof.get("publicJwk") else {
+        return Reject;
+    };
+    let Some((public_key, thumbprint)) = p256_public_key_and_thumbprint(jwk) else {
+        return Reject;
+    };
+    if expected_thumbprint.is_some_and(|expected| expected != thumbprint.as_str()) {
+        return Reject;
+    }
+    let Some(signature) = proof
+        .get("signature")
+        .and_then(Value::as_str)
+        .and_then(|value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+        })
+        .filter(|value| value.len() == 64)
+    else {
+        return Reject;
+    };
+    let public_key = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::ECDSA_P256_SHA256_FIXED,
+        public_key,
+    );
+    if public_key
+        .verify(expected_nonce.as_bytes(), &signature)
+        .is_err()
+    {
+        return Reject;
+    }
+    if !super::mobile_invites::authorize_or_bind_device_proof(
+        root,
+        user_id,
+        &thumbprint,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        return Reject;
+    }
+    Accept
+}
+
+fn p256_public_key_and_thumbprint(jwk: &Value) -> Option<(Vec<u8>, String)> {
+    if jwk.get("kty").and_then(Value::as_str) != Some("EC")
+        || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
+    {
+        return None;
+    }
+    let x = jwk.get("x").and_then(Value::as_str)?;
+    let y = jwk.get("y").and_then(Value::as_str)?;
+    let decoder = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let x_bytes = decoder.decode(x).ok().filter(|value| value.len() == 32)?;
+    let y_bytes = decoder.decode(y).ok().filter(|value| value.len() == 32)?;
+    let mut public_key = Vec::with_capacity(65);
+    public_key.push(0x04);
+    public_key.extend_from_slice(&x_bytes);
+    public_key.extend_from_slice(&y_bytes);
+    // RFC 7638 requires lexicographic member order and no whitespace.
+    let canonical = format!(r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#);
+    let digest = ring::digest::digest(&ring::digest::SHA256, canonical.as_bytes());
+    Some((public_key, decoder.encode(digest.as_ref())))
+}
 
 fn native_peer_bring_up_failure(message: String) -> anyhow::Error {
     // Returning an error is the policy: the supervisor owns the retry. This
@@ -705,13 +856,16 @@ fn native_peer_bring_up_failure(message: String) -> anyhow::Error {
 const CTOX_RXDB_PROTOCOL: &str = "ctox-rxdb-protocol-v1";
 const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-control-plane-v1",
+    "ctox-role-bound-signaling-v1",
     "ctox-rxdb-native-v1",
     "ctox-file-chunks-v1",
     "ctox-schema-hash-v1",
     "ctox-peer-session-v1",
+    "ctox-device-proof-v1",
     "ctox-checkpoint-epoch-v1",
     "ctox-checkpoint-generation-v2",
     "ctox-app-runtime-v1",
+    "ctox-workjet-device-control-v1",
     CTOX_COMMAND_LIFECYCLE_CAPABILITY,
 ];
 /// Standby reconciliation is a safety net, not the normal data path. Runtime
@@ -2450,6 +2604,9 @@ async fn run_native_peer(
         anyhow::bail!("Business OS native RxDB peer requires a signaling URL");
     }
     let peer_session_id = format!("rxdb-rs-{}", Uuid::new_v4().simple());
+    let mut sync_config = store::sync_config(&root)?;
+    let stable_native_peer_id = sync_config.peer_id.clone();
+    let signaling_auth = store::signaling_auth_config(&root, &signaling_room_password)?;
     // The provider re-derives the URLs — including fresh `token_iat`/
     // `token_exp` — on EVERY signaling (re)connect attempt. Baking the token
     // window in once meant that after >24h uptime any socket drop became a
@@ -2459,18 +2616,13 @@ async fn run_native_peer(
     let signaling_url_provider = native_signaling_url_provider(
         signaling_base_urls.clone(),
         sync_room.clone(),
-        signaling_room_password.clone(),
-        peer_session_id.clone(),
+        stable_native_peer_id,
+        signaling_auth,
     );
-    let ice_servers = {
-        let mut sync = store::sync_config(&root)?;
-        // Mint an ephemeral TURN credential for the native peer too (no-op unless
-        // a TURN URL + secret are configured). Re-derived on each peer bring-up.
-        if let Some(turn) = store::ephemeral_turn_server(&root, &peer_session_id) {
-            sync.ice_servers.push(turn);
-        }
-        ice_servers_from_sync_config(&sync.ice_servers)
-    };
+    if let Some(turn) = store::ephemeral_turn_server(&root, &peer_session_id) {
+        sync_config.ice_servers.push(turn);
+    }
+    let ice_servers = ice_servers_from_sync_config(&sync_config.ice_servers);
     let database_path = store::rxdb_store_path(&root);
     // Publish process liveness before opening or repairing the potentially
     // large SQLite store. SQLite has to parse the complete schema on first
@@ -2589,10 +2741,14 @@ async fn run_native_peer(
             std::sync::Arc::new(move |peer_id: &String| {
                 !store::is_business_peer_revoked(&signaling_revocation_root, peer_id)
             });
-        let session_revocation_root = root.clone();
-        let is_peer_session_valid: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> =
-            std::sync::Arc::new(move |session_id: &str| {
-                !store::is_business_peer_revoked(&session_revocation_root, session_id)
+        let session_validation_root = root.clone();
+        let is_peer_session_valid: WebRTCPeerSessionValidator =
+            std::sync::Arc::new(move |protocol: &Value, expected_nonce: Option<&str>| {
+                validate_device_bound_peer_session(
+                    &session_validation_root,
+                    protocol,
+                    expected_nonce,
+                )
             });
         // Server-authoritative exact per-collection read authz. Missing,
         // expired, revoked, or stale-epoch capabilities fail closed.
@@ -2600,7 +2756,7 @@ async fn run_native_peer(
             if store::collection_authz_enabled(&root) {
                 let authz_root = root.clone();
                 Some(std::sync::Arc::new(move |token: &str, collection: &str| {
-                    store::capability_allows_collection_permission(
+                    store::webrtc_capability_allows_collection_permission(
                         &authz_root,
                         token,
                         collection,
@@ -2703,6 +2859,17 @@ async fn run_native_peer(
                                 params,
                             )
                             .await
+                        })
+                    }),
+                );
+                let workjet_device_root = root.clone();
+                pool.set_auxiliary_request_handler(
+                    WORKJET_DEVICE_WEBRTC_METHOD,
+                    Arc::new(move |_peer_identity, capability_token, params| {
+                        let root = workjet_device_root.clone();
+                        Box::pin(async move {
+                            handle_workjet_device_webrtc_request(&root, &capability_token, params)
+                                .await
                         })
                     }),
                 );
@@ -3302,14 +3469,14 @@ type NativeSignalingClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 fn native_signaling_url_provider(
     base_urls: Vec<String>,
     sync_room: String,
-    signaling_room_password: String,
     native_peer_id: String,
+    signaling_auth: store::BusinessOsSignalingAuthConfig,
 ) -> NativeSignalingUrlProvider {
     native_signaling_url_provider_with_clock(
         base_urls,
         sync_room,
-        signaling_room_password,
         native_peer_id,
+        signaling_auth,
         Arc::new(current_unix_seconds),
     )
 }
@@ -3317,8 +3484,8 @@ fn native_signaling_url_provider(
 fn native_signaling_url_provider_with_clock(
     base_urls: Vec<String>,
     sync_room: String,
-    signaling_room_password: String,
     native_peer_id: String,
+    signaling_auth: store::BusinessOsSignalingAuthConfig,
     clock: NativeSignalingClock,
 ) -> NativeSignalingUrlProvider {
     Arc::new(move || {
@@ -3329,8 +3496,8 @@ fn native_signaling_url_provider_with_clock(
                 signaling_url_with_native_metadata_at(
                     base_url,
                     &sync_room,
-                    &signaling_room_password,
                     &native_peer_id,
+                    &signaling_auth,
                     issued_at,
                 )
             })
@@ -3341,13 +3508,16 @@ fn native_signaling_url_provider_with_clock(
 fn signaling_url_with_native_metadata_at(
     raw_url: &str,
     sync_room: &str,
-    signaling_room_password: &str,
     native_peer_id: &str,
+    signaling_auth: &store::BusinessOsSignalingAuthConfig,
     issued_at: u64,
 ) -> String {
     let Ok(mut url) = Url::parse(raw_url) else {
         return raw_url.to_string();
     };
+    if url.host_str() == Some("signaling.ctox.dev") && matches!(url.path(), "/" | "/signal") {
+        url.set_path("/v2");
+    }
     let existing = url
         .query_pairs()
         .filter(|(key, _)| {
@@ -3361,6 +3531,9 @@ fn signaling_url_with_native_metadata_at(
                     | "token"
                     | "token_iat"
                     | "token_exp"
+                    | "auth_version"
+                    | "browser_token_hash"
+                    | "native_token_hash"
             )
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -3388,14 +3561,15 @@ fn signaling_url_with_native_metadata_at(
             query.append_pair("instance_id", instance_id);
         }
         query.append_pair("protocol", CTOX_RXDB_PROTOCOL);
-        if let Some(token) = signaling_token_from_room_password(signaling_room_password) {
-            query.append_pair("token", &token);
-            query.append_pair("token_iat", &issued_at.to_string());
-            query.append_pair(
-                "token_exp",
-                &(issued_at + SIGNALING_TOKEN_TTL_SECONDS).to_string(),
-            );
-        }
+        query.append_pair("token", &signaling_auth.native_token);
+        query.append_pair("token_iat", &issued_at.to_string());
+        query.append_pair(
+            "token_exp",
+            &(issued_at + SIGNALING_TOKEN_TTL_SECONDS).to_string(),
+        );
+        query.append_pair("auth_version", signaling_auth.version);
+        query.append_pair("browser_token_hash", &signaling_auth.browser_token_hash);
+        query.append_pair("native_token_hash", &signaling_auth.native_token_hash);
         for capability in CTOX_NATIVE_CAPABILITIES {
             query.append_pair("cap", capability);
         }
@@ -3408,15 +3582,6 @@ fn current_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
-}
-
-fn signaling_token_from_room_password(room_password: &str) -> Option<String> {
-    let password = room_password.trim();
-    if password.is_empty() {
-        return None;
-    }
-    let digest = sha2::Sha256::digest(password.as_bytes());
-    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)[..32].to_string())
 }
 
 fn instance_id_from_sync_room(sync_room: &str) -> Option<&str> {
@@ -9141,6 +9306,88 @@ pub(in crate::business_os) mod tests {
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn bound_peer_capability_requires_fresh_matching_p256_proof() -> anyhow::Result<()> {
+        use ring::signature::KeyPair as _;
+
+        let root = tempfile::tempdir()?;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &rng,
+        )
+        .map_err(|_| anyhow::anyhow!("generate test P-256 key"))?;
+        let key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8.as_ref(),
+            &rng,
+        )
+        .map_err(|_| anyhow::anyhow!("parse test P-256 key"))?;
+        let public_key = key_pair.public_key().as_ref();
+        anyhow::ensure!(public_key.len() == 65 && public_key[0] == 0x04);
+        let encoder = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let public_jwk = json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": encoder.encode(&public_key[1..33]),
+            "y": encoder.encode(&public_key[33..65]),
+        });
+        let (_, thumbprint) =
+            p256_public_key_and_thumbprint(&public_jwk).expect("valid public JWK");
+        let binding = super::super::mobile_invites::device_binding(
+            Some("pairing-pop-test"),
+            Some("device-pop-test"),
+            Some(&thumbprint),
+        )?
+        .expect("binding");
+        let created = super::super::mobile_invites::create(
+            root.path(),
+            300,
+            Some("PoP test"),
+            Some(&binding),
+        )?;
+        let token = created["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("token");
+        let nonce = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        let mut protocol = json!({
+            "peerSession": {
+                "sessionId": "browser:test-room",
+                "capabilityToken": token,
+            }
+        });
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, None),
+            WebRTCPeerSessionValidation::Defer
+        );
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, Some(nonce)),
+            WebRTCPeerSessionValidation::Reject
+        );
+        let signature = key_pair
+            .sign(&rng, nonce.as_bytes())
+            .map_err(|_| anyhow::anyhow!("sign test nonce"))?;
+        protocol["peerSession"]["deviceProof"] = json!({
+            "version": DEVICE_PROOF_VERSION,
+            "nonce": nonce,
+            "publicJwk": public_jwk,
+            "signature": encoder.encode(signature.as_ref()),
+        });
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, Some(nonce)),
+            WebRTCPeerSessionValidation::Accept
+        );
+        assert_eq!(
+            validate_device_bound_peer_session(
+                root.path(),
+                &protocol,
+                Some("mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm")
+            ),
+            WebRTCPeerSessionValidation::Reject
+        );
+        Ok(())
+    }
+
+    #[test]
     fn reconciliation_startup_delays_are_staggered_after_control_plane() {
         let delays = [
             RUNTIME_SETTINGS_STARTUP_DELAY_SECS,
@@ -11577,17 +11824,24 @@ pub(in crate::business_os) mod tests {
 
     #[test]
     fn native_signaling_provider_rederives_urls_for_every_reconnect() {
+        let root = tempfile::tempdir().expect("test root");
+        let signaling_auth =
+            store::signaling_auth_config(root.path(), "room-password").expect("signaling auth");
+        let expected_native_token = signaling_auth.native_token.clone();
+        let expected_browser_hash = signaling_auth.browser_token_hash.clone();
+        let expected_native_hash = signaling_auth.native_token_hash.clone();
         let clock_value = Arc::new(AtomicU64::new(1_000));
         let clock_value_for_provider = Arc::clone(&clock_value);
         let provider = native_signaling_url_provider_with_clock(
             vec!["wss://signaling.ctox.dev?foo=bar&role=browser".to_string()],
             "ctox-business-os:inst_123:roomhash".to_string(),
-            "room-password".to_string(),
-            "rxdb-rs-test-peer".to_string(),
+            "ctox-core-test-peer".to_string(),
+            signaling_auth,
             Arc::new(move || clock_value_for_provider.fetch_add(60, Ordering::SeqCst)),
         );
         let first_attempt = provider();
         let parsed = Url::parse(&first_attempt[0]).expect("metadata url parses");
+        assert_eq!(parsed.path(), "/v2");
         assert_eq!(
             parsed
                 .query_pairs()
@@ -11602,7 +11856,7 @@ pub(in crate::business_os) mod tests {
                 .find(|(key, _)| key == "client")
                 .unwrap()
                 .1,
-            "rxdb-rs-test-peer"
+            "ctox-core-test-peer"
         );
         assert_eq!(
             parsed
@@ -11610,7 +11864,7 @@ pub(in crate::business_os) mod tests {
                 .find(|(key, _)| key == "native_peer_id")
                 .unwrap()
                 .1,
-            "rxdb-rs-test-peer"
+            "ctox-core-test-peer"
         );
         assert_eq!(
             parsed
@@ -11629,11 +11883,21 @@ pub(in crate::business_os) mod tests {
             "inst_123"
         );
         let query_pairs = parsed.query_pairs().into_owned().collect::<HashMap<_, _>>();
-        let expected_token =
-            signaling_token_from_room_password("room-password").expect("room password token");
         assert_eq!(
             query_pairs.get("token").map(String::as_str),
-            Some(expected_token.as_str())
+            Some(expected_native_token.as_str())
+        );
+        assert_eq!(
+            query_pairs.get("auth_version").map(String::as_str),
+            Some(store::BUSINESS_OS_SIGNALING_AUTH_VERSION)
+        );
+        assert_eq!(
+            query_pairs.get("browser_token_hash").map(String::as_str),
+            Some(expected_browser_hash.as_str())
+        );
+        assert_eq!(
+            query_pairs.get("native_token_hash").map(String::as_str),
+            Some(expected_native_hash.as_str())
         );
         let issued_at = query_pairs
             .get("token_iat")

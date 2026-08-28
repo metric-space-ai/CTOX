@@ -357,6 +357,10 @@ function buildProtocolPayload({
   // bind this peer to its server-authenticated role and authorize per-collection
   // reads. Omitted when absent so the legacy handshake stays byte-identical.
   capabilityToken = null,
+  // Optional proof response for a native-issued nonce. The browser only
+  // carries a public JWK and signature returned by the native Workjet bridge;
+  // private key material is never accepted or serialized here.
+  deviceProof = null,
   // Phase 3 schema-validation hardening: the per-collection schema-hash map
   // for EVERY collection multiplexed on this one connection. Keyed by
   // collection name. The room handshake runs once off a single representative
@@ -383,6 +387,10 @@ function buildProtocolPayload({
   if (cleanCapabilityToken) {
     peerSession.capabilityToken = cleanCapabilityToken;
   }
+  const proof = normalizeDeviceProof(deviceProof);
+  if (proof) {
+    peerSession.deviceProof = proof;
+  }
   return {
     protocol: CTOX_RXDB_PROTOCOL,
     checkpoint: checkpointEvidence,
@@ -405,6 +413,23 @@ function buildProtocolPayload({
       ...CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
       ...capabilities
     ])).sort()
+  };
+}
+function normalizeDeviceProof(proof) {
+  if (!proof || typeof proof !== "object") return null;
+  const nonce = typeof proof.nonce === "string" ? proof.nonce.trim() : "";
+  const signature = typeof proof.signature === "string" ? proof.signature.trim() : "";
+  const jwk = proof.publicJwk;
+  const x = typeof jwk?.x === "string" ? jwk.x.trim() : "";
+  const y = typeof jwk?.y === "string" ? jwk.y.trim() : "";
+  if (proof.version !== "ctox-device-proof-v1" || !/^[A-Za-z0-9_-]{43}$/.test(nonce) || !/^[A-Za-z0-9_-]{86}$/.test(signature) || jwk?.kty !== "EC" || jwk?.crv !== "P-256" || !/^[A-Za-z0-9_-]{43}$/.test(x) || !/^[A-Za-z0-9_-]{43}$/.test(y)) {
+    return null;
+  }
+  return {
+    version: "ctox-device-proof-v1",
+    nonce,
+    publicJwk: { kty: "EC", crv: "P-256", x, y },
+    signature
   };
 }
 function normalizeCollectionSchemas(map) {
@@ -9016,18 +9041,22 @@ var LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 var DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 var CTOX_BROWSER_LIVE_CAPABILITY = "ctox-browser-live-v1";
 var CTOX_BROWSER_LIVE_CHANNEL = "ctox-browser-live-v1";
+var CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY = "ctox-workjet-device-control-v1";
+var CTOX_WORKJET_DEVICE_CONTROL_CHANNEL = "ctox.workjet.device.v1";
 var BROWSER_CAPABILITIES = [
   "ctox-rxdb-browser-v1",
   "ctox-file-chunks-v1",
   "ctox-schema-hash-v1",
   "ctox-peer-session-v1",
+  "ctox-device-proof-v1",
   "ctox-checkpoint-epoch-v1",
   CTOX_CHECKPOINT_GENERATION_CAPABILITY,
   CTOX_APP_RUNTIME_CAPABILITY,
   CTOX_QUERY_FETCH_CAPABILITY,
   CTOX_PRESENCE_CAPABILITY,
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
-  CTOX_BROWSER_LIVE_CAPABILITY
+  CTOX_BROWSER_LIVE_CAPABILITY,
+  CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY
 ];
 function remoteSupportsPresence(remoteProtocol) {
   if (!remoteProtocol || typeof remoteProtocol !== "object") return false;
@@ -9365,7 +9394,7 @@ var SharedRoomPeer = class {
       iceServersRefreshUrl: this.iceServersRefreshUrl,
       refreshIceServers: this.refreshIceServers,
       expectedNativePeerId: this.expectedNativePeerId || "",
-      protocolPayload: async ({ collection } = {}) => this.buildProtocolPayload(collection),
+      protocolPayload: async ({ collection, params } = {}) => this.buildProtocolPayload(collection, params),
       requestHandlers: {
         masterChangesSince: async ({ params, peerId, collection }) => this.routeMasterChangesSince(collection, params, peerId),
         masterWrite: async ({ params, peerId, collection }) => this.routeMasterWrite(collection, params, peerId),
@@ -9373,6 +9402,7 @@ var SharedRoomPeer = class {
       }
     });
     this.peer.openAuxChannel("", CTOX_BROWSER_LIVE_CHANNEL, { ordered: true });
+    this.peer.openAuxChannel("", CTOX_WORKJET_DEVICE_CONTROL_CHANNEL, { ordered: true });
     this.demandTransport.attach(this.peer);
     this.peer.on("error", (event) => this.fanout("error", event.detail || event));
     this.peer.on("transport-status", (event) => this.fanout("transport-status", event.detail || event));
@@ -9517,10 +9547,10 @@ var SharedRoomPeer = class {
       }
     }
   }
-  async buildProtocolPayload(collection) {
-    return this.buildProtocolPayloadUncached(collection);
+  async buildProtocolPayload(collection, params = []) {
+    return this.buildProtocolPayloadUncached(collection, params);
   }
-  async buildProtocolPayloadUncached(collection) {
+  async buildProtocolPayloadUncached(collection, params = []) {
     const registration = collection && this.collections.get(collection) || this.representativeCollection();
     if (!registration) {
       return buildProtocolPayload({
@@ -9544,7 +9574,8 @@ var SharedRoomPeer = class {
         this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
       }
     }
-    const payload = await registration.state.buildProtocolPayload();
+    const deviceProofNonce = Array.isArray(params) ? params[0]?.peerSession?.deviceProofNonce : null;
+    const payload = await registration.state.buildProtocolPayload(deviceProofNonce);
     if (this.collections.size > 1) {
       try {
         const maps = await collectionMapsBuild;
@@ -9874,6 +9905,15 @@ var CtoxWebRtcReplicationState = class {
         timeoutMs
       );
     }
+    if (String(method || "") === "ctox.workjet.device.v1") {
+      return this.peer.requestAuxiliary(
+        negotiated.peerId,
+        CTOX_WORKJET_DEVICE_CONTROL_CHANNEL,
+        String(method || ""),
+        [params],
+        timeoutMs
+      );
+    }
     return this.peer.request(negotiated.peerId, String(method || ""), [params], timeoutMs, this.collection);
   }
   async start(connectionHandlerCreator) {
@@ -9951,9 +9991,10 @@ var CtoxWebRtcReplicationState = class {
   emitError(error) {
     this.error$.next(error);
   }
-  async buildProtocolPayload() {
+  async buildProtocolPayload(deviceProofNonce = null) {
     const checkpoint = await this.collection.storageCollection.replicationCheckpointStatus(this.schemaHashValue);
     const capabilityToken = await resolveCapabilityToken(this.ctox);
+    const deviceProof = await resolveDeviceProof(this.ctox, deviceProofNonce);
     return buildProtocolPayload({
       collectionName: this.collection.name,
       schemaVersion: this.collection.schema.version,
@@ -9964,7 +10005,8 @@ var CtoxWebRtcReplicationState = class {
       checkpoint,
       role: "browser",
       capabilities: BROWSER_CAPABILITIES,
-      capabilityToken: typeof capabilityToken === "string" ? capabilityToken : null
+      capabilityToken: typeof capabilityToken === "string" ? capabilityToken : null,
+      deviceProof
     });
   }
   async onPeerReady(peerId, normalizedRemoteProtocol, queryFetchCapable) {
@@ -11244,6 +11286,23 @@ async function resolveCapabilityToken(ctox = {}) {
     }
   }
   return typeof source === "string" && source.trim() ? source.trim() : null;
+}
+async function resolveDeviceProof(ctox = {}, nonce = null) {
+  const cleanNonce = typeof nonce === "string" ? nonce.trim() : "";
+  if (!/^[A-Za-z0-9_-]{43}$/.test(cleanNonce)) return null;
+  const provider = ctox?.deviceProofProvider;
+  if (typeof provider !== "function") return null;
+  try {
+    const response = await provider(cleanNonce);
+    return {
+      version: "ctox-device-proof-v1",
+      nonce: cleanNonce,
+      publicJwk: response?.publicJwk,
+      signature: response?.signature
+    };
+  } catch {
+    return null;
+  }
 }
 function decodeCapabilityTokenClaims(token) {
   if (typeof token !== "string" || !token) return null;

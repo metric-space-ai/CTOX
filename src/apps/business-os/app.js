@@ -1023,6 +1023,7 @@ async function bootstrap() {
   });
   await resetBusinessDataPlaneForBuildIfNeeded(syncConfig);
   await openBusinessDataPlane(syncConfig);
+  if (await completeWorkjetPairingRedirect()) return;
 
   setStartupProgress(70, shellText('bootWorkspace'));
   let modules;
@@ -6594,6 +6595,130 @@ function createLiveSyncFacade({ host = null } = {}) {
     resumeCollections: (...args) => state.sync?.resumeCollections?.(...args),
     stop: (...args) => state.sync?.stop?.(...args),
   };
+}
+
+const WORKJET_DEVICE_CONTROL_ACTIONS = new Set([
+  'invite.create',
+  'invite.revoke',
+  'binding.list',
+  'binding.revoke',
+]);
+
+globalThis.workjetBusinessOsDeviceControl = async (request) => {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('Workjet device request must be an object.');
+  }
+  const action = String(request.action || '');
+  if (!WORKJET_DEVICE_CONTROL_ACTIONS.has(action)) {
+    throw new TypeError('Workjet device action is unsupported.');
+  }
+  const allowedKeys = action === 'invite.create'
+    ? ['action', 'ttlSeconds', 'displayName']
+    : action === 'invite.revoke'
+      ? ['action', 'inviteId']
+      : action === 'binding.revoke'
+        ? ['action', 'bindingId']
+        : ['action'];
+  if (Object.keys(request).some((key) => !allowedKeys.includes(key))) {
+    throw new TypeError('Workjet device request contains an unsupported field.');
+  }
+  if (typeof state.sync?.requestNative !== 'function') {
+    const error = new Error('CTOX WebRTC device control is unavailable.');
+    error.code = 'ctox_webrtc_unavailable';
+    throw error;
+  }
+  return state.sync.requestNative('ctox.workjet.device.v1', request, {
+    requiredCapability: 'ctox-workjet-device-control-v1',
+    timeoutMs: 10_000,
+  });
+};
+
+function encodeWorkjetPairingPayload(invite) {
+  const compact = [
+    'w2',
+    invite.display_name,
+    invite.instance_id,
+    invite.sync_room,
+    invite.native_peer_id,
+    invite.signaling_urls,
+    invite.signaling_auth_version,
+    invite.signaling_browser_token,
+    invite.signaling_browser_token_hash,
+    invite.signaling_native_token_hash,
+    invite.expires_at,
+    invite.session?.capability_token,
+    invite.session?.capability_expires_at_ms,
+    invite.session?.user?.id,
+    invite.session?.user?.display_name,
+    invite.session?.user?.role,
+    invite.session?.source,
+  ];
+  const bytes = new TextEncoder().encode(JSON.stringify(compact));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/u, '');
+}
+
+function renderWorkjetPairingHandoff(link, expiresAt) {
+  document.title = 'Workjet verbinden';
+  document.documentElement.dataset.workjetPairingHandoff = 'ready';
+  document.body.replaceChildren();
+
+  const main = document.createElement('main');
+  main.setAttribute('aria-labelledby', 'workjet-pairing-title');
+  main.style.cssText = 'min-height:100vh;display:grid;place-items:center;padding:24px;background:#0a0a0a;color:#f5f5f5;font:16px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+  const panel = document.createElement('section');
+  panel.style.cssText = 'width:min(100%,480px);display:grid;gap:16px;padding:28px;border:1px solid rgba(255,255,255,.14);border-radius:20px;background:#111';
+  const title = document.createElement('h1');
+  title.id = 'workjet-pairing-title';
+  title.textContent = 'Instanz ist bereit';
+  title.style.cssText = 'margin:0;font-size:28px;line-height:1.15';
+  const text = document.createElement('p');
+  text.textContent = 'Öffne Workjet, um diese CTOX-Instanz auf deinem Gerät zu verbinden.';
+  text.style.cssText = 'margin:0;color:#aaa';
+  const open = document.createElement('a');
+  open.href = link;
+  open.textContent = 'In Workjet öffnen';
+  open.style.cssText = 'display:flex;min-height:48px;align-items:center;justify-content:center;border-radius:12px;background:#2864dc;color:white;font-weight:700;text-decoration:none';
+  const expiry = document.createElement('p');
+  const expiryDate = new Date(expiresAt || 0);
+  expiry.textContent = Number.isFinite(expiryDate.getTime())
+    ? `Die Einladung ist bis ${expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} Uhr gültig.`
+    : 'Die Einladung ist nur kurzzeitig gültig.';
+  expiry.style.cssText = 'margin:0;color:#777;font-size:14px';
+  panel.append(title, text, open, expiry);
+  main.append(panel);
+  document.body.append(main);
+}
+
+async function completeWorkjetPairingRedirect() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('workjet_pairing') !== '1') return false;
+  params.delete('workjet_pairing');
+  history.replaceState(null, '', `${location.pathname}${params.size ? `?${params.toString()}` : ''}${location.hash}`);
+  try {
+    const result = await globalThis.workjetBusinessOsDeviceControl({
+      action: 'invite.create',
+      ttlSeconds: 300,
+      displayName: document.title || 'Workjet',
+    });
+    const payload = encodeWorkjetPairingPayload(result?.invite);
+    if (!payload || payload.length > 2300) throw new Error('Workjet pairing payload is invalid.');
+    // Custom-scheme navigation after an asynchronous WebRTC round trip is
+    // blocked by some mobile browsers because the original click activation
+    // has expired. Present one explicit, user-activated handoff instead of
+    // silently leaving the user in the browser-hosted Business OS shell.
+    renderWorkjetPairingHandoff(
+      `workjet://pair?payload=${encodeURIComponent(payload)}`,
+      result?.expiresAt || result?.invite?.expires_at,
+    );
+    return true;
+  } catch (error) {
+    params.set('workjet_pairing_failed', '1');
+    history.replaceState(null, '', `${location.pathname}?${params.toString()}${location.hash}`);
+    console.error('[business-os] Workjet pairing redirect failed', error);
+    return false;
+  }
 }
 
 function createLiveCommandBusFacade() {

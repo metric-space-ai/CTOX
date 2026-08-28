@@ -858,6 +858,101 @@ success. `ctox.module.set_visible` is the first registered two-step saga
 (runtime visibility then RxDB catalog projection) and restores the original
 visibility if projection fails.
 
+### 9.1 Device-bound Workjet grants
+
+`ctox business-os mobile-invite create` remains backward-compatible when no
+device flags are supplied. A managed Workjet pairing supplies all three flags
+together: `--device-pairing-id`, `--device-id`, and
+`--proof-key-thumbprint` (the 43-character base64url RFC 7638 SHA-256
+thumbprint of a P-256 public JWK). Partial tuples are rejected. The issuer JSON
+echoes the adapter acknowledgement as `businessOsInstanceId`, `grantId`,
+`deviceId`, `proofKeyThumbprint`, `expiresAt`, and `invite`; it never contains
+the P-256 private key. Revocation accepts either the opaque invite id or,
+additively, `--device-pairing-id`.
+
+The tuple is persisted in nullable columns on `business_mobile_invites` and is
+also HMAC-bound into the capability (`device_pairing_id`, `device_id`, and
+`cnf.jkt`). Existing rows and ordinary Business OS capabilities remain
+unbound. A bound capability is never accepted as an HTTP Bearer session.
+
+The unified Workjet QR flow intentionally starts unbound because the desktop
+does not know the phone's key before it scans the code. The first native
+DataChannel handshake must complete the nonce-bound proof below before the
+peer captures the token. CTOX then atomically binds that invite's unique user
+to the P-256 thumbprint. The QR expiry limits this first use only. Reconnects
+are authorized by the still-active Device-to-Instance edge, the actor's native
+capability epoch, and a fresh proof; revoking either the edge or actor epoch
+fails closed. The interactive token's normal expiry is never relaxed for HTTP.
+
+On WebRTC, the native peer puts a fresh 32-byte base64url nonce in its outbound
+`ctoxProtocol.peerSession.deviceProofNonce`. The browser calls exactly this
+host boundary:
+
+```js
+Object.defineProperty(globalThis, 'ctoxWorkjetDeviceProofProvider', {
+  value: async (nonce) => ({
+    publicJwk: { kty: 'EC', crv: 'P-256', x, y },
+    signature,
+  }),
+  writable: false,
+  configurable: false,
+  enumerable: false,
+});
+```
+
+`signature` is base64url without padding of the 64-byte IEEE-P1363 P-256
+ECDSA/SHA-256 signature over the UTF-8 bytes of `nonce`. Workjet must keep the
+private key in its native key store; the callback exposes only the signature
+and public JWK. The shell sanitizes those two public values into
+`peerSession.deviceProof`. The callback is invoked once per native challenge,
+including every reconnect, and its result is never cached. A rejection or
+exception is treated like a missing proof. Missing provider, wrong key thumbprint, malformed
+signature, missing/stale nonce, revoked tuple, or partial claims fail closed
+before the native peer captures the capability or starts replication. An
+unbound legacy token needs no proof and keeps the existing path. This is an
+authentication extension inside the existing DataChannel handshake, not an
+HTTP data bridge.
+
+### 9.2 Workjet device control is an auxiliary WebRTC method
+
+Device invitation and binding management use the existing authenticated
+RxDB/WebRTC connection. The multiplexed native peer registers exactly one
+auxiliary method, `ctox.workjet.device.v1`. Its single parameter is an exact
+`WorkjetDeviceWebRtcRequestV1` object with one of these actions; unknown fields
+and actions are rejected. Native results are validated and serialized through
+the untagged `WorkjetDeviceWebRtcResponseV1` envelope before they cross the
+DataChannel:
+
+| action | fields | result |
+|---|---|---|
+| `invite.create` | `ttlSeconds?`, `displayName?` | the existing versioned Workjet/Business-OS invite envelope, returned only on the DataChannel |
+| `invite.revoke` | `inviteId` | `{ revoked: true }` |
+| `binding.list` | none | `ctox.workjet-device-bindings.v1` with non-secret device metadata and `inviteIdHash` |
+| `binding.revoke` | `bindingId` | `{ revoked: true }` |
+
+The shell exposes this method as
+`globalThis.workjetBusinessOsDeviceControl(request)` and the native
+mobile host forwards the same request through the bounded
+`device.control`/`device.control.result` lifecycle bridge. Invite secrets are
+never written to RxDB, HTTP, logs, reports, or the binding list. Cloudflare WSS
+is used only by the normal WebRTC signaling exchange; it does not implement
+this method and stores no device edge.
+
+Each binding summary includes `inviteIdHash`, the lowercase hexadecimal
+SHA-256 digest of the one-time `inviteId`. The inviting Workjet installation
+hashes its in-memory invite ID locally and closes the QR only after
+`binding.list` reports a paired edge with that exact digest. The raw invite ID
+is never returned by `binding.list`; accepting an arbitrary new device edge or
+comparing the device proof thumbprint to the invite ID is forbidden.
+
+`invite.create` places only a 32-byte base64url bootstrap secret in the invite's
+`session.capability_token`; CTOX stores only its SHA-256 hash. The secret is not
+an HTTP bearer. Before first-use expiry it resolves to the pending actor only
+inside the native WebRTC verifier. A successful nonce/P-256 proof atomically
+adds the device id and proof-key thumbprint to the invite row. Later reconnects
+require that exact active Device-to-Instance edge; revoke disables both the row
+and actor epoch. This keeps the QR compact without an online reference service.
+
 ## 10. Build & release
 
 `dist/ctox-rxdb-js.mjs` is **built** from `src/index.mjs` with a pinned
@@ -873,10 +968,10 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
 ```
 
 **Cache-buster discipline.** The bundle is imported with a `?v=` query in
-exactly two places, which must always carry the **identical** value:
+exactly three places, which must always carry the **identical** value:
 
 - `src/apps/business-os/shared/db.js` (`RXDB_BUNDLE_URL`)
-- `src/apps/business-os/shared/sync.js` (fallback dynamic import)
+- `src/apps/business-os/shared/sync.js` (two fallback dynamic imports)
 
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
@@ -885,9 +980,9 @@ facade, so it carries no buster and is no longer checked by the guard.
 
 A mismatch makes the browser load a **second copy of the bundle** — two
 module graphs, two shared-room-peer registries, duplicate peers in the room.
-After any `src/` change: rebuild dist with the command above **and** bump the
-buster in both files (current value at the time of writing:
-`20260717-hlc-pull-gate-v66`).
+After any `src/` change: rebuild dist with the command above **and** bump all
+three occurrences (current value at the time of writing:
+`20260827-device-proof-v185`).
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build
 anything: it verifies the manifest identity (name/public name,
@@ -923,6 +1018,7 @@ not noise — never delete or weaken a test to make the suite pass.*
 | `data-plane-guard-smoke` | **Guard (ratchet):** WebRTC-only, package-manager-free, env-toggle-free data plane; new forbidden occurrences fail, allowlist changes require an architecture decision recorded here. |
 | `demand-loader-smoke` | Window cache hit/miss, single remote fetch, dedup. |
 | `demand-loading-transport-smoke` | `replicateWebRTC` builds the demand transport; request/chunk correlation. |
+| `device-proof-smoke` | Native nonce-only Workjet callback boundary, public-only proof sanitizing, and no software-key fallback. |
 | `end-to-end-loop-smoke` | Full V1.5 demand-loading loop. |
 | `error-classification-corpus-smoke` | Shared corpus for the load-bearing error$ cascade order (control-plane → schema → IO → shutdown → lifecycle → blip → generic), incl. order-pin cases; the rxdb-rs twin keeps `ctox_rxdb_*` codes aligned with the generated contract. |
 | `eviction-scheduler-smoke` | Sidecar eviction over budget. |

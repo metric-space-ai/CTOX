@@ -34,6 +34,7 @@ const CTOX_BROWSER_CAPABILITIES = [
   'ctox-file-chunks-v1',
   'ctox-schema-hash-v1',
   'ctox-peer-session-v1',
+  'ctox-device-proof-v1',
   'ctox-checkpoint-epoch-v1',
   'ctox-checkpoint-generation-v2',
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
@@ -54,6 +55,15 @@ const ROOM_CIRCUIT_FAILURE_THRESHOLD = 5;
 const ROOM_CIRCUIT_OPEN_MS = 120_000;
 const ROOM_RETRY_BASE_MS = 1_000;
 const ROOM_RETRY_MAX_MS = 30_000;
+
+// Workjet native-host bridge boundary for device proof. The native app owns
+// the P-256 private key and injects this one callback; browser code receives
+// only the public JWK and a raw IEEE-P1363 signature for the supplied nonce.
+export async function getBusinessOsDeviceProof(nonce) {
+  const provider = globalThis.ctoxWorkjetDeviceProofProvider;
+  if (typeof provider !== 'function') return null;
+  return provider(nonce);
+}
 // Pacing between collection starts. This exists so a multi-collection bootstrap
 // stays under the send-queue budget that recycles a wedged peer — see
 // enqueueSendFrame in rxdb/src/webrtc-native.mjs, which drops the connection at
@@ -484,7 +494,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-workjet-projects-v194');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-workjet-device-control-v195');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1462,7 +1472,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-workjet-projects-v194');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-workjet-device-control-v195');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -1537,6 +1547,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     ctox: {
       expectedNativePeerId: String(config?.native_peer_id || config?.nativePeerId || '').trim(),
       capabilityTokenProvider: getBusinessOsCapabilityToken,
+      deviceProofProvider: getBusinessOsDeviceProof,
       onPeerProtocol(info) {
         const remoteCapabilities = Array.isArray(info?.capabilities) ? info.capabilities : [];
         const remoteCheckpoint = sanitizeRemoteCheckpoint(info?.checkpoint || null);
