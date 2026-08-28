@@ -14,6 +14,7 @@ test('normalizes an instance-scoped active maintenance lease', () => {
     message: 'CTOX wird aktualisiert – Daten bleiben erhalten',
     state: {
       lease_id: 'upgrade-1',
+      lease_expires_at_ms: 123456,
       phase: 'waiting_collections',
       status: 'active',
       service_active: true,
@@ -23,6 +24,7 @@ test('normalizes an instance-scoped active maintenance lease', () => {
   });
   assert.equal(state.active, true);
   assert.equal(state.leaseId, 'upgrade-1');
+  assert.equal(state.leaseExpiresAtMs, 123456);
   assert.equal(state.percent, 96);
   assert.equal(state.replicationUp, true);
 });

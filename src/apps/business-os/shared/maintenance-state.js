@@ -19,6 +19,7 @@ export function normalizeMaintenancePayload(payload, { rememberedLeaseId = '' } 
   return Object.freeze({
     active,
     leaseId,
+    leaseExpiresAtMs: Math.max(0, Number(source?.lease_expires_at_ms || 0)),
     phase: String(source?.phase || (active ? 'preparing' : 'idle')),
     status: String(source?.status || (active ? 'active' : 'idle')),
     targetRelease: String(source?.target_release || ''),

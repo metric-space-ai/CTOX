@@ -72,7 +72,8 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260828-terminal-maintenance-v255';
+const APP_BUILD = '20260828-browser-auth-payload-v265';
+const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
 
@@ -1269,13 +1270,15 @@ async function openBusinessDataPlane(syncConfig) {
     // Der Token wird ohnehin bei jedem Befehl nachgeholt (acquireBusinessOs
     // CapabilityToken prueft expiresAtMs und fordert neu an). Ihn beim Start
     // vorzuwaermen ist eine Optimierung — sie darf die Shell nicht lahmlegen.
-    try {
-      await commandBusModule.getBusinessOsCapabilityToken?.();
-    } catch (tokenError) {
+    // This is only a cache warmup. Waiting here placed the capability
+    // endpoint's 120-second request budget on the shell's critical path and
+    // made a healthy cached workspace look frozen for tens of seconds. The
+    // command bus acquires and validates the token again before every mutation.
+    Promise.resolve(commandBusModule.getBusinessOsCapabilityToken?.()).catch((tokenError) => {
       console.warn('[business-os] Faehigkeitstoken beim Start nicht erhalten — '
         + 'der Befehlsbus wird trotzdem aufgebaut und holt ihn beim ersten Befehl nach.',
         tokenError);
-    }
+    });
     const { createSyncRuntime } = await loadSyncModule();
     state.sync = createSyncRuntime({
       db: state.db,
@@ -4984,6 +4987,18 @@ async function syncTaskbarPinsToDesktopLayout() {
     renderTabs();
     return;
   }
+  const remotePins = Array.isArray(existingLayout?.taskbar_pins)
+    ? existingLayout.taskbar_pins.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const localPins = Array.isArray(state.taskbarPins)
+    ? state.taskbarPins.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (existing
+    && remoteUpdatedAtMs === Number(state.taskbarPinsUpdatedAtMs || 0)
+    && remotePins.length === localPins.length
+    && remotePins.every((id, index) => id === localPins[index])) {
+    return;
+  }
   const patch = {
     taskbar_pins: state.taskbarPins,
     updated_at_ms: state.taskbarPinsUpdatedAtMs || Date.now(),
@@ -6777,6 +6792,7 @@ async function submitBusinessChatTask(moduleLike, options = {}) {
       thread_key: threadKey,
       url: location.href,
       language: document.documentElement.lang || 'de',
+      business_chat_auto_focus: options.open !== false,
     },
   };
   if (options.open !== false) {
@@ -8666,12 +8682,35 @@ function maintenanceClientId() {
 }
 
 function rememberedMaintenanceLease() {
-  try { return sessionStorage.getItem(CTOX_MAINTENANCE_LEASE_KEY) || ''; } catch { return ''; }
+  try {
+    const raw = sessionStorage.getItem(CTOX_MAINTENANCE_LEASE_KEY) || '';
+    if (!raw) return Object.freeze({ leaseId: '', expiresAtMs: 0 });
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch {}
+    const leaseId = String(parsed?.leaseId || '').trim();
+    const expiresAtMs = Math.max(0, Number(parsed?.expiresAtMs || 0));
+    // Older shells stored only the lease id. Such an entry has no bounded
+    // lifetime and must not be allowed to revive maintenance forever after a
+    // completed daemon restart. A still-active upgrade is re-established by
+    // the authoritative control-plane response below.
+    if (!leaseId || !expiresAtMs || Date.now() >= expiresAtMs) {
+      sessionStorage.removeItem(CTOX_MAINTENANCE_LEASE_KEY);
+      return Object.freeze({ leaseId: '', expiresAtMs: 0 });
+    }
+    return Object.freeze({ leaseId, expiresAtMs });
+  } catch {
+    return Object.freeze({ leaseId: '', expiresAtMs: 0 });
+  }
 }
 
-function rememberMaintenanceLease(leaseId) {
+function rememberMaintenanceLease(leaseId, expiresAtMs = 0) {
   try {
-    if (leaseId) sessionStorage.setItem(CTOX_MAINTENANCE_LEASE_KEY, leaseId);
+    if (leaseId && Number(expiresAtMs) > Date.now()) {
+      sessionStorage.setItem(CTOX_MAINTENANCE_LEASE_KEY, JSON.stringify({
+        leaseId: String(leaseId),
+        expiresAtMs: Number(expiresAtMs),
+      }));
+    }
     else sessionStorage.removeItem(CTOX_MAINTENANCE_LEASE_KEY);
   } catch {}
 }
@@ -8683,7 +8722,7 @@ function rememberMaintenanceLease(leaseId) {
 // watch, back off when idle, and stop entirely while the tab is hidden.
 function maintenancePollDelay() {
   if (document.visibilityState === 'hidden') return 0;
-  if (state.maintenance?.active || rememberedMaintenanceLease()) return CTOX_MAINTENANCE_POLL_MS;
+  if (state.maintenance?.active || rememberedMaintenanceLease().leaseId) return CTOX_MAINTENANCE_POLL_MS;
   return CTOX_MAINTENANCE_IDLE_POLL_MS;
 }
 
@@ -8713,11 +8752,14 @@ function startMaintenanceMonitor() {
 }
 
 async function refreshMaintenanceStatus(options = {}) {
-  const rememberedLeaseId = rememberedMaintenanceLease();
+  const rememberedLease = rememberedMaintenanceLease();
+  const rememberedLeaseId = rememberedLease.leaseId;
   try {
     const payload = await fetchBusinessOsControlJson('/api/business-os/ctox/maintenance');
     const next = normalizeMaintenancePayload(payload, { rememberedLeaseId });
-    if (next.active && next.leaseId) rememberMaintenanceLease(next.leaseId);
+    if (next.active && next.leaseId) {
+      rememberMaintenanceLease(next.leaseId, next.leaseExpiresAtMs);
+    }
     if (!payload.active && ['completed', 'rolled_back', 'failed'].includes(next.status)) {
       rememberMaintenanceLease('');
       applyMaintenanceState(normalizeMaintenancePayload(payload));
