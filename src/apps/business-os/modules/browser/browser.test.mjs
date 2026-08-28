@@ -1233,3 +1233,28 @@ function pointerEvent(overrides = {}) {
     `Symbolknoepfe ohne aria-label (fuer Screenreader stumm): ${symbolOhneLabel.join(', ')}`,
   );
 }
+
+// Waechter: Jede Sammlung, die die Scraping-Leiste liest, muss in der
+// Allowlist der Shell stehen. Fehlt sie dort, liefert browserCollection()
+// null, die Leseschleife ueberspringt sie stumm und der Abgleich in
+// mergeScrapingAdapterSource() bleibt wirkungslos - ohne Fehlermeldung.
+// Genau so wurde 'thesen_outbound_sources' einmal ausgeliefert.
+{
+  const appQuelle = await readFile(new URL('../../app.js', import.meta.url), 'utf8');
+  const block = appQuelle.match(
+    /SCOPED_SYSTEM_MODULE_DB_COLLECTIONS\s*=\s*Object\.freeze\(\{[\s\S]*?\n\s*browser:\s*Object\.freeze\(\[([\s\S]*?)\]\)/,
+  );
+  assert.ok(block, 'browser-Allowlist in app.js nicht gefunden');
+  const erlaubt = [...block[1].matchAll(/'([^']+)'/g)].map((treffer) => treffer[1]);
+  const gelesen = [
+    ...__browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
+    ...__browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
+  ];
+  const fehlend = gelesen.filter(
+    (name) => !name.startsWith('outbound_') && !erlaubt.includes(name),
+  );
+  assert.deepEqual(
+    fehlend, [],
+    `Von der Scraping-Leiste gelesen, aber nicht in SCOPED_SYSTEM_MODULE_DB_COLLECTIONS.browser: ${fehlend.join(', ')}`,
+  );
+}
