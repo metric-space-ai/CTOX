@@ -73,6 +73,7 @@ const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 const DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 export const CTOX_BROWSER_LIVE_CAPABILITY = 'ctox-browser-live-v1';
 const CTOX_BROWSER_LIVE_CHANNEL = 'ctox-browser-live-v1';
+const CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD = 'ctox.outbound.sellify_lookup.v1';
 
 const BROWSER_CAPABILITIES = [
   'ctox-rxdb-browser-v1',
@@ -152,6 +153,9 @@ const VOLATILE_SIGNALING_QUERY_PARAMS = new Set([
   'token',
   'token_iat',
   'token_exp',
+  'auth_version',
+  'browser_token_hash',
+  'native_token_hash',
 ]);
 
 function sharedRoomPeerKey(signalingUrl, room) {
@@ -241,6 +245,17 @@ class SharedRoomPeer {
     this.collectionCatchUpGenerations = new Map();
     this.collectionCatchUpQueueSliceMs = SHARED_COLLECTION_CATCH_UP_QUEUE_SLICE_MS;
     this.negotiationCatchUp = null;
+    // Both sides start the symmetric room handshake at almost the same time.
+    // Building our multiplexed payload reads checkpoints for every registered
+    // collection (roughly 200 in Business OS). Without sharing the in-flight
+    // build, our outbound ctoxProtocol request and the native peer's inbound
+    // ctoxProtocol request each repeated that work. The native peer waits for
+    // our answer before sending its token request, while the browser waits only
+    // 15 seconds for that token; on a real tenant the duplicate IndexedDB walk
+    // consistently crossed the deadline and left every collection half-open.
+    // Only the expensive room-wide maps are shared: the collection-specific
+    // envelope must remain distinct or protocol validation rejects it.
+    this.protocolCollectionMapsBuildPromise = null;
     // Phase 2: subscription-driven active-collection priority. The shared peer
     // forwards the RxDB layer's active set (derived from real reactive
     // subscriptions, NOT app.js) to the native peer over `rxdb.activeCollections`
@@ -688,6 +703,10 @@ class SharedRoomPeer {
   }
 
   async buildProtocolPayload(collection) {
+    return this.buildProtocolPayloadUncached(collection);
+  }
+
+  async buildProtocolPayloadUncached(collection) {
     // Resolve the protocol payload for the collection the remote asked about
     // (multiplex), or the representative when none was tagged.
     const registration = (collection && this.collections.get(collection))
@@ -700,6 +719,20 @@ class SharedRoomPeer {
         capabilities: BROWSER_CAPABILITIES,
       });
     }
+    let collectionMapsBuild = null;
+    if (this.collections.size > 1) {
+      collectionMapsBuild = this.protocolCollectionMapsBuildPromise;
+      if (!collectionMapsBuild) {
+        collectionMapsBuild = Promise.all([
+          this.collectCollectionSchemas(),
+          this.collectCollectionCheckpoints(),
+        ]).then(([collectionSchemas, collectionCheckpoints]) => ({
+          collectionSchemas,
+          collectionCheckpoints,
+        }));
+        this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
+      }
+    }
     const payload = await registration.state.buildProtocolPayload();
     // Phase 3 schema-validation hardening: under multiplex the handshake runs
     // ONCE off the representative collection, so attach the per-collection
@@ -707,8 +740,15 @@ class SharedRoomPeer {
     // validates each entry individually instead of skipping schema validation.
     // Single-collection rooms omit the map (payload stays legacy-identical).
     if (this.collections.size > 1) {
-      payload.collectionSchemas = await this.collectCollectionSchemas();
-      payload.collectionCheckpoints = await this.collectCollectionCheckpoints();
+      try {
+        const maps = await collectionMapsBuild;
+        payload.collectionSchemas = maps.collectionSchemas;
+        payload.collectionCheckpoints = maps.collectionCheckpoints;
+      } finally {
+        if (this.protocolCollectionMapsBuildPromise === collectionMapsBuild) {
+          this.protocolCollectionMapsBuildPromise = null;
+        }
+      }
     }
     return payload;
   }
@@ -1082,6 +1122,12 @@ class CtoxWebRtcReplicationState {
         timeoutMs,
       );
     }
+    // The production TURN path can report the Browser-created auxiliary
+    // channel as open while the native peer receives no frames on it. Keep the
+    // small, typed Sellify RPC on the proven primary DataChannel, but have the
+    // native peer send it immediately rather than queueing behind replication
+    // bulk. The response uses the ACK-safe primary lane and its active-
+    // collection priority marker.
     return this.peer.request(negotiated.peerId, String(method || ''), [params], timeoutMs, this.collection);
   }
 

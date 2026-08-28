@@ -45,6 +45,7 @@ const CTOX_REPLICATION_CHANNEL_LABELS = new Set([
   CTOX_REPLICATION_CHANNEL_LABEL,
   'rxdb',
 ]);
+const CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD = 'ctox.outbound.sellify_lookup.v1';
 const MAX_PEER_SEND_QUEUE_FRAMES = 1024;
 const MAX_PEER_SEND_QUEUE_BYTES = 16 * 1024 * 1024;
 const FAIR_SEND_SCHEDULE = ['high', 'high', 'high', 'high', 'normal', 'normal', 'low'];
@@ -73,6 +74,9 @@ const TERMINAL_SIGNALING_REJECTION_CODES = new Set([
   'protocol_missing',
   'protocol_mismatch',
   'instance_mismatch',
+  'role_auth_missing',
+  'role_auth_binding_invalid',
+  'role_credential_invalid',
   'peer_revoked',
   'role_mismatch',
   'token_invalid',
@@ -699,7 +703,10 @@ export class CtoxWebRtcNativePeer {
       this.pending.set(id, { resolve, reject, timer, method, peerId: remotePeerId });
       const frame = { id, method, params };
       if (collection) frame.collection = collection;
-      const sendPromise = method === 'ctox.browser.live.v1'
+      const sendPromise = (
+        method === 'ctox.browser.live.v1'
+        || method === CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD
+      )
         ? this.sendImmediateControlFrame(remotePeerId, frame)
         : Promise.resolve(this.send(remotePeerId, frame));
       sendPromise.then((sent) => {
@@ -829,13 +836,13 @@ export class CtoxWebRtcNativePeer {
       }
       this.pruneStaleNativeCandidateConnections(descriptors);
       const expectedNativePeerId = String(this.options.expectedNativePeerId || '').trim();
-      const hasExpectedDescriptor = Boolean(expectedNativePeerId) && descriptors.some((descriptor) => (
-        this.peerMatchesExpectedNativePeerId(descriptor.peerId, descriptor)
-      ));
       for (const descriptor of descriptors) {
         const remotePeerId = descriptor.peerId;
         if (!remotePeerId) continue;
-        if (hasExpectedDescriptor && !this.peerMatchesExpectedNativePeerId(remotePeerId, descriptor)) {
+        // A configured native identity is authoritative. Never fall back to a
+        // peer that merely self-declares role=ctox_instance while the expected
+        // peer is offline or restarting.
+        if (expectedNativePeerId && !this.peerMatchesExpectedNativePeerId(remotePeerId, descriptor)) {
           this.removeConnection(remotePeerId, 'signaling-non-target-native-peer');
           continue;
         }
@@ -1945,7 +1952,10 @@ export class CtoxWebRtcNativePeer {
     const peerId = String(remotePeerId || '');
     if (!peerId || peerId === this.currentSignalingPeerId()) return false;
     const metadata = this.peerMetadata.get(peerId);
-    if (this.peerMatchesExpectedNativePeerId(peerId, metadata)) return true;
+    const expectedNativePeerId = String(this.options.expectedNativePeerId || '').trim();
+    if (expectedNativePeerId) {
+      return this.peerMatchesExpectedNativePeerId(peerId, metadata);
+    }
     if (this.nativeCandidateConnectionCount(peerId) > 0) return false;
     return this.isNativePeerCandidate(peerId, metadata);
   }
