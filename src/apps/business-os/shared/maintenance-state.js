@@ -11,7 +11,11 @@ export function normalizeMaintenancePayload(payload, { rememberedLeaseId = '' } 
   const source = payload?.state && typeof payload.state === 'object' ? payload.state : null;
   const leaseId = String(source?.lease_id || rememberedLeaseId || '').trim();
   const rememberedPending = Boolean(rememberedLeaseId && leaseId === rememberedLeaseId);
-  const active = Boolean(payload?.active || rememberedPending);
+  const terminal = ['completed', 'rolled_back', 'failed'].includes(String(source?.status || ''));
+  // A remembered lease bridges a brief daemon restart only. It must never
+  // revive a terminal server state and keep every app write-protected after a
+  // failed upgrade has already ended.
+  const active = !terminal && Boolean(payload?.active || rememberedPending);
   return Object.freeze({
     active,
     leaseId,
