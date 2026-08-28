@@ -10038,7 +10038,7 @@ function getOfflineFallbackCatalog() {
         "center": "web page"
       },
       "category": "Workspace",
-      "version": "v0.2.1",
+      "version": "v0.2.3",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
