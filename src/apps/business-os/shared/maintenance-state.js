@@ -35,6 +35,22 @@ export function normalizeMaintenancePayload(payload, { rememberedLeaseId = '' } 
   });
 }
 
+export function completedMaintenanceState(leaseId = '') {
+  return normalizeMaintenancePayload({
+    active: false,
+    state: {
+      lease_id: String(leaseId || '').trim(),
+      phase: 'completed',
+      status: 'completed',
+      service_active: true,
+      replication_up: true,
+      initial_replication_complete: true,
+      progress: { percent: 100, message: 'Upgrade abgeschlossen' },
+      retryable: false,
+    },
+  });
+}
+
 export function maintenanceRequiredCollections(moduleLike) {
   const values = Array.isArray(moduleLike?.collections) ? moduleLike.collections : [];
   return [...new Set(values
