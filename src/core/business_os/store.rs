@@ -1580,8 +1580,7 @@ fn with_store_connection<T>(
 }
 
 pub(super) fn business_os_store_path(root: &Path) -> PathBuf {
-    let runtime = root.join("runtime");
-    runtime.join(STORE_FILE)
+    crate::paths::runtime_dir(root).join(STORE_FILE)
 }
 
 fn open_store_connection(path: &Path) -> anyhow::Result<Connection> {

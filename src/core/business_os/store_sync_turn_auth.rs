@@ -1,9 +1,9 @@
 pub fn rxdb_store_path(root: &Path) -> PathBuf {
-    root.join("runtime").join(RXDB_STORE_FILE)
+    crate::paths::runtime_dir(root).join(RXDB_STORE_FILE)
 }
 
 pub fn status(root: &Path) -> anyhow::Result<BusinessOsStatus> {
-    let path = root.join("runtime").join(STORE_FILE);
+    let path = crate::paths::runtime_dir(root).join(STORE_FILE);
     let ctox_service = Some(cheap_ctox_service_status(root));
     let sync_config = sync_config(root)?;
     Ok(BusinessOsStatus {
