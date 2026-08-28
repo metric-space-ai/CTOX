@@ -189,6 +189,7 @@ export const replicationWebRtcTestInternals = Object.freeze({
   shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
+  protocolHandshakeIsMultiplexed,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -198,6 +199,17 @@ export const replicationWebRtcTestInternals = Object.freeze({
   getSharedRoomPeerClass: () => SharedRoomPeer,
   getReplicationStateClass: () => CtoxWebRtcReplicationState,
 });
+
+function protocolHandshakeIsMultiplexed(collectionCount, localProtocol, remoteProtocol) {
+  const advertisedCollectionCount = (protocol) => (
+    protocol?.collectionSchemas && typeof protocol.collectionSchemas === 'object'
+      ? Object.keys(protocol.collectionSchemas).length
+      : 0
+  );
+  return collectionCount > 1
+    || advertisedCollectionCount(localProtocol) > 1
+    || advertisedCollectionCount(remoteProtocol) > 1;
+}
 
 function isTransientSharedPeerError(error) {
   const message = String(error?.message || error || '');
@@ -883,7 +895,17 @@ class SharedRoomPeer {
     );
     const normalizedRemoteProtocol = normalizeRemoteProtocol(remoteProtocol);
     if (!this.isPeerOpen(peerId)) return null;
-    const multiplexed = this.collections.size > 1;
+    // Startup is asymmetric: the browser can begin negotiation with its first
+    // collection while the native peer already advertises the complete room.
+    // Looking only at the browser's current registration count misclassifies
+    // that handshake as single-collection and compares unrelated representative
+    // envelopes (for example thesen_outbound_leads vs desktop_files). Treat the
+    // room as multiplexed whenever EITHER payload advertises multiple schemas.
+    const multiplexed = protocolHandshakeIsMultiplexed(
+      this.collections.size,
+      localProtocol,
+      normalizedRemoteProtocol,
+    );
     try {
       assertCompatibleProtocol(localProtocol, normalizedRemoteProtocol, {
         requiredCapabilities: CTOX_REQUIRED_PROTOCOL_CAPABILITIES,

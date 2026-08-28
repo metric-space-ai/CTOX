@@ -9102,6 +9102,7 @@ var replicationWebRtcTestInternals = Object.freeze({
   shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
+  protocolHandshakeIsMultiplexed,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -9111,6 +9112,10 @@ var replicationWebRtcTestInternals = Object.freeze({
   getSharedRoomPeerClass: () => SharedRoomPeer,
   getReplicationStateClass: () => CtoxWebRtcReplicationState
 });
+function protocolHandshakeIsMultiplexed(collectionCount, localProtocol, remoteProtocol) {
+  const advertisedCollectionCount = (protocol) => protocol?.collectionSchemas && typeof protocol.collectionSchemas === "object" ? Object.keys(protocol.collectionSchemas).length : 0;
+  return collectionCount > 1 || advertisedCollectionCount(localProtocol) > 1 || advertisedCollectionCount(remoteProtocol) > 1;
+}
 function isTransientSharedPeerError(error) {
   const message = String(error?.message || error || "");
   return message.includes(" is not open") || message.includes("WebRTC peer") || message.includes("Peer closed") || message.includes("peer closed") || message.includes("channel-close") || message.includes("Timed out waiting for WebRTC response ctoxProtocol");
@@ -9670,7 +9675,11 @@ var SharedRoomPeer = class {
     );
     const normalizedRemoteProtocol = normalizeRemoteProtocol(remoteProtocol);
     if (!this.isPeerOpen(peerId)) return null;
-    const multiplexed = this.collections.size > 1;
+    const multiplexed = protocolHandshakeIsMultiplexed(
+      this.collections.size,
+      localProtocol,
+      normalizedRemoteProtocol
+    );
     try {
       assertCompatibleProtocol(localProtocol, normalizedRemoteProtocol, {
         requiredCapabilities: CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
