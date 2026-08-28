@@ -4332,6 +4332,7 @@ pub fn list_module_actions(
                 false,
             ),
         ],
+        "thesen-outbound" => vec![person_research_action_descriptor(&module.id)],
         _ => Vec::new(),
     });
     let has_external_sql = store::local_external_data_source_declarations(root)?
@@ -4390,10 +4391,23 @@ pub fn propose_action(
     let title = optional_string_arg(arguments, "title").unwrap_or_else(|| action.title.clone());
     let objective =
         optional_string_arg(arguments, "objective").unwrap_or_else(|| action.description.clone());
-    let payload = arguments
+    let mut payload = arguments
         .get("payload")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    if action.action_id == "web_stack.person_research" {
+        validate_person_research_action_arguments(arguments, &payload)?;
+        let scoped_record_id = record_id
+            .as_deref()
+            .context("person research action requires record_id")?;
+        payload["writeback_contract"] = serde_json::json!({
+            "collection": "thesen_outbound_leads",
+            "allowed_collections": ["thesen_outbound_leads"],
+            "record_ids": [scoped_record_id],
+            "command_type": "web_stack.person_research",
+            "min_independent_sources": 2
+        });
+    }
     if is_native_mcp_control_action(module_id, &action.action_id) {
         return Ok(BusinessOsActionProposal {
             ok: true,
@@ -4589,7 +4603,7 @@ fn is_native_mcp_control_action(module_id: &str, action_id: &str) -> bool {
     !module_id.trim().is_empty()
         && matches!(
             action_id,
-            "external_sql.sync.refresh" | "external_sql.write"
+            "external_sql.sync.refresh" | "external_sql.write" | "web_stack.person_research"
         )
 }
 
@@ -6750,6 +6764,149 @@ fn action_descriptor(
             "additionalProperties": true
         }),
     }
+}
+
+fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescriptor {
+    let mut descriptor = action_descriptor(
+        "web_stack.person_research",
+        module_id,
+        "Research one campaign lead",
+        "Run the native Web Stack person-research workflow for one explicitly scoped Outbound Lead Generation lead.",
+        "long_running",
+        false,
+        false,
+    );
+    descriptor.input_schema = serde_json::json!({
+        "type": "object",
+        "required": ["record_id", "payload"],
+        "properties": {
+            "record_id": { "type": "string", "minLength": 1 },
+            "payload": {
+                "type": "object",
+                "required": ["operation_id", "company", "country", "mode"],
+                "properties": {
+                    "operation_id": { "type": "string", "minLength": 1 },
+                    "company": { "type": "string", "minLength": 1 },
+                    "country": { "type": "string", "enum": ["DE", "AT", "CH"] },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["new_record", "update_firm", "update_person", "update_inventory_general", "have_data"]
+                    },
+                    "fields": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                    "include_private": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                    "auto_browser_capture": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": true
+    });
+    descriptor
+}
+
+fn validate_person_research_action_arguments(
+    arguments: &Value,
+    payload: &Value,
+) -> anyhow::Result<()> {
+    let record_id = required_arg(arguments, "record_id")?;
+    let object = payload.as_object().ok_or_else(|| {
+        anyhow::Error::new(BusinessOsMcpError::validation(
+            "payload",
+            "web_stack.person_research payload must be an object",
+        ))
+    })?;
+    let required_payload_string = |field: &str| -> anyhow::Result<&str> {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::Error::new(BusinessOsMcpError::validation(
+                    &format!("payload.{field}"),
+                    format!("web_stack.person_research requires a non-empty string `{field}`"),
+                ))
+            })
+    };
+    let operation_id = required_payload_string("operation_id")?;
+    anyhow::ensure!(
+        operation_id == record_id,
+        BusinessOsMcpError::validation(
+            "payload.operation_id",
+            "web_stack.person_research payload.operation_id must match record_id",
+        )
+    );
+    required_payload_string("company")?;
+    let country = required_payload_string("country")?;
+    anyhow::ensure!(
+        matches!(country, "DE" | "AT" | "CH"),
+        BusinessOsMcpError::validation(
+            "payload.country",
+            "web_stack.person_research country must be DE, AT or CH",
+        )
+    );
+    let mode = required_payload_string("mode")?;
+    anyhow::ensure!(
+        matches!(
+            mode,
+            "new_record"
+                | "update_firm"
+                | "update_person"
+                | "update_inventory_general"
+                | "have_data"
+        ),
+        BusinessOsMcpError::validation(
+            "payload.mode",
+            "web_stack.person_research mode is unsupported",
+        )
+    );
+    for field in ["fields", "include_private"] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let valid = value.as_array().is_some_and(|items| {
+            items.iter().all(|item| {
+                item.as_str()
+                    .map(str::trim)
+                    .is_some_and(|item| !item.is_empty())
+            })
+        });
+        anyhow::ensure!(
+            valid,
+            BusinessOsMcpError::validation(
+                &format!("payload.{field}"),
+                format!("web_stack.person_research `{field}` must be an array of strings"),
+            )
+        );
+    }
+    if let Some(value) = object.get("auto_browser_capture") {
+        anyhow::ensure!(
+            value.is_boolean(),
+            BusinessOsMcpError::validation(
+                "payload.auto_browser_capture",
+                "web_stack.person_research auto_browser_capture must be boolean",
+            )
+        );
+    }
+    let allowed = [
+        "operation_id",
+        "company",
+        "country",
+        "mode",
+        "fields",
+        "include_private",
+        "auto_browser_capture",
+    ];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(anyhow::Error::new(BusinessOsMcpError::validation(
+            &format!("payload.{field}"),
+            format!("unsupported web_stack.person_research payload field `{field}`"),
+        )));
+    }
+    Ok(())
 }
 
 fn module_descriptor_from_value(value: Value) -> anyhow::Result<BusinessOsModuleDescriptor> {
@@ -11270,6 +11427,95 @@ mod tests {
         assert!(action_ids.contains(&"support.agent.writeback"));
         assert!(action_ids.contains(&"support.agent.apply_suggestion"));
         assert!(action_ids.contains(&"support.agent.reject_suggestion"));
+        Ok(())
+    }
+
+    #[test]
+    fn thesen_outbound_exposes_bounded_native_person_research() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_module(
+            root,
+            "thesen-outbound",
+            "Outbound Lead Generation",
+            &["thesen_outbound_leads"],
+        )?;
+        seed_default_mcp_admin(root)?;
+
+        let actions = list_module_actions(
+            root,
+            &test_context("business_os.list_module_actions"),
+            "thesen-outbound",
+        )?;
+        let research = actions
+            .items
+            .iter()
+            .find(|action| action.action_id == "web_stack.person_research")
+            .context("person research action")?;
+        assert_eq!(
+            research
+                .input_schema
+                .pointer("/properties/payload/additionalProperties")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let proposal = propose_action(
+            root,
+            &test_context("business_os.propose_action"),
+            "thesen-outbound",
+            "web_stack.person_research",
+            &serde_json::json!({
+                "record_id": "lead_1",
+                "payload": {
+                    "operation_id": "lead_1",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "mode": "update_person",
+                    "fields": ["person_vorname", "person_nachname"],
+                    "include_private": [],
+                    "auto_browser_capture": true
+                }
+            }),
+        )?;
+        assert_eq!(proposal.command_type, "web_stack.person_research");
+        assert_eq!(proposal.record_id.as_deref(), Some("lead_1"));
+        assert_eq!(
+            proposal.payload["writeback_contract"],
+            serde_json::json!({
+                "collection": "thesen_outbound_leads",
+                "allowed_collections": ["thesen_outbound_leads"],
+                "record_ids": ["lead_1"],
+                "command_type": "web_stack.person_research",
+                "min_independent_sources": 2
+            })
+        );
+        assert!(is_native_mcp_control_action(
+            "thesen-outbound",
+            "web_stack.person_research"
+        ));
+
+        let error = propose_action(
+            root,
+            &test_context("business_os.propose_action"),
+            "thesen-outbound",
+            "web_stack.person_research",
+            &serde_json::json!({
+                "record_id": "lead_1",
+                "payload": {
+                    "operation_id": "lead_2",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "mode": "update_person"
+                }
+            }),
+        )
+        .expect_err("record and operation scope must match");
+        let typed = error
+            .downcast_ref::<BusinessOsMcpError>()
+            .context("typed validation error")?;
+        assert_eq!(typed.code, BusinessOsMcpErrorCode::ValidationFailed);
+        assert_eq!(typed.field.as_deref(), Some("payload.operation_id"));
         Ok(())
     }
 
