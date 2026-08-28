@@ -54,6 +54,7 @@ pub(crate) struct WorkjetDeviceMutationResponseV1 {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkjetDeviceBindingV1 {
+    invite_id_hash: String,
     id: String,
     device_id: String,
     display_name: String,

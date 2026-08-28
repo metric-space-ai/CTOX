@@ -927,7 +927,7 @@ DataChannel:
 |---|---|---|
 | `invite.create` | `ttlSeconds?`, `displayName?` | the existing versioned Workjet/Business-OS invite envelope, returned only on the DataChannel |
 | `invite.revoke` | `inviteId` | `{ revoked: true }` |
-| `binding.list` | none | `ctox.workjet-device-bindings.v1` with non-secret device metadata |
+| `binding.list` | none | `ctox.workjet-device-bindings.v1` with non-secret device metadata and `inviteIdHash` |
 | `binding.revoke` | `bindingId` | `{ revoked: true }` |
 
 The shell exposes this method as
@@ -937,6 +937,13 @@ mobile host forwards the same request through the bounded
 never written to RxDB, HTTP, logs, reports, or the binding list. Cloudflare WSS
 is used only by the normal WebRTC signaling exchange; it does not implement
 this method and stores no device edge.
+
+Each binding summary includes `inviteIdHash`, the lowercase hexadecimal
+SHA-256 digest of the one-time `inviteId`. The inviting Workjet installation
+hashes its in-memory invite ID locally and closes the QR only after
+`binding.list` reports a paired edge with that exact digest. The raw invite ID
+is never returned by `binding.list`; accepting an arbitrary new device edge or
+comparing the device proof thumbprint to the invite ID is forbidden.
 
 `invite.create` places only a 32-byte base64url bootstrap secret in the invite's
 `session.capability_token`; CTOX stores only its SHA-256 hash. The secret is not

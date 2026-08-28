@@ -523,7 +523,7 @@ pub fn list_device_bindings(root: &Path) -> anyhow::Result<Value> {
     let conn = super::store::open_store(root)?;
     ensure_table(&conn)?;
     let mut statement = conn.prepare(
-        "SELECT device_pairing_id, device_id, display_name, created_at_ms, redeemed_at_ms
+        "SELECT invite_id_hash, device_pairing_id, device_id, display_name, created_at_ms, redeemed_at_ms
          FROM business_mobile_invites
          WHERE revoked_at_ms IS NULL AND proof_key_thumbprint IS NOT NULL
          ORDER BY COALESCE(redeemed_at_ms, created_at_ms) DESC",
@@ -531,11 +531,15 @@ pub fn list_device_bindings(root: &Path) -> anyhow::Result<Value> {
     let rows = statement
         .query_map([], |row| {
             Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "deviceId": row.get::<_, String>(1)?,
-                "displayName": row.get::<_, String>(2)?,
-                "createdAtMs": row.get::<_, i64>(3)?,
-                "pairedAtMs": row.get::<_, Option<i64>>(4)?,
+                // This one-way digest lets the inviting Workjet installation
+                // confirm that exactly its displayed QR created this edge.
+                // The raw invite credential never leaves the creator again.
+                "inviteIdHash": row.get::<_, String>(0)?,
+                "id": row.get::<_, String>(1)?,
+                "deviceId": row.get::<_, String>(2)?,
+                "displayName": row.get::<_, String>(3)?,
+                "createdAtMs": row.get::<_, i64>(4)?,
+                "pairedAtMs": row.get::<_, Option<i64>>(5)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -651,8 +655,8 @@ pub(super) fn is_active_device_binding(
 #[cfg(test)]
 mod tests {
     use super::{
-        authorize_or_bind_device_proof, create, device_binding, list_device_bindings, revoke,
-        revoke_by_device_pairing_id,
+        authorize_or_bind_device_proof, create, device_binding, invite_hash, list_device_bindings,
+        revoke, revoke_by_device_pairing_id,
     };
     use tempfile::tempdir;
 
@@ -720,6 +724,7 @@ mod tests {
     fn qr_invite_binds_only_on_native_proof_and_survives_qr_expiry() -> anyhow::Result<()> {
         let root = tempdir()?;
         let created = create(root.path(), 300, Some("Fold 8"), None)?;
+        let invite_id = created["inviteId"].as_str().expect("invite id");
         let invite = &created["invite"];
         let user_id = invite["session"]["user"]["id"].as_str().expect("user id");
         let token = invite["session"]["capability_token"]
@@ -762,10 +767,13 @@ mod tests {
             "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             super::now_ms(),
         ));
+        let bindings = list_device_bindings(root.path())?;
+        assert_eq!(bindings["bindings"][0]["displayName"], "Fold 8");
         assert_eq!(
-            list_device_bindings(root.path())?["bindings"][0]["displayName"],
-            "Fold 8"
+            bindings["bindings"][0]["inviteIdHash"],
+            invite_hash(invite_id)
         );
+        assert_ne!(bindings["bindings"][0]["inviteIdHash"], invite_id);
         Ok(())
     }
 
