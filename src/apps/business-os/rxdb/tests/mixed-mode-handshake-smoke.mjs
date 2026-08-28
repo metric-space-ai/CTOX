@@ -58,6 +58,17 @@ assertCompatibleProtocol(localBrowserPayload, remoteV15Native, {
 });
 assert(remoteSupportsQueryFetch(remoteV15Native), 'V1.5 native peer must light query-fetch capability');
 
+// A multiplexed room may choose a different representative collection on
+// each side. Room-level compatibility ignores that envelope and validates the
+// advertised per-collection schema maps separately.
+assertCompatibleProtocol(localBrowserPayload, {
+  ...remoteV15Native,
+  collection: { name: 'iot_realms', schemaVersion: 1, schemaHash: 'bbbb' },
+}, {
+  requiredCapabilities: CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
+  validateSchema: false,
+});
+
 console.log('ctox-rxdb-js mixed-mode handshake smoke OK');
 
 function assert(condition, message) {

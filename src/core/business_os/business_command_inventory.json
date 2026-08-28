@@ -231,7 +231,8 @@
     "browser.session.stop",
     "browser.tab.activate",
     "browser.tab.close",
-    "browser.tab.open"
+    "browser.tab.open",
+    "web_stack.auth_assist.complete"
   ],
   "control_predicates": [
     "command_type.starts_with(\"ctox.channel.\")",
