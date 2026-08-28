@@ -1401,7 +1401,7 @@ fn outbound_handle_research_source_adapter(
     } else {
         None
     };
-    outbound_apply_research_adapter_writeback(conn, command, &adapter_id, &record, now)?;
+    outbound_apply_research_adapter_writeback(root, conn, command, &adapter_id, &record, now)?;
     Ok(serde_json::json!({
         "ok": true,
         "collection": "outbound_research_adapters",
@@ -1414,6 +1414,7 @@ fn outbound_handle_research_source_adapter(
 }
 
 fn outbound_apply_research_adapter_writeback(
+    root: &Path,
     conn: &Connection,
     command: &BusinessCommand,
     adapter_id: &str,
@@ -1464,7 +1465,15 @@ fn outbound_apply_research_adapter_writeback(
         command.id.clone().unwrap_or_default(),
     );
     outbound_put_i64(&mut projection, "updated_at_ms", now);
-    upsert_business_record(conn, collection, record_id, now, projection)?;
+    upsert_business_record(conn, collection, record_id, now, projection.clone())?;
+    // Tenant modules read their adapter state from RxDB/WebRTC. Persisting the
+    // writeback only in `business_records` leaves the browser collection empty
+    // (and the Browser app's Scraping view therefore blank), especially for
+    // on-demand local-module collections that the generic projector does not
+    // eagerly scan. Write through the canonical native RxDB writer as part of
+    // the same command outcome; this is the same server-authoritative data
+    // path used by MCP projection upserts.
+    upsert_rxdb_collection_record(root, collection, record_id, now, projection)?;
     Ok(())
 }
 
@@ -5608,6 +5617,80 @@ mod tests {
         assert!(
             !serialized.contains("DO_NOT_LEAK_BROWSER_PASSWORD"),
             "browser auth assist leaked a credential value"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn outbound_research_adapter_writeback_reaches_tenant_rxdb_collection() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let adapter_id = "adapter_thesen_example-com";
+        let rxdb_path = super::super::store::rxdb_store_path(root);
+        std::fs::create_dir_all(rxdb_path.parent().context("RxDB parent")?)?;
+        let rxdb = Connection::open(rxdb_path)?;
+        rxdb.execute_batch(
+            "CREATE TABLE ctox_business_os__thesen_outbound_adapters__v1 (
+                id TEXT PRIMARY KEY NOT NULL,
+                revision TEXT,
+                deleted INTEGER NOT NULL,
+                lastWriteTime REAL NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )?;
+        drop(rxdb);
+        let outcome = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_thesen_adapter_writeback",
+                "command_id": "cmd_thesen_adapter_writeback",
+                "module": "outbound",
+                "command_type": "outbound.research_source.upsert",
+                "record_id": adapter_id,
+                "status": "pending_sync",
+                "payload": {
+                    "adapter_id": adapter_id,
+                    "source_id": "example.com",
+                    "adapter": {
+                        "id": adapter_id,
+                        "source_id": "example.com",
+                        "label": "Example",
+                        "url": "https://example.com/",
+                        "adapter_kind": "scrape_target",
+                        "target_key": "example-com",
+                        "countries": ["DE"],
+                        "field_keys": ["firma_name"],
+                        "enabled": true,
+                        "requires_credential": false,
+                        "auth_mode": "none",
+                        "auth_status": "not_required"
+                    },
+                    "writeback": {
+                        "collection": "thesen_outbound_adapters",
+                        "record_id": adapter_id
+                    },
+                    "secret_value_in_payload": false
+                },
+                "client_context": {
+                    "actor": { "id": "tester", "role": "admin", "display_name": "Tester" },
+                    "source_module": "thesen-outbound"
+                }
+            }),
+        )?;
+
+        assert_eq!(
+            outcome.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        let projected = load_rxdb_collection_record(root, "thesen_outbound_adapters", adapter_id)?
+            .context("tenant adapter writeback must be projected into RxDB")?;
+        assert_eq!(
+            projected.get("source_id").and_then(Value::as_str),
+            Some("example.com")
+        );
+        assert_eq!(
+            projected.get("status").and_then(Value::as_str),
+            Some("active")
         );
         Ok(())
     }
