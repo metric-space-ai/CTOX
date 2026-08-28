@@ -2386,7 +2386,25 @@ async function readDocument(collection, id) {
 }
 
 function mergeRequestedSession(sessions, requestedSession) {
-  return mergeRequestedDocument(sessions, requestedSession);
+  if (!requestedSession?.id) return sessions;
+  const existing = sessions.find((session) => session.id === requestedSession.id);
+  if (!existing) return [requestedSession, ...sessions];
+
+  // The direct session list, the local RxDB projection, and the optimistic
+  // live response converge independently. A reduced/older summary must never
+  // replace canonical fields (especially payload.purpose/auth_assist_status)
+  // that another path already delivered. Prefer the newest top-level values
+  // while merging payload objects so an otherwise fresh summary cannot erase
+  // authentication metadata merely because it omits `payload` entirely.
+  const requestedIsNewer = Number(requestedSession.updated_at_ms || 0)
+    >= Number(existing.updated_at_ms || 0);
+  const older = requestedIsNewer ? existing : requestedSession;
+  const newer = requestedIsNewer ? requestedSession : existing;
+  const merged = { ...older, ...newer };
+  const olderPayload = older.payload && typeof older.payload === 'object' ? older.payload : null;
+  const newerPayload = newer.payload && typeof newer.payload === 'object' ? newer.payload : null;
+  if (olderPayload || newerPayload) merged.payload = { ...(olderPayload || {}), ...(newerPayload || {}) };
+  return [merged, ...sessions.filter((session) => session.id !== requestedSession.id)];
 }
 
 function mergeRequestedDocument(documents, requestedDocument) {

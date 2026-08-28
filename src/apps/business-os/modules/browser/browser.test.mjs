@@ -490,6 +490,38 @@ assert.equal(
   'the targeted requested session must replace its stale list entry',
 );
 assert.deepEqual(
+  hooks.mergeRequestedSession([
+    {
+      id: 'browser_session_auth',
+      runtime_status: 'active',
+      updated_at_ms: 10,
+      payload: { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+    },
+  ], {
+    id: 'browser_session_auth',
+    runtime_status: 'starting',
+    updated_at_ms: 5,
+  })[0].payload,
+  { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+  'an older reduced session summary must not erase canonical auth-assist payload',
+);
+assert.deepEqual(
+  hooks.mergeRequestedSession([
+    {
+      id: 'browser_session_auth',
+      runtime_status: 'starting',
+      updated_at_ms: 5,
+      payload: { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+    },
+  ], {
+    id: 'browser_session_auth',
+    runtime_status: 'active',
+    updated_at_ms: 10,
+  })[0].payload,
+  { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+  'a newer reduced session summary must retain auth-assist payload from the full projection',
+);
+assert.deepEqual(
   hooks.mergeRequestedDocument(
     [{ id: 'browser_tab_old', updated_at_ms: 1 }],
     { id: 'browser_tab_requested', updated_at_ms: 2 },
