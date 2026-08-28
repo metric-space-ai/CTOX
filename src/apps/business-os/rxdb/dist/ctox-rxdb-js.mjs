@@ -9529,22 +9529,24 @@ var SharedRoomPeer = class {
         capabilities: BROWSER_CAPABILITIES
       });
     }
-    let collectionMapsBuild = null;
-    if (this.collections.size > 1) {
-      collectionMapsBuild = this.protocolCollectionMapsBuildPromise;
-      if (!collectionMapsBuild) {
-        collectionMapsBuild = Promise.all([
+    const acquireCollectionMapsBuild = () => {
+      let build = this.protocolCollectionMapsBuildPromise;
+      if (!build) {
+        build = Promise.all([
           this.collectCollectionSchemas(),
           this.collectCollectionCheckpoints()
         ]).then(([collectionSchemas, collectionCheckpoints]) => ({
           collectionSchemas,
           collectionCheckpoints
         }));
-        this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
+        this.protocolCollectionMapsBuildPromise = build;
       }
-    }
+      return build;
+    };
+    let collectionMapsBuild = this.collections.size > 1 ? acquireCollectionMapsBuild() : null;
     const payload = await registration.state.buildProtocolPayload();
     if (this.collections.size > 1) {
+      collectionMapsBuild ||= acquireCollectionMapsBuild();
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;

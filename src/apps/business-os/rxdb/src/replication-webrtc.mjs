@@ -719,20 +719,23 @@ class SharedRoomPeer {
         capabilities: BROWSER_CAPABILITIES,
       });
     }
-    let collectionMapsBuild = null;
-    if (this.collections.size > 1) {
-      collectionMapsBuild = this.protocolCollectionMapsBuildPromise;
-      if (!collectionMapsBuild) {
-        collectionMapsBuild = Promise.all([
+    const acquireCollectionMapsBuild = () => {
+      let build = this.protocolCollectionMapsBuildPromise;
+      if (!build) {
+        build = Promise.all([
           this.collectCollectionSchemas(),
           this.collectCollectionCheckpoints(),
         ]).then(([collectionSchemas, collectionCheckpoints]) => ({
           collectionSchemas,
           collectionCheckpoints,
         }));
-        this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
+        this.protocolCollectionMapsBuildPromise = build;
       }
-    }
+      return build;
+    };
+    let collectionMapsBuild = this.collections.size > 1
+      ? acquireCollectionMapsBuild()
+      : null;
     const payload = await registration.state.buildProtocolPayload();
     // Phase 3 schema-validation hardening: under multiplex the handshake runs
     // ONCE off the representative collection, so attach the per-collection
@@ -740,6 +743,12 @@ class SharedRoomPeer {
     // validates each entry individually instead of skipping schema validation.
     // Single-collection rooms omit the map (payload stays legacy-identical).
     if (this.collections.size > 1) {
+      // Runtime-installed collections can register while the representative
+      // payload above awaits IndexedDB. The method may therefore enter as a
+      // single-collection room and become multiplexed before this branch. Do
+      // not await the initial null snapshot: acquire a current map build for
+      // the expanded room.
+      collectionMapsBuild ||= acquireCollectionMapsBuild();
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;
