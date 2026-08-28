@@ -44,11 +44,12 @@ import { createDocumentsFacade } from './shared/documents.js?v=20260816-browser-
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
+  completedMaintenanceState,
   isDataEmptyStateText,
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260828-terminal-maintenance-v142';
+} from './shared/maintenance-state.js?v=20260828-maintenance-ack-v143';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
@@ -72,7 +73,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260828-browser-auth-merge-v266';
+const APP_BUILD = '20260828-maintenance-ack-v267';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -8866,6 +8867,10 @@ async function tryAcknowledgeMaintenanceReadiness() {
       client_context: { source: 'business-os-maintenance-readiness' },
     }, { until: 'terminal' });
     rememberMaintenanceLease('');
+    // The terminal native command is the authoritative completion signal. A
+    // transient control-plane GET failure immediately after the daemon restart
+    // must not leave the shell write-protected after CTOX persisted completion.
+    applyMaintenanceState(completedMaintenanceState(leaseId));
     await refreshMaintenanceStatus();
   } catch (error) {
     state.maintenanceAckLeaseId = '';

@@ -3,10 +3,21 @@ import test from 'node:test';
 
 import {
   CTOX_MAINTENANCE_SYNC_MESSAGE,
+  completedMaintenanceState,
   isDataEmptyStateText,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
 } from './maintenance-state.js';
+
+test('successful client readiness deterministically clears local maintenance', () => {
+  const state = completedMaintenanceState('upgrade-1');
+  assert.equal(state.active, false);
+  assert.equal(state.leaseId, 'upgrade-1');
+  assert.equal(state.status, 'completed');
+  assert.equal(state.percent, 100);
+  assert.equal(state.replicationUp, true);
+  assert.equal(state.initialReplicationComplete, true);
+});
 
 test('normalizes an instance-scoped active maintenance lease', () => {
   const state = normalizeMaintenancePayload({
