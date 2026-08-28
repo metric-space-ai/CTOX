@@ -2290,6 +2290,7 @@ dependencies = [
  "sha2 0.10.9",
  "ureq 2.12.1",
  "url",
+ "windows-sys 0.61.2",
  "zip 2.4.2",
 ]
 

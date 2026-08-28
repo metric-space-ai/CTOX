@@ -82,6 +82,30 @@ fn can_manage_devices(root: &Path, user_id: &str, role: &str) -> bool {
         || mobile_invites::is_active_paired_device_user(root, user_id)
 }
 
+fn validate_request_object(request: &Value) -> Result<(), String> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "workjet device request is invalid".to_string())?;
+    let action = object
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "workjet device request is invalid".to_string())?;
+    let allowed_fields: &[&str] = match action {
+        "invite.create" => &["action", "ttlSeconds", "displayName"],
+        "invite.revoke" => &["action", "inviteId"],
+        "binding.list" => &["action"],
+        "binding.revoke" => &["action", "bindingId"],
+        _ => return Err("workjet device request is invalid".to_string()),
+    };
+    if object
+        .keys()
+        .any(|field| !allowed_fields.contains(&field.as_str()))
+    {
+        return Err("workjet device request is invalid".to_string());
+    }
+    Ok(())
+}
+
 /// Small transient device-control surface on the already authenticated
 /// RxDB/WebRTC peer. Invite secrets are returned only to this DataChannel
 /// request and are never written to RxDB, HTTP, logs, or reports.
@@ -108,6 +132,7 @@ pub(super) async fn handle_workjet_device_webrtc_request(
         .first()
         .cloned()
         .ok_or_else(|| "workjet device request is missing".to_string())?;
+    validate_request_object(&request)?;
     let request: WorkjetDeviceWebRtcRequestV1 = serde_json::from_value(request)
         .map_err(|_| "workjet device request is invalid".to_string())?;
     let response = match request {
@@ -233,17 +258,32 @@ mod tests {
             "chef",
             now,
         )?;
-        let error = handle_workjet_device_webrtc_request(
-            root.path(),
-            &token,
-            vec![serde_json::json!({
+        for request in [
+            serde_json::json!({
                 "action": "binding.list",
                 "environmentId": "forbidden-http-stack-scope",
-            })],
-        )
-        .await
-        .expect_err("unknown fields must fail closed");
-        assert_eq!(error, "workjet device request is invalid");
+            }),
+            serde_json::json!({
+                "action": "invite.create",
+                "ttlSeconds": 300,
+                "connectionUrl": "https://forbidden.example",
+            }),
+            serde_json::json!({
+                "action": "invite.revoke",
+                "inviteId": "invite_opaque",
+                "relayToken": "forbidden",
+            }),
+            serde_json::json!({
+                "action": "binding.revoke",
+                "bindingId": "binding_opaque",
+                "environmentId": "forbidden-http-stack-scope",
+            }),
+        ] {
+            let error = handle_workjet_device_webrtc_request(root.path(), &token, vec![request])
+                .await
+                .expect_err("unknown fields must fail closed");
+            assert_eq!(error, "workjet device request is invalid");
+        }
 
         let error = handle_workjet_device_webrtc_request(
             root.path(),
