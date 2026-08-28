@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { __browserTestHooks } from './index.js';
 
+assert.deepEqual(
+  __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
+  ['outbound_research_adapters', 'thesen_outbound_adapters'],
+  'the Browser scraping rail must include both core and THESEN tenant adapters',
+);
+
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');
 assert.equal(__browserTestHooks.normalizeUrl('http://localhost:3000/path'), 'http://localhost:3000/path');
 assert.equal(__browserTestHooks.normalizeUrl(''), 'https://example.com');
@@ -209,7 +215,12 @@ assert.deepEqual(
     purpose: 'web_stack_auth',
     allowed_domains: ['dnbhoovers.com', 'app.dnbhoovers.com'],
     capture_script: 'dnbhoovers.company_capture.v1',
+    verify_selector: '',
     secret_name: 'DNB_HOOVERS_BROWSER_LOGIN',
+    auth_assist_command_id: '',
+    auth_assist_task_id: '',
+    requesting_task_id: '',
+    instruction: '',
     auth_assist_status: 'pending',
     profile_mode: 'persistent',
     secret_value_in_rxdb: false,
