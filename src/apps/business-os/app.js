@@ -6624,7 +6624,7 @@ globalThis.workjetBusinessOsDeviceControl = async (request) => {
     throw new TypeError('Workjet device request contains an unsupported field.');
   }
   if (typeof state.sync?.requestNative !== 'function') {
-    const error = new Error('CTOX WebRTC device control is unavailable.');
+    const error = new Error('CTOX device control is unavailable.');
     error.code = 'ctox_webrtc_unavailable';
     throw error;
   }
