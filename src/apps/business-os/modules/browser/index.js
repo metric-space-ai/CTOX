@@ -1156,16 +1156,17 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
   // Chrome-Prozess, keine Protokollzeile in 20 Minuten — und weder der
   // Start-Knopf noch das Plus-Symbol bewirkten etwas. Es lief vorher; nach
   // einem Dienstneustart nie wieder.
-  // Deshalb zuerst den Zustand lesen, dann die Merkliste bewerten: was nicht
-  // mehr laeuft, ist auch nicht mehr "in Arbeit".
-  const existing = await browserCollection(ctx, 'browser_sessions')?.findOne(request.session_id).exec();
-  const existingData = existing?.toJSON?.() || existing;
-  if (!browserSessionNeedsStart(existingData)) {
-    // Laeuft bereits — Merkliste aufraeumen, damit ein spaeteres Wegbrechen
-    // wieder startbar ist.
-    state.requestedSessionStarts.delete(request.session_id);
-    return false;
-  }
+  // Der replizierte Sitzungsstatus ist keine Prozess-Liveness. Nach einem
+  // Dienstneustart oder einem abgestuerzten Chromium kann im Dokument noch
+  // `runtime_status=active` stehen, obwohl der native Manager keinen Handle
+  // mehr besitzt. Genau dann uebersprang die bisherige Abfrage den Start und
+  // die sichtbare Flaeche blieb endlos bei "Browser-Inhalt wird geladen".
+  //
+  // `browser.session.start` ist fuer die stabile Auth-Session-ID nativ ein
+  // idempotentes ensure: ein lebender Prozess wird wiederverwendet, ein toter
+  // neu gestartet, und das persistente Profil bleibt dasselbe. Deshalb muss
+  // ein ausdruecklicher Auth-Klick den Ensure-Befehl immer senden. Nur ein
+  // bereits laufender Ensure derselben ID wird lokal dedupliziert.
   if (state.requestedSessionStarts.has(request.session_id)) {
     console.info('[browser] Start bereits angefordert, warte auf Ergebnis', request.session_id);
     return false;
@@ -1179,9 +1180,8 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
       lease_id: state.controllerLeaseId,
     });
     return true;
-  } catch (error) {
+  } finally {
     state.requestedSessionStarts.delete(request.session_id);
-    throw error;
   }
 }
 
