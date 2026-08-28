@@ -215,7 +215,12 @@ assert.deepEqual(
     purpose: 'web_stack_auth',
     allowed_domains: ['dnbhoovers.com', 'app.dnbhoovers.com'],
     capture_script: 'dnbhoovers.company_capture.v1',
+    verify_selector: '',
     secret_name: 'DNB_HOOVERS_BROWSER_LOGIN',
+    auth_assist_command_id: '',
+    auth_assist_task_id: '',
+    requesting_task_id: '',
+    instruction: '',
     auth_assist_status: 'pending',
     profile_mode: 'persistent',
     secret_value_in_rxdb: false,
@@ -483,6 +488,38 @@ assert.equal(
   }).filter((session) => session.id === 'browser_session_b').length,
   1,
   'the targeted requested session must replace its stale list entry',
+);
+assert.deepEqual(
+  hooks.mergeRequestedSession([
+    {
+      id: 'browser_session_auth',
+      runtime_status: 'active',
+      updated_at_ms: 10,
+      payload: { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+    },
+  ], {
+    id: 'browser_session_auth',
+    runtime_status: 'starting',
+    updated_at_ms: 5,
+  })[0].payload,
+  { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+  'an older reduced session summary must not erase canonical auth-assist payload',
+);
+assert.deepEqual(
+  hooks.mergeRequestedSession([
+    {
+      id: 'browser_session_auth',
+      runtime_status: 'starting',
+      updated_at_ms: 5,
+      payload: { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+    },
+  ], {
+    id: 'browser_session_auth',
+    runtime_status: 'active',
+    updated_at_ms: 10,
+  })[0].payload,
+  { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
+  'a newer reduced session summary must retain auth-assist payload from the full projection',
 );
 assert.deepEqual(
   hooks.mergeRequestedDocument(

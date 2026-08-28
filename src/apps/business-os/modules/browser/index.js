@@ -22,7 +22,10 @@ const BROWSER_SYNC_COLLECTIONS = [
   'browser_tabs',
 ];
 const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
+  // Core Outbound campaigns.
   'outbound_research_adapters',
+  // Tenant-local THESEN campaigns. The THESEN module owns this collection;
+  // reading only the core collection made its complete adapter list disappear.
   'thesen_outbound_adapters',
 ]);
 
@@ -161,8 +164,38 @@ export async function mount(ctx) {
     state.notice = 'Browser-Anmeldung wird geöffnet.';
     scheduleRefresh();
     ensureRequestedBrowserSession(ctx, state, args)
-      .then(scheduleRefresh)
-      .catch((error) => {
+      .then((started) => {
+        if (!started) state.notice = '';
+        scheduleRefresh();
+      })
+      .catch(async (error) => {
+        const requestedSessionId = browserSessionIdFromArgs(args);
+        const session = requestedSessionId
+          ? await browserCollection(ctx, 'browser_sessions')?.findOne(requestedSessionId).exec().catch(() => null)
+          : null;
+        const sessionData = session?.toJSON?.() || session;
+        // The durable command can be processed and the browser can already be
+        // ready while its terminal receipt is still delayed on the return
+        // replication path. The materialized browser session is authoritative
+        // here: do not replace a successful start with a false error or queue
+        // duplicate retries merely because the acknowledgement timed out.
+        if (requestedSessionId && !browserSessionNeedsStart(sessionData)) {
+          state.requestedSessionStarts.delete(requestedSessionId);
+          state.notice = '';
+          scheduleRefresh();
+          return;
+        }
+        const errorCode = String(error?.code || '').toLowerCase();
+        if (['peer_connect_timeout', 'projection_delayed'].includes(errorCode)) {
+          // The command bus has already persisted the start request. This code
+          // describes only the delayed return path, not a rejected browser
+          // start. The session projection/live status will surface a genuine
+          // runtime failure if one occurs later.
+          state.requestedSessionStarts.delete(requestedSessionId);
+          state.notice = '';
+          scheduleRefresh();
+          return;
+        }
         state.notice = browserStartErrorMessage(error);
         scheduleRefresh();
         if (!browserStartErrorIsRetryable(error) || attempt >= 3 || !mounted) return;
@@ -765,9 +798,10 @@ export async function mount(ctx) {
         limit: 50,
         selector: { owner_user_id: { $in: actorIds } },
       }),
-      state.directLiveEnabled
-        ? Promise.resolve(null)
-        : readDocument(browserCollection(ctx, 'browser_sessions'), state.requestedSessionId),
+      readDocument(
+        browserCollection(ctx, 'browser_sessions'),
+        state.requestedSessionId || state.selectedSessionId,
+      ),
       state.directLiveEnabled
         ? Promise.resolve([])
         : readCollection(browserCollection(ctx, 'browser_tabs'), { limit: 40 }),
@@ -776,8 +810,10 @@ export async function mount(ctx) {
         ? Promise.resolve([])
         : readCollection(browserCollection(ctx, 'ctox_queue_tasks'), { limit: 50 }),
     ]);
-    const directRequestedSession = state.directLiveEnabled && state.requestedSessionId
-      ? sessions.find((session) => session.id === state.requestedSessionId) || null
+    const directRequestedSession = state.directLiveEnabled && (state.requestedSessionId || state.selectedSessionId)
+      ? requestedSession
+        || sessions.find((session) => session.id === (state.requestedSessionId || state.selectedSessionId))
+        || null
       : requestedSession;
     // The direct live start response is already authoritative enough to make
     // the new session selectable. Do not hide it while its durable projection
@@ -823,6 +859,7 @@ export async function mount(ctx) {
       if (state.latestSession?.id === state.requestedSessionId
         && browserSessionIsLive(state.latestSession)) {
         state.requestedSessionId = '';
+        if (state.notice === 'Browser-Anmeldung wird geöffnet.') state.notice = '';
       }
     }
     const replicatedFrame = latestFrame(frames, state.latestSession?.id);
@@ -1154,6 +1191,11 @@ function browserAuthRequestFromArgs(value) {
     : [];
   const captureScript = String(value?.capture_script || value?.captureScript || '').trim();
   const secretName = String(value?.secret_name || value?.required_secret_name || '').trim();
+  const verifySelector = String(value?.verify_selector || value?.verifySelector || '').trim();
+  const authAssistCommandId = String(value?.auth_assist_command_id || value?.command_id || '').trim();
+  const authAssistTaskId = String(value?.auth_assist_task_id || value?.execution_task_id || '').trim();
+  const requestingTaskId = String(value?.requesting_task_id || '').trim();
+  const instruction = String(value?.instruction || '').trim();
   return {
     session_id: sessionId,
     tab_id: tabId,
@@ -1163,7 +1205,12 @@ function browserAuthRequestFromArgs(value) {
     purpose,
     allowed_domains: allowedDomains,
     capture_script: captureScript,
+    verify_selector: verifySelector,
     secret_name: secretName,
+    auth_assist_command_id: authAssistCommandId,
+    auth_assist_task_id: authAssistTaskId,
+    requesting_task_id: requestingTaskId,
+    instruction,
     auth_assist_status: 'pending',
     profile_mode: 'persistent',
     secret_value_in_rxdb: false,
@@ -1428,6 +1475,11 @@ async function completeWebStackAuthAssist(ctx, state) {
     tab_id: state.latestTab?.id || session.current_tab_id || '',
     source_id: session.payload?.source_id || '',
     secret_name: session.payload?.secret_name || '',
+    lease_id: state.controllerLeaseId,
+    confirmed: true,
+    auth_assist_command_id: session.payload?.auth_assist_command_id || '',
+    auth_assist_task_id: session.payload?.auth_assist_task_id || '',
+    requesting_task_id: session.payload?.requesting_task_id || '',
     completed_at_ms: now,
     browser_stream: 'rxdb',
     secret_value_in_rxdb: false,
@@ -1446,7 +1498,7 @@ async function completeWebStackAuthAssist(ctx, state) {
         actor: actorContext(ctx.session),
       },
     });
-  state.notice = 'Anmeldung wurde an CTOX uebergeben.';
+  state.notice = 'Anmeldung bestätigt. CTOX setzt denselben Recherchekontext fort.';
 }
 
 async function fillWebStackCredential(ctx, state) {
@@ -2334,7 +2386,25 @@ async function readDocument(collection, id) {
 }
 
 function mergeRequestedSession(sessions, requestedSession) {
-  return mergeRequestedDocument(sessions, requestedSession);
+  if (!requestedSession?.id) return sessions;
+  const existing = sessions.find((session) => session.id === requestedSession.id);
+  if (!existing) return [requestedSession, ...sessions];
+
+  // The direct session list, the local RxDB projection, and the optimistic
+  // live response converge independently. A reduced/older summary must never
+  // replace canonical fields (especially payload.purpose/auth_assist_status)
+  // that another path already delivered. Prefer the newest top-level values
+  // while merging payload objects so an otherwise fresh summary cannot erase
+  // authentication metadata merely because it omits `payload` entirely.
+  const requestedIsNewer = Number(requestedSession.updated_at_ms || 0)
+    >= Number(existing.updated_at_ms || 0);
+  const older = requestedIsNewer ? existing : requestedSession;
+  const newer = requestedIsNewer ? requestedSession : existing;
+  const merged = { ...older, ...newer };
+  const olderPayload = older.payload && typeof older.payload === 'object' ? older.payload : null;
+  const newerPayload = newer.payload && typeof newer.payload === 'object' ? newer.payload : null;
+  if (olderPayload || newerPayload) merged.payload = { ...(olderPayload || {}), ...(newerPayload || {}) };
+  return [merged, ...sessions.filter((session) => session.id !== requestedSession.id)];
 }
 
 function mergeRequestedDocument(documents, requestedDocument) {
@@ -2444,11 +2514,9 @@ function renderSessionList(refs, sessions, tabs, activeSession) {
 // persisted — browser sessions are a read-only projection.
 // custom: Scraping-Adapter im Browser-Modul sichtbar machen.
 //
-// Die Adapter der Recherche (outbound_research_adapters) steuern Browser-
-// Laeufe, waren in der Browser-App aber unsichtbar -- es gab nicht einmal
-// einen Reiter. Verwaltet werden sie weiterhin in der Outbound-App; hier
-// steht der Betriebszustand: wer ist aktiv, wem fehlt der Zugang, wann lief
-// der letzte Test. Die Sammlung ist bedarfsgeladen, deshalb Lease statt
+// Die Adapter der Recherche steuern Browser-Laeufe. Core-Outbound und lokale
+// Tenant-Apps besitzen getrennte Sammlungen; der Browser zeigt beide in einer
+// Betriebssicht. Die Sammlungen sind bedarfsgeladen, deshalb Lease statt
 // startCollection (Muster wie im App-Store-Modul).
 async function ladeScrapingAdapter(ctx, state) {
   if (state.adapterLadedauer) return state.adapterLadedauer;
@@ -3114,11 +3182,14 @@ function renderAuthAssist(refs, session) {
   const canCapture = Boolean(completed && payload.capture_script);
   const canExtract = Boolean(completed && payload.capture_script);
   const domains = Array.isArray(payload.allowed_domains) ? payload.allowed_domains.join(', ') : '';
+  const instruction = String(payload.instruction || '').trim()
+    || 'Melden Sie sich auf der geöffneten Seite an und lösen Sie gegebenenfalls MFA oder Captcha. Bestätigen Sie erst danach die Fortsetzung.';
   refs.authAssist.innerHTML = `
     <div>
       <span class="ctox-pane-kicker">Web Stack Anmeldung</span>
       <strong>${escapeHtml(payload.source_id || 'Anmeldung erforderlich')}</strong>
       <small>${escapeHtml(domains || payload.target_url || '')}</small>
+      <small>${escapeHtml(instruction)}</small>
       ${fillStatus ? `<small>${escapeHtml(authAssistStatusLabel(fillStatus, 'Zugangsdaten werden eingesetzt'))}</small>` : ''}
       ${extractStatus ? `<small>${escapeHtml(authAssistStatusLabel(extractStatus, 'Seitenauswertung laeuft'))}</small>` : ''}
     </div>
@@ -3127,7 +3198,7 @@ function renderAuthAssist(refs, session) {
         Zugangsdaten einsetzen
       </button>
       <button type="button" class="ctox-button" data-browser-auth-complete ${completed ? 'disabled' : ''}>
-        ${completed ? 'Angemeldet' : 'Ich bin angemeldet'}
+        ${completed ? 'Recherche wird fortgesetzt' : 'Erledigt – Recherche fortsetzen'}
       </button>
       <button type="button" class="ctox-button" data-browser-web-stack-capture ${canCapture ? '' : 'disabled'}>
         An CTOX uebergeben

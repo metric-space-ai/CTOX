@@ -24,6 +24,7 @@ use super::rxdb_peer_tombstones::{
     sweep_tombstones_once, TOMBSTONE_SWEEP_DRAIN_INTERVAL_SECS, TOMBSTONE_SWEEP_IDLE_INTERVAL_SECS,
 };
 use super::store;
+use crate::mission::channels;
 use anyhow::Context;
 use base64::Engine;
 use rxdb::rx_database::RxDatabase;
@@ -277,6 +278,15 @@ async fn handle_browser_live_webrtc_request_inner(
                     "viewport_w": session.get("viewport_w").cloned().unwrap_or(Value::Null),
                     "viewport_h": session.get("viewport_h").cloned().unwrap_or(Value::Null),
                     "error": session.get("error").cloned().unwrap_or(Value::Null),
+                    // The Browser app renders website permissions, HTTP auth,
+                    // WebAuthn/dialog prompts, and the web-stack handoff from
+                    // this owner-scoped fast path. These states live in the
+                    // canonical session payload; omitting it made a healthy
+                    // authentication session look like an ordinary browser
+                    // window until the slower RxDB projection caught up.
+                    // Session payloads contain secret references only. Secret
+                    // values are deliberately never persisted in RxDB.
+                    "payload": session.get("payload").cloned().unwrap_or(Value::Null),
                     "updated_at_ms": session.get("updated_at_ms").cloned().unwrap_or(Value::Null),
                 })
             })
@@ -815,7 +825,143 @@ pub(super) fn is_browser_runtime_command(command_type: &str) -> bool {
             | "browser.clipboard.copy"
             | "browser.clipboard.paste"
             | "browser.clipboard.clear"
+            | "web_stack.auth_assist.complete"
     )
+}
+
+fn settle_auth_assist_queue_task(
+    root: &Path,
+    auth_assist_command_id: &str,
+    auth_assist_task_id: &str,
+) -> Value {
+    let task = if !auth_assist_task_id.is_empty() {
+        channels::load_queue_task(root, auth_assist_task_id)
+            .ok()
+            .flatten()
+    } else if !auth_assist_command_id.is_empty() {
+        channels::load_queue_task_for_business_os_command(root, auth_assist_command_id)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let Some(task) = task else {
+        return json!({ "status": "not_applicable" });
+    };
+    if matches!(
+        task.route_status.as_str(),
+        "handled" | "cancelled" | "failed" | "superseded"
+    ) {
+        return json!({
+            "status": "already_terminal",
+            "task_id": task.message_key,
+            "route_status": task.route_status,
+        });
+    }
+    match channels::set_queue_task_route_status(root, &task.message_key, "cancelled") {
+        Ok(true) => json!({
+            "status": "cancelled_after_user_confirmation",
+            "task_id": task.message_key,
+        }),
+        Ok(false) => json!({ "status": "not_found", "task_id": task.message_key }),
+        Err(error) => json!({
+            "status": "settle_failed",
+            "task_id": task.message_key,
+            "error": error.to_string(),
+        }),
+    }
+}
+
+fn resume_auth_assist_requesting_task(
+    root: &Path,
+    requesting_task_id: &str,
+    source_id: &str,
+    session_id: &str,
+) -> Value {
+    if requesting_task_id.is_empty() {
+        return json!({ "status": "not_requested" });
+    }
+    let Ok(Some(task)) = channels::load_queue_task(root, requesting_task_id) else {
+        return json!({
+            "status": "requesting_task_not_found",
+            "requesting_task_id": requesting_task_id,
+        });
+    };
+    if matches!(task.route_status.as_str(), "pending" | "leased" | "running") {
+        return json!({
+            "status": "already_active",
+            "task_id": task.message_key,
+            "thread_key": task.thread_key,
+            "route_status": task.route_status,
+        });
+    }
+    if matches!(
+        task.route_status.as_str(),
+        "blocked" | "review_rework" | "failed"
+    ) {
+        let released = channels::update_queue_task(
+            root,
+            channels::QueueTaskUpdateRequest {
+                message_key: task.message_key.clone(),
+                route_status: Some("pending".to_string()),
+                status_note: Some(format!(
+                    "Browser-Anmeldung fuer {source_id} bestaetigt; derselbe Recherchekontext wird fortgesetzt"
+                )),
+                ..Default::default()
+            },
+        );
+        if let Ok(released) = released {
+            return json!({
+                "status": "resumed",
+                "task_id": released.message_key,
+                "thread_key": released.thread_key,
+                "route_status": released.route_status,
+            });
+        }
+    }
+
+    // A terminal Business-OS command cannot legally be moved back to pending.
+    // Continue in the same durable thread with the original prompt and an
+    // explicit browser-auth checkpoint instead of mutating terminal history.
+    let prompt = format!(
+        "{}\n\nFortsetzung nach manueller Browser-Anmeldung: Die Anmeldung fuer Quelle `{}` wurde in der persistenten CTOX-Browser-Sitzung `{}` vom Benutzer bestaetigt. Setze jetzt die urspruengliche Recherche mit demselben Kontext fort. Verwende die bestehende Browser-Sitzung; frage keine Zugangswerte ab und schreibe keine Secrets in Prompt, Ergebnis, Log oder RxDB.",
+        task.prompt.trim(),
+        source_id,
+        session_id,
+    );
+    match channels::create_queue_task_with_metadata(
+        root,
+        channels::QueueTaskCreateRequest {
+            title: format!("Fortsetzen: {}", task.title),
+            prompt,
+            thread_key: task.thread_key.clone(),
+            workspace_root: task.workspace_root.clone(),
+            priority: task.priority.clone(),
+            suggested_skill: task.suggested_skill.clone(),
+            parent_message_key: Some(task.message_key.clone()),
+            extra_metadata: Some(json!({
+                "source": "web-stack-auth-assist",
+                "auth_assist_resume": true,
+                "requesting_task_id": task.message_key,
+                "source_id": source_id,
+                "browser_session_id": session_id,
+                "secret_value_in_payload": false,
+            })),
+        },
+    ) {
+        Ok(created) => json!({
+            "status": "continued_in_same_thread",
+            "task_id": created.message_key,
+            "thread_key": created.thread_key,
+            "parent_task_id": task.message_key,
+            "route_status": created.route_status,
+        }),
+        Err(error) => json!({
+            "status": "resume_failed",
+            "requesting_task_id": task.message_key,
+            "error": error.to_string(),
+        }),
+    }
 }
 
 pub(super) async fn apply_browser_runtime_command(
@@ -1036,6 +1182,145 @@ pub(super) async fn apply_browser_runtime_command(
                 && current_lease_expires_at_ms > now_ms() as u64,
             "browser controller lease is missing or expired"
         );
+    }
+
+    if command_type == "web_stack.auth_assist.complete" {
+        anyhow::ensure!(existing_session.is_object(), "browser session not found");
+        anyhow::ensure!(
+            payload.get("confirmed").and_then(Value::as_bool) == Some(true),
+            "auth assist completion requires explicit confirmation"
+        );
+        let session_payload = existing_session
+            .get("payload")
+            .filter(|value| value.is_object())
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        anyhow::ensure!(
+            session_payload.get("purpose").and_then(Value::as_str) == Some("web_stack_auth"),
+            "browser session is not a web-stack authentication session"
+        );
+        let source_id = payload
+            .get("source_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| session_payload.get("source_id").and_then(Value::as_str))
+            .unwrap_or_default();
+        let auth_assist_command_id = payload
+            .get("auth_assist_command_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                session_payload
+                    .get("auth_assist_command_id")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or_default();
+        let auth_assist_task_id = payload
+            .get("auth_assist_task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                session_payload
+                    .get("auth_assist_task_id")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or_default();
+        let requesting_task_id = payload
+            .get("requesting_task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                session_payload
+                    .get("requesting_task_id")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or_default();
+        let current_tab_id = existing_session
+            .get("current_tab_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&tab_id);
+        let current_url = existing_tab
+            .get("url")
+            .or_else(|| existing_session.get("current_url"))
+            .and_then(Value::as_str)
+            .unwrap_or(&target_url);
+        let title = existing_tab
+            .get("title")
+            .or_else(|| existing_session.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or("Remote Browser");
+        let completed_at_ms = now_ms() as u64;
+        let metadata_patch = json!({
+            "source_id": source_id,
+            "purpose": "web_stack_auth",
+            "auth_assist_command_id": auth_assist_command_id,
+            "auth_assist_task_id": auth_assist_task_id,
+            "requesting_task_id": requesting_task_id,
+            "auth_assist_status": "completed",
+            "authenticated": true,
+            "authenticated_at_ms": completed_at_ms,
+            "continuation_status": "resume_requested",
+            "secret_value_in_rxdb": false,
+        });
+        upsert_browser_session(
+            database,
+            &session_id,
+            current_tab_id,
+            existing_session
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("active"),
+            existing_session
+                .get("runtime_status")
+                .and_then(Value::as_str)
+                .unwrap_or("active"),
+            current_url,
+            title,
+            viewport_w,
+            viewport_h,
+            existing_session
+                .get("active_frame_id")
+                .and_then(Value::as_str),
+            existing_session
+                .get("last_frame_seq")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            command_type,
+            command_created_at_ms,
+            None,
+            Some(&access),
+            Some(&metadata_patch),
+        )
+        .await?;
+
+        let auth_request =
+            settle_auth_assist_queue_task(root, auth_assist_command_id, auth_assist_task_id);
+        let continuation =
+            resume_auth_assist_requesting_task(root, requesting_task_id, source_id, &session_id);
+        mark_browser_runtime_command_completed(
+            database,
+            document,
+            accepted,
+            json!({
+                "ok": true,
+                "session_id": session_id,
+                "tab_id": current_tab_id,
+                "source_id": source_id,
+                "authenticated": true,
+                "auth_assist_status": "completed",
+                "verification": "explicit_user_confirmation",
+                "auth_request": auth_request,
+                "continuation": continuation,
+                "secret_value_in_rxdb": false,
+            }),
+        )
+        .await?;
+        return Ok(());
     }
 
     let credential_fill = if command_type == "browser.credential.fill" {
@@ -3071,7 +3356,14 @@ pub(super) async fn upsert_browser_session(
             "verify_selector",
             "credential_selector",
             "secret_name",
+            "auth_assist_command_id",
+            "auth_assist_task_id",
+            "requesting_task_id",
+            "instruction",
             "auth_assist_status",
+            "authenticated",
+            "authenticated_at_ms",
+            "continuation_status",
             "profile_mode",
             "credential_fill_status",
             "credential_field_role",
@@ -3679,6 +3971,7 @@ mod tests {
         assert!(is_browser_runtime_command("browser.controller.renew"));
         assert!(is_browser_runtime_command("browser.controller.release"));
         assert!(is_browser_runtime_command("browser.credential.fill"));
+        assert!(is_browser_runtime_command("web_stack.auth_assist.complete"));
 
         let root = tempfile::tempdir().expect("temp root");
         let database = open_test_database(root.path().join("browser-session-access.sqlite3"))

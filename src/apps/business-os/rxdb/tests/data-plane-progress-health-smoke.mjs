@@ -267,7 +267,8 @@ async function waitFor(predicate, timeoutMs = 2_000) {
     async insert(doc) {
       stored = { ...doc };
     },
-    findOne(id) {
+    findOne(query) {
+      const id = typeof query === 'string' ? query : query?.selector?.id;
       return {
         $: {
           subscribe(listener) {
@@ -277,6 +278,19 @@ async function waitFor(predicate, timeoutMs = 2_000) {
           },
         },
         async exec() {
+          // business_commands is demand-only. An authoritative revision read
+          // is the normal healthy path now; model the native exact-id response
+          // instead of relying on the removed collection-wide pull fallback.
+          if (query?.requireRevision && stored?.id === id) {
+            stored = {
+              ...stored,
+              status: 'accepted',
+              replication_phase: 'native_observed',
+              execution_task_id: 'queue:ok::1',
+              updated_at_ms: now + 5,
+            };
+            listeners.forEach((listener) => listener({ toJSON: () => ({ ...stored }) }));
+          }
           return stored?.id === id ? { toJSON: () => ({ ...stored }) } : null;
         },
       };
