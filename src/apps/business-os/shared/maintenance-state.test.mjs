@@ -27,6 +27,22 @@ test('normalizes an instance-scoped active maintenance lease', () => {
   assert.equal(state.replicationUp, true);
 });
 
+test('a remembered lease cannot revive a terminal failed upgrade', () => {
+  const state = normalizeMaintenancePayload({
+    active: false,
+    state: {
+      lease_id: 'upgrade-failed',
+      phase: 'failed',
+      status: 'failed',
+      retryable: true,
+      last_error: 'database is locked',
+    },
+  }, { rememberedLeaseId: 'upgrade-failed' });
+  assert.equal(state.active, false);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.retryable, true);
+});
+
 test('module readiness excludes demand-only blob collections', () => {
   assert.deepEqual(maintenanceRequiredCollections({
     collections: ['research_runs', 'document_blob_chunks', 'research_runs', 'knowledge_tables'],
