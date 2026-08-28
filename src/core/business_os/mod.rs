@@ -49,6 +49,7 @@ mod store_policy;
 mod store_policy_audit;
 mod store_projections;
 mod store_release_review;
+mod store_workjet_projects;
 mod support;
 mod threads;
 

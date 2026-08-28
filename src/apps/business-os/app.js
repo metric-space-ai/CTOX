@@ -388,6 +388,7 @@ function installAdvancedStatusInterface() {
   };
   window.CTOX_BUSINESS_OS_STATUS = api;
   window.CTOX_BUSINESS_OS_APP = state;
+  globalThis.workjetProjectControl = workjetProjectControl;
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
 }
 
@@ -10876,6 +10877,340 @@ async function dispatchShellModuleCommand({
       actor: actorContext(state.session),
     },
   }, { until: 'accepted' });
+}
+
+const WORKJET_PROJECT_CONTROL_MAX_RESULTS = 100;
+const WORKJET_PROJECT_CONTROL_MAX_WORKING_COPIES = 500;
+const WORKJET_PROJECT_CONTROL_TIMEOUT_MS = 30_000;
+
+async function workjetProjectControl(request = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('Workjet project control request must be an object.');
+  }
+  const action = boundedWorkjetProjectText(request.action, 'action', 64);
+  const ownerUserId = boundedWorkjetProjectText(actorContext(state.session).id, 'owner_user_id', 256);
+  const { projectBridge, workingCopyBridge } = await requireWorkjetProjectDataPlane();
+
+  if (action === 'project.list') {
+    assertWorkjetProjectPayloadKeys(request, new Set(['action']));
+    const commandId = `cmd_workjet_project_list_${newId()}`;
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.project.list',
+      record_id: ownerUserId,
+      payload: { limit: WORKJET_PROJECT_CONTROL_MAX_RESULTS },
+      client_context: {
+        source: 'workjet-project-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_PROJECT_CONTROL_TIMEOUT_MS });
+    await waitForSyncBridgeReady(projectBridge, WORKJET_PROJECT_CONTROL_TIMEOUT_MS);
+    await waitForSyncBridgeReady(workingCopyBridge, WORKJET_PROJECT_CONTROL_TIMEOUT_MS);
+    const workingCopies = await listProjectedWorkjetWorkingCopies(ownerUserId);
+    const projects = await listProjectedWorkjetProjects(
+      ownerUserId,
+      WORKJET_PROJECT_CONTROL_MAX_RESULTS,
+      workingCopies,
+    );
+    return { action: 'project.list', projects };
+  }
+
+  if (action === 'project.create') {
+    assertWorkjetProjectPayloadKeys(request, new Set([
+      'action',
+      'commandId',
+      'projectId',
+      'title',
+      'createdAt',
+      'workingCopy',
+    ]));
+    const commandId = boundedWorkjetProjectText(request.commandId, 'commandId', 128);
+    const projectId = boundedWorkjetProjectText(request.projectId, 'projectId', 128);
+    const title = boundedWorkjetProjectText(request.title, 'title', 256);
+    const requestedCreatedAt = boundedWorkjetProjectIsoDate(request.createdAt, 'createdAt');
+    const requestedWorkingCopy = boundedWorkjetWorkingCopyRequest(request.workingCopy);
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.project.upsert',
+      record_id: projectId,
+      payload: {
+        project_id: projectId,
+        name: title,
+      },
+      client_context: {
+        source: 'workjet-project-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_PROJECT_CONTROL_TIMEOUT_MS });
+    await waitForProjectedWorkjetProject(
+      projectId,
+      title,
+      ownerUserId,
+      projectBridge,
+      WORKJET_PROJECT_CONTROL_TIMEOUT_MS,
+    );
+    if (requestedWorkingCopy) {
+      const workingCopyCommandId = await workjetProjectChildCommandId(commandId, 'working-copy');
+      await state.commandBus.dispatch({
+        id: workingCopyCommandId,
+        command_id: workingCopyCommandId,
+        module: 'ctox',
+        command_type: 'ctox.workjet.working_copy.upsert',
+        record_id: projectId,
+        payload: {
+          project_id: projectId,
+          computer_id: requestedWorkingCopy.computerId,
+          path: requestedWorkingCopy.path,
+          active: true,
+        },
+        client_context: {
+          source: 'workjet-project-control',
+          actor: actorContext(state.session),
+        },
+      }, { until: 'terminal', timeoutMs: WORKJET_PROJECT_CONTROL_TIMEOUT_MS });
+      await waitForProjectedWorkjetWorkingCopy(
+        projectId,
+        requestedWorkingCopy,
+        ownerUserId,
+        workingCopyBridge,
+        WORKJET_PROJECT_CONTROL_TIMEOUT_MS,
+      );
+    }
+    const workingCopies = (await listProjectedWorkjetWorkingCopies(ownerUserId))
+      .filter((copy) => copy.projectId === projectId);
+    const project = await waitForProjectedWorkjetProject(
+      projectId,
+      title,
+      ownerUserId,
+      projectBridge,
+      WORKJET_PROJECT_CONTROL_TIMEOUT_MS,
+      workingCopies,
+    );
+    return {
+      action: 'project.create',
+      project: {
+        ...project,
+        createdAt: project.createdAt || requestedCreatedAt,
+      },
+    };
+  }
+
+  throw new Error(`Unsupported Workjet project control action: ${action}`);
+}
+
+async function requireWorkjetProjectDataPlane() {
+  if (!state.commandBus?.dispatch || !state.db?.collection?.('business_commands')) {
+    throw new Error('Workjet project control is not ready.');
+  }
+  const collection = state.db?.collection?.('workjet_projects');
+  if (!collection) throw new Error('workjet_projects collection is not registered.');
+  const commandBridge = await state.sync?.startCollection?.('business_commands');
+  await waitForSyncBridgeReady(commandBridge, 15_000);
+  const projectBridge = await state.sync?.startCollection?.('workjet_projects');
+  await waitForSyncBridgeReady(projectBridge, 15_000);
+  const workingCopyBridge = await state.sync?.startCollection?.('workjet_working_copies');
+  await waitForSyncBridgeReady(workingCopyBridge, 15_000);
+  return { projectBridge, workingCopyBridge };
+}
+
+async function listProjectedWorkjetProjects(ownerUserId, limit, workingCopies = []) {
+  const collection = state.db?.collection?.('workjet_projects');
+  const docs = await collection.find({
+    selector: { owner_user_id: { $eq: ownerUserId } },
+    limit: Math.min(limit, WORKJET_PROJECT_CONTROL_MAX_RESULTS),
+  }).exec();
+  const projects = docs
+    .map((doc) => {
+      const project = boundedWorkjetProjectResult(doc?.toJSON?.() || doc);
+      if (!project) return null;
+      return Object.freeze({
+        ...project,
+        workingCopies: Object.freeze(
+          workingCopies.filter((copy) => copy.projectId === project.id)
+            .map(publicWorkjetWorkingCopyResult),
+        ),
+      });
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftCreatedAt = Date.parse(left.createdAt || '') || 0;
+      const rightCreatedAt = Date.parse(right.createdAt || '') || 0;
+      return rightCreatedAt - leftCreatedAt || left.id.localeCompare(right.id);
+    });
+  return projects;
+}
+
+async function waitForProjectedWorkjetProject(
+  projectId,
+  expectedTitle,
+  ownerUserId,
+  bridge,
+  timeoutMs,
+  workingCopies = [],
+) {
+  const collection = state.db?.collection?.('workjet_projects');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await bridge?.awaitInSync?.();
+      const doc = await collection.findOne(projectId).exec();
+      const rawProject = doc?.toJSON?.() || doc;
+      if (rawProject?.owner_user_id === ownerUserId
+        && rawProject?.name === expectedTitle
+        && rawProject?.status === 'active') {
+        const project = boundedWorkjetProjectResult(rawProject);
+        if (project) return Object.freeze({
+          ...project,
+          workingCopies: Object.freeze(workingCopies.map(publicWorkjetWorkingCopyResult)),
+        });
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  const error = new Error(`Workjet project projection did not arrive for ${projectId}.`);
+  error.code = 'workjet_project_projection_timeout';
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+async function listProjectedWorkjetWorkingCopies(ownerUserId) {
+  const collection = state.db?.collection?.('workjet_working_copies');
+  const docs = await collection.find({
+    selector: { owner_user_id: { $eq: ownerUserId } },
+    limit: WORKJET_PROJECT_CONTROL_MAX_WORKING_COPIES,
+  }).exec();
+  return docs
+    .map((doc) => boundedWorkjetWorkingCopyResult(doc?.toJSON?.() || doc))
+    .filter(Boolean)
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+async function waitForProjectedWorkjetWorkingCopy(
+  projectId,
+  expected,
+  ownerUserId,
+  bridge,
+  timeoutMs,
+) {
+  const collection = state.db?.collection?.('workjet_working_copies');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await bridge?.awaitInSync?.();
+      const docs = await collection.find({
+        selector: {
+          project_id: { $eq: projectId },
+          computer_id: { $eq: expected.computerId },
+          status: { $eq: 'active' },
+        },
+        limit: 2,
+      }).exec();
+      const matches = docs
+        .map((doc) => boundedWorkjetWorkingCopyResult(doc?.toJSON?.() || doc))
+        .filter((copy) => copy?.ownerUserId === ownerUserId && copy.path === expected.path);
+      if (matches.length === 1) return matches[0];
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  const error = new Error(`Workjet working-copy projection did not arrive for ${projectId}.`);
+  error.code = 'workjet_working_copy_projection_timeout';
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+function boundedWorkjetWorkingCopyRequest(value) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid Workjet project workingCopy.');
+  }
+  assertWorkjetProjectPayloadKeys(value, new Set(['computerId', 'path']));
+  return Object.freeze({
+    computerId: boundedWorkjetProjectText(value.computerId, 'workingCopy.computerId', 256),
+    path: boundedWorkjetProjectText(value.path, 'workingCopy.path', 4096),
+  });
+}
+
+function boundedWorkjetWorkingCopyResult(value) {
+  if (!value || typeof value !== 'object' || value._deleted === true
+    || value.is_deleted === true || !['active', 'detached'].includes(value.status)) {
+    return null;
+  }
+  return Object.freeze({
+    id: boundedWorkjetProjectText(value.id, 'workingCopy.id', 160),
+    projectId: boundedWorkjetProjectText(value.project_id, 'workingCopy.projectId', 128),
+    computerId: boundedWorkjetProjectText(value.computer_id, 'workingCopy.computerId', 256),
+    path: boundedWorkjetProjectText(value.path, 'workingCopy.path', 4096),
+    status: value.status,
+    ownerUserId: boundedWorkjetProjectText(value.owner_user_id, 'workingCopy.ownerUserId', 256),
+  });
+}
+
+function publicWorkjetWorkingCopyResult(value) {
+  return Object.freeze({
+    id: value.id,
+    computerId: value.computerId,
+    path: value.path,
+    status: value.status,
+  });
+}
+
+async function workjetProjectChildCommandId(parentCommandId, kind) {
+  if (!crypto?.subtle) throw new Error('Secure Workjet command IDs are unavailable.');
+  const bytes = new TextEncoder().encode(`${kind}\0${parentCommandId}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  return `cmd_workjet_${kind.replaceAll('-', '_')}_${hex}`;
+}
+
+function boundedWorkjetProjectResult(value) {
+  if (!value || typeof value !== 'object' || value._deleted === true || value.is_deleted === true) {
+    return null;
+  }
+  const result = {
+    id: boundedWorkjetProjectText(value.id, 'project.id', 128),
+    title: boundedWorkjetProjectText(value.name, 'project.name', 256),
+  };
+  const createdAtMs = Number(value.created_at_ms);
+  if (Number.isFinite(createdAtMs) && createdAtMs >= 0) {
+    result.createdAt = new Date(createdAtMs).toISOString();
+  }
+  return Object.freeze(result);
+}
+
+function boundedWorkjetProjectText(value, field, maxLength, { allowEmpty = false } = {}) {
+  const text = String(value ?? '').trim();
+  if ((!allowEmpty && !text) || text.length > maxLength || /[\u0000-\u001f\u007f]/u.test(text)) {
+    throw new Error(`Invalid Workjet project ${field}.`);
+  }
+  return text;
+}
+
+function assertWorkjetProjectPayloadKeys(payload, allowed) {
+  const unexpected = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (unexpected.length) {
+    throw new Error(`Unsupported Workjet project payload field: ${unexpected[0]}`);
+  }
+}
+
+function boundedWorkjetProjectIsoDate(value, field) {
+  const text = boundedWorkjetProjectText(value, field, 64);
+  const date = new Date(text);
+  if (!Number.isFinite(date.getTime())) {
+    throw new Error(`Invalid Workjet project ${field}.`);
+  }
+  return date.toISOString();
 }
 
 async function waitForSyncBridgeReady(bridge, timeoutMs = 15000) {

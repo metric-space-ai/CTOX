@@ -242,6 +242,10 @@ const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
     // projected from native channel/account records.
     "communication_accounts",
     "channel_pairing_state",
+    // Workjet project identity and local checkout bindings are native-authored
+    // through exact business_commands; peers render their projections only.
+    "workjet_projects",
+    "workjet_working_copies",
 ];
 
 /// A collection whose documents are server-authored (native core writes them,
