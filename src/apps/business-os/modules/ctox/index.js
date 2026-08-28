@@ -3496,6 +3496,7 @@ function isFocusedTask(item, focusTask) {
 }
 
 function authoritativeTaskStatus(task = {}) {
+  task = task || {};
   const phase = String(task.executionPhase || task.execution_phase || '').trim().toLowerCase();
   if (!phase) return '';
   if (phase === 'terminal') {
@@ -3509,6 +3510,7 @@ function authoritativeTaskStatus(task = {}) {
 }
 
 function authoritativeTaskNodeId(task = {}) {
+  task = task || {};
   const phase = String(task.executionPhase || task.execution_phase || '').trim().toLowerCase();
   if (!phase) return routeStatusNodeId(task.routeStatus || task.status);
   if (['waiting_dependencies', 'waiting-dependencies', 'accepted', 'queued', 'retry_wait', 'retry-wait'].includes(phase)) return 'queued';
@@ -4414,6 +4416,8 @@ function escapeAttr(value) {
 
 export const __ctoxTestHooks = {
   aggregateFlowMetrics,
+  authoritativeTaskNodeId,
+  authoritativeTaskStatus,
   buildHarnessModel,
   canModifyCtoxApp,
   clampMetric,

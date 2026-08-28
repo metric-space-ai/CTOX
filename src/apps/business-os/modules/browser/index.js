@@ -1305,6 +1305,22 @@ function userSessionPrefix(session) {
   return `browser_session_${safe || 'user'}`;
 }
 
+function rxdbIdSlug(value) {
+  const slug = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return slug || 'source';
+}
+
+// The native auth-assist command uses the same stable source/user identity.
+// A timestamp here creates a new persistent Chromium profile on every click
+// and forces the user to log in again for each scrape.
+function webStackAuthSessionId(sourceId, session) {
+  const owner = browserActorIds(session)[0] || 'browser-user';
+  return `browser_session_web_stack_auth_${rxdbIdSlug(sourceId)}_${rxdbIdSlug(owner)}`;
+}
+
 function selectedViewport(select) {
   const [width, height] = String(select?.value || '1280x720').split('x').map(Number);
   return {
@@ -2689,14 +2705,13 @@ function renderAdapterRail(ctx, refs, state) {
         // bleibt. Ohne beides startete zwar ein Fenster, aber der Kreis liess
         // sich nicht schliessen.
         const quelle = String(adapter.source_id || '').trim();
-        const schluessel = quelle.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'quelle';
         const url = String(adapter.url || adapter.payload?.url || (quelle ? `https://${quelle}` : ''));
         if (!url) {
           state.notice = t('adapterNoUrl', 'Für diese Quelle ist keine Adresse hinterlegt.');
           state.refresh?.();
           return;
         }
-        const sessionId = `browser_session_web_stack_auth_${schluessel}_${Date.now()}`;
+        const sessionId = webStackAuthSessionId(quelle, ctx.session);
         if (typeof state.openAuthSession !== 'function') {
           state.notice = t('adapterLoginUnavailable', 'Anmeldesitzung ist gerade nicht verfügbar.');
           state.refresh?.();
@@ -3806,6 +3821,8 @@ export const __browserTestHooks = {
   formatBytes,
   titleCase,
   userSessionPrefix,
+  rxdbIdSlug,
+  webStackAuthSessionId,
   selectedViewport,
   browserAuthRequestFromArgs,
   shouldRenewControllerLease,

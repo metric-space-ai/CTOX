@@ -22,6 +22,8 @@ const { __ctoxTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   aggregateFlowMetrics,
+  authoritativeTaskNodeId,
+  authoritativeTaskStatus,
   applyTaskSelection,
   buildHarnessModel,
   canModifyCtoxApp,
@@ -51,6 +53,11 @@ const {
   webStackProjectionMissing,
   wireTaskSourceReadiness,
 } = hooks;
+
+test('Missing authoritative task telemetry remains a safe empty state', () => {
+  assert.equal(authoritativeTaskStatus(null), '');
+  assert.equal(authoritativeTaskNodeId(null), '');
+});
 
 // --- Minimal fake DOM ---------------------------------------------------------
 // Just enough of the element API for the focus-safe refresh + in-place selection
