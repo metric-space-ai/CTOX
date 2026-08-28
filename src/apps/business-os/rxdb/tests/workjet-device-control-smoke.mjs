@@ -67,6 +67,17 @@ assert(
   'the authenticated web shell must complete ctox.dev pairing through its live CTOX guest',
 );
 assert(
+  app.includes("open.textContent = 'In Workjet öffnen'") &&
+    app.includes("document.documentElement.dataset.workjetPairingHandoff = 'ready'"),
+  'the ctox.dev handoff must require an explicit user-activated return to Workjet',
+);
+assert(
+  !sourceWindow(app, 'async function completeWorkjetPairingRedirect', 2_400).includes(
+    'location.replace(`workjet://pair',
+  ),
+  'the ctox.dev handoff must not rely on an async custom-scheme redirect that browsers block',
+);
+assert(
   mobileHost.includes("command.type === 'device.control'"),
   'the mobile lifecycle bridge accepts the bounded control message',
 );
