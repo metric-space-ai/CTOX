@@ -753,6 +753,24 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         // command. The background repair loop owns reconnect/restart policy.
         // Only a replication state that is actually cancelled is replaced.
         const currentBridge = await withTimeout(currentBridgePromise, 3000);
+        if (!currentBridge) {
+          // A second module/window acquisition must never adopt the unresolved
+          // bridge promise directly. Because this function is async, returning
+          // that promise would keep the caller (and therefore the whole window
+          // launch) pending until WebRTC eventually opens. Return the same
+          // bounded startup handle used for a first slow start instead; its
+          // `ready` member still exposes the authoritative bridge promise.
+          const pendingBridge = createPendingCollectionBridge(collection, currentBridgePromise);
+          recordCollection(collection, {
+            status: 'pending',
+            connectionStatus: 'connecting',
+            reason: pendingBridge.reason,
+            lastError: null,
+            reconnectingSince: null,
+            connectedAt: null,
+          });
+          return pendingBridge;
+        }
         if (
           shouldReplaceCachedBridgeForStart(currentBridge, options)
           || currentBridge?.state?.cancelled === true
@@ -767,7 +785,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
             status: 'reused',
             connectionStatus: current.connectionStatus || current.status || 'connecting',
           });
-          return bridges.get(collection);
+          return currentBridge;
         }
       }
       recordCollection(collection, { status: 'starting' });
@@ -799,17 +817,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       try {
         const bridge = await withTimeout(bridgePromise, 3000);
         if (!bridge) {
-          const pendingBridge = {
-            mode: 'pending',
-            collection,
-            reason: 'startup-in-progress',
-            state: null,
-            ready: bridgePromise,
-            stop: async () => {
-              const resolvedBridge = await bridgePromise.catch(() => null);
-              await resolvedBridge?.stop?.();
-            },
-          };
+          const pendingBridge = createPendingCollectionBridge(collection, bridgePromise);
           recordCollection(collection, {
             status: 'pending',
             connectionStatus: 'connecting',
@@ -1271,6 +1279,41 @@ function withTimeout(value, ms) {
     Promise.resolve(value),
     delay(ms),
   ]);
+}
+
+function createPendingCollectionBridge(collection, bridgePromise) {
+  let stopRequested = false;
+  let stopTask = null;
+  const ready = Promise.resolve(bridgePromise);
+  const stopResolvedBridge = (bridge) => {
+    if (!bridge) return Promise.resolve(false);
+    if (!stopTask) {
+      stopTask = withTimeout(bridge.stop?.(), 3000)
+        .then(() => true)
+        .catch(() => false);
+    }
+    return stopTask;
+  };
+  // If the window closes while WebRTC is still opening, stop the eventual
+  // bridge as soon as it materializes. This prevents a timed-out caller from
+  // leaving an unowned replication process behind.
+  ready.then(async (bridge) => {
+    if (!stopRequested) return;
+    await stopResolvedBridge(bridge);
+  }).catch(() => null);
+  return {
+    mode: 'pending',
+    collection,
+    reason: 'startup-in-progress',
+    state: null,
+    ready,
+    async stop() {
+      stopRequested = true;
+      const bridge = await withTimeout(ready.catch(() => null), 3000);
+      if (!bridge) return false;
+      return stopResolvedBridge(bridge);
+    },
+  };
 }
 
 async function withRejectingTimeout(operation, ms, message) {
@@ -2969,6 +3012,7 @@ export const __ctoxSyncTestHooks = {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   shouldReplaceCachedBridgeForStart,
+  createPendingCollectionBridge,
   DEMAND_ONLY_COLLECTION_START_ERROR,
   createFollowerBridge,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,

@@ -8,11 +8,27 @@ const {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   createFollowerBridge,
+  createPendingCollectionBridge,
   shouldReplaceCachedBridgeForStart,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
   COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
   COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
 } = __ctoxSyncTestHooks;
+
+{
+  let resolveBridge;
+  let stopCalls = 0;
+  const ready = new Promise((resolve) => { resolveBridge = resolve; });
+  const pending = createPendingCollectionBridge('thesen_outbound_adapters', ready);
+  assert.equal(pending.mode, 'pending');
+  assert.equal(pending.reason, 'startup-in-progress');
+  assert.equal(pending.collection, 'thesen_outbound_adapters');
+  assert.equal(pending.ready, ready, 'the bounded handle retains the authoritative bridge promise');
+  const stop = pending.stop();
+  resolveBridge({ stop: async () => { stopCalls += 1; } });
+  assert.equal(await stop, true);
+  assert.equal(stopCalls, 1, 'closing a pending module stops the bridge once it materializes');
+}
 
 assert(
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS < COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
