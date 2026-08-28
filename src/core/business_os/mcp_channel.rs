@@ -11786,7 +11786,7 @@ mod tests {
         let (first, second) = std::thread::scope(|scope| {
             let first_context = context.clone();
             let first_args = args.clone();
-            let first = scope.spawn(|| {
+            let first = scope.spawn(move || {
                 execute_action(
                     root,
                     &first_context,
@@ -11797,7 +11797,7 @@ mod tests {
             });
             let second_context = context.clone();
             let second_args = args.clone();
-            let second = scope.spawn(|| {
+            let second = scope.spawn(move || {
                 execute_action(
                     root,
                     &second_context,
