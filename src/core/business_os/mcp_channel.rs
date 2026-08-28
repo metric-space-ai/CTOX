@@ -7008,6 +7008,16 @@ fn validate_person_research_record_binding(
             "web_stack.person_research is scoped to thesen-outbound",
         )
     );
+    let owning_modules = module_ids_for_collection(root, "thesen_outbound_leads")?;
+    anyhow::ensure!(
+        owning_modules
+            .iter()
+            .any(|candidate| candidate == module_id),
+        BusinessOsMcpError::validation(
+            "collection",
+            "thesen_outbound_leads is not declared by the calling module",
+        )
+    );
     let record = store::pull_collection_record(root, "thesen_outbound_leads", record_id)?
         .ok_or_else(|| {
             anyhow::Error::new(BusinessOsMcpError::not_found(
