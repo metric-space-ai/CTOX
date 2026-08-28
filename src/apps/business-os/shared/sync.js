@@ -27,6 +27,13 @@ import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260816-browse
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
+// Multi-tab leadership may span a rolling Business OS release: an already
+// open tab keeps its Web Lock and continues to heartbeat while a freshly
+// loaded tab runs the new sync protocol. Sharing one coordinator room across
+// those builds made the new tab follow the old, failed bridge forever. The
+// release epoch isolates only the local BroadcastChannel/Web Lock; both builds
+// still replicate through the same server-authoritative WebRTC room.
+const MULTI_TAB_COORDINATOR_EPOCH = '20260828-release-isolated-leader-v273';
 const CTOX_BROWSER_CAPABILITIES = [
   'ctox-control-plane-v1',
   'ctox-role-bound-signaling-v1',
@@ -458,7 +465,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
-      room: config.sync_room,
+      room: multiTabCoordinatorRoom(config.sync_room),
     });
     // Serve follower tabs that ask the leader to run a native request for
     // them. Without this the Browser app is dead in every tab but one.
@@ -2977,7 +2984,12 @@ export const __ctoxSyncTestHooks = {
   collectionForReplication,
   projectDesktopIconForReplication,
   signalingUrlWithBrowserMetadata,
+  multiTabCoordinatorRoom,
 };
+
+function multiTabCoordinatorRoom(room) {
+  return `${String(room || '').trim()}|release=${MULTI_TAB_COORDINATOR_EPOCH}`;
+}
 
 function replicationIoMessageFor(code) {
   if (code === 'ctox_replication_pull_failed') return 'RxDB WebRTC pull from the remote peer failed.';

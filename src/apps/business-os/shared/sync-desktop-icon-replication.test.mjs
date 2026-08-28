@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createSyncRuntime, __ctoxSyncTestHooks } from './sync.js';
 
-const { collectionForReplication, projectDesktopIconForReplication } = __ctoxSyncTestHooks;
+const {
+  collectionForReplication,
+  projectDesktopIconForReplication,
+  multiTabCoordinatorRoom,
+} = __ctoxSyncTestHooks;
 const unsafeIcon = () => ({
   id: `desk_icon_${'x'.repeat(180)}`,
   target_type: 'application-with-an-unbounded-type-name',
@@ -85,6 +89,14 @@ test('desktop icon replication projects unsafe local cache rows at the wire boun
 test('non-desktop collections retain their original collection', () => {
   const collection = { storageCollection: {} };
   assert.strictEqual(collectionForReplication('desktop_layout', collection), collection);
+});
+
+test('multi-tab leadership is isolated across Business OS releases', () => {
+  const nativeRoom = 'ctox-business-os:tenant-1';
+  const coordinatorRoom = multiTabCoordinatorRoom(nativeRoom);
+  assert.match(coordinatorRoom, /^ctox-business-os:tenant-1\|release=/);
+  assert.notEqual(coordinatorRoom, nativeRoom);
+  assert.equal(multiTabCoordinatorRoom(nativeRoom), coordinatorRoom);
 });
 
 test('desktop_icons startup gives WebRTC the projected collection', async () => {
