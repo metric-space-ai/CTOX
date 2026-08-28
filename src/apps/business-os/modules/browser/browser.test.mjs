@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { __browserTestHooks } from './index.js';
+import { collections, migrationStrategies } from './schema.js';
+
+assert.equal(
+  collections.thesen_outbound_adapters.version,
+  1,
+  'tenant adapter schema changes must advance the RxDB collection version',
+);
+assert.equal(
+  typeof migrationStrategies.thesen_outbound_adapters?.[1],
+  'function',
+  'existing tenant adapters must migrate instead of disabling the collection with DB6',
+);
 
 assert.deepEqual(
   __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
@@ -17,6 +29,12 @@ assert.equal(__browserTestHooks.titleCase('browser_frames'), 'Browser frames');
 assert.equal(
   __browserTestHooks.userSessionPrefix({ user: { id: 'Michael.Welsch@example.com' } }),
   'browser_session_michael-welsch-example-com',
+);
+assert.equal(__browserTestHooks.rxdbIdSlug('D&B Hoovers.com'), 'd_b_hoovers_com');
+assert.equal(
+  __browserTestHooks.webStackAuthSessionId('dnbhoovers.com', { user: { id: 'user-1' } }),
+  'browser_session_web_stack_auth_dnbhoovers_com_user_1',
+  'auth sessions reuse one persistent Chromium profile per source and user',
 );
 assert.deepEqual(
   __browserTestHooks.browserActorIds({
@@ -259,6 +277,13 @@ assert.match(html, /data-browser-new-tab/);
 assert.match(html, /data-browser-go/);
 assert.doesNotMatch(html, />Los<\/button>/, 'the address action must stay a compact icon control');
 assert.match(html, /data-browser-sessions-toggle/);
+assert.equal((html.match(/data-browser-notice/g) || []).length, 1);
+assert.match(
+  html,
+  /browser-tabbar[\s\S]*data-browser-session-list[\s\S]*data-browser-notice[\s\S]*data-browser-toggle-advanced/,
+  'connection notice and advanced menu share one compact browser header row',
+);
+assert.match(css, /\.browser-notice[\s\S]*text-overflow:\s*ellipsis/);
 assert.match(css, /grid-template-columns:\s*minmax\(120px, 1fr\) 30px 34px/);
 assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions/);
 assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions-toggle[\s\S]*z-index:\s*21/);

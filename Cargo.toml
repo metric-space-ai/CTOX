@@ -48,6 +48,7 @@ mailparse = "0.16"
 notify = "8.2"
 polars = { version = "0.53.0", default-features = false, features = [
     "lazy",
+    "new_streaming",
     "dtype-full", "strings", "regex", "timezones",
     "is_in", "diagonal_concat", "concat_str",
     "fmt", "describe",
