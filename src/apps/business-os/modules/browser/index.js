@@ -28,6 +28,12 @@ const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
   // reading only the core collection made its complete adapter list disappear.
   'thesen_outbound_adapters',
 ]);
+const SCRAPING_SOURCE_COLLECTIONS = Object.freeze([
+  // Source activation is owned by the tenant Outbound app. Adapter execution
+  // status and source activation used to drift because they are separate
+  // records; the Browser must show the source-owned activation state.
+  'thesen_outbound_sources',
+]);
 
 export async function mount(ctx) {
   await ensureStyles();
@@ -1150,16 +1156,17 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
   // Chrome-Prozess, keine Protokollzeile in 20 Minuten — und weder der
   // Start-Knopf noch das Plus-Symbol bewirkten etwas. Es lief vorher; nach
   // einem Dienstneustart nie wieder.
-  // Deshalb zuerst den Zustand lesen, dann die Merkliste bewerten: was nicht
-  // mehr laeuft, ist auch nicht mehr "in Arbeit".
-  const existing = await browserCollection(ctx, 'browser_sessions')?.findOne(request.session_id).exec();
-  const existingData = existing?.toJSON?.() || existing;
-  if (!browserSessionNeedsStart(existingData)) {
-    // Laeuft bereits — Merkliste aufraeumen, damit ein spaeteres Wegbrechen
-    // wieder startbar ist.
-    state.requestedSessionStarts.delete(request.session_id);
-    return false;
-  }
+  // Der replizierte Sitzungsstatus ist keine Prozess-Liveness. Nach einem
+  // Dienstneustart oder einem abgestuerzten Chromium kann im Dokument noch
+  // `runtime_status=active` stehen, obwohl der native Manager keinen Handle
+  // mehr besitzt. Genau dann uebersprang die bisherige Abfrage den Start und
+  // die sichtbare Flaeche blieb endlos bei "Browser-Inhalt wird geladen".
+  //
+  // `browser.session.start` ist fuer die stabile Auth-Session-ID nativ ein
+  // idempotentes ensure: ein lebender Prozess wird wiederverwendet, ein toter
+  // neu gestartet, und das persistente Profil bleibt dasselbe. Deshalb muss
+  // ein ausdruecklicher Auth-Klick den Ensure-Befehl immer senden. Nur ein
+  // bereits laufender Ensure derselben ID wird lokal dedupliziert.
   if (state.requestedSessionStarts.has(request.session_id)) {
     console.info('[browser] Start bereits angefordert, warte auf Ergebnis', request.session_id);
     return false;
@@ -1173,9 +1180,8 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
       lease_id: state.controllerLeaseId,
     });
     return true;
-  } catch (error) {
+  } finally {
     state.requestedSessionStarts.delete(request.session_id);
-    throw error;
   }
 }
 
@@ -2560,10 +2566,41 @@ async function ladeScrapingAdapter(ctx, state) {
         errors.push(`${collectionName}: ${String(error?.message || error)}`);
       }
     }
+    const sourceRows = [];
+    for (const collectionName of SCRAPING_SOURCE_COLLECTIONS) {
+      try {
+        const collection = browserCollection(ctx, collectionName);
+        if (!collection) continue;
+        if (typeof ctx.sync?.leaseCollection === 'function') {
+          const lease = await ctx.sync.leaseCollection(
+            collectionName,
+            `browser:scraping-sources:${collectionName}`,
+          );
+          if (lease) state.adapterLeases.push(lease);
+        }
+        sourceRows.push(...await readCollection(collection, {
+          limit: 200,
+          sort: [{ updated_at_ms: 'desc' }],
+        }));
+      } catch (error) {
+        // Source reconciliation enriches the adapter rail but must not hide
+        // otherwise usable core adapters if a tenant has no source collection.
+        console.warn(`[browser] scraping source collection unavailable: ${collectionName}`, error);
+      }
+    }
+    const sourceById = new Map(
+      sourceRows
+        .filter((row) => row && row.is_deleted !== true && row.id)
+        .map((row) => [String(row.id), row]),
+    );
     const deduplicated = new Map();
     for (const row of rows) {
       if (!row || row.is_deleted === true) continue;
-      deduplicated.set(`${row.adapter_collection}:${row.id || row.source_id}`, row);
+      const source = sourceById.get(String(row.source_id || ''));
+      deduplicated.set(
+        `${row.adapter_collection}:${row.id || row.source_id}`,
+        mergeScrapingAdapterSource(row, source),
+      );
     }
     state.adapters = [...deduplicated.values()];
     state.adapterFehler = errors.length === SCRAPING_ADAPTER_COLLECTIONS.length
@@ -2574,6 +2611,21 @@ async function ladeScrapingAdapter(ctx, state) {
   return state.adapterLadedauer;
 }
 
+function mergeScrapingAdapterSource(adapter, source) {
+  if (!source) return adapter;
+  return {
+    ...adapter,
+    // Activation is a source setting. Operational adapter status remains on
+    // the adapter record because it is the newer execution evidence.
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : adapter.enabled,
+    label: adapter.label || source.label,
+    url: adapter.url || source.url,
+    requires_credential: typeof source.requires_credential === 'boolean'
+      ? source.requires_credential
+      : adapter.requires_credential,
+    credential_secret_name: adapter.credential_secret_name || source.credential_secret_name,
+  };
+}
 // Zwei GETRENNTE Wahrheiten pro Adapter -- der Kern der Verstaendlichkeit:
 // "Zugang" (gibt es gueltige Anmeldedaten?) und "Funktion" (lief die letzte
 // Pruefung durch?). Beide in einen Topf zu werfen hiess vorher: "Zugang fehlt"
@@ -3816,6 +3868,8 @@ function escapeHtml(value) {
 
 export const __browserTestHooks = {
   SCRAPING_ADAPTER_COLLECTIONS,
+  SCRAPING_SOURCE_COLLECTIONS,
+  mergeScrapingAdapterSource,
   normalizeUrl,
   browserSessionIdFromArgs,
   formatBytes,

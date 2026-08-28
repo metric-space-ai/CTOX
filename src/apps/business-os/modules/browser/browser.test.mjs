@@ -19,6 +19,39 @@ assert.deepEqual(
   ['outbound_research_adapters', 'thesen_outbound_adapters'],
   'the scraping rail loads core and tenant-local adapter collections together',
 );
+assert.deepEqual(
+  __browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
+  ['thesen_outbound_sources'],
+  'the adapter rail reconciles activation with the source-owned setting',
+);
+assert.deepEqual(
+  __browserTestHooks.mergeScrapingAdapterSource(
+    { id: 'adapter_x', source_id: 'x.example', enabled: false, status: 'test_ok' },
+    { id: 'x.example', enabled: true, label: 'X', url: 'https://x.example/' },
+  ),
+  {
+    id: 'adapter_x',
+    source_id: 'x.example',
+    enabled: true,
+    status: 'test_ok',
+    label: 'X',
+    url: 'https://x.example/',
+    requires_credential: undefined,
+    credential_secret_name: undefined,
+  },
+  'source activation wins without overwriting the adapter execution status',
+);
+
+{
+  const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
+  assert.match(css, /\.browser-toolbar\s*\{[^}]*flex-wrap:\s*nowrap/s);
+  assert.match(css, /\.browser-address-form\s*\{[^}]*width:\s*0/s);
+  assert.match(
+    css,
+    /@container business-app-window \(max-width: 640px\)[\s\S]*\.browser-status-strip\s*\{[^}]*display:\s*grid/s,
+    'the narrow toolbar keeps the hamburger and visible connection status in one row',
+  );
+}
 
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');
 assert.equal(__browserTestHooks.normalizeUrl('http://localhost:3000/path'), 'http://localhost:3000/path');
@@ -57,6 +90,11 @@ assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'error' }), true);
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'starting' }), false);
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'active' }), false);
+assert.match(
+  await readFile(new URL('./index.js', import.meta.url), 'utf8'),
+  /ein ausdruecklicher Auth-Klick den Ensure-Befehl immer senden/,
+  'an explicit auth handoff must ensure-start its stable session even when the replicated status is stale-active',
+);
 assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'active' }), true);
 assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'starting' }), false);
 assert.equal(
@@ -981,32 +1019,26 @@ function pointerEvent(overrides = {}) {
   }
 }
 
-// --- Startmerkliste darf nicht dauerhaft merken (13.08.2026) ---
-// Gemessen: 34 Sitzungen, 0 aktiv, kein Chrome-Prozess, keine Protokollzeile in
-// 20 Minuten — weder Start-Knopf noch Plus-Symbol bewirkten etwas. Ursache war
-// requestedSessionStarts: der Eintrag wurde nur im FEHLERfall entfernt, nicht
-// wenn eine erfolgreich gestartete Sitzung spaeter wegbrach.
+// --- Auth-Ensure darf weder Status noch Startmerkliste dauerhaft glauben ---
+// Der replizierte Status kann nach einem Prozessende noch `active` sein. Ein
+// expliziter Auth-Klick muss deshalb den idempotenten nativen Ensure ausloesen;
+// die Merkliste darf nur parallele Starts blockieren und wird immer geleert.
 {
   const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
   const i = quelle.indexOf('async function ensureRequestedBrowserSession');
   assert.ok(i > 0, 'ensureRequestedBrowserSession existiert');
   const block = quelle.slice(i, i + 2200);
-  const zustandGelesen = block.indexOf('browserSessionNeedsStart');
   const merklisteGeprueft = block.indexOf('requestedSessionStarts.has');
-  assert.ok(zustandGelesen > 0 && merklisteGeprueft > 0);
-  assert.ok(
-    zustandGelesen < merklisteGeprueft,
-    'der Sitzungszustand muss VOR der Merkliste geprueft werden — sonst blockiert '
-    + 'ein alter Eintrag den Neustart einer weggebrochenen Sitzung dauerhaft',
+  assert.ok(merklisteGeprueft > 0);
+  assert.doesNotMatch(
+    block.slice(0, merklisteGeprueft), /browserSessionNeedsStart/,
+    'ein repliziertes stale-active darf den nativen Auth-Ensure nicht ueberspringen',
   );
   assert.match(
-    block, /requestedSessionStarts\.delete/,
-    'eine laufende Sitzung muss aus der Merkliste entfernt werden',
+    block, /finally\s*\{[\s\S]*requestedSessionStarts\.delete/,
+    'die Startmerkliste muss nach Erfolg und Fehler entfernt werden',
   );
-  assert.doesNotMatch(
-    block.slice(0, zustandGelesen), /if \(state\.requestedSessionStarts\.has/,
-    'die Merkliste darf nicht mehr die erste Bedingung sein',
-  );
+  assert.match(block, /dispatchBrowserCommand\([\s\S]*'browser\.session\.start'/);
 }
 
 // --- Sitzungszustand: wer steuert, wo muss jemand eingreifen (13.08.2026) ---
