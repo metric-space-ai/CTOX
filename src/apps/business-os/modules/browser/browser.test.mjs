@@ -48,7 +48,7 @@ assert.deepEqual(
   assert.match(css, /\.browser-address-form\s*\{[^}]*width:\s*0/s);
   assert.match(
     css,
-    /@container business-app-window \(max-width: 767px\)[\s\S]*\.browser-status-strip\s*\{[^}]*display:\s*grid/s,
+    /@container business-app-window \(max-width: 640px\)[\s\S]*\.browser-status-strip\s*\{[^}]*display:\s*grid/s,
     'the narrow toolbar keeps the hamburger and visible connection status in one row',
   );
 }
