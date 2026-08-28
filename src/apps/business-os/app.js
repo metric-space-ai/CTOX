@@ -73,7 +73,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260828-release-isolated-leader-v273';
+const APP_BUILD = '20260828-thesen-window-restore-v274';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -1511,17 +1511,29 @@ function persistWorkspaceSession() {
 async function restoreWorkspaceSession(snapshot, options = {}) {
   state.workspaceSessionRestoring = true;
   try {
-    for (const entry of snapshot?.windows || []) {
+    // Start every saved window before awaiting any individual module mount.
+    // openDesktopApp()/openWindowedModule() creates the shell-owned window
+    // synchronously and then performs schema/sync/module work. Awaiting each
+    // one serially meant one slow app (notably Outbound Sellify preflight)
+    // prevented every later saved app, including Browser, from appearing for
+    // up to a minute after the desktop was already visible.
+    const restoreResults = await Promise.allSettled((snapshot?.windows || []).map(async (entry) => {
       const appId = entry.ownerId.slice('desktop-app:'.length);
       const moduleDef = state.modules.find((item) => item.id === appId);
       const knownDesktopApp = DESKTOP_APPS.some((item) => item.id === appId);
-      if (!moduleDef && !knownDesktopApp) continue;
+      if (!moduleDef && !knownDesktopApp) return null;
       const windowId = await openDesktopApp(appId, {
         mode: entry.appMode,
         restoring: true,
       });
-      if (!windowId) continue;
+      if (!windowId) return null;
       if (entry.state === 'minimized') state.windowManager?.minimize?.(windowId);
+      return windowId;
+    }));
+    for (const result of restoreResults) {
+      if (result.status === 'rejected') {
+        console.warn('[business-os] saved workspace window could not be restored', result.reason);
+      }
     }
     const focusedOwner = [...(snapshot?.windows || [])].reverse().find((entry) => entry.focused)?.ownerId;
     const focused = focusedOwner
@@ -10026,7 +10038,7 @@ function getOfflineFallbackCatalog() {
         "center": "web page"
       },
       "category": "Workspace",
-      "version": "v0.1.2",
+      "version": "v0.2.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
