@@ -1347,3 +1347,49 @@ function pointerEvent(overrides = {}) {
   );
   console.log('  ok: Adapterfehler erscheinen als Satz, nicht als Maschinentext');
 }
+
+// --- Zusammengehoerige Felder nicht mischen (Widerspruchsbefund 29.08.2026) ---
+// Die Karte fuer rocketreach.com zeigte gleichzeitig "Kein Zugang noetig" und
+// "Anmeldung im Browser erforderlich". Ursache war feldweises Ergaenzen: der
+// April-Satz trug requires_credential=false, der August-Satz auth_status=
+// required ohne requires_credential. Das veraltete Feld gewann.
+{
+  const { mergeScrapingAdapterRows } = __browserTestHooks;
+
+  const kernAlt = {
+    source_id: 'rocketreach.com', updated_at_ms: 1783967908268,
+    requires_credential: false, auth_status: 'not_required', auth_mode: 'none',
+    last_test: '2026-04', latency_ms: 400, test_ok: true,
+  };
+  const tenantNeu = {
+    source_id: 'rocketreach.com', updated_at_ms: 1787917382172,
+    auth_status: 'required', last_error: 'Anmeldung im Browser erforderlich',
+  };
+  const z = mergeScrapingAdapterRows(kernAlt, tenantNeu);
+  assert.equal(z.auth_status, 'required', 'der aktuelle Zugangszustand gilt');
+  assert.notEqual(z.requires_credential, false,
+    'ein veraltetes requires_credential darf einem aktuellen auth_status nicht widersprechen');
+  assert.equal(z.test_ok, undefined,
+    'ein alter Erfolgstest darf neben einem aktuellen Zugangsfehler nicht stehenbleiben');
+
+  // Gegenprobe: schweigt der neuere Satz zu einer Gruppe, bleibt der aeltere.
+  const kernGeprueft = {
+    source_id: 'bundesanzeiger.de', updated_at_ms: 1787810131946,
+    last_test: '2026-08-27T05:55:31Z', latency_ms: 5690, test_ok: false,
+    evidence: 'status-temporary_unreachable', auth_status: 'not_required',
+  };
+  const tenantStumm = {
+    source_id: 'bundesanzeiger.de', updated_at_ms: 1787917371912,
+    last_test: '', latency_ms: null, auth_status: 'not_required', enabled: false,
+  };
+  const b = mergeScrapingAdapterRows(kernGeprueft, tenantStumm);
+  assert.equal(b.latency_ms, 5690, 'Schweigen darf ein Pruefergebnis nicht loeschen');
+  assert.equal(b.test_ok, false, 'false ist ein Ergebnis, kein Schweigen');
+  assert.equal(b.enabled, false, 'Felder ausserhalb der Gruppen bleiben unberuehrt');
+
+  assert.deepEqual(
+    mergeScrapingAdapterRows(tenantNeu, kernAlt), z,
+    'die Gruppenregel muss reihenfolgeunabhaengig sein',
+  );
+  console.log('  ok: Zugangs- und Pruefaussagen bleiben in sich stimmig');
+}

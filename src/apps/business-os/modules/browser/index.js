@@ -2393,12 +2393,29 @@ function browserInputPayload(event) {
 // den Grundstand vor; Felder, die dort fehlen oder leer sind, werden aus dem
 // aelteren ergaenzt. So ueberlebt ein Pruefergebnis aus der Kern-Sammlung eine
 // frische, aber magere Projektion aus der tenant-lokalen Sammlung.
+// Felder, die EINE Aussage bilden. Sie duerfen nicht feldweise aus zwei
+// Staenden gemischt werden: auf der Produktivinstanz trug der aeltere Satz
+// requires_credential=false, der neuere auth_status=required. Feldweise
+// ergaenzt gewann das vier Monate alte "kein Zugang noetig" gegen das
+// aktuelle "Anmeldung erforderlich" - die Karte widersprach sich selbst.
+const ADAPTER_FELDGRUPPEN = Object.freeze([
+  ['auth_status', 'requires_credential', 'auth_mode', 'credential_secret_name'],
+  ['status', 'last_error', 'last_test', 'latency_ms', 'test_ok', 'evidence'],
+]);
+
 function mergeScrapingAdapterRows(a, b) {
   const [neuer, aelter] = Number(a?.updated_at_ms || 0) >= Number(b?.updated_at_ms || 0) ? [a, b] : [b, a];
+  const leer = (wert) => wert === undefined || wert === null || wert === '';
   const zusammen = { ...aelter, ...neuer };
   for (const [feld, wert] of Object.entries(aelter || {})) {
-    const aktuell = zusammen[feld];
-    if (aktuell === undefined || aktuell === null || aktuell === '') zusammen[feld] = wert;
+    if (leer(zusammen[feld])) zusammen[feld] = wert;
+  }
+  // Sagt der neuere Stand zu einer Gruppe ueberhaupt etwas, gilt er dort
+  // allein; die uebrigen Felder der Gruppe werden nicht aus dem aelteren
+  // nachgefuellt, sondern bleiben ungesetzt.
+  for (const gruppe of ADAPTER_FELDGRUPPEN) {
+    if (!gruppe.some((feld) => !leer(neuer?.[feld]))) continue;
+    for (const feld of gruppe) zusammen[feld] = neuer?.[feld];
   }
   return zusammen;
 }
