@@ -45,6 +45,8 @@ const PROVIDER_SUBSCRIPTION_COMMANDS = Object.freeze({
   disconnect: 'ctox.provider_subscription.disconnect',
 });
 
+let subscriptionAuthWindowSequence = 0;
+
 export async function openReactSettings({
   mount,
   modules = [],
@@ -588,7 +590,7 @@ export async function openReactSettings({
       const providerLabel = profile.label;
       const accountInput = body.querySelector(`[data-provider-account-id="${cssEscape(providerId)}"]`);
       const accountId = normalizeProviderAccountId(accountInput?.value || profile.defaultAccountId);
-      const authWindow = window.open('', `ctox-${providerId}-subscription`);
+      const authWindow = window.open('', nextSubscriptionAuthWindowName(providerId));
       settingsState.subscriptionAuth = {
         status: 'starting', provider: providerId, accountId, action: 'connect', message: 'Login wird bei CTOX angefordert.',
       };
@@ -2895,6 +2897,12 @@ function runtimeProviderForSubscription(provider) {
   if (normalized === 'codex') return 'openai';
   if (normalized === 'claude') return 'anthropic';
   return normalized;
+}
+
+function nextSubscriptionAuthWindowName(provider) {
+  subscriptionAuthWindowSequence += 1;
+  const safeProvider = String(provider || 'provider').replace(/[^a-z0-9_-]/gi, '-');
+  return `ctox-${safeProvider}-subscription-${Date.now()}-${subscriptionAuthWindowSequence}`;
 }
 
 function runtimeSettingsPreservingPendingSubscription(loaded, current, subscriptionAuth) {
@@ -5302,6 +5310,7 @@ export const __reactSettingsTestHooks = {
   providerLogoSpec,
   runtimeModelOptions,
   runtimeSettingsPreservingPendingSubscription,
+  nextSubscriptionAuthWindowName,
   normalizeWorkjetPairingInvite,
   signalingAuthExpiry,
   signalingEndpoint,

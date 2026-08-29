@@ -237,6 +237,13 @@ test('runtime refresh uses the persisted runtime when no subscription login is p
   assert.equal(result, loaded);
 });
 
+test('subscription auth always opens a fresh same-origin code window', () => {
+  const first = hooks.nextSubscriptionAuthWindowName('codex');
+  const second = hooks.nextSubscriptionAuthWindowName('codex');
+  assert.match(first, /^ctox-codex-subscription-\d+-\d+$/);
+  assert.notEqual(second, first);
+});
+
 test('all subscription providers expose one secret-free connect/status/rotate/disconnect story', () => {
   const accounts = {
     codex: 'codex-instance-primary',
