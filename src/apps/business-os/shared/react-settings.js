@@ -1304,19 +1304,31 @@ function normalizeWorkjetPairingInvite(response) {
   return Object.freeze({ pairingUri, qrSvg, expiresAt });
 }
 
-async function createWorkjetPairingInvite(sync, displayName) {
+async function createWorkjetPairingInvite(sync, displayName, retryDelaysMs = [0, 750, 1_500]) {
   if (typeof sync?.requestNative !== 'function') {
     throw new Error('Der CTOX-WebRTC-Kanal ist noch nicht bereit.');
   }
-  const response = await sync.requestNative('ctox.workjet.device.v1', {
-    action: 'invite.create',
-    ttlSeconds: 300,
-    displayName: String(displayName || 'Workjet Gerät').trim() || 'Workjet Gerät',
-  }, {
-    requiredCapability: 'ctox-workjet-device-control-v1',
-    timeoutMs: 10_000,
-  });
-  return normalizeWorkjetPairingInvite(response);
+  let lastError = null;
+  for (const [index, retryDelayMs] of retryDelaysMs.entries()) {
+    if (index > 0 && retryDelayMs > 0) await delay(retryDelayMs);
+    try {
+      const response = await sync.requestNative('ctox.workjet.device.v1', {
+        action: 'invite.create',
+        ttlSeconds: 300,
+        displayName: String(displayName || 'Workjet Gerät').trim() || 'Workjet Gerät',
+      }, {
+        requiredCapability: 'ctox-workjet-device-control-v1',
+        timeoutMs: 10_000,
+      });
+      return normalizeWorkjetPairingInvite(response);
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error || '');
+      const transient = /protocol-incompatible|not open|noch nicht bereit|exceeded|closed|destroyed|data.?channel/i.test(message);
+      if (!transient || index === retryDelaysMs.length - 1) throw error;
+    }
+  }
+  throw lastError || new Error('Der CTOX-WebRTC-Kanal ist noch nicht bereit.');
 }
 
 function appearancePanel(branding = {}) {

@@ -388,6 +388,24 @@ test('Workjet pairing response is validated and rendered as an inert SVG image',
   assert.doesNotMatch(html, /<script/i);
 });
 
+test('Workjet pairing retries while the native WebRTC peer is still negotiating', async () => {
+  const response = {
+    pairingUri: `workjet://pair?payload=${'B'.repeat(64)}`,
+    qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1H0V0"/></svg>',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+  let attempts = 0;
+  const invite = await hooks.createWorkjetPairingInvite({
+    requestNative: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('WebRTC peer is closed: protocol-incompatible');
+      return response;
+    },
+  }, 'Phone', [0, 0]);
+  assert.equal(attempts, 2);
+  assert.deepEqual(invite, response);
+});
+
 test('settings user tab renders business-facing role labels', () => {
   const html = baseTemplate();
   assert.match(html, /Team & Zugänge/);
