@@ -4332,7 +4332,7 @@ pub fn list_module_actions(
                 false,
             ),
         ],
-        "thesen-outbound" => vec![person_research_action_descriptor(&module.id)],
+        "outbound-lead-generation" => vec![person_research_action_descriptor(&module.id)],
         _ => Vec::new(),
     });
     let has_external_sql = store::local_external_data_source_declarations(root)?
@@ -4408,8 +4408,8 @@ pub fn propose_action(
             &payload,
         )?;
         payload["writeback_contract"] = serde_json::json!({
-            "collection": "thesen_outbound_leads",
-            "allowed_collections": ["thesen_outbound_leads"],
+            "collection": "outbound_lead_generation_leads",
+            "allowed_collections": ["outbound_lead_generation_leads"],
             "record_ids": [scoped_record_id],
             "command_type": "web_stack.person_research",
             "min_independent_sources": 2,
@@ -7002,23 +7002,23 @@ fn validate_person_research_record_binding(
     payload: &Value,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        module_id == "thesen-outbound",
+        module_id == "outbound-lead-generation",
         BusinessOsMcpError::validation(
             "module_id",
-            "web_stack.person_research is scoped to thesen-outbound",
+            "web_stack.person_research is scoped to outbound-lead-generation",
         )
     );
-    let owning_modules = module_ids_for_collection(root, "thesen_outbound_leads")?;
+    let owning_modules = module_ids_for_collection(root, "outbound_lead_generation_leads")?;
     anyhow::ensure!(
         owning_modules
             .iter()
             .any(|candidate| candidate == module_id),
         BusinessOsMcpError::validation(
             "collection",
-            "thesen_outbound_leads is not declared by the calling module",
+            "outbound_lead_generation_leads is not declared by the calling module",
         )
     );
-    let record = store::pull_collection_record(root, "thesen_outbound_leads", record_id)?
+    let record = store::pull_collection_record(root, "outbound_lead_generation_leads", record_id)?
         .ok_or_else(|| {
             anyhow::Error::new(BusinessOsMcpError::not_found(
                 BusinessOsMcpErrorCode::RecordNotFound,
@@ -7032,9 +7032,9 @@ fn validate_person_research_record_binding(
         ))
     })?;
     for (field, expected) in [
-        ("module_id", "thesen-outbound"),
-        ("module", "thesen-outbound"),
-        ("collection", "thesen_outbound_leads"),
+        ("module_id", "outbound-lead-generation"),
+        ("module", "outbound-lead-generation"),
+        ("collection", "outbound_lead_generation_leads"),
     ] {
         if let Some(actual) = record_object.get(field).and_then(Value::as_str) {
             anyhow::ensure!(
@@ -7824,7 +7824,7 @@ mod tests {
         store::push_collection_records(
             root,
             serde_json::json!({
-                "collection": "thesen_outbound_leads",
+                "collection": "outbound_lead_generation_leads",
                 "documents": [{
                     "id": "lead_1",
                     "company": "Acme GmbH",
@@ -11655,21 +11655,21 @@ mod tests {
     }
 
     #[test]
-    fn thesen_outbound_exposes_bounded_native_person_research() -> anyhow::Result<()> {
+    fn outbound_lead_generation_exposes_bounded_native_person_research() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_module(
             root,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "Outbound Lead Generation",
-            &["thesen_outbound_leads"],
+            &["outbound_lead_generation_leads"],
         )?;
         seed_default_mcp_admin(root)?;
 
         let actions = list_module_actions(
             root,
             &test_context("business_os.list_module_actions"),
-            "thesen-outbound",
+            "outbound-lead-generation",
         )?;
         let research = actions
             .items
@@ -11687,7 +11687,7 @@ mod tests {
         let proposal = propose_action(
             root,
             &test_context("business_os.propose_action"),
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
@@ -11708,8 +11708,8 @@ mod tests {
         assert_eq!(
             proposal.payload["writeback_contract"],
             serde_json::json!({
-                "collection": "thesen_outbound_leads",
-                "allowed_collections": ["thesen_outbound_leads"],
+                "collection": "outbound_lead_generation_leads",
+                "allowed_collections": ["outbound_lead_generation_leads"],
                 "record_ids": ["lead_1"],
                 "command_type": "web_stack.person_research",
                 "min_independent_sources": 2,
@@ -11721,14 +11721,14 @@ mod tests {
             "person_research/native"
         );
         assert!(is_native_mcp_control_action(
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research"
         ));
 
         let error = propose_action(
             root,
             &test_context("business_os.propose_action"),
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
@@ -11755,15 +11755,15 @@ mod tests {
         let root = temp.path();
         write_module(
             root,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "Outbound Lead Generation",
-            &["thesen_outbound_leads"],
+            &["outbound_lead_generation_leads"],
         )?;
         seed_default_mcp_admin(root)?;
         store::push_collection_records(
             root,
             serde_json::json!({
-                "collection": "thesen_outbound_leads",
+                "collection": "outbound_lead_generation_leads",
                 "documents": [{
                     "id": "lead_1",
                     "company": "Acme GmbH",
@@ -11790,7 +11790,7 @@ mod tests {
                 execute_action(
                     root,
                     &first_context,
-                    "thesen-outbound",
+                    "outbound-lead-generation",
                     "web_stack.person_research",
                     &first_args,
                 )
@@ -11801,7 +11801,7 @@ mod tests {
                 execute_action(
                     root,
                     &second_context,
-                    "thesen-outbound",
+                    "outbound-lead-generation",
                     "web_stack.person_research",
                     &second_args,
                 )
@@ -11830,7 +11830,7 @@ mod tests {
         let third = execute_action(
             root,
             &context,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
@@ -11856,7 +11856,7 @@ mod tests {
         let missing = execute_action(
             root,
             &context,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "missing",
@@ -11880,7 +11880,7 @@ mod tests {
         let mismatch = propose_action(
             root,
             &context,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
