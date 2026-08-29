@@ -1292,18 +1292,31 @@ export async function mount(ctx) {
     const docs = (await collection.find().exec())
       .filter((doc) => !doc.hidden && launcherRef.knows(doc.target_module))
       .sort((a, b) => (a.sort_index ?? 0) - (b.sort_index ?? 0));
-    const seen = new Set();
+    const grid = currentGrid();
+    // Frueher wurde nur auf exakt gleiche Koordinaten geprueft. Zwei Symbole
+    // muessen sich aber nicht decken, um einander unbrauchbar zu machen:
+    // gemessen auf thesen.ctox.dev lagen "Outbound Lead Generation" (128, 520)
+    // und "Bugs & Features" (99, 556) mit 7455 px2 uebereinander - die
+    // Beschriftungen unlesbar, und das obere Symbol fing die Klicks des
+    // unteren ab. Verschiedene Schluessel, also keine erkannte Kollision.
+    //
+    // Geprueft wird deshalb die tatsaechliche Ueberdeckung der Rasterzellen.
+    // Eine kleine Toleranz laesst die uebliche Nachbarschaftsberuehrung durch;
+    // erst eine nennenswerte Ueberdeckung gilt als Kollision.
+    const zelle = { w: Math.max(1, grid.cellW), h: Math.max(1, grid.cellH) };
+    const flaeche = zelle.w * zelle.h;
+    const schwelle = flaeche * 0.1;
     let hasCollision = false;
-    for (const doc of docs) {
-      const key = `${Math.round(doc.x || 0)}:${Math.round(doc.y || 0)}`;
-      if (seen.has(key)) {
-        hasCollision = true;
-        break;
+    for (let i = 0; i < docs.length && !hasCollision; i += 1) {
+      for (let j = i + 1; j < docs.length; j += 1) {
+        const a = docs[i];
+        const b = docs[j];
+        const dx = Math.max(0, zelle.w - Math.abs(Math.round(a.x || 0) - Math.round(b.x || 0)));
+        const dy = Math.max(0, zelle.h - Math.abs(Math.round(a.y || 0) - Math.round(b.y || 0)));
+        if (dx * dy > schwelle) { hasCollision = true; break; }
       }
-      seen.add(key);
     }
     if (!hasCollision) return;
-    const grid = currentGrid();
     await Promise.all(docs.map((doc, index) => {
       const position = gridPosition(index, grid);
       return doc.incrementalPatch({
