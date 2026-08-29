@@ -1549,7 +1549,7 @@ mod runtime_subscription_settings_tests {
             },
         )?;
 
-        let settings = crate::inference::runtime_env::effective_operator_env_map(temp.path())?;
+        let settings = crate::inference::runtime_env::effective_runtime_env_map(temp.path())?;
         assert_eq!(
             settings.get("CTOX_API_PROVIDER").map(String::as_str),
             Some("ctox_subscription")
