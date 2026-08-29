@@ -11658,13 +11658,27 @@ mod tests {
     fn outbound_lead_generation_exposes_bounded_native_person_research() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        write_module(
+        write_installed_module(
             root,
             "outbound-lead-generation",
             "Outbound Lead Generation",
+            "1.0.0",
             &["outbound_lead_generation_leads"],
+            None,
         )?;
         seed_default_mcp_admin(root)?;
+        store::push_collection_records(
+            root,
+            serde_json::json!({
+                "collection": "outbound_lead_generation_leads",
+                "documents": [{
+                    "id": "lead_1",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "workspace": "test-workspace"
+                }]
+            }),
+        )?;
 
         let actions = list_module_actions(
             root,
@@ -11753,11 +11767,13 @@ mod tests {
     fn person_research_execute_is_idempotent_and_record_bound() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        write_module(
+        write_installed_module(
             root,
             "outbound-lead-generation",
             "Outbound Lead Generation",
+            "1.0.0",
             &["outbound_lead_generation_leads"],
+            None,
         )?;
         seed_default_mcp_admin(root)?;
         store::push_collection_records(
