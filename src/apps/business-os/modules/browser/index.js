@@ -2693,6 +2693,19 @@ const ADAPTER_AUTH_AUSSAGEKRAEFTIG = Object.freeze([
   'session_authenticated', 'credential_available', 'authorized',
 ]);
 
+// Der Testzeitpunkt steht im last_test-Objekt als tested_at_ms. Der Code las
+// at_ms, das es dort nicht gibt, fiel deshalb immer auf updated_at_ms zurueck
+// und zeigte das Aenderungsdatum als Testzeitpunkt: die Karte behauptete einen
+// Test am 28.08., der in Wahrheit am 27.08. lief. Wenn kein Testzeitpunkt
+// bekannt ist, wird das Datum als Aenderung gekennzeichnet statt als Test.
+function adapterZeitpunkt(adapter) {
+  const test = Number(adapter?.last_test?.tested_at_ms || adapter?.last_test?.at_ms || 0);
+  if (test > 0) return { ms: test, titel: t('metaTested', 'Zuletzt geprüft') };
+  const geaendert = Number(adapter?.updated_at_ms || 0);
+  if (geaendert > 0) return { ms: geaendert, titel: t('metaChanged', 'Zuletzt geändert') };
+  return { ms: 0, titel: '' };
+}
+
 function adapterZugang(adapter) {
   // Exakte Statuslisten -- Substring-Muster matchten `required` auch in
   // `not_required`, und jeder Adapter ohne Anmeldepflicht stand auf
@@ -2862,11 +2875,12 @@ function renderAdapterRail(ctx, refs, state) {
     }
     const meta = document.createElement('div');
     meta.className = 'browser-adapter-meta';
-    const getestet = Number(adapter.last_test?.at_ms || adapter.updated_at_ms || 0);
+    const zeitpunkt = adapterZeitpunkt(adapter);
     const latenz = Number(adapter.latency_ms || adapter.last_test?.latency_ms || 0);
+    if (zeitpunkt.titel) meta.title = zeitpunkt.titel;
     meta.textContent = [
       String(adapter.source_id || ''),
-      getestet ? new Date(getestet).toLocaleString() : '',
+      zeitpunkt.ms ? new Date(zeitpunkt.ms).toLocaleString() : '',
       latenz ? `${latenz} ms` : '',
     ].filter(Boolean).join(' · ');
     const aktionen = document.createElement('div');
@@ -4008,6 +4022,7 @@ export const __browserTestHooks = {
   mergeScrapingAdapterRows,
   adapterZugang,
   adapterFunktion,
+  adapterZeitpunkt,
   adapterFehlerKurz,
   adapterFehlerText,
   adapterName,

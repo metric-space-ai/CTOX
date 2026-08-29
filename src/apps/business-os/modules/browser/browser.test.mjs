@@ -1427,3 +1427,31 @@ function pointerEvent(overrides = {}) {
 
   console.log('  ok: Zugangschip widerspricht nicht mehr der Anmeldeaufforderung');
 }
+
+// --- Testzeitpunkt statt Aenderungsdatum (Befund 29.08.2026) -----------------
+// Die Karte las last_test.at_ms; das Feld heisst tested_at_ms. Sie fiel deshalb
+// immer auf updated_at_ms zurueck und behauptete einen Test am 28.08., der in
+// Wahrheit am 27.08. lief.
+{
+  const { adapterZeitpunkt } = __browserTestHooks;
+
+  const echt = adapterZeitpunkt({
+    last_test: { tested_at_ms: 1787810138487, ok: false },
+    updated_at_ms: 1787917371912,
+  });
+  assert.equal(echt.ms, 1787810138487, 'der Testzeitpunkt kommt aus tested_at_ms');
+  assert.match(echt.titel, /geprüft/, 'ein echter Testzeitpunkt wird als Pruefung ausgewiesen');
+
+  const ohne = adapterZeitpunkt({ updated_at_ms: 1787917371912 });
+  assert.equal(ohne.ms, 1787917371912);
+  assert.match(ohne.titel, /geändert/, 'ohne Test darf das Datum nicht als Pruefung gelten');
+
+  assert.equal(adapterZeitpunkt({}).ms, 0, 'ohne jede Angabe kein erfundenes Datum');
+
+  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.ok(
+    !/last_test\?\.at_ms \|\| adapter\.updated_at_ms/.test(quelle),
+    'der alte Rueckfall auf updated_at_ms als Testzeitpunkt darf nicht zurueckkehren',
+  );
+  console.log('  ok: Zeitangabe unterscheidet Pruefung von Aenderung');
+}
