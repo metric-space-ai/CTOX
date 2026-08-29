@@ -1058,7 +1058,7 @@ export async function mount(ctx) {
 
   function currentGrid() {
     const surfaceWidth = refs.surface?.getBoundingClientRect?.().width || globalThis.innerWidth || 0;
-    if (surfaceWidth > 0 && surfaceWidth <= 560) {
+    if (surfaceWidth > 0 && surfaceWidth <= 720) {
       return { ...COMPACT_GRID, compact: true };
     }
     return {

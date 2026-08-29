@@ -59,6 +59,14 @@ assert.ok(
   'Windowed module launcher must expose module-backed desktop app targets'
 );
 assert.ok(
+  appSource.includes('state.windowManager?.minimizeAll?.();'),
+  'Foreground module navigation must preserve but minimize unrelated desktop windows'
+);
+assert.ok(
+  readFileSync(resolve(businessOsRoot, 'shared/window-manager.js'), 'utf8').includes('minimizeAll,'),
+  'Window manager must expose the minimize-all desktop transition'
+);
+assert.ok(
   desktopLauncherSource.includes('!appIds.has(mod.id)'),
   'Desktop launcher must not render a module icon when the same id is a window app'
 );

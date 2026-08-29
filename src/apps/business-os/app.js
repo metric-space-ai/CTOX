@@ -73,7 +73,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260829-desktop-maintenance-mount-v286';
+const APP_BUILD = '20260829-workjet-shell-layout-v285';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -5140,6 +5140,13 @@ async function openModule(moduleId, options = {}) {
     return;
   }
   if (state.activeModule?.id === mod.id && !options.force) return;
+
+  // A full-workspace module is a foreground surface, not another desktop
+  // window.  Leaving an unrelated floating window above it made a successful
+  // tile click look dead until the user manually closed that window.  Follow
+  // normal desktop semantics: preserve every window and its state, but
+  // minimize visible windows before foreground navigation.
+  if (state.activeModule?.id !== mod.id) state.windowManager?.minimizeAll?.();
 
   // Track history stack
   if (!options.isNavHistory) {

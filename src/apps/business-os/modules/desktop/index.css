@@ -432,7 +432,12 @@
   visibility: hidden;
 }
 
-@media (max-width: 560px) {
+/* The desktop is routinely embedded next to the Workjet sidebar.  Its usable
+   width can therefore be compact while the outer browser viewport is still
+   wide.  A viewport media query left the absolute desktop layout active in
+   that state and clipped labels/dock controls.  The module is already a size
+   container, so responsive layout must follow the surface it actually owns. */
+@container (max-width: 720px) {
   .desktop-module {
     --desktop-icon-cell-w: 88px;
     --desktop-icon-cell-h: 100px;
@@ -454,7 +459,7 @@
     position: absolute;
     inset: 0;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
     grid-auto-rows: var(--desktop-icon-cell-h);
     align-content: start;
     align-items: start;
@@ -489,6 +494,13 @@
     top: 20px;
     left: 20px;
     right: 20px;
+  }
+}
+
+@container (max-width: 360px) {
+  .desktop-icons {
+    grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+    padding-inline: 8px;
   }
 }
 
