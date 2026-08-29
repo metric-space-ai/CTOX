@@ -508,12 +508,16 @@ export async function openReactSettings({
     });
     body.querySelector('[data-runtime-save]')?.addEventListener('click', async () => {
       const runtimePayload = runtimePayloadFromForm(body);
+      settingsState.runtimeSettings = runtimeSettingsWithDraft(
+        settingsState.runtimeSettings,
+        runtimePayload,
+      );
       settingsState.commandStatus = 'Runtime/Auth wird gespeichert...';
       render();
       try {
         settingsState.runtimeSettings = await saveRuntimeSettings(
           runtimePayload,
-          { commandBus, db, session, sync },
+          { db },
         );
         settingsState.commandStatus = 'Runtime/Auth gespeichert.';
       } catch (error) {
@@ -3519,31 +3523,32 @@ async function loadRuntimeSettings({ db } = {}) {
 }
 
 async function saveRuntimeSettings(payload, {
-  commandBus,
   db,
-  session,
-  sync,
-  waitForProjection = true,
 } = {}) {
-  const previousSettings = waitForProjection
-    ? await loadRuntimeSettings({ db }).catch(() => null)
-    : null;
-  const command = await dispatchModuleCommand({
-    commandBus,
-    db,
-    session,
-    sync,
-    commandType: 'ctox.runtime_settings.save',
-    moduleId: 'ctox',
-    recordId: 'runtime-settings',
-    payload,
-    source: 'business-os-settings',
+  const result = await saveRuntimeSettingsControlPlane(payload);
+  if (result?.runtime_settings) return result.runtime_settings;
+  return waitForRuntimeSettingsProjection(db, { payload });
+}
+
+async function saveRuntimeSettingsControlPlane(payload, options = {}) {
+  const fetchImpl = options.fetchImpl || fetch;
+  const response = await fetchImpl('/api/business-os/ctox/runtime-settings', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload || {}),
+    credentials: 'same-origin',
+    cache: 'no-store',
   });
-  if (!waitForProjection) return command.result || command;
-  return waitForRuntimeSettingsProjection(db, {
-    payload,
-    previousUpdatedAtMs: Number(previousSettings?.updated_at_ms || 0),
-  });
+  const text = await response.text();
+  let result = null;
+  try { result = text ? JSON.parse(text) : null; } catch {}
+  if (!response.ok || result?.ok === false) {
+    throw new Error(result?.message || result?.error || text || `HTTP ${response.status}`);
+  }
+  return result || { ok: true };
 }
 
 async function waitForRuntimeSettingsProjection(db, options = {}) {
@@ -5474,6 +5479,7 @@ export const __reactSettingsTestHooks = {
   providerCredentialRequirement,
   providerSubscriptionCommandRequest,
   startSubscriptionAuthControlPlane,
+  saveRuntimeSettingsControlPlane,
   loadSubscriptionAuthStatusControlPlane,
   subscriptionProviderConnected,
   waitForSubscriptionConnection,

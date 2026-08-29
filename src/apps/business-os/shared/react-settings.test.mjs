@@ -291,6 +291,41 @@ test('subscription status endpoint is same-origin and its ready account is autho
   assert.equal(hooks.subscriptionProviderConnected(payload.provider_subscriptions, 'claude'), false);
 });
 
+test('runtime settings save uses the typed control plane and returns the authoritative projection', async () => {
+  const calls = [];
+  const request = {
+    provider: 'openai',
+    auth_mode: 'subscription',
+    chat_model: 'gpt-5.5',
+    reasoning_effort: 'high',
+    preset: 'Quality',
+    context: '256k',
+    max_run_secs: 1800,
+    api_key: '',
+  };
+  const result = await hooks.saveRuntimeSettingsControlPlane(request, {
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          runtime_settings: {
+            runtime: { provider: 'openai', chat_model: 'gpt-5.5', reasoning_effort: 'high' },
+            auth: { mode: 'subscription' },
+          },
+        }),
+      };
+    },
+  });
+  assert.equal(calls[0].url, '/api/business-os/ctox/runtime-settings');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  assert.deepEqual(JSON.parse(calls[0].options.body), request);
+  assert.equal(result.runtime_settings.runtime.reasoning_effort, 'high');
+});
+
 test('ready subscription projection renders one consistent connected state', () => {
   const html = baseTemplate({
     tab: 'runtime',
