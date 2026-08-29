@@ -326,6 +326,31 @@ test('runtime settings save uses the typed control plane and returns the authori
   assert.equal(result.runtime_settings.runtime.reasoning_effort, 'high');
 });
 
+test('runtime settings reload reads the authoritative control plane projection', async () => {
+  const calls = [];
+  const runtimeSettings = await hooks.loadRuntimeSettingsControlPlane({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          runtime_settings: {
+            runtime: { provider: 'openai', chat_model: 'gpt-5.5', reasoning_effort: 'high' },
+            auth: { mode: 'subscription', subscription_session_configured: true },
+          },
+        }),
+      };
+    },
+  });
+  assert.equal(calls[0].url, '/api/business-os/ctox/runtime-settings');
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  assert.equal(runtimeSettings.runtime.provider, 'openai');
+  assert.equal(runtimeSettings.runtime.reasoning_effort, 'high');
+});
+
 test('ready subscription projection renders one consistent connected state', () => {
   const html = baseTemplate({
     tab: 'runtime',

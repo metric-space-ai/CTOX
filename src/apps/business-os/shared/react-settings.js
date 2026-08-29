@@ -3514,12 +3514,33 @@ function supportVisibilityText(lifecycle = {}, app = {}, mod = {}) {
 }
 
 async function loadRuntimeSettings({ db } = {}) {
-  const coll = db?.collection?.('ctox_runtime_settings');
-  if (!coll) throw new Error('ctox_runtime_settings collection is required for runtime settings');
-  const doc = await coll.findOne('runtime-settings').exec();
-  const data = doc?.toJSON?.();
-  if (!data) throw new Error('Runtime-Status noch nicht synchronisiert.');
-  return data;
+  try {
+    return await loadRuntimeSettingsControlPlane();
+  } catch (controlPlaneError) {
+    const coll = db?.collection?.('ctox_runtime_settings');
+    if (!coll) throw controlPlaneError;
+    const doc = await coll.findOne('runtime-settings').exec();
+    const data = doc?.toJSON?.();
+    if (!data) throw controlPlaneError;
+    return data;
+  }
+}
+
+async function loadRuntimeSettingsControlPlane(options = {}) {
+  const fetchImpl = options.fetchImpl || fetch;
+  const response = await fetchImpl('/api/business-os/ctox/runtime-settings', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  const text = await response.text();
+  let result = null;
+  try { result = text ? JSON.parse(text) : null; } catch {}
+  if (!response.ok || result?.ok === false || !result?.runtime_settings) {
+    throw new Error(result?.message || result?.error || text || `HTTP ${response.status}`);
+  }
+  return result.runtime_settings;
 }
 
 async function saveRuntimeSettings(payload, {
@@ -5480,6 +5501,7 @@ export const __reactSettingsTestHooks = {
   providerSubscriptionCommandRequest,
   startSubscriptionAuthControlPlane,
   saveRuntimeSettingsControlPlane,
+  loadRuntimeSettingsControlPlane,
   loadSubscriptionAuthStatusControlPlane,
   subscriptionProviderConnected,
   waitForSubscriptionConnection,

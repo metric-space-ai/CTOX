@@ -527,6 +527,22 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 )?;
             }
         }
+        (Method::Get, "/api/business-os/ctox/runtime-settings") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                respond_json_value_no_store(
+                    request,
+                    serde_json::json!({
+                        "ok": true,
+                        "runtime_settings": store::runtime_settings_for_rxdb(root)?,
+                    }),
+                )?;
+            }
+        }
         (Method::Post, "/api/business-os/ctox/runtime-settings") => {
             let session = request_session(root, &request);
             if !session.authenticated {
