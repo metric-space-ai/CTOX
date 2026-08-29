@@ -8136,13 +8136,20 @@ fn resolve_business_os_installed_app_root_for_native_peer(root: &Path) -> PathBu
     {
         return root.join("business-os");
     }
-    let runtime = root.join("runtime");
-    if runtime.exists() {
-        return runtime.join("business-os");
-    }
     let direct = root.join("business-os");
     if direct.exists() {
         return direct;
+    }
+    // Installed CTOX instances keep durable customer modules directly below
+    // the state root (`<state>/business-os`). A sibling `<state>/runtime`
+    // directory can exist for unrelated runtime data and must not redirect
+    // module discovery into `<state>/runtime/business-os`; doing so makes the
+    // shell see a local app while the native peer silently omits its
+    // collections. Source checkouts, on the other hand, have no direct
+    // `business-os` directory and keep the app tree under `runtime/`.
+    let runtime = root.join("runtime");
+    if runtime.exists() {
+        return runtime.join("business-os");
     }
     root.join("business-os")
 }
@@ -10327,6 +10334,52 @@ pub(in crate::business_os) mod tests {
         assert_eq!(schema.version, 0);
         assert_eq!(schema.primary_key.primary_field(), "id");
         assert_eq!(schema.schema_type, "object");
+        Ok(())
+    }
+
+    #[test]
+    fn state_root_local_modules_win_over_unrelated_runtime_tree() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(
+            temp.path()
+                .join("runtime/business-os/local-modules/unrelated-runtime-module"),
+        )?;
+        let module_dir = temp
+            .path()
+            .join("business-os/local-modules/outbound-lead-generation");
+        fs::create_dir_all(&module_dir)?;
+        fs::write(
+            module_dir.join("module.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "outbound-lead-generation",
+                "entry": "local-modules/outbound-lead-generation/index.html",
+                "install_scope": "local",
+                "collections": ["outbound_lead_generation_adapters"]
+            }))?,
+        )?;
+        fs::write(
+            module_dir.join("collections.schema.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_format": "ctox-business-os-module-collections-v1",
+                "collections": {
+                    "outbound_lead_generation_adapters": {
+                        "primaryKey": "id",
+                        "properties": {
+                            "id": { "type": "string", "maxLength": 180 },
+                            "updated_at_ms": { "type": "number" }
+                        },
+                        "required": ["id", "updated_at_ms"]
+                    }
+                }
+            }))?,
+        )?;
+
+        assert_eq!(
+            resolve_business_os_installed_app_root_for_native_peer(temp.path()),
+            temp.path().join("business-os")
+        );
+        let creators = collection_creators_for_root(temp.path());
+        assert!(creators.contains_key("outbound_lead_generation_adapters"));
         Ok(())
     }
 
