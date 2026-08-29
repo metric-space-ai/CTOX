@@ -329,6 +329,9 @@ export async function openReactSettings({
     settingsState.tab = nextTab;
     settingsState.commandStatus = '';
     render();
+    if (settingsState.tab === 'sync') {
+      ensureWorkjetPairingInvite();
+    }
     if (settingsState.tab === 'runtime' && !settingsState.runtimeSettings) {
       refreshRuntimeSettings();
     }
@@ -447,26 +450,6 @@ export async function openReactSettings({
         }
         render();
       });
-    });
-    body.querySelector('[data-workjet-pairing-create]')?.addEventListener('click', async () => {
-      const displayName = body.querySelector('[data-workjet-pairing-name]')?.value?.trim()
-        || 'Workjet Gerät';
-      settingsState.workjetPairing = { loading: true, invite: null, error: '' };
-      render();
-      try {
-        settingsState.workjetPairing = {
-          loading: false,
-          invite: await createWorkjetPairingInvite(sync, displayName),
-          error: '',
-        };
-      } catch (error) {
-        settingsState.workjetPairing = {
-          loading: false,
-          invite: null,
-          error: String(error?.message || error),
-        };
-      }
-      render();
     });
     body.querySelector('[data-runtime-save]')?.addEventListener('click', async () => {
       const runtimePayload = runtimePayloadFromForm(body);
@@ -959,7 +942,31 @@ export async function openReactSettings({
     });
   };
 
+  async function ensureWorkjetPairingInvite() {
+    if (!isAdmin || settingsState.tab !== 'sync') return;
+    if (settingsState.workjetPairing.loading || settingsState.workjetPairing.invite) return;
+    settingsState.workjetPairing = { loading: true, invite: null, error: '' };
+    render();
+    try {
+      settingsState.workjetPairing = {
+        loading: false,
+        invite: await createWorkjetPairingInvite(sync, 'Workjet Gerät'),
+        error: '',
+      };
+    } catch (error) {
+      settingsState.workjetPairing = {
+        loading: false,
+        invite: null,
+        error: String(error?.message || error),
+      };
+    }
+    render();
+  }
+
   render();
+  if (settingsState.tab === 'sync') {
+    ensureWorkjetPairingInvite();
+  }
   refreshRuntimeSettings();
   if (settingsState.tab === 'channels') {
     ensureChannelCollections().then(refreshChannelAccounts).catch(refreshChannelAccounts);
@@ -1209,41 +1216,25 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
 function syncPanel(syncConfig, isAdmin, workjetPairing = {}) {
   const urls = syncConfig?.signaling_urls || [];
   const endpoints = urls.map(signalingEndpoint).filter(Boolean);
-  const authExpiry = signalingAuthExpiry(urls);
+  const pairingUri = String(workjetPairing?.invite?.pairingUri || '');
   return `
-    <section class="settings-section">
-      <header><h3>Business-OS-Hosting</h3><span>Der App-Server gehört zur CTOX-Instanz.</span></header>
-      <dl class="settings-kv">
-        ${kv('App-Hosting', syncConfig?.app_hosting || 'ctox_instance_webserver')}
-        ${kv('Sync-Modus', syncConfig?.sync_mode || 'p2p-first')}
-        ${kv('Transport', syncConfig?.transport || 'webrtc')}
-        ${kv('Peer-Rolle', syncConfig?.peer_role || 'ctox_instance')}
-        ${kv('Instanz', syncConfig?.instance_id || '-')}
-      </dl>
-    </section>
-    <section class="settings-section workjet-pairing-section">
-      <header>
-        <h3>Workjet verbinden</h3>
-        <span>Desktop oder Mobilgerät · QR läuft nach 5 Minuten ab.</span>
-      </header>
-      ${workjetPairingContent(workjetPairing, isAdmin)}
-    </section>
-    <section class="settings-section">
-      <header><h3>Technische Verbindung</h3><span>WebRTC direkt zur CTOX-Instanz.</span></header>
+    <section class="settings-section" data-sync-pairing-only>
       <dl class="settings-kv settings-kv--wrap">
+        ${kv('Signaling-Server', endpoints.join(', ') || '-')}
         ${kv('Raum', syncConfig?.sync_room || '-')}
-        ${kv('Signaling', endpoints.join(', ') || '-')}
-        ${kv('Zugang', syncAuthenticationLabel(syncConfig))}
-        ${kv('Gültig bis', authExpiry || 'wird automatisch erneuert')}
-        ${kv('Ziel-Peer', syncConfig?.native_peer_id || '-')}
+        ${kv('Passwort', syncConfig?.signaling_room_password || '-')}
+        <div>
+          <dt>QR-Code</dt>
+          <dd>${workjetPairingQr(workjetPairing, isAdmin)}</dd>
+        </div>
+        <div>
+          <dt>Link</dt>
+          <dd>${pairingUri
+            ? `<a data-workjet-pairing-link href="${escapeAttr(pairingUri)}">${escapeHtml(pairingUri)}</a>`
+            : `<span data-workjet-pairing-link-pending>${escapeHtml(workjetPairing?.error || 'Wird erzeugt…')}</span>`}
+          </dd>
+        </div>
       </dl>
-      <p class="settings-note">Es gibt kein separates Klartext-Passwort mehr. Der kurzlebige, rollengebundene Zugangstoken steckt geschützt im QR-Code beziehungsweise in der signierten Verbindungs-URL.</p>
-      <div class="settings-grid is-one">
-        <label><span>Verbindungsraum</span><input data-sync-room aria-label="Verbindungsraum" title="${escapeAttr(syncConfig?.sync_room || '')}" value="${escapeAttr(syncConfig?.sync_room || '')}" ${isAdmin ? '' : 'disabled'} /></label>
-        <label><span>Signierte Verbindungs-URL</span><textarea data-sync-signaling aria-label="Signierte Verbindungs-URL" title="${escapeAttr(urls.join('\n'))}" ${isAdmin ? '' : 'disabled'}>${escapeHtml(urls.join('\n'))}</textarea></label>
-        <label><span>Passwort / Token</span><input aria-label="Passwort oder Token" value="Kurzlebiger Token ist im QR enthalten" disabled /></label>
-      </div>
-      ${isAdmin ? `<button class="text-button settings-primary" type="button" data-settings-command="sync">Sync Konfiguration an CTOX geben</button>` : ''}
     </section>
   `;
 }
@@ -1278,46 +1269,15 @@ function syncAuthenticationLabel(syncConfig = {}) {
     : (version || 'Kurzlebige Verbindungsfreigabe');
 }
 
-function workjetPairingContent(state = {}, isAdmin = false) {
+function workjetPairingQr(state = {}, isAdmin = false) {
   if (!isAdmin) {
-    return '<p class="settings-note">Nur Admins und Verantwortliche können neue Geräte verbinden.</p>';
-  }
-  if (state.loading) {
-    return `
-      <div class="workjet-pairing-layout" aria-live="polite">
-        <div class="workjet-pairing-placeholder"><span>QR-Code wird sicher erzeugt…</span></div>
-        <p class="settings-note">CTOX erstellt eine kurzlebige Einladung über den bestehenden WebRTC-Kanal.</p>
-      </div>
-    `;
+    return '<span>Nur für Admins verfügbar</span>';
   }
   if (state.invite) {
     const qrDataUrl = workjetPairingSvgDataUrl(state.invite.qrSvg);
-    const expiresAt = formatIsoShort(state.invite.expiresAt);
-    return `
-      <div class="workjet-pairing-layout" data-workjet-pairing-ready>
-        <img class="workjet-pairing-qr" src="${escapeAttr(qrDataUrl)}" alt="Workjet Pairing QR-Code" />
-        <div class="workjet-pairing-copy">
-          <strong>QR-Code mit Workjet scannen</strong>
-          <p>In Workjet „CTOX-Instanz verbinden“ öffnen und diesen Code scannen. Alternativ kannst du Workjet auf diesem Gerät direkt öffnen.</p>
-          <a class="text-button settings-primary" href="${escapeAttr(state.invite.pairingUri)}">In Workjet öffnen</a>
-          <small>Gültig bis ${escapeHtml(expiresAt)} · enthält eine private, einmalige Verbindungsfreigabe.</small>
-          <button class="text-button" type="button" data-workjet-pairing-create>Neuen QR-Code erzeugen</button>
-        </div>
-      </div>
-    `;
+    return `<img class="workjet-pairing-qr" data-workjet-pairing-ready src="${escapeAttr(qrDataUrl)}" alt="Workjet Pairing QR-Code" />`;
   }
-  return `
-    <div class="workjet-pairing-layout">
-      <div class="workjet-pairing-placeholder"><span>QR-Code</span><small>Noch keine Einladung erzeugt</small></div>
-      <div class="workjet-pairing-copy">
-        <strong>CTOX mit Workjet koppeln</strong>
-        <p>Der QR enthält Raum, Signaling-Server und eine kurzlebige, rollengebundene Freigabe. Geschäftsdaten bleiben im WebRTC-Datenpfad.</p>
-        <label><span>Gerätename</span><input data-workjet-pairing-name value="Workjet Gerät" maxlength="256" /></label>
-        <button class="text-button settings-primary" type="button" data-workjet-pairing-create>QR-Code erstellen</button>
-        ${state.error ? `<p class="settings-note workjet-pairing-error">${escapeHtml(state.error)}</p>` : ''}
-      </div>
-    </div>
-  `;
+  return `<span data-workjet-pairing-qr-pending>${escapeHtml(state.error || 'Wird erzeugt…')}</span>`;
 }
 
 function workjetPairingSvgDataUrl(svgText) {

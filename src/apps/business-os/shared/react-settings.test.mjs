@@ -306,7 +306,7 @@ function baseTemplate(overrides = {}) {
   });
 }
 
-test('sync settings explain role-bound auth and expose the Workjet QR action', () => {
+test('sync settings render only signaling server, room, password, QR code, and link', () => {
   const html = baseTemplate({
     tab: 'sync',
     syncConfig: {
@@ -317,6 +317,7 @@ test('sync settings explain role-bound auth and expose the Workjet QR action', (
       instance_id: 'biz_test',
       native_peer_id: 'ctox-core-test',
       sync_room: 'ctox-business-os:biz_test:room',
+      signaling_room_password: 'room-password-test',
       signaling_auth_version: 'ctox-role-bound-v1',
       signaling_urls: [
         'wss://signaling.ctox.dev/v2?token=secret&token_exp=32503680000',
@@ -324,12 +325,19 @@ test('sync settings explain role-bound auth and expose the Workjet QR action', (
     },
     workjetPairing: { loading: false, invite: null, error: '' },
   });
-  assert.match(html, /Workjet verbinden/);
-  assert.match(html, /data-workjet-pairing-create/);
+  assert.match(html, /Signaling-Server/);
+  assert.match(html, />Raum</);
+  assert.match(html, />Passwort</);
+  assert.match(html, />QR-Code</);
+  assert.match(html, />Link</);
   assert.match(html, /ctox-business-os:biz_test:room/);
+  assert.match(html, /room-password-test/);
   assert.match(html, /wss:\/\/signaling\.ctox\.dev\/v2/);
-  assert.match(html, /kein separates Klartext-Passwort/i);
-  assert.match(html, /Kurzlebiger Token ist im QR enthalten/);
+  assert.doesNotMatch(html, /Business-OS-Hosting|Workjet verbinden|Technische Verbindung/);
+  assert.doesNotMatch(html, /App-Hosting|Sync-Modus|Transport|Peer-Rolle|Instanz/);
+  assert.doesNotMatch(html, /Zugang|Gültig bis|Ziel-Peer|Verbindungsraum/);
+  assert.doesNotMatch(html, /Gerätename|QR-Code erstellen|Neuen QR-Code|Sync Konfiguration/);
+  assert.doesNotMatch(html, /Klartext-Passwort|Kurzzeit-Token|Token ist im QR/);
 });
 
 test('Workjet pairing response is validated and rendered as an inert SVG image', async () => {
@@ -360,7 +368,9 @@ test('Workjet pairing response is validated and rendered as an inert SVG image',
   });
   assert.match(html, /data-workjet-pairing-ready/);
   assert.match(html, /alt="Workjet Pairing QR-Code"/);
+  assert.match(html, /data-workjet-pairing-link/);
   assert.match(html, /href="workjet:\/\/pair\?payload=/);
+  assert.doesNotMatch(html, /QR-Code mit Workjet scannen|In Workjet öffnen|Gültig bis/);
   assert.doesNotMatch(html, /<script/i);
 });
 
