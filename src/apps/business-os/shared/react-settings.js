@@ -1292,7 +1292,7 @@ function syncPanel(syncConfig, isAdmin, workjetPairing = {}) {
         <div>
           <dt>Link</dt>
           <dd>${pairingUri
-            ? `<a data-workjet-pairing-link href="${escapeAttr(pairingUri)}">${escapeHtml(pairingUri)}</a>${syncCopyButton('link', 'Link kopieren')}`
+            ? `${syncCopyButton('link', 'Link kopieren')}<a data-workjet-pairing-link href="${escapeAttr(pairingUri)}">${escapeHtml(pairingUri)}</a>`
             : '<span data-workjet-pairing-link-pending>—</span>'}
           </dd>
         </div>
