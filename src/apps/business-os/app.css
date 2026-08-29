@@ -7799,3 +7799,62 @@ button.shell-window-header-meta:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 .module-tab-attention[hidden] { display: none !important; }
+
+/* Embedded hosts routinely expose a 480–640 CSS-pixel shell
+   even when the physical screen has many more pixels.  The legacy <=900px
+   rule split the account controls and app navigation into two independent
+   rows, while the <=600px rule removed app navigation altogether.  Keep one
+   shell header at every compact width: start, scrollable app navigation, and
+   account/menu actions share the same 48px composition. */
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-rows: 48px minmax(0, 1fr);
+  }
+
+  .topbar,
+  :root[data-shell-style="ctox"] .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 40px;
+    min-height: 0 !important;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2) !important;
+  }
+
+  .topbar-status-bar {
+    display: none;
+  }
+
+  .module-nav {
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+    justify-self: stretch;
+    order: initial;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .module-tabs {
+    justify-content: flex-start;
+    min-height: 36px;
+    scroll-padding-inline: var(--space-1);
+  }
+
+  .topbar-actions {
+    grid-column: 3;
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 720px) {
+  .account-button {
+    width: 34px;
+    max-width: 34px;
+    padding-inline: 8px;
+  }
+
+  .account-button span {
+    display: none;
+  }
+}
