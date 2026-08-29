@@ -744,6 +744,12 @@
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
+  /* Am Browser gemessen: ohne min-width:0 HIER blieb die Karte 430 px breit in
+     einer 333-px-Spalte, und die ellipsis-Regel des Namens lief ins Leere -
+     min-width:0 am <strong> allein genuegt nicht, die Kette muss durchgaengig
+     sein. Mit dieser Regel kuerzt der Name auf 283 px und keine Karte
+     ueberschreitet die Spalte. */
+  min-width: 0;
 }
 
 .browser-adapter-head {
