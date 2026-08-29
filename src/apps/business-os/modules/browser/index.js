@@ -2687,12 +2687,67 @@ function adapterZugang(adapter) {
   return { klasse: 'is-neutral', text: t('chipAuthUnknown', 'Zugang ungeprüft') };
 }
 
+// Die Quellen liefern Maschinendiagnosen wie
+// "status=temporary_unreachable; reason=command_timed_out; records_found=0;
+// expected_fields=[...]". Roh angezeigt und bei 60 Zeichen mitten im Wort
+// abgeschnitten liest sich das wie ein Absturz, nicht wie ein Betriebszustand.
+// Diese Tabelle uebersetzt die tatsaechlich auftretenden Muster in einen Satz.
+// Reihenfolge ist Rangfolge: Das erste passende Muster gewinnt, denn eine
+// Diagnose nennt oft mehrere Symptome derselben Ursache. Ein Captcha erklaert
+// die Zeitueberschreitung, nicht umgekehrt.
+const ADAPTER_FEHLERMUSTER = Object.freeze([
+  [/captcha/i, 'Captcha verlangt', 'Die Quelle verlangt ein Captcha. Melden Sie sich einmal im Browser an.'],
+  [/blocked|forbidden|403/i, 'Zugriff blockiert', 'Die Quelle hat den Zugriff blockiert.'],
+  [/auth|login|credential|401/i, 'Anmeldung nötig', 'Die Quelle verlangt eine Anmeldung.'],
+  [/command_timed_out|timeout|timed_out/i, 'Zeitüberschreitung', 'Die Quelle hat nicht rechtzeitig geantwortet.'],
+  // Vor der generischen Huelle: "temporary_unreachable" ist oft nur der
+  // Statuscode um eine konkretere Aussage herum.
+  [/no exact company match|records_found=0/i, 'Kein Treffer', 'Die Quelle lieferte keinen passenden Treffer.'],
+  [/temporary_unreachable|unreachable|network/i, 'Nicht erreichbar', 'Die Quelle hat beim letzten Versuch nicht geantwortet.'],
+]);
+
+// Kurzform fuer den Statuschip: ein bis zwei Woerter, nie ein Rohstring.
+function adapterFehlerKurz(rohtext) {
+  const text = String(rohtext || '');
+  if (!text) return '';
+  for (const [muster, kurz] of ADAPTER_FEHLERMUSTER) if (muster.test(text)) return kurz;
+  return '';
+}
+
+// Langform fuer die Fehlerzeile. Erkannte Muster werden zu einem Satz; alles
+// Unbekannte wird an der Wortgrenze gekuerzt statt mitten im Wort.
+function adapterFehlerText(rohtext) {
+  const text = String(rohtext || '').trim();
+  if (!text) return '';
+  const treffer = ADAPTER_FEHLERMUSTER.find(([muster]) => muster.test(text));
+  if (treffer) return treffer[2];
+  const klartext = text.split('|')[0].replace(/\b[a-z_]+=\S+/g, '').replace(/\s+/g, ' ').trim();
+  const quelle = klartext || text;
+  if (quelle.length <= 90) return quelle;
+  const gekuerzt = quelle.slice(0, 90);
+  const grenze = gekuerzt.lastIndexOf(' ');
+  return (grenze > 40 ? gekuerzt.slice(0, grenze) : gekuerzt) + ' …';
+}
+
+// Ein Adapter ohne label zeigte seine nackte Domain neben gepflegten Namen wie
+// "D&B Hoovers". Aus der Domain laesst sich ein passabler Name ableiten.
+function adapterName(adapter) {
+  const label = String(adapter?.label || '').trim();
+  if (label) return label;
+  const quelle = String(adapter?.source_id || adapter?.id || '').trim();
+  if (!quelle) return '';
+  const kern = quelle.replace(/^www\./, '').split('.')[0];
+  if (!kern) return quelle;
+  const bekannt = { linkedin: 'LinkedIn', xing: 'XING', dnbhoovers: 'D&B Hoovers', companyhouse: 'CompanyHouse', northdata: 'Northdata', firmenabc: 'FirmenABC', moneyhouse: 'Moneyhouse', zefix: 'Zefix', rocketreach: 'RocketReach', leadfeeder: 'Leadfeeder', handelsregister: 'Handelsregister', bundesanzeiger: 'Bundesanzeiger', experte: 'Experte', maps: 'Google Maps', google: 'Google' };
+  return bekannt[kern.toLowerCase()] || (kern.charAt(0).toUpperCase() + kern.slice(1));
+}
+
 function adapterFunktion(adapter) {
   if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
   const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
   if (/(unreachable|fail|error|blocked|captcha|timeout)/.test(status) || adapter.last_error) {
-    const grund = String(adapter.last_error || status).slice(0, 60);
-    return { klasse: 'is-warn', text: t('chipFnFail', 'Prüfung fehlgeschlagen') + (grund ? ` (${grund})` : '') };
+    const grund = adapterFehlerKurz(adapter.last_error || status);
+    return { klasse: 'is-warn', text: t('chipFnFail', 'Prüfung fehlgeschlagen') + (grund ? ` · ${grund}` : '') };
   }
   if (/(ok|ready|passed|success)/.test(status)) {
     return { klasse: 'is-ok', text: t('chipFnOk', 'Funktion geprüft') };
@@ -2749,7 +2804,7 @@ function renderAdapterRail(ctx, refs, state) {
   }
   const suche = String(state.leftView?.search || '');
   for (const adapter of state.adapters) {
-    const label = String(adapter.label || adapter.source_id || adapter.id || '');
+    const label = adapterName(adapter);
     if (suche && !label.toLowerCase().includes(suche)) continue;
     const zugang = adapterZugang(adapter);
     const funktion = adapterFunktion(adapter);
@@ -2836,10 +2891,15 @@ function renderAdapterRail(ctx, refs, state) {
     }
     karte.append(kopf, chips, meta);
     if (aktionen.childElementCount) karte.appendChild(aktionen);
-    if (adapter.last_error) {
+    // Der Chip nennt den Grund bereits in Kurzform. Eine Zeile, die exakt
+    // dasselbe wiederholt, ist Laerm - sie erscheint nur, wenn sie mehr sagt.
+    const fehlertext = adapterFehlerText(adapter.last_error);
+    const chipNennt = funktion.text.includes(adapterFehlerKurz(adapter.last_error || ''));
+    if (fehlertext && !(chipNennt && fehlertext.replace(/\.$/, '') === adapterFehlerKurz(adapter.last_error || ''))) {
       const fehlerzeile = document.createElement('div');
       fehlerzeile.className = 'browser-adapter-error';
-      fehlerzeile.textContent = String(adapter.last_error).slice(0, 160);
+      fehlerzeile.textContent = fehlertext;
+      fehlerzeile.title = String(adapter.last_error);
       karte.appendChild(fehlerzeile);
     }
     rail.appendChild(karte);
@@ -3911,6 +3971,9 @@ export const __browserTestHooks = {
   SCRAPING_SOURCE_COLLECTIONS,
   mergeScrapingAdapterSource,
   mergeScrapingAdapterRows,
+  adapterFehlerKurz,
+  adapterFehlerText,
+  adapterName,
   normalizeUrl,
   browserSessionIdFromArgs,
   formatBytes,

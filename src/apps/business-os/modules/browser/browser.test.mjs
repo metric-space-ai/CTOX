@@ -1303,3 +1303,47 @@ function pointerEvent(overrides = {}) {
   );
   console.log('  ok: doppelte Adapter werden verlustfrei zusammengefuehrt');
 }
+
+// --- Kein Maschinentext in der Oberflaeche (Nutzerbefund 29.08.2026) ----------
+// Die Leiste zeigte "status=temporary_unreachable; reason=explicit_failure_mode_t"
+// - bei 60 Zeichen mitten im Wort abgeschnitten, daneben dieselbe Diagnose noch
+// einmal als roter Fliesstext mit JSON-Fragment. Das liest sich wie ein Absturz.
+{
+  const { adapterFehlerKurz, adapterFehlerText, adapterName } = __browserTestHooks;
+
+  const echt = 'status=temporary_unreachable; reason=command_timed_out; records_found=0; expected_fields=["Branche", "Umsatz", "Beschäftigte"]; extracted_fields=[]; missing_fie';
+  for (const fn of [adapterFehlerKurz, adapterFehlerText]) {
+    const text = fn(echt);
+    assert.ok(!/[a-z_]+=/.test(text), `kein Schluessel=Wert im Nutzertext: ${text}`);
+    assert.ok(!text.includes('['), `kein JSON-Fragment im Nutzertext: ${text}`);
+    assert.ok(!/_$|_[a-z]$/.test(text.replace(/ …$/, '')), `nicht mitten im Bezeichner abgeschnitten: ${text}`);
+  }
+  assert.equal(adapterFehlerKurz(echt), 'Zeitüberschreitung');
+  assert.equal(adapterFehlerText(echt), 'Die Quelle hat nicht rechtzeitig geantwortet.');
+
+  // Spezifisch schlaegt generisch: temporary_unreachable ist oft nur die Huelle.
+  const huelle = 'status=temporary_unreachable; reason=explicit_failure_mode_temporary_unreachable | bundesanzeiger.de returned no exact company match; records_found=0';
+  assert.equal(adapterFehlerKurz(huelle), 'Kein Treffer');
+
+  // Ein Captcha erklaert die Zeitueberschreitung, nicht umgekehrt.
+  assert.equal(adapterFehlerKurz('captcha detected; command_timed_out'), 'Captcha verlangt');
+
+  // Unbekanntes wird an der Wortgrenze gekuerzt, nie mitten im Wort.
+  const lang = adapterFehlerText('ein unbekannter Fehlertext der deutlich laenger ist als neunzig Zeichen und deshalb sauber gekuerzt gehoert');
+  assert.ok(lang.endsWith(' …'), 'gekuerzter Text endet mit Auslassung');
+  assert.ok(!/\w…/.test(lang), 'nicht mitten im Wort gekuerzt');
+
+  // Ein Adapter ohne label darf nicht als nackte Domain neben gepflegten
+  // Namen wie "D&B Hoovers" stehen.
+  assert.equal(adapterName({ source_id: 'linkedin.com' }), 'LinkedIn');
+  assert.equal(adapterName({ source_id: 'xing.com' }), 'XING');
+  assert.equal(adapterName({ source_id: 'unbekannt.de' }), 'Unbekannt');
+  assert.equal(adapterName({ source_id: 'linkedin.com', label: 'LinkedIn Sales' }), 'LinkedIn Sales', 'ein gepflegtes label gewinnt');
+
+  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.ok(
+    !/String\(adapter\.last_error\)\.slice\(/.test(quelle),
+    'last_error darf nicht roh abgeschnitten in die Oberflaeche',
+  );
+  console.log('  ok: Adapterfehler erscheinen als Satz, nicht als Maschinentext');
+}
