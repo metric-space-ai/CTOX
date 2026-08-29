@@ -160,12 +160,17 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
     );
     let key_configured =
         !proxy_subscription_selected && crate::secrets::get_credential(root, key_name).is_some();
+    let available_models_by_provider = available_subscription_models_by_provider(root);
     let available_models = if proxy_subscription_selected {
-        crate::execution::cliproxyapi_host::instance_proxy_route_capabilities(root)
-            .into_iter()
-            .filter(|route| subscription_provider.as_deref() == Some(route.provider.as_str()))
-            .map(|route| route.model)
-            .collect::<Vec<_>>()
+        available_models_by_provider
+            .get(&provider)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     } else if provider.eq_ignore_ascii_case("ctox_proxy") {
         discover_ctox_proxy_models(
             &upstream_base_url,
@@ -309,6 +314,7 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
                 .unwrap_or(1800),
             "upstream_base_url": upstream_base_url,
             "available_models": available_models,
+            "available_models_by_provider": available_models_by_provider,
             "model_catalog_source": if proxy_subscription_selected {
                 "subscription"
             } else if provider.eq_ignore_ascii_case("ctox_proxy") {
@@ -339,6 +345,39 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
             "message": diagnostics_message
         }
     }))
+}
+
+fn available_subscription_models_by_provider(root: &Path) -> BTreeMap<String, Vec<Value>> {
+    let routes = crate::execution::cliproxyapi_host::instance_proxy_route_capabilities(root);
+    let catalog = ctox_cliproxyapi::internal::registry::embedded_models_catalog().ok();
+    let mut models_by_provider = BTreeMap::<String, Vec<Value>>::new();
+
+    for route in routes {
+        let provider = runtime_provider_for_subscription(&route.provider).to_owned();
+        let reasoning_levels = catalog
+            .as_ref()
+            .and_then(|catalog| {
+                ctox_cliproxyapi::internal::registry::models_for_channel(catalog, &route.provider)
+            })
+            .and_then(|models| {
+                models
+                    .into_iter()
+                    .find(|model| model.id.eq_ignore_ascii_case(&route.model))
+            })
+            .and_then(|model| model.thinking)
+            .map(|thinking| thinking.levels)
+            .unwrap_or_default();
+        models_by_provider
+            .entry(provider)
+            .or_default()
+            .push(serde_json::json!({
+                "id": route.model,
+                "reasoning_levels": reasoning_levels,
+                "default": route.default,
+            }));
+    }
+
+    models_by_provider
 }
 
 fn ctox_proxy_models_url(base_url: &str) -> Option<String> {

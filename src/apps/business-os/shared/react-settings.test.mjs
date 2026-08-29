@@ -32,6 +32,62 @@ test('CTOX proxy model options follow the discovered proxy catalog', () => {
   );
 });
 
+test('OpenAI model options prefer the CLIProxy-discovered 5.6 inference catalog', () => {
+  assert.deepEqual(
+    hooks.runtimeModelOptions('openai', '', [
+      { id: 'gpt-5.5' },
+      { id: 'gpt-image-2' },
+      { id: 'gpt-5.6-luna' },
+      { id: 'codex-auto-review' },
+      { id: 'gpt-5.6-sol' },
+      { id: 'gpt-5.6-terra' },
+    ]),
+    [
+      ['', 'Nicht gesetzt'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
+      ['gpt-5.6-terra', 'gpt-5.6-terra'],
+      ['gpt-5.6-luna', 'gpt-5.6-luna'],
+      ['gpt-5.5', 'gpt-5.5'],
+    ],
+  );
+  assert.deepEqual(
+    hooks.runtimeModelOptions('openai', '', []),
+    [
+      ['', 'Nicht gesetzt'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
+      ['gpt-5.6-terra', 'gpt-5.6-terra'],
+      ['gpt-5.6-luna', 'gpt-5.6-luna'],
+      ['gpt-5.4', 'gpt-5.4'],
+      ['gpt-5.4-mini', 'gpt-5.4-mini'],
+    ],
+  );
+});
+
+test('subscription provider switches render their discovered model catalog before saving', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: {
+        provider: 'openai', chat_model: '', reasoning_effort: '', available_models: [],
+        available_models_by_provider: {
+          openai: [
+            { id: 'gpt-5.6-sol', reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+            { id: 'gpt-5.6-terra', reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+            { id: 'gpt-5.6-luna', reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+          ],
+        },
+      },
+      auth: { mode: 'subscription', subscription_session_configured: true },
+      diagnostics: {},
+    },
+  });
+  assert.match(html, /data-value="gpt-5\.6-sol"/);
+  assert.match(html, /data-value="gpt-5\.6-terra"/);
+  assert.match(html, /data-value="gpt-5\.6-luna"/);
+  assert.doesNotMatch(html, /data-value="gpt-5\.5"/);
+});
+
 test('runtime settings follow the Workjet provider-access-model-reasoning flow', () => {
   const html = baseTemplate({
     tab: 'runtime',
@@ -374,7 +430,13 @@ test('ready subscription projection renders one consistent connected state', () 
 test('reasoning choices track the selected model capability', () => {
   assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.5'), ['low', 'medium', 'high', 'xhigh']);
   assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-luna'), ['low', 'medium', 'high', 'xhigh', 'max']);
-  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-sol'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-sol'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(
+    hooks.runtimeReasoningOptions('openai', 'future-model', [
+      { id: 'future-model', reasoning_levels: ['low', 'high', 'max'] },
+    ]),
+    ['low', 'high', 'max'],
+  );
 });
 
 test('subscription auth always opens a fresh same-origin code window', () => {

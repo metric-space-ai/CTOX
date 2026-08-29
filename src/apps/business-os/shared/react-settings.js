@@ -1339,8 +1339,8 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
         ` : ''}
         ${usesApiKey ? `<label class="runtime-field runtime-access-detail"><span>API Key</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'Gespeichert · leer lassen, um ihn zu behalten' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
         ${usesSubscription ? subscriptionStatus(provider, runtimeSettings?.provider_subscriptions, auth, canManage, subscriptionAuth) : ''}
-        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtime.available_models, 'Modell')}
-        ${runtimeReasoningControl(provider, runtime.chat_model, runtime.reasoning_effort, canManage)}
+        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtimeAvailableModels(runtime, provider, authMode), 'Modell')}
+        ${runtimeReasoningControl(provider, runtime.chat_model, runtime.reasoning_effort, canManage, runtimeAvailableModels(runtime, provider, authMode))}
         <details class="runtime-advanced">
           <summary>Weitere Einstellungen</summary>
           <div class="runtime-advanced-grid">
@@ -2535,20 +2535,31 @@ function runtimeChoiceButton(target, value, label, selected, canManage, leading 
   return `<button class="runtime-choice ${selected ? 'is-selected' : ''}" type="button" data-runtime-choice="${escapeAttr(target)}" data-value="${escapeAttr(value)}" ${canManage ? '' : 'disabled'} aria-pressed="${selected ? 'true' : 'false'}">${leading}${escapeHtml(label)}</button>`;
 }
 
-function runtimeReasoningOptions(provider, model) {
+function runtimeReasoningOptions(provider, model, availableModels = []) {
   const normalizedProvider = String(provider || '').trim().toLowerCase();
   const normalizedModel = String(model || '').trim().toLowerCase();
   if (normalizedProvider === 'local') return [];
+  const discovered = Array.isArray(availableModels)
+    ? availableModels.find((candidate) => {
+      const id = typeof candidate === 'string' ? candidate : candidate?.id;
+      return String(id || '').trim().toLowerCase() === normalizedModel;
+    })
+    : null;
+  if (discovered && typeof discovered === 'object' && Array.isArray(discovered.reasoning_levels)) {
+    return [...new Set(discovered.reasoning_levels
+      .map((effort) => String(effort || '').trim().toLowerCase())
+      .filter(Boolean))];
+  }
   if (normalizedModel.includes('5.6-luna')) return ['low', 'medium', 'high', 'xhigh', 'max'];
   if (normalizedModel.includes('5.6-sol') || normalizedModel.includes('5.6-terra')) {
-    return ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+    return ['low', 'medium', 'high', 'xhigh', 'max'];
   }
   return ['low', 'medium', 'high', 'xhigh'];
 }
 
-function runtimeReasoningControl(provider, model, current, canManage) {
+function runtimeReasoningControl(provider, model, current, canManage, availableModels = []) {
   const value = String(current || '').trim().toLowerCase();
-  const options = runtimeReasoningOptions(provider, model);
+  const options = runtimeReasoningOptions(provider, model, availableModels);
   if (!options.length) return '<input type="hidden" data-runtime-reasoning value="" />';
   return `<div class="runtime-choice-section">
     <span class="runtime-section-label">Reasoning</span>
@@ -2563,17 +2574,35 @@ function runtimeReasoningControl(provider, model, current, canManage) {
 }
 
 function runtimeModelOptions(provider, current, availableModels = []) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
   const discovered = Array.isArray(availableModels)
     ? availableModels
       .map((model) => typeof model === 'string' ? model.trim() : String(model?.id || '').trim())
       .filter(Boolean)
     : [];
+  const visibleDiscovered = [...new Set(discovered)]
+    .filter((model) => normalizedProvider !== 'openai'
+      || (!model.toLowerCase().startsWith('gpt-image-')
+        && model.toLowerCase() !== 'codex-auto-review'));
+  if (normalizedProvider === 'openai') {
+    visibleDiscovered.sort((left, right) => {
+      const priority = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+      const leftPriority = priority.indexOf(left.toLowerCase());
+      const rightPriority = priority.indexOf(right.toLowerCase());
+      if (leftPriority >= 0 || rightPriority >= 0) {
+        return (leftPriority < 0 ? priority.length : leftPriority)
+          - (rightPriority < 0 ? priority.length : rightPriority);
+      }
+      return left.localeCompare(right);
+    });
+  }
   const byProvider = {
     openai: [
-      ['gpt-5.5', 'gpt-5.5'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
+      ['gpt-5.6-terra', 'gpt-5.6-terra'],
+      ['gpt-5.6-luna', 'gpt-5.6-luna'],
       ['gpt-5.4', 'gpt-5.4'],
       ['gpt-5.4-mini', 'gpt-5.4-mini'],
-      ['gpt-5.3-codex', 'gpt-5.3-codex'],
     ],
     openrouter: [
       ['openrouter/minimax/m2.7', 'openrouter/minimax/m2.7'],
@@ -2581,26 +2610,42 @@ function runtimeModelOptions(provider, current, availableModels = []) {
     anthropic: [
       ['claude-opus-4-6', 'claude-opus-4-6'],
     ],
-    antigravity: discovered.map((model) => [model, model]),
-    kimi: discovered.length ? discovered.map((model) => [model, model]) : [['kimi-k3[1m]', 'kimi-k3[1m]']],
+    antigravity: visibleDiscovered.map((model) => [model, model]),
+    kimi: visibleDiscovered.length ? visibleDiscovered.map((model) => [model, model]) : [['kimi-k3[1m]', 'kimi-k3[1m]']],
     minimax: [
       ['MiniMax-M3', 'MiniMax-M3'],
     ],
-    ctox_proxy: discovered.length
-      ? discovered.map((model) => [model, model])
+    ctox_proxy: visibleDiscovered.length
+      ? visibleDiscovered.map((model) => [model, model])
       : [
         ['MiniMax-M3', 'MiniMax-M3'],
         ['kimi-k3', 'kimi-k3'],
       ],
   };
-  const options = discovered.length
-    ? discovered.map((model) => [model, model])
-    : (byProvider[String(provider || '').toLowerCase()] || []);
+  const options = visibleDiscovered.length
+    ? visibleDiscovered.map((model) => [model, model])
+    : (byProvider[normalizedProvider] || []);
   if (!current) return [['', 'Nicht gesetzt'], ...options];
   if (!options.some(([value]) => value.toLowerCase() === current.toLowerCase())) {
     return [[current, current], ...options];
   }
   return options;
+}
+
+function runtimeAvailableModels(runtime, provider, authMode) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  if (isSubscriptionMode(authMode)) {
+    const discovered = runtime?.available_models_by_provider?.[normalizedProvider];
+    if (Array.isArray(discovered)) return discovered;
+  }
+  if (String(runtime?.model_catalog_source || '').trim().toLowerCase() === 'subscription') {
+    return [];
+  }
+  if (normalizedProvider === String(runtime?.provider || '').trim().toLowerCase()
+    && Array.isArray(runtime?.available_models)) {
+    return runtime.available_models;
+  }
+  return [];
 }
 
 function runtimeDiagnosticMessage(provider, authMode, auth, diagnostics) {
@@ -2988,7 +3033,8 @@ function runtimePayloadFromForm(root) {
 function runtimeSettingsWithDraft(current, draft) {
   const provider = draft.provider || current?.runtime?.provider || '';
   const authMode = normalizedRuntimeAuthMode(provider, draft.auth_mode);
-  const supportedReasoning = runtimeReasoningOptions(provider, draft.chat_model);
+  const availableModels = runtimeAvailableModels(current?.runtime, provider, authMode);
+  const supportedReasoning = runtimeReasoningOptions(provider, draft.chat_model, availableModels);
   const reasoningEffort = String(draft.reasoning_effort || '').trim().toLowerCase();
   const providerChanged = String(provider).toLowerCase()
     !== String(current?.runtime?.provider || '').toLowerCase();
@@ -3003,7 +3049,7 @@ function runtimeSettingsWithDraft(current, draft) {
       preset: runtimePresetValue(draft.preset),
       context: runtimeContextValue(draft.context),
       max_run_secs: draft.max_run_secs,
-      available_models: providerChanged ? [] : (current?.runtime?.available_models || []),
+      available_models: availableModels,
     },
     auth: {
       ...(current?.auth || {}),
