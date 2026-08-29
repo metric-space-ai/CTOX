@@ -8,6 +8,7 @@ import {
   authorizeInstanceConnect,
   authorizeInstanceId,
   authorizeManagedInstanceConnect,
+  authorizeManagedStatusObserver,
   authorizeMcpClientForRequest,
   gatewayMode,
   authorize,
@@ -641,6 +642,29 @@ test("managed status route reports a specific instance session", async () => {
   assert.equal(forwardedPath, "/status");
   assert.equal(body.connected, true);
   assert.equal(body.pending, 2);
+});
+
+test("managed control plane can observe connector status without a client token", async () => {
+  const response = await handleRequest(
+    new Request("https://mcp.ctox.dev/status/welsch.ctox.dev", {
+      headers: { "x-ctox-managed-mcp-auth": "gateway-secret" }
+    }),
+    {
+      CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret",
+      BUSINESS_OS_MCP_SESSIONS: fakeSessionsBinding(async () =>
+        new Response(JSON.stringify({ connected: true }), {
+          headers: { "content-type": "application/json" }
+        })
+      )
+    }
+  );
+
+  assert.equal(authorizeManagedStatusObserver(
+    new Request("https://mcp.ctox.dev/status/welsch.ctox.dev"),
+    { CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret" }
+  ), false);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).connected, true);
 });
 
 test("managed route parser accepts only bounded instance ids", () => {
