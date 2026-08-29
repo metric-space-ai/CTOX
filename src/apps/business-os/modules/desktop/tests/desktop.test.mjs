@@ -10,9 +10,10 @@ await import('./responsive.test.mjs');
 // diese Sammlungen schreibgeschuetzt; der Fehler wurde durchgereicht und brach
 // den Mount ab. Damit entstand eine Verklemmung: der Wartungs-Lease endet erst,
 // wenn der Browser seine Sammlungen bestaetigt, und diese Bestaetigung setzt
-// einen erfolgreichen Mount voraus. Gemessen auf thesen.ctox.dev: Desktop ohne
-// jedes Symbol, Sync dauerhaft bei "0/3 - Wartet auf Icons, Layout", Lease bei
-// gesundem Peer endlos verlaengert.
+// einen erfolgreichen Mount voraus. Auf einer Produktionsinstanz trat der
+// Desktop deshalb ohne jedes Symbol auf; Sync blieb dauerhaft bei
+// "0/3 - Wartet auf Icons, Layout" und der Lease wurde trotz gesundem Peer
+// endlos verlaengert.
 {
   const quelle = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 
@@ -49,7 +50,7 @@ await import('./responsive.test.mjs');
 
 // --- Symbole duerfen einander nicht verdecken (E2E-01-Befund 29.08.2026) -----
 // normalizeIconLayoutIfNeeded prueste nur auf exakt gleiche Koordinaten. Auf
-// thesen.ctox.dev lagen "Outbound Lead Generation" (128, 520) und
+// In der Referenzinstanz lagen "Outbound Lead Generation" (128, 520) und
 // "Bugs & Features" (99, 556) mit 7455 px2 uebereinander: Beschriftungen
 // unlesbar, und das obere Symbol fing die Klicks des unteren ab, sodass die
 // Outbound-App nicht zu oeffnen war. Verschiedene Schluessel, also keine

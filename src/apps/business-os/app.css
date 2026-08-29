@@ -30,6 +30,7 @@
   --glass-bg: var(--surface);
   --glass-blur: none;
   --shell-topbar-bg: var(--surface);
+  --shell-topbar-height: 48px;
   --shell-app-bg: var(--bg);
   --shell-control-bg: var(--surface-2);
   --shell-topbar-shadow: none;
@@ -197,7 +198,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   width: 100dvw;
   min-width: 360px;
   max-width: none;
@@ -208,7 +209,7 @@ button {
 }
 
 body[data-maintenance-active="true"] .app-shell {
-  grid-template-rows: 48px auto minmax(0, 1fr);
+  grid-template-rows: var(--shell-topbar-height) auto minmax(0, 1fr);
 }
 
 .ctox-maintenance-banner {
@@ -344,7 +345,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   align-items: center;
   gap: var(--space-4);
   min-width: 0;
-  min-height: 48px;
+  min-height: var(--shell-topbar-height);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--hairline, var(--line));
   background: var(--shell-topbar-bg, var(--surface));
@@ -1256,10 +1257,10 @@ body.is-resizing * {
 
 .shell-start-menu-panel {
   position: fixed;
-  top: 52px;
+  top: var(--shell-topbar-height);
   left: 14px;
   width: 360px;
-  max-height: calc(100vh - 80px);
+  max-height: calc(100vh - var(--shell-topbar-height) - var(--space-4));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -4347,26 +4348,40 @@ body[data-auth-state="locked"] .topbar {
 
 @media (max-width: 900px) {
   .topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: 52px 42px;
-    gap: 0 var(--space-2);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 40px;
+    min-height: var(--shell-topbar-height);
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
   }
 
   .topbar-actions {
     width: auto;
   }
 
+  .topbar-status-bar {
+    display: none;
+  }
+
   .module-nav {
-    grid-column: 1 / -1;
-    order: 3;
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+    justify-self: stretch;
+    order: initial;
+    width: 100%;
+    overflow: hidden;
   }
 
   .module-tabs {
     justify-content: flex-start;
+    min-height: 36px;
+    scroll-padding-inline: var(--space-1);
   }
 
   .app-shell {
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   }
 
   .workspace-frame {
@@ -4379,19 +4394,31 @@ body[data-auth-state="locked"] .topbar {
   }
 }
 
+@media (max-width: 720px) {
+  .account-button {
+    width: 34px;
+    max-width: 34px;
+    padding-inline: 8px;
+  }
+
+  .account-button span {
+    display: none;
+  }
+}
+
 /* Matching-aligned shell finish. The token values for this section
    (--panel-shadow, --shell-topbar-bg, --shell-app-bg, --shell-control-bg,
    --shell-topbar-shadow) are defined once in the :root blocks at the top of
    this file. */
 .topbar {
-  min-height: 52px;
+  min-height: var(--shell-topbar-height);
   border-bottom-color: var(--hairline);
   background: var(--shell-topbar-bg);
   box-shadow: var(--shell-topbar-shadow);
 }
 
 .app-shell {
-  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   background: var(--shell-app-bg);
 }
 
@@ -4499,7 +4526,7 @@ body[data-auth-state="locked"] .topbar {
 
 .shell-notifications {
   position: fixed;
-  top: 64px;
+  top: calc(var(--shell-topbar-height) + var(--space-4));
   left: 16px;
   display: flex;
   flex-direction: column;
@@ -4527,7 +4554,7 @@ body[data-auth-state="locked"] .topbar {
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  min-height: 50px;
+  min-height: var(--shell-topbar-height);
 }
 :root[data-shell-style="macos"] .brand-copy {
   display: none;
@@ -4543,7 +4570,7 @@ body[data-auth-state="locked"] .topbar {
 }
 :root[data-shell-style="macos"] .module-tabs {
   gap: 2px;
-  justify-content: center;
+  justify-content: safe center;
 }
 :root[data-shell-style="macos"] .module-tab {
   border-radius: 9px;
@@ -6658,7 +6685,7 @@ body.is-resizing-horizontal * { cursor: row-resize !important; }
 }
 
 .topbar {
-  min-height: 48px;
+  min-height: var(--shell-topbar-height);
   padding: var(--space-1) var(--space-2);
   background: var(--surface) !important;
   border-bottom: 1px solid var(--line) !important;
@@ -6907,13 +6934,13 @@ button.shell-window-header-meta:focus-visible,
   }
 
   .app-shell {
-    grid-template-rows: 48px minmax(0, 1fr);
+    grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   }
 
   .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-rows: 40px;
-    min-height: 48px;
+    min-height: var(--shell-topbar-height);
     gap: var(--space-1);
     padding: var(--space-1) var(--space-2);
   }
@@ -6933,16 +6960,15 @@ button.shell-window-header-meta:focus-visible,
     height: 40px;
   }
 
-  .topbar-status-bar,
-  .module-nav {
+  .topbar-status-bar {
     display: none;
   }
 
   .shell-start-menu-panel {
-    top: 48px;
+    top: var(--shell-topbar-height);
     left: 0;
     width: 100%;
-    max-height: calc(100dvh - 48px - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - var(--shell-topbar-height) - env(safe-area-inset-bottom, 0px));
     border-radius: 0;
   }
 
@@ -7032,7 +7058,7 @@ button.shell-window-header-meta:focus-visible,
   .drawer-left,
   .drawer-right,
   .drawer-bottom {
-    inset: 48px 0 0 !important;
+    inset: var(--shell-topbar-height) 0 0 !important;
     width: auto !important;
     max-width: none !important;
     max-height: none !important;
@@ -7639,6 +7665,20 @@ button.shell-window-header-meta:focus-visible,
     0 2px 8px color-mix(in srgb, var(--bg) 10%, transparent) !important;
 }
 
+/* Embedded compact surfaces use the same edge-to-edge header geometry as
+   the other shell styles. The desktop CTOX island remains unchanged. */
+@media (max-width: 900px) {
+  :root[data-shell-style="ctox"] .topbar {
+    margin: 0;
+    padding: var(--space-1) var(--space-2) !important;
+    gap: var(--space-1);
+    border-top: 0 !important;
+    border-inline: 0 !important;
+    border-radius: 0;
+  }
+
+}
+
 :root[data-shell-style="ctox"] .topbar-brand-triad {
   padding: 0 var(--space-1);
   gap: var(--space-1);
@@ -7685,7 +7725,7 @@ button.shell-window-header-meta:focus-visible,
 /* --- Start menu: a floating glass panel under the island ---------------- */
 
 :root[data-shell-style="ctox"] .shell-start-menu-panel {
-  top: 54px;
+  top: var(--shell-topbar-height);
   left: 16px;
   border-radius: 18px !important;
   border: 1px solid color-mix(in srgb, var(--line) 46%, transparent);

@@ -16,7 +16,8 @@
     "business_module_reports",
     "business_module_source_files",
     "business_module_commits",
-    "business_module_source_blob_chunks"
+    "business_module_source_blob_chunks",
+    "workjet_computers"
   ],
   "layout": {
     "shell": "windowed",

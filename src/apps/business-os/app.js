@@ -73,7 +73,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260829-desktop-icon-overlap-v287';
+const APP_BUILD = '20260829-workjet-shell-responsive-header-v287';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -279,6 +279,9 @@ const state = {
   eventBus: null,
   contextMenu: null,
   notifications: null,
+  compactWarningToasts: { ctox: null, recovery: null },
+  compactWarningFingerprints: { ctox: '', recovery: '' },
+  compactWarningMediaBound: false,
   windowManager: null,
   windowSwitcher: null,
   windowGeometryCache: new Map(),
@@ -377,6 +380,7 @@ function installAdvancedStatusInterface() {
   };
   window.CTOX_BUSINESS_OS_STATUS = api;
   window.CTOX_BUSINESS_OS_APP = state;
+  globalThis.workjetComputerControl = workjetComputerControl;
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
 }
 
@@ -1052,6 +1056,9 @@ async function bootstrap() {
     container: els.shellNotifications,
     t: (key, fallback) => shellText(key) || fallback || key,
   });
+  bindCompactShellWarningNotifications();
+  renderShellCtoxWarning(state.ctoxHealth);
+  renderBrowserRecoveryWarning();
   const snapPreviewEl = document.createElement('div');
   snapPreviewEl.className = 'shell-snap-preview';
   snapPreviewEl.hidden = true;
@@ -5141,6 +5148,13 @@ async function openModule(moduleId, options = {}) {
   }
   if (state.activeModule?.id === mod.id && !options.force) return;
 
+  // A full-workspace module is a foreground surface, not another desktop
+  // window.  Leaving an unrelated floating window above it made a successful
+  // tile click look dead until the user manually closed that window.  Follow
+  // normal desktop semantics: preserve every window and its state, but
+  // minimize visible windows before foreground navigation.
+  if (state.activeModule?.id !== mod.id) state.windowManager?.minimizeAll?.();
+
   // Track history stack
   if (!options.isNavHistory) {
     if (state.navIndex < state.navHistory.length - 1) {
@@ -9030,12 +9044,18 @@ function renderShellCtoxWarning(status) {
     els.ctoxWarning.hidden = true;
     els.ctoxWarning.removeAttribute('title');
     document.body.dataset.ctoxOperational = 'ok';
+    syncCompactShellWarningNotification('ctox', null);
     return;
   }
   els.ctoxWarning.hidden = false;
   els.ctoxWarning.textContent = shellText('ctoxNotWorking');
   els.ctoxWarning.title = problem;
   document.body.dataset.ctoxOperational = 'blocked';
+  syncCompactShellWarningNotification('ctox', {
+    title: shellText('ctoxNotWorking'),
+    message: problem,
+    action: () => openSettingsDrawer({ initialTab: 'runtime' }),
+  });
 }
 
 function updateRecoveryWarningFromEvent(event) {
@@ -9081,10 +9101,61 @@ function renderBrowserRecoveryWarning() {
   els.recoveryWarning.hidden = !warning;
   if (!warning) {
     els.recoveryWarning.removeAttribute('title');
+    syncCompactShellWarningNotification('recovery', null);
     return;
   }
   els.recoveryWarning.textContent = shellText('recoveryExport');
-  els.recoveryWarning.title = `${warning.pendingWrites} pending write(s); storage pressure ${Math.round(warning.pressureRatio * 100)}%`;
+  const message = `${warning.pendingWrites} pending write(s); storage pressure ${Math.round(warning.pressureRatio * 100)}%`;
+  els.recoveryWarning.title = message;
+  syncCompactShellWarningNotification('recovery', {
+    title: shellText('recoveryExport'),
+    message,
+    action: () => exportBrowserRecoveryFromWarning(),
+  });
+}
+
+function compactShellMediaMatches() {
+  try {
+    const media = globalThis.matchMedia?.('(max-width: 900px)');
+    return media ? media.matches === true : globalThis.innerWidth <= 900;
+  } catch {
+    return globalThis.innerWidth <= 900;
+  }
+}
+
+function syncCompactShellWarningNotification(kind, warning) {
+  const notifications = state.notifications;
+  if (!notifications || !(kind in state.compactWarningToasts)) return;
+  const visibleWarning = compactShellMediaMatches() ? warning : null;
+  const fingerprint = visibleWarning
+    ? `${visibleWarning.title}\n${visibleWarning.message}`
+    : '';
+  if (state.compactWarningFingerprints[kind] === fingerprint) return;
+  const existingId = state.compactWarningToasts[kind];
+  if (existingId) notifications.close(existingId);
+  state.compactWarningToasts[kind] = null;
+  state.compactWarningFingerprints[kind] = fingerprint;
+  if (!visibleWarning) return;
+  state.compactWarningToasts[kind] = notifications.show({
+    type: 'warning',
+    time: 0,
+    title: visibleWarning.title,
+    message: visibleWarning.message,
+    action: {
+      label: visibleWarning.title,
+      callback: visibleWarning.action,
+    },
+  });
+}
+
+function bindCompactShellWarningNotifications() {
+  if (state.compactWarningMediaBound || typeof globalThis.matchMedia !== 'function') return;
+  const media = globalThis.matchMedia('(max-width: 900px)');
+  media.addEventListener?.('change', () => {
+    renderShellCtoxWarning(state.ctoxHealth);
+    renderBrowserRecoveryWarning();
+  });
+  state.compactWarningMediaBound = true;
 }
 
 function renderBrowserConflictsWarning() {
@@ -10698,6 +10769,246 @@ async function dispatchShellModuleCommand({
       actor: actorContext(state.session),
     },
   }, { until: 'accepted' });
+}
+
+const WORKJET_COMPUTER_CONTROL_MAX_RESULTS = 100;
+const WORKJET_COMPUTER_CONTROL_TIMEOUT_MS = 30_000;
+const WORKJET_SELF_HOST_COLOCATION_CONFIRMATION = 'workjet-self-host-colocation.v1';
+
+async function workjetComputerControl(request = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('Workjet computer control request must be an object.');
+  }
+  const action = boundedWorkjetComputerText(request.action, 'action', 64);
+  const ownerUserId = boundedWorkjetComputerText(actorContext(state.session).id, 'owner_user_id', 256);
+  const computerBridge = await requireWorkjetComputerDataPlane();
+
+  if (action === 'computer.list') {
+    assertWorkjetComputerPayloadKeys(request, new Set(['action']));
+    const commandId = `cmd_workjet_computer_list_${newId()}`;
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.computer.list',
+      record_id: ownerUserId,
+      payload: { limit: WORKJET_COMPUTER_CONTROL_MAX_RESULTS },
+      client_context: {
+        source: 'workjet-computer-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_COMPUTER_CONTROL_TIMEOUT_MS });
+    await waitForSyncBridgeReady(computerBridge, WORKJET_COMPUTER_CONTROL_TIMEOUT_MS);
+    return {
+      action: 'computer.list',
+      computers: await listProjectedWorkjetComputers(ownerUserId),
+    };
+  }
+
+  if (action === 'computer.assign') {
+    assertWorkjetComputerPayloadKeys(request, new Set([
+      'action',
+      'commandId',
+      'computerId',
+      'displayName',
+      'hostingMode',
+      'capabilities',
+      'selfHostedColocation',
+      'colocationConfirmation',
+    ]));
+    const commandId = boundedWorkjetComputerText(request.commandId, 'commandId', 128);
+    const computerId = boundedWorkjetComputerText(request.computerId, 'computerId', 160);
+    const displayName = boundedWorkjetComputerText(request.displayName, 'displayName', 256);
+    const hostingMode = boundedWorkjetComputerHostingMode(request.hostingMode);
+    const capabilities = boundedWorkjetComputerCapabilities(request.capabilities);
+    const selfHostedColocation = request.selfHostedColocation === true;
+    if (request.selfHostedColocation !== undefined
+      && typeof request.selfHostedColocation !== 'boolean') {
+      throw new Error('Invalid Workjet computer selfHostedColocation.');
+    }
+    let colocationConfirmation;
+    if (request.colocationConfirmation !== undefined) {
+      colocationConfirmation = boundedWorkjetComputerText(
+        request.colocationConfirmation,
+        'colocationConfirmation',
+        64,
+      );
+    }
+    if (selfHostedColocation
+      && colocationConfirmation !== WORKJET_SELF_HOST_COLOCATION_CONFIRMATION) {
+      throw new Error('Self-hosted co-location requires explicit workjet-self-host-colocation.v1 confirmation.');
+    }
+    const payload = {
+      computer_id: computerId,
+      display_name: displayName,
+      hosting_mode: hostingMode,
+      capabilities,
+      self_hosted_colocation: selfHostedColocation,
+    };
+    if (colocationConfirmation !== undefined) {
+      payload.colocation_confirmation = colocationConfirmation;
+    }
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.computer.assign',
+      record_id: computerId,
+      payload,
+      client_context: {
+        source: 'workjet-computer-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_COMPUTER_CONTROL_TIMEOUT_MS });
+    const computer = await waitForProjectedWorkjetComputer(
+      computerId,
+      ownerUserId,
+      'assigned',
+      computerBridge,
+      WORKJET_COMPUTER_CONTROL_TIMEOUT_MS,
+    );
+    return { action: 'computer.assign', computer };
+  }
+
+  if (action === 'computer.unassign') {
+    assertWorkjetComputerPayloadKeys(request, new Set(['action', 'commandId', 'computerId']));
+    const commandId = boundedWorkjetComputerText(request.commandId, 'commandId', 128);
+    const computerId = boundedWorkjetComputerText(request.computerId, 'computerId', 160);
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.computer.unassign',
+      record_id: computerId,
+      payload: { computer_id: computerId },
+      client_context: {
+        source: 'workjet-computer-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_COMPUTER_CONTROL_TIMEOUT_MS });
+    const computer = await waitForProjectedWorkjetComputer(
+      computerId,
+      ownerUserId,
+      'unassigned',
+      computerBridge,
+      WORKJET_COMPUTER_CONTROL_TIMEOUT_MS,
+    );
+    return { action: 'computer.unassign', computer };
+  }
+
+  throw new Error(`Unsupported Workjet computer control action: ${action}`);
+}
+
+async function requireWorkjetComputerDataPlane() {
+  if (!state.commandBus?.dispatch || !state.db?.collection?.('business_commands')) {
+    throw new Error('Workjet computer control is not ready.');
+  }
+  const collection = state.db?.collection?.('workjet_computers');
+  if (!collection) throw new Error('workjet_computers collection is not registered.');
+  const commandBridge = await state.sync?.startCollection?.('business_commands');
+  await waitForSyncBridgeReady(commandBridge, 15_000);
+  const computerBridge = await state.sync?.startCollection?.('workjet_computers');
+  await waitForSyncBridgeReady(computerBridge, 15_000);
+  return computerBridge;
+}
+
+async function listProjectedWorkjetComputers(ownerUserId) {
+  const collection = state.db?.collection?.('workjet_computers');
+  const docs = await collection.find({
+    selector: {
+      owner_user_id: { $eq: ownerUserId },
+      status: { $eq: 'assigned' },
+    },
+    limit: WORKJET_COMPUTER_CONTROL_MAX_RESULTS,
+  }).exec();
+  return docs
+    .map((doc) => boundedWorkjetComputerResult(doc?.toJSON?.() || doc))
+    .filter(Boolean)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName)
+      || left.id.localeCompare(right.id));
+}
+
+async function waitForProjectedWorkjetComputer(
+  computerId,
+  ownerUserId,
+  status,
+  bridge,
+  timeoutMs,
+) {
+  const collection = state.db?.collection?.('workjet_computers');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await bridge?.awaitInSync?.();
+      const doc = await collection.findOne(computerId).exec();
+      const rawComputer = doc?.toJSON?.() || doc;
+      if (rawComputer?.owner_user_id === ownerUserId && rawComputer?.status === status) {
+        const computer = boundedWorkjetComputerResult(rawComputer, { includeUnassigned: true });
+        if (computer) return computer;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  const error = new Error(`Workjet computer projection did not arrive for ${computerId}.`);
+  error.code = 'workjet_computer_projection_timeout';
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+function boundedWorkjetComputerHostingMode(value) {
+  const hostingMode = boundedWorkjetComputerText(value, 'hostingMode', 64);
+  if (hostingMode === 'managed_backend') {
+    throw new Error('Managed backend hosts are backend-only and cannot be assigned as Workjet computers.');
+  }
+  if (!['workstation', 'self_hosted'].includes(hostingMode)) {
+    throw new Error('Unsupported Workjet computer hostingMode.');
+  }
+  return hostingMode;
+}
+
+function boundedWorkjetComputerCapabilities(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error('Invalid Workjet computer capabilities.');
+  }
+  return Array.from(new Set(value.map((capability) => (
+    boundedWorkjetComputerText(capability, 'capability', 80)
+  )))).sort();
+}
+
+function boundedWorkjetComputerResult(value, options = {}) {
+  if (!value || typeof value !== 'object' || value._deleted === true
+    || value.is_deleted === true
+    || (!options.includeUnassigned && value.status !== 'assigned')
+    || !['assigned', 'unassigned'].includes(value.status)) {
+    return null;
+  }
+  return Object.freeze({
+    id: boundedWorkjetComputerText(value.id, 'computer.id', 160),
+    displayName: boundedWorkjetComputerText(value.display_name, 'computer.displayName', 256),
+    hostingMode: boundedWorkjetComputerHostingMode(value.hosting_mode),
+    status: value.status,
+    capabilities: Object.freeze(boundedWorkjetComputerCapabilities(value.capabilities)),
+    selfHostedColocation: value.self_hosted_colocation === true,
+  });
+}
+
+function boundedWorkjetComputerText(value, field, maxLength) {
+  if (typeof value !== 'string') throw new Error(`Invalid Workjet computer ${field}.`);
+  const normalized = value.trim();
+  if (!normalized || [...normalized].length > maxLength || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`Invalid Workjet computer ${field}.`);
+  }
+  return normalized;
+}
+
+function assertWorkjetComputerPayloadKeys(value, allowed) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new Error(`Unsupported Workjet computer payload field: ${key}`);
+  }
 }
 
 async function waitForSyncBridgeReady(bridge, timeoutMs = 15000) {

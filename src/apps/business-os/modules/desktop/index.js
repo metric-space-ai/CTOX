@@ -1058,7 +1058,7 @@ export async function mount(ctx) {
 
   function currentGrid() {
     const surfaceWidth = refs.surface?.getBoundingClientRect?.().width || globalThis.innerWidth || 0;
-    if (surfaceWidth > 0 && surfaceWidth <= 560) {
+    if (surfaceWidth > 0 && surfaceWidth <= 720) {
       return { ...COMPACT_GRID, compact: true };
     }
     return {
@@ -1295,7 +1295,7 @@ export async function mount(ctx) {
     const grid = currentGrid();
     // Frueher wurde nur auf exakt gleiche Koordinaten geprueft. Zwei Symbole
     // muessen sich aber nicht decken, um einander unbrauchbar zu machen:
-    // gemessen auf thesen.ctox.dev lagen "Outbound Lead Generation" (128, 520)
+    // In der Referenzinstanz lagen "Outbound Lead Generation" (128, 520)
     // und "Bugs & Features" (99, 556) mit 7455 px2 uebereinander - die
     // Beschriftungen unlesbar, und das obere Symbol fing die Klicks des
     // unteren ab. Verschiedene Schluessel, also keine erkannte Kollision.

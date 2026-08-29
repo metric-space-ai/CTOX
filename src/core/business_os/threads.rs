@@ -242,6 +242,9 @@ const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
     // projected from native channel/account records.
     "communication_accounts",
     "channel_pairing_state",
+    // Workjet computer assignment is mutated only by policy-gated native
+    // business commands and projected back through RxDB/WebRTC.
+    "workjet_computers",
 ];
 
 /// A collection whose documents are server-authored (native core writes them,

@@ -30,7 +30,12 @@ test('presentation layer stays compact and shell-native', () => {
   // Three-column contract (Claude-Code pattern): projects | agent chat | live artifact.
   assert.match(html, /class="ctox-workspace coding-agents-module/);
   assert.match(html, /coding-agents-chat/);
-  assert.match(html, /id="ca-artifact"[^>]*sandbox=""/);
+  assert.match(html, /id="ca-artifact-host"/);
+  assert.doesNotMatch(html, /<iframe[^>]*id="ca-artifact"/);
+  assert.match(js, /document\.createElement\('iframe'\)/);
+  assert.match(js, /frame\.setAttribute\('sandbox', ''\)/);
+  assert.match(js, /sanitizeArtifactHtml\(html\)/);
+  assert.match(js, /querySelectorAll\('script, iframe, object, embed, base, meta\[http-equiv\]'\)/);
   assert.match(html, /data-resize-frame/);
   assert.match(html, /class="ctox-column-resizer"[^>]*data-resizer-var="--ctox-left-width"/);
   assert.doesNotMatch(js, /CtoxResizer/);
