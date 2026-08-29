@@ -443,8 +443,11 @@ export async function mount(ctx) {
         usingFallbackDocs = true;
       }
     } catch (error) {
-      if (!isDatabaseClosingError(error)) throw error;
-      console.info('[desktop] icon read skipped during database restart; rendering default launcher icons');
+      // Lesen ist auch waehrend der Wartung erlaubt; der Pfad bleibt dennoch
+      // konsistent tolerant, damit ein blockierter Lesezugriff die Oberflaeche
+      // nicht haerter trifft als ein blockierter Schreibzugriff.
+      if (!isTransientSeedError(error)) throw error;
+      console.info('[desktop] icon read skipped during database restart or CTOX maintenance; rendering default launcher icons');
       docs = fallbackIconDocs(launcher);
       usingFallbackDocs = true;
     }
@@ -959,6 +962,26 @@ export async function mount(ctx) {
     return /IDBDatabase.*closing|database connection is closing/i.test(message);
   }
 
+  // Waehrend eines Upgrades sind Sammlungen schreibgeschuetzt. Das Saeen von
+  // Icons und Layout ist dann kein Fehler, sondern verfrueht - es wird
+  // nachgeholt, sobald die Wartung endet.
+  //
+  // Warum das zaehlt: Der Wartungs-Lease endet erst, wenn der Browser seine
+  // Sammlungen bestaetigt. Diese Bestaetigung setzt einen erfolgreichen
+  // Desktop-Mount voraus. Solange ein Schreibversuch beim Mounten den ganzen
+  // Mount abbrach, konnte die Bestaetigung nie erfolgen, der Lease wurde bei
+  // gesundem Peer endlos verlaengert (install/mod.rs) und die Instanz blieb
+  // dauerhaft schreibgeschuetzt: gemessen am 29.08.2026, Desktop ohne jedes
+  // Symbol, Sync bei "0/3 - Wartet auf Icons, Layout".
+  function isMaintenanceReadOnlyError(error) {
+    if (error?.code === 'CTOX_MAINTENANCE_READ_ONLY') return true;
+    return /schreibgeschützt|MAINTENANCE_READ_ONLY/i.test(String(error?.message || error || ''));
+  }
+
+  function isTransientSeedError(error) {
+    return isDatabaseClosingError(error) || isMaintenanceReadOnlyError(error);
+  }
+
   function showManagedAuthorizationError(error) {
     const message = String(error?.message || error || '');
     if (!/UNAUTHORIZED: peer is not authorized for this collection/i.test(message)) return false;
@@ -1011,8 +1034,12 @@ export async function mount(ctx) {
       await upsertSeed(collection, seed.id, seed);
       return seed;
     } catch (error) {
-      if (!isDatabaseClosingError(error)) throw error;
-      console.info('[desktop] layout read skipped during database restart; using default layout');
+      if (!isTransientSeedError(error)) throw error;
+      console.info(
+        isMaintenanceReadOnlyError(error)
+          ? '[desktop] layout read skipped during database restart or CTOX maintenance; Standardlayout wird verwendet'
+          : '[desktop] layout read skipped during database restart; using default layout',
+      );
       return defaultLayout(launcherRef);
     }
   }
@@ -1185,8 +1212,12 @@ export async function mount(ctx) {
       }));
       await normalizeIconLayoutIfNeeded(collection, launcherRef);
     } catch (error) {
-      if (!isDatabaseClosingError(error)) throw error;
-      console.info('[desktop] icon seed skipped during database restart; using transient launcher icons');
+      if (!isTransientSeedError(error)) throw error;
+      console.info(
+        isMaintenanceReadOnlyError(error)
+          ? '[desktop] icon seed skipped during database restart or CTOX maintenance; Icons werden nach der Aktualisierung nachgetragen'
+          : '[desktop] icon seed skipped during database restart; using transient launcher icons',
+      );
     }
   }
 
