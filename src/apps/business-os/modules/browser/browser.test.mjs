@@ -1249,9 +1249,11 @@ function pointerEvent(overrides = {}) {
     ...__browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
     ...__browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
   ];
-  const fehlend = gelesen.filter(
-    (name) => !name.startsWith('outbound_') && !erlaubt.includes(name),
-  );
+  // Kein Praefix-Ausschluss: der urspruengliche Waechter nahm 'outbound_'
+  // pauschal aus und verdeckte damit genau den Fall, den er finden sollte -
+  // 'outbound_research_adapters' fehlte in der Allowlist, obwohl die Sammlung
+  // auf der Produktivinstanz 17 aktive Adapter trug.
+  const fehlend = gelesen.filter((name) => !erlaubt.includes(name));
   assert.deepEqual(
     fehlend, [],
     `Von der Scraping-Leiste gelesen, aber nicht in SCOPED_SYSTEM_MODULE_DB_COLLECTIONS.browser: ${fehlend.join(', ')}`,

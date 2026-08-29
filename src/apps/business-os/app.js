@@ -73,7 +73,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260829-browser-auth-restart-v276';
+const APP_BUILD = '20260829-browser-core-adapters-v277';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -5981,7 +5981,10 @@ const SCOPED_SYSTEM_MODULE_DB_COLLECTIONS = Object.freeze({
     'business_commands',
     'ctox_queue_tasks',
     // Lesend fuer die Scraping-Leiste: welcher Adapter treibt Browser-Laeufe.
-    // Verwaltung und Schreibzugriff bleiben bei der Outbound-App.
+    // Verwaltung und Schreibzugriff bleiben bei der Outbound-App. BEIDE
+    // Adaptersammlungen werden gebraucht: die Kern-Sammlung trug auf der
+    // Produktivinstanz 17 aktive Adapter, darunter als einziger linkedin.com.
+    'outbound_research_adapters',
     'thesen_outbound_adapters',
     // Ebenfalls nur lesend: die Aktivierung einer Quelle gehoert der
     // Outbound-App. Ohne diesen Eintrag liefert browserCollection() null und

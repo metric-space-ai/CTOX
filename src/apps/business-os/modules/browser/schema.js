@@ -213,11 +213,22 @@ const thesenOutboundAdapterSchema = {
   additionalProperties: true,
 };
 
+// Die Kern-Adaptersammlung traegt dieselben Felder wie die tenant-lokale, liegt
+// aber auf Version 0. Ohne diesen Eintrag laesst sich die Sammlung im Browser
+// nicht registrieren, und die Scraping-Leiste sieht ausschliesslich die
+// tenant-lokalen Adapter. Auf der Produktivinstanz betraf das 17 aktive
+// Adapter, darunter als einziger Traeger linkedin.com.
+const outboundResearchAdapterSchema = {
+  ...thesenOutboundAdapterSchema,
+  version: 0,
+};
+
 export const collections = {
   browser_sessions: browserSessionSchema,
   browser_tabs: browserTabSchema,
   browser_frames: browserFrameSchema,
   browser_input_events: browserInputEventSchema,
+  outbound_research_adapters: outboundResearchAdapterSchema,
   thesen_outbound_adapters: thesenOutboundAdapterSchema,
 };
 
