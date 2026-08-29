@@ -2576,6 +2576,7 @@ async function ladeScrapingAdapter(ctx, state) {
   state.adapterLadedauer = (async () => {
     const rows = [];
     const errors = [];
+    const leer = [];
     state.adapterLeases ||= [];
     for (const collectionName of SCRAPING_ADAPTER_COLLECTIONS) {
       try {
@@ -2593,6 +2594,12 @@ async function ladeScrapingAdapter(ctx, state) {
           sort: [{ updated_at_ms: 'desc' }],
         });
         rows.push(...collectionRows.map((row) => ({ ...row, adapter_collection: collectionName })));
+        // Eine Sammlung, deren Demand-Sync noch nicht gefuellt hat, liefert
+        // NULL ZEILEN OHNE FEHLER - vom Ergebnis her nicht von "wirklich leer"
+        // zu unterscheiden. Genau so verschwand die tenant-lokale Sammlung
+        // still aus der Leiste: 15 Karten aus der Kern-Sammlung sahen
+        // vollstaendig aus, waehrend jeder aktuelle Zugangszustand fehlte.
+        if (!collectionRows.length) leer.push(collectionName);
       } catch (error) {
         errors.push(`${collectionName}: ${String(error?.message || error)}`);
       }
@@ -2648,9 +2655,17 @@ async function ladeScrapingAdapter(ctx, state) {
     // Eine Sammlung, die beim Oeffnen noch nicht bereit war, lieferte still
     // nichts: die Leiste laed nur einmal und zeigte dann dauerhaft eine
     // unvollstaendige Liste. Der Vermerk erlaubt gezieltes Nachladen.
-    state.adapterUnvollstaendig = errors.length > 0;
+    // Begrenzt nachfassen: eine dauerhaft leere Sammlung ist ein zulaessiger
+    // Zustand und darf nicht endlos pollen.
+    state.adapterLeerVersuche = leer.length ? Number(state.adapterLeerVersuche || 0) + 1 : 0;
+    const nochNachfassen = leer.length > 0 && state.adapterLeerVersuche <= 5;
+    state.adapterUnvollstaendig = errors.length > 0 || nochNachfassen;
     state.adapterZuletztGeladenMs = Date.now();
-    if (errors.length) console.warn(`[browser] Adaptersammlung unvollstaendig gelesen: ${errors.join(' | ')}`);
+    if (errors.length) console.warn(`[browser] Adaptersammlung nicht lesbar: ${errors.join(' | ')}`);
+    if (leer.length) {
+      console.warn(`[browser] Adaptersammlung lieferte keine Zeilen: ${leer.join(', ')}`
+        + ` (Versuch ${state.adapterLeerVersuche}${nochNachfassen ? ', wird nachgeladen' : ', akzeptiert'})`);
+    }
     state.adapterFehler = errors.length === SCRAPING_ADAPTER_COLLECTIONS.length
       ? errors.join(' | ')
       : '';

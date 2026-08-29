@@ -1455,3 +1455,32 @@ function pointerEvent(overrides = {}) {
   );
   console.log('  ok: Zeitangabe unterscheidet Pruefung von Aenderung');
 }
+
+// --- Leere Sammlung ist kein Erfolg (Befund 29.08.2026) ----------------------
+// Nach einem Neustart lieferte die tenant-lokale Adaptersammlung null Zeilen
+// OHNE Fehler, weil ihr Demand-Sync noch nicht gefuellt hatte. Die Leiste zeigte
+// 15 Karten aus der Kern-Sammlung, sah vollstaendig aus - und verschwieg jeden
+// aktuellen Zugangszustand: rocketreach.com stand auf "Kein Zugang noetig",
+// obwohl der aktuelle Satz "Anmeldung im Browser erforderlich" trug.
+{
+  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+
+  assert.ok(
+    /if \(!collectionRows\.length\) leer\.push\(collectionName\)/.test(quelle),
+    'eine erwartete Sammlung ohne Zeilen muss vermerkt werden, nicht als Erfolg gelten',
+  );
+  assert.ok(
+    /state\.adapterUnvollstaendig = errors\.length > 0 \|\| nochNachfassen/.test(quelle),
+    'auch die leer gelesene Sammlung muss ein Nachladen ausloesen',
+  );
+  // Ohne Obergrenze wuerde eine dauerhaft leere Sammlung endlos pollen.
+  assert.ok(
+    /state\.adapterLeerVersuche <= \d+/.test(quelle),
+    'das Nachfassen muss begrenzt sein',
+  );
+  assert.ok(
+    /Adaptersammlung lieferte keine Zeilen/.test(quelle),
+    'der Fall muss sichtbar protokolliert werden, sonst bleibt er wieder stumm',
+  );
+  console.log('  ok: leer gelesene Adaptersammlung gilt nicht als vollstaendig');
+}
