@@ -291,6 +291,26 @@ test('subscription status endpoint is same-origin and its ready account is autho
   assert.equal(hooks.subscriptionProviderConnected(payload.provider_subscriptions, 'claude'), false);
 });
 
+test('ready subscription projection renders one consistent connected state', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: { provider: 'openai', chat_model: 'gpt-5.5', available_models: ['gpt-5.5'] },
+      auth: { mode: 'subscription', subscription_session_configured: false },
+      diagnostics: { service_message: 'CTOX Service läuft.' },
+      provider_subscriptions: {
+        schema: 'ctox.provider-subscriptions.v1',
+        providers: [{ id: 'codex', label: 'ChatGPT / Codex' }],
+        accounts: [{ id: 'codex-primary', provider: 'codex', enabled: true, status: 'ready' }],
+      },
+    },
+  });
+  assert.match(html, /Subscription verbunden/);
+  assert.match(html, /ChatGPT \/ Codex ist verbunden und einsatzbereit/);
+  assert.doesNotMatch(html, /Subscription nicht verbunden|CTOX-Harness zur Verfügung/);
+});
+
 test('reasoning choices track the selected model capability', () => {
   assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.5'), ['low', 'medium', 'high', 'xhigh']);
   assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-luna'), ['low', 'medium', 'high', 'xhigh', 'max']);

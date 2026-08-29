@@ -1310,7 +1310,7 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
       <div class="runtime-healthline ${serviceNeedsAttention || authNeedsAttention ? 'is-danger' : 'is-ok'}">
         <span aria-hidden="true"></span>
         <strong>${escapeHtml(providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'Runtime nicht geladen')}</strong>
-        <em>${escapeHtml(runtimeAuthSummary(provider, authMode, auth))}</em>
+        <em>${escapeHtml(runtimeAuthSummary(provider, authMode, auth, runtimeSettings?.provider_subscriptions))}</em>
       </div>
       <div class="runtime-flow">
         <div class="runtime-choice-section">
@@ -2461,11 +2461,12 @@ function runtimeSubscriptionProvider(provider) {
   }[String(provider || '').trim().toLowerCase()] || '';
 }
 
-function runtimeAuthSummary(provider, authMode, auth) {
+function runtimeAuthSummary(provider, authMode, auth, projection = null) {
   if (!String(provider || '').trim()) return 'nicht geladen';
   if (String(provider || '').toLowerCase() === 'local') return 'nicht erforderlich';
   if (isSubscriptionMode(authMode)) {
-    if (auth.subscription_session_configured) {
+    if (auth.subscription_session_configured
+      || subscriptionProviderConnected(projection, runtimeSubscriptionProvider(provider))) {
       return auth.subscription_account_email || auth.subscription_account_id || 'Subscription verbunden';
     }
     return 'Subscription nicht verbunden';
@@ -2625,7 +2626,7 @@ function subscriptionStatus(provider, projection, auth, canManage, subscriptionA
   if (auth.subscription_plan) lines.push(kv('Plan', auth.subscription_plan));
   return `
     <div class="runtime-access-detail ${configured ? 'is-ok' : ''}">
-      <div><strong>${escapeHtml(configured ? 'Verbunden' : 'Noch nicht verbunden')}</strong><span>${escapeHtml(configured ? `${profile.label} steht dem CTOX-Harness zur Verfügung.` : `Mit ${profile.label} anmelden.`)}</span></div>
+      <div><strong>${escapeHtml(configured ? 'Verbunden' : 'Noch nicht verbunden')}</strong><span>${escapeHtml(configured ? `${profile.label} ist verbunden und einsatzbereit.` : `Mit ${profile.label} anmelden.`)}</span></div>
       ${pending ? `
         <div class="subscription-device-code is-pending">
           <span>Geräte-Code</span>
