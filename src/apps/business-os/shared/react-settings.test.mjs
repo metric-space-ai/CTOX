@@ -189,6 +189,54 @@ test('subscription login starts through the typed control plane without RxDB com
   assert.doesNotMatch(calls[0].options.body, /token|secret|api[_-]?key/i);
 });
 
+test('runtime refresh preserves the selected subscription provider while device login is pending', () => {
+  const loaded = {
+    runtime: {
+      provider: 'ctox_proxy',
+      chat_model: 'MiniMax-M3',
+      preset: 'Quality',
+      context: '256k',
+      max_run_secs: 1800,
+      available_models: ['MiniMax-M3'],
+    },
+    auth: { mode: 'api_key', api_key_configured: true },
+    diagnostics: { service_message: 'CTOX Service läuft.' },
+  };
+  const draft = {
+    ...loaded,
+    runtime: {
+      ...loaded.runtime,
+      provider: 'openai',
+      chat_model: '',
+      available_models: [],
+    },
+    auth: { mode: 'subscription', subscription_selected: true },
+  };
+  const result = hooks.runtimeSettingsPreservingPendingSubscription(loaded, draft, {
+    status: 'device_code',
+    provider: 'codex',
+    userCode: 'ABCD-EFGHI',
+  });
+  assert.equal(result.runtime.provider, 'openai');
+  assert.equal(result.auth.mode, 'subscription');
+  assert.equal(result.auth.subscription_selected, true);
+  assert.equal(result.auth.subscription_session_configured, false);
+  assert.deepEqual(result.diagnostics, loaded.diagnostics);
+});
+
+test('runtime refresh uses the persisted runtime when no subscription login is pending', () => {
+  const loaded = {
+    runtime: { provider: 'ctox_proxy', chat_model: 'MiniMax-M3' },
+    auth: { mode: 'api_key', api_key_configured: true },
+  };
+  const result = hooks.runtimeSettingsPreservingPendingSubscription(
+    loaded,
+    { runtime: { provider: 'openai' }, auth: { mode: 'subscription' } },
+    null,
+  );
+  assert.equal(result, loaded);
+});
+
 test('all subscription providers expose one secret-free connect/status/rotate/disconnect story', () => {
   const accounts = {
     codex: 'codex-instance-primary',

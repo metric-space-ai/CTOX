@@ -219,8 +219,15 @@ export async function openReactSettings({
     render();
     try {
       await ensureRuntimeCollections();
-      settingsState.runtimeSettings = await loadRuntimeSettings({ db });
-      settingsState.commandStatus = '';
+      const loadedRuntimeSettings = await loadRuntimeSettings({ db });
+      settingsState.runtimeSettings = runtimeSettingsPreservingPendingSubscription(
+        loadedRuntimeSettings,
+        settingsState.runtimeSettings,
+        settingsState.subscriptionAuth,
+      );
+      if (!isPendingSubscriptionAuth(settingsState.subscriptionAuth)) {
+        settingsState.commandStatus = '';
+      }
     } catch (error) {
       settingsState.commandStatus = `Runtime-Status konnte nicht geladen werden: ${error.message || error}`;
     }
@@ -628,14 +635,21 @@ export async function openReactSettings({
             message: 'Code im OpenAI-Fenster eingeben.',
           };
           settingsState.commandStatus = `${providerLabel} Geräte-Code: ${payload.user_code}. Code im Provider-Fenster eingeben.`;
+          writeSubscriptionDeviceCodeWindow(
+            authWindow,
+            providerLabel,
+            payload.user_code,
+            payload.verification_url || payload.auth_url,
+          );
           render();
         }
         const authUrl = payload.auth_url || payload.verification_url;
-        if (authUrl && authWindow && !authWindow.closed) {
+        const deviceCodeWindowOwnsNavigation = payload.status === 'device_code' && payload.user_code;
+        if (!deviceCodeWindowOwnsNavigation && authUrl && authWindow && !authWindow.closed) {
           authWindow.location.href = authUrl;
-        } else if (authUrl) {
+        } else if (!deviceCodeWindowOwnsNavigation && authUrl) {
           window.location.href = authUrl;
-        } else if (authWindow && !authWindow.closed) {
+        } else if (!deviceCodeWindowOwnsNavigation && authWindow && !authWindow.closed) {
           authWindow.close();
         }
         settingsState.commandStatus = payload.status === 'connected'
@@ -2872,6 +2886,33 @@ function runtimeSettingsWithDraft(current, draft) {
   };
 }
 
+function isPendingSubscriptionAuth(subscriptionAuth) {
+  return ['starting', 'device_code', 'pending'].includes(String(subscriptionAuth?.status || ''));
+}
+
+function runtimeProviderForSubscription(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (normalized === 'codex') return 'openai';
+  if (normalized === 'claude') return 'anthropic';
+  return normalized;
+}
+
+function runtimeSettingsPreservingPendingSubscription(loaded, current, subscriptionAuth) {
+  if (!isPendingSubscriptionAuth(subscriptionAuth)) return loaded;
+  const provider = runtimeProviderForSubscription(subscriptionAuth?.provider);
+  if (!provider) return loaded;
+  const currentRuntime = current?.runtime || {};
+  const draft = {
+    provider,
+    auth_mode: 'subscription',
+    chat_model: String(currentRuntime.chat_model || ''),
+    preset: currentRuntime.preset,
+    context: currentRuntime.context,
+    max_run_secs: Number(currentRuntime.max_run_secs || 1800),
+  };
+  return runtimeSettingsWithDraft(loaded, draft);
+}
+
 
 function resolveRole(session) {
   const user = session?.user || {};
@@ -3616,6 +3657,29 @@ function writeSubscriptionAuthWindow(authWindow, title, message, danger = false)
         <section style="max-width: 520px; padding: 32px; border: 1px solid ${danger ? '#ff4d4d' : '#16d9ad'}; border-radius: 10px; background: #162021;">
           <h1 style="margin: 0 0 12px; font-size: 22px;">${escapeHtml(title)}</h1>
           <p style="margin: 0; color: #a8b6ba; line-height: 1.5;">${escapeHtml(message)}</p>
+        </section>
+      </main>
+    `;
+  } catch {
+    // Cross-origin navigation can make the placeholder window no longer writable.
+  }
+}
+
+function writeSubscriptionDeviceCodeWindow(authWindow, providerLabel, userCode, authUrl) {
+  if (!authWindow || authWindow.closed) return;
+  try {
+    const formattedCode = formatDeviceCode(userCode);
+    authWindow.document.title = `${providerLabel} Geräte-Code`;
+    authWindow.document.body.innerHTML = `
+      <main style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111819; color: #f4f8f8;">
+        <section style="width: min(520px, calc(100vw - 48px)); padding: 32px; border: 1px solid #16d9ad; border-radius: 12px; background: #162021; box-sizing: border-box;">
+          <p style="margin: 0 0 8px; color: #8fa2a7; font-size: 13px; font-weight: 700; text-transform: uppercase;">${escapeHtml(providerLabel)}</p>
+          <h1 style="margin: 0 0 20px; font-size: 24px;">Geräte-Code</h1>
+          <div style="padding: 18px; border-radius: 10px; background: #0d1415; text-align: center;">
+            <strong style="font: 700 36px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; user-select: all;">${escapeHtml(formattedCode)}</strong>
+          </div>
+          <p style="margin: 18px 0; color: #a8b6ba; line-height: 1.5;">Dieses Fenster offen lassen. Öffne OpenAI separat und gib dort den Code ein.</p>
+          <a href="${escapeAttr(authUrl)}" target="_blank" rel="noopener noreferrer" style="display: block; padding: 13px 18px; border-radius: 9px; background: #16d9ad; color: #07110f; font-weight: 750; text-align: center; text-decoration: none;">OpenAI öffnen</a>
         </section>
       </main>
     `;
@@ -5233,9 +5297,11 @@ export const __reactSettingsTestHooks = {
   normalizeProviderSubscriptions,
   providerCredentialRequirement,
   providerSubscriptionCommandRequest,
+  startSubscriptionAuthControlPlane,
   providerLogoHtml,
   providerLogoSpec,
   runtimeModelOptions,
+  runtimeSettingsPreservingPendingSubscription,
   normalizeWorkjetPairingInvite,
   signalingAuthExpiry,
   signalingEndpoint,
