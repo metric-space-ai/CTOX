@@ -90,11 +90,16 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: "3.13"
+          # Semgrep 1.172.0's current dependency set is not importable on
+          # Python 3.13. Keep the proof on its supported, reproducible ABI.
+          python-version: "3.12"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: "1.25.x"
+          # osv-scanner 2.4.0 requires >=1.26.4; syft 1.51.0 requires
+          # >=1.26.3. GOTOOLCHAIN stays local so the workflow owns the exact
+          # compiler instead of allowing an installer-time network upgrade.
+          go-version: "1.26.4"
           check-latest: true
 
       - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
@@ -106,35 +111,308 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          packages=(nmap ncat ndiff bubblewrap git ca-certificates pkg-config libssl-dev libfontconfig1-dev libpcap-dev)
-          if [ "$APPSEC_PROFILE" = "full" ]; then
-            packages+=(clamav clamav-freshclam)
-          fi
+          packages=(nmap ncat ndiff curl meson ninja-build libcap-dev git ca-certificates pkg-config libssl-dev libfontconfig1-dev libpcap-dev)
           sudo apt-get install -y "${packages[@]}"
+          src/scripts/install-appsec-bubblewrap.sh
+
+          native_bin="$RUNNER_TEMP/appsec-native/bin"
+          native_src="$RUNNER_TEMP/appsec-native/src"
+          mkdir -p "$native_bin" "$native_src"
+          case "$(uname -m)" in
+            x86_64)
+              dalfox_platform="linux-x86_64"
+              dalfox_sha256="ef48d30c183cead88eb89da10bdc1a7fa58a484d175319096075b470f3652fd4"
+              clamav_platform="x86_64"
+              clamav_sha256="28d6efc5b4423e7830c3559339552eb53870a9eac51ac4efb37d60530d329886"
+              ;;
+            aarch64|arm64)
+              dalfox_platform="linux-aarch64"
+              dalfox_sha256="b61dc832582e738dc5b838197d28b6d0d4d33de2d849fc73741635fc380f0348"
+              clamav_platform="aarch64"
+              clamav_sha256="4bdab4118e8accb02108316b996d7c14da1cccc4eea2dff7bea82109f9239d95"
+              ;;
+            *)
+              echo "Unsupported Linux architecture for Dalfox: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          dalfox_archive="$RUNNER_TEMP/dalfox-v3.1.2-${dalfox_platform}.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-${dalfox_platform}.tar.gz" \
+            --output "$dalfox_archive"
+          printf '%s  %s\n' "$dalfox_sha256" "$dalfox_archive" | sha256sum --check --strict
+          tar -xzf "$dalfox_archive" -C "$native_src"
+          install -m 0755 "$native_src/dalfox-v3.1.2-${dalfox_platform}/dalfox" "$native_bin/dalfox"
+
+          if [ "$APPSEC_PROFILE" = "full" ]; then
+            clamav_archive="$RUNNER_TEMP/clamav-1.5.4.linux.${clamav_platform}.deb"
+            clamav_root="$native_src/clamav-1.5.4"
+            curl --fail --location --silent --show-error \
+              "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.${clamav_platform}.deb" \
+              --output "$clamav_archive"
+            printf '%s  %s\n' "$clamav_sha256" "$clamav_archive" | sha256sum --check --strict
+            mkdir -p "$clamav_root"
+            dpkg-deb --extract "$clamav_archive" "$clamav_root"
+            clamav_prefix="$clamav_root/usr/local"
+            if [ ! -d "$clamav_prefix/etc/certs" ] || [ -L "$clamav_prefix/etc/certs" ]; then
+              echo "ClamAV CVD certificate directory is missing or is a symlink" >&2
+              exit 1
+            fi
+            clamav_distribution_root=$(realpath "$clamav_prefix")
+            clamav_certs_dir=$(realpath "$clamav_prefix/etc/certs")
+            if [ "$clamav_certs_dir" != "$clamav_distribution_root/etc/certs" ] || [ ! -d "$clamav_certs_dir" ]; then
+              echo "ClamAV CVD certificate directory is missing or escaped its checksum-verified distribution" >&2
+              exit 1
+            fi
+            clamav_certs_manifest="$RUNNER_TEMP/clamav-1.5.4-certs.manifest"
+            : > "$clamav_certs_manifest"
+            clamav_certs_file_count=0
+            clamav_certs_total_bytes=0
+            while IFS= read -r -d '' clamav_cert_entry; do
+              if [ -L "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains a symlink: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              if [ -d "$clamav_cert_entry" ]; then
+                continue
+              fi
+              if [ ! -f "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains an unsupported entry: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              clamav_cert_bytes=$(stat -c '%s' "$clamav_cert_entry")
+              clamav_certs_file_count=$((clamav_certs_file_count + 1))
+              clamav_certs_total_bytes=$((clamav_certs_total_bytes + clamav_cert_bytes))
+              if [ "$clamav_certs_file_count" -gt 64 ] || [ "$clamav_cert_bytes" -gt 8388608 ] || [ "$clamav_certs_total_bytes" -gt 16777216 ]; then
+                echo "ClamAV CVD certificate tree exceeds its bounded attestation contract" >&2
+                exit 1
+              fi
+              clamav_cert_relative=${clamav_cert_entry#"$clamav_certs_dir"/}
+              clamav_cert_sha256=$(sha256sum "$clamav_cert_entry" | cut -d ' ' -f 1)
+              printf '%s\0%s\0%s\0' "$clamav_cert_relative" "$clamav_cert_bytes" "$clamav_cert_sha256" >> "$clamav_certs_manifest"
+            done < <(find -P "$clamav_certs_dir" -mindepth 1 -print0 | LC_ALL=C sort -z)
+            if [ "$clamav_certs_file_count" -eq 0 ]; then
+              echo "ClamAV CVD certificate directory contains no regular files" >&2
+              exit 1
+            fi
+            clamav_certs_manifest_sha256=$(sha256sum "$clamav_certs_manifest" | cut -d ' ' -f 1)
+            export CVD_CERTS_DIR="$clamav_certs_dir"
+            test -x "$clamav_prefix/bin/clamscan"
+            test -x "$clamav_prefix/bin/freshclam"
+            ln -s "$clamav_prefix/bin/clamscan" "$native_bin/clamscan"
+            ln -s "$clamav_prefix/bin/freshclam" "$native_bin/freshclam"
+            managed_appsec_bin="$APPSEC_PROOF_ROOT/runtime/tools/appsec/bin"
+            mkdir -p "$managed_appsec_bin"
+            ln -s "$clamav_prefix/bin/clamscan" "$managed_appsec_bin/clamscan"
+            ln -s "$clamav_prefix/bin/freshclam" "$managed_appsec_bin/freshclam"
+            clamav_library_path="$clamav_prefix/lib"
+            freshclam_probe_root="$APPSEC_PROOF_ROOT/runtime/tools/appsec/clamav-version-probe"
+            freshclam_probe_database="$freshclam_probe_root/database"
+            freshclam_probe_config="$freshclam_probe_root/freshclam.conf"
+            mkdir -p "$freshclam_probe_database"
+            printf 'DatabaseDirectory %s\nDatabaseMirror database.clamav.net\nTestDatabases yes\n' \
+              "$freshclam_probe_database" > "$freshclam_probe_config"
+            chmod 600 "$freshclam_probe_config"
+            freshclam_config_arg="--config-file=$freshclam_probe_config"
+            freshclam_version_stderr="$freshclam_probe_root/version-probe.stderr"
+            set +e
+            freshclam_version=$(LD_LIBRARY_PATH="$clamav_library_path" \
+              "$native_bin/freshclam" "$freshclam_config_arg" --cvdcertsdir "$clamav_certs_dir" --version \
+              2>"$freshclam_version_stderr")
+            freshclam_version_exit=$?
+            set -e
+            freshclam_version_stderr_tail=$(tail -n 8 "$freshclam_version_stderr" | tr '\r\n' '  ' | cut -c1-1000)
+            rm -f "$freshclam_version_stderr"
+            if [ "$freshclam_version_exit" -ne 0 ] || [ "$freshclam_version" != "ClamAV 1.5.4" ]; then
+              printf 'FreshClam version probe failed: phase=freshclam-version-probe exit_code=%s observed_version=%s stderr_tail=%s\n' \
+                "$freshclam_version_exit" "$freshclam_version" "$freshclam_version_stderr_tail" >&2
+              exit 1
+            fi
+            LD_LIBRARY_PATH="$clamav_library_path" "$native_bin/clamscan" --cvdcertsdir "$clamav_certs_dir" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            {
+              echo "LD_LIBRARY_PATH=$clamav_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              echo "CVD_CERTS_DIR=$clamav_certs_dir"
+            } >> "$GITHUB_ENV"
+            mkdir -p "$APPSEC_PROOF_ROOT"
+            jq -n \
+              --arg source_url "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.${clamav_platform}.deb" \
+              --arg archive_sha256 "$clamav_sha256" \
+              --arg freshclam_path "$(realpath "$managed_appsec_bin/freshclam")" \
+              --arg freshclam_sha256 "$(sha256sum "$managed_appsec_bin/freshclam" | cut -d ' ' -f 1)" \
+              --arg freshclam_version "$freshclam_version" \
+              --arg clamscan_path "$(realpath "$managed_appsec_bin/clamscan")" \
+              --arg certs_path "$clamav_certs_dir" \
+              --arg certs_manifest_sha256 "$clamav_certs_manifest_sha256" \
+              --argjson certs_file_count "$clamav_certs_file_count" \
+              --argjson certs_total_bytes "$clamav_certs_total_bytes" \
+              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},cvd_certificate_directory:{version:"ctox.appsec.clamav_cvd_certificate_attestation.v1",canonical_path:$certs_path,manifest_sha256:$certs_manifest_sha256,file_count:$certs_file_count,total_bytes:$certs_total_bytes,source:"same-checksum-verified-distribution",environment_variable:"CVD_CERTS_DIR",verifier_bypass_allowed:false},managed_bin_staged:true,path_fallback_allowed:false,host_package_mutated:false,apparmor_mutated:false}' \
+              > "$APPSEC_PROOF_ROOT/clamav-native-provenance.json"
+          fi
+
+          testssl_src="$native_src/testssl.sh"
+          git init "$testssl_src"
+          git -C "$testssl_src" remote add origin https://github.com/testssl/testssl.sh.git
+          git -C "$testssl_src" fetch --depth 1 origin 97763a411c525720a5f9bd9d2cded416b10f210a
+          git -C "$testssl_src" checkout --detach 97763a411c525720a5f9bd9d2cded416b10f210a
+          test "$(git -C "$testssl_src" rev-parse HEAD)" = "97763a411c525720a5f9bd9d2cded416b10f210a"
+          ln -s "$testssl_src/testssl.sh" "$native_bin/testssl.sh"
+          echo "$native_bin" >> "$GITHUB_PATH"
 
       - name: Install macOS native AppSec packages
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          set -euo pipefail
           brew list nmap >/dev/null 2>&1 || brew install nmap
+
+          native_bin="$RUNNER_TEMP/appsec-native/bin"
+          native_src="$RUNNER_TEMP/appsec-native/src"
+          mkdir -p "$native_bin" "$native_src"
+          case "$(uname -m)" in
+            arm64|aarch64)
+              dalfox_platform="macos-aarch64"
+              dalfox_sha256="37375c9c9bcc3c04b57ae53b5b8b4a2a334c456512f9e4e30e8acc992444ffe9"
+              ;;
+            x86_64)
+              dalfox_platform="macos-x86_64"
+              dalfox_sha256="f2646f9d6cb79d2026f153d6a8a08b09f19f49d96de520cad2a7e15c37515270"
+              ;;
+            *)
+              echo "Unsupported macOS architecture for Dalfox: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          dalfox_archive="$RUNNER_TEMP/dalfox-v3.1.2-${dalfox_platform}.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-${dalfox_platform}.tar.gz" \
+            --output "$dalfox_archive"
+          printf '%s  %s\n' "$dalfox_sha256" "$dalfox_archive" | shasum -a 256 --check
+          tar -xzf "$dalfox_archive" -C "$native_src"
+          install -m 0755 "$native_src/dalfox-v3.1.2-${dalfox_platform}/dalfox" "$native_bin/dalfox"
+
           if [ "$APPSEC_PROFILE" = "full" ]; then
-            brew list clamav >/dev/null 2>&1 || brew install clamav
+            clamav_package="$RUNNER_TEMP/clamav-1.5.4.macos.universal.pkg"
+            curl --fail --location --silent --show-error \
+              "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.macos.universal.pkg" \
+              --output "$clamav_package"
+            printf '%s  %s\n' "df7fa753e2f9f67f3bc99b2a40a3be7ef559088c68ad6bdf66b4b5764e965bd6" "$clamav_package" | shasum -a 256 --check
+            clamav_signature=$(pkgutil --check-signature "$clamav_package")
+            printf '%s\n' "$clamav_signature" | grep -F 'Status: signed by a developer certificate issued by Apple for distribution'
+            printf '%s\n' "$clamav_signature" | grep -F 'Notarization: trusted by the Apple notary service'
+            printf '%s\n' "$clamav_signature" | grep -F 'Developer ID Installer: Cisco (DE8Y96K9QP)'
+            sudo installer -pkg "$clamav_package" -target /
+            clamav_prefix="/usr/local/clamav"
+            if [ ! -d "$clamav_prefix/etc/certs" ] || [ -L "$clamav_prefix/etc/certs" ]; then
+              echo "ClamAV CVD certificate directory is missing or is a symlink" >&2
+              exit 1
+            fi
+            clamav_distribution_root=$(realpath "$clamav_prefix")
+            clamav_certs_dir=$(realpath "$clamav_prefix/etc/certs")
+            if [ "$clamav_certs_dir" != "$clamav_distribution_root/etc/certs" ] || [ ! -d "$clamav_certs_dir" ]; then
+              echo "ClamAV CVD certificate directory is missing or escaped its signed distribution" >&2
+              exit 1
+            fi
+            clamav_certs_manifest="$RUNNER_TEMP/clamav-1.5.4-certs.manifest"
+            : > "$clamav_certs_manifest"
+            clamav_certs_file_count=0
+            clamav_certs_total_bytes=0
+            while IFS= read -r -d '' clamav_cert_entry; do
+              if [ -L "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains a symlink: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              if [ -d "$clamav_cert_entry" ]; then
+                continue
+              fi
+              if [ ! -f "$clamav_cert_entry" ]; then
+                echo "ClamAV CVD certificate tree contains an unsupported entry: $clamav_cert_entry" >&2
+                exit 1
+              fi
+              clamav_cert_bytes=$(stat -f '%z' "$clamav_cert_entry")
+              clamav_certs_file_count=$((clamav_certs_file_count + 1))
+              clamav_certs_total_bytes=$((clamav_certs_total_bytes + clamav_cert_bytes))
+              if [ "$clamav_certs_file_count" -gt 64 ] || [ "$clamav_cert_bytes" -gt 8388608 ] || [ "$clamav_certs_total_bytes" -gt 16777216 ]; then
+                echo "ClamAV CVD certificate tree exceeds its bounded attestation contract" >&2
+                exit 1
+              fi
+              clamav_cert_relative=${clamav_cert_entry#"$clamav_certs_dir"/}
+              clamav_cert_sha256=$(shasum -a 256 "$clamav_cert_entry" | cut -d ' ' -f 1)
+              printf '%s\0%s\0%s\0' "$clamav_cert_relative" "$clamav_cert_bytes" "$clamav_cert_sha256" >> "$clamav_certs_manifest"
+            done < <(find -s "$clamav_certs_dir" -mindepth 1 -print0)
+            if [ "$clamav_certs_file_count" -eq 0 ]; then
+              echo "ClamAV CVD certificate directory contains no regular files" >&2
+              exit 1
+            fi
+            clamav_certs_manifest_sha256=$(shasum -a 256 "$clamav_certs_manifest" | cut -d ' ' -f 1)
+            export CVD_CERTS_DIR="$clamav_certs_dir"
+            test -x "$clamav_prefix/bin/clamscan"
+            test -x "$clamav_prefix/bin/freshclam"
+            codesign --verify --strict "$clamav_prefix/bin/clamscan"
+            codesign --verify --strict "$clamav_prefix/bin/freshclam"
+            managed_appsec_bin="$APPSEC_PROOF_ROOT/runtime/tools/appsec/bin"
+            mkdir -p "$managed_appsec_bin"
+            ln -s "$clamav_prefix/bin/clamscan" "$managed_appsec_bin/clamscan"
+            ln -s "$clamav_prefix/bin/freshclam" "$managed_appsec_bin/freshclam"
+            freshclam_probe_root="$APPSEC_PROOF_ROOT/runtime/tools/appsec/clamav-version-probe"
+            freshclam_probe_database="$freshclam_probe_root/database"
+            freshclam_probe_config="$freshclam_probe_root/freshclam.conf"
+            mkdir -p "$freshclam_probe_database"
+            printf 'DatabaseDirectory %s\nDatabaseMirror database.clamav.net\nTestDatabases yes\n' \
+              "$freshclam_probe_database" > "$freshclam_probe_config"
+            chmod 600 "$freshclam_probe_config"
+            freshclam_config_arg="--config-file=$freshclam_probe_config"
+            freshclam_version_stderr="$freshclam_probe_root/version-probe.stderr"
+            set +e
+            freshclam_version=$("$managed_appsec_bin/freshclam" \
+              "$freshclam_config_arg" --cvdcertsdir "$clamav_certs_dir" --version 2>"$freshclam_version_stderr")
+            freshclam_version_exit=$?
+            set -e
+            freshclam_version_stderr_tail=$(tail -n 8 "$freshclam_version_stderr" | tr '\r\n' '  ' | cut -c1-1000)
+            rm -f "$freshclam_version_stderr"
+            if [ "$freshclam_version_exit" -ne 0 ] || [ "$freshclam_version" != "ClamAV 1.5.4" ]; then
+              printf 'FreshClam version probe failed: phase=freshclam-version-probe exit_code=%s observed_version=%s stderr_tail=%s\n' \
+                "$freshclam_version_exit" "$freshclam_version" "$freshclam_version_stderr_tail" >&2
+              exit 1
+            fi
+            "$managed_appsec_bin/clamscan" --cvdcertsdir "$clamav_certs_dir" --version | grep -E '^ClamAV 1\.5\.4(/|$)'
+            echo "CVD_CERTS_DIR=$clamav_certs_dir" >> "$GITHUB_ENV"
+            mkdir -p "$APPSEC_PROOF_ROOT"
+            jq -n \
+              --arg source_url "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.macos.universal.pkg" \
+              --arg archive_sha256 "df7fa753e2f9f67f3bc99b2a40a3be7ef559088c68ad6bdf66b4b5764e965bd6" \
+              --arg installer_identity "Developer ID Installer: Cisco (DE8Y96K9QP)" \
+              --arg freshclam_path "$(realpath "$managed_appsec_bin/freshclam")" \
+              --arg freshclam_sha256 "$(shasum -a 256 "$managed_appsec_bin/freshclam" | cut -d ' ' -f 1)" \
+              --arg freshclam_version "$freshclam_version" \
+              --arg clamscan_path "$(realpath "$managed_appsec_bin/clamscan")" \
+              --arg certs_path "$clamav_certs_dir" \
+              --arg certs_manifest_sha256 "$clamav_certs_manifest_sha256" \
+              --argjson certs_file_count "$clamav_certs_file_count" \
+              --argjson certs_total_bytes "$clamav_certs_total_bytes" \
+              '{version:"ctox.appsec.clamav_native_provenance.v1",ok:true,scope:"ephemeral-ci-proof-only",source_url:$source_url,archive_sha256:$archive_sha256,required_version:"1.5.4",installer_identity:$installer_identity,apple_notarization_verified:true,freshclam:{canonical_path:$freshclam_path,sha256:$freshclam_sha256,version:$freshclam_version},clamscan:{canonical_path:$clamscan_path},cvd_certificate_directory:{version:"ctox.appsec.clamav_cvd_certificate_attestation.v1",canonical_path:$certs_path,manifest_sha256:$certs_manifest_sha256,file_count:$certs_file_count,total_bytes:$certs_total_bytes,source:"same-signed-checksum-verified-distribution",environment_variable:"CVD_CERTS_DIR",verifier_bypass_allowed:false},managed_bin_staged:true,path_fallback_allowed:false}' \
+              > "$APPSEC_PROOF_ROOT/clamav-native-provenance.json"
           fi
+
+          testssl_src="$native_src/testssl.sh"
+          git init "$testssl_src"
+          git -C "$testssl_src" remote add origin https://github.com/testssl/testssl.sh.git
+          git -C "$testssl_src" fetch --depth 1 origin 97763a411c525720a5f9bd9d2cded416b10f210a
+          git -C "$testssl_src" checkout --detach 97763a411c525720a5f9bd9d2cded416b10f210a
+          test "$(git -C "$testssl_src" rev-parse HEAD)" = "97763a411c525720a5f9bd9d2cded416b10f210a"
+          ln -s "$testssl_src/testssl.sh" "$native_bin/testssl.sh"
+          echo "$native_bin" >> "$GITHUB_PATH"
 
       - name: Install Windows native AppSec packages
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           choco install nmap -y --no-progress
-          if ($env:APPSEC_PROFILE -eq "full") {
-            choco install clamav -y --no-progress
-          }
           $candidates = @(
             "${env:ProgramFiles(x86)}\Nmap",
-            "${env:ProgramFiles}\Nmap",
-            "${env:ProgramFiles}\ClamAV",
-            "${env:ProgramData}\chocolatey\lib\clamav\tools"
+            "${env:ProgramFiles}\Nmap"
           )
           foreach ($candidate in $candidates) {
             if (Test-Path $candidate) {
@@ -142,10 +420,241 @@ jobs:
             }
           }
 
+          $nativeRoot = Join-Path $env:RUNNER_TEMP "appsec-native"
+          $nativeBin = Join-Path $nativeRoot "bin"
+          $nativeSrc = Join-Path $nativeRoot "src"
+          New-Item -ItemType Directory -Force -Path $nativeBin, $nativeSrc | Out-Null
+
+          if ($env:APPSEC_PROFILE -eq "full") {
+            $clamavArchive = Join-Path $env:RUNNER_TEMP "clamav-1.5.4.win.x64.zip"
+            Invoke-WebRequest -Uri "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.win.x64.zip" -OutFile $clamavArchive
+            $clamavArchiveDigest = (Get-FileHash -Algorithm SHA256 $clamavArchive).Hash.ToLowerInvariant()
+            if ($clamavArchiveDigest -ne "0d9e0228b2674137ea1a2853566c98a0278ad52ab2582c3d6dbd75373848c395") {
+              throw "ClamAV archive checksum mismatch: $clamavArchiveDigest"
+            }
+            $clamavExtract = Join-Path $nativeSrc "clamav-1.5.4"
+            Expand-Archive -Path $clamavArchive -DestinationPath $clamavExtract -Force
+            $clamavSource = Get-ChildItem -Path $clamavExtract -Recurse -File -Filter "clamscan.exe" | Select-Object -First 1
+            if ($null -eq $clamavSource) {
+              throw "Official ClamAV archive did not contain clamscan.exe"
+            }
+            $clamavDistribution = $clamavSource.Directory.FullName
+            $freshclamSource = Join-Path $clamavDistribution "freshclam.exe"
+            if (-not (Test-Path -PathType Leaf $freshclamSource)) {
+              throw "Official ClamAV archive did not place freshclam.exe beside clamscan.exe"
+            }
+            $managedAppsecBin = Join-Path $env:APPSEC_PROOF_ROOT "runtime/tools/appsec/bin"
+            New-Item -ItemType Directory -Force -Path $managedAppsecBin | Out-Null
+            Copy-Item -Path (Join-Path $clamavDistribution "*") -Destination $managedAppsecBin -Recurse -Force
+            $managedClamscan = Join-Path $managedAppsecBin "clamscan.exe"
+            $managedFreshclam = Join-Path $managedAppsecBin "freshclam.exe"
+            $managedClamavRoot = [IO.Path]::GetFullPath($managedAppsecBin).TrimEnd('\')
+            $clamavCertsCandidate = Join-Path $managedAppsecBin "certs"
+            if (-not (Test-Path -PathType Container $clamavCertsCandidate)) {
+              throw "ClamAV CVD certificate directory is missing from the checksum-verified distribution"
+            }
+            $clamavCertsItem = Get-Item -LiteralPath $clamavCertsCandidate -Force
+            if (($clamavCertsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "ClamAV CVD certificate directory must not be a reparse point"
+            }
+            $clamavCertsDirectory = (Resolve-Path -LiteralPath $clamavCertsCandidate).ProviderPath
+            if ($clamavCertsDirectory -ne (Join-Path $managedClamavRoot "certs")) {
+              throw "ClamAV CVD certificate directory escaped its checksum-verified distribution: $clamavCertsDirectory"
+            }
+            $clamavCertEntries = @(Get-ChildItem -LiteralPath $clamavCertsDirectory -Recurse -Force | Sort-Object FullName)
+            $clamavCertManifestLines = @()
+            $clamavCertFileCount = 0
+            [Int64]$clamavCertTotalBytes = 0
+            foreach ($clamavCertEntry in $clamavCertEntries) {
+              if (($clamavCertEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "ClamAV CVD certificate tree contains a reparse point: $($clamavCertEntry.FullName)"
+              }
+              if ($clamavCertEntry.PSIsContainer) {
+                continue
+              }
+              $clamavCertFileCount += 1
+              $clamavCertTotalBytes += $clamavCertEntry.Length
+              if ($clamavCertFileCount -gt 64 -or $clamavCertEntry.Length -gt 8388608 -or $clamavCertTotalBytes -gt 16777216) {
+                throw "ClamAV CVD certificate tree exceeds its bounded attestation contract"
+              }
+              $clamavCertRelative = [IO.Path]::GetRelativePath($clamavCertsDirectory, $clamavCertEntry.FullName).Replace('\', '/')
+              $clamavCertSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $clamavCertEntry.FullName).Hash.ToLowerInvariant()
+              $clamavCertManifestLines += "$clamavCertRelative`0$($clamavCertEntry.Length)`0$clamavCertSha256`0"
+            }
+            if ($clamavCertFileCount -eq 0) {
+              throw "ClamAV CVD certificate directory contains no regular files"
+            }
+            $clamavCertManifestBytes = [Text.Encoding]::UTF8.GetBytes(($clamavCertManifestLines -join ''))
+            $clamavCertManifestHasher = [Security.Cryptography.SHA256]::Create()
+            try {
+              $clamavCertManifestSha256 = ([BitConverter]::ToString($clamavCertManifestHasher.ComputeHash($clamavCertManifestBytes))).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $clamavCertManifestHasher.Dispose()
+            }
+            $env:CVD_CERTS_DIR = $clamavCertsDirectory
+            Add-Content -Path $env:GITHUB_ENV -Value "CVD_CERTS_DIR=$clamavCertsDirectory"
+            $freshclamProbeRoot = Join-Path $env:APPSEC_PROOF_ROOT "runtime/tools/appsec/clamav-version-probe"
+            $freshclamProbeDatabase = Join-Path $freshclamProbeRoot "database"
+            $freshclamProbeConfig = Join-Path $freshclamProbeRoot "freshclam.conf"
+            New-Item -ItemType Directory -Force -Path $freshclamProbeDatabase | Out-Null
+            $freshclamProbeDatabaseForConfig = $freshclamProbeDatabase.Replace('\', '/')
+            @(
+              "DatabaseDirectory $freshclamProbeDatabaseForConfig"
+              "DatabaseMirror database.clamav.net"
+              "TestDatabases yes"
+            ) | Set-Content -Path $freshclamProbeConfig -Encoding ascii
+            $freshclamConfigArg = "--config-file=$freshclamProbeConfig"
+            $freshclamVersionStderr = Join-Path $freshclamProbeRoot "version-probe.stderr"
+            $freshclamVersionOutput = @(& $managedFreshclam $freshclamConfigArg --cvdcertsdir $clamavCertsDirectory --version 2> $freshclamVersionStderr)
+            $freshclamVersionExit = $LASTEXITCODE
+            $freshclamVersion = ($freshclamVersionOutput | Out-String).Trim()
+            $freshclamVersionStderrTail = ((Get-Content -Path $freshclamVersionStderr -Tail 8 -ErrorAction SilentlyContinue | Out-String).Trim() -replace '[\r\n]+', ' | ')
+            Remove-Item -Force -ErrorAction SilentlyContinue $freshclamVersionStderr
+            if ($freshclamVersionStderrTail.Length -gt 1000) {
+              $freshclamVersionStderrTail = $freshclamVersionStderrTail.Substring(0, 1000)
+            }
+            if ($freshclamVersionExit -ne 0 -or $freshclamVersion -ne "ClamAV 1.5.4") {
+              throw "FreshClam version probe failed: phase=freshclam-version-probe exit_code=$freshclamVersionExit observed_version=$freshclamVersion stderr_tail=$freshclamVersionStderrTail"
+            }
+            $clamscanVersion = (& $managedClamscan --cvdcertsdir $clamavCertsDirectory --version | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $clamscanVersion -notmatch '^ClamAV 1\.5\.4(/|$)') {
+              throw "Official clamscan did not report exact version 1.5.4: $clamscanVersion"
+            }
+            New-Item -ItemType Directory -Force -Path $env:APPSEC_PROOF_ROOT | Out-Null
+            [ordered]@{
+              version = "ctox.appsec.clamav_native_provenance.v1"
+              ok = $true
+              scope = "ephemeral-ci-proof-only"
+              source_url = "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.win.x64.zip"
+              archive_sha256 = $clamavArchiveDigest
+              required_version = "1.5.4"
+              freshclam = [ordered]@{
+                canonical_path = [IO.Path]::GetFullPath($managedFreshclam)
+                sha256 = (Get-FileHash -Algorithm SHA256 $managedFreshclam).Hash.ToLowerInvariant()
+                version = $freshclamVersion
+              }
+              clamscan = [ordered]@{
+                canonical_path = [IO.Path]::GetFullPath($managedClamscan)
+                sha256 = (Get-FileHash -Algorithm SHA256 $managedClamscan).Hash.ToLowerInvariant()
+                version = $clamscanVersion
+              }
+              cvd_certificate_directory = [ordered]@{
+                version = "ctox.appsec.clamav_cvd_certificate_attestation.v1"
+                canonical_path = $clamavCertsDirectory
+                manifest_sha256 = $clamavCertManifestSha256
+                file_count = $clamavCertFileCount
+                total_bytes = $clamavCertTotalBytes
+                source = "same-checksum-verified-distribution"
+                environment_variable = "CVD_CERTS_DIR"
+                verifier_bypass_allowed = $false
+              }
+              managed_bin_staged = $true
+              path_fallback_allowed = $false
+              host_package_mutated = $false
+            } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $env:APPSEC_PROOF_ROOT "clamav-native-provenance.json")
+            Add-Content -Path $env:GITHUB_PATH -Value $managedAppsecBin
+          }
+
+          $dalfoxArchive = Join-Path $env:RUNNER_TEMP "dalfox-v3.1.2-windows-x86_64.zip"
+          Invoke-WebRequest -Uri "https://github.com/hahwul/dalfox/releases/download/v3.1.2/dalfox-v3.1.2-windows-x86_64.zip" -OutFile $dalfoxArchive
+          $dalfoxDigest = (Get-FileHash -Algorithm SHA256 $dalfoxArchive).Hash.ToLowerInvariant()
+          if ($dalfoxDigest -ne "9aac0bb85fec8710ba23f1df96de34217931dee81693503ebcf61150c4368300") {
+            throw "Dalfox archive checksum mismatch: $dalfoxDigest"
+          }
+          Expand-Archive -Path $dalfoxArchive -DestinationPath $nativeSrc -Force
+          Copy-Item (Join-Path $nativeSrc "dalfox-v3.1.2-windows-x86_64/dalfox.exe") (Join-Path $nativeBin "dalfox.exe")
+
+          $testsslSrc = Join-Path $nativeSrc "testssl.sh"
+          git init $testsslSrc
+          git -C $testsslSrc remote add origin https://github.com/testssl/testssl.sh.git
+          git -C $testsslSrc fetch --depth 1 origin 97763a411c525720a5f9bd9d2cded416b10f210a
+          git -C $testsslSrc checkout --detach 97763a411c525720a5f9bd9d2cded416b10f210a
+          if ((git -C $testsslSrc rev-parse HEAD).Trim() -ne "97763a411c525720a5f9bd9d2cded416b10f210a") {
+            throw "testssl.sh checkout does not match the reviewed commit"
+          }
+          $gitBash = Join-Path $env:ProgramFiles "Git/bin/bash.exe"
+          if (-not (Test-Path $gitBash)) {
+            throw "Git Bash is required for the pinned testssl.sh runtime"
+          }
+          $testsslLauncher = Join-Path $nativeBin "testssl.cmd"
+          @"
+          @echo off
+          set "PATH=$nativeBin;%PATH%"
+          "$gitBash" "$testsslSrc\testssl.sh" %*
+          "@ | Set-Content -Encoding Ascii $testsslLauncher
+          Add-Content -Path $env:GITHUB_PATH -Value $nativeBin
+
       - name: Build focused deployment audit CLIs
         run: |
           cargo build --locked --manifest-path src/tools/appsec-pentest/Cargo.toml
           cargo build --locked --manifest-path src/tools/web-stack/Cargo.toml --no-default-features --bin ctox-web-stack
+
+      - name: Stage reviewed Windows testssl hexdump adapter
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml --features ci-testssl-hexdump --bin ctox-appsec-hexdump
+          cargo build --locked --manifest-path src/tools/appsec-pentest/Cargo.toml --features ci-testssl-hexdump --bin ctox-appsec-hexdump
+          $nativeBin = Join-Path $env:RUNNER_TEMP "appsec-native/bin"
+          $hexdump = Join-Path $nativeBin "hexdump.exe"
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR "debug/ctox-appsec-hexdump.exe") $hexdump
+
+          # This adapter is built from the reviewed checkout with the pinned
+          # Rust toolchain. It exists only in RUNNER_TEMP for this proof and is
+          # never installed into CTOX's managed product/runtime tool root.
+          $fixture = Join-Path $env:RUNNER_TEMP "appsec-native/hexdump-selftest.bin"
+          [IO.File]::WriteAllBytes($fixture, [Text.Encoding]::ASCII.GetBytes("CTOX"))
+          $compactUpper = (& $hexdump -v -e '16/1 "%02X"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $compactUpper -ne "43544F58") {
+            throw "Reviewed hexdump adapter failed the uppercase compact-format proof"
+          }
+          $compactLower = (& $hexdump -v -e '16/1 "%02x"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $compactLower -ne "43544f58") {
+            throw "Reviewed hexdump adapter failed the lowercase compact-format proof"
+          }
+          $commaLower = (& $hexdump -v -e '4/1 "%02x,"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $commaLower -ne "43,54,4f,58,") {
+            throw "Reviewed hexdump adapter failed the comma-format proof"
+          }
+          $spacedLower = (& $hexdump -ve '2/1 "%02x " " \n"' $fixture | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $spacedLower -notmatch '43 54\s+4f 58') {
+            throw "Reviewed hexdump adapter failed the spaced-line-format proof"
+          }
+          $canonical = (& $hexdump -C $fixture | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $canonical -notmatch "43 54 4f 58" -or $canonical -notmatch "CTOX") {
+            throw "Reviewed hexdump adapter failed the canonical-format proof"
+          }
+          & $hexdump -e '16/1 "%03x"' $fixture 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Reviewed hexdump adapter accepted a format outside the testssl allowlist"
+          }
+          $testsslLauncher = Join-Path $nativeBin "testssl.cmd"
+          $testsslVersion = (& $testsslLauncher --version 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $testsslVersion -notmatch 'testssl\.sh' -or $testsslVersion -notmatch '3\.2\.4') {
+            throw "Pinned testssl.sh did not pass its real Windows version probe"
+          }
+
+          New-Item -ItemType Directory -Force -Path $env:APPSEC_PROOF_ROOT | Out-Null
+          [ordered]@{
+            version = "ctox.appsec.windows_hexdump_provenance.v2"
+            ok = $true
+            scope = "ephemeral-ci-proof-only"
+            source_repository = $env:GITHUB_REPOSITORY
+            source_commit = $env:GITHUB_SHA
+            source_path = "src/tools/appsec-pentest/src/bin/ctox-appsec-hexdump.rs"
+            source_sha256 = (Get-FileHash -Algorithm SHA256 "src/tools/appsec-pentest/src/bin/ctox-appsec-hexdump.rs").Hash.ToLowerInvariant()
+            executable_sha256 = (Get-FileHash -Algorithm SHA256 $hexdump).Hash.ToLowerInvariant()
+            reviewed_testssl_commit = "97763a411c525720a5f9bd9d2cded416b10f210a"
+            supported_formats = @("-C", 'N/1 "%02X"', 'N/1 "%02x"', 'N/1 "%02x,"', 'N/1 "%02x " " \n"')
+            compact_upper_proof = $compactUpper
+            compact_lower_proof = $compactLower
+            comma_lower_proof = $commaLower
+            spaced_lower_proof = $true
+            canonical_proof = $true
+            rejects_unreviewed_formats = $true
+            testssl_version_proof = $true
+          } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $env:APPSEC_PROOF_ROOT "windows-hexdump-provenance.json")
 
       - name: Run AppSec toolchain proof
         shell: bash
@@ -286,6 +795,10 @@ jobs:
           const report = read('report.json');
           const exported = read('export.json');
           const verified = read('verify-export.json');
+          const hexdumpPath = path.join(root, 'windows-hexdump-provenance.json');
+          const hexdump = process.env.RUNNER_OS === 'Windows'
+            ? JSON.parse(fs.readFileSync(hexdumpPath, 'utf8'))
+            : null;
           const inventoryPath = path.join(root, 'runtime', 'appsec', 'default', 'tool-inventory.json');
           const inventory = JSON.parse(fs.readFileSync(inventoryPath, 'utf8'));
           const requiredTools = (inventory.tools || []).filter(tool =>
@@ -308,6 +821,21 @@ jobs:
               report: report?.ok === true && report?.report_complete === true,
               retained_export: exported?.ok === true && verified?.ok === true,
               zap_nonblocking: zap?.default_enabled === false,
+              windows_hexdump_attested: process.env.RUNNER_OS !== 'Windows'
+                || (hexdump?.ok === true
+                  && hexdump?.version === 'ctox.appsec.windows_hexdump_provenance.v2'
+                  && hexdump?.scope === 'ephemeral-ci-proof-only'
+                  && hexdump?.source_path === 'src/tools/appsec-pentest/src/bin/ctox-appsec-hexdump.rs'
+                  && /^[a-f0-9]{64}$/.test(hexdump?.source_sha256 || '')
+                  && /^[a-f0-9]{64}$/.test(hexdump?.executable_sha256 || '')
+                  && hexdump?.reviewed_testssl_commit === '97763a411c525720a5f9bd9d2cded416b10f210a'
+                  && hexdump?.compact_upper_proof === '43544F58'
+                  && hexdump?.compact_lower_proof === '43544f58'
+                  && hexdump?.comma_lower_proof === '43,54,4f,58,'
+                  && hexdump?.spaced_lower_proof === true
+                  && hexdump?.canonical_proof === true
+                  && hexdump?.rejects_unreviewed_formats === true
+                  && hexdump?.testssl_version_proof === true),
             },
             required_tools: requiredTools.map(tool => ({
               name: tool.name,
@@ -398,6 +926,8 @@ jobs:
             ${{ runner.temp }}/ctox-appsec-proof/report.json
             ${{ runner.temp }}/ctox-appsec-proof/export.json
             ${{ runner.temp }}/ctox-appsec-proof/verify-export.json
+            ${{ runner.temp }}/ctox-appsec-proof/windows-hexdump-provenance.json
+            ${{ runner.temp }}/ctox-appsec-proof/clamav-native-provenance.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/appsec/**/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/*.json
             ${{ runner.temp }}/ctox-appsec-proof/runtime/tools/appsec/install-logs/**

@@ -168,7 +168,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bubblewrap libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
+            curl meson ninja-build libcap-dev \
+            libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
+          src/scripts/install-appsec-bubblewrap.sh
 
       - name: Business OS JS dependency bootstrap
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -208,6 +210,8 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           bwrap --version
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml "tests::linux_scanner_workspace_enforces_atomic_filesystem_capacity" -- --exact
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml "tests::linux_bubblewrap_denies_operator_files_host_processes_and_network" -- --exact
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml scanner_schema_covers_all_allowlisted_tools --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_realistic_web_scanner_outputs_validate_contracts --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_remaining_allowlisted_tools_have_structured_output --quiet
@@ -230,6 +234,86 @@ jobs:
             cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml browser_runtime_live_chromium_fixture_proves_authenticated_positive_and_negative_cases --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml finding_bundle_exports_authz_replay_issue_and_fix_check_script --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml finding_verify_bundle_executes_proof_script_and_records_fix_status --quiet
+          mkdir -p runtime/build/deployment-audit
+          python3 - <<'PY'
+          import datetime
+          import json
+          import pathlib
+
+          evidence = {
+              "version": "ctox.deployment_audit.linux_scanner_sandbox_acceptance.v1",
+              "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "platform": "linux-x86_64",
+              "target": "x86_64-unknown-linux-gnu",
+              "gates": {
+                  "bubblewrap_user_pid_network_namespaces": True,
+                  "host_filesystem_write_isolation": True,
+                  "host_process_isolation": True,
+                  "network_default_deny": True,
+                  "sized_root_tmpfs_atomic_aggregate_quota": True,
+                  "locked_dependency_graph": True,
+              },
+              "ok": True,
+          }
+          pathlib.Path("runtime/build/deployment-audit/linux-scanner-sandbox-acceptance.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload Linux AppSec sandbox evidence
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: linux-appsec-sandbox-acceptance
+          path: runtime/build/deployment-audit/linux-scanner-sandbox-acceptance.json
+          if-no-files-found: error
+
+      - name: macOS AppSec sandbox and atomic quota acceptance
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          cargo metadata --locked \
+            --manifest-path src/tools/appsec-pentest/Cargo.toml \
+            --format-version 1 >/dev/null
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml \
+            "tests::macos_scanner_workspace_enforces_atomic_filesystem_capacity" \
+            -- --exact
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml \
+            "tests::macos_scanner_sandbox_denies_operator_files_processes_and_network" \
+            -- --exact
+          mkdir -p runtime/build/deployment-audit
+          python3 - <<'PY'
+          import datetime
+          import json
+          import pathlib
+
+          evidence = {
+              "version": "ctox.deployment_audit.macos_scanner_sandbox_acceptance.v1",
+              "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "platform": "macos-x86_64",
+              "target": "x86_64-apple-darwin",
+              "gates": {
+                  "seatbelt_default_deny": True,
+                  "operator_file_and_process_isolation": True,
+                  "network_default_deny": True,
+                  "apfs_atomic_aggregate_quota": True,
+                  "locked_dependency_graph": True,
+              },
+              "ok": True,
+          }
+          pathlib.Path("runtime/build/deployment-audit/macos-scanner-sandbox-acceptance.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload macOS AppSec sandbox evidence
+        if: matrix.target == 'x86_64-apple-darwin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-appsec-sandbox-acceptance
+          path: runtime/build/deployment-audit/macos-scanner-sandbox-acceptance.json
+          if-no-files-found: error
 
       - name: Build rxdb wire daemon (cross-process smokes)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -429,6 +513,9 @@ jobs:
           cargo test --locked --bin ctox `
             "secrets::tests::secret_store_encrypts_values_at_rest_and_round_trips" `
             -- --exact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows Secret Store runtime gate failed with exit code $LASTEXITCODE"
+          }
           New-Item -ItemType Directory -Force -Path runtime/build/deployment-audit | Out-Null
           $contract = @{
             version = "ctox.deployment_audit.windows_secret_store_acceptance.v1"
@@ -447,12 +534,73 @@ jobs:
             -Encoding utf8 `
             runtime/build/deployment-audit/windows-secret-store-acceptance.json
 
+      - name: Windows AppSec sandbox and atomic quota acceptance
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          cargo metadata --locked `
+            --manifest-path src/tools/appsec-pentest/Cargo.toml `
+            --format-version 1 | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows AppSec locked metadata gate failed with exit code $LASTEXITCODE"
+          }
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml `
+            "tests::windows_scanner_workspace_enforces_atomic_filesystem_capacity" `
+            -- --exact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows AppSec atomic quota gate failed with exit code $LASTEXITCODE"
+          }
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml `
+            "tests::windows_appcontainer_denies_operator_files_writes_and_network" `
+            -- --exact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows AppSec denial gate failed with exit code $LASTEXITCODE"
+          }
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml `
+            "tests::windows_appcontainer_executes_managed_batch_launcher_without_argument_injection" `
+            -- --exact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows AppSec managed batch gate failed with exit code $LASTEXITCODE"
+          }
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml `
+            "tests::windows_job_object_timeout_terminates_scanner_process_tree" `
+            -- --exact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows AppSec process tree gate failed with exit code $LASTEXITCODE"
+          }
+          $contract = @{
+            version = "ctox.deployment_audit.windows_scanner_sandbox_acceptance.v1"
+            generated_at = (Get-Date).ToUniversalTime().ToString("o")
+            platform = "windows-x86_64"
+            target = "${{ matrix.target }}"
+            gates = @{
+              appcontainer_identity_and_filesystem = $true
+              hardened_managed_batch_launcher = $true
+              network_default_deny = $true
+              job_object_process_tree = $true
+              vhdx_atomic_aggregate_quota = $true
+              locked_dependency_graph = $true
+            }
+            ok = $true
+          }
+          $contract | ConvertTo-Json -Depth 5 | Set-Content `
+            -Encoding utf8 `
+            runtime/build/deployment-audit/windows-scanner-sandbox-acceptance.json
+
       - name: Upload Windows Secret Store evidence
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: windows-secret-store-acceptance
           path: runtime/build/deployment-audit/windows-secret-store-acceptance.json
+          if-no-files-found: error
+
+      - name: Upload Windows AppSec sandbox evidence
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-appsec-sandbox-acceptance
+          path: runtime/build/deployment-audit/windows-scanner-sandbox-acceptance.json
           if-no-files-found: error
 
       - name: Harness core tests
