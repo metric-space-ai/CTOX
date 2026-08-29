@@ -201,7 +201,10 @@ struct SubscriptionAuthStartRequest {
 }
 
 pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow::Result<()> {
-    let app_root = resolve_business_os_app_root(root);
+    // Static shell assets are release-owned. In installed layouts `root` is
+    // the durable runtime directory, so resolving `root/business-os` first
+    // would resurrect a copied legacy shell after every release switch.
+    let app_root = store::resolve_business_os_app_root(root)?;
     if !app_root.join("index.html").is_file() {
         anyhow::bail!(
             "native Business OS app is missing at {}",
@@ -289,17 +292,6 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
         }
     }
     Ok(())
-}
-
-fn resolve_business_os_app_root(root: &Path) -> PathBuf {
-    [
-        root.join("business-os"),
-        root.join("src/apps/business-os"),
-        root.join("archive/2026-05-18-cleanup/generated/business-os"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.join("index.html").is_file())
-    .unwrap_or_else(|| root.join("business-os"))
 }
 
 fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
