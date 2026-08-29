@@ -3249,6 +3249,44 @@ pub fn update_module_to_catalog(
 /// runtime apps, marketplace installs, and operator-owned local modules are
 /// never touched. The regular catalog updater performs the staged swap and
 /// records a recovery version before discarding a locally changed shadow.
+pub(crate) fn quarantine_release_owned_system_module_overlay(
+    root: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let source_app_root = resolve_business_os_app_root(root)?;
+    let installed_app_root = resolve_business_os_installed_app_root(root);
+    if source_app_root == installed_app_root {
+        return Ok(None);
+    }
+
+    // `modules/` is part of the immutable CTOX release. Durable customer apps
+    // have explicit homes in `installed-modules/` and `local-modules/`. Older
+    // installers copied the complete shell into the state root, which let a
+    // stale system module survive an otherwise successful release switch.
+    // Preserve that unsupported overlay for recovery, but never execute it.
+    let overlay = installed_app_root.join("modules");
+    if !overlay.is_dir() || !source_app_root.join("modules").is_dir() {
+        return Ok(None);
+    }
+
+    let recovery_root = installed_app_root
+        .join(".recovery")
+        .join("release-owned-system-module-overlays");
+    fs::create_dir_all(&recovery_root).with_context(|| {
+        format!(
+            "failed to create Business OS system-module overlay recovery root {}",
+            recovery_root.display()
+        )
+    })?;
+    let target = recovery_root.join(format!("modules-{}-{}", now_ms(), Uuid::new_v4().simple()));
+    fs::rename(&overlay, &target).with_context(|| {
+        format!(
+            "failed to quarantine release-owned Business OS system-module overlay {}",
+            overlay.display()
+        )
+    })?;
+    Ok(Some(target))
+}
+
 pub(crate) fn reconcile_release_managed_module_shadows(root: &Path) -> anyhow::Result<Value> {
     let source_app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
@@ -24194,6 +24232,52 @@ pub(super) mod tests {
                 "entry": "index.html"
             }))?,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_release_owned_system_modules_are_quarantined_without_touching_runtime_apps(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let source_app_root = root.join("src/apps/business-os");
+        let installed_app_root = root.join("runtime/business-os");
+        let source_module = source_app_root.join("modules/browser");
+        let stale_module = installed_app_root.join("modules/browser");
+        let installed_module = installed_app_root.join("installed-modules/private-app");
+        let local_module = installed_app_root.join("local-modules/operator-app");
+
+        fs::create_dir_all(&source_module)?;
+        fs::create_dir_all(&stale_module)?;
+        fs::create_dir_all(&installed_module)?;
+        fs::create_dir_all(&local_module)?;
+        fs::write(source_app_root.join("index.html"), "<!doctype html>")?;
+        fs::write(
+            source_module.join("index.js"),
+            "export const build = 'current';\n",
+        )?;
+        fs::write(
+            stale_module.join("index.js"),
+            "export const build = 'stale';\n",
+        )?;
+        fs::write(installed_module.join("index.js"), "private app\n")?;
+        fs::write(local_module.join("index.js"), "operator app\n")?;
+
+        let quarantine = quarantine_release_owned_system_module_overlay(root)?
+            .context("expected legacy system-module quarantine")?;
+
+        assert!(!installed_app_root.join("modules").exists());
+        assert_eq!(
+            fs::read_to_string(quarantine.join("browser/index.js"))?,
+            "export const build = 'stale';\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source_module.join("index.js"))?,
+            "export const build = 'current';\n"
+        );
+        assert!(installed_module.join("index.js").is_file());
+        assert!(local_module.join("index.js").is_file());
+        assert!(quarantine_release_owned_system_module_overlay(root)?.is_none());
         Ok(())
     }
 

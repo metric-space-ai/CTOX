@@ -208,6 +208,12 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
             app_root.display()
         );
     }
+    if let Some(quarantine) = store::quarantine_release_owned_system_module_overlay(root)? {
+        eprintln!(
+            "[business-os] quarantined stale release-owned system-module overlay at {}",
+            quarantine.display()
+        );
+    }
     let reconciled = store::reconcile_release_managed_module_shadows(root)?;
     if reconciled
         .get("updated")
