@@ -157,6 +157,21 @@ INSTANCE_CONNECT_TOKENS=desk_123=secret-a,org:desk.1=secret-b
 JSON object syntax is also accepted. A matching scoped token takes precedence
 over `INSTANCE_CONNECT_TOKEN`.
 
+Production instances can also use an isolated Worker secret binding whose name
+is `INSTANCE_CONNECT_TOKEN_` followed by the lowercase hexadecimal UTF-8 bytes
+of the instance id. For example, `welsch.ctox.dev` uses
+`INSTANCE_CONNECT_TOKEN_77656c7363682e63746f782e646576`. An isolated binding
+takes precedence over the mapped and global tokens and implicitly allows only
+its exact instance id through the managed route allowlist.
+
+Managed-fleet provisioning should instead set
+`CTOX_MANAGED_MCP_CONNECT_AUTH_URL` to the control plane's purpose-bound
+connector-auth endpoint. The gateway then validates each instance credential
+remotely and treats that successful tenant/instance match as the route
+allowlist decision. Client MCP tokens are not accepted as connector
+credentials. Static global, mapped, and isolated secrets remain available for
+legacy and emergency operation.
+
 Replay controls:
 
 ```text
