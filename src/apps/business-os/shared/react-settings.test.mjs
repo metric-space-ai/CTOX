@@ -331,8 +331,15 @@ test('sync settings render only signaling server, room, password, QR code, and l
   assert.match(html, />QR-Code</);
   assert.match(html, />Link</);
   assert.match(html, /ctox-business-os:biz_test:room/);
-  assert.match(html, /room-password-test/);
+  assert.match(html, /••••••••••••/);
+  assert.doesNotMatch(html, /room-password-test/);
   assert.match(html, /wss:\/\/signaling\.ctox\.dev\/v2/);
+  assert.match(html, /data-sync-copy="signaling"/);
+  assert.match(html, /data-sync-copy="room"/);
+  assert.match(html, /data-sync-copy="password"/);
+  assert.match(html, /data-sync-password-toggle/);
+  assert.match(html, /data-workjet-pairing-generate/);
+  assert.doesNotMatch(html, /data-workjet-pairing-ready|workjet:\/\/pair\?payload=/);
   assert.doesNotMatch(html, /Business-OS-Hosting|Workjet verbinden|Technische Verbindung/);
   assert.doesNotMatch(html, /App-Hosting|Sync-Modus|Transport|Peer-Rolle|Instanz/);
   assert.doesNotMatch(html, /Zugang|Gültig bis|Ziel-Peer|Verbindungsraum/);
@@ -350,8 +357,19 @@ test('sync settings use the role-bound signaling token when no room password is 
     },
     workjetPairing: { loading: false, invite: null, error: '' },
   });
-  assert.match(html, /role-bound-browser-token/);
+  assert.match(html, /••••••••••••/);
+  assert.doesNotMatch(html, /role-bound-browser-token/);
   assert.doesNotMatch(html, /<dt>Passwort<\/dt><dd>-<\/dd>/);
+  assert.equal(hooks.syncCopyValue('password', {
+    signaling_browser_token: 'role-bound-browser-token',
+  }), 'role-bound-browser-token');
+
+  const revealed = baseTemplate({
+    tab: 'sync',
+    syncConfig: { signaling_browser_token: 'role-bound-browser-token' },
+    workjetPairing: { loading: false, invite: null, error: '', passwordVisible: true },
+  });
+  assert.match(revealed, /role-bound-browser-token/);
 });
 
 test('Workjet pairing response is validated and rendered as an inert SVG image', async () => {
@@ -383,9 +401,23 @@ test('Workjet pairing response is validated and rendered as an inert SVG image',
   assert.match(html, /data-workjet-pairing-ready/);
   assert.match(html, /alt="Workjet Pairing QR-Code"/);
   assert.match(html, /data-workjet-pairing-link/);
+  assert.match(html, /data-sync-copy="link"/);
   assert.match(html, /href="workjet:\/\/pair\?payload=/);
+  assert.match(html, /Gültig für/);
   assert.doesNotMatch(html, /QR-Code mit Workjet scannen|In Workjet öffnen|Gültig bis/);
   assert.doesNotMatch(html, /<script/i);
+});
+
+test('Workjet pairing countdown reports the remaining validity window', () => {
+  const now = Date.parse('2026-08-29T12:00:00.000Z');
+  assert.equal(
+    hooks.workjetPairingRemainingLabel('2026-08-29T12:05:00.000Z', now),
+    'Gültig für 5:00',
+  );
+  assert.equal(
+    hooks.workjetPairingRemainingLabel('2026-08-29T11:59:00.000Z', now),
+    'Gültig für 0:00',
+  );
 });
 
 test('Workjet pairing retries while the native WebRTC peer is still negotiating', async () => {

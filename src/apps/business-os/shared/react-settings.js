@@ -106,6 +106,7 @@ export async function openReactSettings({
       loading: false,
       invite: null,
       error: '',
+      passwordVisible: false,
     },
     modules: Array.isArray(modules) ? modules : [],
     governance,
@@ -129,6 +130,7 @@ export async function openReactSettings({
   let usersSub = null;
   let activityRetryTimer = null;
   let activityRetryAttempts = 0;
+  let workjetPairingExpiryTimer = null;
   const ensureChannelCollections = async () => {
     await Promise.allSettled([
       sync?.startCollection?.('communication_accounts'),
@@ -329,9 +331,6 @@ export async function openReactSettings({
     settingsState.tab = nextTab;
     settingsState.commandStatus = '';
     render();
-    if (settingsState.tab === 'sync') {
-      ensureWorkjetPairingInvite();
-    }
     if (settingsState.tab === 'runtime' && !settingsState.runtimeSettings) {
       refreshRuntimeSettings();
     }
@@ -367,6 +366,37 @@ export async function openReactSettings({
   };
   const revokeModuleSupportDownloadUrls = () => {
     Object.keys(settingsState.moduleSupportStatus || {}).forEach(revokeModuleSupportDownloadUrl);
+  };
+  const stopWorkjetPairingExpiryTimer = () => {
+    if (workjetPairingExpiryTimer) clearInterval(workjetPairingExpiryTimer);
+    workjetPairingExpiryTimer = null;
+  };
+  const refreshWorkjetPairingCountdown = () => {
+    const invite = settingsState.workjetPairing.invite;
+    if (!invite) {
+      stopWorkjetPairingExpiryTimer();
+      return;
+    }
+    const remainingMs = Date.parse(invite.expiresAt) - Date.now();
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      stopWorkjetPairingExpiryTimer();
+      settingsState.workjetPairing = {
+        ...settingsState.workjetPairing,
+        loading: false,
+        invite: null,
+        error: '',
+      };
+      render();
+      return;
+    }
+    const countdown = body.querySelector('[data-workjet-pairing-countdown]');
+    if (countdown) countdown.textContent = workjetPairingRemainingLabel(invite.expiresAt);
+  };
+  const startWorkjetPairingExpiryTimer = () => {
+    stopWorkjetPairingExpiryTimer();
+    if (!settingsState.workjetPairing.invite || settingsState.tab !== 'sync') return;
+    refreshWorkjetPairingCountdown();
+    workjetPairingExpiryTimer = setInterval(refreshWorkjetPairingCountdown, 1_000);
   };
 
   const render = () => {
@@ -418,6 +448,7 @@ export async function openReactSettings({
         clearTimeout(activityRetryTimer);
         activityRetryTimer = null;
       }
+      stopWorkjetPairingExpiryTimer();
       revokeModuleSupportDownloadUrls();
       onClose?.();
     });
@@ -528,6 +559,22 @@ export async function openReactSettings({
         render();
       });
     });
+    body.querySelector('[data-sync-password-toggle]')?.addEventListener('click', () => {
+      settingsState.workjetPairing.passwordVisible = !settingsState.workjetPairing.passwordVisible;
+      render();
+    });
+    body.querySelectorAll('[data-sync-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const value = syncCopyValue(button.dataset.syncCopy, syncConfig, settingsState.workjetPairing.invite);
+        if (!value || !navigator.clipboard?.writeText) return;
+        try {
+          await navigator.clipboard.writeText(value);
+          button.textContent = '✓';
+          button.setAttribute('aria-label', 'Kopiert');
+        } catch {}
+      });
+    });
+    body.querySelector('[data-workjet-pairing-generate]')?.addEventListener('click', ensureWorkjetPairingInvite);
     body.querySelectorAll('[data-runtime-authorize-subscription]').forEach((button) => button.addEventListener('click', async () => {
       const providerId = String(button.dataset.runtimeAuthorizeSubscription || 'codex');
       const profile = providerSubscriptionProfile(providerId);
@@ -940,21 +987,29 @@ export async function openReactSettings({
         render();
       }
     });
+    startWorkjetPairingExpiryTimer();
   };
 
   async function ensureWorkjetPairingInvite() {
     if (!isAdmin || settingsState.tab !== 'sync') return;
     if (settingsState.workjetPairing.loading || settingsState.workjetPairing.invite) return;
-    settingsState.workjetPairing = { loading: true, invite: null, error: '' };
+    settingsState.workjetPairing = {
+      ...settingsState.workjetPairing,
+      loading: true,
+      invite: null,
+      error: '',
+    };
     render();
     try {
       settingsState.workjetPairing = {
+        ...settingsState.workjetPairing,
         loading: false,
         invite: await createWorkjetPairingInvite(sync, 'Workjet Gerät'),
         error: '',
       };
     } catch (error) {
       settingsState.workjetPairing = {
+        ...settingsState.workjetPairing,
         loading: false,
         invite: null,
         error: String(error?.message || error),
@@ -964,9 +1019,6 @@ export async function openReactSettings({
   }
 
   render();
-  if (settingsState.tab === 'sync') {
-    ensureWorkjetPairingInvite();
-  }
   refreshRuntimeSettings();
   if (settingsState.tab === 'channels') {
     ensureChannelCollections().then(refreshChannelAccounts).catch(refreshChannelAccounts);
@@ -1217,12 +1269,22 @@ function syncPanel(syncConfig, isAdmin, workjetPairing = {}) {
   const urls = syncConfig?.signaling_urls || [];
   const endpoints = urls.map(signalingEndpoint).filter(Boolean);
   const pairingUri = String(workjetPairing?.invite?.pairingUri || '');
+  const password = String(syncConfig?.signaling_room_password || syncConfig?.signaling_browser_token || '');
+  const passwordDisplay = workjetPairing?.passwordVisible
+    ? (password || '-')
+    : (password ? '••••••••••••' : '-');
   return `
     <section class="settings-section" data-sync-pairing-only>
       <dl class="settings-kv settings-kv--wrap">
-        ${kv('Signaling-Server', endpoints.join(', ') || '-')}
-        ${kv('Raum', syncConfig?.sync_room || '-')}
-        ${kv('Passwort', syncConfig?.signaling_room_password || syncConfig?.signaling_browser_token || '-')}
+        ${syncCopyRow('Signaling-Server', endpoints.join(', ') || '-', 'signaling')}
+        ${syncCopyRow('Raum', syncConfig?.sync_room || '-', 'room')}
+        <div>
+          <dt>Passwort</dt>
+          <dd>
+            <span data-sync-password-value>${escapeHtml(passwordDisplay)}</span>
+            ${password ? `<button class="channels-copy" type="button" data-sync-password-toggle aria-label="Passwort ${workjetPairing?.passwordVisible ? 'verbergen' : 'anzeigen'}" title="Passwort ${workjetPairing?.passwordVisible ? 'verbergen' : 'anzeigen'}">👁</button>${syncCopyButton('password', 'Passwort kopieren')}` : ''}
+          </dd>
+        </div>
         <div>
           <dt>QR-Code</dt>
           <dd>${workjetPairingQr(workjetPairing, isAdmin)}</dd>
@@ -1230,13 +1292,34 @@ function syncPanel(syncConfig, isAdmin, workjetPairing = {}) {
         <div>
           <dt>Link</dt>
           <dd>${pairingUri
-            ? `<a data-workjet-pairing-link href="${escapeAttr(pairingUri)}">${escapeHtml(pairingUri)}</a>`
-            : `<span data-workjet-pairing-link-pending>${escapeHtml(workjetPairing?.error || 'Wird erzeugt…')}</span>`}
+            ? `<a data-workjet-pairing-link href="${escapeAttr(pairingUri)}">${escapeHtml(pairingUri)}</a>${syncCopyButton('link', 'Link kopieren')}`
+            : '<span data-workjet-pairing-link-pending>—</span>'}
           </dd>
         </div>
       </dl>
     </section>
   `;
+}
+
+function syncCopyRow(label, value, key) {
+  return `<div><dt>${escapeHtml(label)}</dt><dd><span>${escapeHtml(value)}</span>${value !== '-' ? syncCopyButton(key, `${label} kopieren`) : ''}</dd></div>`;
+}
+
+function syncCopyButton(key, label) {
+  return `<button class="channels-copy" type="button" data-sync-copy="${escapeAttr(key)}" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">⧉</button>`;
+}
+
+function syncCopyValue(key, syncConfig = {}, invite = null) {
+  if (key === 'signaling') {
+    const urls = Array.isArray(syncConfig?.signaling_urls) ? syncConfig.signaling_urls : [];
+    return urls.map(signalingEndpoint).filter(Boolean).join(', ');
+  }
+  if (key === 'room') return String(syncConfig?.sync_room || '');
+  if (key === 'password') {
+    return String(syncConfig?.signaling_room_password || syncConfig?.signaling_browser_token || '');
+  }
+  if (key === 'link') return String(invite?.pairingUri || '');
+  return '';
 }
 
 function signalingEndpoint(raw) {
@@ -1275,9 +1358,16 @@ function workjetPairingQr(state = {}, isAdmin = false) {
   }
   if (state.invite) {
     const qrDataUrl = workjetPairingSvgDataUrl(state.invite.qrSvg);
-    return `<img class="workjet-pairing-qr" data-workjet-pairing-ready src="${escapeAttr(qrDataUrl)}" alt="Workjet Pairing QR-Code" />`;
+    return `<div><img class="workjet-pairing-qr" data-workjet-pairing-ready src="${escapeAttr(qrDataUrl)}" alt="Workjet Pairing QR-Code" /><span class="settings-note" data-workjet-pairing-countdown>${escapeHtml(workjetPairingRemainingLabel(state.invite.expiresAt))}</span></div>`;
   }
-  return `<span data-workjet-pairing-qr-pending>${escapeHtml(state.error || 'Wird erzeugt…')}</span>`;
+  return `<button class="text-button settings-primary" type="button" data-workjet-pairing-generate ${state.loading ? 'disabled' : ''}>${state.loading ? 'Wird erzeugt…' : 'QR-Code generieren'}</button>${state.error ? `<span class="settings-alert" role="alert">${escapeHtml(state.error)}</span>` : ''}`;
+}
+
+function workjetPairingRemainingLabel(expiresAt, nowMs = Date.now()) {
+  const remainingSeconds = Math.max(0, Math.ceil((Date.parse(expiresAt) - nowMs) / 1_000));
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = String(remainingSeconds % 60).padStart(2, '0');
+  return `Gültig für ${minutes}:${seconds}`;
 }
 
 function workjetPairingSvgDataUrl(svgText) {
@@ -5123,7 +5213,9 @@ export const __reactSettingsTestHooks = {
   signalingAuthExpiry,
   signalingEndpoint,
   settingsTemplate,
+  syncCopyValue,
   syncAuthenticationLabel,
+  workjetPairingRemainingLabel,
   workjetPairingSvgDataUrl,
   wireProviderLogoFallbacks,
 };
