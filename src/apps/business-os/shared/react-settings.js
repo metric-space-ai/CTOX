@@ -1222,7 +1222,7 @@ function syncPanel(syncConfig, isAdmin, workjetPairing = {}) {
       <dl class="settings-kv settings-kv--wrap">
         ${kv('Signaling-Server', endpoints.join(', ') || '-')}
         ${kv('Raum', syncConfig?.sync_room || '-')}
-        ${kv('Passwort', syncConfig?.signaling_room_password || '-')}
+        ${kv('Passwort', syncConfig?.signaling_room_password || syncConfig?.signaling_browser_token || '-')}
         <div>
           <dt>QR-Code</dt>
           <dd>${workjetPairingQr(workjetPairing, isAdmin)}</dd>

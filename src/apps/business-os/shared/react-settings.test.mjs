@@ -340,6 +340,20 @@ test('sync settings render only signaling server, room, password, QR code, and l
   assert.doesNotMatch(html, /Klartext-Passwort|Kurzzeit-Token|Token ist im QR/);
 });
 
+test('sync settings use the role-bound signaling token when no room password is exposed', () => {
+  const html = baseTemplate({
+    tab: 'sync',
+    syncConfig: {
+      sync_room: 'ctox-business-os:biz_test:room',
+      signaling_browser_token: 'role-bound-browser-token',
+      signaling_urls: ['wss://signaling.ctox.dev/v2'],
+    },
+    workjetPairing: { loading: false, invite: null, error: '' },
+  });
+  assert.match(html, /role-bound-browser-token/);
+  assert.doesNotMatch(html, /<dt>Passwort<\/dt><dd>-<\/dd>/);
+});
+
 test('Workjet pairing response is validated and rendered as an inert SVG image', async () => {
   const response = {
     pairingUri: `workjet://pair?payload=${'A'.repeat(64)}`,
