@@ -2679,14 +2679,28 @@ function mergeScrapingAdapterSource(adapter, source) {
 // "Zugang" (gibt es gueltige Anmeldedaten?) und "Funktion" (lief die letzte
 // Pruefung durch?). Beide in einen Topf zu werfen hiess vorher: "Zugang fehlt"
 // stand auch da, wenn der Zugang existierte und nur die Pruefung scheiterte.
+// Statuswerte, die eine eigene Aussage ueber den Zugang treffen. Sie haben
+// Vorrang vor dem Flag requires_credential: das Flag bedeutet "braucht keine
+// GESPEICHERTEN Zugangsdaten" und schliesst eine noetige Browseranmeldung
+// nicht aus. Auf der Produktivinstanz trug rocketreach.com
+// requires_credential=false (aus der Quelle) und zugleich
+// auth_status=browser_session_requested mit dem Fehler "Anmeldung im Browser
+// erforderlich" - die Karte zeigte "Kein Zugang noetig" und widersprach sich.
+const ADAPTER_AUTH_AUSSAGEKRAEFTIG = Object.freeze([
+  'missing', 'required', 'auth_required', 'credential_missing', 'expired',
+  'invalid', 'denied', 'logged_out', 'auth_requested', 'browser_session_requested',
+  'ok', 'valid', 'ready', 'active', 'signed_in', 'authenticated',
+  'session_authenticated', 'credential_available', 'authorized',
+]);
+
 function adapterZugang(adapter) {
-  if (adapter.requires_credential === false) {
-    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
-  }
   // Exakte Statuslisten -- Substring-Muster matchten `required` auch in
   // `not_required`, und jeder Adapter ohne Anmeldepflicht stand auf
   // "Zugang fehlt" (Review-Befund; der Server schreibt `not_required`).
   const auth = String(adapter.auth_status || '').toLowerCase();
+  if (adapter.requires_credential === false && !ADAPTER_AUTH_AUSSAGEKRAEFTIG.includes(auth)) {
+    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
+  }
   if (auth === 'not_required') {
     return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
   }
@@ -3992,6 +4006,8 @@ export const __browserTestHooks = {
   SCRAPING_SOURCE_COLLECTIONS,
   mergeScrapingAdapterSource,
   mergeScrapingAdapterRows,
+  adapterZugang,
+  adapterFunktion,
   adapterFehlerKurz,
   adapterFehlerText,
   adapterName,

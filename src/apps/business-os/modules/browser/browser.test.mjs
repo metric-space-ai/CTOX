@@ -1393,3 +1393,37 @@ function pointerEvent(overrides = {}) {
   );
   console.log('  ok: Zugangs- und Pruefaussagen bleiben in sich stimmig');
 }
+
+// --- requires_credential darf einen echten Status nicht ueberstimmen ----------
+// Auf der Produktivinstanz trug die QUELLE rocketreach.com
+// requires_credential=false, waehrend der Adapter
+// auth_status=browser_session_requested und den Fehler "Anmeldung im Browser
+// erforderlich" trug. Weil das Flag zuerst geprueft wurde, zeigte die Karte
+// "Kein Zugang noetig" - direkt neben der Aufforderung, sich anzumelden.
+{
+  const { adapterZugang } = __browserTestHooks;
+  const text = (a) => adapterZugang(a).text;
+
+  assert.equal(
+    text({ requires_credential: false, auth_status: 'browser_session_requested' }),
+    'Anmeldung angefordert',
+    'ein angeforderter Login schlaegt das Flag requires_credential=false',
+  );
+  assert.equal(
+    text({ requires_credential: false, auth_status: 'required' }),
+    'Zugang fehlt',
+    'ein verlangter Zugang schlaegt das Flag',
+  );
+  assert.equal(
+    text({ requires_credential: false, auth_status: 'session_authenticated' }),
+    'Zugang OK',
+    'eine bestehende Anmeldung schlaegt das Flag',
+  );
+
+  // Das Flag bleibt gueltig, solange der Status nichts Eigenes sagt.
+  assert.equal(text({ requires_credential: false, auth_status: 'not_required' }), 'Kein Zugang nötig');
+  assert.equal(text({ requires_credential: false }), 'Kein Zugang nötig');
+  assert.equal(text({ requires_credential: false, auth_status: '' }), 'Kein Zugang nötig');
+
+  console.log('  ok: Zugangschip widerspricht nicht mehr der Anmeldeaufforderung');
+}
