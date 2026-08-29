@@ -2263,7 +2263,7 @@ function installAddressClearControl(form, address, go) {
   button.className = 'ctox-icon-button';
   button.dataset.browserAddressClear = '';
   button.setAttribute('aria-label', 'Adresse löschen');
-  button.title = 'Adresse löschen';
+  button.title = t('btnClearAddress', 'Adresse löschen');
   button.textContent = '×';
   form.insertBefore(button, go || null);
   return button;
