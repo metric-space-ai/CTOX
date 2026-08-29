@@ -1033,6 +1033,13 @@ fn request_session(root: &Path, request: &Request) -> store::BusinessOsSession {
     //    X-CTOX-Business-OS-Session). The reversible cookie credential-replay
     //    path is gone — cookies are opaque tokens only.
     let auth_header = header_value(request, "Authorization");
+    // Managed ctox.dev document/control-plane requests arrive through an SSH
+    // loopback forward. Resolve their native-signed capability before the
+    // optional local-dev session; otherwise loopback would replace the actual
+    // managed user with local-dev/admin.
+    if let Some(session) = session_from_capability_bearer(root, auth_header.as_deref()) {
+        return session;
+    }
     let session_header = header_value(request, "X-CTOX-Business-OS-Session");
     let session = store::session_for_request(
         auth_header.as_deref(),
@@ -1046,15 +1053,7 @@ fn request_session(root: &Path, request: &Request) -> store::BusinessOsSession {
             request_allows_local_dev_session(request),
         )
     });
-    if session.authenticated {
-        return session;
-    }
-
-    // Managed ctox.dev control-plane requests mint a short-lived native
-    // capability token over SSH and replay it as Authorization: Bearer for
-    // localhost-only control-plane fetches. Treat that signed token as an API
-    // session, then let the normal route-level role checks decide access.
-    session_from_capability_bearer(root, auth_header.as_deref()).unwrap_or(session)
+    session
 }
 
 fn session_from_capability_bearer(
@@ -1081,6 +1080,15 @@ fn session_from_capability_bearer(
         reason: None,
     };
     Some(store::session_with_persisted_user(root, session.clone()).unwrap_or(session))
+}
+
+fn verified_capability_bearer_token(root: &Path, auth_header: Option<&str>) -> Option<String> {
+    let token = auth_header
+        .map(str::trim)?
+        .strip_prefix("Bearer ")
+        .map(str::trim)?;
+    store::verify_capability_actor(root, token)?;
+    Some(token.to_owned())
 }
 
 fn request_allows_local_dev_session(request: &Request) -> bool {
@@ -3443,6 +3451,10 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         // way the shell can start; the document that carries the shell must
         // also be able to carry its context.
         let session = request_session(root, &request);
+        let capability_token = verified_capability_bearer_token(
+            root,
+            header_value(&request, "Authorization").as_deref(),
+        );
         store::remember_authenticated_session_user(root, &session)?;
         let sync_config = if session.authenticated {
             let turn_session = session
@@ -3457,8 +3469,14 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         };
         let html = String::from_utf8(bytes).context("Business OS index.html is not UTF-8")?;
         let design_templates = load_design_template_manifests(root)?;
-        bytes = inject_launch_context(html, &session, sync_config.as_ref(), &design_templates)?
-            .into_bytes();
+        bytes = inject_launch_context(
+            html,
+            &session,
+            sync_config.as_ref(),
+            &design_templates,
+            capability_token.as_deref(),
+        )?
+        .into_bytes();
     }
     let cache_control = business_os_static_cache_control(is_index, &rel, request.url());
     if is_index {
@@ -3475,11 +3493,19 @@ fn inject_launch_context(
     session: &store::BusinessOsSession,
     sync_config: Option<&Value>,
     design_templates: &[DesignTemplateDescriptor],
+    capability_token: Option<&str>,
 ) -> anyhow::Result<String> {
     let html = ensure_shell_stylesheets_in_index(html);
+    let mut session_value = serde_json::to_value(session)?;
+    if let (Some(token), Some(object)) = (capability_token, session_value.as_object_mut()) {
+        object.insert(
+            "capability_token".to_owned(),
+            Value::String(token.to_owned()),
+        );
+    }
     let script = format!(
         "<script>window.CTOX_BUSINESS_OS_SESSION={};window.CTOX_BUSINESS_OS_CONFIG={};window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES={};</script>",
-        script_json(session)?,
+        script_json(&session_value)?,
         sync_config
             .map(script_json)
             .transpose()?
@@ -4213,10 +4239,44 @@ mod tests {
 
         assert!(session.authenticated);
         assert!(store::session_can_manage_all(&session));
+        assert_eq!(
+            verified_capability_bearer_token(root.path(), Some(&auth_header)).as_deref(),
+            Some(token.as_str())
+        );
         let user = session.user.expect("session user");
         assert_eq!(user.id, "admin@example.com");
         assert_eq!(user.display_name, "Admin User");
         assert_eq!(user.role, "admin");
+    }
+
+    #[test]
+    fn managed_shell_launch_context_carries_verified_capability() {
+        let session = store::BusinessOsSession {
+            ok: true,
+            authenticated: true,
+            auth_required: true,
+            user: Some(store::BusinessOsSessionUser {
+                id: "managed@example.com".to_owned(),
+                display_name: "Managed User".to_owned(),
+                role: "user".to_owned(),
+                is_admin: false,
+            }),
+            login_url: None,
+            reason: None,
+        };
+
+        let html = inject_launch_context(
+            "<html><head></head><body>instance shell</body></html>".to_owned(),
+            &session,
+            None,
+            &[],
+            Some("verified-managed-capability"),
+        )
+        .expect("inject launch context");
+
+        assert!(html.contains("instance shell"));
+        assert!(html.contains(r#""capability_token":"verified-managed-capability""#));
+        assert!(html.contains("window.CTOX_BUSINESS_OS_SESSION"));
     }
 
     #[test]
