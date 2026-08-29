@@ -1259,3 +1259,47 @@ function pointerEvent(overrides = {}) {
     `Von der Scraping-Leiste gelesen, aber nicht in SCOPED_SYSTEM_MODULE_DB_COLLECTIONS.browser: ${fehlend.join(', ')}`,
   );
 }
+
+// --- Zusammenfuehrung doppelter Adapter (Feldbefund 29.08.2026) ---------------
+// Auf der Produktivinstanz lagen 14 Quellen in BEIDEN Adaptersammlungen, mit
+// identischer id. Nach Sammlung geschluesselt erschien jede doppelt; eine Seite
+// zu verwerfen haette entweder die Pruefergebnisse (Kern) oder die Aktualitaet
+// (tenant) verloren.
+{
+  const { mergeScrapingAdapterRows } = __browserTestHooks;
+  assert.equal(typeof mergeScrapingAdapterRows, 'function', 'mergeScrapingAdapterRows muss exportiert sein');
+
+  const kern = {
+    source_id: 'bundesanzeiger.de', id: 'adapter_thesen_bundesanzeiger-de',
+    updated_at_ms: 1787810131946,
+    last_test: '2026-08-27T05:55:31Z', latency_ms: 5680, test_ok: false,
+    evidence: 'status-temporary_unreachable', auth_status: 'not_required',
+  };
+  const tenant = {
+    source_id: 'bundesanzeiger.de', id: 'adapter_thesen_bundesanzeiger-de',
+    updated_at_ms: 1787917371912,
+    last_test: '', latency_ms: null, auth_status: 'not_required', enabled: false,
+  };
+
+  const zusammen = mergeScrapingAdapterRows(kern, tenant);
+  assert.equal(zusammen.updated_at_ms, 1787917371912, 'der neuere Stand gibt den Grundstand vor');
+  assert.equal(zusammen.last_test, '2026-08-27T05:55:31Z', 'ein Pruefergebnis darf nicht von einem leeren Feld verdraengt werden');
+  assert.equal(zusammen.latency_ms, 5680, 'null darf einen gemessenen Wert nicht verdraengen');
+  assert.equal(zusammen.evidence, 'status-temporary_unreachable', 'nur im aelteren Satz vorhandene Felder bleiben erhalten');
+  assert.equal(zusammen.test_ok, false, 'false ist ein Ergebnis und darf nicht als leer gelten');
+  assert.equal(zusammen.enabled, false, 'Felder des neueren Satzes bleiben erhalten');
+
+  const andersherum = mergeScrapingAdapterRows(tenant, kern);
+  assert.deepEqual(andersherum, zusammen, 'die Zusammenfuehrung muss reihenfolgeunabhaengig sein');
+
+  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.ok(
+    /deduplicated\.set\(schluessel/.test(quelle),
+    'die Dedup muss nach Quelle schluesseln, sonst erscheint jede Quelle doppelt',
+  );
+  assert.ok(
+    /state\.adapterUnvollstaendig = errors\.length > 0/.test(quelle),
+    'eine unvollstaendige Ladung muss vermerkt werden, sonst bleibt die Leiste dauerhaft lueckenhaft',
+  );
+  console.log('  ok: doppelte Adapter werden verlustfrei zusammengefuehrt');
+}

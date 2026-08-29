@@ -2389,6 +2389,20 @@ function browserInputPayload(event) {
   };
 }
 
+// Fuehrt zwei Adaptersaetze derselben Quelle zusammen. Der neuere Satz gibt
+// den Grundstand vor; Felder, die dort fehlen oder leer sind, werden aus dem
+// aelteren ergaenzt. So ueberlebt ein Pruefergebnis aus der Kern-Sammlung eine
+// frische, aber magere Projektion aus der tenant-lokalen Sammlung.
+function mergeScrapingAdapterRows(a, b) {
+  const [neuer, aelter] = Number(a?.updated_at_ms || 0) >= Number(b?.updated_at_ms || 0) ? [a, b] : [b, a];
+  const zusammen = { ...aelter, ...neuer };
+  for (const [feld, wert] of Object.entries(aelter || {})) {
+    const aktuell = zusammen[feld];
+    if (aktuell === undefined || aktuell === null || aktuell === '') zusammen[feld] = wert;
+  }
+  return zusammen;
+}
+
 async function readCollection(collection, options = {}) {
   if (!collection?.find) return [];
   const limit = Number.isFinite(options.limit) ? options.limit : 100;
@@ -2593,16 +2607,33 @@ async function ladeScrapingAdapter(ctx, state) {
         .filter((row) => row && row.is_deleted !== true && row.id)
         .map((row) => [String(row.id), row]),
     );
+    // Dieselbe Quelle liegt in beiden Adaptersammlungen, mit identischer id.
+    // Nach Sammlung getrennt zu schluesseln zeigte jede Quelle doppelt. Nach
+    // Quelle zu schluesseln und eine Seite zu verwerfen verliert dagegen
+    // Information: die Kern-Saetze tragen die Pruefergebnisse (last_test,
+    // latency_ms, test_ok, evidence), die tenant-lokalen sind aktueller.
+    // Deshalb wird zusammengefuehrt statt ausgewaehlt.
     const deduplicated = new Map();
     for (const row of rows) {
       if (!row || row.is_deleted === true) continue;
-      const source = sourceById.get(String(row.source_id || ''));
+      const schluessel = String(row.source_id || row.id || '');
+      if (!schluessel) continue;
+      const vorhanden = deduplicated.get(schluessel);
+      deduplicated.set(schluessel, vorhanden ? mergeScrapingAdapterRows(vorhanden, row) : row);
+    }
+    for (const [schluessel, row] of deduplicated) {
       deduplicated.set(
-        `${row.adapter_collection}:${row.id || row.source_id}`,
-        mergeScrapingAdapterSource(row, source),
+        schluessel,
+        mergeScrapingAdapterSource(row, sourceById.get(String(row.source_id || ''))),
       );
     }
     state.adapters = [...deduplicated.values()];
+    // Eine Sammlung, die beim Oeffnen noch nicht bereit war, lieferte still
+    // nichts: die Leiste laed nur einmal und zeigte dann dauerhaft eine
+    // unvollstaendige Liste. Der Vermerk erlaubt gezieltes Nachladen.
+    state.adapterUnvollstaendig = errors.length > 0;
+    state.adapterZuletztGeladenMs = Date.now();
+    if (errors.length) console.warn(`[browser] Adaptersammlung unvollstaendig gelesen: ${errors.join(' | ')}`);
     state.adapterFehler = errors.length === SCRAPING_ADAPTER_COLLECTIONS.length
       ? errors.join(' | ')
       : '';
@@ -2682,6 +2713,14 @@ function renderAdapterRail(ctx, refs, state) {
   const rail = refs.sessions;
   if (!rail) return;
   if (refs.adapterCount) refs.adapterCount.textContent = String((state.adapters || []).length || '');
+  const nachladenFaellig = state.adapterUnvollstaendig
+    && Date.now() - Number(state.adapterZuletztGeladenMs || 0) > 5000;
+  if (nachladenFaellig) {
+    state.adapterUnvollstaendig = false;
+    ladeScrapingAdapter(ctx, state).then(() => {
+      if (state.leftView?.band === 'adapters') renderAdapterRail(ctx, refs, state);
+    });
+  }
   if (!Array.isArray(state.adapters)) {
     rail.replaceChildren();
     const laden = document.createElement('div');
@@ -3871,6 +3910,7 @@ export const __browserTestHooks = {
   SCRAPING_ADAPTER_COLLECTIONS,
   SCRAPING_SOURCE_COLLECTIONS,
   mergeScrapingAdapterSource,
+  mergeScrapingAdapterRows,
   normalizeUrl,
   browserSessionIdFromArgs,
   formatBytes,
