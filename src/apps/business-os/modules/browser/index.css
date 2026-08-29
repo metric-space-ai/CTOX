@@ -757,6 +757,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Ohne min-width:0 schrumpft ein Flex-Kind nicht, sondern schiebt die Karte
+     auf: ein langer Adaptername sprengte damit die Spalte, statt zu kuerzen. */
+  min-width: 0;
 }
 
 .browser-adapter-dot {

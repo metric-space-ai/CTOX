@@ -2816,6 +2816,10 @@ function renderAdapterRail(ctx, refs, state) {
     punkt.className = `browser-adapter-dot ${zugang.klasse === 'is-error' ? 'is-error' : funktion.klasse}`;
     const name = document.createElement('strong');
     name.textContent = label;
+    // Namen kommen aus den Daten und sind gelegentlich lang (ein Adapter hiess
+    // "Handelsregister DE repair slice (German app-error detection)"). Gekuerzt
+    // anzeigen, vollstaendig im Tooltip - raten waere schlechter als kuerzen.
+    name.title = label;
     kopf.append(punkt, name);
     const chips = document.createElement('div');
     chips.className = 'browser-adapter-chips';
