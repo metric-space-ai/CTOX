@@ -157,6 +157,38 @@ test('provider account commands carry only typed non-secret selectors', () => {
   );
 });
 
+test('subscription login starts through the typed control plane without RxDB command dispatch', async () => {
+  const calls = [];
+  const payload = await hooks.startSubscriptionAuthControlPlane('codex', 'codex-primary', {
+    callbackUrl: 'https://welsch.ctox.dev/api/business-os/ctox/subscription-auth/callback',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          status: 'device_code',
+          user_code: 'ABCD-EFGH',
+          verification_url: 'https://auth.example/device',
+        }),
+      };
+    },
+  });
+  assert.equal(payload.status, 'device_code');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/api/business-os/ctox/subscription-auth/start');
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    provider: 'codex',
+    auth_mode: 'subscription',
+    flow: 'device_code',
+    account_id: 'codex-primary',
+    callback_url: 'https://welsch.ctox.dev/api/business-os/ctox/subscription-auth/callback',
+  });
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  assert.doesNotMatch(calls[0].options.body, /token|secret|api[_-]?key/i);
+});
+
 test('all subscription providers expose one secret-free connect/status/rotate/disconnect story', () => {
   const accounts = {
     codex: 'codex-instance-primary',

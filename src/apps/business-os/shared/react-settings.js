@@ -598,7 +598,7 @@ export async function openReactSettings({
           settingsState.runtimeSettings,
           runtimePayload,
         );
-        const payload = await startSubscriptionAuth(providerId, accountId, { commandBus, db, session, sync });
+        const payload = await startSubscriptionAuth(providerId, accountId);
         const credentialRequirement = providerCredentialRequirement(payload, providerId);
         if (credentialRequirement) {
           if (authWindow && !authWindow.closed) authWindow.close();
@@ -3471,32 +3471,22 @@ async function waitForWorkspaceBrandingProjection(db, options = {}) {
   throw lastError || new Error('Corporate Design wurde nicht synchronisiert.');
 }
 
-async function startSubscriptionAuth(provider = 'codex', accountId = '', { commandBus, db, session, sync } = {}) {
+async function startSubscriptionAuth(provider = 'codex', accountId = '') {
   const request = providerSubscriptionCommandRequest('connect', provider, accountId);
-  const command = await dispatchModuleCommand({
-    commandBus,
-    db,
-    session,
-    sync,
-    commandType: request.commandType,
-    moduleId: 'ctox',
-    recordId: `provider-subscription:${request.payload.provider}:${request.payload.account_id}`,
-    payload: request.payload,
-    source: 'business-os-settings',
-    timeoutMs: 30000,
-    requireResult: true,
-  });
-  const payload = command.result || command;
+  const payload = await startSubscriptionAuthControlPlane(
+    request.payload.provider,
+    request.payload.account_id,
+  );
   const credentialRequirement = providerCredentialRequirement(payload, provider);
   if (credentialRequirement) {
     return {
       status: 'credential_required',
       credential_name: credentialRequirement.credentialName,
-      source: 'business_commands',
+      source: 'ctox_control_plane',
     };
   }
   if (payload?.status === 'connected') {
-    return { status: 'connected', source: 'business_commands' };
+    return { status: 'connected', source: 'ctox_control_plane' };
   }
   if (payload?.user_code || payload?.auth_url || payload?.verification_url) {
     return {
@@ -3504,10 +3494,47 @@ async function startSubscriptionAuth(provider = 'codex', accountId = '', { comma
       user_code: String(payload.user_code || ''),
       auth_url: String(payload.auth_url || ''),
       verification_url: String(payload.verification_url || ''),
-      source: 'business_commands',
+      source: 'ctox_control_plane',
     };
   }
-  throw new Error(`Command ${command.command_id || command.id || ''} lieferte keinen Geräte-Code.`);
+  throw new Error('CTOX lieferte weder eine Login-URL noch einen Geräte-Code.');
+}
+
+async function startSubscriptionAuthControlPlane(provider, accountId, options = {}) {
+  const fetchImpl = options.fetchImpl || fetch;
+  const normalizedProvider = String(provider || '').trim();
+  const normalizedAccountId = normalizeProviderAccountId(accountId);
+  const isOpenAi = ['codex', 'openai'].includes(normalizedProvider);
+  const callbackUrl = isOpenAi
+    ? String(options.callbackUrl || (typeof location !== 'undefined'
+      ? new URL('/api/business-os/ctox/subscription-auth/callback', location.origin).href
+      : ''))
+    : '';
+  const response = await fetchImpl('/api/business-os/ctox/subscription-auth/start', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      provider: normalizedProvider,
+      auth_mode: 'subscription',
+      flow: isOpenAi ? 'device_code' : 'auth_url',
+      account_id: normalizedAccountId,
+      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+    }),
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {}
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.message || payload?.error || text || `HTTP ${response.status}`);
+  }
+  return payload || { ok: true };
 }
 
 async function runProviderSubscriptionCommand(action, provider, accountId, {

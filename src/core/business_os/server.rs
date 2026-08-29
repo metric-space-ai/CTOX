@@ -197,6 +197,14 @@ struct DeleteModuleRequest {
 struct SubscriptionAuthStartRequest {
     #[serde(default)]
     callback_url: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    auth_mode: Option<String>,
+    #[serde(default)]
+    flow: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow::Result<()> {
@@ -489,10 +497,21 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
             } else {
                 let body = read_json(&mut request)?;
                 let options: SubscriptionAuthStartRequest = serde_json::from_value(body)?;
-                respond_json_value(
-                    request,
-                    subscription_auth_start_payload(root, options.callback_url)?,
-                )?;
+                let payload = if options.provider.is_some() {
+                    store::start_subscription_auth_command(
+                        root,
+                        &session,
+                        store::SubscriptionAuthStartCommandRequest {
+                            provider: options.provider,
+                            auth_mode: options.auth_mode,
+                            flow: options.flow,
+                            account_id: options.account_id,
+                        },
+                    )?
+                } else {
+                    subscription_auth_start_payload(root, options.callback_url)?
+                };
+                respond_json_value(request, payload)?;
             }
         }
         (Method::Get, "/api/business-os/ctox/subscription-auth/callback") => {
@@ -4270,6 +4289,22 @@ fn mime_for(path: &PathBuf) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_auth_control_request_accepts_only_public_provider_selectors() {
+        let request: SubscriptionAuthStartRequest = serde_json::from_value(serde_json::json!({
+            "provider": "codex",
+            "auth_mode": "subscription",
+            "flow": "device_code",
+            "account_id": "codex-primary"
+        }))
+        .unwrap();
+        assert_eq!(request.provider.as_deref(), Some("codex"));
+        assert_eq!(request.auth_mode.as_deref(), Some("subscription"));
+        assert_eq!(request.flow.as_deref(), Some("device_code"));
+        assert_eq!(request.account_id.as_deref(), Some("codex-primary"));
+        assert!(request.callback_url.is_none());
+    }
 
     #[test]
     fn knowledge_index_reuses_one_ctox_sqlite_connection() -> anyhow::Result<()> {
