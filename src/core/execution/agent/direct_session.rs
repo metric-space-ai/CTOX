@@ -1106,6 +1106,9 @@ impl PersistentSession {
             find_codex_home().map_err(|err| anyhow::anyhow!("find_codex_home: {err}"))?;
         let use_chatgpt_subscription_auth =
             use_openai_chatgpt_subscription_auth(settings, selected_api_provider.as_deref());
+        let use_provider_subscription_proxy = selected_api_provider
+            .as_deref()
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("ctox_subscription"));
 
         let selected_api_key_name = selected_api_provider.as_deref().map(|provider| {
             runtime_state::api_key_env_var_for_provider_with_env_map(provider, settings)
@@ -1116,6 +1119,7 @@ impl PersistentSession {
             {
                 None
             }
+            Some(_) if use_provider_subscription_proxy => None,
             Some(key) => settings
                 .get(key)
                 .cloned()
@@ -1188,6 +1192,7 @@ impl PersistentSession {
             && local_provider.is_none()
             && api_key.is_none()
             && !use_chatgpt_subscription_auth
+            && !use_provider_subscription_proxy
         {
             anyhow::bail!(
                 "API runtime requires provider credentials from the CTOX SQLite secret store or runtime settings; auth.json and process env fallbacks are disabled"
@@ -1210,14 +1215,15 @@ impl PersistentSession {
                     .as_ref()
                     .map(|provider| provider.provider_id.to_string())
             });
-        let tracking_api_provider = if use_chatgpt_subscription_auth {
-            None
-        } else {
-            local_provider
-                .is_none()
-                .then(|| selected_api_provider.clone())
-                .flatten()
-        };
+        let tracking_api_provider =
+            if use_chatgpt_subscription_auth || use_provider_subscription_proxy {
+                None
+            } else {
+                local_provider
+                    .is_none()
+                    .then(|| selected_api_provider.clone())
+                    .flatten()
+            };
         let overrides = ConfigOverrides {
             model: Some(model.clone()),
             model_context_window: resolved_runtime

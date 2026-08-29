@@ -612,11 +612,12 @@ pub(crate) struct ApiModelProviderSpec {
     /// into provider-native forms only at this outer boundary.
     pub(crate) wire_api: &'static str,
     pub(crate) requires_full_responses_history: bool,
+    pub(crate) subscription_provider: Option<String>,
 }
 
 impl ApiModelProviderSpec {
     pub(crate) fn ctox_core_cli_overrides(&self) -> Vec<(String, TomlValue)> {
-        vec![
+        let mut overrides = vec![
             (
                 format!("model_providers.{}.name", self.provider_id),
                 TomlValue::String(self.name.to_string()),
@@ -640,7 +641,19 @@ impl ApiModelProviderSpec {
                 ),
                 TomlValue::Boolean(self.requires_full_responses_history),
             ),
-        ]
+        ];
+        if let Some(provider) = self.subscription_provider.as_ref() {
+            let mut headers = toml::map::Map::new();
+            headers.insert(
+                "X-CTOX-Provider".to_owned(),
+                TomlValue::String(provider.clone()),
+            );
+            overrides.push((
+                format!("model_providers.{}.http_headers", self.provider_id),
+                TomlValue::Table(headers),
+            ));
+        }
+        overrides
     }
 }
 
@@ -1861,11 +1874,34 @@ pub(crate) fn resolve_api_model_provider_spec(
                 "responses",
                 false,
             ),
+            "ctox_subscription" => (
+                "CTOX_SUBSCRIPTION_PROXY_NO_AUTH",
+                "ctox_subscription",
+                "responses",
+                false,
+            ),
             "azure_foundry" => ("AZURE_FOUNDRY_API_KEY", "azure_foundry", "responses", false),
             _ => return None,
         };
-    let base_url = resolved_runtime
-        .map(|runtime| runtime.internal_responses_base_url())
+    let subscription_provider = (normalized == "ctox_subscription")
+        .then(|| {
+            settings
+                .get(runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV)
+                .map(|value| value.trim().to_ascii_lowercase())
+        })
+        .flatten()
+        .filter(|provider| {
+            matches!(
+                provider.as_str(),
+                "codex" | "claude" | "antigravity" | "kimi"
+            )
+        });
+    if normalized == "ctox_subscription" && subscription_provider.is_none() {
+        return None;
+    }
+    let base_url = (normalized == "ctox_subscription")
+        .then(crate::execution::cliproxyapi_host::instance_codex_proxy_base_url)
+        .or_else(|| resolved_runtime.map(|runtime| runtime.internal_responses_base_url()))
         .or_else(|| {
             settings
                 .get("CTOX_UPSTREAM_BASE_URL")
@@ -1883,6 +1919,7 @@ pub(crate) fn resolve_api_model_provider_spec(
         env_key,
         wire_api,
         requires_full_responses_history,
+        subscription_provider,
     })
 }
 
@@ -2210,6 +2247,7 @@ mod tests {
             env_key: "AZURE_FOUNDRY_API_KEY",
             wire_api: "responses",
             requires_full_responses_history: false,
+            subscription_provider: None,
         };
 
         let overrides = spec
@@ -2240,6 +2278,38 @@ mod tests {
             Some(&TomlValue::Boolean(false))
         );
         assert!(!overrides.contains_key("model_providers.ctox_core_api.env_key"));
+    }
+
+    #[test]
+    fn subscription_provider_routes_harness_through_instance_proxy() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_API_PROVIDER".to_string(),
+            "ctox_subscription".to_string(),
+        );
+        settings.insert(
+            runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV.to_string(),
+            "claude".to_string(),
+        );
+
+        let spec = resolve_api_model_provider_spec("claude-opus-4-6", &settings, None)
+            .expect("subscription provider spec");
+        assert_eq!(
+            spec.base_url,
+            crate::execution::cliproxyapi_host::instance_codex_proxy_base_url()
+        );
+        assert_eq!(spec.subscription_provider.as_deref(), Some("claude"));
+        let overrides = spec
+            .ctox_core_cli_overrides()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            overrides
+                .get("model_providers.ctox_core_api.http_headers")
+                .and_then(TomlValue::as_table)
+                .and_then(|headers| headers.get("X-CTOX-Provider")),
+            Some(&TomlValue::String("claude".to_string()))
+        );
     }
 
     #[test]
