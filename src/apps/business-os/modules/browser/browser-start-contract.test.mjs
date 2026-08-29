@@ -13,6 +13,16 @@ assert.match(source, /startNewBrowserSession[\s\S]*?requestedSessionId\s*=\s*ses
 assert.match(source, /applyLatestNavigationResult\(state, commands\)/);
 assert.match(source, /candidate\.result\?\.url/);
 assert.match(source, /renderSessionList\([^\n]*renderedTabs/);
+assert.match(
+  source,
+  /addEventListener\?\.\('ctox-business-os-app-launch', handleDesktopAppLaunch\)/,
+  'an already-open Browser must consume later launch arguments',
+);
+assert.match(
+  source,
+  /handleDesktopAppLaunch[\s\S]*?selectRequestedBrowserSession\(detail\.args \|\| \{\}\)/,
+  'a protected-source launch must select and start the requested session',
+);
 assert.doesNotMatch(
   source.match(/async function startBrowserRuntimeSync[\s\S]*?\n\}/)?.[0] || '',
   /catch\s*\([^)]*\)\s*\{[\s\S]*console\.warn/,
