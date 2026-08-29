@@ -441,22 +441,24 @@ export async function handleManagedStatus(request, env = {}, instanceId) {
   if (request.method !== "GET") {
     return jsonResponse({ ok: false, error: "method_not_allowed" }, 405);
   }
-  const auth = await authorizeManagedMcpClientForInstance(request, env, instanceId);
-  if (!auth.ok) {
-    if (auth.code === "instance_not_allowed") {
-      return jsonResponse(
-        {
-          ok: false,
-          error: "instance_not_allowed",
-          message: auth.message
-        },
-        403
-      );
+  if (!authorizeManagedStatusObserver(request, env)) {
+    const auth = await authorizeManagedMcpClientForInstance(request, env, instanceId);
+    if (!auth.ok) {
+      if (auth.code === "instance_not_allowed") {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "instance_not_allowed",
+            message: auth.message
+          },
+          403
+        );
+      }
+      return jsonResponse({ ok: false, error: "not_authorized", message: auth.message }, 401);
     }
-    return jsonResponse({ ok: false, error: "not_authorized", message: auth.message }, 401);
-  }
-  if (auth.policy && auth.policy.allowReads === false) {
-    return jsonResponse({ ok: false, error: "permission_denied", message: "Managed MCP token does not allow reads" }, 403);
+    if (auth.policy && auth.policy.allowReads === false) {
+      return jsonResponse({ ok: false, error: "permission_denied", message: "Managed MCP token does not allow reads" }, 403);
+    }
   }
   const stub = sessionStub(env, instanceId);
   if (!stub) {
@@ -470,6 +472,12 @@ export async function handleManagedStatus(request, env = {}, instanceId) {
     );
   }
   return stub.fetch(new Request(`https://session.local${STATUS_PATH}`, request));
+}
+
+export function authorizeManagedStatusObserver(request, env = {}) {
+  const expected = (env.CTOX_MANAGED_MCP_AUTH_TOKEN || "").trim();
+  const actual = request.headers.get("x-ctox-managed-mcp-auth") || "";
+  return Boolean(expected) && actual === expected;
 }
 
 export async function handleMcpRelay(request, env = {}) {
