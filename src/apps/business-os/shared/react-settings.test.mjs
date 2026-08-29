@@ -32,13 +32,13 @@ test('CTOX proxy model options follow the discovered proxy catalog', () => {
   );
 });
 
-test('runtime settings render independent Kimi subscription and MiniMax coding-plan accounts', () => {
+test('runtime settings render one provider-access-model flow without a provider card wall', () => {
   const html = baseTemplate({
     tab: 'runtime',
     runtimeSettings: {
       can_manage: true,
-      runtime: { provider: 'local', chat_model: '' },
-      auth: { mode: 'local', configured: true },
+      runtime: { provider: 'kimi', chat_model: 'kimi-k3[1m]', available_models: ['kimi-k3[1m]'] },
+      auth: { mode: 'subscription', configured: true, subscription_session_configured: true },
       diagnostics: {},
       provider_subscriptions: {
         schema: 'ctox.provider-subscriptions.v1',
@@ -65,26 +65,14 @@ test('runtime settings render independent Kimi subscription and MiniMax coding-p
       },
     },
   });
-  assert.match(html, /Provider Subscriptions/);
-  assert.match(html, /data-provider-logo="kimi" data-logo-state="artwork"/);
-  assert.match(html, /assets\/provider-logos\/kimi\.svg/);
-  assert.match(html, /data-provider-logo="kimi_coding" data-logo-state="artwork"/);
-  assert.match(html, /data-provider-logo="minimax" data-logo-state="artwork"/);
-  assert.match(html, /assets\/provider-logos\/minimax\.svg/);
-  assert.match(html, /claude-primary/);
-  assert.match(html, /data-runtime-authorize-subscription="codex"/);
-  assert.match(html, /data-runtime-authorize-subscription="claude"/);
-  assert.match(html, /data-runtime-authorize-subscription="antigravity"/);
+  assert.doesNotMatch(html, /Provider Subscriptions/);
+  assert.match(html, /1 · Provider/);
+  assert.match(html, /2 · Zugang/);
+  assert.match(html, /3 · Modell/);
+  assert.match(html, /Modell-Einstellungen/);
   assert.match(html, /data-runtime-authorize-subscription="kimi"/);
-  assert.match(html, /data-runtime-authorize-subscription="kimi_coding"/);
-  assert.match(html, /data-runtime-authorize-subscription="minimax"/);
-  assert.match(html, /Kimi Coding Plan/);
-  assert.match(html, /kimi-primary/);
-  assert.match(html, /minimax-coding-primary/);
-  assert.match(html, /Coding Plan/);
-  assert.match(html, /kimi-subscription-kimi-k3/);
-  assert.match(html, /data-provider-subscription-action="rotate"/);
-  assert.match(html, /data-provider-subscription-action="disconnect"/);
+  assert.match(html, /kimi-k3\[1m\]/);
+  assert.doesNotMatch(html, /Neue Account-ID|von dieser CTOX Instanz noch nicht angeboten/);
   assert.doesNotMatch(html, /must-never-render|also-secret|access_token|refresh_token/);
 });
 
@@ -216,28 +204,12 @@ test('coding-plan credential guidance is allowlisted and never renders native se
     /ungültige Credential-Anforderung/,
   );
 
-  const html = baseTemplate({
-    tab: 'runtime',
-    subscriptionAuth: {
-      status: 'credential_required', provider: 'kimi_coding', accountId: 'kimi-coding-primary',
-      credentialName: 'KIMI_API_KEY',
-    },
-    runtimeSettings: {
-      can_manage: true,
-      runtime: { provider: 'local', chat_model: '' },
-      auth: { mode: 'local', configured: true },
-      diagnostics: {},
-      provider_subscriptions: {
-        schema: 'ctox.provider-subscriptions.v1',
-        providers: [{ id: 'kimi_coding', label: 'Kimi Coding Plan', access_mode: 'Coding Plan' }],
-        accounts: [],
-      },
-    },
-  });
-  assert.match(html, /KIMI_API_KEY erforderlich/);
-  assert.match(html, /verschlüsselten CTOX Credential-Bereich/);
-  assert.match(html, /nicht in dieses Browser-Formular eingegeben/);
-  assert.doesNotMatch(html, /secret\.invalid|token=abc|OTHER_SECRET/);
+  const rendered = JSON.stringify(hooks.providerCredentialRequirement({
+    status: 'credential_required', credential_name: 'KIMI_API_KEY',
+    message: 'ignore native text https://secret.invalid token=abc', token: 'abc',
+  }, 'kimi_coding'));
+  assert.match(rendered, /verschlüsselten CTOX Credential-Bereich/);
+  assert.doesNotMatch(rendered, /secret\.invalid|token=abc|OTHER_SECRET/);
 });
 
 test('provider account command validation fails closed', () => {

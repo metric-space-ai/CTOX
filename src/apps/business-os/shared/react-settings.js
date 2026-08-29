@@ -613,7 +613,7 @@ export async function openReactSettings({
           : payload.user_code
           ? `${providerLabel} Geräte-Code: ${payload.user_code}. Danach Status neu laden.`
           : `${providerLabel} Login geöffnet. Danach Status neu laden.`;
-        if (providerId === 'codex') saveRuntimeSettings(runtimePayload, {
+        saveRuntimeSettings(runtimePayload, {
           commandBus,
           db,
           session,
@@ -736,9 +736,15 @@ export async function openReactSettings({
     }));
     body.querySelectorAll('[data-runtime-provider], [data-runtime-auth-mode]').forEach((control) => {
       control.addEventListener('change', () => {
+        const previousProvider = String(settingsState.runtimeSettings?.runtime?.provider || '').toLowerCase();
+        const runtimePayload = runtimePayloadFromForm(body);
+        if (control.matches('[data-runtime-provider]')
+          && previousProvider !== String(runtimePayload.provider || '').toLowerCase()) {
+          runtimePayload.chat_model = '';
+        }
         settingsState.runtimeSettings = runtimeSettingsWithDraft(
           settingsState.runtimeSettings,
-          runtimePayloadFromForm(body),
+          runtimePayload,
         );
         settingsState.commandStatus = '';
         render();
@@ -1117,14 +1123,8 @@ function settingsPreferenceControls() {
 function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth = null) {
   if (runtimeLoading && !runtimeSettings) {
     return `
-      <section class="settings-section">
-        <header><h3>Model Runtime</h3><span>Status wird gelesen.</span></header>
-        <div class="runtime-status-strip">
-          ${runtimePill('Modelle', 'Status wird gelesen.', false)}
-          ${runtimePill('Autorisierung', 'Status wird gelesen.', false)}
-          ${runtimePill('CTOX Service', 'Status wird gelesen.', false)}
-          ${runtimePill('Route', 'Status wird gelesen.', false)}
-        </div>
+      <section class="settings-section runtime-editor">
+        <header><h3>Inference</h3><span>Status wird geladen…</span></header>
       </section>
       <section class="settings-section">
         <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
@@ -1138,59 +1138,64 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
   const providerLoaded = Boolean(provider);
   const authMode = normalizedRuntimeAuthMode(provider, auth.mode);
   const isLocalProvider = provider === 'local';
-  const usesSubscription = provider === 'openai' && isSubscriptionMode(authMode);
+  const usesSubscription = isSubscriptionMode(authMode);
   const usesApiKey = providerLoaded && !isLocalProvider && !usesSubscription;
   const serviceNeedsAttention = Boolean(diagnostics.service_needs_attention);
   const authNeedsAttention = Boolean(diagnostics.auth_needs_attention);
   const canManage = Boolean(isAdmin && runtimeSettings?.can_manage !== false);
   return `
-    <section class="settings-section">
+    <section class="settings-section runtime-editor">
       <header>
-        <h3>Model Runtime</h3>
-        <span>${escapeHtml(runtimeLoading ? 'Status wird gelesen.' : runtimeAuthSummary(provider, authMode, auth))}</span>
+        <div><span class="settings-eyebrow">CTOX Harness</span><h3>Inference</h3></div>
+        <span>${escapeHtml(runtimeLoading ? 'Status wird geladen…' : diagnostics.service_message || 'Status unbekannt')}</span>
       </header>
-      <div class="runtime-status-strip">
-        ${runtimeProviderPill(provider, providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'nicht geladen')}
-        ${runtimePill('Autorisierung', runtimeAuthSummary(provider, authMode, auth), authNeedsAttention)}
-        ${runtimePill('CTOX Service', diagnostics.service_message || 'Status unbekannt', serviceNeedsAttention)}
-        ${runtimePill('Route', runtimeRouteSummary(runtime, provider, auth), false)}
+      <div class="runtime-healthline ${serviceNeedsAttention || authNeedsAttention ? 'is-danger' : 'is-ok'}">
+        <span aria-hidden="true"></span>
+        <strong>${escapeHtml(providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'Runtime nicht geladen')}</strong>
+        <em>${escapeHtml(runtimeAuthSummary(provider, authMode, auth))}</em>
       </div>
-      <div class="settings-grid">
-        <label><span>Provider</span><select data-runtime-provider ${canManage ? '' : 'disabled'}>
+      <div class="runtime-flow">
+        <label class="runtime-field"><span>1 · Provider</span><select data-runtime-provider ${canManage ? '' : 'disabled'}>
           ${providerLoaded ? '' : option('', 'Nicht geladen', provider)}
           ${option('local', 'Local CTOX', provider)}
           ${option('openai', 'OpenAI', provider)}
-          ${option('openrouter', 'OpenRouter', provider)}
           ${option('anthropic', 'Anthropic', provider)}
+          ${option('antigravity', 'Google', provider)}
+          ${option('kimi', 'Kimi', provider)}
           ${option('minimax', 'MiniMax', provider)}
+          ${option('openrouter', 'OpenRouter', provider)}
           ${option('ctox_proxy', 'CTOX LLM Proxy', provider)}
         </select></label>
         ${!isLocalProvider ? `
-          <label><span>Autorisierung</span><select data-runtime-auth-mode ${canManage ? '' : 'disabled'}>
-            ${option('api_key', 'API Key', authMode)}
-            ${provider === 'openai' ? option('chatgpt_subscription', 'ChatGPT Subscription', authMode) : ''}
+          <label class="runtime-field"><span>2 · Zugang</span><select data-runtime-auth-mode ${canManage ? '' : 'disabled'}>
+            ${runtimeAccessModes(provider).map(([value, label]) => option(value, label, authMode)).join('')}
           </select></label>
         ` : ''}
-        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtime.available_models)}
-        <label><span>Preset</span><select data-runtime-preset ${canManage ? '' : 'disabled'}>
-          ${option('Quality', 'Quality', runtimePresetValue(runtime.preset))}
-          ${option('Performance', 'Performance', runtimePresetValue(runtime.preset))}
-        </select></label>
-        <label><span>Context</span><select data-runtime-context ${canManage ? '' : 'disabled'}>
-          ${option('256k', '256k', runtimeContextValue(runtime.context))}
-        </select></label>
-        <label><span>Maximale Laufzeit (Sekunden)</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
-        ${usesApiKey ? `<label><span>${escapeHtml(auth.api_key_name || 'API Key')}</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'gespeichert - leer lassen' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
+        ${usesApiKey ? `<label class="runtime-field runtime-access-detail"><span>API Key</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'Gespeichert · leer lassen, um ihn zu behalten' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
+        ${usesSubscription ? subscriptionStatus(provider, runtimeSettings?.provider_subscriptions, auth, canManage, subscriptionAuth) : ''}
+        <div class="runtime-divider" aria-hidden="true"></div>
+        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtime.available_models, '3 · Modell')}
+        <details class="runtime-advanced">
+          <summary>Modell-Einstellungen</summary>
+          <div class="runtime-advanced-grid">
+            <label><span>Preset</span><select data-runtime-preset ${canManage ? '' : 'disabled'}>
+              ${option('Quality', 'Quality', runtimePresetValue(runtime.preset))}
+              ${option('Performance', 'Performance', runtimePresetValue(runtime.preset))}
+            </select></label>
+            <label><span>Context</span><select data-runtime-context ${canManage ? '' : 'disabled'}>
+              ${option('256k', '256k', runtimeContextValue(runtime.context))}
+            </select></label>
+            <label><span>Maximale Laufzeit</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
+          </div>
+        </details>
       </div>
-      ${usesSubscription ? subscriptionStatus(auth, canManage, subscriptionAuth) : ''}
       ${canManage ? `
         <div class="runtime-actions">
-          <button class="text-button settings-primary" type="button" data-runtime-save>Runtime speichern</button>
-          <button class="text-button" type="button" data-runtime-refresh>Status neu laden</button>
+          <button class="text-button settings-primary" type="button" data-runtime-save>Übernehmen</button>
+          <button class="text-button" type="button" data-runtime-refresh>Neu laden</button>
         </div>
       ` : ''}
     </section>
-    ${providerSubscriptionsPanel(runtimeSettings?.provider_subscriptions, canManage, subscriptionAuth)}
     <section class="settings-section">
       <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
       <div class="settings-grid is-one">
@@ -2260,8 +2265,10 @@ function normalizedRuntimeAuthMode(provider, mode) {
   if (!String(provider || '').trim()) return '';
   if (String(provider || '').toLowerCase() === 'local') return 'local';
   const value = String(mode || '').toLowerCase();
-  if (String(provider || '').toLowerCase() !== 'openai') return 'api_key';
-  return isSubscriptionMode(value) ? 'chatgpt_subscription' : 'api_key';
+  const accessModes = runtimeAccessModes(provider);
+  if (!accessModes.some(([access]) => access === 'api_key')) return accessModes[0]?.[0] || 'api_key';
+  if (!accessModes.some(([access]) => access === 'subscription')) return 'api_key';
+  return isSubscriptionMode(value) ? 'subscription' : 'api_key';
 }
 
 function isSubscriptionMode(mode) {
@@ -2276,9 +2283,29 @@ function runtimeProviderLabel(provider) {
     openai: 'OpenAI',
     openrouter: 'OpenRouter',
     anthropic: 'Anthropic',
+    antigravity: 'Google',
+    kimi: 'Kimi',
     minimax: 'MiniMax',
     ctox_proxy: 'CTOX LLM Proxy',
   }[String(provider || '').toLowerCase()] || provider || 'nicht geladen';
+}
+
+function runtimeAccessModes(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (['openai', 'anthropic'].includes(normalized)) {
+    return [['api_key', 'API Key'], ['subscription', 'Subscription']];
+  }
+  if (['antigravity', 'kimi'].includes(normalized)) return [['subscription', 'Subscription']];
+  return [['api_key', 'API Key']];
+}
+
+function runtimeSubscriptionProvider(provider) {
+  return {
+    openai: 'codex',
+    anthropic: 'claude',
+    antigravity: 'antigravity',
+    kimi: 'kimi',
+  }[String(provider || '').trim().toLowerCase()] || '';
 }
 
 function runtimeAuthSummary(provider, authMode, auth) {
@@ -2286,9 +2313,9 @@ function runtimeAuthSummary(provider, authMode, auth) {
   if (String(provider || '').toLowerCase() === 'local') return 'nicht erforderlich';
   if (isSubscriptionMode(authMode)) {
     if (auth.subscription_session_configured) {
-      return auth.subscription_account_email || 'ChatGPT Subscription autorisiert';
+      return auth.subscription_account_email || auth.subscription_account_id || 'Subscription verbunden';
     }
-    return 'ChatGPT Subscription nicht autorisiert';
+    return 'Subscription nicht verbunden';
   }
   return auth.api_key_configured
     ? `${auth.api_key_name || 'API Key'} gespeichert`
@@ -2322,16 +2349,16 @@ function hostLabel(value) {
   }
 }
 
-function runtimeModelControl(provider, model, canManage, availableModels = []) {
+function runtimeModelControl(provider, model, canManage, availableModels = [], label = 'Chat Modell') {
   const value = String(model || '');
   if (!String(provider || '').trim()) {
-    return `<label><span>Chat Modell</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Runtime nicht geladen" ${canManage ? '' : 'disabled'} /></label>`;
+    return `<label class="runtime-field"><span>${escapeHtml(label)}</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Runtime nicht geladen" ${canManage ? '' : 'disabled'} /></label>`;
   }
   if (String(provider || '').toLowerCase() === 'local') {
-    return `<label><span>Lokales Modell</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="kein Modell aus Runtime gemeldet" ${canManage ? '' : 'disabled'} /></label>`;
+    return `<label class="runtime-field"><span>${escapeHtml(label)}</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Lokales Modell" ${canManage ? '' : 'disabled'} /></label>`;
   }
   const options = runtimeModelOptions(provider, value, availableModels);
-  return `<label><span>Chat Modell</span><select data-runtime-model ${canManage ? '' : 'disabled'}>
+  return `<label class="runtime-field"><span>${escapeHtml(label)}</span><select data-runtime-model ${canManage ? '' : 'disabled'}>
     ${options.map(([optionValue, label]) => option(optionValue, label, value)).join('')}
   </select></label>`;
 }
@@ -2355,6 +2382,8 @@ function runtimeModelOptions(provider, current, availableModels = []) {
     anthropic: [
       ['claude-opus-4-6', 'claude-opus-4-6'],
     ],
+    antigravity: discovered.map((model) => [model, model]),
+    kimi: discovered.length ? discovered.map((model) => [model, model]) : [['kimi-k3[1m]', 'kimi-k3[1m]']],
     minimax: [
       ['MiniMax-M3', 'MiniMax-M3'],
     ],
@@ -2365,7 +2394,9 @@ function runtimeModelOptions(provider, current, availableModels = []) {
         ['kimi-k3', 'kimi-k3'],
       ],
   };
-  const options = byProvider[String(provider || '').toLowerCase()] || [];
+  const options = discovered.length
+    ? discovered.map((model) => [model, model])
+    : (byProvider[String(provider || '').toLowerCase()] || []);
   if (!current) return [['', 'Nicht gesetzt'], ...options];
   if (!options.some(([value]) => value.toLowerCase() === current.toLowerCase())) {
     return [[current, current], ...options];
@@ -2384,7 +2415,9 @@ function runtimeDiagnosticMessage(provider, authMode, auth, diagnostics) {
   return message || 'Runtime-Status wird geladen.';
 }
 
-function subscriptionStatus(auth, canManage, subscriptionAuth = null) {
+function subscriptionStatus(provider, projection, auth, canManage, subscriptionAuth = null) {
+  const subscriptionProvider = runtimeSubscriptionProvider(provider);
+  const profile = providerSubscriptionProfile(subscriptionProvider);
   const configured = Boolean(auth.subscription_session_configured);
   const userCode = String(subscriptionAuth?.userCode || '').trim();
   const failed = subscriptionAuth?.status === 'failed';
@@ -2393,9 +2426,8 @@ function subscriptionStatus(auth, canManage, subscriptionAuth = null) {
   if (auth.subscription_account_email) lines.push(kv('Account', auth.subscription_account_email));
   if (auth.subscription_plan) lines.push(kv('Plan', auth.subscription_plan));
   return `
-    <div class="runtime-auth-status ${configured ? 'is-ok' : 'is-danger'}">
-      <strong>${escapeHtml(configured ? 'ChatGPT Subscription verbunden' : 'ChatGPT Subscription verbinden')}</strong>
-      <span>${escapeHtml(configured ? 'OpenAI Modelle können diese Subscription verwenden.' : 'Öffnet den ChatGPT Login und speichert die Subscription für OpenAI Modelle.')}</span>
+    <div class="runtime-access-detail ${configured ? 'is-ok' : ''}">
+      <div><strong>${escapeHtml(configured ? 'Verbunden' : 'Noch nicht verbunden')}</strong><span>${escapeHtml(configured ? `${profile.label} steht dem CTOX-Harness zur Verfügung.` : `Mit ${profile.label} anmelden.`)}</span></div>
       ${pending ? `
         <div class="subscription-device-code is-pending">
           <span>Geräte-Code</span>
@@ -2411,7 +2443,7 @@ function subscriptionStatus(auth, canManage, subscriptionAuth = null) {
       ` : ''}
       ${failed ? `<div class="subscription-device-error">${escapeHtml(subscriptionAuth.error || 'ChatGPT Login konnte nicht gestartet werden.')}</div>` : ''}
       ${lines.length ? `<dl class="settings-kv">${lines.join('')}</dl>` : ''}
-      ${canManage ? `<button class="text-button" type="button" data-runtime-authorize-subscription="codex">${escapeHtml(configured ? 'Subscription erneuern' : 'Subscription verbinden')}</button>` : ''}
+      ${canManage ? `<button class="text-button" type="button" data-runtime-authorize-subscription="${escapeAttr(subscriptionProvider)}">${escapeHtml(configured ? 'Neu anmelden' : 'Anmelden')}</button>` : ''}
     </div>
   `;
 }
@@ -2751,6 +2783,8 @@ function runtimePayloadFromForm(root) {
 function runtimeSettingsWithDraft(current, draft) {
   const provider = draft.provider || current?.runtime?.provider || '';
   const authMode = normalizedRuntimeAuthMode(provider, draft.auth_mode);
+  const providerChanged = String(provider).toLowerCase()
+    !== String(current?.runtime?.provider || '').toLowerCase();
   return {
     ...(current || {}),
     runtime: {
@@ -2761,11 +2795,17 @@ function runtimeSettingsWithDraft(current, draft) {
       preset: runtimePresetValue(draft.preset),
       context: runtimeContextValue(draft.context),
       max_run_secs: draft.max_run_secs,
+      available_models: providerChanged ? [] : (current?.runtime?.available_models || []),
     },
     auth: {
       ...(current?.auth || {}),
       mode: authMode,
-      subscription_selected: authMode === 'chatgpt_subscription',
+      subscription_selected: isSubscriptionMode(authMode),
+      subscription_session_configured: providerChanged
+        ? false
+        : Boolean(current?.auth?.subscription_session_configured),
+      subscription_account_id: providerChanged ? '' : (current?.auth?.subscription_account_id || ''),
+      api_key_configured: providerChanged ? false : Boolean(current?.auth?.api_key_configured),
     },
   };
 }
