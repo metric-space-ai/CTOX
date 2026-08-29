@@ -92,6 +92,21 @@ start without a WebRTC-capable sync contract — `createSyncRuntime` throws
 
 **Any HTTP fallback for these records is a regression, not a feature.**
 
+### 2.1 Workjet instance-local records
+
+Workjet computer assignments are Business OS records under the same
+WebRTC-only boundary:
+
+- `workjet_computers` is the server-authoritative set of computers assigned to
+  this CTOX instance. Its `id` is an opaque Workjet identity; hostnames,
+  environment ids, presentation ids, and renderer flags are not authority.
+
+Mutations use the typed `ctox.workjet.computer.*` `business_commands` family.
+Managed backend hosts are always backend-only. Self-hosted co-location is
+disabled by default and requires the exact explicit confirmation contract
+`workjet-self-host-colocation.v1`. These records have no HTTP, REST, or
+WebSocket-RPC fallback.
+
 This is mechanically enforced by
 `src/apps/business-os/rxdb/tests/data-plane-guard-smoke.mjs`, a ratchet guard
 whose allowlist may only change with an explicit architecture decision

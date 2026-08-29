@@ -262,7 +262,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 57] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 64] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -318,7 +318,14 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 57] = [
     "ctox.subscription_auth.start",
     "ctox.task.delete",
     "ctox.task.update",
+    "ctox.workjet.computer.assign",
+    "ctox.workjet.computer.list",
+    "ctox.workjet.computer.unassign",
     "knowledge.command",
+    "kundenpipeline.decision.answer",
+    "kundenpipeline.delegate",
+    "kundenpipeline.mail.send",
+    "kundenpipeline.triage.write",
     "web_stack.person_research",
 ];
 
@@ -791,6 +798,17 @@ impl CentralCommandPolicyRequirement {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::IntegrationsManage,
             ))
+        } else if command_type == "ctox.workjet.computer.list" {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::DataRead,
+            ))
+        } else if matches!(
+            command_type,
+            "ctox.workjet.computer.assign" | "ctox.workjet.computer.unassign"
+        ) {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::DataWrite,
+            ))
         } else if is_appsec_business_command(command_type) {
             let permission = if appsec_business_command_requires_data_write(command_type) {
                 BusinessOsPermission::DataWrite
@@ -1028,6 +1046,28 @@ fn dispatch_business_command(
         | "ctox.business_os.support.export_diagnostics"
         | "ctox.business_os.why" => {
             handle_business_os_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
+        }
+        "ctox.workjet.computer.list"
+        | "ctox.workjet.computer.assign"
+        | "ctox.workjet.computer.unassign" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            let owner_user_id = session_user_id(session)
+                .context("authorized Workjet computer command is missing a user identity")?;
+            match super::store_workjet_computers::handle_workjet_computer_store_command(
+                root,
+                command,
+                owner_user_id,
+            ) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    None,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
         }
         "ctox.secret.list"
         | "ctox.secret.put"

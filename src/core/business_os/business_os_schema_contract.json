@@ -7756,6 +7756,102 @@
     ],
     "additionalProperties": true
   },
+  "outbound_lead_generation_adapters": {
+    "version": 1,
+    "primaryKey": "id",
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "maxLength": 180
+      },
+      "campaign_id": {
+        "type": "string"
+      },
+      "source_id": {
+        "type": "string"
+      },
+      "label": {
+        "type": "string"
+      },
+      "url": {
+        "type": "string"
+      },
+      "adapter_kind": {
+        "type": "string"
+      },
+      "target_key": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "tier": {
+        "type": "string"
+      },
+      "countries": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "field_keys": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "requires_credential": {
+        "type": "boolean"
+      },
+      "credential_secret_name": {
+        "type": "string"
+      },
+      "auth_mode": {
+        "type": "string"
+      },
+      "auth_status": {
+        "type": "string"
+      },
+      "scrape_status": {
+        "type": "string"
+      },
+      "last_run_id": {
+        "type": "string"
+      },
+      "last_success_at_ms": {
+        "type": "number"
+      },
+      "last_error": {
+        "type": "string"
+      },
+      "payload": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "created_at_ms": {
+        "type": "number"
+      },
+      "updated_at_ms": {
+        "type": "number"
+      }
+    },
+    "required": [
+      "id",
+      "source_id",
+      "url",
+      "adapter_kind",
+      "status",
+      "enabled",
+      "payload",
+      "created_at_ms",
+      "updated_at_ms"
+    ],
+    "additionalProperties": true
+  },
   "outbound_letter_templates": {
     "title": "outbound_letter_templates",
     "version": 0,
@@ -10713,102 +10809,6 @@
     ],
     "additionalProperties": true
   },
-  "outbound_lead_generation_adapters": {
-    "version": 1,
-    "primaryKey": "id",
-    "type": "object",
-    "properties": {
-      "id": {
-        "type": "string",
-        "maxLength": 180
-      },
-      "campaign_id": {
-        "type": "string"
-      },
-      "source_id": {
-        "type": "string"
-      },
-      "label": {
-        "type": "string"
-      },
-      "url": {
-        "type": "string"
-      },
-      "adapter_kind": {
-        "type": "string"
-      },
-      "target_key": {
-        "type": "string"
-      },
-      "status": {
-        "type": "string"
-      },
-      "enabled": {
-        "type": "boolean"
-      },
-      "tier": {
-        "type": "string"
-      },
-      "countries": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "field_keys": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
-      },
-      "requires_credential": {
-        "type": "boolean"
-      },
-      "credential_secret_name": {
-        "type": "string"
-      },
-      "auth_mode": {
-        "type": "string"
-      },
-      "auth_status": {
-        "type": "string"
-      },
-      "scrape_status": {
-        "type": "string"
-      },
-      "last_run_id": {
-        "type": "string"
-      },
-      "last_success_at_ms": {
-        "type": "number"
-      },
-      "last_error": {
-        "type": "string"
-      },
-      "payload": {
-        "type": "object",
-        "additionalProperties": true
-      },
-      "created_at_ms": {
-        "type": "number"
-      },
-      "updated_at_ms": {
-        "type": "number"
-      }
-    },
-    "required": [
-      "id",
-      "source_id",
-      "url",
-      "adapter_kind",
-      "status",
-      "enabled",
-      "payload",
-      "created_at_ms",
-      "updated_at_ms"
-    ],
-    "additionalProperties": true
-  },
   "user_notifications": {
     "version": 0,
     "primaryKey": "id",
@@ -11295,5 +11295,83 @@
       ]
     ],
     "additionalProperties": true
+  },
+  "workjet_computers": {
+    "version": 0,
+    "primaryKey": "id",
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "maxLength": 160
+      },
+      "display_name": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "hosting_mode": {
+        "type": "string",
+        "enum": [
+          "workstation",
+          "self_hosted"
+        ]
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "assigned",
+          "unassigned"
+        ]
+      },
+      "capabilities": {
+        "type": "array",
+        "maxItems": 32,
+        "items": {
+          "type": "string",
+          "maxLength": 80
+        }
+      },
+      "self_hosted_colocation": {
+        "type": "boolean"
+      },
+      "owner_user_id": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "created_at_ms": {
+        "type": "number"
+      },
+      "updated_at_ms": {
+        "type": "number"
+      },
+      "unassigned_at_ms": {
+        "type": "number"
+      },
+      "is_deleted": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "id",
+      "display_name",
+      "hosting_mode",
+      "status",
+      "capabilities",
+      "self_hosted_colocation",
+      "owner_user_id",
+      "created_at_ms",
+      "updated_at_ms"
+    ],
+    "indexes": [
+      "owner_user_id",
+      "status",
+      "updated_at_ms",
+      [
+        "owner_user_id",
+        "status",
+        "updated_at_ms"
+      ]
+    ],
+    "additionalProperties": false
   }
 }
