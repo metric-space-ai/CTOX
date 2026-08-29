@@ -232,6 +232,15 @@ export async function mount(ctx) {
   // ReferenceError und tat sichtbar nichts.
   state.openAuthSession = openRequestedBrowserSession;
   cleanups.push(() => { state.openAuthSession = null; });
+  // Die Buehne liegt ausserhalb dieses Bereichs, braucht aber den Wiederstart:
+  // sie forderte bisher "Starten Sie die Sitzung erneut" ohne jeden Weg dahin.
+  state.resumeSession = (session) => {
+    const id = String(session?.id || '').trim();
+    if (!id) return;
+    const url = String(session.url || session.payload?.url || refs.address?.value || 'https://example.com');
+    startNewBrowserSession(url, { sessionId: id, tabId: session.tab_id || session.payload?.tab_id || null });
+  };
+  cleanups.push(() => { state.resumeSession = null; });
 
   function selectRequestedBrowserSession(detail = {}) {
     const sessionId = browserSessionIdFromArgs(detail);
@@ -330,7 +339,10 @@ export async function mount(ctx) {
     const hidden = refs.advanced.classList.toggle('is-advanced-hidden');
     refs.toggleAdvanced.setAttribute('aria-pressed', hidden ? 'false' : 'true');
   });
-  const startNewBrowserSession = (url = refs.address?.value || 'https://example.com') => {
+  // wiederaufnahme: die bestehende session_id behalten. Das persistente
+  // Browserprofil haengt an ihr - eine neue id waere ein neues, leeres Profil
+  // und alle Anmeldungen der Quelle waeren verloren.
+  const startNewBrowserSession = (url = refs.address?.value || 'https://example.com', wiederaufnahme = null) => {
     const now = Date.now();
     // Jeder Aufruf vergibt eine NEUE Sitzungskennung und startet einen eigenen
     // Chrome. Ohne Sperre wird aus zwei Klicks zweimal alles.
@@ -346,8 +358,8 @@ export async function mount(ctx) {
       return;
     }
     state.startPendingSince = now;
-    const sessionId = `${userSessionPrefix(ctx.session)}_${now}`;
-    const tabId = `browser_tab_${now}`;
+    const sessionId = wiederaufnahme?.sessionId || `${userSessionPrefix(ctx.session)}_${now}`;
+    const tabId = wiederaufnahme?.tabId || `browser_tab_${now}`;
     const viewport = selectedViewport(refs.viewport);
     console.info(`[browser] session start clicked session_id=${sessionId} tab_id=${tabId}`);
     state.addressDirty = false;
@@ -373,7 +385,7 @@ export async function mount(ctx) {
       viewport_h: viewport.height,
       profile_mode: refs.privateMode?.checked ? 'private' : 'persistent',
       lease_id: state.controllerLeaseId,
-      new_session: true,
+      new_session: !wiederaufnahme,
     };
     const command = () => dispatchBrowserCommand(ctx, state, 'browser.session.start', startPayload);
     const directStart = async () => {
@@ -3568,7 +3580,7 @@ async function renderFrame(refs, frame, state) {
   const skriptSichtbar = state.ansicht === 'script';
   if (!frame?.data || state.drawing) {
     refs.empty.hidden = skriptSichtbar || Boolean(frame?.data);
-    if (!frame?.data) refs.empty.textContent = frameEmptyText(state);
+    if (!frame?.data) renderFrameEmpty(refs.empty, state);
     return;
   }
   state.drawing = true;
@@ -3594,6 +3606,40 @@ async function renderFrame(refs, frame, state) {
   }
 }
 
+// Der Platzhalter trug bisher nur Text. Bei einer beendeten Sitzung stand dort
+// "Starten Sie die Sitzung erneut" - ohne jeden Weg dahin: eine Aufforderung
+// ohne Knopf. Das persistente Profil haengt an der session_id, ein Wiederstart
+// mit derselben id bringt die Anmeldungen der Quelle zurueck.
+function frameEmptyResumable(state) {
+  const session = state.latestSession;
+  if (!session?.id || typeof state.resumeSession !== 'function') return null;
+  const status = String(session.runtime_status || session.status || '').toLowerCase();
+  return ['disconnected', 'offline', 'stopped', 'closed', 'failed', 'error'].includes(status)
+    ? session
+    : null;
+}
+
+function renderFrameEmpty(host, state) {
+  if (!host) return;
+  host.replaceChildren();
+  const text = document.createElement('div');
+  text.className = 'browser-empty-text';
+  text.textContent = frameEmptyText(state);
+  host.appendChild(text);
+  const session = frameEmptyResumable(state);
+  if (!session) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ctox-btn browser-empty-action';
+  button.textContent = t('btnSessionResume', 'Sitzung fortsetzen');
+  button.title = t('btnSessionResumeHint', 'Startet dieselbe Sitzung neu. Angemeldete Zugänge bleiben erhalten.');
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    state.resumeSession(session);
+  });
+  host.appendChild(button);
+}
+
 function frameEmptyText(state) {
   const session = state.latestSession;
   const commandError = commandErrorMessage(state.latestCommand);
@@ -3605,7 +3651,7 @@ function frameEmptyText(state) {
     return runtimeError || t('frameStartFailed', 'Der Browser konnte nicht gestartet werden');
   }
   if (['disconnected', 'offline'].includes(status)) {
-    return runtimeError || 'Kein laufender Browser-Prozess. Starten Sie die Sitzung erneut.';
+    return runtimeError || t('frameDisconnected', 'Kein laufender Browser-Prozess. Sitzung fortsetzen, um weiterzuarbeiten.');
   }
   if (status === 'stopped' || status === 'closed') return t('frameClosed', 'Browser-Fenster geschlossen');
   if (status === 'requested' || status === 'starting' || status === 'pending_command') return t('frameStarting', 'Browser wird gestartet');
@@ -4089,6 +4135,7 @@ export const __browserTestHooks = {
   browserUiState,
   browserStatusLabel,
   frameEmptyText,
+  frameEmptyResumable,
   sessionListSignature,
   browserWorkbenchVisible,
   browserSessionShardMeta,

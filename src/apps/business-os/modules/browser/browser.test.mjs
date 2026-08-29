@@ -1489,3 +1489,60 @@ function pointerEvent(overrides = {}) {
   );
   console.log('  ok: leer gelesene Adaptersammlung gilt nicht als vollstaendig');
 }
+
+// --- Beendete Sitzung muss fortsetzbar sein (Befund 29.08.2026) --------------
+// Die Buehne forderte "Starten Sie die Sitzung erneut", ohne einen Weg dahin
+// anzubieten. Auf der Produktivinstanz standen 12 eigene Sitzungen, alle
+// disconnected, keine einzige aktiv - der Nutzer kam an keine seiner
+// angemeldeten Quellen mehr heran.
+{
+  const { frameEmptyResumable, frameEmptyText } = __browserTestHooks;
+  const mitWiederstart = (session) => ({ latestSession: session, resumeSession: () => {} });
+
+  for (const status of ['disconnected', 'offline', 'stopped', 'closed', 'failed', 'error']) {
+    const zustand = mitWiederstart({ id: 'browser_session_x', status });
+    assert.ok(frameEmptyResumable(zustand), `Status ${status} muss fortsetzbar sein`);
+  }
+  for (const status of ['active', 'starting', 'requested']) {
+    const zustand = mitWiederstart({ id: 'browser_session_x', status });
+    assert.equal(frameEmptyResumable(zustand), null, `Status ${status} darf keinen Wiederstart anbieten`);
+  }
+
+  // Ohne Bruecke kein Knopf: sonst erschiene eine Schaltflaeche ohne Wirkung.
+  assert.equal(
+    frameEmptyResumable({ latestSession: { id: 'browser_session_x', status: 'disconnected' } }),
+    null,
+    'ohne resumeSession darf kein Knopf angeboten werden',
+  );
+  assert.equal(frameEmptyResumable({ resumeSession: () => {} }), null, 'ohne Sitzung kein Knopf');
+
+  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+
+  // Das persistente Profil haengt an der session_id. Ein Wiederstart mit neuer
+  // id waere ein leeres Profil und alle Anmeldungen der Quelle waeren weg.
+  assert.ok(
+    /wiederaufnahme\?\.sessionId \|\| `\$\{userSessionPrefix/.test(quelle),
+    'der Wiederstart muss die bestehende session_id behalten',
+  );
+  assert.ok(
+    /new_session: !wiederaufnahme/.test(quelle),
+    'eine Wiederaufnahme darf nicht als neue Sitzung angefordert werden',
+  );
+
+  // Die Buehne setzt pointer-events: none; ein Knopf darin waere sonst
+  // sichtbar und unklickbar.
+  const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
+  assert.match(
+    css,
+    /\.browser-empty-action\s*\{[^}]*pointer-events:\s*auto/,
+    'der Wiederstart-Knopf muss klickbar sein, obwohl die Buehne Klicks durchreicht',
+  );
+
+  // Kein hartcodierter Text mehr im Platzhalter.
+  assert.ok(
+    !/'Kein laufender Browser-Prozess\. Starten Sie die Sitzung erneut\.'/.test(quelle),
+    'der Hinweis muss uebersetzbar sein',
+  );
+  assert.equal(typeof frameEmptyText({ latestSession: null }), 'string');
+  console.log('  ok: beendete Sitzung bietet einen Wiederstart an');
+}

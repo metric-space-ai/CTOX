@@ -351,6 +351,24 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  text-align: center;
+  padding: 1rem;
+}
+
+.browser-empty-text {
+  max-width: 34rem;
+}
+
+/* Die Buehne selbst faengt keine Klicks (pointer-events: none), damit sie den
+   gestreamten Inhalt nicht blockiert. Der Wiederstart-Knopf muss deshalb
+   ausdruecklich klickbar bleiben - sonst waere er sichtbar und wirkungslos. */
+.browser-empty-action {
+  pointer-events: auto;
 }
 
 .browser-empty[hidden] {
