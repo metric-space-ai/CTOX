@@ -237,6 +237,27 @@ test('runtime refresh uses the persisted runtime when no subscription login is p
   assert.equal(result, loaded);
 });
 
+test('pending OpenAI device login renders code and provider link in the runtime menu', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: { provider: 'openai', chat_model: '', available_models: [] },
+      auth: { mode: 'subscription', subscription_session_configured: false },
+      diagnostics: {},
+    },
+    subscriptionAuth: {
+      status: 'device_code',
+      provider: 'codex',
+      userCode: 'ABCD-EFGHI',
+      verificationUrl: 'https://auth.openai.com/codex/device',
+    },
+  });
+  assert.match(html, /ABCD-EFGHI/);
+  assert.match(html, /href="https:\/\/auth\.openai\.com\/codex\/device"/);
+  assert.match(html, />OpenAI öffnen<\/a>/);
+});
+
 test('subscription auth always opens a fresh same-origin code window', () => {
   const first = hooks.nextSubscriptionAuthWindowName('codex');
   const second = hooks.nextSubscriptionAuthWindowName('codex');

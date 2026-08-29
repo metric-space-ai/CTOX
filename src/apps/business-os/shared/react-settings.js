@@ -590,7 +590,10 @@ export async function openReactSettings({
       const providerLabel = profile.label;
       const accountInput = body.querySelector(`[data-provider-account-id="${cssEscape(providerId)}"]`);
       const accountId = normalizeProviderAccountId(accountInput?.value || profile.defaultAccountId);
-      const authWindow = window.open('', nextSubscriptionAuthWindowName(providerId));
+      const usesInlineDeviceFlow = ['codex', 'openai'].includes(providerId);
+      const authWindow = usesInlineDeviceFlow
+        ? null
+        : window.open('', nextSubscriptionAuthWindowName(providerId));
       settingsState.subscriptionAuth = {
         status: 'starting', provider: providerId, accountId, action: 'connect', message: 'Login wird bei CTOX angefordert.',
       };
@@ -2498,6 +2501,7 @@ function subscriptionStatus(provider, projection, auth, canManage, subscriptionA
   const profile = providerSubscriptionProfile(subscriptionProvider);
   const configured = Boolean(auth.subscription_session_configured);
   const userCode = String(subscriptionAuth?.userCode || '').trim();
+  const verificationUrl = String(subscriptionAuth?.verificationUrl || '').trim();
   const failed = subscriptionAuth?.status === 'failed';
   const pending = subscriptionAuth?.status === 'starting';
   const lines = [];
@@ -2517,6 +2521,7 @@ function subscriptionStatus(provider, projection, auth, canManage, subscriptionA
           <span>Geräte-Code</span>
           <strong>${escapeHtml(formatDeviceCode(userCode))}</strong>
           <em>${escapeHtml(subscriptionAuth?.message || 'Im OpenAI-Fenster eingeben.')}</em>
+          ${verificationUrl ? `<a class="text-button" href="${escapeAttr(verificationUrl)}" target="_blank" rel="noopener noreferrer">OpenAI öffnen</a>` : ''}
         </div>
       ` : ''}
       ${failed ? `<div class="subscription-device-error">${escapeHtml(subscriptionAuth.error || 'ChatGPT Login konnte nicht gestartet werden.')}</div>` : ''}
