@@ -181,7 +181,7 @@ const browserInputEventSchema = {
 // declared database-handle grant, so the manifest and schema must agree or the
 // shell cannot enforce the module's collection boundary.
 const outboundLeadGenerationAdapterSchema = {
-  version: 1,
+  version: 2,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -239,5 +239,8 @@ export const migrationStrategies = {
   browser_tabs: { 1: retainV0BrowserDocument },
   browser_frames: { 1: retainV0BrowserDocument },
   browser_input_events: { 1: retainV0BrowserDocument },
-  outbound_lead_generation_adapters: { 1: retainV0BrowserDocument },
+  outbound_lead_generation_adapters: {
+    1: retainV0BrowserDocument,
+    2: retainV0BrowserDocument,
+  },
 };

@@ -5,13 +5,18 @@ import { collections, migrationStrategies } from './schema.js';
 
 assert.equal(
   collections.outbound_lead_generation_adapters.version,
-  1,
+  2,
   'tenant adapter schema changes must advance the RxDB collection version',
 );
 assert.equal(
   typeof migrationStrategies.outbound_lead_generation_adapters?.[1],
   'function',
   'existing tenant adapters must migrate instead of disabling the collection with DB6',
+);
+assert.equal(
+  typeof migrationStrategies.outbound_lead_generation_adapters?.[2],
+  'function',
+  'the drifted v1 adapter schema must migrate to the canonical v2 schema',
 );
 
 assert.deepEqual(
