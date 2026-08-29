@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use base64::Engine;
+use qrcode::{render::svg, EcLevel, QrCode};
 use ring::rand::SecureRandom;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -12,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const DEFAULT_TTL_SECONDS: i64 = 300;
 pub const MIN_TTL_SECONDS: i64 = 60;
 pub const MAX_TTL_SECONDS: i64 = 3_600;
+
+const WORKJET_PAIRING_PAYLOAD_VERSION: &str = "w2";
+const WORKJET_PAIRING_PAYLOAD_MAX_CHARS: usize = 2_300;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -92,6 +96,76 @@ fn invite_hash(invite_id: &str) -> String {
         .collect()
 }
 
+fn workjet_pairing_uri(invite: &Value) -> anyhow::Result<String> {
+    let compact = json!([
+        WORKJET_PAIRING_PAYLOAD_VERSION,
+        invite.get("display_name").cloned().unwrap_or(Value::Null),
+        invite.get("instance_id").cloned().unwrap_or(Value::Null),
+        invite.get("sync_room").cloned().unwrap_or(Value::Null),
+        invite.get("native_peer_id").cloned().unwrap_or(Value::Null),
+        invite.get("signaling_urls").cloned().unwrap_or(Value::Null),
+        invite
+            .get("signaling_auth_version")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .get("signaling_browser_token")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .get("signaling_browser_token_hash")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .get("signaling_native_token_hash")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite.get("expires_at").cloned().unwrap_or(Value::Null),
+        invite
+            .pointer("/session/capability_token")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .pointer("/session/capability_expires_at_ms")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .pointer("/session/user/id")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .pointer("/session/user/display_name")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .pointer("/session/user/role")
+            .cloned()
+            .unwrap_or(Value::Null),
+        invite
+            .pointer("/session/source")
+            .cloned()
+            .unwrap_or(Value::Null),
+    ]);
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&compact).context("encode Workjet pairing payload")?);
+    anyhow::ensure!(
+        encoded.len() <= WORKJET_PAIRING_PAYLOAD_MAX_CHARS,
+        "Workjet pairing payload is too large"
+    );
+    Ok(format!("workjet://pair?payload={encoded}"))
+}
+
+fn workjet_pairing_qr_svg(pairing_uri: &str) -> anyhow::Result<String> {
+    let code = QrCode::with_error_correction_level(pairing_uri.as_bytes(), EcLevel::M)
+        .context("build Workjet pairing QR")?;
+    Ok(code
+        .render::<svg::Color>()
+        .min_dimensions(320, 320)
+        .dark_color(svg::Color("#111111"))
+        .light_color(svg::Color("#ffffff"))
+        .build())
+}
+
 fn validate_display_name(value: Option<&str>) -> anyhow::Result<String> {
     let value = value.unwrap_or("Workjet mobile pairing").trim();
     anyhow::ensure!(!value.is_empty(), "mobile invite display name is required");
@@ -138,7 +212,9 @@ pub fn device_binding(
                     && proof_key_thumbprint
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-                    && decoded_thumbprint.as_deref().is_some_and(|value| value.len() == 32),
+                    && decoded_thumbprint
+                        .as_deref()
+                        .is_some_and(|value| value.len() == 32),
                 "mobile invite proofKeyThumbprint must be a 43-character base64url SHA-256 thumbprint"
             );
             Ok(Some(super::capability::CapabilityDeviceBinding {
@@ -278,6 +354,8 @@ pub fn create(
     let grant_id = device_binding
         .map(|binding| binding.device_pairing_id.as_str())
         .unwrap_or(invite_id.as_str());
+    let pairing_uri = workjet_pairing_uri(&invite)?;
+    let qr_svg = workjet_pairing_qr_svg(&pairing_uri)?;
     Ok(json!({
         "businessOsInstanceId": config.instance_id,
         "deviceId": device_binding.map(|binding| binding.device_id.as_str()),
@@ -285,7 +363,9 @@ pub fn create(
         "grantId": grant_id,
         "inviteId": invite_id,
         "invite": invite,
-        "expiresAt": expires_at
+        "expiresAt": expires_at,
+        "pairingUri": pairing_uri,
+        "qrSvg": qr_svg
     }))
 }
 
@@ -689,6 +769,12 @@ mod tests {
         );
         assert!(invite.get("signaling_room_password").is_none());
         assert_eq!(invite["session"]["user"]["role"], "user");
+        assert!(created["pairingUri"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("workjet://pair?payload=")));
+        assert!(created["qrSvg"]
+            .as_str()
+            .is_some_and(|value| value.contains("<svg") && value.contains("<path")));
         assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
         assert!(
             super::super::store::verified_webrtc_capability_claims(root.path(), token).is_some()

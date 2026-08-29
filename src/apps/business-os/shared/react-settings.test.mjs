@@ -334,6 +334,64 @@ function baseTemplate(overrides = {}) {
   });
 }
 
+test('sync settings explain role-bound auth and expose the Workjet QR action', () => {
+  const html = baseTemplate({
+    tab: 'sync',
+    syncConfig: {
+      app_hosting: 'ctox_dev_web_deploy',
+      sync_mode: 'p2p-first',
+      transport: 'webrtc',
+      peer_role: 'browser',
+      instance_id: 'biz_test',
+      native_peer_id: 'ctox-core-test',
+      sync_room: 'ctox-business-os:biz_test:room',
+      signaling_auth_version: 'ctox-role-bound-v1',
+      signaling_urls: [
+        'wss://signaling.ctox.dev/v2?token=secret&token_exp=32503680000',
+      ],
+    },
+    workjetPairing: { loading: false, invite: null, error: '' },
+  });
+  assert.match(html, /Workjet verbinden/);
+  assert.match(html, /data-workjet-pairing-create/);
+  assert.match(html, /ctox-business-os:biz_test:room/);
+  assert.match(html, /wss:\/\/signaling\.ctox\.dev\/v2/);
+  assert.match(html, /kein separates Klartext-Passwort/i);
+  assert.match(html, /Kurzlebiger Token ist im QR enthalten/);
+});
+
+test('Workjet pairing response is validated and rendered as an inert SVG image', async () => {
+  const response = {
+    pairingUri: `workjet://pair?payload=${'A'.repeat(64)}`,
+    qrSvg: '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1H0V0"/></svg>',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+  const calls = [];
+  const invite = await hooks.createWorkjetPairingInvite({
+    requestNative: async (...args) => {
+      calls.push(args);
+      return response;
+    },
+  }, 'Fold 8');
+  assert.deepEqual(invite, response);
+  assert.equal(calls[0][0], 'ctox.workjet.device.v1');
+  assert.deepEqual(calls[0][1], {
+    action: 'invite.create', ttlSeconds: 300, displayName: 'Fold 8',
+  });
+  assert.equal(calls[0][2].requiredCapability, 'ctox-workjet-device-control-v1');
+  assert.match(hooks.workjetPairingSvgDataUrl(response.qrSvg), /^data:image\/svg\+xml/);
+
+  const html = baseTemplate({
+    tab: 'sync',
+    syncConfig: {},
+    workjetPairing: { loading: false, invite, error: '' },
+  });
+  assert.match(html, /data-workjet-pairing-ready/);
+  assert.match(html, /alt="Workjet Pairing QR-Code"/);
+  assert.match(html, /href="workjet:\/\/pair\?payload=/);
+  assert.doesNotMatch(html, /<script/i);
+});
+
 test('settings user tab renders business-facing role labels', () => {
   const html = baseTemplate();
   assert.match(html, /Team & Zugänge/);

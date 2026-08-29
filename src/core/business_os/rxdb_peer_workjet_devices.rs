@@ -43,6 +43,8 @@ pub(crate) struct WorkjetDeviceInviteCreateResponseV1 {
     invite_id: String,
     invite: Value,
     expires_at: String,
+    pairing_uri: String,
+    qr_svg: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -200,6 +202,12 @@ mod tests {
         .map_err(anyhow::Error::msg)?;
         assert_eq!(created["invite"]["data_plane"], "rxdb-webrtc");
         assert_eq!(created["invite"]["http_bridge_available"], false);
+        assert!(created["pairingUri"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("workjet://pair?payload=")));
+        assert!(created["qrSvg"]
+            .as_str()
+            .is_some_and(|value| value.contains("<svg")));
 
         let listed = handle_workjet_device_webrtc_request(
             root.path(),
