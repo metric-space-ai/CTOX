@@ -1,8 +1,0 @@
-{
-  "name": "thesen-outbound-worktree",
-  "private": true,
-  "type": "module",
-  "main": "tests/all.test.mjs",
-  "description": "Local work copy of the private THESEN Outbound app. esbuild is the test harness dependency (tests bundle index.js before importing it).",
-  "devDependencies": { "esbuild": "^0.25.0" }
-}

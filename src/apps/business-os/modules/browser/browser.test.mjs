@@ -4,24 +4,24 @@ import { __browserTestHooks } from './index.js';
 import { collections, migrationStrategies } from './schema.js';
 
 assert.equal(
-  collections.thesen_outbound_adapters.version,
+  collections.outbound_lead_generation_adapters.version,
   1,
   'tenant adapter schema changes must advance the RxDB collection version',
 );
 assert.equal(
-  typeof migrationStrategies.thesen_outbound_adapters?.[1],
+  typeof migrationStrategies.outbound_lead_generation_adapters?.[1],
   'function',
   'existing tenant adapters must migrate instead of disabling the collection with DB6',
 );
 
 assert.deepEqual(
   __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
-  ['outbound_research_adapters', 'thesen_outbound_adapters'],
+  ['outbound_research_adapters', 'outbound_lead_generation_adapters'],
   'the scraping rail loads core and tenant-local adapter collections together',
 );
 assert.deepEqual(
   __browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
-  ['thesen_outbound_sources'],
+  ['outbound_lead_generation_sources'],
   'the adapter rail reconciles activation with the source-owned setting',
 );
 assert.deepEqual(
@@ -1237,7 +1237,7 @@ function pointerEvent(overrides = {}) {
 // Allowlist der Shell stehen. Fehlt sie dort, liefert browserCollection()
 // null, die Leseschleife ueberspringt sie stumm und der Abgleich in
 // mergeScrapingAdapterSource() bleibt wirkungslos - ohne Fehlermeldung.
-// Genau so wurde 'thesen_outbound_sources' einmal ausgeliefert.
+// Genau so wurde 'outbound_lead_generation_sources' einmal ausgeliefert.
 {
   const appQuelle = await readFile(new URL('../../app.js', import.meta.url), 'utf8');
   const block = appQuelle.match(
@@ -1270,13 +1270,13 @@ function pointerEvent(overrides = {}) {
   assert.equal(typeof mergeScrapingAdapterRows, 'function', 'mergeScrapingAdapterRows muss exportiert sein');
 
   const kern = {
-    source_id: 'bundesanzeiger.de', id: 'adapter_thesen_bundesanzeiger-de',
+    source_id: 'bundesanzeiger.de', id: 'adapter_outbound_bundesanzeiger-de',
     updated_at_ms: 1787810131946,
     last_test: '2026-08-27T05:55:31Z', latency_ms: 5680, test_ok: false,
     evidence: 'status-temporary_unreachable', auth_status: 'not_required',
   };
   const tenant = {
-    source_id: 'bundesanzeiger.de', id: 'adapter_thesen_bundesanzeiger-de',
+    source_id: 'bundesanzeiger.de', id: 'adapter_outbound_bundesanzeiger-de',
     updated_at_ms: 1787917371912,
     last_test: '', latency_ms: null, auth_status: 'not_required', enabled: false,
   };

@@ -180,7 +180,7 @@ const browserInputEventSchema = {
 // under this German collection name. The Browser module reads it only after a
 // declared database-handle grant, so the manifest and schema must agree or the
 // shell cannot enforce the module's collection boundary.
-const thesenOutboundAdapterSchema = {
+const outboundLeadGenerationAdapterSchema = {
   version: 1,
   primaryKey: 'id',
   type: 'object',
@@ -219,7 +219,7 @@ const thesenOutboundAdapterSchema = {
 // tenant-lokalen Adapter. Auf der Produktivinstanz betraf das 17 aktive
 // Adapter, darunter als einziger Traeger linkedin.com.
 const outboundResearchAdapterSchema = {
-  ...thesenOutboundAdapterSchema,
+  ...outboundLeadGenerationAdapterSchema,
   version: 0,
 };
 
@@ -229,7 +229,7 @@ export const collections = {
   browser_frames: browserFrameSchema,
   browser_input_events: browserInputEventSchema,
   outbound_research_adapters: outboundResearchAdapterSchema,
-  thesen_outbound_adapters: thesenOutboundAdapterSchema,
+  outbound_lead_generation_adapters: outboundLeadGenerationAdapterSchema,
 };
 
 const retainV0BrowserDocument = (oldDoc) => ({ ...oldDoc });
@@ -239,5 +239,5 @@ export const migrationStrategies = {
   browser_tabs: { 1: retainV0BrowserDocument },
   browser_frames: { 1: retainV0BrowserDocument },
   browser_input_events: { 1: retainV0BrowserDocument },
-  thesen_outbound_adapters: { 1: retainV0BrowserDocument },
+  outbound_lead_generation_adapters: { 1: retainV0BrowserDocument },
 };

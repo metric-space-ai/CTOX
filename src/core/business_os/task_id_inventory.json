@@ -39,7 +39,7 @@
     },
     {
       "file": "src/core/business_os/person_research_command.rs",
-      "function": "thesen_outbound_lead_state_document",
+      "function": "outbound_lead_generation_lead_state_document",
       "occurrence": 1,
       "semantics": "compatibility_target",
       "target_field": "task_id stays empty; command_id carries the lifecycle link"

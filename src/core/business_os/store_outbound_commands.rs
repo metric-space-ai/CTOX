@@ -5625,12 +5625,12 @@ mod tests {
     fn outbound_research_adapter_writeback_reaches_tenant_rxdb_collection() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        let adapter_id = "adapter_thesen_example-com";
+        let adapter_id = "adapter_outbound_example-com";
         let rxdb_path = super::super::store::rxdb_store_path(root);
         std::fs::create_dir_all(rxdb_path.parent().context("RxDB parent")?)?;
         let rxdb = Connection::open(rxdb_path)?;
         rxdb.execute_batch(
-            "CREATE TABLE ctox_business_os__thesen_outbound_adapters__v1 (
+            "CREATE TABLE ctox_business_os__outbound_lead_generation_adapters__v1 (
                 id TEXT PRIMARY KEY NOT NULL,
                 revision TEXT,
                 deleted INTEGER NOT NULL,
@@ -5642,8 +5642,8 @@ mod tests {
         let outcome = accept_rxdb_business_command(
             root,
             serde_json::json!({
-                "id": "cmd_thesen_adapter_writeback",
-                "command_id": "cmd_thesen_adapter_writeback",
+                "id": "cmd_outbound_adapter_writeback",
+                "command_id": "cmd_outbound_adapter_writeback",
                 "module": "outbound",
                 "command_type": "outbound.research_source.upsert",
                 "record_id": adapter_id,
@@ -5666,14 +5666,14 @@ mod tests {
                         "auth_status": "not_required"
                     },
                     "writeback": {
-                        "collection": "thesen_outbound_adapters",
+                        "collection": "outbound_lead_generation_adapters",
                         "record_id": adapter_id
                     },
                     "secret_value_in_payload": false
                 },
                 "client_context": {
                     "actor": { "id": "tester", "role": "admin", "display_name": "Tester" },
-                    "source_module": "thesen-outbound"
+                    "source_module": "outbound-lead-generation"
                 }
             }),
         )?;
@@ -5682,8 +5682,9 @@ mod tests {
             outcome.get("status").and_then(Value::as_str),
             Some("completed")
         );
-        let projected = load_rxdb_collection_record(root, "thesen_outbound_adapters", adapter_id)?
-            .context("tenant adapter writeback must be projected into RxDB")?;
+        let projected =
+            load_rxdb_collection_record(root, "outbound_lead_generation_adapters", adapter_id)?
+                .context("tenant adapter writeback must be projected into RxDB")?;
         assert_eq!(
             projected.get("source_id").and_then(Value::as_str),
             Some("example.com")
@@ -10637,7 +10638,7 @@ mod tests {
 /// Der Login-Rueckweg: nach "Ich bin angemeldet" bekommt jeder business_record,
 /// der diese `source_id` beschreibt, `auth_status = session_authenticated` --
 /// in der generischen Sammlung `outbound_research_adapters` UND im Modul-
-/// Zwilling `thesen_outbound_adapters`, den die Oberflaeche wirklich liest.
+/// Zwilling `outbound_lead_generation_adapters`, den die Oberflaeche wirklich liest.
 /// Damit schliesst sich zugleich die Zwei-Wahrheiten-Luecke: der Server, der
 /// bisher nur die generische Sammlung schrieb, spiegelt die Wahrheit hier in
 /// beide. Gibt die Zahl der geaenderten Records zurueck.
@@ -10650,7 +10651,10 @@ pub(super) fn outbound_mark_source_authenticated(
     let conn = open_store(root)?;
     let now = now_ms() as i64;
     let mut touched = 0usize;
-    for collection in ["outbound_research_adapters", "thesen_outbound_adapters"] {
+    for collection in [
+        "outbound_research_adapters",
+        "outbound_lead_generation_adapters",
+    ] {
         let mut rows = conn.prepare(
             "SELECT record_id, payload_json FROM business_records
              WHERE collection = ?1 AND deleted = 0",

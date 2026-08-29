@@ -769,7 +769,10 @@ async fn complete_web_stack_auth_assist(
     // Oberflaeche also nie -- gemessen: records_updated=2, Anzeige unveraendert.
     // Deshalb hier zusaetzlich direkt in die replizierten Sammlungen.
     let mut projected = 0usize;
-    for collection_name in ["thesen_outbound_adapters", "outbound_research_adapters"] {
+    for collection_name in [
+        "outbound_lead_generation_adapters",
+        "outbound_research_adapters",
+    ] {
         let Some(collection) = database.collection(collection_name) else {
             continue;
         };
@@ -1485,7 +1488,7 @@ mod tests {
 
         // Ein Zombie, wie er real vorlag: verjaehrt, aber noch Kandidat.
         let mut zombie = json!({
-            "id": "cmd_thesen_source_zombie",
+            "id": "cmd_outbound_source_zombie",
             "status": "failed",
             "command_type": "outbound.research_source.test",
         });

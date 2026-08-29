@@ -23,12 +23,12 @@ const payloadBuild = shared.buildProtocolPayload();
 // Grow the room while buildProtocolPayloadUncached() is awaiting the
 // representative collection payload.
 await Promise.resolve();
-shared.collections.set('thesen_outbound_adapters', registration('thesen_outbound_adapters'));
+shared.collections.set('outbound_lead_generation_adapters', registration('outbound_lead_generation_adapters'));
 releaseRepresentative();
 
 const payload = await payloadBuild;
 assert(payload.collectionSchemas?.business_commands?.schemaHash === 'hash-business_commands', 'representative schema is present');
-assert(payload.collectionSchemas?.thesen_outbound_adapters?.schemaHash === 'hash-thesen_outbound_adapters', 'late schema is present');
+assert(payload.collectionSchemas?.outbound_lead_generation_adapters?.schemaHash === 'hash-outbound_lead_generation_adapters', 'late schema is present');
 assert(payload.collectionCheckpoints == null, 'browser symmetric response omits unused checkpoint map');
 
 console.log('ctox-rxdb handshake collection-registration race smoke OK');

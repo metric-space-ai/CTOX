@@ -209,7 +209,7 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   support_thread_links: 'c144074785a1e22697f7f2ebc30b297d404fd3ff2bfca797b78371e9f205a8be',
   support_view_filters: 'e8988877eef64c437758f90f5d6868d8310122bb5f78e854fad31d256d3cafe5',
   support_views: '10ac9212258aef30b798d1d4e6d58712b9f59ee725966a8c7bd0fa49f72c1033',
-  thesen_outbound_adapters: '2c55fa1c30faf50dfe88029278d2d32f7d9eaf1a159dabf24a28b4b3859f3bc9',
+  outbound_lead_generation_adapters: '2c55fa1c30faf50dfe88029278d2d32f7d9eaf1a159dabf24a28b4b3859f3bc9',
   user_notifications: '28593fbad81de44fc2218886d67284cc140ca4b657bf75267412859a32753e5b',
   user_thread_links: 'cc911076015a884b58fda2b28b5e8d840b048e78d958081429db31d573916129',
   user_thread_messages: '3e9ac54c218496245fdeaa9e8cd6f2f649455448703bada2ac290a1de4fd7646',

@@ -1,7 +1,7 @@
 // REGRESSION: the browser used to read every IndexedDB checkpoint before
 // answering the native peer's symmetric ctoxProtocol request. A production
 // room with 192 collections exceeded the native 60 s handshake, so the native
-// peer never advanced to its token request and Browser/THESEN reconnected
+// peer never advanced to its token request and Browser/managed tenant reconnected
 // forever. The browser is always the fork for a native CTOX peer: it must send
 // every schema hash, but the native side never consumes browser checkpoints.
 

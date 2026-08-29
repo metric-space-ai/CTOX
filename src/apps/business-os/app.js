@@ -5377,7 +5377,7 @@ function withMigrationStrategies(collections, migrationStrategies = {}) {
 // Eine App, die eine fremde Collection deklariert, muss sie auch lesen koennen —
 // ohne dass der Nutzer vorher die besitzende App geoeffnet hat.
 //
-// THESEN Outbound deklariert sellify_companies und sellify_people, um vor jeder
+// Outbound Lead Generation deklariert sellify_companies und sellify_people, um vor jeder
 // Recherche im CRM nachzuschlagen: existiert die Firma schon, ist es eine
 // Nachrecherche, und die dort gefuehrten Ansprechpartner (im Schnitt 3,5 je
 // Firma) sind bereits bekannt. Registriert wurden diese Collections aber nur
@@ -5985,11 +5985,11 @@ const SCOPED_SYSTEM_MODULE_DB_COLLECTIONS = Object.freeze({
     // Adaptersammlungen werden gebraucht: die Kern-Sammlung trug auf der
     // Produktivinstanz 17 aktive Adapter, darunter als einziger linkedin.com.
     'outbound_research_adapters',
-    'thesen_outbound_adapters',
+    'outbound_lead_generation_adapters',
     // Ebenfalls nur lesend: die Aktivierung einer Quelle gehoert der
     // Outbound-App. Ohne diesen Eintrag liefert browserCollection() null und
     // der Abgleich in mergeScrapingAdapterSource() bliebe wirkungslos.
-    'thesen_outbound_sources',
+    'outbound_lead_generation_sources',
   ]),
   creator: Object.freeze([
     'business_commands',
@@ -6495,7 +6495,7 @@ function createLiveSyncFacade({ host = null } = {}) {
       assertActive();
       // Fehlte die native Bruecke, lieferte das optionale Aufrufzeichen still
       // `undefined` statt zu werfen. Aufrufer behandeln das als Erfolg: der
-      // Browser meldete am 20.08.2026 auf thesen.ctox.dev "Bereit", waehrend
+      // Browser meldete am 20.08.2026 auf managed production tenant "Bereit", waehrend
       // serverseitig weder Sitzung noch Tab noch Chromium existierten — der
       // Los-Knopf war tot, ohne dass irgendwo ein Fehler entstand.
       if (typeof state.sync?.requestNative !== 'function') {
@@ -9209,7 +9209,7 @@ function renderShellCtoxVersion(status = state.ctoxHealth) {
   // Die Versionsnummer stammt aus Cargo.toml und wird auf main nie
   // hochgezaehlt: sie zeigt seit Monaten 0.3.22, egal wie oft aktualisiert
   // wurde. Ein Betreiber konnte am Bildschirm nicht erkennen, ob ein Upgrade
-  // angekommen ist — auf thesen.ctox.dev lief drei Wochen ein alter Build
+  // angekommen ist — auf managed production tenant lief drei Wochen ein alter Build
   // hinter einer Zahl, die aktuell aussah. Der Build-Stand des laufenden
   // Release ist die Angabe, die sich tatsaechlich aendert.
   const buildStand = platformBuildStamp(platform?.current_release);

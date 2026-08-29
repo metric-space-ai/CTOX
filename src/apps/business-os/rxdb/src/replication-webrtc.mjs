@@ -904,7 +904,7 @@ class SharedRoomPeer {
     // collection while the native peer already advertises the complete room.
     // Looking only at the browser's current registration count misclassifies
     // that handshake as single-collection and compares unrelated representative
-    // envelopes (for example thesen_outbound_leads vs desktop_files). Treat the
+    // envelopes (for example outbound_lead_generation_leads vs desktop_files). Treat the
     // room as multiplexed whenever EITHER payload advertises multiple schemas.
     const multiplexed = protocolHandshakeIsMultiplexed(
       this.collections.size,

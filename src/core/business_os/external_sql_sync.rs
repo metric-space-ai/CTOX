@@ -2191,10 +2191,11 @@ mod tests {
     #[test]
     fn allowed_module_resolves_shared_source() {
         let mut source = source();
-        source.allowed_modules = vec!["thesen-outbound".into()];
+        source.allowed_modules = vec!["outbound-lead-generation".into()];
 
-        let resolved = resolve_source_for_module(vec![source], "thesen-outbound", "erp-primary")
-            .expect("shared source");
+        let resolved =
+            resolve_source_for_module(vec![source], "outbound-lead-generation", "erp-primary")
+                .expect("shared source");
 
         assert_eq!(resolved.module_id, "inventory");
         assert_eq!(resolved.id, "erp-primary");
@@ -2203,7 +2204,7 @@ mod tests {
     #[test]
     fn module_not_in_share_list_is_rejected_with_existing_error() {
         let mut source = source();
-        source.allowed_modules = vec!["thesen-outbound".into()];
+        source.allowed_modules = vec!["outbound-lead-generation".into()];
 
         let error = resolve_source_for_module(vec![source], "other-outbound", "erp-primary")
             .expect_err("unlisted module must be rejected");
@@ -2222,11 +2223,12 @@ mod tests {
             resolve_source_for_module(vec![source.clone()], "inventory", "erp-primary").is_ok()
         );
 
-        let error = resolve_source_for_module(vec![source], "thesen-outbound", "erp-primary")
-            .expect_err("missing allow-list must preserve owner-only behavior");
+        let error =
+            resolve_source_for_module(vec![source], "outbound-lead-generation", "erp-primary")
+                .expect_err("missing allow-list must preserve owner-only behavior");
         assert_eq!(
             error.to_string(),
-            "external SQL source `erp-primary` is not registered for local module `thesen-outbound`"
+            "external SQL source `erp-primary` is not registered for local module `outbound-lead-generation`"
         );
     }
 

@@ -24,15 +24,15 @@ const BROWSER_SYNC_COLLECTIONS = [
 const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
   // Core Outbound campaigns.
   'outbound_research_adapters',
-  // Tenant-local THESEN campaigns. The THESEN module owns this collection;
+  // Tenant-local managed tenant campaigns. The managed tenant module owns this collection;
   // reading only the core collection made its complete adapter list disappear.
-  'thesen_outbound_adapters',
+  'outbound_lead_generation_adapters',
 ]);
 const SCRAPING_SOURCE_COLLECTIONS = Object.freeze([
   // Source activation is owned by the tenant Outbound app. Adapter execution
   // status and source activation used to drift because they are separate
   // records; the Browser must show the source-owned activation state.
-  'thesen_outbound_sources',
+  'outbound_lead_generation_sources',
 ]);
 
 export async function mount(ctx) {
@@ -364,7 +364,7 @@ export async function mount(ctx) {
       if (typeof ctx.sync?.requestNative !== 'function') return command();
       try {
         // requestNative respektiert sein timeoutMs nicht zuverlaessig: auf
-        // thesen.ctox.dev am 20.08.2026 gemessen blieb das Promise ewig offen,
+        // managed production tenant am 20.08.2026 gemessen blieb das Promise ewig offen,
         // der Rueckfall auf den dauerhaften Befehlsweg wurde nie erreicht,
         // finally lief nie, die Start-Sperre blieb gesetzt — der Los-Knopf war
         // dauerhaft tot, ohne Meldung. Ein eigenes Zeitlimit erzwingt nach
@@ -1594,7 +1594,7 @@ async function startBrowserRuntimeSync(ctx, collections = [
   }
   // startCollection kann nach einem Dienst-Neustart ewig haengen: die Bruecke
   // wartet auf ein Ready-Ereignis, das nie kommt. Gemessen am 20.08.2026 auf
-  // thesen.ctox.dev: jeder Sitzungsstart blieb VOR dem Dispatch stumm stehen —
+  // managed production tenant: jeder Sitzungsstart blieb VOR dem Dispatch stumm stehen —
   // kein Fehler, kein Protokoll, kein Chromium. Der Befehlsbus prueft seine
   // Bereitschaft selbst; nach 8 s wird deshalb abgebrochen statt gewartet,
   // und der Aufrufer faehrt ueber seinen Fehlerpfad fort.
@@ -2921,7 +2921,7 @@ function renderAdapterRail(ctx, refs, state) {
       pruefen.type = 'button';
       pruefen.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
       pruefen.textContent = t('btnAdapterCheck', 'Prüfen (Outbound)');
-      pruefen.addEventListener('click', () => ctx.openDesktopApp('thesen-outbound'));
+      pruefen.addEventListener('click', () => ctx.openDesktopApp('outbound-lead-generation'));
       aktionen.appendChild(pruefen);
     }
     karte.append(kopf, chips, meta);
@@ -3731,7 +3731,7 @@ function setzeEingabeHinweis(ctx, state, text) {
   state.eingabeHinweis = text;
   // eingabeHinweis wurde gesetzt und NIRGENDS gerendert — es gab nur die zwei
   // Zuweisungen in dieser Funktion. Der Nutzer sah deshalb exakt nichts: kein
-  // Klick wirkte, keine Meldung erschien. Am 19.08.2026 auf thesen.ctox.dev
+  // Klick wirkte, keine Meldung erschien. Am 19.08.2026 auf managed production tenant
   // gemessen: jede Eingabe endete in "Die Steuerung wurde an ein anderes
   // Fenster uebergeben", sichtbar allein in der Browserkonsole. Der Grund
   // gehoert dorthin, wo der Nutzer hinsieht — in die Statuszeile.

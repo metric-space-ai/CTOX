@@ -358,7 +358,7 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         // Rueckkehrer-Schutz: Ein Client mit tagealtem lokalen Spiegel besteht
         // die optimistische Sperre, indem er erst den aktuellen Master zieht
         // und seinen alten Inhalt obendrauf setzt. Am 19.08.2026 hat genau das
-        // auf thesen.ctox.dev zweimal Bestandsdaten rueckwaerts ueberschrieben
+        // auf managed production tenant zweimal Bestandsdaten rueckwaerts ueberschrieben
         // (12:47 alle 19 Leads, 23:08 zwei weitere — Schreiber oazkvgmhxl und
         // vyeayvygxs). Traegt der eingehende Zustand ein updated_at_ms, das
         // deutlich AELTER ist als der Master, ist das keine Bearbeitung,

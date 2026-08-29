@@ -308,7 +308,7 @@ test('Sellify handoff opens the canonical Mail series-email contract', () => {
   const hash = hooks.buildSeriesEmailTransferHash({
     campaignId: 'sellify-campaign-1',
     recipients: ['a@example.test', 'b@example.test'],
-    subject: 'Thesen',
+    subject: 'Notizen',
   });
   assert.match(hash, /^mail\?action=series-email&source_module=sellify/);
   assert.match(hash, /campaign_id=sellify-campaign-1/);

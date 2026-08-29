@@ -10713,7 +10713,7 @@
     ],
     "additionalProperties": true
   },
-  "thesen_outbound_adapters": {
+  "outbound_lead_generation_adapters": {
     "version": 1,
     "primaryKey": "id",
     "type": "object",

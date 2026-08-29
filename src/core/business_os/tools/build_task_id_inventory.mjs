@@ -38,7 +38,7 @@ const classifications = new Map(Object.entries({
   record_report: ['execution_link', 'execution_task_id'],
   record_report_command: ['execution_link', 'execution_task_id'],
   reusable_web_stack_auth_assist_request: ['execution_link', 'execution_task_id'],
-  thesen_outbound_lead_state_document: ['compatibility_target', 'task_id stays empty; command_id carries the lifecycle link'],
+  outbound_lead_generation_lead_state_document: ['compatibility_target', 'task_id stays empty; command_id carries the lifecycle link'],
   upsert_app_record_link: ['domain_queue_reference', 'thread-linked task reference'],
   upsert_ctox_command_link: ['domain_queue_reference', 'thread-linked task reference'],
   upsert_ctox_task_link: ['target_task', 'target_task_id'],

@@ -79,7 +79,7 @@ const COLLECTION_START_GAP_MS = 60;
 // How many collection registrations may mutate the shared room handshake at
 // the same time. Four lanes looked faster in an isolated bootstrap benchmark,
 // but a restored workspace starts several module leases concurrently. On the
-// managed THESEN instance that invalidated the multiplexed handshake while
+// managed managed tenant instance that invalidated the multiplexed handshake while
 // other lanes were still running: masterChangesSince timed out, the shared
 // peer dropped, and even a one-row command insert waited 16.5 seconds behind
 // recovery work. Serialize registration on the one shared transport. This is
@@ -461,7 +461,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-schema-registry-v199');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260829-outbound-lead-generation-v200');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1482,7 +1482,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260828-schema-registry-v199');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260829-outbound-lead-generation-v200');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -3358,7 +3358,7 @@ function isDemandOnlyPullCollection(collection) {
     // Browser history must never gate the interactive browser surface. A
     // user needs only a bounded, owner-scoped session window plus the tabs of
     // the selected session; replaying every historical session/tab delayed a
-    // cold open by more than 90 seconds on the managed THESEN instance.
+    // cold open by more than 90 seconds on the managed managed tenant instance.
     || collection === 'browser_sessions'
     || collection === 'browser_tabs'
     // Knowledge table documents embed dataframe rows and can grow far beyond
