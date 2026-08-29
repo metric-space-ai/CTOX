@@ -222,6 +222,21 @@ export async function openReactSettings({
     try {
       await ensureRuntimeCollections();
       const loadedRuntimeSettings = await loadRuntimeSettings({ db });
+      const authStatus = await loadSubscriptionAuthStatusControlPlane().catch(() => null);
+      if (authStatus?.provider_subscriptions) {
+        loadedRuntimeSettings.provider_subscriptions = authStatus.provider_subscriptions;
+        const selectedSubscriptionProvider = runtimeSubscriptionProvider(
+          loadedRuntimeSettings?.runtime?.provider,
+        );
+        if (selectedSubscriptionProvider
+          && subscriptionProviderConnected(authStatus.provider_subscriptions, selectedSubscriptionProvider)) {
+          loadedRuntimeSettings.auth = {
+            ...(loadedRuntimeSettings.auth || {}),
+            configured: true,
+            subscription_session_configured: true,
+          };
+        }
+      }
       settingsState.runtimeSettings = runtimeSettingsPreservingPendingSubscription(
         loadedRuntimeSettings,
         settingsState.runtimeSettings,
@@ -507,6 +522,52 @@ export async function openReactSettings({
       render();
     });
     body.querySelector('[data-runtime-refresh]')?.addEventListener('click', refreshRuntimeSettings);
+    body.querySelectorAll('[data-runtime-choice]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = body.querySelector(`[${button.dataset.runtimeChoice}]`);
+        if (!target) return;
+        target.value = button.dataset.value || '';
+        body.querySelectorAll(`[data-runtime-choice="${cssEscape(button.dataset.runtimeChoice)}"]`)
+          .forEach((candidate) => {
+            const selected = candidate === button;
+            candidate.classList.toggle('is-selected', selected);
+            candidate.setAttribute('aria-pressed', selected ? 'true' : 'false');
+          });
+        if (['data-runtime-provider', 'data-runtime-auth-mode'].includes(button.dataset.runtimeChoice)) {
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (button.dataset.runtimeChoice === 'data-runtime-model') {
+          settingsState.runtimeSettings = runtimeSettingsWithDraft(
+            settingsState.runtimeSettings,
+            runtimePayloadFromForm(body),
+          );
+          render();
+        }
+      });
+    });
+    body.querySelector('[data-runtime-model-manual]')?.addEventListener('input', (event) => {
+      const target = body.querySelector('[data-runtime-model]');
+      if (target) target.value = event.currentTarget.value;
+    });
+    body.querySelector('[data-runtime-model-manual]')?.addEventListener('change', () => {
+      settingsState.runtimeSettings = runtimeSettingsWithDraft(
+        settingsState.runtimeSettings,
+        runtimePayloadFromForm(body),
+      );
+      render();
+    });
+    body.querySelectorAll('[data-runtime-copy-code]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const code = String(button.dataset.runtimeCopyCode || '').trim();
+        if (!code || !navigator.clipboard?.writeText) return;
+        try {
+          await navigator.clipboard.writeText(code);
+          button.textContent = 'Kopiert';
+          button.setAttribute('aria-label', 'Geräte-Code kopiert');
+        } catch {
+          button.textContent = 'Kopieren fehlgeschlagen';
+        }
+      });
+    });
     body.querySelector('[data-branding-refresh]')?.addEventListener('click', refreshBranding);
     body.querySelector('[data-branding-save]')?.addEventListener('click', async () => {
       const input = body.querySelector('[data-branding-json]');
@@ -610,6 +671,10 @@ export async function openReactSettings({
           settingsState.runtimeSettings,
           runtimePayload,
         );
+        settingsState.runtimeSettings = await saveRuntimeSettings(
+          runtimePayload,
+          { commandBus, db, session, sync },
+        );
         const payload = await startSubscriptionAuth(providerId, accountId);
         const credentialRequirement = providerCredentialRequirement(payload, providerId);
         if (credentialRequirement) {
@@ -662,23 +727,31 @@ export async function openReactSettings({
           : payload.user_code
           ? `${providerLabel} Geräte-Code: ${payload.user_code}. Danach Status neu laden.`
           : `${providerLabel} Login geöffnet. Danach Status neu laden.`;
-        saveRuntimeSettings(runtimePayload, {
-          commandBus,
-          db,
-          session,
-          sync,
-          waitForProjection: false,
+        waitForSubscriptionConnection(providerId, {
+          onProjection: (projection) => {
+            settingsState.runtimeSettings = {
+              ...(settingsState.runtimeSettings || {}),
+              provider_subscriptions: projection,
+            };
+          },
+        }).then(async (projection) => {
+          settingsState.runtimeSettings = {
+            ...(settingsState.runtimeSettings || {}),
+            provider_subscriptions: projection,
+            auth: {
+              ...(settingsState.runtimeSettings?.auth || {}),
+              configured: true,
+              subscription_session_configured: true,
+            },
+          };
+          settingsState.subscriptionAuth = { status: 'connected', provider: providerId, accountId };
+          settingsState.commandStatus = `${providerLabel} ist verbunden.`;
+          await refreshRuntimeSettings();
         }).catch((error) => {
-          const message = `Runtime konnte nach Start des Provider-Logins nicht gespeichert werden: ${String(error?.message || error)}`;
-          settingsState.commandStatus = settingsState.subscriptionAuth?.userCode
-            ? `${settingsState.commandStatus} ${message}`
-            : message;
+          if (String(error?.message || error).includes('Zeitüberschreitung')) return;
+          settingsState.commandStatus = String(error?.message || error);
           render();
         });
-        setTimeout(refreshRuntimeSettings, 3000);
-        setTimeout(refreshRuntimeSettings, 9000);
-        setTimeout(refreshRuntimeSettings, 30000);
-        setTimeout(refreshRuntimeSettings, 90000);
       } catch (error) {
         writeSubscriptionAuthWindow(
           authWindow,
@@ -1204,9 +1277,6 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
       <section class="settings-section runtime-editor">
         <header><h3>Inference</h3><span>Status wird geladen…</span></header>
       </section>
-      <section class="settings-section">
-        <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
-      </section>
     `;
   }
   const runtime = runtimeSettings?.runtime || {};
@@ -1221,10 +1291,20 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
   const serviceNeedsAttention = Boolean(diagnostics.service_needs_attention);
   const authNeedsAttention = Boolean(diagnostics.auth_needs_attention);
   const canManage = Boolean(isAdmin && runtimeSettings?.can_manage !== false);
+  const providerChoices = [
+    ['local', 'Local CTOX'],
+    ['openai', 'OpenAI'],
+    ['anthropic', 'Anthropic'],
+    ['antigravity', 'Google'],
+    ['kimi', 'Kimi'],
+    ['minimax', 'MiniMax'],
+    ['openrouter', 'OpenRouter'],
+    ['ctox_proxy', 'CTOX LLM Proxy'],
+  ];
   return `
     <section class="settings-section runtime-editor">
       <header>
-        <div><span class="settings-eyebrow">CTOX Harness</span><h3>Inference</h3></div>
+        <div><h3>Anbieter, Zugang und Modell</h3></div>
         <span>${escapeHtml(runtimeLoading ? 'Status wird geladen…' : diagnostics.service_message || 'Status unbekannt')}</span>
       </header>
       <div class="runtime-healthline ${serviceNeedsAttention || authNeedsAttention ? 'is-danger' : 'is-ok'}">
@@ -1233,38 +1313,37 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
         <em>${escapeHtml(runtimeAuthSummary(provider, authMode, auth))}</em>
       </div>
       <div class="runtime-flow">
-        <label class="runtime-field"><span>1 · Provider</span><select data-runtime-provider ${canManage ? '' : 'disabled'}>
-          ${providerLoaded ? '' : option('', 'Nicht geladen', provider)}
-          ${option('local', 'Local CTOX', provider)}
-          ${option('openai', 'OpenAI', provider)}
-          ${option('anthropic', 'Anthropic', provider)}
-          ${option('antigravity', 'Google', provider)}
-          ${option('kimi', 'Kimi', provider)}
-          ${option('minimax', 'MiniMax', provider)}
-          ${option('openrouter', 'OpenRouter', provider)}
-          ${option('ctox_proxy', 'CTOX LLM Proxy', provider)}
-        </select></label>
+        <div class="runtime-choice-section">
+          <span class="runtime-section-label">Provider</span>
+          <input type="hidden" data-runtime-provider value="${escapeAttr(provider)}" />
+          <div class="runtime-choice-row runtime-provider-choices">
+            ${providerChoices.map(([value, label]) => runtimeChoiceButton(
+              'data-runtime-provider', value, label, provider === value, canManage, providerLogoHtml(value),
+            )).join('')}
+          </div>
+        </div>
         ${!isLocalProvider ? `
-          <label class="runtime-field"><span>2 · Zugang</span><select data-runtime-auth-mode ${canManage ? '' : 'disabled'}>
-            ${runtimeAccessModes(provider).map(([value, label]) => option(value, label, authMode)).join('')}
-          </select></label>
+          <div class="runtime-choice-section">
+            <span class="runtime-section-label">Zugang</span>
+            <input type="hidden" data-runtime-auth-mode value="${escapeAttr(authMode)}" />
+            <div class="runtime-choice-row">
+              ${runtimeAccessModes(provider).map(([value, label]) => runtimeChoiceButton(
+                'data-runtime-auth-mode', value, label, authMode === value, canManage,
+              )).join('')}
+            </div>
+          </div>
         ` : ''}
         ${usesApiKey ? `<label class="runtime-field runtime-access-detail"><span>API Key</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'Gespeichert · leer lassen, um ihn zu behalten' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
         ${usesSubscription ? subscriptionStatus(provider, runtimeSettings?.provider_subscriptions, auth, canManage, subscriptionAuth) : ''}
-        <div class="runtime-divider" aria-hidden="true"></div>
-        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtime.available_models, '3 · Modell')}
+        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtime.available_models, 'Modell')}
+        ${runtimeReasoningControl(provider, runtime.chat_model, runtime.reasoning_effort, canManage)}
         <details class="runtime-advanced">
-          <summary>Modell-Einstellungen</summary>
+          <summary>Weitere Einstellungen</summary>
           <div class="runtime-advanced-grid">
-            <label><span>Preset</span><select data-runtime-preset ${canManage ? '' : 'disabled'}>
-              ${option('Quality', 'Quality', runtimePresetValue(runtime.preset))}
-              ${option('Performance', 'Performance', runtimePresetValue(runtime.preset))}
-            </select></label>
-            <label><span>Context</span><select data-runtime-context ${canManage ? '' : 'disabled'}>
-              ${option('256k', '256k', runtimeContextValue(runtime.context))}
-            </select></label>
             <label><span>Maximale Laufzeit</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
           </div>
+          <input type="hidden" data-runtime-preset value="${escapeAttr(runtimePresetValue(runtime.preset))}" />
+          <input type="hidden" data-runtime-context value="${escapeAttr(runtimeContextValue(runtime.context))}" />
         </details>
       </div>
       ${canManage ? `
@@ -1273,13 +1352,6 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
           <button class="text-button" type="button" data-runtime-refresh>Neu laden</button>
         </div>
       ` : ''}
-    </section>
-    <section class="settings-section">
-      <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
-      <div class="settings-grid is-one">
-        <label><span>Verantwortlichen-Prüfung</span><select data-policy-review ${isAdmin ? '' : 'disabled'}><option value="strict-founder-review">Externe Nachrichten immer prüfen</option><option value="internal-autonomy">Interne Tasks autonom</option></select></label>
-      </div>
-      ${isAdmin ? `<button class="text-button settings-primary" type="button" data-settings-command="policy">Policy prüfen lassen</button>` : ''}
     </section>
   `;
 }
@@ -2439,9 +2511,50 @@ function runtimeModelControl(provider, model, canManage, availableModels = [], l
     return `<label class="runtime-field"><span>${escapeHtml(label)}</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Lokales Modell" ${canManage ? '' : 'disabled'} /></label>`;
   }
   const options = runtimeModelOptions(provider, value, availableModels);
-  return `<label class="runtime-field"><span>${escapeHtml(label)}</span><select data-runtime-model ${canManage ? '' : 'disabled'}>
-    ${options.map(([optionValue, label]) => option(optionValue, label, value)).join('')}
-  </select></label>`;
+  return `<div class="runtime-choice-section">
+    <span class="runtime-section-label">${escapeHtml(label)}</span>
+    <input type="hidden" data-runtime-model value="${escapeAttr(value)}" />
+    <div class="runtime-choice-row">
+      ${options.filter(([optionValue]) => optionValue).map(([optionValue, optionLabel]) => runtimeChoiceButton(
+        'data-runtime-model', optionValue, optionLabel, optionValue.toLowerCase() === value.toLowerCase(), canManage,
+      )).join('')}
+    </div>
+    <details class="runtime-manual-model">
+      <summary aria-label="Modell-ID manuell bearbeiten">Modell-ID manuell</summary>
+      <input data-runtime-model-manual value="${escapeAttr(value)}" placeholder="Modell-ID" ${canManage ? '' : 'disabled'} />
+    </details>
+  </div>`;
+}
+
+function runtimeChoiceButton(target, value, label, selected, canManage, leading = '') {
+  return `<button class="runtime-choice ${selected ? 'is-selected' : ''}" type="button" data-runtime-choice="${escapeAttr(target)}" data-value="${escapeAttr(value)}" ${canManage ? '' : 'disabled'} aria-pressed="${selected ? 'true' : 'false'}">${leading}${escapeHtml(label)}</button>`;
+}
+
+function runtimeReasoningOptions(provider, model) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  const normalizedModel = String(model || '').trim().toLowerCase();
+  if (normalizedProvider === 'local') return [];
+  if (normalizedModel.includes('5.6-luna')) return ['low', 'medium', 'high', 'xhigh', 'max'];
+  if (normalizedModel.includes('5.6-sol') || normalizedModel.includes('5.6-terra')) {
+    return ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  }
+  return ['low', 'medium', 'high', 'xhigh'];
+}
+
+function runtimeReasoningControl(provider, model, current, canManage) {
+  const value = String(current || '').trim().toLowerCase();
+  const options = runtimeReasoningOptions(provider, model);
+  if (!options.length) return '<input type="hidden" data-runtime-reasoning value="" />';
+  return `<div class="runtime-choice-section">
+    <span class="runtime-section-label">Reasoning</span>
+    <input type="hidden" data-runtime-reasoning value="${escapeAttr(value)}" />
+    <div class="runtime-choice-row">
+      ${runtimeChoiceButton('data-runtime-reasoning', '', 'Automatisch', !value, canManage)}
+      ${options.map((effort) => runtimeChoiceButton(
+        'data-runtime-reasoning', effort, effort, effort === value, canManage,
+      )).join('')}
+    </div>
+  </div>`;
 }
 
 function runtimeModelOptions(provider, current, availableModels = []) {
@@ -2499,7 +2612,10 @@ function runtimeDiagnosticMessage(provider, authMode, auth, diagnostics) {
 function subscriptionStatus(provider, projection, auth, canManage, subscriptionAuth = null) {
   const subscriptionProvider = runtimeSubscriptionProvider(provider);
   const profile = providerSubscriptionProfile(subscriptionProvider);
-  const configured = Boolean(auth.subscription_session_configured);
+  const configured = Boolean(
+    auth.subscription_session_configured
+    || subscriptionProviderConnected(projection, subscriptionProvider),
+  );
   const userCode = String(subscriptionAuth?.userCode || '').trim();
   const verificationUrl = String(subscriptionAuth?.verificationUrl || '').trim();
   const failed = subscriptionAuth?.status === 'failed';
@@ -2519,7 +2635,7 @@ function subscriptionStatus(provider, projection, auth, canManage, subscriptionA
       ${userCode ? `
         <div class="subscription-device-code">
           <span>Geräte-Code</span>
-          <strong>${escapeHtml(formatDeviceCode(userCode))}</strong>
+          <div class="subscription-device-code-value"><strong>${escapeHtml(formatDeviceCode(userCode))}</strong><button class="text-button subscription-copy-button" type="button" data-runtime-copy-code="${escapeAttr(userCode)}" aria-label="Geräte-Code kopieren">Kopieren</button></div>
           <em>${escapeHtml(subscriptionAuth?.message || 'Im OpenAI-Fenster eingeben.')}</em>
           ${verificationUrl ? `<a class="text-button" href="${escapeAttr(verificationUrl)}" target="_blank" rel="noopener noreferrer">OpenAI öffnen</a>` : ''}
         </div>
@@ -2856,6 +2972,7 @@ function runtimePayloadFromForm(root) {
     provider,
     auth_mode: authMode,
     chat_model: root.querySelector('[data-runtime-model]')?.value || '',
+    reasoning_effort: root.querySelector('[data-runtime-reasoning]')?.value || '',
     preset: runtimePresetValue(root.querySelector('[data-runtime-preset]')?.value),
     context: runtimeContextValue(root.querySelector('[data-runtime-context]')?.value),
     max_run_secs: Number(root.querySelector('[data-runtime-timeout]')?.value || 1800),
@@ -2866,6 +2983,8 @@ function runtimePayloadFromForm(root) {
 function runtimeSettingsWithDraft(current, draft) {
   const provider = draft.provider || current?.runtime?.provider || '';
   const authMode = normalizedRuntimeAuthMode(provider, draft.auth_mode);
+  const supportedReasoning = runtimeReasoningOptions(provider, draft.chat_model);
+  const reasoningEffort = String(draft.reasoning_effort || '').trim().toLowerCase();
   const providerChanged = String(provider).toLowerCase()
     !== String(current?.runtime?.provider || '').toLowerCase();
   return {
@@ -2875,6 +2994,7 @@ function runtimeSettingsWithDraft(current, draft) {
       provider,
       source: provider === 'local' ? 'local' : 'api',
       chat_model: draft.chat_model,
+      reasoning_effort: supportedReasoning.includes(reasoningEffort) ? reasoningEffort : '',
       preset: runtimePresetValue(draft.preset),
       context: runtimeContextValue(draft.context),
       max_run_secs: draft.max_run_secs,
@@ -2919,6 +3039,7 @@ function runtimeSettingsPreservingPendingSubscription(loaded, current, subscript
     provider,
     auth_mode: 'subscription',
     chat_model: String(currentRuntime.chat_model || ''),
+    reasoning_effort: String(currentRuntime.reasoning_effort || ''),
     preset: currentRuntime.preset,
     context: currentRuntime.context,
     max_run_secs: Number(currentRuntime.max_run_secs || 1800),
@@ -3591,6 +3712,46 @@ async function startSubscriptionAuthControlPlane(provider, accountId, options = 
   return payload || { ok: true };
 }
 
+async function loadSubscriptionAuthStatusControlPlane(options = {}) {
+  const fetchImpl = options.fetchImpl || fetch;
+  const response = await fetchImpl('/api/business-os/ctox/subscription-auth/status', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  const text = await response.text();
+  let payload = null;
+  try { payload = text ? JSON.parse(text) : null; } catch {}
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.message || payload?.error || text || `HTTP ${response.status}`);
+  }
+  return payload || { ok: true };
+}
+
+function subscriptionProviderConnected(projection, provider) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  if (!normalizedProvider) return false;
+  const normalized = normalizeProviderSubscriptions(projection || {});
+  return normalized.accounts.some((account) => account.provider === normalizedProvider
+    && account.enabled
+    && ['ready', 'connected', 'active'].includes(account.status));
+}
+
+async function waitForSubscriptionConnection(provider, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 600000);
+  const pollMs = Number(options.pollMs || 1500);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const payload = await loadSubscriptionAuthStatusControlPlane(options);
+    const projection = payload?.provider_subscriptions || {};
+    options.onProjection?.(projection);
+    if (subscriptionProviderConnected(projection, provider)) return projection;
+    await delay(pollMs);
+  }
+  throw new Error('Zeitüberschreitung beim Provider-Login. Der Geräte-Code bleibt sichtbar.');
+}
+
 async function runProviderSubscriptionCommand(action, provider, accountId, {
   commandBus, db, session, sync,
 } = {}) {
@@ -3634,6 +3795,7 @@ function runtimeSettingsReflectPayload(settings, payload, previousUpdatedAtMs = 
   if (String(runtime.provider || '').toLowerCase() !== provider) return false;
   if (String(auth.mode || '').toLowerCase() !== authMode) return false;
   if (payload.chat_model && String(runtime.chat_model || '') !== String(payload.chat_model)) return false;
+  if (String(runtime.reasoning_effort || '') !== String(payload.reasoning_effort || '')) return false;
   if (payload.preset && runtimePresetValue(runtime.preset) !== runtimePresetValue(payload.preset)) {
     return false;
   }
@@ -5311,9 +5473,13 @@ export const __reactSettingsTestHooks = {
   providerCredentialRequirement,
   providerSubscriptionCommandRequest,
   startSubscriptionAuthControlPlane,
+  loadSubscriptionAuthStatusControlPlane,
+  subscriptionProviderConnected,
+  waitForSubscriptionConnection,
   providerLogoHtml,
   providerLogoSpec,
   runtimeModelOptions,
+  runtimeReasoningOptions,
   runtimeSettingsPreservingPendingSubscription,
   nextSubscriptionAuthWindowName,
   normalizeWorkjetPairingInvite,

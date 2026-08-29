@@ -831,6 +831,8 @@ pub struct RuntimeSettingsRequest {
     #[serde(default)]
     pub chat_model: String,
     #[serde(default)]
+    pub reasoning_effort: String,
+    #[serde(default)]
     pub preset: String,
     #[serde(default)]
     pub context: String,

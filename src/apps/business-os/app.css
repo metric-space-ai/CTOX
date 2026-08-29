@@ -3568,6 +3568,17 @@ body[data-auth-state="locked"] .topbar {
   line-height: 1.15;
 }
 
+.subscription-device-code-value {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.subscription-copy-button {
+  flex: 0 0 auto;
+}
+
 .subscription-device-code em {
   color: var(--muted);
   font-size: var(--fs-sm);
@@ -3672,7 +3683,89 @@ body[data-auth-state="locked"] .topbar {
 .runtime-flow {
   display: grid;
   gap: var(--space-3);
-  max-width: 720px;
+  max-width: 860px;
+}
+
+.runtime-choice-section {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.runtime-section-label {
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  font-weight: 800;
+}
+
+.runtime-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runtime-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.runtime-choice:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--text);
+}
+
+.runtime-choice.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 82%, var(--line));
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  color: var(--text);
+}
+
+.runtime-choice:disabled {
+  cursor: default;
+  opacity: .66;
+}
+
+.runtime-choice .provider-brand-mark {
+  width: 20px;
+  height: 20px;
+}
+
+.runtime-choice .provider-brand-mark img {
+  inset: 3px;
+  width: 14px;
+  height: 14px;
+}
+
+.runtime-manual-model {
+  width: fit-content;
+}
+
+.runtime-manual-model summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.runtime-manual-model input {
+  width: min(420px, 80vw);
+  min-height: 38px;
+  margin-top: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 var(--space-2);
 }
 
 .runtime-field,
@@ -3750,7 +3843,7 @@ body[data-auth-state="locked"] .topbar {
 
 .runtime-advanced-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(180px, 260px);
   gap: var(--space-2);
   padding-top: var(--space-3);
 }

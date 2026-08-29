@@ -32,12 +32,15 @@ test('CTOX proxy model options follow the discovered proxy catalog', () => {
   );
 });
 
-test('runtime settings render one provider-access-model flow without a provider card wall', () => {
+test('runtime settings follow the Workjet provider-access-model-reasoning flow', () => {
   const html = baseTemplate({
     tab: 'runtime',
     runtimeSettings: {
       can_manage: true,
-      runtime: { provider: 'kimi', chat_model: 'kimi-k3[1m]', available_models: ['kimi-k3[1m]'] },
+      runtime: {
+        provider: 'kimi', chat_model: 'kimi-k3[1m]', reasoning_effort: 'high',
+        available_models: ['kimi-k3[1m]'],
+      },
       auth: { mode: 'subscription', configured: true, subscription_session_configured: true },
       diagnostics: {},
       provider_subscriptions: {
@@ -66,10 +69,13 @@ test('runtime settings render one provider-access-model flow without a provider 
     },
   });
   assert.doesNotMatch(html, /Provider Subscriptions/);
-  assert.match(html, /1 · Provider/);
-  assert.match(html, /2 · Zugang/);
-  assert.match(html, /3 · Modell/);
-  assert.match(html, /Modell-Einstellungen/);
+  assert.match(html, /Anbieter, Zugang und Modell/);
+  assert.match(html, /data-runtime-choice="data-runtime-provider"/);
+  assert.match(html, /data-runtime-choice="data-runtime-auth-mode"/);
+  assert.match(html, /data-runtime-choice="data-runtime-model"/);
+  assert.match(html, /data-runtime-choice="data-runtime-reasoning"/);
+  assert.match(html, /data-value="high"[^>]*aria-pressed="true"/);
+  assert.doesNotMatch(html, /Queue Policy|Preset|Context/);
   assert.match(html, /data-runtime-authorize-subscription="kimi"/);
   assert.match(html, /kimi-k3\[1m\]/);
   assert.doesNotMatch(html, /Neue Account-ID|von dieser CTOX Instanz noch nicht angeboten/);
@@ -256,6 +262,39 @@ test('pending OpenAI device login renders code and provider link in the runtime 
   assert.match(html, /ABCD-EFGHI/);
   assert.match(html, /href="https:\/\/auth\.openai\.com\/codex\/device"/);
   assert.match(html, />OpenAI öffnen<\/a>/);
+  assert.match(html, /data-runtime-copy-code="ABCD-EFGHI"/);
+  assert.match(html, /Geräte-Code kopieren/);
+});
+
+test('subscription status endpoint is same-origin and its ready account is authoritative', async () => {
+  const calls = [];
+  const payload = await hooks.loadSubscriptionAuthStatusControlPlane({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          provider_subscriptions: {
+            schema: 'ctox.provider-subscriptions.v1',
+            providers: [{ id: 'codex', label: 'ChatGPT / Codex' }],
+            accounts: [{ id: 'codex-primary', provider: 'codex', enabled: true, status: 'ready' }],
+          },
+        }),
+      };
+    },
+  });
+  assert.equal(calls[0].url, '/api/business-os/ctox/subscription-auth/status');
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  assert.equal(hooks.subscriptionProviderConnected(payload.provider_subscriptions, 'codex'), true);
+  assert.equal(hooks.subscriptionProviderConnected(payload.provider_subscriptions, 'claude'), false);
+});
+
+test('reasoning choices track the selected model capability', () => {
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.5'), ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-luna'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-sol'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 });
 
 test('subscription auth always opens a fresh same-origin code window', () => {

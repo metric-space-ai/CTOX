@@ -514,6 +514,19 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 respond_json_value(request, payload)?;
             }
         }
+        (Method::Get, "/api/business-os/ctox/subscription-auth/status") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                respond_json_value_no_store(
+                    request,
+                    store::provider_subscription_status_for_control_plane(root),
+                )?;
+            }
+        }
         (Method::Get, "/api/business-os/ctox/subscription-auth/callback") => {
             let url_raw = request.url().to_owned();
             handle_subscription_auth_callback(request, root, &url_raw)?;
@@ -1200,6 +1213,7 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
         // index.html. It carries no Business OS collection records.
         "/api/business-os/launch-context"
             | "/api/business-os/ctox/subscription-auth/start"
+            | "/api/business-os/ctox/subscription-auth/status"
             | "/api/business-os/ctox/subscription-auth/callback"
             // Admin-triggered release control-plane: release metadata check
             // and update subprocess launch. No Business OS records flow here.

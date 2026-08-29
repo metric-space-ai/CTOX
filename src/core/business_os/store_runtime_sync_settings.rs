@@ -299,6 +299,9 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
                 .or_else(|| runtime_state.as_ref().and_then(|state| state.requested_model.clone()))
                 .or_else(|| runtime_state.as_ref().and_then(|state| state.active_model.clone()))
                 .unwrap_or_default(),
+            "reasoning_effort": env_map.get("CTOX_CHAT_REASONING_EFFORT")
+                .cloned()
+                .unwrap_or_default(),
             "preset": preset,
             "context": context,
             "max_run_secs": env_map.get("CTOX_CHAT_TURN_TIMEOUT_SECS")

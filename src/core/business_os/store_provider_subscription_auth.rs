@@ -304,6 +304,13 @@ fn provider_subscription_status_projection(root: &Path) -> Value {
     projection
 }
 
+pub fn provider_subscription_status_for_control_plane(root: &Path) -> Value {
+    serde_json::json!({
+        "ok": true,
+        "provider_subscriptions": provider_subscription_status_projection(root),
+    })
+}
+
 const KIMI_CODING_ACCOUNT_ID: &str = "kimi-coding-primary";
 const MINIMAX_CODING_ACCOUNT_ID: &str = "minimax-coding-primary";
 
@@ -538,6 +545,7 @@ fn save_runtime_settings(root: &Path, request: RuntimeSettingsRequest) -> anyhow
     let mut env_map = crate::inference::runtime_env::effective_operator_env_map(root)
         .unwrap_or_else(|_| BTreeMap::new());
     let chat_model = request.chat_model.trim();
+    let reasoning_effort = request.reasoning_effort.trim().to_ascii_lowercase();
     let preset = request.preset.trim();
     let requested_context = request.context.trim();
     let context = runtime_settings_context(
@@ -569,6 +577,17 @@ fn save_runtime_settings(root: &Path, request: RuntimeSettingsRequest) -> anyhow
     if !chat_model.is_empty() {
         env_map.insert("CTOX_CHAT_MODEL".to_owned(), chat_model.to_owned());
         env_map.insert("CTOX_CHAT_MODEL_BASE".to_owned(), chat_model.to_owned());
+    } else {
+        env_map.remove("CTOX_CHAT_MODEL");
+        env_map.remove("CTOX_CHAT_MODEL_BASE");
+    }
+    if matches!(
+        reasoning_effort.as_str(),
+        "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    ) {
+        env_map.insert("CTOX_CHAT_REASONING_EFFORT".to_owned(), reasoning_effort);
+    } else {
+        env_map.remove("CTOX_CHAT_REASONING_EFFORT");
     }
     if let Some(preset) = normalize_runtime_preset(preset) {
         env_map.insert("CTOX_CHAT_LOCAL_PRESET".to_owned(), preset.to_owned());
@@ -1542,6 +1561,7 @@ mod runtime_subscription_settings_tests {
                 provider: "anthropic".to_owned(),
                 auth_mode: "subscription".to_owned(),
                 chat_model: "claude-opus-4-6".to_owned(),
+                reasoning_effort: "high".to_owned(),
                 preset: "Quality".to_owned(),
                 context: "256k".to_owned(),
                 max_run_secs: Some(1800),
@@ -1565,6 +1585,12 @@ mod runtime_subscription_settings_tests {
             Some("http://127.0.0.1:12435/v1")
         );
         assert!(!settings.contains_key("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            settings
+                .get("CTOX_CHAT_REASONING_EFFORT")
+                .map(String::as_str),
+            Some("high")
+        );
         Ok(())
     }
 }
