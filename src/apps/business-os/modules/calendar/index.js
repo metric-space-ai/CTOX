@@ -889,19 +889,16 @@ function calendarRowHtml(cal) {
 }
 
 function bookingPageRowHtml(bp) {
-  const safeSlug = normalizeSlug(bp.slug) || String(bp.slug || '').replace(/[^a-zA-Z0-9-_]/g, '');
-  const publicUrl = `${window.location.origin}/book/${encodeURIComponent(safeSlug)}`;
   const isActive = bp.status === 'active';
   return `
     <div class="ctox-list-item booking-page-item" data-action="select-bp" data-id="${escapeHtml(bp.id)}" data-context-record-id="${escapeHtml(bp.id)}" data-context-record-type="calendar_booking_page" data-context-label="${escapeHtml(bp.title || bp.id)}" role="button" tabindex="0" aria-pressed="false">
       <div class="booking-page-item-left">
         <div class="booking-page-item-title">
           <span>${escapeHtml(bp.title)}</span>
-          <small>${Number(bp.duration_minutes) || 0} Min · /book/${escapeHtml(safeSlug)} · ${isActive ? 'Aktiv' : 'Inaktiv'}</small>
+          <small>${Number(bp.duration_minutes) || 0} Min · ${isActive ? 'Intern aktiv' : 'Intern inaktiv'} · Nicht veröffentlicht</small>
         </div>
       </div>
       <div class="booking-page-item-actions">
-        <a class="ctox-icon-button ctox-icon-button--sm" href="${publicUrl}" target="_blank" rel="noreferrer" title="Öffnen" aria-label="${escapeHtml(bp.title || 'Buchungsseite')} öffnen">${actionIcon('open')}</a>
         <button type="button" class="ctox-icon-button ctox-icon-button--sm" data-action="edit-bp" data-id="${escapeHtml(bp.id)}" title="Bearbeiten" aria-label="${escapeHtml(bp.title || 'Buchungsseite')} bearbeiten">${actionIcon('edit')}</button>
       </div>
     </div>
@@ -998,13 +995,12 @@ function renderContextPane() {
   if (els.contextDetail) els.contextDetail.hidden = false;
   if (els.contextTitle) els.contextTitle.textContent = selectedPage.title || state.t('bookingContextTitle', 'Kontext');
 
-  const safeSlug = normalizeSlug(selectedPage.slug) || String(selectedPage.slug || '').replace(/[^a-zA-Z0-9-_]/g, '');
   if (els.bookingContext) {
     els.bookingContext.innerHTML = `
       <div class="ctox-callout calendar-context-card" data-context-record-id="${escapeHtml(selectedPage.id)}" data-context-record-type="calendar_booking_page" data-context-label="${escapeHtml(selectedPage.title || selectedPage.id)}">
         <span class="ctox-field-label">Ausgewählte Buchungsseite</span>
         <strong>${escapeHtml(selectedPage.title)}</strong>
-        <span>${Number(selectedPage.duration_minutes) || 0} Min · /book/${escapeHtml(safeSlug)}</span>
+        <span>${Number(selectedPage.duration_minutes) || 0} Min · Nicht veröffentlicht</span>
       </div>
     `;
   }
@@ -1547,14 +1543,14 @@ function openBookingPageForm(bpId = null) {
     <form id="drawerBookingPageForm">
       <div class="calendar-drawer-form-inner">
         <div class="calendar-form-group">
-          <label class="ctox-field-label">Titel des Buchungs-Links</label>
+          <label class="ctox-field-label">Titel der Buchungsseite</label>
           <input type="text" class="ctox-input" name="title" value="${escapeHtml(dbBp?.title || '')}" required placeholder="z. B. 30 Min. Erstgespräch" aria-describedby="booking-title-error" />
           <div class="calendar-field-error" id="booking-title-error" data-error-for="title"></div>
         </div>
 
         <div class="calendar-form-row">
           <div class="calendar-form-group">
-            <label class="ctox-field-label">Link-Kürzel (Slug)</label>
+            <label class="ctox-field-label">Interne Kennung (Slug)</label>
             <input type="text" class="ctox-input" name="slug" value="${escapeHtml(dbBp?.slug || '')}" required placeholder="z. B. erstgespraech" aria-describedby="booking-slug-error" />
             <div class="calendar-field-error" id="booking-slug-error" data-error-for="slug"></div>
           </div>

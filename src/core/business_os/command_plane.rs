@@ -262,7 +262,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 67] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 60] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -318,17 +318,10 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 67] = [
     "ctox.subscription_auth.start",
     "ctox.task.delete",
     "ctox.task.update",
-    "ctox.workjet.computer.assign",
-    "ctox.workjet.computer.list",
-    "ctox.workjet.computer.unassign",
     "ctox.workjet.project.list",
     "ctox.workjet.project.upsert",
     "ctox.workjet.working_copy.upsert",
     "knowledge.command",
-    "kundenpipeline.decision.answer",
-    "kundenpipeline.delegate",
-    "kundenpipeline.mail.send",
-    "kundenpipeline.triage.write",
     "web_stack.person_research",
 ];
 
@@ -801,19 +794,13 @@ impl CentralCommandPolicyRequirement {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::IntegrationsManage,
             ))
-        } else if matches!(
-            command_type,
-            "ctox.workjet.computer.list" | "ctox.workjet.project.list"
-        ) {
+        } else if command_type == "ctox.workjet.project.list" {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::DataRead,
             ))
         } else if matches!(
             command_type,
-            "ctox.workjet.computer.assign"
-                | "ctox.workjet.computer.unassign"
-                | "ctox.workjet.project.upsert"
-                | "ctox.workjet.working_copy.upsert"
+            "ctox.workjet.project.upsert" | "ctox.workjet.working_copy.upsert"
         ) {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::DataWrite,
@@ -1055,28 +1042,6 @@ fn dispatch_business_command(
         | "ctox.business_os.support.export_diagnostics"
         | "ctox.business_os.why" => {
             handle_business_os_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
-        }
-        "ctox.workjet.computer.list"
-        | "ctox.workjet.computer.assign"
-        | "ctox.workjet.computer.unassign" => {
-            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
-            let owner_user_id = session_user_id(session)
-                .context("authorized Workjet computer command is missing a user identity")?;
-            match super::store_workjet_computers::handle_workjet_computer_store_command(
-                root,
-                command,
-                owner_user_id,
-            ) {
-                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
-                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
-                    None,
-                    serde_json::json!({
-                        "ok": false,
-                        "error": error.to_string(),
-                    }),
-                    error,
-                )),
-            }
         }
         "ctox.workjet.project.list"
         | "ctox.workjet.project.upsert"
@@ -1369,6 +1334,8 @@ fn dispatch_business_command(
             handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         "kundenpipeline.triage.write"
+        | "kundenpipeline.decision.request"
+        | "kundenpipeline.decision.resolve"
         | "kundenpipeline.decision.answer"
         | "kundenpipeline.mail.send"
         | "kundenpipeline.delegate" => {

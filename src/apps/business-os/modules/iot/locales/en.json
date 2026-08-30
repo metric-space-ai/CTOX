@@ -36,7 +36,7 @@
   "asset.formUnder": "Asset under “{0}”",
   "asset.formNew": "New asset",
   "field.name": "Name",
-  "asset.namePlaceholder": "e.g. Server room",
+  "asset.namePlaceholder": "e.g. Server location",
   "field.type": "Type",
   "btn.cancel": "Cancel",
   "btn.create": "Create",

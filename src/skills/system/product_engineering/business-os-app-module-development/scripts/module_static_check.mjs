@@ -779,19 +779,195 @@ function lineNumberForIndex(text, index) {
   return String(text || '').slice(0, Math.max(0, index)).split(/\r?\n/).length;
 }
 
+function skipJsQuotedValue(text, start) {
+  const quote = text[start];
+  let index = start + 1;
+  while (index < text.length) {
+    if (text[index] === '\\') {
+      index += 2;
+      continue;
+    }
+    if (text[index] === quote) return index + 1;
+    index += 1;
+  }
+  return index;
+}
+
+function skipJsTemplateValue(text, start) {
+  let index = start + 1;
+  while (index < text.length) {
+    if (text[index] === '\\') {
+      index += 2;
+      continue;
+    }
+    if (text[index] === '`') return index + 1;
+    index += 1;
+  }
+  return index;
+}
+
+const REGEX_PREFIX_KEYWORDS = new Set([
+  'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'of',
+  'return', 'throw', 'typeof', 'void', 'yield',
+]);
+const REGEX_PREFIX_PUNCTUATORS = new Set([
+  '!', '%', '&', '&&', '(', '*', '+', ',', '-', '.', '/', ':', ';', '<',
+  '<=', '=', '==', '===', '>', '>=', '?', '??', '||', '[', '{', '|', '^',
+  '~',
+]);
+const JS_THREE_CHAR_PUNCTUATORS = new Set(['===', '!==', '>>>', '**=']);
+const JS_TWO_CHAR_PUNCTUATORS = new Set([
+  '!=', '&&', '||', '??', '=>', '==', '>=', '<=', '++', '--', '?.',
+  '+=', '-=', '*=', '/=', '%=', '**', '<<', '>>',
+]);
+
+function regexCanStartAfter(token) {
+  if (!token) return true;
+  if (token.type === 'identifier') {
+    return REGEX_PREFIX_KEYWORDS.has(token.value);
+  }
+  return REGEX_PREFIX_PUNCTUATORS.has(token.value);
+}
+
+function skipJsRegexLiteral(text, start) {
+  let index = start + 1;
+  let inCharacterClass = false;
+  while (index < text.length) {
+    if (text[index] === '\\') {
+      index += 2;
+      continue;
+    }
+    if (text[index] === '[') inCharacterClass = true;
+    else if (text[index] === ']') inCharacterClass = false;
+    else if (text[index] === '/' && !inCharacterClass) {
+      index += 1;
+      while (/[A-Za-z]/.test(text[index] || '')) index += 1;
+      return index;
+    }
+    if (text[index] === '\n') return index;
+    index += 1;
+  }
+  return index;
+}
+
+function javascriptLexicalTokens(text) {
+  const source = String(text || '');
+  const tokens = [];
+  let index = 0;
+  let previous = null;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      const newline = source.indexOf('\n', index + 2);
+      index = newline === -1 ? source.length : newline + 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const close = source.indexOf('*/', index + 2);
+      index = close === -1 ? source.length : close + 2;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      index = skipJsQuotedValue(source, index);
+      previous = { type: 'string', value: 'string' };
+      continue;
+    }
+    if (char === '`') {
+      index = skipJsTemplateValue(source, index);
+      previous = { type: 'string', value: 'template' };
+      continue;
+    }
+    if (char === '/' && regexCanStartAfter(previous)) {
+      index = skipJsRegexLiteral(source, index);
+      previous = { type: 'regex', value: 'regex' };
+      continue;
+    }
+    const identifier = /^[A-Za-z_$][\w$]*/.exec(source.slice(index));
+    if (identifier) {
+      const token = { type: 'identifier', value: identifier[0], start: index };
+      tokens.push(token);
+      previous = token;
+      index += identifier[0].length;
+      continue;
+    }
+    const number = /^(?:\d+(?:\.\d*)?|\.\d+)/.exec(source.slice(index));
+    if (number) {
+      const token = { type: 'number', value: number[0], start: index };
+      tokens.push(token);
+      previous = token;
+      index += number[0].length;
+      continue;
+    }
+    const threeCharacterPunctuator = source.slice(index, index + 3);
+    const twoCharacterPunctuator = source.slice(index, index + 2);
+    const tokenValue = JS_THREE_CHAR_PUNCTUATORS.has(threeCharacterPunctuator)
+      ? threeCharacterPunctuator
+      : JS_TWO_CHAR_PUNCTUATORS.has(twoCharacterPunctuator)
+        ? twoCharacterPunctuator
+        : char;
+    const token = { type: 'punctuator', value: tokenValue, start: index };
+    tokens.push(token);
+    previous = token;
+    index += tokenValue.length;
+  }
+  return tokens;
+}
+
+function isFunctionDeclarationToken(tokens, index) {
+  const previous = tokens[index - 1];
+  if (!previous) return true;
+  if (previous.value === 'export' || previous.value === 'default') return true;
+  if (previous.value === 'async') {
+    const beforeAsync = tokens[index - 2];
+    return !beforeAsync || ['export', 'default', ';', '{', '}'].includes(beforeAsync.value);
+  }
+  return [';', '{', '}'].includes(previous.value);
+}
+
 function collectDuplicateFunctionDeclarationFailures(file, text) {
   const declarations = new Map();
-  const source = stripJsComments(text);
-  const pattern = /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g;
-  for (const match of source.matchAll(pattern)) {
-    const name = match[1];
-    if (!declarations.has(name)) declarations.set(name, []);
-    declarations.get(name).push(lineNumberForIndex(source, match.index || 0));
+  const tokens = javascriptLexicalTokens(text);
+  const scopeStack = ['module'];
+  let nextScopeId = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.value === '}') {
+      if (scopeStack.length > 1) scopeStack.pop();
+      continue;
+    }
+    if (token.value === 'function' && isFunctionDeclarationToken(tokens, index)) {
+      let nameIndex = index + 1;
+      if (tokens[nameIndex]?.value === '*') nameIndex += 1;
+      const nameToken = tokens[nameIndex];
+      const openParen = tokens[nameIndex + 1];
+      if (nameToken?.type === 'identifier' && openParen?.value === '(') {
+        const scope = scopeStack.at(-1);
+        if (!declarations.has(scope)) declarations.set(scope, new Map());
+        const byName = declarations.get(scope);
+        if (!byName.has(nameToken.value)) byName.set(nameToken.value, []);
+        byName.get(nameToken.value).push({
+          line: lineNumberForIndex(text, token.start),
+          name: nameToken.value,
+        });
+      }
+    }
+    if (token.value === '{') {
+      nextScopeId += 1;
+      scopeStack.push(`block-${nextScopeId}`);
+    }
   }
   const messages = [];
-  for (const [name, lines] of declarations.entries()) {
-    if (lines.length <= 1) continue;
-    messages.push(`${rel(file)} declares function ${name} more than once (lines ${lines.join(', ')}); duplicate function names shadow helpers and can break browser mount`);
+  for (const byName of declarations.values()) {
+    for (const [name, entries] of byName.entries()) {
+      if (entries.length <= 1) continue;
+      const lines = entries.map((entry) => entry.line);
+      messages.push(`${rel(file)} declares function ${name} more than once (lines ${lines.join(', ')}); duplicate function names shadow helpers and can break browser mount`);
+    }
   }
   return messages;
 }
@@ -901,6 +1077,7 @@ function collectLegacyDbFacadeFailures(file, text) {
 
 function indexJsHandlesDataAction(indexJs, action) {
   return jsContainsDataActionSelector(indexJs, action)
+    || jsHandlesDatasetDataAction(indexJs, action, indexHtml)
     || jsComparesAgainstLiteral(indexJs, action)
     || jsObjectKeyLiteralExists(indexJs, action);
 }
@@ -933,6 +1110,31 @@ function jsContainsDataActionSelector(source, action) {
   for (const literal of jsQuotedLiterals(source)) {
     if (!literal.value.includes('[data-') || !literal.value.includes('action')) continue;
     if (htmlDataActionValue(literal.value) === expected) return true;
+  }
+  return false;
+}
+
+function jsHandlesDatasetDataAction(source, action, html) {
+  const text = String(source || '');
+  const expected = String(action || '');
+  for (const literal of jsQuotedLiterals(text)) {
+    for (const match of literal.value.matchAll(/\[\s*(data-[A-Za-z0-9_-]*action)\s*[^\]]*\]/gi)) {
+      const attribute = match[1] || '';
+      const htmlActionPattern = new RegExp(
+        String.raw`\b${escapeRegExp(attribute)}\s*=\s*(['"])${escapeRegExp(expected)}\1`,
+        'i',
+      );
+      if (!htmlActionPattern.test(String(html || ''))) continue;
+      const datasetProperty = attribute
+        .slice('data-'.length)
+        .split('-')
+        .map((part, index) => index === 0 ? part : `${part[0]?.toUpperCase() || ''}${part.slice(1)}`)
+        .join('');
+      if (!datasetProperty) continue;
+      if (new RegExp(String.raw`\bdataset\s*\.\s*${escapeRegExp(datasetProperty)}\b`).test(text)) {
+        return true;
+      }
+    }
   }
   return false;
 }

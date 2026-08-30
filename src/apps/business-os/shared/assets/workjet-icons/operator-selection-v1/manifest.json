@@ -1,0 +1,348 @@
+{
+  "schema": "workjet.operator-icon-selection.v1",
+  "selectionSource": "operator-approved-desktop-preview",
+  "assetKind": "raster-reference",
+  "count": 34,
+  "icons": [
+    {
+      "appId": "ctox",
+      "candidateId": "candidate-02",
+      "sha256": "595492dd0ab23f3db59a0ebe9a6ec8062b1b2a80cbc54f566ee32b0501bcf0ce",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/ctox.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/ctox.jpg",
+      "renderSha256": "595492dd0ab23f3db59a0ebe9a6ec8062b1b2a80cbc54f566ee32b0501bcf0ce"
+    },
+    {
+      "appId": "tickets",
+      "candidateId": "candidate-02",
+      "sha256": "6d0cbd2138977725b6043fd582b1d2b65b7214c8c9153ad7977942c26ebc4675",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/tickets.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/tickets.jpg",
+      "renderSha256": "6d0cbd2138977725b6043fd582b1d2b65b7214c8c9153ad7977942c26ebc4675"
+    },
+    {
+      "appId": "threads",
+      "candidateId": "candidate-01",
+      "sha256": "b4cf784881d8c5463837688755795dffbd66b5082333bf1508357df3a10d28ed",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/threads.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/threads.jpg",
+      "renderSha256": "b4cf784881d8c5463837688755795dffbd66b5082333bf1508357df3a10d28ed"
+    },
+    {
+      "appId": "knowledge",
+      "candidateId": "candidate-01",
+      "sha256": "6aaaac3c849a444f1bc8af3e4f019eb4eded5ad64ac70ec85eee5c54cdb06e3b",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/knowledge.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "modules/knowledge/assets/icon/knowledge-256.png",
+      "renderSha256": "257526ec6c932c287be864be47e7e7708f32d136d587ab2d17da6cc62629c220"
+    },
+    {
+      "appId": "browser",
+      "candidateId": "candidate-01",
+      "sha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
+      "renderSha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11"
+    },
+    {
+      "appId": "credentials",
+      "candidateId": "candidate-01",
+      "sha256": "d796dc418c8f64faadc3f43e914a7bfb6ea6e6a4b54a7b6d643e6ff40b1f4e57",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/credentials.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/credentials.jpg",
+      "renderSha256": "d796dc418c8f64faadc3f43e914a7bfb6ea6e6a4b54a7b6d643e6ff40b1f4e57"
+    },
+    {
+      "appId": "mail",
+      "candidateId": "candidate-01",
+      "sha256": "dd943203a5729623a71df00b3c994f5a9085cf8d1373c6c7f440494409f3bcc4",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/mail.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/mail.jpg",
+      "renderSha256": "dd943203a5729623a71df00b3c994f5a9085cf8d1373c6c7f440494409f3bcc4"
+    },
+    {
+      "appId": "app-store",
+      "candidateId": "candidate-01",
+      "sha256": "b6e9bc5bfa8bb42b86748efc00e9b5e736c4a0b6809b6c763aa6e8e7164de108",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/app-store.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/app-store.jpg",
+      "renderSha256": "b6e9bc5bfa8bb42b86748efc00e9b5e736c4a0b6809b6c763aa6e8e7164de108"
+    },
+    {
+      "appId": "importer",
+      "candidateId": "candidate-01",
+      "sha256": "13c493fc01ebc97db2fd6d098281ffde490761deadfbfc9963db7b8ecda60e61",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/importer.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/importer.jpg",
+      "renderSha256": "13c493fc01ebc97db2fd6d098281ffde490761deadfbfc9963db7b8ecda60e61"
+    },
+    {
+      "appId": "reports",
+      "candidateId": "candidate-01",
+      "sha256": "f83ec81f7954a899490a63d02af84fc4d145f49184b7884b97a749a8bd373275",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/reports.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/reports.jpg",
+      "renderSha256": "f83ec81f7954a899490a63d02af84fc4d145f49184b7884b97a749a8bd373275"
+    },
+    {
+      "appId": "appsec-pentest",
+      "candidateId": "candidate-01",
+      "sha256": "85fd7ee28a9d4f8a047569cbc376b63e5f26d16584272ccd0785fae638fb1a53",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/appsec-pentest.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/appsec-pentest.jpg",
+      "renderSha256": "85fd7ee28a9d4f8a047569cbc376b63e5f26d16584272ccd0785fae638fb1a53"
+    },
+    {
+      "appId": "coding-agents",
+      "candidateId": "candidate-09",
+      "sha256": "1cf4cc4fd8e785f1b557be6dbbc3d0d8f02ab7462f9c16b17b163fc023c0bae3",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/coding-agents.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/coding-agents.jpg",
+      "renderSha256": "1cf4cc4fd8e785f1b557be6dbbc3d0d8f02ab7462f9c16b17b163fc023c0bae3"
+    },
+    {
+      "appId": "conversations",
+      "candidateId": "candidate-01",
+      "sha256": "1656adf1e387e7db50c4b7f6ea99998de43ecd6373fc1bedeb760e3cd109941b",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/conversations.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/conversations.jpg",
+      "renderSha256": "1656adf1e387e7db50c4b7f6ea99998de43ecd6373fc1bedeb760e3cd109941b"
+    },
+    {
+      "appId": "calendar",
+      "candidateId": "candidate-05",
+      "sha256": "c3de8ab4a29322bb08256ac953058904ac73d8d945df22f20df72ff988067f67",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/calendar.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/calendar.jpg",
+      "renderSha256": "c3de8ab4a29322bb08256ac953058904ac73d8d945df22f20df72ff988067f67"
+    },
+    {
+      "appId": "notes",
+      "candidateId": "candidate-06",
+      "sha256": "aa1aafef932cb21d16611927780be82d4a5d68c9b474b70308aaeda83be5cf8b",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/notes.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/notes.jpg",
+      "renderSha256": "aa1aafef932cb21d16611927780be82d4a5d68c9b474b70308aaeda83be5cf8b"
+    },
+    {
+      "appId": "support",
+      "candidateId": "candidate-02",
+      "sha256": "d5058006ec868a0ea19378ea477e16f8ddb51bb92c7817c1c39c390291e26235",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/support.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/support.jpg",
+      "renderSha256": "d5058006ec868a0ea19378ea477e16f8ddb51bb92c7817c1c39c390291e26235"
+    },
+    {
+      "appId": "customers",
+      "candidateId": "candidate-16",
+      "sha256": "3a03210ceaa9ce7850ebd0409bff33e09e20e0c1850d9f84805682c307c4a5f9",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/customers.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/customers.jpg",
+      "renderSha256": "3a03210ceaa9ce7850ebd0409bff33e09e20e0c1850d9f84805682c307c4a5f9"
+    },
+    {
+      "appId": "outbound",
+      "candidateId": "candidate-05",
+      "sha256": "a47a0a7e7e42acf918ae7e8a64304566b62ce94d31513a33894e163fda735c5a",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/outbound.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/outbound.jpg",
+      "renderSha256": "a47a0a7e7e42acf918ae7e8a64304566b62ce94d31513a33894e163fda735c5a"
+    },
+    {
+      "appId": "invoices",
+      "candidateId": "candidate-04",
+      "sha256": "1a0828f86f17d972434a30390e81f7d58fb8bff6e4fd4f9f5a7476088c36c52e",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/invoices.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/invoices.jpg",
+      "renderSha256": "1a0828f86f17d972434a30390e81f7d58fb8bff6e4fd4f9f5a7476088c36c52e"
+    },
+    {
+      "appId": "buchhaltung",
+      "candidateId": "candidate-14",
+      "sha256": "56b558dd0dbc5210bf6b0472ccef3df5602ce582b987ae04ee4c5f762d14eb0a",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/buchhaltung.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/buchhaltung.jpg",
+      "renderSha256": "56b558dd0dbc5210bf6b0472ccef3df5602ce582b987ae04ee4c5f762d14eb0a"
+    },
+    {
+      "appId": "consent",
+      "candidateId": "candidate-13",
+      "sha256": "a886247228318a5bf11d85a7e64ffd4f9e914454327718be8e1f451f9b032596",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/consent.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/consent.jpg",
+      "renderSha256": "a886247228318a5bf11d85a7e64ffd4f9e914454327718be8e1f451f9b032596"
+    },
+    {
+      "appId": "esign",
+      "candidateId": "candidate-04",
+      "sha256": "766c1175e036a870e4a28465ddc9e294bd0df22a9376e3acb8e125683026089f",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/esign.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/esign.jpg",
+      "renderSha256": "766c1175e036a870e4a28465ddc9e294bd0df22a9376e3acb8e125683026089f"
+    },
+    {
+      "appId": "intake",
+      "candidateId": "candidate-14",
+      "sha256": "0a6d81e7d9c14b8526ab8d19f8344164d054db52fdc9b3856108f12729e532e7",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/intake.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/intake.jpg",
+      "renderSha256": "0a6d81e7d9c14b8526ab8d19f8344164d054db52fdc9b3856108f12729e532e7"
+    },
+    {
+      "appId": "interviews",
+      "candidateId": "candidate-01",
+      "sha256": "642cda9e3cb5c56c9ac63b46d731696087f980b48423501f2d8428bf5554f9d7",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/interviews.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/interviews.jpg",
+      "renderSha256": "642cda9e3cb5c56c9ac63b46d731696087f980b48423501f2d8428bf5554f9d7"
+    },
+    {
+      "appId": "matching",
+      "candidateId": "candidate-02",
+      "sha256": "3ececa42f99f1d63104468b920b6fea37fcc398186cae1f3b409de1647e2c3b7",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/matching.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/matching.jpg",
+      "renderSha256": "3ececa42f99f1d63104468b920b6fea37fcc398186cae1f3b409de1647e2c3b7"
+    },
+    {
+      "appId": "nachweise",
+      "candidateId": "candidate-11",
+      "sha256": "cd43c8c297a229317fab2d9cd399e889e7377a6dcf16025bf52a1ce325f6d76a",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/nachweise.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/nachweise.jpg",
+      "renderSha256": "cd43c8c297a229317fab2d9cd399e889e7377a6dcf16025bf52a1ce325f6d76a"
+    },
+    {
+      "appId": "placements",
+      "candidateId": "candidate-13",
+      "sha256": "f5818b645ddd2f8c4ea3f54a90b34003c1fb3fa86228b2f44ac5c4c90703079c",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/placements.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/placements.jpg",
+      "renderSha256": "f5818b645ddd2f8c4ea3f54a90b34003c1fb3fa86228b2f44ac5c4c90703079c"
+    },
+    {
+      "appId": "shiftflow",
+      "candidateId": "candidate-14",
+      "sha256": "19b53504a0ce1129bc049039aa24c1e5f2baa64f70afe6cc23011420e5a81ef0",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/shiftflow.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/shiftflow.jpg",
+      "renderSha256": "19b53504a0ce1129bc049039aa24c1e5f2baa64f70afe6cc23011420e5a81ef0"
+    },
+    {
+      "appId": "submissions",
+      "candidateId": "candidate-08",
+      "sha256": "8cbfd230fafe8eacc84752410f1e1321024378125bb17189b9fcb7b7b39bfc13",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/submissions.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/submissions.jpg",
+      "renderSha256": "8cbfd230fafe8eacc84752410f1e1321024378125bb17189b9fcb7b7b39bfc13"
+    },
+    {
+      "appId": "cv-print-builder",
+      "candidateId": "candidate-01",
+      "sha256": "bfda9b1a621037eb1d508614ddc3a9d4221abfe941976ddf326764d6b02c2b87",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/cv-print-builder.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/cv-print-builder.jpg",
+      "renderSha256": "bfda9b1a621037eb1d508614ddc3a9d4221abfe941976ddf326764d6b02c2b87"
+    },
+    {
+      "appId": "documents",
+      "candidateId": "candidate-05",
+      "sha256": "31123bf173860e01f05eb6be2431f71925bab9f355241b2582d30a2d06aef216",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/documents.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/documents.jpg",
+      "renderSha256": "31123bf173860e01f05eb6be2431f71925bab9f355241b2582d30a2d06aef216"
+    },
+    {
+      "appId": "iot",
+      "candidateId": "candidate-14",
+      "sha256": "47e1a59d94e34baa238268a4eb5ec8190b8211e885ac418e106bb0de25bd2e43",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/iot.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/iot.jpg",
+      "renderSha256": "47e1a59d94e34baa238268a4eb5ec8190b8211e885ac418e106bb0de25bd2e43"
+    },
+    {
+      "appId": "research",
+      "candidateId": "candidate-14",
+      "sha256": "a888d0b6ca2053cd15030286577951004fb449a97e79980df76ffaf643e796fb",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/research.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/research.jpg",
+      "renderSha256": "a888d0b6ca2053cd15030286577951004fb449a97e79980df76ffaf643e796fb"
+    },
+    {
+      "appId": "spreadsheets",
+      "candidateId": "candidate-05",
+      "sha256": "664b5a31fa43c3d1135b15979c8348e0397dc648c37dbd823e681f4da35db284",
+      "mediaType": "image/jpeg",
+      "asset": "shared/assets/workjet-icons/operator-selection-v1/spreadsheets.jpg",
+      "sourceArtifact": "/Users/michaelwelsch/Documents/ctox/runtime/icon-selection/workjet-all-apps-v2/business-os-desktop-34-icons-mockup.html",
+      "renderAsset": "shared/assets/workjet-icons/operator-selection-v1/spreadsheets.jpg",
+      "renderSha256": "664b5a31fa43c3d1135b15979c8348e0397dc648c37dbd823e681f4da35db284"
+    }
+  ]
+}

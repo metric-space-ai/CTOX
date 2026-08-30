@@ -121,6 +121,18 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
             source = "api".to_owned();
         }
     }
+    let runtime_provider = provider.clone();
+    let subscription_provider = env_map
+        .get(crate::inference::runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| matches!(value.as_str(), "codex" | "claude" | "antigravity" | "kimi"));
+    let proxy_subscription_selected = runtime_provider.eq_ignore_ascii_case("ctox_subscription")
+        && subscription_provider.is_some();
+    if proxy_subscription_selected {
+        if let Some(subscription_provider) = subscription_provider.as_deref() {
+            provider = runtime_provider_for_subscription(subscription_provider).to_owned();
+        }
+    }
     let preset = runtime_settings_preset(runtime_state.as_ref(), &env_map);
     let context =
         runtime_settings_context(env_map.get("CTOX_CHAT_MODEL_MAX_CONTEXT").cloned().or_else(
@@ -139,14 +151,27 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             (!source.eq_ignore_ascii_case("local"))
-                .then(|| runtime_settings_api_upstream_base_url(&provider, &env_map))
+                .then(|| runtime_settings_api_upstream_base_url(&runtime_provider, &env_map))
         })
         .unwrap_or_default();
     let key_name = crate::inference::runtime_state::api_key_env_var_for_provider_with_env_map(
-        &provider, &env_map,
+        &runtime_provider,
+        &env_map,
     );
-    let key_configured = crate::secrets::get_credential(root, key_name).is_some();
-    let available_models = if provider.eq_ignore_ascii_case("ctox_proxy") {
+    let key_configured =
+        !proxy_subscription_selected && crate::secrets::get_credential(root, key_name).is_some();
+    let available_models_by_provider = available_subscription_models_by_provider(root);
+    let available_models = if proxy_subscription_selected {
+        available_models_by_provider
+            .get(&provider)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else if provider.eq_ignore_ascii_case("ctox_proxy") {
         discover_ctox_proxy_models(
             &upstream_base_url,
             crate::secrets::get_credential(root, key_name).as_deref(),
@@ -156,6 +181,8 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
     };
     let auth_mode = if provider.eq_ignore_ascii_case("local") {
         "local".to_owned()
+    } else if proxy_subscription_selected {
+        "subscription".to_owned()
     } else {
         configured_auth_mode
     };
@@ -169,9 +196,11 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_default();
-    let subscription_selected = provider.eq_ignore_ascii_case("openai")
+    let legacy_openai_subscription = provider.eq_ignore_ascii_case("openai")
+        && !proxy_subscription_selected
         && runtime_settings_auth_mode_is_subscription(&auth_mode);
-    let subscription_auth = if subscription_selected {
+    let subscription_selected = proxy_subscription_selected || legacy_openai_subscription;
+    let mut subscription_auth = if legacy_openai_subscription {
         if subscription_auth_probe.configured {
             subscription_auth_probe
         } else {
@@ -180,9 +209,35 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
     } else {
         ChatgptSubscriptionAuthStatus::default()
     };
+    let provider_subscriptions = provider_subscription_status_projection(root);
+    let subscription_account = subscription_provider.as_deref().and_then(|selected| {
+        provider_subscriptions
+            .get("accounts")
+            .and_then(Value::as_array)
+            .and_then(|accounts| {
+                accounts.iter().find(|account| {
+                    account.get("provider").and_then(Value::as_str) == Some(selected)
+                        && account
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true)
+                        && account.get("status").and_then(Value::as_str) != Some("disabled")
+                        && (account.get("ready").and_then(Value::as_bool) == Some(true)
+                            || account.get("status").and_then(Value::as_str) == Some("ready")
+                            || account.get("managed_by").and_then(Value::as_str)
+                                == Some("ctox-auth"))
+                })
+            })
+    });
+    let proxy_subscription_configured =
+        proxy_subscription_selected && subscription_account.is_some();
+    if proxy_subscription_configured {
+        subscription_auth.configured = true;
+    }
     let auth_configured = provider.eq_ignore_ascii_case("local")
         || key_configured
-        || (subscription_selected && subscription_auth.configured);
+        || (legacy_openai_subscription && subscription_auth.configured)
+        || proxy_subscription_configured;
     let service_needs_attention = !service_running || !service_last_error.trim().is_empty();
     let auth_needs_attention = !auth_configured;
     let needs_attention = service_needs_attention || auth_needs_attention;
@@ -225,7 +280,6 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
         })
     });
     let office = load_office_runtime_settings(root)?;
-    let provider_subscriptions = provider_subscription_status_projection(root);
     let updated_at_ms = now_ms() as u64;
     Ok(serde_json::json!({
         "id": "runtime-settings",
@@ -242,11 +296,16 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
         "runtime": {
             "source": source,
             "provider": provider,
+            "runtime_provider": runtime_provider,
+            "subscription_provider": subscription_provider,
             "chat_model": env_map.get("CTOX_CHAT_MODEL")
                 .or_else(|| env_map.get("CTOX_CHAT_MODEL_BASE"))
                 .cloned()
                 .or_else(|| runtime_state.as_ref().and_then(|state| state.requested_model.clone()))
                 .or_else(|| runtime_state.as_ref().and_then(|state| state.active_model.clone()))
+                .unwrap_or_default(),
+            "reasoning_effort": env_map.get("CTOX_CHAT_REASONING_EFFORT")
+                .cloned()
                 .unwrap_or_default(),
             "preset": preset,
             "context": context,
@@ -255,7 +314,10 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
                 .unwrap_or(1800),
             "upstream_base_url": upstream_base_url,
             "available_models": available_models,
-            "model_catalog_source": if provider.eq_ignore_ascii_case("ctox_proxy") {
+            "available_models_by_provider": available_models_by_provider,
+            "model_catalog_source": if proxy_subscription_selected {
+                "subscription"
+            } else if provider.eq_ignore_ascii_case("ctox_proxy") {
                 "proxy"
             } else {
                 "static"
@@ -266,7 +328,8 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
             "api_key_name": key_name,
             "api_key_configured": key_configured,
             "subscription_selected": subscription_selected,
-            "subscription_session_configured": subscription_auth.configured,
+            "subscription_session_configured": proxy_subscription_configured || subscription_auth.configured,
+            "subscription_account_id": subscription_account.and_then(|account| account.get("id")).and_then(Value::as_str),
             "subscription_account_email": subscription_auth.account_email,
             "subscription_plan": subscription_auth.plan,
             "configured": auth_configured
@@ -282,6 +345,39 @@ fn build_runtime_settings_for_rxdb(root: &Path) -> anyhow::Result<Value> {
             "message": diagnostics_message
         }
     }))
+}
+
+fn available_subscription_models_by_provider(root: &Path) -> BTreeMap<String, Vec<Value>> {
+    let routes = crate::execution::cliproxyapi_host::instance_proxy_route_capabilities(root);
+    let catalog = ctox_cliproxyapi::internal::registry::embedded_models_catalog().ok();
+    let mut models_by_provider = BTreeMap::<String, Vec<Value>>::new();
+
+    for route in routes {
+        let provider = runtime_provider_for_subscription(&route.provider).to_owned();
+        let reasoning_levels = catalog
+            .as_ref()
+            .and_then(|catalog| {
+                ctox_cliproxyapi::internal::registry::models_for_channel(catalog, &route.provider)
+            })
+            .and_then(|models| {
+                models
+                    .into_iter()
+                    .find(|model| model.id.eq_ignore_ascii_case(&route.model))
+            })
+            .and_then(|model| model.thinking)
+            .map(|thinking| thinking.levels)
+            .unwrap_or_default();
+        models_by_provider
+            .entry(provider)
+            .or_default()
+            .push(serde_json::json!({
+                "id": route.model,
+                "reasoning_levels": reasoning_levels,
+                "default": route.default,
+            }));
+    }
+
+    models_by_provider
 }
 
 fn ctox_proxy_models_url(base_url: &str) -> Option<String> {

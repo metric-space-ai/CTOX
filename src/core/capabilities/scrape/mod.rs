@@ -1205,7 +1205,7 @@ fn build_run_artifacts(
     Ok(artifacts)
 }
 
-fn invoke_responses_text(
+pub(crate) fn invoke_responses_text(
     root: &Path,
     model: &str,
     prompt: &str,

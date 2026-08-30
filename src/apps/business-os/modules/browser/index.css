@@ -43,7 +43,7 @@
 
 /* custom: Sitzungs-Shards im Well — reiner Selektor: Titel + eine gedämpfte
    Meta-Zeile. Auswahl = Akzent-Füllung + flacher 2px-Balken über ::before
-   (aus dem Kit über .ctox-list-item.is-selected). Kompakte Listen-Ansicht
+   (aus dem Kit über .ctox-list-item.is-selected). Kompakte Listenansicht
    reduziert nur die Innenabstände. */
 .browser-session-rail {
   display: grid;
@@ -115,21 +115,6 @@
    nur, wenn die Klappe offen ist. */
 .browser-toggle-advanced {
   flex: 0 0 auto;
-}
-
-.browser-notice {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 13px;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.browser-notice[hidden] {
-  display: none;
 }
 
 .browser-toggle-advanced[aria-pressed="true"] {
@@ -214,10 +199,6 @@
   overflow-x: auto;
 }
 
-.browser-session-list:empty {
-  display: none;
-}
-
 /* custom: Browser-Tabs kürzen lange Seitentitel — Kit-Tabs tragen feste,
    kurze View-Namen und haben deshalb keine Breitenbegrenzung. */
 .browser-tab {
@@ -279,16 +260,6 @@
   gap: 4px;
   flex: 1 1 auto;
   min-width: 0;
-  width: 0;
-}
-
-/* The shared toolbar wraps by default. A browser address bar is a single
-   control row; allowing its intrinsic grid width to wrap expanded the toolbar
-   beyond a 640px app window and pushed controls outside the visible window. */
-.browser-toolbar {
-  width: 100%;
-  overflow: hidden;
-  flex-wrap: nowrap;
 }
 
 /* custom: Statusleiste unter der Adresszeile — Kit-Badge plus gekürzter
@@ -351,24 +322,6 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  text-align: center;
-  padding: 1rem;
-}
-
-.browser-empty-text {
-  max-width: 34rem;
-}
-
-/* Die Buehne selbst faengt keine Klicks (pointer-events: none), damit sie den
-   gestreamten Inhalt nicht blockiert. Der Wiederstart-Knopf muss deshalb
-   ausdruecklich klickbar bleiben - sonst waere er sichtbar und wirkungslos. */
-.browser-empty-action {
-  pointer-events: auto;
 }
 
 .browser-empty[hidden] {
@@ -452,7 +405,7 @@
   overflow-wrap: anywhere;
 }
 
-@container business-app-window (max-width: 640px) {
+@container business-app-window (max-width: 767px) {
   .browser-automation-overlay {
     top: 6px;
     right: 6px;
@@ -542,22 +495,17 @@
 }
 
 /* custom: Schmales Fenster / Mobil-Sheet — der Remote-Canvas bleibt die
-   Arbeitsfläche; Sitzungen sind über den Drawer erreichbar. */
-@container business-app-window (max-width: 640px) {
+   Arbeitsfläche; Sitzungen sind über den Drawer erreichbar. Grenze = die
+   shell-weite 767px-Mobile-Marke (Phase-1/2-Konvention). */
+@container business-app-window (max-width: 767px) {
   .browser-toolbar {
     gap: 3px;
     padding-inline: 4px;
   }
 
   .browser-status-strip {
-    display: grid;
-    flex: 0 0 auto;
-    grid-template-columns: auto;
-    max-width: 118px;
-    padding-inline-start: 0;
+    display: none;
   }
-
-  .browser-status-strip [data-browser-status-title] { display: none; }
 
   .browser-address-form {
     grid-template-columns: minmax(90px, 1fr) 30px 34px;
@@ -566,6 +514,54 @@
   .browser-advanced-actions .ctox-button,
   .browser-advanced-actions .ctox-choice {
     flex: 1 1 auto;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum; icon-only buttons in both dimensions, plus the
+   custom tab-strip buttons and the on-canvas context menu. */
+@media (pointer: coarse) {
+  .browser-module button,
+  .browser-module input,
+  .browser-module select,
+  .browser-module textarea {
+    min-height: 44px;
+  }
+
+  .browser-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .browser-module .ctox-icon-button {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .browser-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-session {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-tab,
+  .browser-module .browser-tab-title,
+  .browser-module .browser-tab-close {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-tab-close {
+    min-width: 44px;
+  }
+
+  .browser-module .browser-context-menu button {
+    min-height: 44px;
+  }
+
+  .browser-module .browser-advanced-actions .ctox-compact-field > .ctox-select {
+    min-height: 44px;
   }
 }
 
@@ -762,12 +758,6 @@
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  /* Am Browser gemessen: ohne min-width:0 HIER blieb die Karte 430 px breit in
-     einer 333-px-Spalte, und die ellipsis-Regel des Namens lief ins Leere -
-     min-width:0 am <strong> allein genuegt nicht, die Kette muss durchgaengig
-     sein. Mit dieser Regel kuerzt der Name auf 283 px und keine Karte
-     ueberschreitet die Spalte. */
-  min-width: 0;
 }
 
 .browser-adapter-head {
@@ -781,9 +771,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* Ohne min-width:0 schrumpft ein Flex-Kind nicht, sondern schiebt die Karte
-     auf: ein langer Adaptername sprengte damit die Spalte, statt zu kuerzen. */
-  min-width: 0;
 }
 
 .browser-adapter-dot {
@@ -819,40 +806,4 @@
   padding: 0.6rem;
   font-size: 0.78rem;
   opacity: 0.6;
-}
-
-/* custom: Zwei getrennte Zustands-Chips pro Adapter (Zugang / Funktion) plus
-   direkte Aktionen. */
-.browser-adapter-chips {
-  display: flex;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-}
-
-.browser-adapter-chip {
-  font-size: 0.72rem;
-  padding: 0.1rem 0.45rem;
-  border-radius: 999px;
-  border: 1px solid var(--border, #333a42);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-.browser-adapter-chip.is-ok { color: var(--ok, #37b26c); border-color: var(--ok, #37b26c); }
-.browser-adapter-chip.is-warn { color: var(--warn, #d9a03f); border-color: var(--warn, #d9a03f); }
-.browser-adapter-chip.is-error { color: var(--danger, #d95c4a); border-color: var(--danger, #d95c4a); }
-.browser-adapter-chip.is-neutral, .browser-adapter-chip.is-off { opacity: 0.7; }
-
-.browser-adapter-actions {
-  display: flex;
-  gap: 0.35rem;
-  flex-wrap: wrap;
-  margin-top: 0.15rem;
-}
-
-.browser-adapter-action {
-  font-size: 0.75rem;
-  padding: 0.15rem 0.5rem;
 }

@@ -27,8 +27,8 @@ pub(crate) use super::business_os_app_testing::resolve_business_os_validator_nod
 use super::business_os_app_testing::{
     app_browser_evidence_arg, app_validator_args_from_finalize_args,
     business_os_app_reference_candidates, collect_business_os_app_bench_status,
-    handle_business_os_app_bench, run_business_os_app_bench, run_business_os_app_e2e,
-    run_business_os_app_smoke, run_business_os_app_validator,
+    handle_business_os_app_bench, run_business_os_app_audit, run_business_os_app_bench,
+    run_business_os_app_e2e, run_business_os_app_smoke, run_business_os_app_validator,
 };
 
 pub(super) const BUSINESS_OS_APP_CANDIDATES: &[&str] = &["src/apps/business-os", "business-os"];
@@ -339,6 +339,12 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
         }
         Some("auth") => handle_business_os_auth(root, &args[1..]),
         Some("desktop") => handle_business_os_desktop(root, &args[1..]),
+        Some("mobile-invite") => handle_business_os_mobile_invite(root, &args[1..]),
+        Some("shell-update") => handle_business_os_shell_update(root, &args[1..]),
+        Some("customer-apps") => match args.get(1).map(String::as_str) {
+            None | Some("audit") => print_json(&crate::business_os::audit_customer_apps(root)?),
+            Some(other) => anyhow::bail!("unknown business-os customer-apps command `{other}`"),
+        },
         Some("web-stack") => handle_business_os_web_stack(root, &args[1..]),
         Some("files") => handle_business_os_files(root, &args[1..]),
         Some("mcp") => handle_business_os_mcp(root, &args[1..]),
@@ -353,6 +359,125 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
             business_os_usage()
         ),
     }
+}
+
+fn handle_business_os_shell_update(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let result = match action {
+        "status" => crate::business_os::shell_update::status(root, true),
+        "check" => crate::business_os::shell_update::check(root),
+        "stage" => crate::business_os::shell_update::stage(root),
+        "activate" => crate::business_os::shell_update::activate(root),
+        "rollback" => crate::business_os::shell_update::rollback(root),
+        "--help" | "-h" => {
+            println!("usage: ctox business-os shell-update [status|check|stage|activate|rollback]");
+            return Ok(());
+        }
+        other => anyhow::bail!("unknown business-os shell-update command `{other}`"),
+    };
+    match result {
+        Ok(value) => {
+            if action != "status" {
+                crate::business_os::shell_update::record_audit(
+                    root,
+                    action,
+                    "succeeded",
+                    "local-cli",
+                )?;
+            }
+            print_json(&value)
+        }
+        Err(error) => {
+            if action != "status" {
+                crate::business_os::shell_update::record_audit(
+                    root,
+                    action,
+                    "failed",
+                    "local-cli",
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn handle_business_os_mobile_invite(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            validate_mobile_invite_flags(
+                &args[1..],
+                &[
+                    "--ttl-seconds",
+                    "--display-name",
+                    "--device-pairing-id",
+                    "--device-id",
+                    "--proof-key-thumbprint",
+                ],
+            )?;
+            let ttl_seconds = flag_value(args, "--ttl-seconds")
+                .map(str::parse::<i64>)
+                .transpose()
+                .context("mobile invite --ttl-seconds must be an integer")?
+                .unwrap_or(crate::business_os::mobile_invites::DEFAULT_TTL_SECONDS);
+            let binding = crate::business_os::mobile_invites::device_binding(
+                flag_value(args, "--device-pairing-id"),
+                flag_value(args, "--device-id"),
+                flag_value(args, "--proof-key-thumbprint"),
+            )?;
+            print_json(&crate::business_os::mobile_invites::create(
+                root,
+                ttl_seconds,
+                flag_value(args, "--display-name"),
+                binding.as_ref(),
+            )?)
+        }
+        Some("revoke") => {
+            validate_mobile_invite_flags(&args[1..], &["--invite-id", "--device-pairing-id"])?;
+            match (
+                flag_value(args, "--invite-id"),
+                flag_value(args, "--device-pairing-id"),
+            ) {
+                (Some(invite_id), None) => print_json(
+                    &crate::business_os::mobile_invites::revoke(root, invite_id)?,
+                ),
+                (None, Some(device_pairing_id)) => print_json(
+                    &crate::business_os::mobile_invites::revoke_by_device_pairing_id(
+                        root,
+                        device_pairing_id,
+                    )?,
+                ),
+                _ => anyhow::bail!(
+                    "mobile invite revoke requires exactly one of --invite-id or --device-pairing-id"
+                ),
+            }
+        }
+        Some("--help") | Some("-h") | None => {
+            println!(
+                "usage:\n  ctox business-os mobile-invite create [--ttl-seconds 300] [--display-name <name>] [--device-pairing-id <id> --device-id <id> --proof-key-thumbprint <base64url-sha256>]\n  ctox business-os mobile-invite revoke (--invite-id <opaque-id> | --device-pairing-id <id>)"
+            );
+            Ok(())
+        }
+        Some(other) => anyhow::bail!("unknown business-os mobile-invite command `{other}`"),
+    }
+}
+
+fn validate_mobile_invite_flags(args: &[String], allowed: &[&str]) -> anyhow::Result<()> {
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        anyhow::ensure!(
+            allowed.contains(&flag),
+            "unknown business-os mobile-invite flag `{flag}`"
+        );
+        let value = args
+            .get(index + 1)
+            .map(String::as_str)
+            .filter(|value| !value.starts_with("--"))
+            .with_context(|| format!("mobile invite {flag} requires a value"))?;
+        anyhow::ensure!(!value.is_empty(), "mobile invite {flag} requires a value");
+        index += 2;
+    }
+    Ok(())
 }
 
 fn handle_business_os_backup(root: &Path, args: &[String]) -> anyhow::Result<()> {
@@ -1078,6 +1203,22 @@ fn handle_business_os_app(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("Business OS app browser E2E failed for `{module_id}`");
             }
             print_process_output(&output);
+            Ok(())
+        }
+        Some("audit") => {
+            let module_id = args
+                .get(1)
+                .filter(|value| !value.starts_with("--"))
+                .context(
+                    "usage: ctox business-os app audit <module-id> [--installed|--source] [--profile quick|release|full] [--url <business-os-url>] [--deployed-url <url> [--active --approval-id <id>]]",
+                )?;
+            let result = run_business_os_app_audit(root, module_id, &args[2..])?;
+            print_json(&result)?;
+            if result.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+                anyhow::bail!(
+                    "Business OS app audit is not closable for `{module_id}`; inspect completion_review.blockers"
+                );
+            }
             Ok(())
         }
         Some("references") => {
@@ -3806,7 +3947,7 @@ fn business_os_usage() -> String {
     business_os_usage_base()
         .replace(
             "  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog",
-            "  ctox business-os app references [--query <text>] [--limit <n>|--all] [--json]\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog\n  ctox business-os app smoke <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>]\n  ctox business-os app e2e <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>] [--marker <value>]",
+            "  ctox business-os app references [--query <text>] [--limit <n>|--all] [--json]\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog\n  ctox business-os app smoke <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>]\n  ctox business-os app e2e <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>] [--marker <value>] [--scenario <id>] [--require-scenario]\n  ctox business-os app audit <module-id> [--installed|--source] [--profile quick|release|full] [--url <business-os-url>] [--deployed-url <url> [--active --approval-id <id>]]",
         )
         .replace(
             "  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]",
@@ -3835,7 +3976,7 @@ fn business_os_usage() -> String {
 }
 
 fn business_os_usage_base() -> &'static str {
-    "usage:\n  ctox business-os status\n  ctox business-os serve [--addr 127.0.0.1:8765]\n  ctox business-os mcp status\n  ctox business-os mcp tools\n  ctox business-os mcp policy\n  ctox business-os mcp policy keys\n  ctox business-os mcp policy set [--enabled true|false] [--allow-reads true|false] [--allow-writes true|false] [--allow-approvals true|false] [--allow-external-effects true|false] [--rate-limit-per-minute <n>] [--audit-retention-days <n>] [--allow-actor <id>]... [--allow-workspace <id>]... [--allow-module <id>]... [--allow-collection <name>]... [--deny-tool business_os.<tool>]... [--clear-deny-tools]\n  ctox business-os mcp call <tool-name> [--args <json>]\n  ctox business-os mcp audit [--limit <n>] [--format json|jsonl] [--output <path>] [--prune]\n  ctox business-os mcp serve [--addr 127.0.0.1:8788]\n  ctox business-os mcp connect --url wss://mcp.ctox.dev/connect/<instance-id> [--token <token>] [--once] [--max-reconnect-delay-ms <n>] [--heartbeat-interval-ms <n>] [--max-connection-age-ms <n>]\n  ctox business-os mcp gateway-status --url https://mcp.ctox.dev/status/<instance-id> [--token <token>]\n  ctox business-os peer status\n  ctox business-os peer rotate\n  ctox business-os peer start\n  ctox business-os desktop invite [--display-name <name>] [--ttl-hours <n> | --expires-at <rfc3339>] [--format json|link] [--output <path>]\n  ctox business-os rxdb status [--json]\n  ctox business-os rxdb repair-optional-drift --collection <name> [--dry-run] [--force]\n  ctox business-os turn status\n  ctox business-os turn set [--url turns:host:5349] [--secret <coturn use-auth-secret>]\n  ctox business-os app create --instruction <text> [--module-id <id>]\n  ctox business-os app modify <module-id> --instruction <text>\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog\n  ctox business-os app finalize <module-id> --task-id <queue-task-id> [--installed|--source] [--reason <text>]\n  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]\n  ctox business-os repair queue-projections (--dry-run | --apply)\n  ctox business-os backup restore-drill [--module <module-id>]\n  ctox business-os backup prune-drills [--dry-run]\n  ctox business-os commands process <command-id>\n  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)\n  ctox business-os web-stack person-research --company <name> --country <DE|AT|CH> --mode <new_record|update_firm|update_person|update_inventory_general|have_data> [--field <field-key>]... [--include-private <source-id>]... [--auto-auth-assist] [--task-id <id>] [--workspace <path>] [--no-workspace]\n  ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--task-id <id>]\n  ctox business-os web-stack source-capture --source-id <dnbhoovers.com|leadfeeder.com|xing.com> --company <name> [--country <DE|AT|CH>] [--session-id <id>] [--timeout-ms <n>] [--dir <path>]\n  ctox business-os web-stack auth-assist-status --session-id <id>\n  ctox business-os web-stack context-capture --session-id <id> [--source-id <id>] [--task-id <id>] [--no-handoff]\n  ctox business-os web-stack context-extract --session-id <id> [--source-id <id>] [--capture-script <id>] [--task-id <id>]\n  ctox business-os web-stack redaction-audit --canary <value> [--canary <value>]... [--path <path>]...\n  ctox business-os web-stack browser-doctor [--dir <path>]\n  ctox business-os files sync <path>\n  ctox business-os files sync-workspace <path>\n  ctox business-os modules list\n  ctox business-os modules enable <module>\n  ctox business-os modules disable <module> [--force-remove-skills]\n  ctox business-os skills list\n  ctox business-os skills enable <skill>\n  ctox business-os skills disable <skill> [--force-remove]"
+    "usage:\n  ctox business-os status\n  ctox business-os serve [--addr 127.0.0.1:8765]\n  ctox business-os customer-apps audit\n  ctox business-os mcp status\n  ctox business-os mcp tools\n  ctox business-os mcp policy\n  ctox business-os mcp policy keys\n  ctox business-os mcp policy set [--enabled true|false] [--allow-reads true|false] [--allow-writes true|false] [--allow-approvals true|false] [--allow-external-effects true|false] [--rate-limit-per-minute <n>] [--audit-retention-days <n>] [--allow-actor <id>]... [--allow-workspace <id>]... [--allow-module <id>]... [--allow-collection <name>]... [--deny-tool business_os.<tool>]... [--clear-deny-tools]\n  ctox business-os mcp call <tool-name> [--args <json>]\n  ctox business-os mcp audit [--limit <n>] [--format json|jsonl] [--output <path>] [--prune]\n  ctox business-os mcp serve [--addr 127.0.0.1:8788]\n  ctox business-os mcp connect --url wss://mcp.ctox.dev/connect/<instance-id> [--token <token>] [--once] [--max-reconnect-delay-ms <n>] [--heartbeat-interval-ms <n>] [--max-connection-age-ms <n>]\n  ctox business-os mcp gateway-status --url https://mcp.ctox.dev/status/<instance-id> [--token <token>]\n  ctox business-os peer status\n  ctox business-os peer rotate\n  ctox business-os peer start\n  ctox business-os desktop invite [--display-name <name>] [--ttl-hours <n> | --expires-at <rfc3339>] [--format json|link] [--output <path>]\n  ctox business-os rxdb status [--json]\n  ctox business-os rxdb repair-optional-drift --collection <name> [--dry-run] [--force]\n  ctox business-os turn status\n  ctox business-os turn set [--url turns:host:5349] [--secret <coturn use-auth-secret>]\n  ctox business-os app create --instruction <text> [--module-id <id>]\n  ctox business-os app modify <module-id> --instruction <text>\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog\n  ctox business-os app finalize <module-id> --task-id <queue-task-id> [--installed|--source] [--reason <text>]\n  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]\n  ctox business-os repair queue-projections (--dry-run | --apply)\n  ctox business-os backup restore-drill [--module <module-id>]\n  ctox business-os backup prune-drills [--dry-run]\n  ctox business-os commands process <command-id>\n  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)\n  ctox business-os web-stack person-research --company <name> --country <DE|AT|CH> --mode <new_record|update_firm|update_person|update_inventory_general|have_data> [--field <field-key>]... [--include-private <source-id>]... [--auto-auth-assist] [--task-id <id>] [--workspace <path>] [--no-workspace]\n  ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--task-id <id>]\n  ctox business-os web-stack source-capture --source-id <dnbhoovers.com|leadfeeder.com|xing.com> --company <name> [--country <DE|AT|CH>] [--session-id <id>] [--timeout-ms <n>] [--dir <path>]\n  ctox business-os web-stack auth-assist-status --session-id <id>\n  ctox business-os web-stack context-capture --session-id <id> [--source-id <id>] [--task-id <id>] [--no-handoff]\n  ctox business-os web-stack context-extract --session-id <id> [--source-id <id>] [--capture-script <id>] [--task-id <id>]\n  ctox business-os web-stack redaction-audit --canary <value> [--canary <value>]... [--path <path>]...\n  ctox business-os web-stack browser-doctor [--dir <path>]\n  ctox business-os files sync <path>\n  ctox business-os files sync-workspace <path>\n  ctox business-os modules list\n  ctox business-os modules enable <module>\n  ctox business-os modules disable <module> [--force-remove-skills]\n  ctox business-os skills list\n  ctox business-os skills enable <skill>\n  ctox business-os skills disable <skill> [--force-remove]"
 }
 
 fn exists_label(exists: bool) -> &'static str {
@@ -4511,7 +4652,7 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
             "secret_value_in_rxdb": false,
             "dedupe_key": dedupe_key,
             "requesting_task_id": requesting_task_id,
-            "instruction": "Oeffne die Recherchequelle ueber den CTOX Web Stack. Nutze die hinterlegte Credential-Referenz ausschliesslich ueber den CTOX Secret Store. Fuehre die Anmeldung mit auth-assist-login aus. Falls MFA oder eine interaktive Freigabe erforderlich ist, halte die persistente CTOX-Browser-Sitzung fuer den Benutzer offen. Gib niemals Zugangswerte in Prompt, Ergebnis, Log oder RxDB aus.",
+            "instruction": "Melden Sie sich in der geoeffneten Quelle an und loesen Sie gegebenenfalls MFA, Captcha oder eine andere interaktive Freigabe. Klicken Sie danach im CTOX-Browser auf `Erledigt - Recherche fortsetzen`. Zugangswerte bleiben ausschliesslich im CTOX Secret Store und werden nie in Prompt, Ergebnis, Log oder RxDB geschrieben.",
             "required_skills": ["universal-scraping", "web-unlock"],
         },
         "client_context": {
@@ -4576,6 +4717,8 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         "capture_script": capture_script,
         "owner_user_id": owner_user_id,
         "dedupe_key": dedupe_key,
+        "requesting_task_id": requesting_task_id,
+        "instruction": "Melden Sie sich in der geoeffneten Quelle an und loesen Sie gegebenenfalls MFA, Captcha oder eine andere interaktive Freigabe. Klicken Sie danach im CTOX-Browser auf `Erledigt - Recherche fortsetzen`.",
         "deduped_by_command_id": deterministic_for_task,
         "browser_stream": "rxdb",
         "secret_value_in_payload": false,

@@ -1,4 +1,4 @@
-import { collections as ctoxCoreCollections } from '../ctox/schema.js?v=20260811-fremde-collection-mitladen-v106';
+import { collections as ctoxCoreCollections } from '../ctox/schema.js?v=20260816-browser-sync-guards-v141';
 
 const jsonObject = { type: 'object', additionalProperties: true };
 const stringArray = { type: 'array', items: { type: 'string' } };

@@ -47,7 +47,7 @@
   "libImport": "Import requests",
   "libExport": "Export requests",
   "libFilter": "Filter",
-  "libViewCards": "Shard view",
+  "libViewCards": "Card view",
   "libViewList": "List view",
   "libReset": "Reset filters",
   "bandApps": "Apps",

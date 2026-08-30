@@ -20,10 +20,11 @@ function findRuntimeChromiumExecutable(root) {
   const cacheDir = join(root, 'runtime/browser/interactive-reference/ms-playwright');
   if (!existsSync(cacheDir)) return null;
   for (const entry of readdirSync(cacheDir)) {
-    if (!entry.startsWith('chromium-')) continue;
+    if (!entry.startsWith('chromium-') && !entry.startsWith('chromium_headless_shell-')) continue;
     const base = join(cacheDir, entry);
     const candidates = [
       join(base, 'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'),
+      join(base, 'chrome-mac/headless_shell'),
       join(base, 'chrome-linux/chrome'),
       join(base, 'chrome-linux64/chrome'),
       join(base, 'chrome-headless-shell-linux64/chrome-headless-shell'),
@@ -146,6 +147,15 @@ function withModuleHash(baseUrl, moduleId) {
   return url.href;
 }
 
+function redactedRequestUrl(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return '<invalid-url>';
+  }
+}
+
 function printResult(result, json) {
   if (json) {
     console.log(JSON.stringify(result, null, 2));
@@ -218,7 +228,7 @@ async function runSmoke(options) {
   });
   page.on('requestfailed', (request) => {
     failedRequests.push({
-      url: request.url(),
+      url: redactedRequestUrl(request.url()),
       error: request.failure()?.errorText || '',
     });
   });
@@ -275,13 +285,33 @@ async function runSmoke(options) {
       }
     }, options.moduleId);
     await page.waitForSelector(rootSelector, { state: 'visible', timeout: options.timeoutMs });
+    result.evidence.mount = await page.evaluate((selector) => {
+      const root = document.querySelector(selector);
+      if (!root) return { visible: false };
+      const box = root.getBoundingClientRect();
+      const style = window.getComputedStyle(root);
+      return {
+        visible: box.width > 0 && box.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+        text_present: String(root.textContent || '').trim().length > 0,
+      };
+    }, rootSelector);
+    if (!result.evidence.mount.visible) {
+      result.failures.push('module root mounted but is not visible');
+      return result;
+    }
 
     const action = options.createAction || await waitForPrimaryCreateAction(page, options.moduleId, options.timeoutMs);
     result.create_action = action;
     if (!action) {
-      result.failures.push('no visible primary create action found under module root');
+      result.evidence.interaction = {
+        status: 'not-declared',
+        reason: 'No primary create action is required for a generic mount smoke; release/full workflow evidence is provided by tests/audit-scenarios.json.',
+      };
       return result;
     }
+    result.evidence.interaction = { status: 'checking', action };
 
     const actionSelector = `${rootSelector} [data-action="${action}"]`;
     await page.waitForSelector(actionSelector, { state: 'visible', timeout: options.timeoutMs });
@@ -355,6 +385,8 @@ async function runSmoke(options) {
     }
     if (!(openedDialog || revealedForm || revealedSave || calledShowModal)) {
       result.failures.push(`primary create action ${action} did not reveal an open dialog, visible form, or save/submit control`);
+    } else {
+      result.evidence.interaction.status = 'passed';
     }
   } catch (error) {
     result.failures.push(String(error.stack || error.message || error).split('\n')[0]);
@@ -369,6 +401,18 @@ async function runSmoke(options) {
     result.evidence.console_errors = consoleErrors;
     result.evidence.page_errors = pageErrors;
     result.evidence.failed_requests = failedRequests;
+    const pageOrigin = new URL(options.url).origin;
+    const blockingFailedRequests = failedRequests.filter((request) => {
+      try {
+        const url = new URL(request.url);
+        return url.origin === pageOrigin && ['http:', 'https:'].includes(url.protocol);
+      } catch {
+        return false;
+      }
+    });
+    if (blockingFailedRequests.length > 0) {
+      result.failures.push(...blockingFailedRequests.map((request) => `same-origin request failed: ${request.url} (${request.error || 'unknown error'})`));
+    }
     result.ok = result.failures.length === 0;
     if (options.screenshot && !result.ok) {
       ensureParentDir(options.screenshot);

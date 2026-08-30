@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 
 export const manifest = {
   id: 'code-editor',
@@ -387,7 +387,7 @@ export async function mount(container, ctx) {
       state.activePath = '';
       clearEditor('Source nicht verfügbar', `${state.moduleTitle}: ${error?.message || error}`);
       renderFileList();
-      setStatus(`Source konnte nicht über RxDB/WebRTC geladen werden: ${error?.message || error}`, true);
+      setStatus(`Source konnte nicht geladen werden: ${error?.message || error}`, true);
     } finally {
       state.loading = false;
       renderFileList();
@@ -949,7 +949,7 @@ export async function mount(container, ctx) {
       if (expectedCount <= 0 || files.length >= expectedCount) return files;
       await delay(300);
     }
-    throw new Error('Source-Dateien wurden nicht über RxDB repliziert.');
+    throw new Error('Source-Dateien konnten nicht geladen werden.');
   }
 
   async function waitForSourceFile(id, timeoutMs = 45000) {

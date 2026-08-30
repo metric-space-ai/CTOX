@@ -32,7 +32,6 @@ use super::store;
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rxdb::rx_database::RxDatabase;
-use rxdb::types::MangoQuery;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -661,26 +660,6 @@ fn business_command_store_error_is_permanent(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("idempotency_conflict")
 }
 
-/// Erfolgs-Gegenstueck zu [`apply_terminal_failure_fields`]: derselbe
-/// Feldvertrag (`validate_terminal_pair`), nur mit completed-Ausgang.
-fn apply_terminal_success_fields(object: &mut serde_json::Map<String, Value>, result: Value) {
-    object.insert("status".to_string(), Value::String("completed".to_string()));
-    object.insert(
-        "task_status".to_string(),
-        Value::String("completed".to_string()),
-    );
-    object.insert(
-        "execution_phase".to_string(),
-        Value::String("terminal".to_string()),
-    );
-    object.insert(
-        "terminal_status".to_string(),
-        Value::String("completed".to_string()),
-    );
-    object.insert("result".to_string(), result);
-    object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
-}
-
 /// Die Felder, die einen Befehl endgueltig terminal machen.
 ///
 /// Es reicht NICHT, `status` auf "failed" zu setzen:
@@ -711,111 +690,6 @@ fn apply_terminal_failure_fields(object: &mut serde_json::Map<String, Value>, er
     );
     object.insert("error".to_string(), Value::String(error.to_string()));
     object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
-}
-
-/// Sitzung als angemeldet markieren und die Adapter-/Quellen-Projektionen
-/// nachziehen. Sitzungsseite: direkter Dokument-Patch mit Envelope -- die
-/// Oberflaeche liest `payload.auth_assist_status === 'completed'`.
-/// Datenseite: alle business_records, die diese Quelle beschreiben
-/// (generische UND Modul-Zwillings-Sammlungen), bekommen
-/// `auth_status = session_authenticated`.
-async fn complete_web_stack_auth_assist(
-    root: &Path,
-    database: &Arc<RxDatabase>,
-    session_id: &str,
-    source_id: &str,
-) -> anyhow::Result<Value> {
-    anyhow::ensure!(!session_id.is_empty(), "session_id is required");
-    let collection = database
-        .collection("browser_sessions")
-        .context("browser_sessions collection is not registered")?;
-    let mut session =
-        super::rxdb_peer_browser::find_browser_document(database, "browser_sessions", session_id)
-            .await?;
-    anyhow::ensure!(
-        session.get("id").and_then(Value::as_str) == Some(session_id),
-        "browser session {session_id} not found"
-    );
-    if let Some(object) = session.as_object_mut() {
-        object.remove("_rev");
-        object.remove("_meta");
-        let payload = object
-            .entry("payload".to_string())
-            .or_insert_with(|| Value::Object(Default::default()));
-        if let Some(payload) = payload.as_object_mut() {
-            payload.insert(
-                "auth_assist_status".to_string(),
-                Value::String("completed".to_string()),
-            );
-            payload.insert("authenticated".to_string(), Value::Bool(true));
-        }
-        object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
-    }
-    incremental_upsert_document_with_envelope(&collection, session, "auth assist session patch")
-        .await
-        .map_err(|err| anyhow::anyhow!("patch browser session: {err}"))?;
-
-    let root_buf = root.to_path_buf();
-    let source = source_id.to_string();
-    let touched = tokio::task::spawn_blocking(move || {
-        super::store_outbound_commands::outbound_mark_source_authenticated(&root_buf, &source)
-    })
-    .await
-    .context("join source auth writeback")??;
-
-    // Der native Store allein reicht NICHT: die Adapter-Sammlungen werden
-    // client-seitig in RxDB rekonstruiert, nicht vom Server dorthin
-    // projiziert. Ein Schreiben nur nach business_records erreicht die
-    // Oberflaeche also nie -- gemessen: records_updated=2, Anzeige unveraendert.
-    // Deshalb hier zusaetzlich direkt in die replizierten Sammlungen.
-    let mut projected = 0usize;
-    for collection_name in [
-        "outbound_lead_generation_adapters",
-        "outbound_research_adapters",
-    ] {
-        let Some(collection) = database.collection(collection_name) else {
-            continue;
-        };
-        let docs = collection
-            .find(Some(MangoQuery {
-                selector: Some(json!({ "source_id": { "$eq": source_id } })),
-                ..Default::default()
-            }))
-            .map_err(|err| anyhow::anyhow!("query {collection_name}: {err}"))?
-            .exec(false)
-            .await
-            .map_err(|err| anyhow::anyhow!("exec {collection_name} query: {err}"))?;
-        let rows = docs.as_array().cloned().unwrap_or_default();
-        for mut doc in rows {
-            if let Some(object) = doc.as_object_mut() {
-                object.remove("_rev");
-                object.remove("_meta");
-                object.insert(
-                    "auth_status".to_string(),
-                    Value::String("session_authenticated".to_string()),
-                );
-                object.insert(
-                    "auth_authenticated_at_ms".to_string(),
-                    Value::from(now_ms() as u64),
-                );
-            }
-            incremental_upsert_document_with_envelope(
-                &collection,
-                doc,
-                "auth assist adapter patch",
-            )
-            .await
-            .map_err(|err| anyhow::anyhow!("patch {collection_name}: {err}"))?;
-            projected += 1;
-        }
-    }
-    Ok(serde_json::json!({
-        "session_id": session_id,
-        "source_id": source_id,
-        "records_updated": touched,
-        "adapters_projected": projected,
-        "auth_assist_status": "completed",
-    }))
 }
 
 async fn terminalize_business_command_document(
@@ -871,49 +745,6 @@ pub(super) async fn accept_pending_business_command(
         .unwrap_or_default()
         .to_string();
     let command_payload = document.get("payload").cloned().unwrap_or(Value::Null);
-
-    // "Ich bin angemeldet" aus dem Browser-Fenster. Ohne diesen Handler fiel
-    // der Befehl als generische Agent-Aufgabe in die Queue und NIEMAND setzte
-    // je einen Status: die Outbound-App zeigte 15 Minuten "Anmeldung
-    // angefordert" und kippte dann in "abgelaufen", obwohl der Login gelang.
-    // Der Kreis schliesst sich hier deterministisch: Sitzung wird als
-    // angemeldet markiert, die Adapter-/Quellen-Projektionen ziehen nach,
-    // der Befehl endet terminal-completed.
-    if command_type == "web_stack.auth_assist.complete" {
-        let session_id = command_payload
-            .get("session_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let source_id = command_payload
-            .get("source_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let outcome = complete_web_stack_auth_assist(root, database, &session_id, &source_id)
-            .await
-            .map_err(|error| format!("{error:#}"));
-        let mut marked = document.clone();
-        if let Some(object) = marked.as_object_mut() {
-            object.remove("_rev");
-            object.remove("_meta");
-            match outcome {
-                Ok(result) => apply_terminal_success_fields(object, result),
-                Err(error) => apply_terminal_failure_fields(object, &error),
-            }
-        }
-        let collection = database
-            .collection("business_commands")
-            .context("business_commands collection is not registered")?;
-        incremental_upsert_document_with_envelope(
-            &collection,
-            marked,
-            "web-stack auth assist completion",
-        )
-        .await
-        .map_err(|err| anyhow::anyhow!("terminalize auth assist completion: {err}"))?;
-        return Ok(PendingBusinessCommandIntakeOutcome::Terminalized);
-    }
 
     if is_browser_runtime_command(&command_type) {
         let command_id = document
@@ -1488,7 +1319,7 @@ mod tests {
 
         // Ein Zombie, wie er real vorlag: verjaehrt, aber noch Kandidat.
         let mut zombie = json!({
-            "id": "cmd_outbound_source_zombie",
+            "id": "cmd_thesen_source_zombie",
             "status": "failed",
             "command_type": "outbound.research_source.test",
         });

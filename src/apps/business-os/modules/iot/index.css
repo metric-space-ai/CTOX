@@ -151,3 +151,65 @@
     padding: 10px;
   }
 }
+
+/* Phone sheet (container <= 767px): the <= 760px block already stacks the
+   asset tree above the dashboard and forces single-column widgets. What
+   remains for touch operability: >=44px tap targets (tree rows, twisties,
+   widget footers, form controls) and — critically — the hover-reveal
+   affordances (.iot-node-add, .iot-widget-more) become always visible,
+   because touch has no hover. */
+@container business-app-window (max-width: 767px) {
+  .iot-module .ctox-button,
+  .iot-module .ctox-run-control,
+  .iot-module .ctox-pane-icon,
+  .iot-module .ctox-icon-button,
+  .iot-module .ctox-sort-dir {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .iot-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .iot-module .ctox-input,
+  .iot-module .ctox-select,
+  .iot-module textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  /* Touch equivalent of the hover-reveal: always-on, full-height buttons. */
+  .iot-node-add,
+  .iot-widget-more {
+    opacity: 1;
+  }
+
+  .iot-node {
+    min-height: 44px;
+  }
+
+  .iot-node .iot-twisty {
+    width: 32px;
+    align-self: stretch;
+    display: grid;
+    place-items: center;
+  }
+
+  .iot-signal {
+    min-height: 44px;
+  }
+
+  .iot-widget-foot {
+    flex-wrap: wrap;
+  }
+
+  .iot-form-actions {
+    flex-wrap: wrap;
+  }
+
+  .iot-form-actions .ctox-button,
+  .iot-ed-actions .ctox-button {
+    flex: 1 1 auto;
+  }
+}

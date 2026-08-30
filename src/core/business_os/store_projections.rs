@@ -140,6 +140,11 @@ pub(super) fn materialize_pending_business_chat(
     let chat_id = business_chat_id(command, command_id);
     let title = business_chat_title(command);
     let owner_user_id = business_chat_owner_user_id(command);
+    let auto_focus = command
+        .client_context
+        .get("business_chat_auto_focus")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let task_id = queue_task
         .map(|task| task.message_key.clone())
         .unwrap_or_default();
@@ -172,8 +177,13 @@ pub(super) fn materialize_pending_business_chat(
                 "id": chat_id,
                 "title": title,
                 "open": true,
-                "minimized": false,
+                "minimized": !auto_focus,
                 "owner_user_id": owner_user_id,
+                "contextMeta": {
+                    "module": command.module,
+                    "source_module": command.module,
+                    "client_context": command.client_context
+                },
                 "lastTrackingId": task_id,
                 "messages": [],
                 "draft": "",
@@ -189,7 +199,14 @@ pub(super) fn materialize_pending_business_chat(
         .or_insert_with(|| Value::String(title));
     obj.insert("open".to_string(), Value::Bool(true));
     obj.entry("minimized".to_string())
-        .or_insert_with(|| Value::Bool(false));
+        .or_insert_with(|| Value::Bool(!auto_focus));
+    obj.entry("contextMeta".to_string()).or_insert_with(|| {
+        serde_json::json!({
+            "module": command.module,
+            "source_module": command.module,
+            "client_context": command.client_context
+        })
+    });
     obj.insert("owner_user_id".to_string(), Value::String(owner_user_id));
     obj.insert(
         "lastTrackingId".to_string(),
@@ -288,11 +305,27 @@ pub(super) fn materialize_control_business_chat_state(
         .context("native control chat messages is not an array")?;
     let message_id = format!("status_{command_id}");
     let normalized_status = normalize_business_chat_tracking_status(status);
+    let functional_status = first_string_field(result, &["status", "state", "outcome_status"])
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    let functional_failure = functional_status
+        .as_deref()
+        .is_some_and(business_chat_result_status_is_failure);
+    let message_status = if functional_failure {
+        "failed".to_string()
+    } else {
+        normalized_status.clone()
+    };
     let text = first_string_field(result, &["summary", "message", "error"])
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
             if terminal {
-                if normalized_status == "completed" {
+                if functional_failure {
+                    format!(
+                        "Ausführung abgeschlossen. Fachliches Ergebnis: {}.",
+                        functional_status.as_deref().unwrap_or("fehlgeschlagen")
+                    )
+                } else if normalized_status == "completed" {
                     "Aufgabe abgeschlossen.".to_string()
                 } else {
                     "Aufgabe konnte nicht abgeschlossen werden.".to_string()
@@ -310,7 +343,7 @@ pub(super) fn materialize_control_business_chat_state(
         message["text"] = Value::String(text);
         message["commandId"] = Value::String(command_id.to_string());
         message["taskId"] = Value::String(String::new());
-        message["status"] = Value::String(normalized_status);
+        message["status"] = Value::String(message_status);
         message["createdAt"] = Value::from(updated_at_ms);
     } else {
         messages.push(serde_json::json!({
@@ -319,7 +352,7 @@ pub(super) fn materialize_control_business_chat_state(
             "text": text,
             "commandId": command_id,
             "taskId": "",
-            "status": normalized_status,
+            "status": message_status,
             "createdAt": updated_at_ms
         }));
     }
@@ -337,6 +370,21 @@ pub(super) fn materialize_control_business_chat_state(
     )?;
     upsert_rxdb_collection_record(root, "business_chats", &chat_id, updated_at_ms, chat)?;
     Ok(chat_id)
+}
+
+fn business_chat_result_status_is_failure(status: &str) -> bool {
+    matches!(
+        status.trim().to_lowercase().as_str(),
+        "failed"
+            | "failure"
+            | "error"
+            | "blocked"
+            | "rejected"
+            | "unreachable"
+            | "temporary_unreachable"
+            | "unavailable"
+            | "temporary_unavailable"
+    )
 }
 
 pub(super) fn business_chat_payload(
@@ -1222,8 +1270,8 @@ pub(crate) mod tests {
         queue_status_is_terminal_success, rxdb_store_path,
     };
     use super::{
-        effective_queue_projection_route_status, repair_queue_projections, upsert_business_record,
-        QueueProjectionRepairOptions,
+        business_chat_result_status_is_failure, effective_queue_projection_route_status,
+        repair_queue_projections, upsert_business_record, QueueProjectionRepairOptions,
     };
     use crate::mission::channels;
     use anyhow::Context;
@@ -1303,6 +1351,16 @@ pub(crate) mod tests {
             params![id, serde_json::to_string(&payload)?],
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn business_chat_marks_functional_adapter_failures_as_failures() {
+        assert!(business_chat_result_status_is_failure(
+            "temporary_unreachable"
+        ));
+        assert!(business_chat_result_status_is_failure("FAILED"));
+        assert!(!business_chat_result_status_is_failure("completed"));
+        assert!(!business_chat_result_status_is_failure("ready"));
     }
 
     #[test]

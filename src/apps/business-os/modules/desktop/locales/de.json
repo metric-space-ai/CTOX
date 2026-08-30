@@ -50,7 +50,7 @@
   "syncStarting": "Sync startet",
   "syncRunning": "Sync läuft",
   "syncIssue": "Sync prüfen",
-  "syncNoDiagnostics": "Warte auf WebRTC-Diagnostik",
+  "syncNoDiagnostics": "Warte auf Verbindungsstatus",
   "syncReadyDetail": "Icons, Layout und Hinweise sind lokal bereit.",
   "syncWaitingOn": "Wartet auf {collections}",
   "menuFile": "Datei",

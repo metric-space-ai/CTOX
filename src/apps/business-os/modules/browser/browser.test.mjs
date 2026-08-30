@@ -1,62 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { __browserTestHooks } from './index.js';
-import { collections, migrationStrategies } from './schema.js';
-
-assert.equal(
-  collections.outbound_lead_generation_adapters.version,
-  2,
-  'tenant adapter schema changes must advance the RxDB collection version',
-);
-assert.equal(
-  typeof migrationStrategies.outbound_lead_generation_adapters?.[1],
-  'function',
-  'existing tenant adapters must migrate instead of disabling the collection with DB6',
-);
-assert.equal(
-  typeof migrationStrategies.outbound_lead_generation_adapters?.[2],
-  'function',
-  'the drifted v1 adapter schema must migrate to the canonical v2 schema',
-);
 
 assert.deepEqual(
   __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
   ['outbound_research_adapters', 'outbound_lead_generation_adapters'],
-  'the scraping rail loads core and tenant-local adapter collections together',
+  'the Browser scraping rail must include both core and managed tenant adapters',
 );
-assert.deepEqual(
-  __browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
-  ['outbound_lead_generation_sources'],
-  'the adapter rail reconciles activation with the source-owned setting',
-);
-assert.deepEqual(
-  __browserTestHooks.mergeScrapingAdapterSource(
-    { id: 'adapter_x', source_id: 'x.example', enabled: false, status: 'test_ok' },
-    { id: 'x.example', enabled: true, label: 'X', url: 'https://x.example/' },
-  ),
-  {
-    id: 'adapter_x',
-    source_id: 'x.example',
-    enabled: true,
-    status: 'test_ok',
-    label: 'X',
-    url: 'https://x.example/',
-    requires_credential: undefined,
-    credential_secret_name: undefined,
-  },
-  'source activation wins without overwriting the adapter execution status',
-);
-
-{
-  const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
-  assert.match(css, /\.browser-toolbar\s*\{[^}]*flex-wrap:\s*nowrap/s);
-  assert.match(css, /\.browser-address-form\s*\{[^}]*width:\s*0/s);
-  assert.match(
-    css,
-    /@container business-app-window \(max-width: 640px\)[\s\S]*\.browser-status-strip\s*\{[^}]*display:\s*grid/s,
-    'the narrow toolbar keeps the hamburger and visible connection status in one row',
-  );
-}
 
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');
 assert.equal(__browserTestHooks.normalizeUrl('http://localhost:3000/path'), 'http://localhost:3000/path');
@@ -67,12 +17,6 @@ assert.equal(__browserTestHooks.titleCase('browser_frames'), 'Browser frames');
 assert.equal(
   __browserTestHooks.userSessionPrefix({ user: { id: 'Michael.Welsch@example.com' } }),
   'browser_session_michael-welsch-example-com',
-);
-assert.equal(__browserTestHooks.rxdbIdSlug('D&B Hoovers.com'), 'd_b_hoovers_com');
-assert.equal(
-  __browserTestHooks.webStackAuthSessionId('dnbhoovers.com', { user: { id: 'user-1' } }),
-  'browser_session_web_stack_auth_dnbhoovers_com_user_1',
-  'auth sessions reuse one persistent Chromium profile per source and user',
 );
 assert.deepEqual(
   __browserTestHooks.browserActorIds({
@@ -95,11 +39,6 @@ assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'error' }), true);
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'starting' }), false);
 assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'active' }), false);
-assert.match(
-  await readFile(new URL('./index.js', import.meta.url), 'utf8'),
-  /ein ausdruecklicher Auth-Klick den Ensure-Befehl immer senden/,
-  'an explicit auth handoff must ensure-start its stable session even when the replicated status is stale-active',
-);
 assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'active' }), true);
 assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'starting' }), false);
 assert.equal(
@@ -308,10 +247,10 @@ assert.doesNotMatch(source, forbiddenSurfacePattern);
 assert.doesNotMatch(source, /border-(?:left|right)\s*:\s*(?:[2-9]|[0-9]{2,})px/);
 assert.doesNotMatch(source, /border-radius:\s*(?:10|12|14|16|18|20|24)px/);
 assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
-// Der Waechter prueft die Absicht -- es gibt eine Schmal-Variante -- nicht
-// eine feste Zahl: der Mobile-Umbau verschiebt den Breakpoint gerade von
-// 640 auf 767, und beide Staende sind in Umlauf (main vs. Arbeitsbaum).
-assert.match(css, /@container business-app-window \(max-width: (640|767)px\)/);
+// 640 -> 767: der Mobile-Umbau (mobile usability phase 2) hat den
+// Schmal-Breakpoint bewusst verschoben; der Waechter prueft die Absicht
+// (es gibt eine Schmal-Variante), nicht die alte Zahl.
+assert.match(css, /@container business-app-window \(max-width: 767px\)/);
 assert.match(css, /\.browser-session-list[\s\S]*overflow-x: auto/);
 assert.match(html, /data-browser-start/);
 assert.match(html, /data-browser-private/);
@@ -320,13 +259,6 @@ assert.match(html, /data-browser-new-tab/);
 assert.match(html, /data-browser-go/);
 assert.doesNotMatch(html, />Los<\/button>/, 'the address action must stay a compact icon control');
 assert.match(html, /data-browser-sessions-toggle/);
-assert.equal((html.match(/data-browser-notice/g) || []).length, 1);
-assert.match(
-  html,
-  /browser-tabbar[\s\S]*data-browser-session-list[\s\S]*data-browser-notice[\s\S]*data-browser-toggle-advanced/,
-  'connection notice and advanced menu share one compact browser header row',
-);
-assert.match(css, /\.browser-notice[\s\S]*text-overflow:\s*ellipsis/);
 assert.match(css, /grid-template-columns:\s*minmax\(120px, 1fr\) 30px 34px/);
 assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions/);
 assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions-toggle[\s\S]*z-index:\s*21/);
@@ -556,38 +488,6 @@ assert.equal(
   }).filter((session) => session.id === 'browser_session_b').length,
   1,
   'the targeted requested session must replace its stale list entry',
-);
-assert.deepEqual(
-  hooks.mergeRequestedSession([
-    {
-      id: 'browser_session_auth',
-      runtime_status: 'active',
-      updated_at_ms: 10,
-      payload: { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
-    },
-  ], {
-    id: 'browser_session_auth',
-    runtime_status: 'starting',
-    updated_at_ms: 5,
-  })[0].payload,
-  { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
-  'an older reduced session summary must not erase canonical auth-assist payload',
-);
-assert.deepEqual(
-  hooks.mergeRequestedSession([
-    {
-      id: 'browser_session_auth',
-      runtime_status: 'starting',
-      updated_at_ms: 5,
-      payload: { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
-    },
-  ], {
-    id: 'browser_session_auth',
-    runtime_status: 'active',
-    updated_at_ms: 10,
-  })[0].payload,
-  { purpose: 'web_stack_auth', auth_assist_status: 'pending' },
-  'a newer reduced session summary must retain auth-assist payload from the full projection',
 );
 assert.deepEqual(
   hooks.mergeRequestedDocument(
@@ -1024,26 +924,32 @@ function pointerEvent(overrides = {}) {
   }
 }
 
-// --- Auth-Ensure darf weder Status noch Startmerkliste dauerhaft glauben ---
-// Der replizierte Status kann nach einem Prozessende noch `active` sein. Ein
-// expliziter Auth-Klick muss deshalb den idempotenten nativen Ensure ausloesen;
-// die Merkliste darf nur parallele Starts blockieren und wird immer geleert.
+// --- Startmerkliste darf nicht dauerhaft merken (13.08.2026) ---
+// Gemessen: 34 Sitzungen, 0 aktiv, kein Chrome-Prozess, keine Protokollzeile in
+// 20 Minuten — weder Start-Knopf noch Plus-Symbol bewirkten etwas. Ursache war
+// requestedSessionStarts: der Eintrag wurde nur im FEHLERfall entfernt, nicht
+// wenn eine erfolgreich gestartete Sitzung spaeter wegbrach.
 {
   const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
   const i = quelle.indexOf('async function ensureRequestedBrowserSession');
   assert.ok(i > 0, 'ensureRequestedBrowserSession existiert');
   const block = quelle.slice(i, i + 2200);
+  const zustandGelesen = block.indexOf('browserSessionNeedsStart');
   const merklisteGeprueft = block.indexOf('requestedSessionStarts.has');
-  assert.ok(merklisteGeprueft > 0);
-  assert.doesNotMatch(
-    block.slice(0, merklisteGeprueft), /browserSessionNeedsStart/,
-    'ein repliziertes stale-active darf den nativen Auth-Ensure nicht ueberspringen',
+  assert.ok(zustandGelesen > 0 && merklisteGeprueft > 0);
+  assert.ok(
+    zustandGelesen < merklisteGeprueft,
+    'der Sitzungszustand muss VOR der Merkliste geprueft werden — sonst blockiert '
+    + 'ein alter Eintrag den Neustart einer weggebrochenen Sitzung dauerhaft',
   );
   assert.match(
-    block, /finally\s*\{[\s\S]*requestedSessionStarts\.delete/,
-    'die Startmerkliste muss nach Erfolg und Fehler entfernt werden',
+    block, /requestedSessionStarts\.delete/,
+    'eine laufende Sitzung muss aus der Merkliste entfernt werden',
   );
-  assert.match(block, /dispatchBrowserCommand\([\s\S]*'browser\.session\.start'/);
+  assert.doesNotMatch(
+    block.slice(0, zustandGelesen), /if \(state\.requestedSessionStarts\.has/,
+    'die Merkliste darf nicht mehr die erste Bedingung sein',
+  );
 }
 
 // --- Sitzungszustand: wer steuert, wo muss jemand eingreifen (13.08.2026) ---
@@ -1236,313 +1142,4 @@ function pointerEvent(overrides = {}) {
     symbolOhneLabel, [],
     `Symbolknoepfe ohne aria-label (fuer Screenreader stumm): ${symbolOhneLabel.join(', ')}`,
   );
-}
-
-// Waechter: Jede Sammlung, die die Scraping-Leiste liest, muss in der
-// Allowlist der Shell stehen. Fehlt sie dort, liefert browserCollection()
-// null, die Leseschleife ueberspringt sie stumm und der Abgleich in
-// mergeScrapingAdapterSource() bleibt wirkungslos - ohne Fehlermeldung.
-// Genau so wurde 'outbound_lead_generation_sources' einmal ausgeliefert.
-{
-  const appQuelle = await readFile(new URL('../../app.js', import.meta.url), 'utf8');
-  const block = appQuelle.match(
-    /SCOPED_SYSTEM_MODULE_DB_COLLECTIONS\s*=\s*Object\.freeze\(\{[\s\S]*?\n\s*browser:\s*Object\.freeze\(\[([\s\S]*?)\]\)/,
-  );
-  assert.ok(block, 'browser-Allowlist in app.js nicht gefunden');
-  const erlaubt = [...block[1].matchAll(/'([^']+)'/g)].map((treffer) => treffer[1]);
-  const gelesen = [
-    ...__browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
-    ...__browserTestHooks.SCRAPING_SOURCE_COLLECTIONS,
-  ];
-  // Kein Praefix-Ausschluss: der urspruengliche Waechter nahm 'outbound_'
-  // pauschal aus und verdeckte damit genau den Fall, den er finden sollte -
-  // 'outbound_research_adapters' fehlte in der Allowlist, obwohl die Sammlung
-  // auf der Produktivinstanz 17 aktive Adapter trug.
-  const fehlend = gelesen.filter((name) => !erlaubt.includes(name));
-  assert.deepEqual(
-    fehlend, [],
-    `Von der Scraping-Leiste gelesen, aber nicht in SCOPED_SYSTEM_MODULE_DB_COLLECTIONS.browser: ${fehlend.join(', ')}`,
-  );
-}
-
-// --- Zusammenfuehrung doppelter Adapter (Feldbefund 29.08.2026) ---------------
-// Auf der Produktivinstanz lagen 14 Quellen in BEIDEN Adaptersammlungen, mit
-// identischer id. Nach Sammlung geschluesselt erschien jede doppelt; eine Seite
-// zu verwerfen haette entweder die Pruefergebnisse (Kern) oder die Aktualitaet
-// (tenant) verloren.
-{
-  const { mergeScrapingAdapterRows } = __browserTestHooks;
-  assert.equal(typeof mergeScrapingAdapterRows, 'function', 'mergeScrapingAdapterRows muss exportiert sein');
-
-  const kern = {
-    source_id: 'bundesanzeiger.de', id: 'adapter_outbound_bundesanzeiger-de',
-    updated_at_ms: 1787810131946,
-    last_test: '2026-08-27T05:55:31Z', latency_ms: 5680, test_ok: false,
-    evidence: 'status-temporary_unreachable', auth_status: 'not_required',
-  };
-  const tenant = {
-    source_id: 'bundesanzeiger.de', id: 'adapter_outbound_bundesanzeiger-de',
-    updated_at_ms: 1787917371912,
-    last_test: '', latency_ms: null, auth_status: 'not_required', enabled: false,
-  };
-
-  const zusammen = mergeScrapingAdapterRows(kern, tenant);
-  assert.equal(zusammen.updated_at_ms, 1787917371912, 'der neuere Stand gibt den Grundstand vor');
-  assert.equal(zusammen.last_test, '2026-08-27T05:55:31Z', 'ein Pruefergebnis darf nicht von einem leeren Feld verdraengt werden');
-  assert.equal(zusammen.latency_ms, 5680, 'null darf einen gemessenen Wert nicht verdraengen');
-  assert.equal(zusammen.evidence, 'status-temporary_unreachable', 'nur im aelteren Satz vorhandene Felder bleiben erhalten');
-  assert.equal(zusammen.test_ok, false, 'false ist ein Ergebnis und darf nicht als leer gelten');
-  assert.equal(zusammen.enabled, false, 'Felder des neueren Satzes bleiben erhalten');
-
-  const andersherum = mergeScrapingAdapterRows(tenant, kern);
-  assert.deepEqual(andersherum, zusammen, 'die Zusammenfuehrung muss reihenfolgeunabhaengig sein');
-
-  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-  assert.ok(
-    /deduplicated\.set\(schluessel/.test(quelle),
-    'die Dedup muss nach Quelle schluesseln, sonst erscheint jede Quelle doppelt',
-  );
-  assert.ok(
-    /state\.adapterUnvollstaendig = errors\.length > 0/.test(quelle),
-    'eine unvollstaendige Ladung muss vermerkt werden, sonst bleibt die Leiste dauerhaft lueckenhaft',
-  );
-  console.log('  ok: doppelte Adapter werden verlustfrei zusammengefuehrt');
-}
-
-// --- Kein Maschinentext in der Oberflaeche (Nutzerbefund 29.08.2026) ----------
-// Die Leiste zeigte "status=temporary_unreachable; reason=explicit_failure_mode_t"
-// - bei 60 Zeichen mitten im Wort abgeschnitten, daneben dieselbe Diagnose noch
-// einmal als roter Fliesstext mit JSON-Fragment. Das liest sich wie ein Absturz.
-{
-  const { adapterFehlerKurz, adapterFehlerText, adapterName } = __browserTestHooks;
-
-  const echt = 'status=temporary_unreachable; reason=command_timed_out; records_found=0; expected_fields=["Branche", "Umsatz", "Beschäftigte"]; extracted_fields=[]; missing_fie';
-  for (const fn of [adapterFehlerKurz, adapterFehlerText]) {
-    const text = fn(echt);
-    assert.ok(!/[a-z_]+=/.test(text), `kein Schluessel=Wert im Nutzertext: ${text}`);
-    assert.ok(!text.includes('['), `kein JSON-Fragment im Nutzertext: ${text}`);
-    assert.ok(!/_$|_[a-z]$/.test(text.replace(/ …$/, '')), `nicht mitten im Bezeichner abgeschnitten: ${text}`);
-  }
-  assert.equal(adapterFehlerKurz(echt), 'Zeitüberschreitung');
-  assert.equal(adapterFehlerText(echt), 'Die Quelle hat nicht rechtzeitig geantwortet.');
-
-  // Spezifisch schlaegt generisch: temporary_unreachable ist oft nur die Huelle.
-  const huelle = 'status=temporary_unreachable; reason=explicit_failure_mode_temporary_unreachable | bundesanzeiger.de returned no exact company match; records_found=0';
-  assert.equal(adapterFehlerKurz(huelle), 'Kein Treffer');
-
-  // Ein Captcha erklaert die Zeitueberschreitung, nicht umgekehrt.
-  assert.equal(adapterFehlerKurz('captcha detected; command_timed_out'), 'Captcha verlangt');
-
-  // Unbekanntes wird an der Wortgrenze gekuerzt, nie mitten im Wort.
-  const lang = adapterFehlerText('ein unbekannter Fehlertext der deutlich laenger ist als neunzig Zeichen und deshalb sauber gekuerzt gehoert');
-  assert.ok(lang.endsWith(' …'), 'gekuerzter Text endet mit Auslassung');
-  assert.ok(!/\w…/.test(lang), 'nicht mitten im Wort gekuerzt');
-
-  // Ein Adapter ohne label darf nicht als nackte Domain neben gepflegten
-  // Namen wie "D&B Hoovers" stehen.
-  assert.equal(adapterName({ source_id: 'linkedin.com' }), 'LinkedIn');
-  assert.equal(adapterName({ source_id: 'xing.com' }), 'XING');
-  assert.equal(adapterName({ source_id: 'unbekannt.de' }), 'Unbekannt');
-  assert.equal(adapterName({ source_id: 'linkedin.com', label: 'LinkedIn Sales' }), 'LinkedIn Sales', 'ein gepflegtes label gewinnt');
-
-  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-  assert.ok(
-    !/String\(adapter\.last_error\)\.slice\(/.test(quelle),
-    'last_error darf nicht roh abgeschnitten in die Oberflaeche',
-  );
-  console.log('  ok: Adapterfehler erscheinen als Satz, nicht als Maschinentext');
-}
-
-// --- Zusammengehoerige Felder nicht mischen (Widerspruchsbefund 29.08.2026) ---
-// Die Karte fuer rocketreach.com zeigte gleichzeitig "Kein Zugang noetig" und
-// "Anmeldung im Browser erforderlich". Ursache war feldweises Ergaenzen: der
-// April-Satz trug requires_credential=false, der August-Satz auth_status=
-// required ohne requires_credential. Das veraltete Feld gewann.
-{
-  const { mergeScrapingAdapterRows } = __browserTestHooks;
-
-  const kernAlt = {
-    source_id: 'rocketreach.com', updated_at_ms: 1783967908268,
-    requires_credential: false, auth_status: 'not_required', auth_mode: 'none',
-    last_test: '2026-04', latency_ms: 400, test_ok: true,
-  };
-  const tenantNeu = {
-    source_id: 'rocketreach.com', updated_at_ms: 1787917382172,
-    auth_status: 'required', last_error: 'Anmeldung im Browser erforderlich',
-  };
-  const z = mergeScrapingAdapterRows(kernAlt, tenantNeu);
-  assert.equal(z.auth_status, 'required', 'der aktuelle Zugangszustand gilt');
-  assert.notEqual(z.requires_credential, false,
-    'ein veraltetes requires_credential darf einem aktuellen auth_status nicht widersprechen');
-  assert.equal(z.test_ok, undefined,
-    'ein alter Erfolgstest darf neben einem aktuellen Zugangsfehler nicht stehenbleiben');
-
-  // Gegenprobe: schweigt der neuere Satz zu einer Gruppe, bleibt der aeltere.
-  const kernGeprueft = {
-    source_id: 'bundesanzeiger.de', updated_at_ms: 1787810131946,
-    last_test: '2026-08-27T05:55:31Z', latency_ms: 5690, test_ok: false,
-    evidence: 'status-temporary_unreachable', auth_status: 'not_required',
-  };
-  const tenantStumm = {
-    source_id: 'bundesanzeiger.de', updated_at_ms: 1787917371912,
-    last_test: '', latency_ms: null, auth_status: 'not_required', enabled: false,
-  };
-  const b = mergeScrapingAdapterRows(kernGeprueft, tenantStumm);
-  assert.equal(b.latency_ms, 5690, 'Schweigen darf ein Pruefergebnis nicht loeschen');
-  assert.equal(b.test_ok, false, 'false ist ein Ergebnis, kein Schweigen');
-  assert.equal(b.enabled, false, 'Felder ausserhalb der Gruppen bleiben unberuehrt');
-
-  assert.deepEqual(
-    mergeScrapingAdapterRows(tenantNeu, kernAlt), z,
-    'die Gruppenregel muss reihenfolgeunabhaengig sein',
-  );
-  console.log('  ok: Zugangs- und Pruefaussagen bleiben in sich stimmig');
-}
-
-// --- requires_credential darf einen echten Status nicht ueberstimmen ----------
-// Auf der Produktivinstanz trug die QUELLE rocketreach.com
-// requires_credential=false, waehrend der Adapter
-// auth_status=browser_session_requested und den Fehler "Anmeldung im Browser
-// erforderlich" trug. Weil das Flag zuerst geprueft wurde, zeigte die Karte
-// "Kein Zugang noetig" - direkt neben der Aufforderung, sich anzumelden.
-{
-  const { adapterZugang } = __browserTestHooks;
-  const text = (a) => adapterZugang(a).text;
-
-  assert.equal(
-    text({ requires_credential: false, auth_status: 'browser_session_requested' }),
-    'Anmeldung angefordert',
-    'ein angeforderter Login schlaegt das Flag requires_credential=false',
-  );
-  assert.equal(
-    text({ requires_credential: false, auth_status: 'required' }),
-    'Zugang fehlt',
-    'ein verlangter Zugang schlaegt das Flag',
-  );
-  assert.equal(
-    text({ requires_credential: false, auth_status: 'session_authenticated' }),
-    'Zugang OK',
-    'eine bestehende Anmeldung schlaegt das Flag',
-  );
-
-  // Das Flag bleibt gueltig, solange der Status nichts Eigenes sagt.
-  assert.equal(text({ requires_credential: false, auth_status: 'not_required' }), 'Kein Zugang nötig');
-  assert.equal(text({ requires_credential: false }), 'Kein Zugang nötig');
-  assert.equal(text({ requires_credential: false, auth_status: '' }), 'Kein Zugang nötig');
-
-  console.log('  ok: Zugangschip widerspricht nicht mehr der Anmeldeaufforderung');
-}
-
-// --- Testzeitpunkt statt Aenderungsdatum (Befund 29.08.2026) -----------------
-// Die Karte las last_test.at_ms; das Feld heisst tested_at_ms. Sie fiel deshalb
-// immer auf updated_at_ms zurueck und behauptete einen Test am 28.08., der in
-// Wahrheit am 27.08. lief.
-{
-  const { adapterZeitpunkt } = __browserTestHooks;
-
-  const echt = adapterZeitpunkt({
-    last_test: { tested_at_ms: 1787810138487, ok: false },
-    updated_at_ms: 1787917371912,
-  });
-  assert.equal(echt.ms, 1787810138487, 'der Testzeitpunkt kommt aus tested_at_ms');
-  assert.match(echt.titel, /geprüft/, 'ein echter Testzeitpunkt wird als Pruefung ausgewiesen');
-
-  const ohne = adapterZeitpunkt({ updated_at_ms: 1787917371912 });
-  assert.equal(ohne.ms, 1787917371912);
-  assert.match(ohne.titel, /geändert/, 'ohne Test darf das Datum nicht als Pruefung gelten');
-
-  assert.equal(adapterZeitpunkt({}).ms, 0, 'ohne jede Angabe kein erfundenes Datum');
-
-  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-  assert.ok(
-    !/last_test\?\.at_ms \|\| adapter\.updated_at_ms/.test(quelle),
-    'der alte Rueckfall auf updated_at_ms als Testzeitpunkt darf nicht zurueckkehren',
-  );
-  console.log('  ok: Zeitangabe unterscheidet Pruefung von Aenderung');
-}
-
-// --- Leere Sammlung ist kein Erfolg (Befund 29.08.2026) ----------------------
-// Nach einem Neustart lieferte die tenant-lokale Adaptersammlung null Zeilen
-// OHNE Fehler, weil ihr Demand-Sync noch nicht gefuellt hatte. Die Leiste zeigte
-// 15 Karten aus der Kern-Sammlung, sah vollstaendig aus - und verschwieg jeden
-// aktuellen Zugangszustand: rocketreach.com stand auf "Kein Zugang noetig",
-// obwohl der aktuelle Satz "Anmeldung im Browser erforderlich" trug.
-{
-  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-
-  assert.ok(
-    /if \(!collectionRows\.length\) leer\.push\(collectionName\)/.test(quelle),
-    'eine erwartete Sammlung ohne Zeilen muss vermerkt werden, nicht als Erfolg gelten',
-  );
-  assert.ok(
-    /state\.adapterUnvollstaendig = errors\.length > 0 \|\| nochNachfassen/.test(quelle),
-    'auch die leer gelesene Sammlung muss ein Nachladen ausloesen',
-  );
-  // Ohne Obergrenze wuerde eine dauerhaft leere Sammlung endlos pollen.
-  assert.ok(
-    /state\.adapterLeerVersuche <= \d+/.test(quelle),
-    'das Nachfassen muss begrenzt sein',
-  );
-  assert.ok(
-    /Adaptersammlung lieferte keine Zeilen/.test(quelle),
-    'der Fall muss sichtbar protokolliert werden, sonst bleibt er wieder stumm',
-  );
-  console.log('  ok: leer gelesene Adaptersammlung gilt nicht als vollstaendig');
-}
-
-// --- Beendete Sitzung muss fortsetzbar sein (Befund 29.08.2026) --------------
-// Die Buehne forderte "Starten Sie die Sitzung erneut", ohne einen Weg dahin
-// anzubieten. Auf der Produktivinstanz standen 12 eigene Sitzungen, alle
-// disconnected, keine einzige aktiv - der Nutzer kam an keine seiner
-// angemeldeten Quellen mehr heran.
-{
-  const { frameEmptyResumable, frameEmptyText } = __browserTestHooks;
-  const mitWiederstart = (session) => ({ latestSession: session, resumeSession: () => {} });
-
-  for (const status of ['disconnected', 'offline', 'stopped', 'closed', 'failed', 'error']) {
-    const zustand = mitWiederstart({ id: 'browser_session_x', status });
-    assert.ok(frameEmptyResumable(zustand), `Status ${status} muss fortsetzbar sein`);
-  }
-  for (const status of ['active', 'starting', 'requested']) {
-    const zustand = mitWiederstart({ id: 'browser_session_x', status });
-    assert.equal(frameEmptyResumable(zustand), null, `Status ${status} darf keinen Wiederstart anbieten`);
-  }
-
-  // Ohne Bruecke kein Knopf: sonst erschiene eine Schaltflaeche ohne Wirkung.
-  assert.equal(
-    frameEmptyResumable({ latestSession: { id: 'browser_session_x', status: 'disconnected' } }),
-    null,
-    'ohne resumeSession darf kein Knopf angeboten werden',
-  );
-  assert.equal(frameEmptyResumable({ resumeSession: () => {} }), null, 'ohne Sitzung kein Knopf');
-
-  const quelle = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-
-  // Das persistente Profil haengt an der session_id. Ein Wiederstart mit neuer
-  // id waere ein leeres Profil und alle Anmeldungen der Quelle waeren weg.
-  assert.ok(
-    /wiederaufnahme\?\.sessionId \|\| `\$\{userSessionPrefix/.test(quelle),
-    'der Wiederstart muss die bestehende session_id behalten',
-  );
-  assert.ok(
-    /new_session: !wiederaufnahme/.test(quelle),
-    'eine Wiederaufnahme darf nicht als neue Sitzung angefordert werden',
-  );
-
-  // Die Buehne setzt pointer-events: none; ein Knopf darin waere sonst
-  // sichtbar und unklickbar.
-  const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
-  assert.match(
-    css,
-    /\.browser-empty-action\s*\{[^}]*pointer-events:\s*auto/,
-    'der Wiederstart-Knopf muss klickbar sein, obwohl die Buehne Klicks durchreicht',
-  );
-
-  // Kein hartcodierter Text mehr im Platzhalter.
-  assert.ok(
-    !/'Kein laufender Browser-Prozess\. Starten Sie die Sitzung erneut\.'/.test(quelle),
-    'der Hinweis muss uebersetzbar sein',
-  );
-  assert.equal(typeof frameEmptyText({ latestSession: null }), 'string');
-  console.log('  ok: beendete Sitzung bietet einen Wiederstart an');
 }

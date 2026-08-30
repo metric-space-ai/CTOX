@@ -252,3 +252,21 @@
     grid-template-rows: minmax(220px, 38vh) minmax(380px, 1fr);
   }
 }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions. The
+   narrow-viewport pane stacking itself is handled by the @container
+   business-app-window rules above (1160px/640px). */
+@media (pointer: coarse) {
+  .tickets-module button,
+  .tickets-module input,
+  .tickets-module select,
+  .tickets-module textarea {
+    min-height: 44px;
+  }
+
+  .tickets-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+}

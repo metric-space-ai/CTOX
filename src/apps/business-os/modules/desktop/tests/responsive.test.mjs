@@ -2,15 +2,48 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('../index.css', import.meta.url), 'utf8');
+const js = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+const dragJs = readFileSync(new URL('../iconDrag.js', import.meta.url), 'utf8');
 
 assert.match(css, /\.desktop-module\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container \(max-width: 1320px\)\s*\{[\s\S]*\.desktop-widget-container\s*\{[\s\S]*display:\s*none/);
 assert.match(css, /\.desktop-hero-widget\s*\{[\s\S]*width:\s*248px/);
 assert.doesNotMatch(css, /\.desktop-hero-widget\s*\{[\s\S]*width:\s*334px/);
-assert.match(css, /@container \(max-width: 720px\)\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit, minmax\(80px, 1fr\)\)/);
-assert.doesNotMatch(css, /@media \(max-width: 560px\)\s*\{[\s\S]*\.desktop-icons/);
 
-const js = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-assert.match(js, /surfaceWidth > 0 && surfaceWidth <= 720/);
+const selectedIconRule = css.match(/\.desktop-icon\.selected\s*\{([^}]*)\}/u)?.[1] ?? '';
+assert.match(selectedIconRule, /background:\s*transparent/u);
+assert.match(selectedIconRule, /box-shadow:\s*none/u);
+assert.doesNotMatch(selectedIconRule, /border-color/u);
 
-console.log('ok - desktop labels and dock clearance follow the embedded surface width');
+const glyphRule = css.match(/\.desktop-icon \.desktop-icon-glyph\s*\{([^}]*)\}/u)?.[1] ?? '';
+assert.match(glyphRule, /background:\s*transparent\s*!important/u);
+assert.match(glyphRule, /border:\s*0\s*!important/u);
+assert.match(glyphRule, /box-shadow:\s*none\s*!important/u);
+assert.doesNotMatch(
+  css,
+  /:root\[data-shell-style="ctox"\] \.desktop-icon(?::hover)? \.desktop-icon-glyph/u,
+  'a shell theme must not reintroduce a second tile around app artwork',
+);
+
+const selectedLabelRule = css.match(/\.desktop-icon\.selected \.desktop-icon-label\s*\{([^}]*)\}/u)?.[1] ?? '';
+assert.match(selectedLabelRule, /background:\s*transparent/u);
+assert.match(css, /--desktop-icon-cell-h:\s*116px/u);
+assert.match(css, /\.desktop-icon:focus-visible \.desktop-icon-glyph/u);
+assert.match(js, /height:\s*116,/u, 'drag bounds use the rendered desktop icon height');
+assert.match(js, /return 'CTOX Backend';/u);
+assert.match(js, /el\.setAttribute\('role', 'button'\)/u);
+assert.match(js, /el\.setAttribute\('aria-label', label\)/u);
+assert.match(js, /const columns = Math\.max\(1, Math\.floor\(usableWidth \/ grid\.cellW\)\)/u);
+assert.match(js, /x: grid\.offset \+ \(index % columns\) \* grid\.cellW/u);
+assert.match(js, /ROW_MAJOR_LAYOUT_MIGRATION = 'row-major-v2'/u);
+assert.match(js, /const position = clampIconPosition\(doc, doc, currentGrid\(\)\)/u);
+assert.doesNotMatch(js, /const rows = Math\.max\(1, Math\.floor\(usableHeight \/ grid\.cellH\)\)/u);
+assert.match(js, /onReorder: reorderIcons/u);
+assert.match(js, /dataset\.workjetMobileHost === 'true'\) return/u);
+assert.match(js, /await iconsCollection\.bulkUpsert\(updates\)/u);
+assert.match(dragJs, /TOUCH_REORDER_HOLD_MS = 360/u);
+assert.match(dragJs, /addEventListener\('touchstart', onTouchStart/u);
+assert.match(dragJs, /addEventListener\('touchmove', onTouchMove, \{ passive: false \}\)/u);
+assert.match(dragJs, /\.desktop-icon\[data-icon-id\]/u);
+
+console.log('ok - desktop icons keep one unboxed surface and responsive row-major layout');

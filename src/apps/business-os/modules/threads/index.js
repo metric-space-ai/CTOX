@@ -1663,7 +1663,10 @@ function updateConnectivity() {
 }
 
 function notifyActionRequired(notifications) {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  const canShowWebNotification = typeof Notification !== 'undefined'
+    && Notification.permission === 'granted';
+  const showSystemNotification = state.ctx?.notifications?.showSystem;
+  if (!canShowWebNotification && typeof showSystemNotification !== 'function') return;
   const preferences = personalPreferences();
   if (isQuietTime(preferences)) return;
   const enabledTypes = new Set(arrayField(preferences?.notification_types));
@@ -1679,8 +1682,32 @@ function notifyActionRequired(notifications) {
     .slice(0, 3)
     .forEach((item) => {
       const dedupeKey = `ctox:threads:notified:${currentUserId()}:${item.id}`;
-      if (storageGet(dedupeKey)) return;
+      const decisionHubDedupeKey = item.source_module === 'kundenpipeline' && item.source_record_id
+        ? `ctox:decision-hub:notified:${currentUserId()}:${item.source_record_id}`
+        : '';
+      if (storageGet(dedupeKey) || (decisionHubDedupeKey && storageGet(decisionHubDedupeKey))) return;
+      if (decisionHubDedupeKey && typeof showSystemNotification === 'function') {
+        const delivered = showSystemNotification({
+          kind: 'decision_hub',
+          title: item.title || 'Decision Hub',
+          message: 'Decision Hub wartet auf deine Entscheidung.',
+          tag: `decision-hub:${item.source_record_id}`,
+          recordId: item.source_record_id,
+          urgency: 'normal',
+          action: {
+            callback: () => {
+              location.hash = `kundenpipeline?record=${encodeURIComponent(item.source_record_id)}`;
+            },
+          },
+        });
+        if (!delivered) return;
+        storageSet(dedupeKey, '1');
+        storageSet(decisionHubDedupeKey, '1');
+        return;
+      }
+      if (!canShowWebNotification) return;
       storageSet(dedupeKey, '1');
+      if (decisionHubDedupeKey) storageSet(decisionHubDedupeKey, '1');
       const notice = new Notification(item.title || 'CTOX braucht deine Aufmerksamkeit', {
         body: 'In Threads ist eine Aktion für dich offen.',
         tag: `ctox-thread-${item.thread_id || item.id}`,

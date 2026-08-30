@@ -33,7 +33,7 @@ const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
 // those builds made the new tab follow the old, failed bridge forever. The
 // release epoch isolates only the local BroadcastChannel/Web Lock; both builds
 // still replicate through the same server-authoritative WebRTC room.
-const MULTI_TAB_COORDINATOR_EPOCH = '20260830-dialoge-im-modulfenster-v291';
+const MULTI_TAB_COORDINATOR_EPOCH = '20260830-knowledge-shell-v2-dialogs-v292';
 const CTOX_BROWSER_CAPABILITIES = [
   'ctox-control-plane-v1',
   'ctox-role-bound-signaling-v1',
@@ -41,6 +41,7 @@ const CTOX_BROWSER_CAPABILITIES = [
   'ctox-file-chunks-v1',
   'ctox-schema-hash-v1',
   'ctox-peer-session-v1',
+  'ctox-device-proof-v1',
   'ctox-checkpoint-epoch-v1',
   'ctox-checkpoint-generation-v2',
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
@@ -61,6 +62,15 @@ const ROOM_CIRCUIT_FAILURE_THRESHOLD = 5;
 const ROOM_CIRCUIT_OPEN_MS = 120_000;
 const ROOM_RETRY_BASE_MS = 1_000;
 const ROOM_RETRY_MAX_MS = 30_000;
+
+// Workjet native-host bridge boundary for device proof. The native app owns
+// the P-256 private key and injects this one callback; browser code receives
+// only the public JWK and a raw IEEE-P1363 signature for the supplied nonce.
+export async function getBusinessOsDeviceProof(nonce) {
+  const provider = globalThis.ctoxWorkjetDeviceProofProvider;
+  if (typeof provider !== 'function') return null;
+  return provider(nonce);
+}
 // Pacing between collection starts. This exists so a multi-collection bootstrap
 // stays under the send-queue budget that recycles a wedged peer — see
 // enqueueSendFrame in rxdb/src/webrtc-native.mjs, which drops the connection at
@@ -79,7 +89,7 @@ const COLLECTION_START_GAP_MS = 60;
 // How many collection registrations may mutate the shared room handshake at
 // the same time. Four lanes looked faster in an isolated bootstrap benchmark,
 // but a restored workspace starts several module leases concurrently. On the
-// managed managed tenant instance that invalidated the multiplexed handshake while
+// managed customer tenant instance that invalidated the multiplexed handshake while
 // other lanes were still running: masterChangesSince timed out, the shared
 // peer dropped, and even a one-row command insert waited 16.5 seconds behind
 // recovery work. Serialize registration on the one shared transport. This is
@@ -99,6 +109,7 @@ const MODULE_EXPLICIT_START_COLLECTIONS = new Set([
 // zum Dauerlauf wird.
 const UNREGISTERED_SWEEP_DELAY_MS = 3000;
 const UNREGISTERED_SWEEP_RETRY_MS = 15000;
+const STALLED_RECONNECT_MIN_AGE_MS = 30000;
 const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
 const DESKTOP_ICON_SAFE_FIELDS = new Set([
@@ -376,6 +387,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           || isHealthyCollectionStatus(current.status);
         return !healthy;
       });
+      const repairCandidates = repairCandidateCollectionNames(
+        activeCollections,
+        diagnostics.collections,
+      );
+      const stalledReconnects = repairCandidates.filter((collection) => (
+        isStalledReconnectingCollection(
+          diagnostics.collections[collection],
+          Date.now(),
+          STALLED_RECONNECT_MIN_AGE_MS,
+        )
+      ));
       for (const collection of stuck) {
         if (stopped) return;
         try {
@@ -383,6 +405,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         } catch (error) {
           recordCollection(collection, { lastError: serializeError(error) });
         }
+      }
+      // Event-driven recovery is still the fast path. This heartbeat is the
+      // bounded safety net for a bridge whose peer disappeared while its
+      // one-shot restart timer was already consumed. Measured after a native
+      // peer restart: ctox_queue_tasks remained on the old peer session for
+      // more than a minute while every other collection had reconnected; the
+      // existing manual restart repaired it immediately. Route the stale
+      // collection back through the shared room repair cycle so circuit
+      // breaking, retry limits and healthy-collection isolation still apply.
+      if (stalledReconnects.length) {
+        scheduleRestartOfUnhealthyCollections(stalledReconnects[0], 0);
       }
       scheduleUnregisteredCollectionSweep(UNREGISTERED_SWEEP_RETRY_MS);
     }, delayMs);
@@ -411,7 +444,10 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         roomCircuit.nextProbeAtMs = 0;
         roomCircuit.updatedAtMs = Date.now();
       }
-      const collections = [...activeCollections].filter(collectionNeedsRestart);
+      const collections = repairCandidateCollectionNames(
+        activeCollections,
+        diagnostics.collections,
+      ).filter(collectionNeedsRestart);
       let nextDelay = 0;
       repairCycleInProgress = true;
       try {
@@ -428,7 +464,11 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         emitDiagnostic({ phase: 'failed', lastError: restartSerialized });
       } finally {
         repairCycleInProgress = false;
-        if (!stopped && [...activeCollections].some(collectionNeedsRestart)) {
+        if (
+          !stopped
+          && repairCandidateCollectionNames(activeCollections, diagnostics.collections)
+            .some(collectionNeedsRestart)
+        ) {
           scheduleRestartOfUnhealthyCollections(triggerCollection, nextDelay || ROOM_RETRY_BASE_MS);
         }
       }
@@ -461,11 +501,11 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260829-workjet-projects-main-v288');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260830-main-merge-v197');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
-      room: multiTabCoordinatorRoom(config.sync_room),
+      room: config.sync_room,
     });
     // Serve follower tabs that ask the leader to run a native request for
     // them. Without this the Browser app is dead in every tab but one.
@@ -753,24 +793,6 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         // command. The background repair loop owns reconnect/restart policy.
         // Only a replication state that is actually cancelled is replaced.
         const currentBridge = await withTimeout(currentBridgePromise, 3000);
-        if (!currentBridge) {
-          // A second module/window acquisition must never adopt the unresolved
-          // bridge promise directly. Because this function is async, returning
-          // that promise would keep the caller (and therefore the whole window
-          // launch) pending until WebRTC eventually opens. Return the same
-          // bounded startup handle used for a first slow start instead; its
-          // `ready` member still exposes the authoritative bridge promise.
-          const pendingBridge = createPendingCollectionBridge(collection, currentBridgePromise);
-          recordCollection(collection, {
-            status: 'pending',
-            connectionStatus: 'connecting',
-            reason: pendingBridge.reason,
-            lastError: null,
-            reconnectingSince: null,
-            connectedAt: null,
-          });
-          return pendingBridge;
-        }
         if (
           shouldReplaceCachedBridgeForStart(currentBridge, options)
           || currentBridge?.state?.cancelled === true
@@ -785,7 +807,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
             status: 'reused',
             connectionStatus: current.connectionStatus || current.status || 'connecting',
           });
-          return currentBridge;
+          return bridges.get(collection);
         }
       }
       recordCollection(collection, { status: 'starting' });
@@ -817,7 +839,17 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       try {
         const bridge = await withTimeout(bridgePromise, 3000);
         if (!bridge) {
-          const pendingBridge = createPendingCollectionBridge(collection, bridgePromise);
+          const pendingBridge = {
+            mode: 'pending',
+            collection,
+            reason: 'startup-in-progress',
+            state: null,
+            ready: bridgePromise,
+            stop: async () => {
+              const resolvedBridge = await bridgePromise.catch(() => null);
+              await resolvedBridge?.stop?.();
+            },
+          };
           recordCollection(collection, {
             status: 'pending',
             connectionStatus: 'connecting',
@@ -1281,41 +1313,6 @@ function withTimeout(value, ms) {
   ]);
 }
 
-function createPendingCollectionBridge(collection, bridgePromise) {
-  let stopRequested = false;
-  let stopTask = null;
-  const ready = Promise.resolve(bridgePromise);
-  const stopResolvedBridge = (bridge) => {
-    if (!bridge) return Promise.resolve(false);
-    if (!stopTask) {
-      stopTask = withTimeout(bridge.stop?.(), 3000)
-        .then(() => true)
-        .catch(() => false);
-    }
-    return stopTask;
-  };
-  // If the window closes while WebRTC is still opening, stop the eventual
-  // bridge as soon as it materializes. This prevents a timed-out caller from
-  // leaving an unowned replication process behind.
-  ready.then(async (bridge) => {
-    if (!stopRequested) return;
-    await stopResolvedBridge(bridge);
-  }).catch(() => null);
-  return {
-    mode: 'pending',
-    collection,
-    reason: 'startup-in-progress',
-    state: null,
-    ready,
-    async stop() {
-      stopRequested = true;
-      const bridge = await withTimeout(ready.catch(() => null), 3000);
-      if (!bridge) return false;
-      return stopResolvedBridge(bridge);
-    },
-  };
-}
-
 async function withRejectingTimeout(operation, ms, message) {
   let timer = null;
   try {
@@ -1482,7 +1479,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260829-workjet-projects-main-v288');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260830-main-merge-v197');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -1557,6 +1554,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     ctox: {
       expectedNativePeerId: String(config?.native_peer_id || config?.nativePeerId || '').trim(),
       capabilityTokenProvider: getBusinessOsCapabilityToken,
+      deviceProofProvider: getBusinessOsDeviceProof,
       onPeerProtocol(info) {
         const remoteCapabilities = Array.isArray(info?.capabilities) ? info.capabilities : [];
         const remoteCheckpoint = sanitizeRemoteCheckpoint(info?.checkpoint || null);
@@ -2752,6 +2750,33 @@ function isHealthyCollectionStatus(status) {
   return ['connected', 'running', 'reused'].includes(String(status || '').trim());
 }
 
+function isStalledReconnectingCollection(
+  current,
+  nowMs = Date.now(),
+  minimumAgeMs = STALLED_RECONNECT_MIN_AGE_MS,
+) {
+  if (!current || typeof current !== 'object') return false;
+  const status = String(current.connectionStatus || current.status || '').trim();
+  if (!['reconnecting', 'restarting'].includes(status)) return false;
+  if (current.lastError?.retryable === false) return false;
+  const reconnectingAtMs = Date.parse(String(current.reconnectingSince || ''));
+  if (!Number.isFinite(reconnectingAtMs)) return false;
+  return Number(nowMs) - reconnectingAtMs >= Math.max(0, Number(minimumAgeMs) || 0);
+}
+
+function repairCandidateCollectionNames(activeCollections, collectionDiagnostics = {}) {
+  const candidates = new Set(activeCollections || []);
+  for (const [collection, current] of Object.entries(collectionDiagnostics || {})) {
+    // Demand-only leases may expire while an already-open bridge is still
+    // marked active and reconnecting. Such a bridge disappeared from the
+    // activeCollections Set and therefore from every repair batch, even though
+    // the diagnostic state proved it still needed a peer. Keep the candidate
+    // set aligned with the runtime's own active marker.
+    if (current?.active === true) candidates.add(collection);
+  }
+  return [...candidates];
+}
+
 function classifySignalingControlPlaneError(error) {
   if (!error || typeof error !== 'object') return null;
   const source = error?.detail && typeof error.detail === 'object' ? error.detail : error;
@@ -3012,28 +3037,24 @@ export const __ctoxSyncTestHooks = {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   shouldReplaceCachedBridgeForStart,
-  createPendingCollectionBridge,
   DEMAND_ONLY_COLLECTION_START_ERROR,
   createFollowerBridge,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
   COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
   COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
   checkpointDiagnosticFields,
+  signalingUrlWithBrowserMetadata,
   maxCheckpointLwt,
   snapshotDiagnostics,
   boundedCollectionStartQueueStep,
   repairRestartBatch,
   applyRoomRepairCycleOutcome,
+  isStalledReconnectingCollection,
+  repairCandidateCollectionNames,
   resetRoomCircuitState,
   collectionForReplication,
   projectDesktopIconForReplication,
-  signalingUrlWithBrowserMetadata,
-  multiTabCoordinatorRoom,
 };
-
-function multiTabCoordinatorRoom(room) {
-  return `${String(room || '').trim()}|release=${MULTI_TAB_COORDINATOR_EPOCH}`;
-}
 
 function replicationIoMessageFor(code) {
   if (code === 'ctox_replication_pull_failed') return 'RxDB WebRTC pull from the remote peer failed.';
@@ -3358,7 +3379,7 @@ function isDemandOnlyPullCollection(collection) {
     // Browser history must never gate the interactive browser surface. A
     // user needs only a bounded, owner-scoped session window plus the tabs of
     // the selected session; replaying every historical session/tab delayed a
-    // cold open by more than 90 seconds on the managed managed tenant instance.
+    // cold open by more than 90 seconds on the managed customer tenant instance.
     || collection === 'browser_sessions'
     || collection === 'browser_tabs'
     // Knowledge table documents embed dataframe rows and can grow far beyond

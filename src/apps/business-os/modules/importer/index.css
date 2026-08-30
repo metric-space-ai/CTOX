@@ -1,15 +1,15 @@
 .importer-module {
-  --imp-accent: #0a8f98;
-  --imp-accent-strong: #087983;
-  --imp-accent-soft: color-mix(in srgb, var(--imp-accent) 10%, transparent);
+  --imp-accent: var(--app-accent);
+  --imp-accent-strong: var(--app-accent-foreground);
+  --imp-accent-soft: var(--app-accent-soft);
   display: grid;
   grid-template-columns: 230px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  background: var(--surface, #f8fafb);
-  color: var(--text, #162126);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .importer-module [hidden] {
@@ -28,8 +28,8 @@
   padding: 26px 22px 22px;
   background:
     linear-gradient(160deg, color-mix(in srgb, var(--imp-accent) 7%, transparent), transparent 45%),
-    color-mix(in srgb, var(--surface-2, #edf2f4) 86%, var(--surface, #fff));
-  border-right: 1px solid var(--border, rgba(20, 39, 45, .1));
+    color-mix(in srgb, var(--surface-2) 86%, var(--surface));
+  border-right: 1px solid var(--border);
 }
 
 .imp-brand {
@@ -69,7 +69,7 @@
 
 .imp-brand-kicker,
 .imp-eyebrow {
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
   font-size: 10px;
   font-weight: 700;
@@ -103,7 +103,7 @@
   min-height: 60px;
   padding: 8px 9px;
   border-radius: 11px;
-  color: var(--muted, #66757b);
+  color: var(--muted);
   transition: background-color 180ms ease, color 180ms ease, opacity 180ms ease;
 }
 
@@ -113,7 +113,7 @@
   top: 48px;
   width: 1px;
   height: 20px;
-  background: var(--border, rgba(20, 39, 45, .12));
+  background: var(--border);
   content: "";
 }
 
@@ -124,9 +124,9 @@
   width: 28px;
   height: 28px;
   place-items: center;
-  border: 1px solid var(--border, rgba(20, 39, 45, .13));
+  border: 1px solid var(--border);
   border-radius: 50%;
-  background: color-mix(in srgb, var(--surface, #fff) 80%, transparent);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
   font-size: 11px;
   font-weight: 720;
 }
@@ -143,7 +143,7 @@
 }
 
 .imp-steps small {
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-size: 10px;
   line-height: 1.25;
 }
@@ -160,7 +160,7 @@
 .importer-module[data-imp-stage="done"] [data-imp-step="review"] > span:first-child {
   border-color: var(--imp-accent);
   background: var(--imp-accent);
-  color: white;
+  color: var(--app-accent-foreground);
   font-size: 0;
 }
 
@@ -174,7 +174,7 @@
 .imp-rail-claim {
   max-width: 22ch;
   margin: auto 0 0;
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-size: 10px;
   line-height: 1.55;
 }
@@ -206,7 +206,7 @@
 .imp-done-stage h2 {
   max-width: 18ch;
   margin: 8px 0 0;
-  color: var(--text, #162126);
+  color: var(--text);
   font-size: clamp(25px, 3.5vw, 34px);
   font-weight: 620;
   letter-spacing: -.035em;
@@ -217,7 +217,7 @@
 .imp-stage-header p {
   max-width: 54ch;
   margin: 12px 0 0;
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -226,7 +226,7 @@
 .imp-details label > span {
   display: block;
   margin: 0 0 8px;
-  color: var(--text, #162126);
+  color: var(--text);
   font-size: 11px;
   font-weight: 650;
 }
@@ -243,7 +243,7 @@
   left: 14px;
   z-index: 1;
   display: grid;
-  color: var(--muted, #66757b);
+  color: var(--muted);
   pointer-events: none;
 }
 
@@ -253,7 +253,7 @@
   flex: 1;
   padding-left: 44px;
   border-radius: 11px;
-  background: color-mix(in srgb, var(--surface, #fff) 88%, transparent);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
   font-size: 13px;
 }
 
@@ -269,7 +269,7 @@
   align-items: center;
   gap: 12px;
   margin: 24px 0;
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-size: 10px;
   text-transform: uppercase;
 }
@@ -278,7 +278,7 @@
 .imp-divider::after {
   height: 1px;
   flex: 1;
-  background: var(--border, rgba(20, 39, 45, .1));
+  background: var(--border);
   content: "";
 }
 
@@ -289,10 +289,10 @@
   align-items: center;
   gap: 13px;
   padding: 16px;
-  border: 1px solid var(--border, rgba(20, 39, 45, .1));
+  border: 1px solid var(--border);
   border-radius: 13px;
-  background: color-mix(in srgb, var(--surface-2, #edf2f4) 62%, transparent);
-  color: var(--text, #162126);
+  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
+  color: var(--text);
   text-align: left;
   cursor: pointer;
   transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
@@ -310,7 +310,7 @@
   height: 38px;
   place-items: center;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--surface, #fff) 86%, transparent);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
   color: var(--imp-accent-strong);
 }
 
@@ -320,8 +320,8 @@
 }
 
 .imp-folder strong { font-size: 13px; }
-.imp-folder small { color: var(--muted, #66757b); font-size: 10px; line-height: 1.35; }
-.imp-folder-arrow { color: var(--muted, #66757b); font-size: 17px; }
+.imp-folder small { color: var(--muted); font-size: 10px; line-height: 1.35; }
+.imp-folder-arrow { color: var(--muted); font-size: 17px; }
 
 .imp-notice {
   position: sticky;
@@ -332,23 +332,23 @@
   padding: 11px 14px;
   border: 1px solid color-mix(in srgb, var(--imp-accent) 24%, transparent);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--surface, #fff) 92%, var(--imp-accent-soft));
-  box-shadow: 0 8px 25px rgba(16, 44, 52, .08);
+  background: color-mix(in srgb, var(--surface) 92%, var(--imp-accent-soft));
+  box-shadow: var(--shadow-md);
   color: var(--imp-accent-strong);
   font-size: 12px;
 }
 
 .imp-notice.is-danger {
-  border-color: color-mix(in srgb, var(--danger, #c33) 28%, transparent);
-  background: color-mix(in srgb, var(--surface, #fff) 92%, var(--danger, #c33) 8%);
-  color: var(--danger, #c33);
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+  background: color-mix(in srgb, var(--surface) 92%, var(--danger) 8%);
+  color: var(--danger);
 }
 
 .imp-report {
   overflow: hidden;
-  border: 1px solid var(--border, rgba(20, 39, 45, .1));
+  border: 1px solid var(--border);
   border-radius: 13px;
-  background: color-mix(in srgb, var(--surface, #fff) 88%, transparent);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
 }
 
 .imp-report-status {
@@ -356,7 +356,7 @@
   align-items: center;
   gap: 12px;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--border, rgba(20, 39, 45, .1));
+  border-bottom: 1px solid var(--border);
   background: var(--imp-accent-soft);
 }
 
@@ -383,7 +383,7 @@
 }
 
 .imp-report-status small {
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-size: 10px;
 }
 
@@ -401,13 +401,13 @@
 .imp-hint {
   margin: 0;
   padding: 0 16px 14px;
-  color: var(--danger, #c33);
+  color: var(--danger);
   font-size: 11px;
   line-height: 1.45;
 }
 
 .imp-good { color: var(--imp-accent-strong); font-weight: 650; }
-.imp-bad { color: var(--danger, #c33); font-weight: 650; }
+.imp-bad { color: var(--danger); font-weight: 650; }
 
 .imp-details {
   display: grid;
@@ -461,7 +461,7 @@
 .imp-done-copy {
   max-width: 48ch;
   margin: 16px 0 26px;
-  color: var(--muted, #66757b);
+  color: var(--muted);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -477,7 +477,7 @@
   border-radius: 10px;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 767px) {
   .importer-module { grid-template-columns: 1fr; }
   .imp-rail {
     display: grid;
@@ -486,7 +486,7 @@
     gap: 18px;
     padding: 14px 16px;
     border-right: 0;
-    border-bottom: 1px solid var(--border, rgba(20, 39, 45, .1));
+    border-bottom: 1px solid var(--border);
   }
   .imp-steps { display: flex; justify-content: flex-end; gap: 8px; margin: 0; }
   .imp-steps li {
@@ -510,4 +510,34 @@
 
 @media (prefers-reduced-motion: reduce) {
   .imp-stage { animation: none; }
+}
+
+/* Mobile operability (Phase 2): the review action row wraps instead of
+   clipping on narrow phones, and coarse pointers get the 44px tap-target
+   minimum (rail stacking lives in the 767px/560px queries above). */
+@media (max-width: 767px) {
+  .imp-actions {
+    flex-wrap: wrap;
+  }
+
+  .imp-actions .ctox-button {
+    flex: 1 1 140px;
+  }
+
+  .imp-install {
+    margin-left: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  .importer-module button,
+  .importer-module input,
+  .importer-module select,
+  .importer-module textarea {
+    min-height: 44px;
+  }
+
+  .importer-module .imp-folder {
+    min-height: 64px;
+  }
 }

@@ -143,3 +143,43 @@
   .invoices-rail { grid-column: 1; }
   .invoices-main { grid-column: 1; }
 }
+
+/* Mobile operability (Phase 2). Pane stacking is handled by the @container
+   business-app-window rule above (760px); all wide tables (editable lines,
+   journal, payments, dunning) already sit in kit .ctox-table-wrap
+   containers that scroll horizontally inside the pane. On narrow panes the
+   editable lines grid keeps a usable minimum width so its columns never
+   crush below thumb size. */
+@container business-app-window (max-width: 767px) {
+  .invoices-lines-table {
+    min-width: 620px;
+  }
+
+  .invoices-payment-form {
+    max-width: none;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive
+   control reaches the 44px minimum, including the dense line-edit inputs. */
+@media (pointer: coarse) {
+  .invoices-module button,
+  .invoices-module input,
+  .invoices-module select,
+  .invoices-module textarea {
+    min-height: 44px;
+  }
+
+  .invoices-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .invoices-module .ctox-record-list .ctox-list-item {
+    min-height: 44px;
+  }
+
+  .invoices-module .invoices-lines-table .ctox-input {
+    min-height: 44px;
+  }
+}

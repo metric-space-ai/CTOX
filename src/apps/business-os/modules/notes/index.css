@@ -1139,3 +1139,60 @@
     max-width: none;
   }
 }
+
+/* --- Phase 2: phone sheet (container <= 767px) ---
+   The 760px stack above owns the layout switch; this only keeps absolutely
+   positioned popover menus inside the narrow sheet (they anchor to their
+   trigger and could otherwise bleed past the right edge). */
+@container business-app-window (max-width: 767px) {
+  .nn-dropdown-menu,
+  .nn-toolbar-dropdown {
+    max-width: calc(100cqw - 24px);
+    right: 0;
+    left: auto;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, and
+   the PIN pad keys grow to a full finger height. */
+@media (pointer: coarse) {
+  .notes-module button,
+  .notes-module input,
+  .notes-module select,
+  .notes-module textarea {
+    min-height: 44px;
+  }
+
+  .notes-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .notes-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  /* Note rows and dropdown entries get a full finger-height hit area. */
+  .notes-module .notes-card,
+  .notes-module .nn-dropdown-item,
+  .notes-module .nn-tag-select-item {
+    min-height: 44px;
+  }
+
+  .notes-module .nn-pin-pad button {
+    height: 48px;
+  }
+
+  /* Editor toolbar buttons stay compact visually but keep a 44px tap area. */
+  .notes-module .nn-editor-toolbar .ctox-pane-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  /* Interactive todo checkboxes inside note content. */
+  .notes-module .notes-todo-checkbox {
+    width: 22px;
+    height: 22px;
+  }
+}

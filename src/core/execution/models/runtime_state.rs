@@ -41,9 +41,12 @@ const API_PROVIDER_ANTHROPIC: &str = "anthropic";
 const API_PROVIDER_OPENROUTER: &str = "openrouter";
 const API_PROVIDER_MINIMAX: &str = "minimax";
 const API_PROVIDER_CTOX_PROXY: &str = "ctox_proxy";
+const API_PROVIDER_CTOX_SUBSCRIPTION: &str = "ctox_subscription";
 const API_PROVIDER_AZURE_FOUNDRY: &str = "azure_foundry";
 pub const CTOX_LLM_PROXY_API_KEY_ENV: &str = "CTOX_LLM_PROXY_API_KEY";
 pub const CTOX_LLM_PROXY_BASE_URL_ENV: &str = "CTOX_LLM_PROXY_BASE_URL";
+pub const CTOX_SUBSCRIPTION_PROVIDER_ENV: &str = "CTOX_SUBSCRIPTION_PROVIDER";
+const CTOX_SUBSCRIPTION_PROXY_BASE_URL: &str = "http://127.0.0.1:12435/v1";
 
 type RuntimeStateFileStamp = (u64, u128);
 
@@ -302,6 +305,7 @@ pub fn default_api_upstream_base_url_for_provider(provider: &str) -> &'static st
         API_PROVIDER_OPENROUTER => DEFAULT_OPENROUTER_RESPONSES_BASE_URL,
         API_PROVIDER_MINIMAX => DEFAULT_MINIMAX_RESPONSES_BASE_URL,
         API_PROVIDER_CTOX_PROXY => DEFAULT_CTOX_PROXY_RESPONSES_BASE_URL,
+        API_PROVIDER_CTOX_SUBSCRIPTION => CTOX_SUBSCRIPTION_PROXY_BASE_URL,
         API_PROVIDER_AZURE_FOUNDRY => DEFAULT_AZURE_FOUNDRY_RESPONSES_BASE_URL,
         _ => DEFAULT_OPENAI_RESPONSES_BASE_URL,
     }
@@ -313,6 +317,9 @@ pub fn normalize_api_provider(provider: &str) -> &'static str {
         API_PROVIDER_OPENROUTER => API_PROVIDER_OPENROUTER,
         API_PROVIDER_MINIMAX => API_PROVIDER_MINIMAX,
         API_PROVIDER_CTOX_PROXY | "ctox-proxy" | "ctox" => API_PROVIDER_CTOX_PROXY,
+        API_PROVIDER_CTOX_SUBSCRIPTION | "subscription" | "cli_proxy_subscription" => {
+            API_PROVIDER_CTOX_SUBSCRIPTION
+        }
         API_PROVIDER_AZURE_FOUNDRY | "azure" | "azure-foundry" | "azure_openai" => {
             API_PROVIDER_AZURE_FOUNDRY
         }
@@ -365,6 +372,7 @@ pub fn is_openai_compatible_api_upstream(upstream_base_url: &str) -> bool {
     let trimmed = upstream_base_url.trim();
     trimmed.starts_with(DEFAULT_OPENAI_RESPONSES_BASE_URL)
         || trimmed.starts_with(DEFAULT_ANTHROPIC_RESPONSES_BASE_URL)
+        || is_ctox_subscription_proxy_base_url(trimmed)
         || is_ctox_llm_proxy_base_url(trimmed)
         || is_azure_foundry_upstream(trimmed)
 }
@@ -375,7 +383,9 @@ pub fn api_provider_for_upstream_base_url(upstream_base_url: &str) -> &'static s
         return API_PROVIDER_LOCAL;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if is_ctox_llm_proxy_base_url(trimmed) {
+    if is_ctox_subscription_proxy_base_url(trimmed) {
+        API_PROVIDER_CTOX_SUBSCRIPTION
+    } else if is_ctox_llm_proxy_base_url(trimmed) {
         API_PROVIDER_CTOX_PROXY
     } else if is_azure_foundry_upstream(trimmed) {
         API_PROVIDER_AZURE_FOUNDRY
@@ -441,6 +451,7 @@ pub fn api_key_env_var_for_provider(provider: &str) -> &'static str {
         API_PROVIDER_ANTHROPIC => "ANTHROPIC_API_KEY",
         API_PROVIDER_MINIMAX => "MINIMAX_API_KEY",
         API_PROVIDER_CTOX_PROXY => CTOX_LLM_PROXY_API_KEY_ENV,
+        API_PROVIDER_CTOX_SUBSCRIPTION => "CTOX_SUBSCRIPTION_PROXY_NO_AUTH",
         API_PROVIDER_AZURE_FOUNDRY => "AZURE_FOUNDRY_API_KEY",
         _ => "OPENAI_API_KEY",
     }
@@ -466,6 +477,19 @@ pub fn is_ctox_llm_proxy_base_url(base_url: &str) -> bool {
             )
         })
         .unwrap_or_else(|| trimmed.to_ascii_lowercase().contains("/api/fallback-llm"))
+}
+
+pub fn is_ctox_subscription_proxy_base_url(base_url: &str) -> bool {
+    let Ok(candidate) = url::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let Ok(expected) = url::Url::parse(CTOX_SUBSCRIPTION_PROXY_BASE_URL) else {
+        return false;
+    };
+    candidate.scheme() == expected.scheme()
+        && candidate.host_str() == expected.host_str()
+        && candidate.port_or_known_default() == expected.port_or_known_default()
+        && candidate.path().trim_end_matches('/') == expected.path().trim_end_matches('/')
 }
 
 pub fn use_ctox_llm_proxy_credentials(env_map: &BTreeMap<String, String>) -> bool {
@@ -1669,6 +1693,31 @@ mod tests {
             api_key_env_var_for_provider_with_env_map("ctox_proxy", &env_map),
             CTOX_LLM_PROXY_API_KEY_ENV
         );
+    }
+
+    #[test]
+    fn instance_subscription_proxy_has_distinct_provider_identity() {
+        let mut env_map = BTreeMap::new();
+        env_map.insert(
+            "CTOX_API_PROVIDER".to_string(),
+            "ctox_subscription".to_string(),
+        );
+        env_map.insert(
+            "CTOX_UPSTREAM_BASE_URL".to_string(),
+            "http://127.0.0.1:12435/v1".to_string(),
+        );
+
+        assert_eq!(
+            infer_api_provider_from_env_map(&env_map),
+            "ctox_subscription"
+        );
+        assert_eq!(
+            api_provider_for_upstream_base_url("http://127.0.0.1:12435/v1"),
+            "ctox_subscription"
+        );
+        assert!(is_openai_compatible_api_upstream(
+            "http://127.0.0.1:12435/v1"
+        ));
     }
 
     #[test]

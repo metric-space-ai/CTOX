@@ -1,7 +1,7 @@
 {
   "id": "app-store",
   "title": "App Store",
-  "description": "CTOX GitHub module catalog to discover repository apps, create apps from templates, and manage local Business OS installations.",
+  "description": "Workjet App Store to discover repository apps, create apps from templates, and manage local Business OS installations.",
   "entry": "modules/app-store/index.html",
   "collections": [
     "business_commands",

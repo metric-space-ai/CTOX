@@ -1,9 +1,7 @@
-name: Business OS Desktop Release
+name: Legacy Business OS Desktop (release disabled)
 
 on:
-  push:
-    tags:
-      - "business-os-desktop-v*"
+  workflow_dispatch:
 
 permissions:
   attestations: write
@@ -18,6 +16,8 @@ env:
 
 jobs:
   build:
+    # Quarantined donor only. Workjet is the sole desktop product and release target.
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:
@@ -193,6 +193,7 @@ jobs:
           if-no-files-found: error
 
   release:
+    if: ${{ false }}
     needs: build
     runs-on: ubuntu-latest
     name: Publish Business OS Desktop release

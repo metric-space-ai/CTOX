@@ -1,6 +1,6 @@
 ---
 name: ctox-business-os-mcp
-description: Use when an external agent should connect to CTOX Business OS through the Business OS MCP Channel to query modules, records, runs, artifacts, approvals, or delegate validated Business OS actions. Trigger when setting up or using CTOX from ChatGPT, Codex, another MCP-capable agent, or an agent runtime that can install GitHub-hosted skills.
+description: Use when an external agent should connect to CTOX Business OS through the Business OS MCP Channel to query modules, records, runs, artifacts, approvals, request bounded Decision Hub decisions, or delegate validated Business OS actions. Trigger when setting up or using CTOX from ChatGPT, Codex, another MCP-capable agent, or an agent runtime that can install GitHub-hosted skills.
 ---
 
 # CTOX Business OS MCP
@@ -167,6 +167,7 @@ business_os.list_mcp_activity
 business_os.list_app_files
 business_os.read_app_file
 business_os.search_app_source
+decision_hub.get_decision
 ```
 
 Action tools:
@@ -188,9 +189,27 @@ business_os.approve
 business_os.reject
 business_os.request_changes
 business_os.get_command_status
+decision_hub.request_decision
 ```
 
 If the server exposes fewer tools, use only the advertised tools.
+
+## Decision Hub Escalations
+
+Use `decision_hub.request_decision` only for a genuinely blocking owner choice.
+Send a stable `decision_key`, a bounded title/question/context, two to eight
+stable options, and the authoritative source/correlation identifiers supplied
+by the calling runtime. A retry with identical content returns the same
+decision; reusing the key for changed content is a conflict.
+
+Poll `decision_hub.get_decision` by `decision_id`. It returns only the bounded
+status, selected option, optional comment, and correlation data needed to
+resume work. These tools are scoped to `data.write` and `data.read` for the
+`kundenpipeline` module. They do not grant approval or external-effect rights,
+and `agent_escalation` decisions must never send mail or trigger delegation.
+
+Do not use generic record tools for `kundenpipeline_entscheidungen`, and do not
+change the separate mail-oriented `decision-hub-triage` workflow.
 
 ## Business OS App Development Via MCP
 

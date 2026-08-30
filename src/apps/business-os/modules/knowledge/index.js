@@ -1972,7 +1972,7 @@ async function dispatchKnowledgeCommand(command) {
       client_context: clientContext,
     });
   }
-  throw new Error('RxDB command bus is not available');
+  throw new Error('The local command service is not available.');
 }
 
 function showCommandStatus(result) {
@@ -2209,7 +2209,7 @@ function openRunbookConfig() {
   const runbook = state.runbooks.find((entry) => runbookIdMatches(entry.id || entry.runbook_id, state.selectedRunbookId));
   state.ctx.openRightDrawer(drawerContent('Runbook Runtime', [
     ['Ausführung', 'CTOX Task Queue'],
-    ['Command Store', 'RxDB business_commands'],
+    ['Command history', 'Local command data'],
     ['Ausgewählt', runbook?.title || state.selectedRunbookId || 'kein Runbook'],
     ['Status', runbook?.status || 'unbekannt'],
   ]));

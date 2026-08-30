@@ -5621,17 +5621,18 @@ fn ack_messages_in_transaction(
     let mut updated = 0usize;
     for message_key in message_keys {
         let transition_reason = ack_reason.or(failure_note).unwrap_or("ack_messages");
-        if status == QueueRouteStatus::Cancelled
-            && transition_business_command_for_task_in_transaction(
-                tx,
-                message_key,
-                status.as_str(),
-                None,
-                None,
-                None,
-                transition_reason,
-            )?
-        {
+        if matches!(
+            status,
+            QueueRouteStatus::Cancelled | QueueRouteStatus::Failed
+        ) && transition_business_command_for_task_in_transaction(
+            tx,
+            message_key,
+            status.as_str(),
+            None,
+            (status == QueueRouteStatus::Failed).then_some("queue_terminal_failure"),
+            failure_note,
+            transition_reason,
+        )? {
             updated = updated.saturating_add(1);
             tx.execute(
                 "UPDATE communication_messages SET seen = 1 WHERE message_key = ?1",

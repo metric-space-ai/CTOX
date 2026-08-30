@@ -1,18 +1,25 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { createCtoxLauncher } from './ctoxLauncher.js';
-import { makeIconDraggable } from './iconDrag.js?v=20260811-fremde-collection-mitladen-v106';
-import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260811-fremde-collection-mitladen-v106';
+import { makeIconDraggable } from './iconDrag.js?v=20260816-browser-sync-guards-v141';
+import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260816-browser-sync-guards-v141';
 import {
   buildQuickAppCreateCommand,
   isRuntimeInstalledApp,
   moduleRenamePayload,
   nextQuickAppIdentity,
 } from './appCommands.js';
+import {
+  applyWorkjetCategory,
+  normalizeWorkjetCategory,
+  workjetCategoryForModule,
+} from '../../shared/workjet-theme.js?v=20260826-workjet-ui-contract-v1';
 
-const STYLE_BUILD = '20260716-label-clamp-v2';
+const STYLE_BUILD = '20260826-workjet-ui-contract-v1';
 const LAYOUT_DOC_ID = 'layout';
 const ICON_POSITION_CACHE_KEY = 'ctox.businessOs.desktopIconPositions';
+const ICON_POSITION_CACHE_VERSION = 2;
+const ROW_MAJOR_LAYOUT_MIGRATION = 'row-major-v2';
 const DESKTOP_SYNC_COLLECTIONS = Object.freeze([
   'desktop_icons',
   'desktop_layout',
@@ -33,12 +40,12 @@ const DESKTOP_ICON_PERSISTED_FIELDS = new Set([
   'updated_at_ms',
 ]);
 const DEFAULT_GRID = { cellW: 104, cellH: 120, offset: 24 };
-const COMPACT_GRID = { cellW: 88, cellH: 100, offset: 12 };
+const COMPACT_GRID = { cellW: 88, cellH: 116, offset: 12 };
 const ICON_METRICS = {
   width: 96,
-  height: 104,
+  height: 116,
   compactWidth: 80,
-  compactHeight: 96,
+  compactHeight: 108,
 };
 
 const FALLBACK_LABELS = {
@@ -74,7 +81,7 @@ const FALLBACK_LABELS = {
     syncStarting: 'Sync startet',
     syncRunning: 'Sync läuft',
     syncIssue: 'Sync prüfen',
-    syncNoDiagnostics: 'Warte auf WebRTC-Diagnostik',
+    syncNoDiagnostics: 'Warte auf Verbindungsstatus',
     syncReadyDetail: 'Icons, Layout und Hinweise sind lokal bereit.',
     syncWaitingOn: 'Wartet auf {collections}',
     ctoxLiveActivity: 'CTOX live',
@@ -111,7 +118,7 @@ const FALLBACK_LABELS = {
     syncStarting: 'Starting sync',
     syncRunning: 'Sync running',
     syncIssue: 'Check sync',
-    syncNoDiagnostics: 'Waiting for WebRTC diagnostics',
+    syncNoDiagnostics: 'Waiting for connection status',
     syncReadyDetail: 'Icons, layout and notices are locally ready.',
     syncWaitingOn: 'Waiting for {collections}',
     ctoxLiveActivity: 'CTOX live',
@@ -155,6 +162,7 @@ export async function mount(ctx) {
     widgetSyncDetail: root.querySelector('[data-widget-sync-detail]'),
     widgetSyncFill: root.querySelector('[data-widget-sync-fill]'),
   };
+  applyWorkjetCategory(refs.root, workjetCategoryForModule(ctx.module));
 
   const initialModules = Array.isArray(ctx.modules) ? ctx.modules : await loadModuleRegistry();
   let launcher = createLauncher(initialModules);
@@ -412,6 +420,12 @@ export async function mount(ctx) {
     });
   }
 
+  function categoryForLauncherEntry(entry) {
+    return entry?.kind === 'module'
+      ? workjetCategoryForModule(entry)
+      : normalizeWorkjetCategory(entry?.category);
+  }
+
   function subscribeModuleCatalogChanges() {
     if (!ctx.eventBus?.on) return () => {};
     const token = ctx.eventBus.on('modules:changed', (payload = {}) => {
@@ -443,11 +457,8 @@ export async function mount(ctx) {
         usingFallbackDocs = true;
       }
     } catch (error) {
-      // Lesen ist auch waehrend der Wartung erlaubt; der Pfad bleibt dennoch
-      // konsistent tolerant, damit ein blockierter Lesezugriff die Oberflaeche
-      // nicht haerter trifft als ein blockierter Schreibzugriff.
-      if (!isTransientSeedError(error)) throw error;
-      console.info('[desktop] icon read skipped during database restart or CTOX maintenance; rendering default launcher icons');
+      if (!isDatabaseClosingError(error)) throw error;
+      console.info('[desktop] icon read skipped during database restart; rendering default launcher icons');
       docs = fallbackIconDocs(launcher);
       usingFallbackDocs = true;
     }
@@ -466,6 +477,7 @@ export async function mount(ctx) {
         return [
           value.id, value.label, value.glyph, value.target_module, value.target_type,
           value.x, value.y, value.pinned, value.hidden, value.sort_index,
+          categoryForLauncherEntry(launcher.entries().find((entry) => entry.id === value.target_module)),
         ];
       }),
     ]);
@@ -503,8 +515,9 @@ export async function mount(ctx) {
     el.className = 'desktop-icon';
     el.dataset.iconId = doc.id;
     el.dataset.target = doc.target_module || '';
-    el.style.left = `${doc.x ?? DEFAULT_GRID.offset}px`;
-    el.style.top = `${doc.y ?? DEFAULT_GRID.offset}px`;
+    const position = clampIconPosition(doc, doc, currentGrid());
+    el.style.left = `${position.x}px`;
+    el.style.top = `${position.y}px`;
     el.innerHTML = `
       <div class="desktop-icon-glyph" aria-hidden="true"></div>
       <div class="desktop-icon-label"></div>
@@ -512,6 +525,10 @@ export async function mount(ctx) {
     
     const glyphEl = el.querySelector('.desktop-icon-glyph');
     const targetModule = doc.target_module || '';
+    applyWorkjetCategory(
+      el,
+      categoryForLauncherEntry(launcher.entries().find((entry) => entry.id === targetModule)),
+    );
     const resolveSvgIcon = typeof ctx.getSvgIcon === 'function' ? ctx.getSvgIcon : getFallbackSvgIcon;
     const svgIcon = resolveSvgIcon(targetModule, 28);
     if (svgIcon) {
@@ -520,8 +537,11 @@ export async function mount(ctx) {
       glyphEl.textContent = doc.glyph || launcher.glyphFor(targetModule);
     }
     
-    el.querySelector('.desktop-icon-label').textContent = doc.label || titleForModule(doc.target_module);
-    el.title = doc.label || titleForModule(doc.target_module);
+    const label = desktopIconLabel(doc);
+    el.querySelector('.desktop-icon-label').textContent = label;
+    el.title = label;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', label);
     el.tabIndex = 0;
 
     el.addEventListener('keydown', (event) => {
@@ -535,7 +555,10 @@ export async function mount(ctx) {
     makeIconDraggable(el, {
       surface: refs.surface,
       iconId: doc.id,
-      grid: currentGrid(),
+      grid: {
+        ...currentGrid(),
+        flow: document.documentElement.dataset.workjetMobileHost === 'true' || currentGrid().compact,
+      },
       onSelect: () => {
         for (const node of refs.icons.querySelectorAll('.desktop-icon.selected')) {
           node.classList.remove('selected');
@@ -552,6 +575,7 @@ export async function mount(ctx) {
           togglePinnedTarget(doc.target_module, true);
         }
       },
+      onReorder: reorderIcons,
     });
 
     return el;
@@ -578,6 +602,12 @@ export async function mount(ctx) {
   function onIconContextMenu(event, doc) {
     event.preventDefault();
     event.stopPropagation();
+    // Android WebView emits a synthetic contextmenu during the same long-press
+    // gesture that enters launcher edit mode. Mobile reserves long-press for
+    // full-cell reordering; opening the desktop menu here steals the drop and
+    // can even activate a menu action under the moving finger.
+    if (document.documentElement.dataset.workjetMobileHost === 'true') return;
+    if (event.currentTarget?.classList?.contains('touch-reordering')) return;
     if (!ctx.contextMenu) return;
     const pinned = isPinnedTarget(doc.target_module);
     const app = moduleForDesktopTarget(doc.target_module);
@@ -926,6 +956,44 @@ export async function mount(ctx) {
     await renderIcons();
   }
 
+  async function reorderIcons(orderedIconIds) {
+    if (!iconsCollection || !Array.isArray(orderedIconIds) || !orderedIconIds.length) return;
+    const docs = await iconsCollection.find().exec();
+    const docsById = new Map(docs.map((doc) => [doc.id, doc]));
+    const visibleIds = orderedIconIds.filter((id) => {
+      const doc = docsById.get(id);
+      return doc && !doc.hidden && launcher.knows(doc.target_module);
+    });
+    const remainingIds = docs
+      .filter((doc) => !doc.hidden && launcher.knows(doc.target_module) && !visibleIds.includes(doc.id))
+      .sort((a, b) => (a.sort_index ?? 0) - (b.sort_index ?? 0))
+      .map((doc) => doc.id);
+    const nextIds = [...visibleIds, ...remainingIds];
+    if (nextIds.length < 2) return;
+    const updatedAt = Date.now();
+    const updates = nextIds.map((id, sortIndex) => {
+      const plain = plainIconDoc(docsById.get(id));
+      const persisted = Object.fromEntries(
+        Object.entries(plain).filter(([key]) => DESKTOP_ICON_PERSISTED_FIELDS.has(key)),
+      );
+      return {
+        ...persisted,
+        sort_index: sortIndex,
+        updated_at_ms: updatedAt + sortIndex,
+      };
+    });
+    if (typeof iconsCollection.bulkUpsert === 'function') {
+      await iconsCollection.bulkUpsert(updates);
+    } else {
+      await Promise.all(updates.map((update) => docsById.get(update.id)?.incrementalPatch({
+        sort_index: update.sort_index,
+        updated_at_ms: update.updated_at_ms,
+      })));
+    }
+    renderIcons.lastSignature = '';
+    await renderIcons();
+  }
+
   function subscribeIcons() {
     if (!iconsCollection?.$) return () => {};
     const sub = iconsCollection.$.subscribe(() => {
@@ -962,26 +1030,6 @@ export async function mount(ctx) {
     return /IDBDatabase.*closing|database connection is closing/i.test(message);
   }
 
-  // Waehrend eines Upgrades sind Sammlungen schreibgeschuetzt. Das Saeen von
-  // Icons und Layout ist dann kein Fehler, sondern verfrueht - es wird
-  // nachgeholt, sobald die Wartung endet.
-  //
-  // Warum das zaehlt: Der Wartungs-Lease endet erst, wenn der Browser seine
-  // Sammlungen bestaetigt. Diese Bestaetigung setzt einen erfolgreichen
-  // Desktop-Mount voraus. Solange ein Schreibversuch beim Mounten den ganzen
-  // Mount abbrach, konnte die Bestaetigung nie erfolgen, der Lease wurde bei
-  // gesundem Peer endlos verlaengert (install/mod.rs) und die Instanz blieb
-  // dauerhaft schreibgeschuetzt: gemessen am 29.08.2026, Desktop ohne jedes
-  // Symbol, Sync bei "0/3 - Wartet auf Icons, Layout".
-  function isMaintenanceReadOnlyError(error) {
-    if (error?.code === 'CTOX_MAINTENANCE_READ_ONLY') return true;
-    return /schreibgeschützt|MAINTENANCE_READ_ONLY/i.test(String(error?.message || error || ''));
-  }
-
-  function isTransientSeedError(error) {
-    return isDatabaseClosingError(error) || isMaintenanceReadOnlyError(error);
-  }
-
   function showManagedAuthorizationError(error) {
     const message = String(error?.message || error || '');
     if (!/UNAUTHORIZED: peer is not authorized for this collection/i.test(message)) return false;
@@ -1016,6 +1064,17 @@ export async function mount(ctx) {
     return entry?.title || moduleId || '';
   }
 
+  function desktopIconLabel(doc) {
+    const targetModule = String(doc?.target_module || '').trim();
+    const persisted = String(doc?.label || '').trim();
+    // Preserve explicit user renames. Only migrate the historical technical
+    // launcher label, which otherwise reads like a second product app.
+    if (targetModule === 'ctox' && (!persisted || persisted === 'CTOX')) {
+      return 'CTOX Backend';
+    }
+    return persisted || titleForModule(targetModule);
+  }
+
   function composeCommandToast(doc) {
     const moduleTitle = titleForModule(doc.module);
     return `${moduleTitle ? `[${moduleTitle}] ` : ''}${doc.command_type || ''}`.trim() || doc.command_id || '';
@@ -1034,12 +1093,8 @@ export async function mount(ctx) {
       await upsertSeed(collection, seed.id, seed);
       return seed;
     } catch (error) {
-      if (!isTransientSeedError(error)) throw error;
-      console.info(
-        isMaintenanceReadOnlyError(error)
-          ? '[desktop] layout read skipped during database restart or CTOX maintenance; Standardlayout wird verwendet'
-          : '[desktop] layout read skipped during database restart; using default layout',
-      );
+      if (!isDatabaseClosingError(error)) throw error;
+      console.info('[desktop] layout read skipped during database restart; using default layout');
       return defaultLayout(launcherRef);
     }
   }
@@ -1058,7 +1113,9 @@ export async function mount(ctx) {
 
   function currentGrid() {
     const surfaceWidth = refs.surface?.getBoundingClientRect?.().width || globalThis.innerWidth || 0;
-    if (surfaceWidth > 0 && surfaceWidth <= 720) {
+    // Keep in sync with the compact (touch) grid breakpoint in index.css:
+    // @media (max-width: 767px) switches icons to a scrollable flow grid.
+    if (surfaceWidth > 0 && surfaceWidth <= 767) {
       return { ...COMPACT_GRID, compact: true };
     }
     return {
@@ -1083,6 +1140,7 @@ export async function mount(ctx) {
     try {
       const raw = window.localStorage.getItem(desktopIconPositionCacheStorageKey());
       const parsed = JSON.parse(raw || 'null');
+      if (parsed?.version !== ICON_POSITION_CACHE_VERSION) return positions;
       const entries = parsed?.positions && typeof parsed.positions === 'object' ? parsed.positions : {};
       for (const [id, value] of Object.entries(entries)) {
         const x = Number(value?.x);
@@ -1110,7 +1168,7 @@ export async function mount(ctx) {
     }
     try {
       window.localStorage.setItem(desktopIconPositionCacheStorageKey(), JSON.stringify({
-        version: 1,
+        version: ICON_POSITION_CACHE_VERSION,
         positions,
       }));
     } catch {}
@@ -1179,11 +1237,11 @@ export async function mount(ctx) {
 
   function gridPosition(index, grid = currentGrid()) {
     const surfaceRect = refs.surface?.getBoundingClientRect();
-    const usableHeight = Math.max(grid.cellH, (surfaceRect?.height || 720) - grid.offset * 2);
-    const rows = Math.max(1, Math.floor(usableHeight / grid.cellH));
+    const usableWidth = Math.max(grid.cellW, (surfaceRect?.width || 1024) - grid.offset * 2);
+    const columns = Math.max(1, Math.floor(usableWidth / grid.cellW));
     return {
-      x: grid.offset + Math.floor(index / rows) * grid.cellW,
-      y: grid.offset + (index % rows) * grid.cellH,
+      x: grid.offset + (index % columns) * grid.cellW,
+      y: grid.offset + Math.floor(index / columns) * grid.cellH,
     };
   }
 
@@ -1212,12 +1270,8 @@ export async function mount(ctx) {
       }));
       await normalizeIconLayoutIfNeeded(collection, launcherRef);
     } catch (error) {
-      if (!isTransientSeedError(error)) throw error;
-      console.info(
-        isMaintenanceReadOnlyError(error)
-          ? '[desktop] icon seed skipped during database restart or CTOX maintenance; Icons werden nach der Aktualisierung nachgetragen'
-          : '[desktop] icon seed skipped during database restart; using transient launcher icons',
-      );
+      if (!isDatabaseClosingError(error)) throw error;
+      console.info('[desktop] icon seed skipped during database restart; using transient launcher icons');
     }
   }
 
@@ -1292,33 +1346,30 @@ export async function mount(ctx) {
     const docs = (await collection.find().exec())
       .filter((doc) => !doc.hidden && launcherRef.knows(doc.target_module))
       .sort((a, b) => (a.sort_index ?? 0) - (b.sort_index ?? 0));
-    const grid = currentGrid();
-    // Frueher wurde nur auf exakt gleiche Koordinaten geprueft. Zwei Symbole
-    // muessen sich aber nicht decken, um einander unbrauchbar zu machen:
-    // In der Referenzinstanz lagen "Outbound Lead Generation" (128, 520)
-    // und "Bugs & Features" (99, 556) mit 7455 px2 uebereinander - die
-    // Beschriftungen unlesbar, und das obere Symbol fing die Klicks des
-    // unteren ab. Verschiedene Schluessel, also keine erkannte Kollision.
-    //
-    // Geprueft wird deshalb die tatsaechliche Ueberdeckung der Rasterzellen.
-    // Eine kleine Toleranz laesst die uebliche Nachbarschaftsberuehrung durch;
-    // erst eine nennenswerte Ueberdeckung gilt als Kollision.
-    const zelle = { w: Math.max(1, grid.cellW), h: Math.max(1, grid.cellH) };
-    const flaeche = zelle.w * zelle.h;
-    const schwelle = flaeche * 0.1;
+    const migrationKey = `${desktopIconPositionCacheStorageKey()}.${ROW_MAJOR_LAYOUT_MIGRATION}`;
+    let needsRowMajorMigration = true;
+    try {
+      needsRowMajorMigration = window.localStorage.getItem(migrationKey) !== 'complete';
+    } catch {}
+    const seen = new Set();
     let hasCollision = false;
-    for (let i = 0; i < docs.length && !hasCollision; i += 1) {
-      for (let j = i + 1; j < docs.length; j += 1) {
-        const a = docs[i];
-        const b = docs[j];
-        const dx = Math.max(0, zelle.w - Math.abs(Math.round(a.x || 0) - Math.round(b.x || 0)));
-        const dy = Math.max(0, zelle.h - Math.abs(Math.round(a.y || 0) - Math.round(b.y || 0)));
-        if (dx * dy > schwelle) { hasCollision = true; break; }
+    for (const doc of docs) {
+      const key = `${Math.round(doc.x || 0)}:${Math.round(doc.y || 0)}`;
+      if (seen.has(key)) {
+        hasCollision = true;
+        break;
       }
+      seen.add(key);
     }
-    if (!hasCollision) return;
+    if (!hasCollision && !needsRowMajorMigration) return;
+    const grid = currentGrid();
     await Promise.all(docs.map((doc, index) => {
       const position = gridPosition(index, grid);
+      iconPositionCache.set(doc.id, {
+        x: position.x,
+        y: position.y,
+        updated_at_ms: Date.now() + index,
+      });
       return doc.incrementalPatch({
         x: position.x,
         y: position.y,
@@ -1326,6 +1377,10 @@ export async function mount(ctx) {
         updated_at_ms: Date.now(),
       });
     }));
+    writeIconPositionCache();
+    try {
+      window.localStorage.setItem(migrationKey, 'complete');
+    } catch {}
   }
 
   async function upsertSeed(collection, id, seed) {

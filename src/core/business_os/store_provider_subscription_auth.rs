@@ -304,6 +304,13 @@ fn provider_subscription_status_projection(root: &Path) -> Value {
     projection
 }
 
+pub fn provider_subscription_status_for_control_plane(root: &Path) -> Value {
+    serde_json::json!({
+        "ok": true,
+        "provider_subscriptions": provider_subscription_status_projection(root),
+    })
+}
+
 const KIMI_CODING_ACCOUNT_ID: &str = "kimi-coding-primary";
 const MINIMAX_CODING_ACCOUNT_ID: &str = "minimax-coding-primary";
 
@@ -526,10 +533,19 @@ pub fn run_channel_command(
 }
 
 fn save_runtime_settings(root: &Path, request: RuntimeSettingsRequest) -> anyhow::Result<()> {
-    let provider = crate::inference::runtime_state::normalize_api_provider(&request.provider);
+    let requested_provider = request.provider.trim().to_ascii_lowercase();
+    let auth_mode = request.auth_mode.trim().to_ascii_lowercase();
+    let subscription_provider = runtime_subscription_provider(&requested_provider)
+        .filter(|_| runtime_settings_auth_mode_is_subscription(&auth_mode));
+    let provider = if subscription_provider.is_some() {
+        "ctox_subscription"
+    } else {
+        crate::inference::runtime_state::normalize_api_provider(&requested_provider)
+    };
     let mut env_map = crate::inference::runtime_env::effective_operator_env_map(root)
         .unwrap_or_else(|_| BTreeMap::new());
     let chat_model = request.chat_model.trim();
+    let reasoning_effort = request.reasoning_effort.trim().to_ascii_lowercase();
     let preset = request.preset.trim();
     let requested_context = request.context.trim();
     let context = runtime_settings_context(
@@ -541,6 +557,7 @@ fn save_runtime_settings(root: &Path, request: RuntimeSettingsRequest) -> anyhow
         env_map.remove("CTOX_UPSTREAM_BASE_URL");
         env_map.remove("OPENAI_AUTH_MODE");
         env_map.remove("CTOX_OPENAI_AUTH_MODE");
+        env_map.remove(crate::inference::runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV);
     } else {
         env_map.insert("CTOX_CHAT_SOURCE".to_owned(), "api".to_owned());
         env_map.insert("CTOX_API_PROVIDER".to_owned(), provider.to_owned());
@@ -548,10 +565,29 @@ fn save_runtime_settings(root: &Path, request: RuntimeSettingsRequest) -> anyhow
             "CTOX_UPSTREAM_BASE_URL".to_owned(),
             runtime_settings_api_upstream_base_url(provider, &env_map),
         );
+        if let Some(subscription_provider) = subscription_provider {
+            env_map.insert(
+                crate::inference::runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV.to_owned(),
+                subscription_provider.to_owned(),
+            );
+        } else {
+            env_map.remove(crate::inference::runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV);
+        }
     }
     if !chat_model.is_empty() {
         env_map.insert("CTOX_CHAT_MODEL".to_owned(), chat_model.to_owned());
         env_map.insert("CTOX_CHAT_MODEL_BASE".to_owned(), chat_model.to_owned());
+    } else {
+        env_map.remove("CTOX_CHAT_MODEL");
+        env_map.remove("CTOX_CHAT_MODEL_BASE");
+    }
+    if matches!(
+        reasoning_effort.as_str(),
+        "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    ) {
+        env_map.insert("CTOX_CHAT_REASONING_EFFORT".to_owned(), reasoning_effort);
+    } else {
+        env_map.remove("CTOX_CHAT_REASONING_EFFORT");
     }
     if let Some(preset) = normalize_runtime_preset(preset) {
         env_map.insert("CTOX_CHAT_LOCAL_PRESET".to_owned(), preset.to_owned());
@@ -565,31 +601,45 @@ fn save_runtime_settings(root: &Path, request: RuntimeSettingsRequest) -> anyhow
             max_run_secs.to_string(),
         );
     }
-    let auth_mode = request.auth_mode.trim().to_ascii_lowercase();
-    if provider.eq_ignore_ascii_case("openai")
-        && matches!(
-            auth_mode.as_str(),
-            "chatgpt_subscription" | "subscription" | "codex_subscription" | "chatgpt"
-        )
+    if subscription_provider.is_some()
+        || (provider.eq_ignore_ascii_case("openai")
+            && runtime_settings_auth_mode_is_subscription(&auth_mode))
     {
-        env_map.insert(
-            "OPENAI_AUTH_MODE".to_owned(),
-            "chatgpt_subscription".to_owned(),
-        );
+        env_map.insert("OPENAI_AUTH_MODE".to_owned(), "subscription".to_owned());
         env_map.insert(
             "CTOX_OPENAI_AUTH_MODE".to_owned(),
-            "chatgpt_subscription".to_owned(),
+            "subscription".to_owned(),
         );
     } else {
         env_map.insert("OPENAI_AUTH_MODE".to_owned(), "api_key".to_owned());
         env_map.insert("CTOX_OPENAI_AUTH_MODE".to_owned(), "api_key".to_owned());
     }
     let api_key = request.api_key.trim();
-    if !api_key.is_empty() {
+    if subscription_provider.is_none() && !api_key.is_empty() {
         let key_name = crate::inference::runtime_state::api_key_env_var_for_provider(provider);
         env_map.insert(key_name.to_owned(), api_key.to_owned());
     }
     crate::inference::runtime_env::save_runtime_env_map(root, &env_map)
+}
+
+fn runtime_subscription_provider(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "openai" | "codex" => Some("codex"),
+        "anthropic" | "claude" => Some("claude"),
+        "antigravity" | "google" => Some("antigravity"),
+        "kimi" => Some("kimi"),
+        _ => None,
+    }
+}
+
+fn runtime_provider_for_subscription(provider: &str) -> &'static str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" => "openai",
+        "claude" => "anthropic",
+        "antigravity" => "antigravity",
+        "kimi" => "kimi",
+        _ => "openai",
+    }
 }
 
 fn runtime_settings_preset(
@@ -617,6 +667,9 @@ fn runtime_settings_api_upstream_base_url(
     env_map: &BTreeMap<String, String>,
 ) -> String {
     let provider = crate::inference::runtime_state::normalize_api_provider(provider);
+    if provider.eq_ignore_ascii_case("ctox_subscription") {
+        return crate::execution::cliproxyapi_host::instance_codex_proxy_base_url();
+    }
     if provider.eq_ignore_ascii_case("ctox_proxy") {
         return env_map
             .get(crate::inference::runtime_state::CTOX_LLM_PROXY_BASE_URL_ENV)
@@ -699,10 +752,18 @@ fn runtime_auth_message(
                     format!("ChatGPT Subscription autorisiert: {email} ({plan}).")
                 }
                 (Some(email), None) => format!("ChatGPT Subscription autorisiert: {email}."),
-                _ => "ChatGPT Subscription autorisiert.".to_owned(),
+                _ => format!(
+                    "{} Subscription ist verbunden.",
+                    runtime_provider_for_subscription(
+                        runtime_subscription_provider(provider).unwrap_or(provider)
+                    )
+                ),
             }
         } else {
-            "ChatGPT Subscription ausgewählt, aber keine ChatGPT-Session im Codex/CTOX Auth-Store gefunden.".to_owned()
+            format!(
+                "{} Subscription ist ausgewählt, aber noch nicht verbunden.",
+                provider
+            )
         };
     }
     if key_configured {
@@ -1487,6 +1548,53 @@ fn chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[cfg(test)]
+mod runtime_subscription_settings_tests {
+    use super::*;
+
+    #[test]
+    fn subscription_selection_persists_cli_proxy_route_for_main_harness() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        save_runtime_settings(
+            temp.path(),
+            RuntimeSettingsRequest {
+                provider: "anthropic".to_owned(),
+                auth_mode: "subscription".to_owned(),
+                chat_model: "claude-opus-4-6".to_owned(),
+                reasoning_effort: "high".to_owned(),
+                preset: "Quality".to_owned(),
+                context: "256k".to_owned(),
+                max_run_secs: Some(1800),
+                api_key: "must-not-be-stored".to_owned(),
+            },
+        )?;
+
+        let settings = crate::inference::runtime_env::effective_runtime_env_map(temp.path())?;
+        assert_eq!(
+            settings.get("CTOX_API_PROVIDER").map(String::as_str),
+            Some("ctox_subscription")
+        );
+        assert_eq!(
+            settings
+                .get(crate::inference::runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV)
+                .map(String::as_str),
+            Some("claude")
+        );
+        assert_eq!(
+            settings.get("CTOX_UPSTREAM_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:12435/v1")
+        );
+        assert!(!settings.contains_key("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            settings
+                .get("CTOX_CHAT_REASONING_EFFORT")
+                .map(String::as_str),
+            Some("high")
+        );
+        Ok(())
+    }
+}
+
 fn urlencoding_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -1569,7 +1677,7 @@ fn repair_orphan_private_app_responsibility(
 fn current_business_os_module_ids(root: &Path) -> anyhow::Result<BTreeSet<String>> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let modules = load_module_manifests(&app_root, &installed_app_root)?;
+    let modules = load_module_manifests(root, &app_root, &installed_app_root)?;
     Ok(modules.into_iter().map(|manifest| manifest.id).collect())
 }
 

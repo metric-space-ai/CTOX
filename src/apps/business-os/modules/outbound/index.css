@@ -2169,7 +2169,7 @@
    Narrow window: the kit collapses the frame to one column and hides the
    resizer; the left pane only needs a height cap.
    -------------------------------------------------------------------------- */
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 767px) {
   .outbound-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(180px, 42vh) minmax(360px, 1fr);
@@ -2184,4 +2184,139 @@
 
   .outbound-left { grid-row: 1; }
   .outbound-center { grid-row: 2; }
+}
+
+/* ----------------------------------------------------------------------------
+   Phone layout (≤767px container): the JS collapses the inner split to a
+   single track below 720px (handle hidden), so the detail pane becomes a
+   stacked section under the table and the workbench scrolls vertically.
+   The CRM grid keeps its fixed column widths and scrolls horizontally inside
+   its own container (.outbound-table-scroll-unified) — never the page.
+   -------------------------------------------------------------------------- */
+@container business-app-window (max-width: 767px) {
+  .outbound-split-workbench,
+  .outbound-split-workbench.is-detail-hidden {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: auto;
+    overflow-y: auto;
+  }
+
+  .outbound-split-workbench > .outbound-center-resizer {
+    display: none !important;
+  }
+
+  .outbound-split-workbench > .outbound-unified-workbench {
+    min-height: 320px;
+  }
+
+  .outbound-split-workbench > .outbound-right {
+    border-top: 1px solid var(--line);
+  }
+
+  .outbound-split-workbench.is-detail-hidden > .outbound-right {
+    display: none;
+  }
+
+  /* The activity chip cards would clip — let the strip scroll horizontally. */
+  .outbound-research-activity-list {
+    overflow-x: auto;
+  }
+
+  /* Drawer stat tiles: 4 → 2 columns. */
+  .outbound-automation-body dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .outbound-automation-body > .ctox-compact-field {
+    max-width: none;
+  }
+
+  /* Column-settings rows carry their track definition inline (JS template),
+     so the narrow track set needs !important; the 56px lead column only
+     holds a 15px checkbox. */
+  .outbound-column-settings-labels,
+  .outbound-column-setting-row {
+    grid-template-columns: 32px minmax(0, 0.72fr) minmax(0, 1.28fr) 26px !important;
+  }
+
+  .outbound-column-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .outbound-custom-field-form,
+  .outbound-research-source-add,
+  .outbound-mailserver-form-row.is-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .outbound-mailserver-form-row {
+    flex-wrap: wrap;
+  }
+
+  /* Engagement list + detail stack vertically. */
+  .outbound-outreach-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .outbound-outreach-detail-meta {
+    align-items: flex-start;
+  }
+
+  /* Fixed overlays must never exceed the phone viewport. */
+  .hidden-company-panel {
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .multi-editor-overlay {
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+  }
+}
+
+/* Touch targets on coarse pointers: every interactive control inside the
+   module reaches the 44px minimum. min-height wins over the compact desktop
+   heights (22–28px filter inputs, 26px icon buttons, tab pills). Checkboxes
+   stay visual-size but gain wrapper padding. */
+@media (pointer: coarse) {
+  .outbound-module button,
+  .outbound-module input:not([type="checkbox"]):not([type="radio"]),
+  .outbound-module select,
+  .outbound-module textarea,
+  .outbound-module summary,
+  [data-campaign-editor-modal] button,
+  [data-campaign-editor-modal] input:not([type="checkbox"]):not([type="radio"]),
+  [data-campaign-editor-modal] select,
+  [data-campaign-editor-modal] textarea {
+    min-height: 44px;
+  }
+
+  .outbound-module .ctox-pane-icon,
+  [data-campaign-editor-modal] .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .outbound-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .outbound-column-setting-toggle,
+  .outbound-source-enabled {
+    min-width: 44px;
+    min-height: 44px;
+    padding-top: 0;
+  }
+
+  .outbound-column-setting-toggle input,
+  .outbound-source-enabled input,
+  .outbound-source-credential-toggle input,
+  .outbound-toggle-label input {
+    width: 22px;
+    height: 22px;
+  }
 }

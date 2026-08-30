@@ -1,6 +1,4 @@
 const REPORTER_STYLE_ID = 'ctox-business-reporter-style';
-const REPORT_DISPATCH_TIMEOUT_MS = 25000;
-
 let reporterState = null;
 let fabButton = null;
 let bugActor = null;
@@ -49,14 +47,14 @@ function reporterCopy() {
     ? {
       fabLabel: 'An app is never finished',
       fabTitle: 'An app is never finished — tell CTOX what should improve.',
-      fabAria: 'Send feedback to CTOX: report a bug or feature',
-      tagline: 'An app is never finished. Your report goes straight into the CTOX work queue.',
+      fabAria: 'Save feedback: report a bug or feature',
+      tagline: 'An app is never finished. Save the report here first, then manage or delegate it from Bugs & Features.',
     }
     : {
       fabLabel: 'Eine App ist nie fertig',
       fabTitle: 'Eine App ist nie fertig — sag CTOX, was besser werden soll.',
-      fabAria: 'Feedback an CTOX senden: Bug oder Feature melden',
-      tagline: 'Eine App ist nie fertig. Dein Hinweis geht direkt in die CTOX-Arbeitsschlange.',
+      fabAria: 'Feedback speichern: Bug oder Feature melden',
+      tagline: 'Eine App ist nie fertig. Speichere den Hinweis zuerst hier und verwalte oder delegiere ihn danach in Bugs & Features.',
     };
 }
 
@@ -345,9 +343,9 @@ function animLoop(timestamp) {
 export function initBusinessReporter({
   session,
   getActiveModule,
-  commandBus,
   db = null,
   sync = null,
+  ensureReportCollections = null,
   idleMs = IDLE_TIME,
 }) {
   if (!session?.authenticated || document.querySelector('[data-ctox-reporter]')) return;
@@ -356,9 +354,9 @@ export function initBusinessReporter({
   reporterState = {
     session,
     getActiveModule,
-    commandBus,
     db,
     sync,
+    ensureReportCollections,
     modal: null,
     overlay: null,
     attachment: null,
@@ -434,6 +432,26 @@ export function initBusinessReporter({
   idleTimeout = setTimeout(startEasterEgg, idleDelay);
 }
 
+export function resolveBusinessReporterModule({
+  activeModule = null,
+  modules = [],
+  windowManager = null,
+} = {}) {
+  const focusedWindow = windowManager?.listWindows?.()
+    ?.find((entry) => entry?.isFocused && entry?.state !== 'minimized');
+  const ownerId = String(focusedWindow?.ownerId || '');
+  const focusedModuleId = ownerId.replace(/^(?:desktop-app|module):/, '');
+  if (focusedModuleId && focusedModuleId !== ownerId) {
+    const catalogModule = modules.find((entry) => entry?.id === focusedModuleId);
+    if (catalogModule) return catalogModule;
+    return {
+      id: focusedModuleId,
+      title: String(focusedWindow?.title || focusedModuleId).trim() || focusedModuleId,
+    };
+  }
+  return activeModule || { id: 'ctox', title: 'CTOX' };
+}
+
 function openReporterDialog(state) {
   const module = state.getActiveModule?.() || { id: 'ctox', title: 'CTOX' };
   const backdrop = document.createElement('div');
@@ -442,7 +460,7 @@ function openReporterDialog(state) {
     <form class="ctox-report-dialog" data-report-form>
       <header>
         <div>
-          <strong>Bug oder Feature an CTOX</strong>
+          <strong>Bug oder Feature erfassen</strong>
           <span>${escapeHtml(module.title || module.id || 'Business OS')}</span>
         </div>
         <button type="button" class="ctox-report-close" data-close aria-label="Schließen">x</button>
@@ -475,7 +493,7 @@ function openReporterDialog(state) {
       </label>
       <label>
         <span>Erwartung</span>
-        <textarea name="expected" rows="3" placeholder="Was sollte CTOX tun oder prüfen?"></textarea>
+        <textarea name="expected" rows="3" placeholder="Was sollte stattdessen passieren?"></textarea>
       </label>
       <div class="ctox-report-actions">
         <button type="button" class="ctox-report-secondary" data-markup>${screenIconSvg()}<span>Screenshot + Kritzeln</span></button>
@@ -490,12 +508,13 @@ function openReporterDialog(state) {
       </div>
       <footer>
         <span data-status></span>
-        <button type="submit">An CTOX senden</button>
+        <button type="submit">In Bugs & Features speichern</button>
       </footer>
     </form>
   `;
   state.modal = backdrop;
   state.attachment = null;
+  state.pendingReportIdentity = null;
   backdrop.querySelector('[data-close]')?.addEventListener('click', () => closeReporterDialog(state));
   backdrop.querySelector('[data-open-reports]')?.addEventListener('click', () => {
     closeReporterDialog(state);
@@ -549,11 +568,17 @@ async function submitReport(state, module, form) {
     created_at: new Date(now).toISOString(),
     attachment: reporterAttachmentContext(state.attachment),
   };
+  const identity = state.pendingReportIdentity || {
+    reportId: `report_${newId()}`,
+  };
+  state.pendingReportIdentity = identity;
   submit.disabled = true;
-  status.textContent = 'Sende...';
+  status.textContent = 'Speichere in Bugs & Features...';
   try {
-    const result = await dispatchBusinessReport({
-      commandBus: state.commandBus,
+    await state.ensureReportCollections?.();
+    const result = await saveBusinessReportLocally({
+      db: state.db,
+      sync: state.sync,
       session: state.session,
       module,
       kind,
@@ -563,31 +588,21 @@ async function submitReport(state, module, form) {
       expected,
       clientContext,
       now,
+      reportId: identity.reportId,
     });
-    await upsertLocalReport(state, {
-      result,
-      module,
-      kind,
-      severity,
-      title,
-      summary,
-      expected,
-      clientContext,
-      now,
-    });
-    window.dispatchEvent(new CustomEvent('ctox-business-os-reports-updated', {
-      detail: { reportId: result.report_id || '', moduleId: module.id || '' },
-    }));
+    notifyReportsUpdated(result.report_id || identity.reportId, module.id || '');
+    state.pendingReportIdentity = null;
     status.textContent = reporterStatusText(result);
-    setTimeout(() => closeReporterDialog(state), result.task_id ? 900 : 1400);
+    setTimeout(() => closeReporterDialog(state), 1400);
   } catch (error) {
     submit.disabled = false;
     status.textContent = reporterErrorText(error);
   }
 }
 
-export async function dispatchBusinessReport({
-  commandBus,
+export async function saveBusinessReportLocally({
+  db,
+  sync = null,
   session,
   module,
   kind = 'bug',
@@ -597,56 +612,37 @@ export async function dispatchBusinessReport({
   expected = '',
   clientContext = {},
   now = Date.now(),
+  reportId = '',
 }) {
-  if (!commandBus?.dispatch) {
-    throw new Error('business_commands collection is required for reports');
-  }
-  const reportId = `report_${newId()}`;
-  const commandId = `cmd_${newId()}`;
-  const moduleId = module?.id || clientContext?.module_id || 'ctox';
-  const actor = session?.user ? {
-    id: session.user.id || '',
-    display_name: session.user.display_name || session.user.name || session.user.id || '',
-    role: session.user.role || 'user',
-    is_admin: Boolean(session.user.is_admin),
-  } : null;
-  const dispatchResult = await withTimeout(commandBus.dispatch({
-    id: commandId,
-    module: 'ctox',
-    type: `ctox.report.${kind || 'bug'}`,
-    record_id: reportId,
-    inbound_channel: moduleId,
-    payload: {
-      report_id: reportId,
-      module_id: moduleId,
+  const resolvedReportId = String(reportId || '').trim() || `report_${newId()}`;
+  const result = {
+    ok: true,
+    report_id: resolvedReportId,
+    command_id: '',
+    task_id: '',
+    task_status: 'not_delegated',
+    status: 'open',
+    report_status: 'open',
+    delivery_status: 'not_delegated',
+    transport: 'rxdb-webrtc',
+  };
+  await persistLocalBusinessReport({
+    db,
+    sync,
+    session,
+    report: {
+      result,
+      module,
       kind,
       severity,
       title,
       summary,
       expected,
-      reporter_id: actor?.id || '',
+      clientContext,
+      now,
     },
-    client_context: {
-      ...clientContext,
-      actor,
-      created_at: clientContext?.created_at || new Date(now).toISOString(),
-    },
-  }), REPORT_DISPATCH_TIMEOUT_MS, 'Report konnte nicht rechtzeitig an CTOX übergeben werden.');
-  const taskId = String(dispatchResult?.task_id || '').trim();
-  if (!taskId) {
-    throw new Error('CTOX hat fuer den Report keine echte Queue-ID zurueckprojiziert.');
-  }
-  const status = String(dispatchResult?.status || 'accepted').trim() || 'accepted';
-  const taskStatus = String(dispatchResult?.task_status || 'queued').trim() || 'queued';
-  return {
-    ok: dispatchResult?.ok !== false,
-    report_id: reportId,
-    command_id: dispatchResult?.command_id || commandId,
-    task_id: taskId,
-    task_status: taskStatus,
-    status,
-    transport: dispatchResult?.transport || 'rxdb-webrtc',
-  };
+  });
+  return result;
 }
 
 function reporterAttachmentContext(attachment) {
@@ -677,8 +673,9 @@ function countStrokePoints(strokes) {
 }
 
 function reporterStatusText(result) {
-  if (result?.task_id) return 'Als CTOX Task angelegt.';
-  return 'Report wurde nicht als CTOX Task bestaetigt.';
+  return result?.report_id
+    ? 'In Bugs & Features gespeichert. Dort kannst du den Report verwalten oder delegieren.'
+    : 'Report konnte nicht gespeichert werden.';
 }
 
 function reporterErrorText(error) {
@@ -686,20 +683,33 @@ function reporterErrorText(error) {
   return message || 'Report konnte nicht gesendet werden.';
 }
 
-async function withTimeout(promise, timeoutMs, message) {
-  return Promise.race([
-    Promise.resolve(promise),
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), timeoutMs)),
-  ]);
-}
-
-async function upsertLocalReport(state, report) {
-  const raw = state.db?.raw;
-  if (!raw) return;
-  await prepareReportSync(state.sync);
+export async function persistLocalBusinessReport({ db, sync = null, session = null, report }) {
+  const moduleReports = db?.collection?.('business_module_reports')
+    || db?.raw?.business_module_reports
+    || null;
+  const bugReports = db?.collection?.('ctox_bug_reports')
+    || db?.raw?.ctox_bug_reports
+    || null;
+  if (!moduleReports || !bugReports) {
+    throw new Error('Bugs & Features ist noch nicht bereit. Bitte erneut senden.');
+  }
+  // Report visibility is local-first. Starting or catching up the WebRTC
+  // bridges must never block the write: delegation is an explicit later
+  // action from Bugs & Features, not part of this persistence step.
   const id = report.result?.report_id || `report_${crypto.randomUUID?.() || Date.now()}`;
   const taskId = report.result?.task_id || '';
   const commandId = report.result?.command_id || '';
+  const reportStatus = report.result?.report_status || 'open';
+  const deliveryStatus = report.result?.delivery_status
+    || (taskId ? 'accepted' : (commandId ? 'pending_sync' : 'not_delegated'));
+  const clientContext = {
+    ...(report.clientContext || {}),
+    report_delivery: {
+      status: deliveryStatus,
+      command_id: commandId,
+      task_id: taskId,
+    },
+  };
   const common = {
     id,
     report_id: id,
@@ -709,38 +719,46 @@ async function upsertLocalReport(state, report) {
     title: report.title,
     summary: report.summary,
     expected: report.expected,
-    status: report.result?.status || 'open',
-    reporter_id: state.session?.user?.id || '',
+    status: reportStatus,
+    reporter_id: session?.user?.id || '',
     ctox_command_id: commandId,
     task_id: taskId,
     inbound_channel: report.module.id || 'ctox',
-    client_context: report.clientContext,
+    client_context: clientContext,
     created_at_ms: report.now,
     updated_at_ms: report.now,
   };
-  await upsertRx(raw.business_module_reports, common);
-  await upsertRx(raw.ctox_bug_reports, {
+  await upsertRx(moduleReports, common);
+  await upsertRx(bugReports, {
     id,
     title: report.title,
-    status: report.result?.status || 'open',
+    status: reportStatus,
     module: report.module.id || 'ctox',
     inbound_channel: report.module.id || 'ctox',
     severity: report.severity,
     surface: 'business-os',
     description: report.summary,
-    evidence: report.clientContext,
+    evidence: clientContext,
     payload: {
       kind: report.kind,
       expected: report.expected,
       ctox_command_id: commandId,
       task_id: taskId,
+      delivery_status: deliveryStatus,
       change_summary: '',
       rollback_version_id: '',
     },
     created_at_ms: report.now,
     updated_at_ms: report.now,
   });
-  await waitForReportSync(state.sync);
+  void waitForReportSync(sync);
+  return true;
+}
+
+function notifyReportsUpdated(reportId, moduleId) {
+  window.dispatchEvent(new CustomEvent('ctox-business-os-reports-updated', {
+    detail: { reportId: reportId || '', moduleId: moduleId || '' },
+  }));
 }
 
 async function upsertRx(collection, doc) {
@@ -754,14 +772,6 @@ async function upsertRx(collection, doc) {
   const existing = await collection.findOne(doc.id).exec();
   if (existing) await existing.patch(doc);
   else await collection.insert(doc);
-}
-
-async function prepareReportSync(sync) {
-  if (!sync?.startCollection) return;
-  await Promise.all([
-    sync.startCollection('business_module_reports').then((bridge) => waitForSyncBridgeReady(bridge, 10000)).catch(() => null),
-    sync.startCollection('ctox_bug_reports').then((bridge) => waitForSyncBridgeReady(bridge, 10000)).catch(() => null),
-  ]);
 }
 
 async function waitForReportSync(sync) {
@@ -1268,7 +1278,9 @@ function installReporterStyles() {
       position: fixed;
       right: 18px;
       bottom: 18px;
-      z-index: 40;
+      /* Shell windows live at z-index 50. The standing reporter must remain
+         clickable above them while staying below shell menus and dialogs. */
+      z-index: 220;
       display: inline-flex;
       align-items: center;
       justify-content: flex-start;
@@ -1432,7 +1444,7 @@ function installReporterStyles() {
     .ctox-report-backdrop {
       position: fixed;
       inset: 0;
-      z-index: 80;
+      z-index: 280;
       display: grid;
       place-items: center;
       background: rgba(5, 8, 12, .62);

@@ -97,3 +97,44 @@
   .nachweise-rail { grid-column: 1; }
   .nachweise-main { grid-column: 1; }
 }
+
+/* Phone sheet (container <= 767px): the <= 760px block already stacks the
+   rail above the workbench, and the kit collapses .ctox-compact-form to
+   2/1 columns. What remains for touch operability: >=44px tap targets on
+   every control and a wrapping detail header so the record actions never
+   push past the viewport edge. */
+@container business-app-window (max-width: 767px) {
+  .nachweise-module .ctox-button,
+  .nachweise-module .ctox-run-control,
+  .nachweise-module .ctox-pane-icon,
+  .nachweise-module .ctox-icon-button,
+  .nachweise-module .ctox-sort-dir {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .nachweise-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .nachweise-module .ctox-input,
+  .nachweise-module .ctox-select,
+  .nachweise-module textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .nachweise-detail-head {
+    flex-wrap: wrap;
+  }
+
+  .nachweise-detail-actions {
+    flex-wrap: wrap;
+  }
+
+  /* Submit rows go full-width so the primary action is thumb-reachable. */
+  .nachweise-module .ctox-compact-form__actions > .ctox-button {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+}

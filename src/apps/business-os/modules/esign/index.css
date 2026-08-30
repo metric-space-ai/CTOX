@@ -162,3 +162,39 @@
     grid-column: 1;
   }
 }
+
+/* ---- Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes
+   interaktive Control erreicht das 44px-Minimum, Icon-Buttons in beiden
+   Dimensionen, Listenzeilen und Signer-Rows bekommen fingerhohe
+   Tap-Flaechen. Das Spalten-Stacking steuert die @container-Regel oben
+   (760px). ---- */
+@media (pointer: coarse) {
+  .esign-module button,
+  .esign-module input,
+  .esign-module select,
+  .esign-module textarea {
+    min-height: 44px;
+  }
+
+  .esign-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .esign-module .ctox-pane-tab,
+  .esign-module .ctox-sort-dir {
+    min-height: 44px;
+  }
+
+  .esign-module .ctox-sort-dir {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .esign-module .ctox-list-item,
+  .esign-module .esign-shard,
+  .esign-module .esign-row-compact,
+  .esign-module .esign-signer {
+    min-height: 44px;
+  }
+}

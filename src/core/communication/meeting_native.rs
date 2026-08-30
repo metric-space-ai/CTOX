@@ -6,9 +6,14 @@
 // the meeting chat, and responds when @CTOX is mentioned.
 
 use anyhow::{bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
+use ring::rand::{SecureRandom, SystemRandom};
+use ring::{aead, hmac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -29,7 +34,11 @@ use crate::communication_store::{
 use crate::inference::{engine, native_stt, runtime_env, supervisor};
 
 const DEFAULT_MEETING_STT_MODEL: &str = "engineai/Voxtral-Mini-4B-Realtime-2602";
+const DEFAULT_MANAGED_MEETING_BOT_NAME: &str = "Milton Protokoll-Assistent – Transkription aktiv";
 const MEETING_XVFB_SERVER_ARGS: &str = "-screen 0 1920x1080x24 -ac +extension RANDR";
+const MEETING_ARTIFACT_SECRET_SCOPE: &str = "meeting-artifacts";
+const MEETING_ARTIFACT_SECRET_NAME: &str = "aes-256-gcm-key-v1";
+const MEETING_ARTIFACT_FORMAT: &str = "ctox.meeting-artifact.aes256gcm.v1";
 
 static MEETING_SYNC_FILE_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, MeetingSyncFileState>>> =
     OnceLock::new();
@@ -52,6 +61,7 @@ pub(crate) enum MeetingSessionStatus {
     Running,
     Active,
     JoinFailed,
+    ConsentRevoked,
     Ended,
 }
 
@@ -62,6 +72,7 @@ impl MeetingSessionStatus {
             "running" => Ok(Self::Running),
             "active" => Ok(Self::Active),
             "join_failed" => Ok(Self::JoinFailed),
+            "consent_revoked" => Ok(Self::ConsentRevoked),
             "ended" => Ok(Self::Ended),
             other => bail!("unknown meeting session status `{other}`"),
         }
@@ -81,6 +92,7 @@ impl MeetingSessionStatus {
             Self::Running => "running",
             Self::Active => "active",
             Self::JoinFailed => "join_failed",
+            Self::ConsentRevoked => "consent_revoked",
             Self::Ended => "ended",
         }
     }
@@ -138,10 +150,7 @@ pub(crate) fn sync(
                 skipped_unchanged += 1;
                 continue;
             }
-            let Ok(contents) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(mut session) = serde_json::from_str::<Value>(&contents) else {
+            let Ok(mut session) = load_meeting_session_value(root, &path) else {
                 continue;
             };
             let status = MeetingSessionStatus::from_session_value(&session)
@@ -216,7 +225,7 @@ pub(crate) fn sync(
                                 Value::String(now_iso_string()),
                             );
                         }
-                        let _ = fs::write(&path, serde_json::to_string_pretty(&session)?);
+                        let _ = persist_split_meeting_session_value(root, &path, &session);
                     }
                     continue;
                 }
@@ -249,7 +258,7 @@ pub(crate) fn sync(
                             Value::String(now_iso_string()),
                         );
                     }
-                    let _ = fs::write(&path, serde_json::to_string_pretty(&session)?);
+                    let _ = persist_split_meeting_session_value(root, &path, &session);
                 }
                 let transcript_snapshot = session_transcript_snapshot(&session, 12);
                 let chat_snapshot = session_chat_snapshot(&session, 20);
@@ -361,8 +370,7 @@ pub(crate) fn send(
             session_path.display()
         );
     }
-    let contents = fs::read_to_string(&session_path)?;
-    let session: Value = serde_json::from_str(&contents)?;
+    let session = load_meeting_session_value(root, &session_path)?;
     let status = MeetingSessionStatus::from_session_value(&session).with_context(|| {
         format!(
             "invalid meeting session status at {}",
@@ -412,6 +420,23 @@ pub(crate) fn send(
 
 fn first_mention_ack_text() -> &'static str {
     "Ich habe die Frage gesehen und antworte hier im Chat. Das kann einen Augenblick dauern, weil mir Echtzeit-Antworten leider noch nicht zuverlaessig moeglich sind."
+}
+
+fn meeting_consent_notice_text() -> &'static str {
+    "Hinweis: Der Milton Protokoll-Assistent transkribiert dieses Meeting auf Grundlage der vorab dokumentierten Einwilligung. Mikrofon und Kamera des Assistenten bleiben deaktiviert. Schreiben Sie „Transkription stoppen“ in den Chat, um die Aufzeichnung sofort zu beenden und Teildaten zu löschen."
+}
+
+fn chat_revokes_meeting_consent(text: &str) -> bool {
+    let normalized = normalize_chat_text(text).to_lowercase();
+    [
+        "transkription stoppen",
+        "transkription beenden",
+        "aufzeichnung stoppen",
+        "keine aufzeichnung",
+        "widerruf transkription",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
 }
 
 fn meeting_outbound_message_key(
@@ -2079,6 +2104,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     let reader = BufReader::new(stdout);
     let mut join_failure_reason: Option<String> = None;
     let mut runner_reported_end_reason: Option<String> = None;
+    let mut consent_revoked_by: Option<String> = None;
     let mut last_speaker_signal: Option<SpeakerSignal> = None;
     let speaker_probe_path =
         meeting_sessions_dir(root).join(format!("{}-speaker-probes.jsonl", session.session_id));
@@ -2116,7 +2142,22 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                     eprintln!("[meeting] Joined meeting successfully ({reason})");
                 }
                 session.status = MeetingSessionStatus::Active;
+                let notice = meeting_consent_notice_text();
+                match write_chat_command_to_session(&session.to_json(), notice, None) {
+                    Ok(()) => session.outbound_chat_texts.push(notice.to_string()),
+                    Err(err) => {
+                        eprintln!("[meeting] warning: consent notice could not be queued: {err}")
+                    }
+                }
                 session.save(root)?;
+                if let Some(meeting_id) = managed_meeting_id_for_url(root, &session.meeting_url) {
+                    emit_managed_meeting_event(
+                        root,
+                        &meeting_id,
+                        "in_progress",
+                        json!({"session_id": session.session_id}),
+                    );
+                }
             }
             "join_failed" => {
                 let reason = event.get("reason").and_then(Value::as_str).unwrap_or("");
@@ -2219,6 +2260,12 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                     continue;
                 }
 
+                if chat_revokes_meeting_consent(text) {
+                    eprintln!("[meeting] consent revoked in chat by {sender}");
+                    consent_revoked_by = Some(sanitize_speaker_display(sender));
+                    break;
+                }
+
                 eprintln!("[meeting] chat [{sender}]: {text}");
                 session.chat_messages.push(ChatMessage {
                     sender: sender.to_string(),
@@ -2267,9 +2314,9 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                 eprintln!("[meeting] chat sent: {}", &text[..text.len().min(80)]);
                 if !message_key.is_empty() {
                     match confirm_meeting_outbound_message(root, &session.session_id, message_key) {
-                        Ok(true) => eprintln!(
-                            "[meeting] outbound message confirmed sent: {message_key}"
-                        ),
+                        Ok(true) => {
+                            eprintln!("[meeting] outbound message confirmed sent: {message_key}")
+                        }
                         Ok(false) => eprintln!(
                             "[meeting] warning: no submitted outbound row found for confirmation {message_key}"
                         ),
@@ -2343,6 +2390,10 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
         }
     }
 
+    if consent_revoked_by.is_some() {
+        let _ = child.kill();
+    }
+
     // The process monitor owns terminal session persistence. This covers normal
     // finalization and runner crashes that close stdout without an `ended` event.
     let wait_result = child.wait();
@@ -2355,6 +2406,40 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
 
     // Clean up script file
     let _ = fs::remove_file(&script_path);
+
+    if let Some(actor) = consent_revoked_by {
+        session.status = MeetingSessionStatus::ConsentRevoked;
+        session.end_reason = Some(format!("consent revoked in meeting chat by {actor}"));
+        session.ended_at = Some(now_iso_string());
+        session.transcript_chunks.clear();
+        session.transcript_segments.clear();
+        session.speaker_signals.clear();
+        session.chat_messages.clear();
+        session.pending_audio_chunks.clear();
+        session.save(root)?;
+        delete_meeting_sensitive_artifacts(root, &session.session_id);
+        if let Some(meeting_id) = managed_meeting_id_for_url(root, &session.meeting_url) {
+            emit_managed_meeting_event(
+                root,
+                &meeting_id,
+                "consent_revoked",
+                json!({
+                    "session_id": session.session_id,
+                    "diagnosis": "Einwilligung im Meeting-Chat widerrufen; Teildaten gelöscht",
+                    "transcript": {"available": false, "segment_count": 0},
+                }),
+            );
+        }
+        drop(stdin);
+        stt_guard.finish();
+        return Ok(json!({
+            "ok": true,
+            "session_id": session.session_id,
+            "provider": session.provider,
+            "status": "consent_revoked",
+            "partial_artifacts_deleted": true,
+        }));
+    }
 
     if let Some(reason) = join_failure_reason {
         drop(stdin); // close stdin pipe
@@ -2421,22 +2506,51 @@ fn finalize_meeting(
     let chat_log = session.full_chat_log();
 
     if transcript.is_empty() && chat_log.is_empty() {
+        if let Some(meeting_id) = managed_meeting_id_for_url(root, &session.meeting_url) {
+            emit_managed_meeting_event(
+                root,
+                &meeting_id,
+                "completed",
+                json!({
+                    "session_id": session.session_id,
+                    "transcript": {"available": false, "segment_count": 0},
+                    "summary": generate_structured_meeting_summary(root, session),
+                }),
+            );
+        }
         return Ok(json!({
             "action": "skipped",
             "reason": "no transcript or chat content to process",
         }));
     }
 
-    // Save full transcript to file
-    let transcript_path =
-        meeting_sessions_dir(root).join(format!("{}-transcript.txt", session.session_id));
-    fs::write(&transcript_path, &transcript)?;
+    // Full meeting content is always encrypted at rest. The transcript payload
+    // keeps the structured speaker provenance so consumers do not have to infer names.
+    let transcript_payload = json!({
+        "transcript": transcript,
+        "segments": session.transcript_segments,
+        "sha256": sha256_hex(transcript.as_bytes()),
+    });
+    let transcript_path = write_encrypted_meeting_artifact(
+        root,
+        &session.session_id,
+        "transcript",
+        &serde_json::to_vec(&transcript_payload)?,
+    )?;
 
-    let chat_log_path =
-        meeting_sessions_dir(root).join(format!("{}-chatlog.txt", session.session_id));
-    if !chat_log.is_empty() {
-        fs::write(&chat_log_path, &chat_log)?;
-    }
+    let chat_log_path = write_encrypted_meeting_artifact(
+        root,
+        &session.session_id,
+        "chatlog",
+        chat_log.as_bytes(),
+    )?;
+    let structured_summary = generate_structured_meeting_summary(root, session);
+    let summary_path = write_encrypted_meeting_artifact(
+        root,
+        &session.session_id,
+        "summary",
+        &serde_json::to_vec(&structured_summary)?,
+    )?;
     let recording_artifacts = list_recording_artifacts(root, &session.session_id);
     let artifact_manifest_path =
         meeting_sessions_dir(root).join(format!("{}-artifacts.json", session.session_id));
@@ -2445,11 +2559,14 @@ fn finalize_meeting(
         serde_json::to_string_pretty(&json!({
             "session_id": session.session_id,
             "provider": session.provider,
-            "meeting_url": session.meeting_url,
+            "meeting_url_sha256": sha256_hex(session.meeting_url.as_bytes()),
             "started_at": session.started_at,
             "ended_at": session.ended_at,
-            "transcript_path": transcript_path.display().to_string(),
-            "chatlog_path": chat_log_path.display().to_string(),
+            "transcript_artifact": transcript_path.file_name().and_then(|name| name.to_str()),
+            "chatlog_artifact": chat_log_path.file_name().and_then(|name| name.to_str()),
+            "summary_artifact": summary_path.file_name().and_then(|name| name.to_str()),
+            "encryption": MEETING_ARTIFACT_FORMAT,
+            "transcript_sha256": sha256_hex(transcript.as_bytes()),
             "transcript_segment_count": session.transcript_segments.len(),
             "speaker_signal_count": session.speaker_signals.len(),
             "recording_artifacts": recording_artifacts,
@@ -2460,11 +2577,10 @@ fn finalize_meeting(
     let prompt = format!(
         "## Post-meeting transcript processing\n\
          \n\
-         A **{provider}** meeting has ended. Process the transcript and chat log below.\n\
+         A **{provider}** meeting has ended. Process the structured CTOX summary below.\n\
          \n\
          ### Meeting metadata\n\
          - Provider: {provider}\n\
-         - URL: {url}\n\
          - Session: `{session_id}`\n\
          - Started: {started}\n\
          - Ended: {ended}\n\
@@ -2476,7 +2592,7 @@ fn finalize_meeting(
          \n\
          ### What to extract\n\
          \n\
-         Read the transcript carefully and extract:\n\
+         Use the structured summary as the source for follow-up work:\n\
          \n\
          1. **Decisions** -- What was agreed upon? By whom?\n\
          2. **Action items** -- Who committed to doing what? By when?\n\
@@ -2514,13 +2630,9 @@ fn finalize_meeting(
          - Check existing tickets before creating duplicates.\n\
          - The summary should be something a human who missed the meeting can act on.\n\
          \n\
-         ### Full transcript\n\
-         {transcript}\n\
-         \n\
-         ### Chat log\n\
-         {chat_log}\n",
+         ### Structured summary\n\
+         {structured_summary}\n",
         provider = session.provider,
-        url = session.meeting_url,
         session_id = session.session_id,
         started = session.started_at,
         ended = session.ended_at.as_deref().unwrap_or("unknown"),
@@ -2529,16 +2641,7 @@ fn finalize_meeting(
         speaker_signal_count = session.speaker_signals.len(),
         chat_count = session.chat_messages.len(),
         transcript_path = transcript_path.display(),
-        transcript = if transcript.is_empty() {
-            "(empty)"
-        } else {
-            &transcript
-        },
-        chat_log = if chat_log.is_empty() {
-            "(no chat)"
-        } else {
-            &chat_log
-        },
+        structured_summary = serde_json::to_string_pretty(&structured_summary)?,
     );
 
     let post_meeting_ticket = crate::ticket_local_native::create_local_ticket(
@@ -2616,12 +2719,31 @@ fn finalize_meeting(
     refresh_thread(&mut conn, &session.session_id)?;
     ensure_routing_rows_for_inbound(&conn)?;
 
+    if let Some(meeting_id) = managed_meeting_id_for_url(root, &session.meeting_url) {
+        emit_managed_meeting_event(
+            root,
+            &meeting_id,
+            "completed",
+            json!({
+                "session_id": session.session_id,
+                "transcript": {
+                    "available": true,
+                    "segment_count": session.transcript_segments.len(),
+                    "sha256": sha256_hex(transcript.as_bytes()),
+                },
+                "summary": structured_summary,
+            }),
+        );
+    }
+
+    let deleted_recording_artifacts = delete_recording_artifacts(root, &session.session_id);
     Ok(json!({
         "action": "ingested",
         "message_key": message_key,
         "transcript_path": transcript_path.display().to_string(),
         "artifact_manifest_path": artifact_manifest_path.display().to_string(),
         "recording_artifact_count": recording_artifacts.len(),
+        "recording_artifacts_deleted": deleted_recording_artifacts,
         "post_meeting_ticket_id": post_meeting_ticket.as_ref().map(|ticket| ticket.ticket_id.clone()),
         "skill": "meeting-participant",
     }))
@@ -2661,6 +2783,48 @@ fn list_recording_artifacts(root: &Path, session_id: &str) -> Vec<String> {
     artifacts.sort();
     artifacts.dedup();
     artifacts
+}
+
+fn delete_recording_artifacts(root: &Path, session_id: &str) -> usize {
+    let artifacts = list_recording_artifacts(root, session_id);
+    let mut deleted = 0usize;
+    for artifact in artifacts {
+        if fs::remove_file(&artifact).is_ok() {
+            deleted += 1;
+        }
+    }
+    let audio_dir = meeting_sessions_dir(root).join(format!("{session_id}-audio"));
+    if audio_dir.is_dir() {
+        let _ = fs::remove_dir(&audio_dir);
+    }
+    deleted
+}
+
+fn delete_meeting_sensitive_artifacts(root: &Path, session_id: &str) -> usize {
+    let dir = meeting_sessions_dir(root);
+    let mut deleted = delete_recording_artifacts(root, session_id);
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let should_delete = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| {
+                    name.starts_with(session_id)
+                        && (name.ends_with("-sensitive.enc.json")
+                            || name.ends_with("-transcript.enc.json")
+                            || name.ends_with("-chatlog.enc.json")
+                            || name.ends_with("-summary.enc.json")
+                            || name.ends_with("-speaker-probes.jsonl")
+                            || name.ends_with(".commands.jsonl")
+                            || name.ends_with("-artifacts.json"))
+                })
+                .unwrap_or(false);
+            if should_delete && path.is_file() && fs::remove_file(path).is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+    deleted
 }
 
 fn is_recording_media_path(path: &Path) -> bool {
@@ -3293,7 +3457,7 @@ impl MeetingSession {
         let dir = meeting_sessions_dir(root);
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", self.session_id));
-        fs::write(&path, serde_json::to_string_pretty(&self.to_json())?)?;
+        persist_split_meeting_session_value(root, &path, &self.to_json())?;
         Ok(())
     }
 
@@ -3940,7 +4104,7 @@ try {
     emit({ type: "warning", message: "Teams audio option not selected: " + err.message });
   }
 
-  // 3. Keep the injected transcript camera on, mute microphone
+  // 3. Managed meeting privacy baseline: microphone and camera stay disabled.
   try {
     await page.waitForTimeout(2000);
     // Microphone mute
@@ -3954,6 +4118,18 @@ try {
     for (const sel of micSelectors) {
       const el = page.locator(sel).first();
       if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await el.click(); await page.waitForTimeout(500); break;
+      }
+    }
+    const cameraOffSelectors = [
+      'button[aria-label*="Turn camera off" i]',
+      'button[aria-label*="Kamera ausschalten" i]',
+      'input[data-tid="toggle-video"][checked]',
+      'input[role="switch"][data-tid="toggle-video"][aria-checked="true"]',
+    ];
+    for (const sel of cameraOffSelectors) {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
         await el.click(); await page.waitForTimeout(500); break;
       }
     }
@@ -4006,7 +4182,7 @@ try {
   // 5. Wait for lobby admission (Leave button appears)
   {
     const DENIED_TEXT = "Sorry, but you were denied access to the meeting";
-    const wanderingTime = Math.min(10 * 60 * 1000, maxDurationMs);
+    const wanderingTime = Math.min(15 * 60 * 1000, maxDurationMs);
     try {
       const leaveBtn = page.getByRole("button", { name: /Leave|Verlassen/i });
       await leaveBtn.waitFor({ timeout: wanderingTime });
@@ -4689,6 +4865,388 @@ pub(crate) fn cancel_meeting_join(root: &Path, meeting_url: &str) -> Result<Valu
     cancel_meeting_join_with_uid(root, meeting_url, None)
 }
 
+fn validate_managed_meeting_id(meeting_id: &str) -> Result<&str> {
+    let value = meeting_id.trim();
+    anyhow::ensure!(
+        !value.is_empty()
+            && value.len() <= 180
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "managed meeting id must contain only letters, digits, `_`, or `-`"
+    );
+    Ok(value)
+}
+
+fn managed_meeting_record(root: &Path, meeting_id: &str) -> Result<(PathBuf, Value)> {
+    validate_managed_meeting_id(meeting_id)?;
+    for dir in existing_meeting_session_dirs(root) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json")
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".enc.json"))
+            {
+                continue;
+            }
+            let Ok(value) = serde_json::from_slice::<Value>(&fs::read(&path).unwrap_or_default())
+            else {
+                continue;
+            };
+            if value.get("external_id").and_then(Value::as_str) == Some(meeting_id) {
+                return Ok((path, value));
+            }
+        }
+    }
+    bail!("managed meeting `{meeting_id}` not found")
+}
+
+fn managed_meeting_id_for_url(root: &Path, meeting_url: &str) -> Option<String> {
+    for dir in existing_meeting_session_dirs(root) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_slice::<Value>(&fs::read(path).unwrap_or_default())
+            else {
+                continue;
+            };
+            if value.get("meeting_url").and_then(Value::as_str) == Some(meeting_url) {
+                if let Some(external_id) = value.get("external_id").and_then(Value::as_str) {
+                    return Some(external_id.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn managed_meeting_session(root: &Path, record: &Value) -> Option<(PathBuf, Value)> {
+    let meeting_url = record.get("meeting_url").and_then(Value::as_str)?;
+    let mut candidates = Vec::new();
+    for dir in existing_meeting_session_dirs(root) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let Ok(value) = load_meeting_session_value(root, &path) else {
+                continue;
+            };
+            if value.get("session_id").and_then(Value::as_str).is_some()
+                && value.get("meeting_url").and_then(Value::as_str) == Some(meeting_url)
+            {
+                candidates.push((path, value));
+            }
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.1
+            .get("started_at")
+            .and_then(Value::as_str)
+            .cmp(&right.1.get("started_at").and_then(Value::as_str))
+    });
+    candidates.pop()
+}
+
+fn ensure_managed_meeting_capacity(root: &Path, meeting_id: &str, starts_at: &str) -> Result<()> {
+    let requested = DateTime::parse_from_rfc3339(starts_at)
+        .context("meeting start must be an RFC3339 timestamp")?
+        .with_timezone(&Utc);
+    for dir in existing_meeting_session_dirs(root) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let Ok(value) = serde_json::from_slice::<Value>(&fs::read(path).unwrap_or_default())
+            else {
+                continue;
+            };
+            if value.get("external_id").and_then(Value::as_str) == Some(meeting_id)
+                || !matches!(
+                    value.get("status").and_then(Value::as_str),
+                    Some("scheduled" | "joining" | "running" | "active")
+                )
+            {
+                continue;
+            }
+            let Some(existing) = value
+                .get("meeting_time")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc))
+            else {
+                continue;
+            };
+            if (requested - existing).num_minutes().abs() < 180 {
+                bail!("meeting capacity conflict: pilot runtime allows one meeting at a time");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn managed_meeting_runtime_health(root: &Path) -> Value {
+    let required = if cfg!(target_os = "linux") {
+        vec!["ffmpeg", "Xvfb", "pactl"]
+    } else {
+        vec!["ffmpeg"]
+    };
+    let dependencies = required
+        .iter()
+        .map(|name| (name.to_string(), json!(command_available(name))))
+        .collect::<serde_json::Map<String, Value>>();
+    let node_available = find_node_executable().is_ok();
+    let playwright_reference = root.join("runtime/browser/interactive-reference").is_dir();
+    let dependencies_ready = dependencies
+        .values()
+        .all(|value| value.as_bool() == Some(true))
+        && node_available
+        && playwright_reference;
+    json!({
+        "ok": dependencies_ready,
+        "dependencies": dependencies,
+        "node": node_available,
+        "playwright_reference": playwright_reference,
+        "stt_reachable": check_engine_reachable(root),
+        "capacity": {"max_concurrent_meetings": 1},
+    })
+}
+
+pub(crate) fn schedule_managed_meeting(
+    root: &Path,
+    external_id: &str,
+    join_url: &str,
+    starts_at: &str,
+    bot_name: &str,
+    consent_ref: &str,
+    tenant_ref: &str,
+    lead_ref: &str,
+) -> Result<Value> {
+    let external_id = validate_managed_meeting_id(external_id)?;
+    anyhow::ensure!(
+        !consent_ref.trim().is_empty(),
+        "consent reference is required"
+    );
+    anyhow::ensure!(
+        !tenant_ref.trim().is_empty(),
+        "tenant reference is required"
+    );
+    anyhow::ensure!(!lead_ref.trim().is_empty(), "lead reference is required");
+    anyhow::ensure!(
+        bot_name.trim() == DEFAULT_MANAGED_MEETING_BOT_NAME,
+        "managed meeting bot name must disclose active transcription"
+    );
+    anyhow::ensure!(
+        MeetingProvider::detect(join_url) == Some(MeetingProvider::MicrosoftTeams),
+        "managed meeting v1 supports Microsoft Teams only"
+    );
+    ensure_managed_meeting_capacity(root, external_id, starts_at)?;
+    let health = managed_meeting_runtime_health(root);
+    anyhow::ensure!(
+        health.get("ok").and_then(Value::as_bool) == Some(true),
+        "managed meeting runtime dependencies are not ready: {health}"
+    );
+    let result = schedule_meeting_join_with_metadata(
+        root,
+        join_url,
+        starts_at,
+        bot_name,
+        Some(external_id),
+        None,
+        Some("Milton CRM managed Teams meeting"),
+    )?;
+    let schedule_name = result
+        .get("schedule_name")
+        .and_then(Value::as_str)
+        .context("managed schedule name missing")?;
+    let path = meeting_sessions_dir(root).join(format!("{schedule_name}.json"));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    if let Some(object) = record.as_object_mut() {
+        object.insert("external_id".to_string(), json!(external_id));
+        object.insert("consent_ref".to_string(), json!(consent_ref));
+        object.insert("tenant_ref".to_string(), json!(tenant_ref));
+        object.insert("lead_ref".to_string(), json!(lead_ref));
+        object.insert("managed_by".to_string(), json!("milton-crm"));
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
+    emit_managed_meeting_event(
+        root,
+        external_id,
+        "scheduled",
+        json!({"schedule_name": schedule_name}),
+    );
+    let mut result = result;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("runtime_health".to_string(), health);
+    }
+    Ok(result)
+}
+
+pub(crate) fn managed_meeting_status(root: &Path, meeting_id: &str) -> Result<Value> {
+    let (_, record) = managed_meeting_record(root, meeting_id)?;
+    if let Some((_, session)) = managed_meeting_session(root, &record) {
+        let raw_status = session
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let status = match raw_status {
+            "active" | "running" => "in_progress",
+            "ended" => "completed",
+            "join_failed" => "failed",
+            other => other,
+        };
+        return Ok(json!({
+            "ok": true,
+            "meeting_id": meeting_id,
+            "session_id": session.get("session_id"),
+            "status": status,
+            "diagnosis": session.get("end_reason"),
+            "runtime_health": managed_meeting_runtime_health(root),
+        }));
+    }
+    Ok(json!({
+        "ok": true,
+        "meeting_id": meeting_id,
+        "schedule_name": record.get("schedule_name"),
+        "status": record.get("status").and_then(Value::as_str).unwrap_or("scheduled"),
+        "runtime_health": managed_meeting_runtime_health(root),
+    }))
+}
+
+pub(crate) fn cancel_managed_meeting(root: &Path, meeting_id: &str, reason: &str) -> Result<Value> {
+    let (record_path, mut record) = managed_meeting_record(root, meeting_id)?;
+    if let Some((_, session)) = managed_meeting_session(root, &record) {
+        if let Some(pid) = session.get("pid").and_then(Value::as_u64) {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
+    let meeting_url = record
+        .get("meeting_url")
+        .and_then(Value::as_str)
+        .context("managed meeting URL missing")?;
+    cancel_meeting_join_with_uid(root, meeting_url, Some(meeting_id))?;
+    if let Some(object) = record.as_object_mut() {
+        object.insert("status".to_string(), json!("cancelled"));
+        object.insert("cancelled_at".to_string(), json!(now_iso_string()));
+        object.insert(
+            "cancel_reason".to_string(),
+            json!(reason.chars().take(500).collect::<String>()),
+        );
+    }
+    fs::write(record_path, serde_json::to_vec_pretty(&record)?)?;
+    emit_managed_meeting_event(root, meeting_id, "cancelled", json!({"diagnosis": reason}));
+    Ok(json!({"ok": true, "meeting_id": meeting_id, "status": "cancelled"}))
+}
+
+pub(crate) fn managed_meeting_transcript(root: &Path, meeting_id: &str) -> Result<Value> {
+    let (_, record) = managed_meeting_record(root, meeting_id)?;
+    let (_, session) = managed_meeting_session(root, &record)
+        .context("managed meeting has no runtime session yet")?;
+    let session_id = session
+        .get("session_id")
+        .and_then(Value::as_str)
+        .context("managed meeting session id missing")?;
+    let mut transcript = load_meeting_transcript(root, session_id)?;
+    if let Some(object) = transcript.as_object_mut() {
+        let safe_segments = object
+            .get("segments")
+            .and_then(Value::as_array)
+            .map(|segments| {
+                segments
+                    .iter()
+                    .map(|segment| {
+                        let source = segment
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let confidence = segment
+                            .get("confidence")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0);
+                        let attributable = source == "platform_caption" || confidence >= 0.70;
+                        json!({
+                            "timestamp": segment.get("timestamp"),
+                            "speaker": if attributable {
+                                segment.get("speaker_display").cloned().unwrap_or(Value::Null)
+                            } else {
+                                Value::Null
+                            },
+                            "source": source,
+                            "confidence": confidence,
+                            "text": segment.get("text"),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        object.insert("segments".to_string(), json!(safe_segments));
+        object.remove("session");
+        object.remove("chatlog");
+        object.insert("meeting_id".to_string(), json!(meeting_id));
+        object.insert(
+            "status".to_string(),
+            json!(
+                if session.get("status").and_then(Value::as_str) == Some("ended") {
+                    "completed"
+                } else {
+                    session
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                }
+            ),
+        );
+    }
+    Ok(transcript)
+}
+
+pub(crate) fn delete_managed_meeting(root: &Path, meeting_id: &str, reason: &str) -> Result<Value> {
+    let (record_path, mut record) = managed_meeting_record(root, meeting_id)?;
+    let _ = cancel_managed_meeting(root, meeting_id, reason);
+    let mut deleted = 0usize;
+    if let Some((session_path, session)) = managed_meeting_session(root, &record) {
+        if let Some(session_id) = session.get("session_id").and_then(Value::as_str) {
+            deleted += delete_meeting_sensitive_artifacts(root, session_id);
+        }
+        if fs::remove_file(session_path).is_ok() {
+            deleted += 1;
+        }
+    }
+    if let Some(object) = record.as_object_mut() {
+        object.insert("status".to_string(), json!("deleted"));
+        object.insert("deleted_at".to_string(), json!(now_iso_string()));
+        object.insert(
+            "delete_reason".to_string(),
+            json!(reason.chars().take(500).collect::<String>()),
+        );
+        object.remove("meeting_url");
+        object.remove("consent_ref");
+    }
+    fs::write(record_path, serde_json::to_vec_pretty(&record)?)?;
+    emit_managed_meeting_event(
+        root,
+        meeting_id,
+        "deleted",
+        json!({"transcript": {"available": false, "segment_count": 0}}),
+    );
+    Ok(json!({
+        "ok": true,
+        "meeting_id": meeting_id,
+        "status": "deleted",
+        "deleted_artifact_count": deleted,
+    }))
+}
+
 fn cancel_meeting_join_with_uid(
     root: &Path,
     meeting_url: &str,
@@ -4897,22 +5455,380 @@ fn meeting_session_artifact_file(root: &Path, session_id: &str, suffix: &str) ->
     canonical
 }
 
+fn meeting_artifact_key(root: &Path) -> Result<[u8; 32]> {
+    if let Ok(encoded) = crate::secrets::read_secret_value(
+        root,
+        MEETING_ARTIFACT_SECRET_SCOPE,
+        MEETING_ARTIFACT_SECRET_NAME,
+    ) {
+        let decoded = BASE64_STANDARD
+            .decode(encoded.trim())
+            .context("decode meeting artifact encryption key")?;
+        return decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("meeting artifact encryption key must be 32 bytes"));
+    }
+    let mut key = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut key)
+        .map_err(|_| anyhow::anyhow!("generate meeting artifact encryption key"))?;
+    crate::secrets::write_secret_record(
+        root,
+        MEETING_ARTIFACT_SECRET_SCOPE,
+        MEETING_ARTIFACT_SECRET_NAME,
+        &BASE64_STANDARD.encode(key),
+        Some("AES-256-GCM key for encrypted meeting transcripts and session payloads".to_string()),
+        json!({"format": MEETING_ARTIFACT_FORMAT}),
+    )?;
+    Ok(key)
+}
+
+fn meeting_artifact_aad(session_id: &str, kind: &str) -> String {
+    format!("ctox-meeting:{session_id}:{kind}:{MEETING_ARTIFACT_FORMAT}")
+}
+
+fn encrypted_meeting_artifact_path(root: &Path, session_id: &str, kind: &str) -> PathBuf {
+    meeting_sessions_dir(root).join(format!("{session_id}-{kind}.enc.json"))
+}
+
+fn write_encrypted_meeting_artifact(
+    root: &Path,
+    session_id: &str,
+    kind: &str,
+    plaintext: &[u8],
+) -> Result<PathBuf> {
+    let key_bytes = meeting_artifact_key(root)?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes)
+        .map_err(|_| anyhow::anyhow!("construct meeting artifact encryption key"))?;
+    let key = aead::LessSafeKey::new(unbound);
+    let mut nonce_bytes = [0u8; 12];
+    SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("generate meeting artifact nonce"))?;
+    let mut ciphertext = plaintext.to_vec();
+    key.seal_in_place_append_tag(
+        aead::Nonce::assume_unique_for_key(nonce_bytes),
+        aead::Aad::from(meeting_artifact_aad(session_id, kind).as_bytes()),
+        &mut ciphertext,
+    )
+    .map_err(|_| anyhow::anyhow!("encrypt meeting artifact"))?;
+    let path = encrypted_meeting_artifact_path(root, session_id, kind);
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "format": MEETING_ARTIFACT_FORMAT,
+            "kind": kind,
+            "session_id": session_id,
+            "nonce_b64": BASE64_STANDARD.encode(nonce_bytes),
+            "ciphertext_b64": BASE64_STANDARD.encode(ciphertext),
+            "plaintext_sha256": sha256_hex(plaintext),
+            "created_at": now_iso_string(),
+        }))?,
+    )?;
+    Ok(path)
+}
+
+fn read_encrypted_meeting_artifact(root: &Path, session_id: &str, kind: &str) -> Result<Vec<u8>> {
+    let path = meeting_session_artifact_file(root, session_id, &format!("-{kind}.enc.json"));
+    let envelope: Value = serde_json::from_slice(
+        &fs::read(&path)
+            .with_context(|| format!("read encrypted meeting artifact {}", path.display()))?,
+    )?;
+    anyhow::ensure!(
+        envelope.get("format").and_then(Value::as_str) == Some(MEETING_ARTIFACT_FORMAT),
+        "unsupported encrypted meeting artifact format"
+    );
+    anyhow::ensure!(
+        envelope.get("session_id").and_then(Value::as_str) == Some(session_id)
+            && envelope.get("kind").and_then(Value::as_str) == Some(kind),
+        "encrypted meeting artifact identity mismatch"
+    );
+    let nonce_bytes = BASE64_STANDARD.decode(
+        envelope
+            .get("nonce_b64")
+            .and_then(Value::as_str)
+            .context("encrypted meeting artifact nonce missing")?,
+    )?;
+    let nonce: [u8; 12] = nonce_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("encrypted meeting artifact nonce must be 12 bytes"))?;
+    let mut ciphertext = BASE64_STANDARD.decode(
+        envelope
+            .get("ciphertext_b64")
+            .and_then(Value::as_str)
+            .context("encrypted meeting artifact ciphertext missing")?,
+    )?;
+    let key_bytes = meeting_artifact_key(root)?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes)
+        .map_err(|_| anyhow::anyhow!("construct meeting artifact decryption key"))?;
+    let key = aead::LessSafeKey::new(unbound);
+    let plaintext = key
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(nonce),
+            aead::Aad::from(meeting_artifact_aad(session_id, kind).as_bytes()),
+            &mut ciphertext,
+        )
+        .map_err(|_| anyhow::anyhow!("decrypt meeting artifact"))?;
+    let actual_sha256 = sha256_hex(plaintext);
+    anyhow::ensure!(
+        envelope.get("plaintext_sha256").and_then(Value::as_str) == Some(actual_sha256.as_str()),
+        "encrypted meeting artifact integrity hash mismatch"
+    );
+    Ok(plaintext.to_vec())
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
+}
+
+fn meeting_summary_quality_flags(session: &MeetingSession) -> Vec<String> {
+    let mut flags = Vec::new();
+    if session.transcript_segments.is_empty() {
+        flags.push("empty_transcript".to_string());
+    }
+    if !session.pending_audio_chunks.is_empty() {
+        flags.push("incomplete_transcript".to_string());
+    }
+    if session
+        .transcript_segments
+        .iter()
+        .all(|segment| segment.confidence < 0.7 || segment.speaker_display == "unknown")
+    {
+        flags.push("speaker_attribution_limited".to_string());
+    }
+    flags
+}
+
+fn generate_structured_meeting_summary(root: &Path, session: &MeetingSession) -> Value {
+    let transcript = session.full_transcript();
+    let base_flags = meeting_summary_quality_flags(session);
+    if transcript.trim().is_empty() {
+        return json!({
+            "overview": "Für dieses Meeting konnte kein belastbares Transcript erstellt werden.",
+            "decisions": [], "action_items": [], "open_questions": [], "next_steps": [],
+            "language": "de", "generated_at": now_iso_string(), "quality_flags": base_flags,
+        });
+    }
+    let runtime = crate::inference::runtime_kernel::InferenceRuntimeKernel::resolve(root);
+    let model = runtime.as_ref().ok().and_then(|kernel| {
+        kernel
+            .primary_generation
+            .as_ref()
+            .map(|binding| binding.request_model.clone())
+            .or_else(|| kernel.gateway.active_model.clone())
+    });
+    let prompt = format!(
+        "Erstelle eine belastbare deutsche Meeting-Zusammenfassung. Antworte ausschließlich als JSON mit den Feldern overview (String), decisions (String[]), action_items (Array aus {{text, owner|null, due_at|null}}), open_questions (String[]), next_steps (String[]), language (de), quality_flags (String[]). Erfinde keine Namen, Zuständigkeiten, Entscheidungen oder Fristen. Nenne Sprecher nur, wenn die Zeile source=platform_caption oder confidence>=0.70 enthält. Unklare Inhalte gehören in open_questions.\n\nTRANSCRIPT:\n{}",
+        transcript.chars().take(120_000).collect::<String>()
+    );
+    let generated = model.and_then(|model| {
+        crate::capabilities::scrape::invoke_responses_text(root, &model, &prompt, 120).ok()
+    });
+    let parsed = generated.and_then(|text| {
+        let start = text.find('{')?;
+        let end = text.rfind('}')?;
+        serde_json::from_str::<Value>(&text[start..=end]).ok()
+    });
+    let mut summary = parsed.unwrap_or_else(|| {
+        json!({
+            "overview": "Das Transcript wurde erstellt, die automatische fachliche Zusammenfassung benötigt jedoch eine Prüfung.",
+            "decisions": [], "action_items": [], "open_questions": [], "next_steps": [],
+            "language": "de", "quality_flags": ["summary_failed"],
+        })
+    });
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("generated_at".to_string(), json!(now_iso_string()));
+        let flags = object
+            .entry("quality_flags".to_string())
+            .or_insert_with(|| json!([]));
+        if let Some(items) = flags.as_array_mut() {
+            for flag in base_flags {
+                if !items.iter().any(|item| item.as_str() == Some(&flag)) {
+                    items.push(json!(flag));
+                }
+            }
+        }
+    }
+    summary
+}
+
+fn configured_milton_webhook(root: &Path) -> Option<(String, String)> {
+    let url = crate::secrets::read_secret_value(root, "meeting-webhooks", "milton-url").ok()?;
+    let secret =
+        crate::secrets::read_secret_value(root, "meeting-webhooks", "milton-signing-secret")
+            .ok()?;
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() || secret.trim().len() < 32 {
+        return None;
+    }
+    Some((url.trim().to_string(), secret.trim().to_string()))
+}
+
+fn deliver_milton_webhook(root: &Path, event: &Value) -> Result<bool> {
+    let Some((url, secret)) = configured_milton_webhook(root) else {
+        return Ok(false);
+    };
+    let outbox = meeting_sessions_dir(root).join("webhook-outbox");
+    fs::create_dir_all(&outbox)?;
+    let event_id = event
+        .get("event_id")
+        .and_then(Value::as_str)
+        .context("meeting webhook event id missing")?;
+    let pending_path = outbox.join(format!("{}.json", sha256_hex(event_id.as_bytes())));
+    fs::write(&pending_path, serde_json::to_vec_pretty(event)?)?;
+    let mut all_delivered = true;
+    for path in fs::read_dir(&outbox)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+    {
+        let body = match fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+        let pending_event_id = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| sha256_hex(body.as_bytes()));
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let signing_input = format!("{timestamp}.{body}");
+        let signature = hmac::sign(
+            &hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes()),
+            signing_input.as_bytes(),
+        );
+        let signature_hex = signature
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let delivered = ureq::post(&url)
+            .set("content-type", "application/json")
+            .set(
+                "x-ctox-signature",
+                &format!("t={timestamp},v1={signature_hex}"),
+            )
+            .set("idempotency-key", &pending_event_id)
+            .timeout(StdDuration::from_secs(15))
+            .send_string(&body)
+            .map(|response| response.status() >= 200 && response.status() < 300)
+            .unwrap_or(false);
+        if delivered {
+            let _ = fs::remove_file(path);
+        } else {
+            all_delivered = false;
+        }
+    }
+    Ok(all_delivered)
+}
+
+fn emit_managed_meeting_event(root: &Path, meeting_id: &str, event_type: &str, fields: Value) {
+    let occurred_at = now_iso_string();
+    let event_id = format!(
+        "meeting_evt_{}",
+        sha256_hex(format!("{meeting_id}:{event_type}:{occurred_at}").as_bytes())
+    );
+    let mut event = json!({
+        "event_id": event_id,
+        "meeting_id": meeting_id,
+        "type": event_type,
+        "occurred_at": occurred_at,
+    });
+    if let (Some(target), Some(extra)) = (event.as_object_mut(), fields.as_object()) {
+        for (key, value) in extra {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    if let Err(err) = deliver_milton_webhook(root, &event) {
+        eprintln!("[meeting] warning: could not enqueue Milton webhook: {err}");
+    }
+}
+
+const SENSITIVE_MEETING_SESSION_KEYS: &[&str] = &[
+    "meeting_url",
+    "transcript_chunks",
+    "transcript_segments",
+    "speaker_signals",
+    "chat_messages",
+    "outbound_chat_texts",
+    "pending_audio_chunks",
+];
+
+fn persist_split_meeting_session_value(root: &Path, path: &Path, session: &Value) -> Result<()> {
+    let session_id = session
+        .get("session_id")
+        .and_then(Value::as_str)
+        .context("meeting session id missing")?;
+    let mut public = session.clone();
+    let mut sensitive = serde_json::Map::new();
+    if let Some(object) = public.as_object_mut() {
+        for key in SENSITIVE_MEETING_SESSION_KEYS {
+            if let Some(value) = object.remove(*key) {
+                sensitive.insert((*key).to_string(), value);
+            }
+        }
+        object.insert(
+            "sensitive_artifact".to_string(),
+            json!(format!("{session_id}-sensitive.enc.json")),
+        );
+    }
+    write_encrypted_meeting_artifact(
+        root,
+        session_id,
+        "sensitive",
+        &serde_json::to_vec(&Value::Object(sensitive))?,
+    )?;
+    fs::write(path, serde_json::to_vec_pretty(&public)?)?;
+    Ok(())
+}
+
+fn load_meeting_session_value(root: &Path, path: &Path) -> Result<Value> {
+    let mut session: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let Some(session_id) = session
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(session);
+    };
+    let sensitive_path = meeting_session_artifact_file(root, &session_id, "-sensitive.enc.json");
+    if sensitive_path.exists() {
+        let sensitive: Value = serde_json::from_slice(&read_encrypted_meeting_artifact(
+            root,
+            &session_id,
+            "sensitive",
+        )?)?;
+        if let (Some(public), Some(secret)) = (session.as_object_mut(), sensitive.as_object()) {
+            for (key, value) in secret {
+                public.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(session)
+}
+
 /// Load the final artifacts of a meeting session: the session metadata
 /// JSON (speakers, duration, provider, etc.), the full STT transcript,
 /// and the captured chat log. Returns a structured JSON suitable for
 /// direct emission by the `ctox meeting transcript` CLI and consumption
 /// by the agent-runtime `meeting_get_transcript` tool.
 ///
-/// Missing transcript/chatlog files are returned as empty strings rather
+/// Missing transcript/chatlog artifacts are returned as empty values rather
 /// than errors — an active session may have metadata persisted before
-/// finalize_meeting_session has written the text files.
+/// finalization has written the encrypted artifacts.
 pub(crate) fn load_meeting_transcript(root: &Path, session_id: &str) -> Result<Value> {
     let session_path = meeting_session_file(root, session_id);
     let session: Value = if session_path.exists() {
-        let contents = fs::read_to_string(&session_path)
+        let session = load_meeting_session_value(root, &session_path)
             .with_context(|| format!("read meeting session {}", session_path.display()))?;
-        let session: Value = serde_json::from_str(&contents)
-            .with_context(|| format!("parse meeting session JSON at {}", session_path.display()))?;
         MeetingSessionStatus::from_session_value(&session).with_context(|| {
             format!(
                 "invalid meeting session status at {}",
@@ -4924,20 +5840,50 @@ pub(crate) fn load_meeting_transcript(root: &Path, session_id: &str) -> Result<V
         anyhow::bail!("no meeting session found with id {session_id}");
     };
 
-    let transcript_path = meeting_session_artifact_file(root, session_id, "-transcript.txt");
-    let chatlog_path = meeting_session_artifact_file(root, session_id, "-chatlog.txt");
-
-    let transcript = fs::read_to_string(&transcript_path).unwrap_or_default();
-    let chatlog = fs::read_to_string(&chatlog_path).unwrap_or_default();
+    let transcript_payload: Value = read_encrypted_meeting_artifact(root, session_id, "transcript")
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| {
+            // Read-only compatibility for pre-encryption sessions. New writes never create these files.
+            let legacy = meeting_session_artifact_file(root, session_id, "-transcript.txt");
+            let text = fs::read_to_string(legacy).unwrap_or_default();
+            json!({"transcript": text, "segments": [], "sha256": sha256_hex(text.as_bytes())})
+        });
+    let chatlog = read_encrypted_meeting_artifact(root, session_id, "chatlog")
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| {
+            fs::read_to_string(meeting_session_artifact_file(
+                root,
+                session_id,
+                "-chatlog.txt",
+            ))
+            .unwrap_or_default()
+        });
+    let transcript = transcript_payload
+        .get("transcript")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let segments = transcript_payload
+        .get("segments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let sha256 = transcript_payload
+        .get("sha256")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| sha256_hex(transcript.as_bytes()));
 
     Ok(json!({
         "ok": true,
         "session_id": session_id,
         "session": session,
         "transcript": transcript,
+        "segments": segments,
+        "sha256": sha256,
         "chatlog": chatlog,
-        "transcript_path": transcript_path.display().to_string(),
-        "chatlog_path": chatlog_path.display().to_string(),
+        "encrypted_at_rest": true,
     }))
 }
 
@@ -5931,13 +6877,18 @@ mod tests {
         assert!(result["post_meeting_ticket_id"].as_str().is_some());
 
         let transcript_path =
-            meeting_sessions_dir(&root).join(format!("{}-transcript.txt", session.session_id));
+            meeting_sessions_dir(&root).join(format!("{}-transcript.enc.json", session.session_id));
         let chatlog_path =
-            meeting_sessions_dir(&root).join(format!("{}-chatlog.txt", session.session_id));
+            meeting_sessions_dir(&root).join(format!("{}-chatlog.enc.json", session.session_id));
         let manifest_path =
             meeting_sessions_dir(&root).join(format!("{}-artifacts.json", session.session_id));
         assert!(transcript_path.exists());
         assert!(chatlog_path.exists());
+        assert!(!std::fs::read_to_string(&transcript_path)
+            .unwrap()
+            .contains("deployment ticket"));
+        assert!(!artifact_dir.join("chunk-001.webm").exists());
+        assert!(!artifact_dir.join("screen-001.mp4").exists());
         assert!(manifest_path.exists());
         let manifest: Value =
             serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();

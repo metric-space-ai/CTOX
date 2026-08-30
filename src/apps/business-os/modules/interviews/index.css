@@ -142,3 +142,63 @@
   font-variant-numeric: tabular-nums;
   color: var(--text);
 }
+
+/* --- Schmale Fenster (Phase-1-Breakpoint 767px): die zwei Panes stapeln
+       vertikal, der Resizer entfaellt. Bei verstecktem Workbench (Auto-Reveal)
+       bleibt es eine einzelne volle Zeile — kein leerer zweiter Track. --- */
+@container business-app-window (max-width: 767px) {
+  .ats-interviews {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(200px, 40vh) minmax(320px, 1fr);
+    height: auto;
+    min-height: 100%;
+    overflow-y: auto;
+    gap: 8px;
+  }
+
+  .ats-interviews > [data-resizer] {
+    display: none !important;
+  }
+
+  .ats-interviews .ats-list-pane,
+  .ats-interviews .ats-workbench-pane {
+    grid-column: 1;
+    min-width: 0;
+  }
+
+  .ats-interviews.is-workbench-hidden {
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
+/* --- Touch-Bedienung auf groben Zeigern: jedes interaktive Control erreicht
+       das 44px-Minimum, Icon-Buttons in beiden Dimensionen, Shard- und
+       Kompakt-Zeilen bekommen fingerhohe Tap-Flaechen. --- */
+@media (pointer: coarse) {
+  .ats-interviews button,
+  .ats-interviews input,
+  .ats-interviews select,
+  .ats-interviews textarea {
+    min-height: 44px;
+  }
+
+  .ats-interviews .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .ats-interviews .ctox-pane-tab,
+  .ats-interviews .ctox-sort-dir {
+    min-height: 44px;
+  }
+
+  .ats-interviews .ctox-sort-dir {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .ats-interviews .ats-shard,
+  .ats-interviews .ats-scorecard-row {
+    min-height: 44px;
+  }
+}

@@ -81,7 +81,11 @@ pub(super) use super::rxdb_peer_projections::{
 use super::rxdb_peer_projections::{
     chat_tracking_batch_document_lookup_count, reset_chat_tracking_batch_document_lookups,
 };
+use super::rxdb_peer_workjet_devices::{
+    handle_workjet_device_webrtc_request, WORKJET_DEVICE_WEBRTC_METHOD,
+};
 use super::store;
+use super::store_outbound_commands::outbound_sellify_lookup;
 use crate::command_lifecycle::generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
 use crate::mission::channels;
 use crate::mission::tickets;
@@ -93,6 +97,9 @@ use notify::Watcher;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use rxdb::plugins::replication_webrtc::index_mod::auxiliary_request_metrics_snapshot;
+use rxdb::plugins::replication_webrtc::webrtc_types::{
+    WebRTCPeerSessionValidation, WebRTCPeerSessionValidator,
+};
 use rxdb::plugins::replication_webrtc::{
     file_fetch_handler::FileRange, CollectionAuthzHook, CollectionEagerPullHook,
     CollectionLiveChangeHook, DocumentReadAuthzHook, DocumentWriteAuthzHook, RTCIceServer,
@@ -695,6 +702,152 @@ enum NativePeerExit {
 /// that produced the canonical zombie (heartbeat "running", zero replication,
 /// no retry). See docs/ctox-rxdb.md §4.
 const NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS: u64 = 20;
+const OUTBOUND_SELLIFY_LOOKUP_WEBRTC_METHOD: &str = "ctox.outbound.sellify_lookup.v1";
+const DEVICE_PROOF_VERSION: &str = "ctox-device-proof-v1";
+
+fn validate_device_bound_peer_session(
+    root: &Path,
+    protocol: &Value,
+    expected_nonce: Option<&str>,
+) -> WebRTCPeerSessionValidation {
+    use WebRTCPeerSessionValidation::{Accept, Defer, Reject};
+
+    let Some(session_id) = protocol
+        .pointer("/peerSession/sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Reject;
+    };
+    if store::is_business_peer_revoked(root, session_id) {
+        return Reject;
+    }
+    let Some(token) = protocol
+        .pointer("/peerSession/capabilityToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        // Preserve the legacy least-privilege handshake. Collection hooks
+        // still deny protected data when no capability is captured.
+        return Accept;
+    };
+    let Some(claims) = store::verified_webrtc_capability_claims(root, token) else {
+        return Reject;
+    };
+    let mobile_invite_requires_proof =
+        super::mobile_invites::mobile_invite_requires_device_proof(root, &claims.user_id);
+    let Some(binding) = claims.device_binding.as_ref() else {
+        if mobile_invite_requires_proof {
+            // First use of a QR invite must complete the native nonce proof.
+            // The browser-initiated probe is answered only far enough for the
+            // native peer to issue that nonce; it may not capture the token.
+            if expected_nonce.is_none() {
+                return Defer;
+            }
+        } else {
+            return Accept;
+        }
+        return validate_and_bind_mobile_device_proof(
+            root,
+            &claims.user_id,
+            protocol,
+            expected_nonce,
+            None,
+        );
+    };
+    validate_and_bind_mobile_device_proof(
+        root,
+        &claims.user_id,
+        protocol,
+        expected_nonce,
+        Some(&binding.proof_key_thumbprint),
+    )
+}
+
+fn validate_and_bind_mobile_device_proof(
+    root: &Path,
+    user_id: &str,
+    protocol: &Value,
+    expected_nonce: Option<&str>,
+    expected_thumbprint: Option<&str>,
+) -> WebRTCPeerSessionValidation {
+    use WebRTCPeerSessionValidation::{Accept, Defer, Reject};
+
+    let Some(expected_nonce) = expected_nonce else {
+        return Defer;
+    };
+    let Some(proof) = protocol.pointer("/peerSession/deviceProof") else {
+        return Reject;
+    };
+    if proof.get("version").and_then(Value::as_str) != Some(DEVICE_PROOF_VERSION)
+        || proof.get("nonce").and_then(Value::as_str) != Some(expected_nonce)
+    {
+        return Reject;
+    }
+    let Some(jwk) = proof.get("publicJwk") else {
+        return Reject;
+    };
+    let Some((public_key, thumbprint)) = p256_public_key_and_thumbprint(jwk) else {
+        return Reject;
+    };
+    if expected_thumbprint.is_some_and(|expected| expected != thumbprint.as_str()) {
+        return Reject;
+    }
+    let Some(signature) = proof
+        .get("signature")
+        .and_then(Value::as_str)
+        .and_then(|value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+        })
+        .filter(|value| value.len() == 64)
+    else {
+        return Reject;
+    };
+    let public_key = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::ECDSA_P256_SHA256_FIXED,
+        public_key,
+    );
+    if public_key
+        .verify(expected_nonce.as_bytes(), &signature)
+        .is_err()
+    {
+        return Reject;
+    }
+    if !super::mobile_invites::authorize_or_bind_device_proof(
+        root,
+        user_id,
+        &thumbprint,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        return Reject;
+    }
+    Accept
+}
+
+fn p256_public_key_and_thumbprint(jwk: &Value) -> Option<(Vec<u8>, String)> {
+    if jwk.get("kty").and_then(Value::as_str) != Some("EC")
+        || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
+    {
+        return None;
+    }
+    let x = jwk.get("x").and_then(Value::as_str)?;
+    let y = jwk.get("y").and_then(Value::as_str)?;
+    let decoder = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let x_bytes = decoder.decode(x).ok().filter(|value| value.len() == 32)?;
+    let y_bytes = decoder.decode(y).ok().filter(|value| value.len() == 32)?;
+    let mut public_key = Vec::with_capacity(65);
+    public_key.push(0x04);
+    public_key.extend_from_slice(&x_bytes);
+    public_key.extend_from_slice(&y_bytes);
+    // RFC 7638 requires lexicographic member order and no whitespace.
+    let canonical = format!(r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#);
+    let digest = ring::digest::digest(&ring::digest::SHA256, canonical.as_bytes());
+    Some((public_key, decoder.encode(digest.as_ref())))
+}
 
 fn native_peer_bring_up_failure(message: String) -> anyhow::Error {
     // Returning an error is the policy: the supervisor owns the retry. This
@@ -710,9 +863,11 @@ const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-file-chunks-v1",
     "ctox-schema-hash-v1",
     "ctox-peer-session-v1",
+    "ctox-device-proof-v1",
     "ctox-checkpoint-epoch-v1",
     "ctox-checkpoint-generation-v2",
     "ctox-app-runtime-v1",
+    "ctox-workjet-device-control-v1",
     CTOX_COMMAND_LIFECYCLE_CAPABILITY,
 ];
 /// Standby reconciliation is a safety net, not the normal data path. Runtime
@@ -1450,6 +1605,25 @@ pub fn native_peer_maintenance_health(root: &Path) -> (bool, bool) {
     (process_alive, replication_up)
 }
 
+fn heartbeat_replication_signal(heartbeat: Option<&Value>, key: &str) -> bool {
+    heartbeat
+        .and_then(|value| value.pointer(&format!("/replicationSignals/{key}")))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn heartbeat_critical_task_alive(heartbeat: Option<&Value>, task_name: &str) -> bool {
+    heartbeat
+        .and_then(|value| value.get("criticalTasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|task| {
+                task.get("name").and_then(Value::as_str) == Some(task_name)
+                    && task.get("alive").and_then(Value::as_bool) == Some(true)
+            })
+        })
+}
+
 pub fn native_peer_status(root: &Path) -> Value {
     let circuit_breaker = native_peer_circuit_snapshot();
     let circuit_open = circuit_breaker.get("state").and_then(Value::as_str) == Some("open");
@@ -1467,7 +1641,7 @@ pub fn native_peer_status(root: &Path) -> Value {
         .and_then(|peer| peer._pools.first())
         .map(|pool| pool.connection_handler.frame_transport_status_json())
         .unwrap_or(Value::Null);
-    let command_consumer_alive = active_peer
+    let local_command_consumer_alive = active_peer
         .as_ref()
         .is_some_and(|peer| !peer._command_consumer.is_finished());
     let in_process_started = lifecycle.supervisor_active;
@@ -1510,6 +1684,50 @@ pub fn native_peer_status(root: &Path) -> Value {
                 .and_then(|value| value.get("replicationUp"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
+    };
+    // `ctox business-os rxdb status` normally runs in a short-lived CLI
+    // process, not inside the supervised service that owns `current_peer()`.
+    // In that case every detailed stage must come from the service's fresh
+    // heartbeat. Falling back only for `replicationUp` produced the impossible
+    // status "replication up, but no socket/auth/data channel".
+    let heartbeat_owned = !lifecycle.running && heartbeat_running;
+    let signaling_socket_connected = if lifecycle.running {
+        transport
+            .get("signalingSocketConnected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    } else {
+        heartbeat_owned
+            && (heartbeat_replication_signal(heartbeat.as_ref(), "signalingSocketConnected")
+                || heartbeat_replication_signal(heartbeat.as_ref(), "signalingJoinAccepted"))
+    };
+    let signaling_join_accepted = if lifecycle.running {
+        lifecycle.signaling_join_accepted
+    } else {
+        heartbeat_owned && heartbeat_replication_signal(heartbeat.as_ref(), "signalingJoinAccepted")
+    };
+    let data_channel_open = if lifecycle.running {
+        lifecycle.data_channel_open
+    } else {
+        heartbeat_owned && heartbeat_replication_signal(heartbeat.as_ref(), "dataChannelOpen")
+    };
+    let peer_authenticated = if lifecycle.running {
+        transport
+            .get("peerCount")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            > 0
+    } else {
+        heartbeat_owned
+            && (heartbeat_replication_signal(heartbeat.as_ref(), "peerAuthenticated")
+                || (replication_up && data_channel_open))
+    };
+    let command_consumer_alive = if lifecycle.running {
+        local_command_consumer_alive
+    } else {
+        heartbeat_owned
+            && (heartbeat_replication_signal(heartbeat.as_ref(), "commandConsumerAlive")
+                || heartbeat_critical_task_alive(heartbeat.as_ref(), "business_commands"))
     };
     let health_errors = if circuit_open {
         vec![native_peer_health_error(
@@ -1596,12 +1814,10 @@ pub fn native_peer_status(root: &Path) -> Value {
         "command_plane": command_plane_status(root),
         "health_stages": {
             "process_alive": running,
-            "signaling_socket_connected": transport
-                .get("signalingSocketConnected").and_then(Value::as_bool).unwrap_or(false),
-            "signaling_join_accepted": lifecycle.signaling_join_accepted,
-            "peer_authenticated": transport
-                .get("peerCount").and_then(Value::as_u64).unwrap_or_default() > 0,
-            "data_channel_open": lifecycle.data_channel_open,
+            "signaling_socket_connected": signaling_socket_connected,
+            "signaling_join_accepted": signaling_join_accepted,
+            "peer_authenticated": peer_authenticated,
+            "data_channel_open": data_channel_open,
             "command_consumer_alive": command_consumer_alive,
             "last_command_ingestion_progress_ms": COMMAND_PLANE_METRICS.last_processed_at_ms.load(Ordering::Relaxed),
             "projection_outbox": crate::mission::channels::business_command_core_diagnostics(root)
@@ -2236,7 +2452,8 @@ fn sync_runtime_settings_if_changed(
     )
 }
 
-pub(crate) fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
+#[cfg(test)]
+fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
     with_business_os_database(
         root,
         "failed to create Business OS module catalog sync runtime",
@@ -2392,7 +2609,6 @@ async fn run_native_peer(
     let mut sync_config = store::sync_config(&root)?;
     let stable_native_peer_id = sync_config.peer_id.clone();
     let signaling_auth = store::signaling_auth_config(&root, &signaling_room_password)?;
-    let active_native_token_hash = signaling_auth.native_token_hash.clone();
     // The provider re-derives the URLs — including fresh `token_iat`/
     // `token_exp` — on EVERY signaling (re)connect attempt. Baking the token
     // window in once meant that after >24h uptime any socket drop became a
@@ -2422,6 +2638,11 @@ async fn run_native_peer(
         peer_session_id.clone(),
         database_path.clone(),
     );
+    let repaired_revisions = repair_legacy_business_command_revisions(&database_path)
+        .context("repair legacy Business OS command revisions")?;
+    if repaired_revisions > 0 {
+        eprintln!("[business-os] repaired {repaired_revisions} legacy business_commands revisions");
+    }
     let database = open_database(database_path.clone()).await?;
     let database_write_lock = Arc::new(AsyncMutex::new(()));
 
@@ -2529,10 +2750,14 @@ async fn run_native_peer(
             std::sync::Arc::new(move |peer_id: &String| {
                 !store::is_business_peer_revoked(&signaling_revocation_root, peer_id)
             });
-        let session_revocation_root = root.clone();
-        let is_peer_session_valid: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> =
-            std::sync::Arc::new(move |session_id: &str| {
-                !store::is_business_peer_revoked(&session_revocation_root, session_id)
+        let session_validation_root = root.clone();
+        let is_peer_session_valid: WebRTCPeerSessionValidator =
+            std::sync::Arc::new(move |protocol: &Value, expected_nonce: Option<&str>| {
+                validate_device_bound_peer_session(
+                    &session_validation_root,
+                    protocol,
+                    expected_nonce,
+                )
             });
         // Server-authoritative exact per-collection read authz. Missing,
         // expired, revoked, or stale-epoch capabilities fail closed.
@@ -2540,7 +2765,7 @@ async fn run_native_peer(
             if store::collection_authz_enabled(&root) {
                 let authz_root = root.clone();
                 Some(std::sync::Arc::new(move |token: &str, collection: &str| {
-                    store::capability_allows_collection_permission(
+                    store::webrtc_capability_allows_collection_permission(
                         &authz_root,
                         token,
                         collection,
@@ -2643,6 +2868,40 @@ async fn run_native_peer(
                                 params,
                             )
                             .await
+                        })
+                    }),
+                );
+                let outbound_lookup_root = root.clone();
+                pool.set_auxiliary_request_handler(
+                    OUTBOUND_SELLIFY_LOOKUP_WEBRTC_METHOD,
+                    Arc::new(move |_peer_identity, capability_token, params| {
+                        let root = outbound_lookup_root.clone();
+                        Box::pin(async move {
+                            if !store::capability_allows_collection_permission(
+                                &root,
+                                &capability_token,
+                                "outbound_lead_generation_leads",
+                                crate::business_os::policy::BusinessOsPermission::DataRead,
+                            ) {
+                                return Err(
+                                    "outbound Sellify lookup capability may not read managed tenant leads"
+                                        .to_string(),
+                                );
+                            }
+                            let payload = params.first().cloned().unwrap_or(Value::Null);
+                            outbound_sellify_lookup(&root, &payload)
+                                .map_err(|error| error.to_string())
+                        })
+                    }),
+                );
+                let workjet_device_root = root.clone();
+                pool.set_auxiliary_request_handler(
+                    WORKJET_DEVICE_WEBRTC_METHOD,
+                    Arc::new(move |_peer_identity, capability_token, params| {
+                        let root = workjet_device_root.clone();
+                        Box::pin(async move {
+                            handle_workjet_device_webrtc_request(&root, &capability_token, params)
+                                .await
                         })
                     }),
                 );
@@ -2935,7 +3194,6 @@ async fn run_native_peer(
                     &root,
                     &sync_room,
                     &signaling_room_password,
-                    &active_native_token_hash,
                     &configured_signaling_urls,
                 ) {
                     Ok(true) => {
@@ -3042,14 +3300,11 @@ fn native_peer_sync_config_changed(
     root: &Path,
     active_sync_room: &str,
     active_signaling_room_password: &str,
-    active_native_token_hash: &str,
     active_signaling_urls: &[String],
 ) -> anyhow::Result<bool> {
     let config = store::sync_connection_config(root)?;
-    let signaling_auth = store::signaling_auth_config(root, &config.signaling_room_password)?;
     Ok(config.sync_room != active_sync_room
         || config.signaling_room_password != active_signaling_room_password
-        || signaling_auth.native_token_hash != active_native_token_hash
         || normalized_signaling_urls(&config.signaling_urls)
             != normalized_signaling_urls(active_signaling_urls))
 }
@@ -3142,54 +3397,18 @@ fn runtime_installed_module_schema_metadata_fingerprint(root: &Path) -> anyhow::
 fn runtime_installed_module_schema_fingerprint(root: &Path) -> anyhow::Result<String> {
     let (modules_root, files) = runtime_installed_module_schema_files(root)?;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(b"ctox-runtime-installed-module-schemas-v2");
+    hasher.update(b"ctox-runtime-installed-module-schemas-v1");
     for path in files {
         let rel = path.strip_prefix(&modules_root).unwrap_or(&path);
         hasher.update(rel.to_string_lossy().as_bytes());
         hasher.update([0]);
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read runtime app schema {}", path.display()))?;
-        // module.json contains both schema activation inputs and ordinary app
-        // lifecycle metadata. A release changes version/visibility but does
-        // not change the native collection registry; hashing the whole file
-        // caused every release/rollback to tear down the shared WebRTC room.
-        // Hash only the installed marker plus the declared collection set.
-        // Malformed JSON falls back to raw bytes so a valid -> invalid edit
-        // still forces fail-closed reconfiguration (the loader then skips it).
-        let schema_input = if path.file_name().and_then(|name| name.to_str()) == Some("module.json")
-        {
-            runtime_installed_module_schema_manifest_input(&bytes)
-        } else {
-            bytes
-        };
-        hasher.update((schema_input.len() as u64).to_le_bytes());
-        hasher.update(schema_input);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
         hasher.update([0xff]);
     }
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn runtime_installed_module_schema_manifest_input(bytes: &[u8]) -> Vec<u8> {
-    let Ok(manifest) = serde_json::from_slice::<Value>(bytes) else {
-        return bytes.to_vec();
-    };
-    let mut collections = manifest
-        .get("collections")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    collections.sort();
-    collections.dedup();
-    serde_json::to_vec(&serde_json::json!({
-        "runtime_installed": manifest_value_is_runtime_installed_for_native_peer(&manifest),
-        "collections": collections,
-    }))
-    .unwrap_or_else(|_| bytes.to_vec())
 }
 
 fn normalized_signaling_urls(values: &[String]) -> Vec<String> {
@@ -3347,12 +3566,6 @@ fn signaling_url_with_native_metadata_at(
                     | "auth_version"
                     | "browser_token_hash"
                     | "native_token_hash"
-                    | "signaling_browser_token"
-                    | "signalingBrowserToken"
-                    | "signaling_room_password"
-                    | "signalingRoomPassword"
-                    | "room_password"
-                    | "roomPassword"
             )
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -3482,6 +3695,14 @@ fn write_native_peer_heartbeat(
         .as_ref()
         .map(|peer| peer.task_liveness_json())
         .unwrap_or_else(|| Value::Array(Vec::new()));
+    let transport = active_peer
+        .as_ref()
+        .and_then(|peer| peer._pools.first())
+        .map(|pool| pool.connection_handler.frame_transport_status_json())
+        .unwrap_or(Value::Null);
+    let command_consumer_alive = active_peer
+        .as_ref()
+        .is_some_and(|peer| !peer._command_consumer.is_finished());
     let payload = json!({
         "version": NATIVE_PEER_STATUS_VERSION,
         "running": native_peer_heartbeat_running(&lifecycle),
@@ -3496,8 +3717,13 @@ fn write_native_peer_heartbeat(
         "lifecyclePhase": lifecycle.phase,
         "replicationSignals": {
             "poolCreated": active_peer.as_ref().is_some_and(|peer| !peer._pools.is_empty()),
+            "signalingSocketConnected": transport
+                .get("signalingSocketConnected").and_then(Value::as_bool).unwrap_or(false),
             "signalingJoinAccepted": lifecycle.signaling_join_accepted,
+            "peerAuthenticated": transport
+                .get("peerCount").and_then(Value::as_u64).unwrap_or_default() > 0,
             "dataChannelOpen": lifecycle.data_channel_open,
+            "commandConsumerAlive": command_consumer_alive,
             "criticalTasksAlive": critical_tasks_alive,
         },
         "circuitBreaker": native_peer_circuit_snapshot(),
@@ -6372,72 +6598,19 @@ pub(super) async fn incremental_upsert_projection_if_changed(
         .map_err(|err| anyhow::anyhow!("load existing {label} projection: {err}"))?
         .into_iter()
         .next();
-    let mut invalid_revision_previous = None;
     if let Some(existing) = existing {
-        if !projection_document_has_valid_revision(&existing) {
-            // Legacy native projections used application revisions such as
-            // `rev_<uuid>`. Do not hydrate those into RxDB's document cache:
-            // the cache parses revision heights and correctly rejects them as
-            // UTL2. The guarded storage write below compares the exact legacy
-            // predecessor and replaces it with a canonical RxDB revision.
-            invalid_revision_previous = Some(existing);
-        } else {
-            // Native intake can discover rows written directly to the shared SQLite
-            // store before the RxDB change stream has observed them. Hydrate the
-            // document cache from the authoritative storage read so incremental_upsert
-            // does not attempt to write against an older cached revision.
-            collection
-                .doc_cache()
-                .map_err(|err| anyhow::anyhow!("load {label} document cache: {err}"))?
-                .get_cached_rx_document(&existing)
-                .map_err(|err| {
-                    anyhow::anyhow!("refresh existing {label} projection cache: {err}")
-                })?;
-            if canonical_projection_document_for_compare(&existing)
+        if projection_document_has_valid_revision(&existing)
+            && canonical_projection_document_for_compare(&existing)
                 == canonical_projection_document_for_compare(&document)
-            {
-                return Ok(false);
-            }
+        {
+            return Ok(false);
         }
     }
     let document = fill_projection_document_envelope(collection, document, label)?;
-    if let Some(previous) = invalid_revision_previous {
-        let result = collection
-            .storage_instance
-            .bulk_write(
-                vec![BulkWriteRow {
-                    previous: Some(previous),
-                    document,
-                }],
-                "business-os-projection-legacy-revision-repair",
-            )
-            .await
-            .map_err(|err| anyhow::anyhow!("repair {label} projection revision: {err}"))?;
-        if let Some(err) = result.error.first() {
-            anyhow::bail!("repair {label} projection revision conflict: {err:?}");
-        }
-        let repaired = collection
-            .storage_instance
-            .find_documents_by_id(std::slice::from_ref(&document_id), true)
-            .await
-            .map_err(|err| anyhow::anyhow!("load repaired {label} projection: {err}"))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("repaired {label} projection disappeared"))?;
-        if !projection_document_has_valid_revision(&repaired) {
-            anyhow::bail!("repaired {label} projection still has an invalid revision");
-        }
-        collection
-            .doc_cache()
-            .map_err(|err| anyhow::anyhow!("load repaired {label} document cache: {err}"))?
-            .get_cached_rx_document(&repaired)
-            .map_err(|err| anyhow::anyhow!("cache repaired {label} projection: {err}"))?;
-    } else {
-        collection
-            .incremental_upsert(document)
-            .await
-            .map_err(|err| anyhow::anyhow!("upsert {label} projection: {err}"))?;
-    }
+    collection
+        .incremental_upsert(document)
+        .await
+        .map_err(|err| anyhow::anyhow!("upsert {label} projection: {err}"))?;
     Ok(true)
 }
 
@@ -7687,6 +7860,62 @@ pub(super) fn mime_type_for_path(path: &Path) -> &'static str {
     }
 }
 
+fn valid_rxdb_revision(revision: &str) -> bool {
+    let Some((height, hash)) = revision.split_once('-') else {
+        return false;
+    };
+    !hash.is_empty() && !hash.contains('-') && height.parse::<u64>().is_ok()
+}
+
+fn repair_legacy_business_command_revisions(database_path: &Path) -> anyhow::Result<usize> {
+    if !database_path.is_file() {
+        return Ok(0);
+    }
+    let mut conn = Connection::open(database_path)?;
+    let Some(table) = store::rxdb_collection_table_name(database_path, &conn, "business_commands")
+    else {
+        return Ok(0);
+    };
+    let quoted = sqlite_quote_identifier(&table);
+    let rows = {
+        let mut statement = conn.prepare(&format!("SELECT id, revision, data FROM {quoted}"))?;
+        let mapped = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let transaction = conn.transaction()?;
+    let mut repaired = 0usize;
+    for (id, stored_revision, raw) in rows {
+        let mut document: Value = serde_json::from_str(&raw)?;
+        let document_revision = document.get("_rev").and_then(Value::as_str).unwrap_or("");
+        if valid_rxdb_revision(&stored_revision) && document_revision == stored_revision {
+            continue;
+        }
+        let revision = if valid_rxdb_revision(&stored_revision) {
+            stored_revision
+        } else if valid_rxdb_revision(document_revision) {
+            document_revision.to_string()
+        } else {
+            format!("1-{}", Uuid::new_v4().simple())
+        };
+        if let Some(object) = document.as_object_mut() {
+            object.insert("_rev".to_string(), Value::String(revision.clone()));
+        }
+        transaction.execute(
+            &format!("UPDATE {quoted} SET revision = ?1, data = ?2 WHERE id = ?3"),
+            params![revision, serde_json::to_string(&document)?, id],
+        )?;
+        repaired += 1;
+    }
+    transaction.commit()?;
+    Ok(repaired)
+}
+
 pub(super) async fn open_database(database_path: PathBuf) -> anyhow::Result<Arc<RxDatabase>> {
     let storage = get_rx_storage_sqlite(RxStorageSqliteSettings { database_path });
     create_rx_database(RxDatabaseCreator {
@@ -7798,7 +8027,7 @@ fn runtime_module_collection_entries_for_root(root: &Path) -> Vec<RuntimeModuleC
                 continue;
             }
             for collection_entry in
-                module_dir_collection_entries(&module_dir, require_installed_marker)
+                module_dir_collection_entries(root, &module_dir, require_installed_marker)
             {
                 if static_collections.contains_key(&collection_entry.name)
                     || !seen.insert(collection_entry.name.clone())
@@ -7812,8 +8041,11 @@ fn runtime_module_collection_entries_for_root(root: &Path) -> Vec<RuntimeModuleC
     collected
 }
 
-fn runtime_installed_module_collection_schemas(module_dir: &Path) -> Vec<(String, RxJsonSchema)> {
-    module_dir_collection_entries(module_dir, true)
+fn runtime_installed_module_collection_schemas(
+    root: &Path,
+    module_dir: &Path,
+) -> Vec<(String, RxJsonSchema)> {
+    module_dir_collection_entries(root, module_dir, true)
         .into_iter()
         .map(|entry| (entry.name, entry.schema))
         .collect()
@@ -7823,8 +8055,8 @@ fn runtime_installed_module_collection_schemas(module_dir: &Path) -> Vec<(String
 /// git-ignored) load their collection schemas exactly like installed modules
 /// but carry no runtime-installed marker — dropping the directory IS the
 /// install. Completes the local-modules discovery from commit 8741c150.
-fn local_module_collection_schemas(module_dir: &Path) -> Vec<(String, RxJsonSchema)> {
-    module_dir_collection_entries(module_dir, false)
+fn local_module_collection_schemas(root: &Path, module_dir: &Path) -> Vec<(String, RxJsonSchema)> {
+    module_dir_collection_entries(root, module_dir, false)
         .into_iter()
         .map(|entry| (entry.name, entry.schema))
         .collect()
@@ -7941,12 +8173,12 @@ fn runtime_module_migration_strategies_for_collection(
 }
 
 fn module_dir_collection_entries(
+    root: &Path,
     module_dir: &Path,
     require_installed_marker: bool,
 ) -> Vec<RuntimeModuleCollectionEntry> {
     let manifest_path = module_dir.join("module.json");
-    let schema_path = module_dir.join("collections.schema.json");
-    if !manifest_path.is_file() || !schema_path.is_file() {
+    if !manifest_path.is_file() {
         return Vec::new();
     }
     let manifest = match read_json_file(&manifest_path) {
@@ -7959,6 +8191,17 @@ fn module_dir_collection_entries(
             return Vec::new();
         }
     };
+    if let Err(err) = super::customer_apps::authorize_runtime_module(root, module_dir, &manifest) {
+        eprintln!(
+            "[business-os] skipping runtime module schema {}: module admission denied: {err:#}",
+            module_dir.display()
+        );
+        return Vec::new();
+    }
+    let schema_path = module_dir.join("collections.schema.json");
+    if !schema_path.is_file() {
+        return Vec::new();
+    }
     if require_installed_marker && !manifest_value_is_runtime_installed_for_native_peer(&manifest) {
         return Vec::new();
     }
@@ -8136,20 +8379,13 @@ fn resolve_business_os_installed_app_root_for_native_peer(root: &Path) -> PathBu
     {
         return root.join("business-os");
     }
-    let direct = root.join("business-os");
-    if direct.exists() {
-        return direct;
-    }
-    // Installed CTOX instances keep durable customer modules directly below
-    // the state root (`<state>/business-os`). A sibling `<state>/runtime`
-    // directory can exist for unrelated runtime data and must not redirect
-    // module discovery into `<state>/runtime/business-os`; doing so makes the
-    // shell see a local app while the native peer silently omits its
-    // collections. Source checkouts, on the other hand, have no direct
-    // `business-os` directory and keep the app tree under `runtime/`.
     let runtime = root.join("runtime");
     if runtime.exists() {
         return runtime.join("business-os");
+    }
+    let direct = root.join("business-os");
+    if direct.exists() {
+        return direct;
     }
     root.join("business-os")
 }
@@ -9156,6 +9392,88 @@ pub(in crate::business_os) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn bound_peer_capability_requires_fresh_matching_p256_proof() -> anyhow::Result<()> {
+        use ring::signature::KeyPair as _;
+
+        let root = tempfile::tempdir()?;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &rng,
+        )
+        .map_err(|_| anyhow::anyhow!("generate test P-256 key"))?;
+        let key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8.as_ref(),
+            &rng,
+        )
+        .map_err(|_| anyhow::anyhow!("parse test P-256 key"))?;
+        let public_key = key_pair.public_key().as_ref();
+        anyhow::ensure!(public_key.len() == 65 && public_key[0] == 0x04);
+        let encoder = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let public_jwk = json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": encoder.encode(&public_key[1..33]),
+            "y": encoder.encode(&public_key[33..65]),
+        });
+        let (_, thumbprint) =
+            p256_public_key_and_thumbprint(&public_jwk).expect("valid public JWK");
+        let binding = super::super::mobile_invites::device_binding(
+            Some("pairing-pop-test"),
+            Some("device-pop-test"),
+            Some(&thumbprint),
+        )?
+        .expect("binding");
+        let created = super::super::mobile_invites::create(
+            root.path(),
+            300,
+            Some("PoP test"),
+            Some(&binding),
+        )?;
+        let token = created["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("token");
+        let nonce = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        let mut protocol = json!({
+            "peerSession": {
+                "sessionId": "browser:test-room",
+                "capabilityToken": token,
+            }
+        });
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, None),
+            WebRTCPeerSessionValidation::Defer
+        );
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, Some(nonce)),
+            WebRTCPeerSessionValidation::Reject
+        );
+        let signature = key_pair
+            .sign(&rng, nonce.as_bytes())
+            .map_err(|_| anyhow::anyhow!("sign test nonce"))?;
+        protocol["peerSession"]["deviceProof"] = json!({
+            "version": DEVICE_PROOF_VERSION,
+            "nonce": nonce,
+            "publicJwk": public_jwk,
+            "signature": encoder.encode(signature.as_ref()),
+        });
+        assert_eq!(
+            validate_device_bound_peer_session(root.path(), &protocol, Some(nonce)),
+            WebRTCPeerSessionValidation::Accept
+        );
+        assert_eq!(
+            validate_device_bound_peer_session(
+                root.path(),
+                &protocol,
+                Some("mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm")
+            ),
+            WebRTCPeerSessionValidation::Reject
+        );
+        Ok(())
+    }
 
     #[test]
     fn reconciliation_startup_delays_are_staggered_after_control_plane() {
@@ -10338,23 +10656,20 @@ pub(in crate::business_os) mod tests {
     }
 
     #[test]
-    fn state_root_local_modules_win_over_unrelated_runtime_tree() -> anyhow::Result<()> {
+    fn unbound_customer_runtime_module_schema_is_not_discovered() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
-        fs::create_dir_all(
-            temp.path()
-                .join("runtime/business-os/local-modules/unrelated-runtime-module"),
-        )?;
         let module_dir = temp
             .path()
-            .join("business-os/local-modules/outbound-lead-generation");
+            .join("runtime/business-os/installed-modules/rem-private");
         fs::create_dir_all(&module_dir)?;
         fs::write(
             module_dir.join("module.json"),
             serde_json::to_vec_pretty(&json!({
-                "id": "outbound-lead-generation",
-                "entry": "local-modules/outbound-lead-generation/index.html",
-                "install_scope": "local",
-                "collections": ["outbound_lead_generation_adapters"]
+                "id": "rem-private",
+                "entry": "installed-modules/rem-private/index.html",
+                "install_scope": "installed",
+                "distribution": "customer",
+                "collections": ["rem_private_records"]
             }))?,
         )?;
         fs::write(
@@ -10362,24 +10677,23 @@ pub(in crate::business_os) mod tests {
             serde_json::to_vec_pretty(&json!({
                 "schema_format": "ctox-business-os-module-collections-v1",
                 "collections": {
-                    "outbound_lead_generation_adapters": {
+                    "rem_private_records": {
                         "primaryKey": "id",
                         "properties": {
-                            "id": { "type": "string", "maxLength": 180 },
-                            "updated_at_ms": { "type": "number" }
+                            "id": { "type": "string", "maxLength": 120 },
+                            "title": { "type": "string" }
                         },
-                        "required": ["id", "updated_at_ms"]
+                        "required": ["id"]
                     }
                 }
             }))?,
         )?;
 
-        assert_eq!(
-            resolve_business_os_installed_app_root_for_native_peer(temp.path()),
-            temp.path().join("business-os")
-        );
-        let creators = collection_creators_for_root(temp.path());
-        assert!(creators.contains_key("outbound_lead_generation_adapters"));
+        let entries = runtime_module_collection_entries_for_root(temp.path());
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.name == "rem_private_records"));
+        assert!(!collection_creators_for_root(temp.path()).contains_key("rem_private_records"));
         Ok(())
     }
 
@@ -11044,21 +11358,6 @@ pub(in crate::business_os) mod tests {
             "unchanged runtime app schemas must not force a respawn"
         );
         fs::write(
-            module_dir.join("module.json"),
-            serde_json::to_vec_pretty(&json!({
-                "id": "subscriptions",
-                "entry": "installed-modules/subscriptions/index.html",
-                "install_scope": "installed",
-                "version": "1.0.0",
-                "lifecycle": { "visibility_state": "team" },
-                "collections": ["subscriptions_records"]
-            }))?,
-        )?;
-        assert!(
-            !native_peer_runtime_installed_schemas_changed(temp.path(), &mut state)?,
-            "release-only manifest metadata must not restart the native peer"
-        );
-        fs::write(
             module_dir.join("collections.schema.json"),
             serde_json::to_vec_pretty(&json!({
                 "schema_format": "ctox-business-os-module-collections-v1",
@@ -11231,112 +11530,6 @@ pub(in crate::business_os) mod tests {
     }
 
     #[test]
-    fn projection_writer_repairs_malformed_legacy_revision_before_cache_refresh() {
-        let root = tempfile::tempdir().expect("temp root");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let path = store::rxdb_store_path(root.path());
-            let database = open_test_database(path.clone())
-                .await
-                .expect("open rxdb sqlite");
-            database
-                .add_collections(collection_creators())
-                .await
-                .expect("register collections");
-            let documents = database
-                .collection("documents")
-                .expect("documents collection");
-            let document_id = "projection_legacy_revision_repair_probe";
-            let projection = |title: &str| {
-                json!({
-                    "id": document_id,
-                    "title": title,
-                    "filename": "legacy-revision-repair.txt",
-                    "mime_type": "text/plain",
-                    "status": "imported",
-                    "current_version_id": "",
-                    "index_text": title,
-                    "is_deleted": false,
-                    "created_at_ms": 1_000,
-                    "updated_at_ms": 2_000
-                })
-            };
-
-            incremental_upsert_projection_if_changed(
-                &documents,
-                projection("Initial title"),
-                "accepted business_command",
-            )
-            .await
-            .expect("write initial projection");
-
-            let conn = Connection::open(&path).expect("open projection sqlite");
-            let documents_table: String = conn
-                .query_row(
-                    "SELECT name FROM sqlite_master
-                     WHERE type = 'table'
-                       AND name LIKE '%__documents__v%'
-                     ORDER BY name DESC
-                     LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("resolve documents projection table");
-            let raw: String = conn
-                .query_row(
-                    &format!("SELECT data FROM {documents_table} WHERE id = ?1"),
-                    [document_id],
-                    |row| row.get(0),
-                )
-                .expect("load projected row");
-            let mut damaged: Value = serde_json::from_str(&raw).expect("parse projected row");
-            damaged
-                .as_object_mut()
-                .expect("projected object")
-                .insert("_rev".to_string(), json!("rev_legacy_uuid"));
-            conn.execute(
-                &format!(
-                    "UPDATE {documents_table}
-                     SET revision = 'rev_legacy_uuid', data = ?1
-                     WHERE id = ?2"
-                ),
-                rusqlite::params![
-                    serde_json::to_string(&damaged).expect("serialize damaged row"),
-                    document_id
-                ],
-            )
-            .expect("damage persisted revision");
-            drop(conn);
-
-            assert!(incremental_upsert_projection_if_changed(
-                &documents,
-                projection("Accepted title"),
-                "accepted business_command",
-            )
-            .await
-            .expect("repair malformed revision through projection writer"));
-
-            let repaired = documents
-                .storage_instance
-                .find_documents_by_id(&[document_id.to_string()], true)
-                .await
-                .expect("load repaired projection")
-                .into_iter()
-                .next()
-                .expect("repaired projection");
-            assert_eq!(
-                repaired.get("title").and_then(Value::as_str),
-                Some("Accepted title")
-            );
-            assert!(projection_document_has_valid_revision(&repaired));
-        });
-    }
-
-    #[test]
     fn stale_schema_startup_repair_reuses_an_existing_store() {
         let root = tempfile::tempdir().expect("temp root");
         std::fs::create_dir_all(root.path().join("runtime")).expect("runtime dir");
@@ -11488,11 +11681,21 @@ pub(in crate::business_os) mod tests {
             serde_json::to_vec(&json!({
                 "version": NATIVE_PEER_STATUS_VERSION,
                 "running": true,
-                "replicationUp": false,
+                "replicationUp": true,
                 "pid": 1,
                 "peer_session_id": "rxdb-rs-test",
                 "updated_at_ms": now_ms() as u64,
                 "database_path": database_path.display().to_string(),
+                "replicationSignals": {
+                    "poolCreated": true,
+                    "signalingSocketConnected": true,
+                    "signalingJoinAccepted": true,
+                    "peerAuthenticated": true,
+                    "dataChannelOpen": true,
+                    "commandConsumerAlive": true,
+                    "criticalTasksAlive": true,
+                },
+                "criticalTasks": [{"name": "business_commands", "alive": true}],
                 "performance": native_peer_performance_snapshot(),
             }))
             .expect("serialize heartbeat"),
@@ -11502,6 +11705,20 @@ pub(in crate::business_os) mod tests {
         let status = native_peer_status(root.path());
         assert_eq!(status["running"], true);
         assert_eq!(status["heartbeat"]["fresh"], true);
+        assert_eq!(status["replicationUp"], true);
+        for stage in [
+            "signaling_socket_connected",
+            "signaling_join_accepted",
+            "peer_authenticated",
+            "data_channel_open",
+            "command_consumer_alive",
+        ] {
+            assert_eq!(
+                status.pointer(&format!("/health_stages/{stage}")),
+                Some(&Value::Bool(true)),
+                "fresh service heartbeat must populate external CLI stage {stage}"
+            );
+        }
         assert_eq!(status["peer_session_id"], "rxdb-rs-test");
         assert_eq!(
             status
@@ -11537,7 +11754,6 @@ pub(in crate::business_os) mod tests {
                 root.path(),
                 &initial.sync_room,
                 &initial.signaling_room_password,
-                &initial.signaling_native_token_hash,
                 &initial.signaling_urls,
             )
             .expect("unchanged config check"),
@@ -11552,32 +11768,10 @@ pub(in crate::business_os) mod tests {
                 root.path(),
                 &initial.sync_room,
                 &initial.signaling_room_password,
-                &initial.signaling_native_token_hash,
                 &initial.signaling_urls,
             )
             .expect("rotated config check"),
             "room rotation must force native peer respawn"
-        );
-    }
-
-    #[test]
-    fn native_peer_sync_config_change_detects_native_token_rotation() {
-        let root = tempfile::tempdir().expect("temp root");
-        let initial = store::sync_config(root.path()).expect("initial sync config");
-
-        store::rotate_sync_native_signaling_token(root.path())
-            .expect("rotate native signaling token");
-
-        assert!(
-            native_peer_sync_config_changed(
-                root.path(),
-                &initial.sync_room,
-                &initial.signaling_room_password,
-                &initial.signaling_native_token_hash,
-                &initial.signaling_urls,
-            )
-            .expect("native token rotation check"),
-            "native token rotation must force native peer respawn"
         );
     }
 
@@ -11913,16 +12107,9 @@ pub(in crate::business_os) mod tests {
 
     #[tokio::test]
     async fn native_all_schema_hashes_match_browser_contract_fixture() {
-        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/core/business_os/business_os_schema_hashes.json");
-        let fixture_json = std::fs::read_to_string(&fixture_path).unwrap_or_else(|error| {
-            panic!(
-                "read Business OS schema hash fixture at {}: {error}",
-                fixture_path.display()
-            )
-        });
-        let fixture: HashMap<String, String> = serde_json::from_str(&fixture_json)
-            .expect("Business OS schema hash fixture must be valid JSON");
+        let fixture: HashMap<String, String> =
+            serde_json::from_str(include_str!("business_os_schema_hashes.json"))
+                .expect("Business OS schema hash fixture must be valid JSON");
         let contract = business_os_schema_contract();
         let mut missing = Vec::new();
         let mut stale = Vec::new();
@@ -14490,6 +14677,57 @@ pub(in crate::business_os) mod tests {
             .block_on(business_record_projection_source_stamp(root.path()))
             .expect("updated projection stamp");
         assert_ne!(before.knowledge, after.knowledge);
+    }
+
+    #[test]
+    fn repair_legacy_business_command_revisions_updates_storage_and_document() {
+        let root = tempfile::tempdir().expect("temp root");
+        let path = store::rxdb_store_path(root.path());
+        std::fs::create_dir_all(path.parent().expect("rxdb parent")).expect("create rxdb parent");
+        let conn = Connection::open(&path).expect("open rxdb sqlite");
+        conn.execute_batch(
+            "CREATE TABLE ctox_business_os__business_commands__v1 (
+                id TEXT PRIMARY KEY,
+                revision TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .expect("create command projection table");
+        let malformed = json!({
+            "id": "cmd_legacy_revision",
+            "_rev": "rev_legacy_uuid",
+            "status": "completed",
+            "updated_at_ms": 1
+        });
+        conn.execute(
+            "INSERT INTO ctox_business_os__business_commands__v1 (id, revision, data)
+             VALUES ('cmd_legacy_revision', 'rev_legacy_uuid', ?1)",
+            [serde_json::to_string(&malformed).expect("serialize malformed command")],
+        )
+        .expect("insert malformed command");
+        drop(conn);
+
+        assert_eq!(
+            repair_legacy_business_command_revisions(&path).expect("repair revisions"),
+            1
+        );
+
+        let conn = Connection::open(path).expect("reopen rxdb sqlite");
+        let (revision, raw): (String, String) = conn
+            .query_row(
+                "SELECT revision, data
+                 FROM ctox_business_os__business_commands__v1
+                 WHERE id = 'cmd_legacy_revision'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load repaired command");
+        let document: Value = serde_json::from_str(&raw).expect("parse repaired command");
+        assert!(valid_rxdb_revision(&revision));
+        assert_eq!(
+            document.get("_rev").and_then(Value::as_str),
+            Some(revision.as_str())
+        );
     }
 
     #[test]

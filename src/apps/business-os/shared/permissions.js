@@ -1,4 +1,4 @@
-import { normalizeRole, roleCanManage } from './roles.js?v=20260811-fremde-collection-mitladen-v106';
+import { normalizeRole, roleCanManage } from './roles.js?v=20260816-browser-sync-guards-v141';
 
 export const BusinessOsPermissions = Object.freeze({
   WorkspaceManage: 'workspace.manage',

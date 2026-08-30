@@ -6,7 +6,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use ring::hmac;
+use ring::{digest, hmac};
 use rusqlite::params;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
@@ -1097,6 +1097,46 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
             "Use this when you need CTOX Business OS MCP channel and runtime status.",
             object_schema(vec![]),
         ),
+        external_effect_tool(
+            "meeting.schedule",
+            "Schedule one consent-backed Microsoft Teams guest meeting for the managed CTOX meeting runtime.",
+            object_schema(vec![
+                required_string("external_id"),
+                required_string("provider"),
+                required_string("join_url"),
+                required_string("starts_at"),
+                required_string("bot_name"),
+                required_string("consent_ref"),
+                required_string("tenant_ref"),
+                required_string("lead_ref"),
+            ]),
+        ),
+        read_tool(
+            "meeting.status",
+            "Read managed meeting schedule or runtime status without returning transcript content.",
+            object_schema(vec![required_string("meeting_id")]),
+        ),
+        write_tool(
+            "meeting.cancel",
+            "Cancel a scheduled managed meeting or stop its active guest participation.",
+            object_schema(vec![
+                required_string("meeting_id"),
+                optional_string("reason"),
+            ]),
+        ),
+        read_tool(
+            "meeting.get_transcript",
+            "Read the encrypted-at-rest transcript through CTOX, including source-backed speaker segments and confidence.",
+            object_schema(vec![required_string("meeting_id")]),
+        ),
+        destructive_tool(
+            "meeting.delete",
+            "Permanently delete a managed meeting transcript and all remaining audio artifacts.",
+            object_schema(vec![
+                required_string("meeting_id"),
+                optional_string("reason"),
+            ]),
+        ),
         read_tool(
             "business_os.list_modules",
             "Use this when you need the installed Business OS module catalog.",
@@ -1137,6 +1177,16 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
             "business_os.list_entities",
             "Use this when you need the entity/collection contract exposed by a module.",
             object_schema(vec![required_string("module_id")]),
+        ),
+        write_tool(
+            "decision_hub.request_decision",
+            "Escalate one bounded, blocking owner decision to the CTOX Decision Hub. This creates no external side effects.",
+            decision_hub_request_schema(),
+        ),
+        read_tool(
+            "decision_hub.get_decision",
+            "Read the bounded status and resolution of one Decision Hub escalation.",
+            object_schema(vec![required_string("decision_id")]),
         ),
         read_tool(
             "business_os.query_records",
@@ -1382,7 +1432,7 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
                 optional_string("record_id"),
                 optional_string("title"),
                 optional_string("objective"),
-                optional_object("payload"),
+                optional_action_payload("payload"),
             ]),
         ),
         write_tool(
@@ -1394,7 +1444,7 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
                 optional_string("record_id"),
                 optional_string("title"),
                 optional_string("objective"),
-                optional_object("payload"),
+                optional_action_payload("payload"),
             ]),
         ),
         read_tool(
@@ -2586,6 +2636,55 @@ fn call_tool_inner(
     enforce_argument_scope_policy(root, &context, tool_name, &arguments)?;
     enforce_rate_limit(root, &context)?;
     let result = match tool_name {
+        "meeting.schedule" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            let provider = required_arg(&arguments, "provider")?;
+            anyhow::ensure!(provider == "teams", "meeting provider must be `teams`");
+            crate::communication::meeting_native::schedule_managed_meeting(
+                root,
+                &required_arg(&arguments, "external_id")?,
+                &required_arg(&arguments, "join_url")?,
+                &required_arg(&arguments, "starts_at")?,
+                &required_arg(&arguments, "bot_name")?,
+                &required_arg(&arguments, "consent_ref")?,
+                &required_arg(&arguments, "tenant_ref")?,
+                &required_arg(&arguments, "lead_ref")?,
+            )?
+        }
+        "meeting.status" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::managed_meeting_status(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+            )?
+        }
+        "meeting.cancel" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::cancel_managed_meeting(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+                optional_string_arg(&arguments, "reason")
+                    .as_deref()
+                    .unwrap_or(""),
+            )?
+        }
+        "meeting.get_transcript" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::managed_meeting_transcript(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+            )?
+        }
+        "meeting.delete" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::delete_managed_meeting(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+                optional_string_arg(&arguments, "reason")
+                    .as_deref()
+                    .unwrap_or(""),
+            )?
+        }
         "business_os.status" => mcp_status(root, &context)?,
         "business_os.list_modules" => serde_json::to_value(list_modules(root, &context)?)?,
         "business_os.list_design_templates" => super::server::list_design_template_documents(root)?,
@@ -2634,6 +2733,35 @@ fn call_tool_inner(
         "business_os.list_entities" => {
             let module_id = required_arg(&arguments, "module_id")?;
             serde_json::to_value(list_entities(root, &context, &module_id)?)?
+        }
+        "decision_hub.request_decision" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            let command_id = format!("cmd_{}", uuid::Uuid::new_v4());
+            let outcome = store::accept_rxdb_business_command(
+                root,
+                serde_json::json!({
+                    "id": command_id,
+                    "command_id": command_id,
+                    "module": "kundenpipeline",
+                    "command_type": "kundenpipeline.decision.request",
+                    "payload": arguments,
+                    "client_context": {
+                        "channel": &context.channel,
+                        "surface": &context.surface,
+                        "actor": resolved_mcp_actor_context(root, &context)?,
+                        "mcp_actor": &context.actor,
+                        "workspace": &context.workspace,
+                        "request_id": &context.request_id,
+                        "mcp_tool": tool_name,
+                    }
+                }),
+            )?;
+            outcome.get("result").cloned().unwrap_or(outcome)
+        }
+        "decision_hub.get_decision" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            let decision_id = required_arg(&arguments, "decision_id")?;
+            super::decision_hub::get_agent_decision(root, &decision_id)?
         }
         "business_os.query_records" => {
             let collection = required_arg(&arguments, "collection")?;
@@ -4391,29 +4519,24 @@ pub fn propose_action(
     let title = optional_string_arg(arguments, "title").unwrap_or_else(|| action.title.clone());
     let objective =
         optional_string_arg(arguments, "objective").unwrap_or_else(|| action.description.clone());
-    let mut payload = arguments
-        .get("payload")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut payload = normalize_native_mcp_action_payload(
+        action_id,
+        arguments
+            .get("payload")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    );
     if action.action_id == "web_stack.person_research" {
         validate_person_research_action_arguments(arguments, &payload)?;
         let scoped_record_id = record_id
             .as_deref()
             .context("person research action requires record_id")?;
-        validate_person_research_record_binding(
-            root,
-            context,
-            module_id,
-            scoped_record_id,
-            &payload,
-        )?;
         payload["writeback_contract"] = serde_json::json!({
             "collection": "outbound_lead_generation_leads",
             "allowed_collections": ["outbound_lead_generation_leads"],
             "record_ids": [scoped_record_id],
             "command_type": "web_stack.person_research",
-            "min_independent_sources": 2,
-            "workspace": &context.workspace
+            "min_independent_sources": 2
         });
     }
     if is_native_mcp_control_action(module_id, &action.action_id) {
@@ -4430,11 +4553,7 @@ pub fn propose_action(
                 "request_id": &context.request_id,
                 "requires_confirmation": action.confirmation_required,
                 "proposal_only": true,
-                "writeback_contract": if action.action_id == "web_stack.person_research" {
-                    "person_research/native"
-                } else {
-                    "external_sql"
-                }
+                "writeback_contract": "external_sql"
             }),
             confirmation_required: action.confirmation_required,
             would_execute: false,
@@ -4529,22 +4648,7 @@ pub fn execute_action(
             field: Some("action_id".to_string()),
         }));
     }
-    let writeback_contract = if action_id == "web_stack.person_research" {
-        "person_research/native"
-    } else if is_native_mcp_control_action(module_id, action_id) {
-        "external_sql"
-    } else {
-        ""
-    };
-    let person_research_key = if action_id == "web_stack.person_research" {
-        Some(person_research_idempotency_key(
-            arguments,
-            proposal.record_id.as_deref().unwrap_or_default(),
-        )?)
-    } else {
-        None
-    };
-    let mut client_context = serde_json::json!({
+    let client_context = serde_json::json!({
         "channel": &context.channel,
         "surface": &context.surface,
         "actor": resolved_mcp_actor_context(root, context)?,
@@ -4556,18 +4660,9 @@ pub fn execute_action(
         "proposal_only": false,
         "mcp_tool": &context.tool
     });
-    if !writeback_contract.is_empty() {
-        client_context["writeback_contract"] = serde_json::json!(writeback_contract);
-    }
-    if let Some(key) = person_research_key {
-        client_context["idempotency_key"] = serde_json::json!(key);
-    }
     if is_native_mcp_control_action(module_id, action_id) {
-        let command_id = if action_id == "web_stack.person_research" {
-            person_research_command_id(context, &proposal, arguments)?
-        } else {
-            format!("cmd_{}", uuid::Uuid::new_v4())
-        };
+        let command_id =
+            native_mcp_control_command_id(context, module_id, action_id, &proposal.payload);
         let outcome = store::accept_rxdb_business_command(
             root,
             serde_json::json!({
@@ -4642,6 +4737,77 @@ fn is_native_mcp_control_action(module_id: &str, action_id: &str) -> bool {
             action_id,
             "external_sql.sync.refresh" | "external_sql.write" | "web_stack.person_research"
         )
+}
+
+fn normalize_native_mcp_action_payload(action_id: &str, mut payload: Value) -> Value {
+    if action_id != "web_stack.person_research" {
+        return payload;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    for field in ["fields", "include_private"] {
+        let Some(value) = object.get_mut(field) else {
+            continue;
+        };
+        let mut normalized = value.clone();
+        loop {
+            let replacement = match &normalized {
+                Value::Object(wrapper) if wrapper.len() == 1 => wrapper.get("item").cloned(),
+                _ => None,
+            };
+            let Some(replacement) = replacement else {
+                break;
+            };
+            normalized = replacement;
+        }
+        *value = match normalized {
+            Value::Array(_) => normalized,
+            Value::Null => Value::Array(Vec::new()),
+            item => Value::Array(vec![item]),
+        };
+    }
+    if let Some(Value::String(value)) = object.get_mut("auto_browser_capture") {
+        if value.eq_ignore_ascii_case("true") {
+            object.insert("auto_browser_capture".to_string(), Value::Bool(true));
+        } else if value.eq_ignore_ascii_case("false") {
+            object.insert("auto_browser_capture".to_string(), Value::Bool(false));
+        }
+    }
+    payload
+}
+
+fn native_mcp_control_command_id(
+    context: &McpChannelRequestContext,
+    module_id: &str,
+    action_id: &str,
+    payload: &Value,
+) -> String {
+    let operation_id = payload
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if context.trusted_role_source.as_deref() == Some(MCP_INTERNAL_SESSION_AUTH_SOURCE) {
+        if let Some(operation_id) = operation_id {
+            let identity = format!(
+                "{}\0{}\0{}\0{}",
+                context.request_id.trim(),
+                module_id.trim(),
+                action_id.trim(),
+                operation_id
+            );
+            let hash = digest::digest(&digest::SHA256, identity.as_bytes());
+            let suffix = hash
+                .as_ref()
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            return format!("cmd_{suffix}");
+        }
+    }
+    format!("cmd_{}", uuid::Uuid::new_v4())
 }
 
 fn ensure_non_empty(field: &str, value: &str) -> Result<(), BusinessOsMcpError> {
@@ -5217,6 +5383,22 @@ fn business_os_mcp_policy_decision(
     arguments: &Value,
 ) -> anyhow::Result<Option<PolicyDecision>> {
     match tool_name {
+        "meeting.status" | "meeting.get_transcript" => Ok(Some(trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::DataRead,
+            BusinessOsScopeType::Workspace,
+            None,
+        )?)),
+        "meeting.schedule" | "meeting.cancel" | "meeting.delete" => {
+            Ok(Some(trusted_mcp_actor_policy_decision(
+                root,
+                context,
+                BusinessOsPermission::DataWrite,
+                BusinessOsScopeType::Workspace,
+                None,
+            )?))
+        }
         "web_search" | "web_read" | "web_deep_research" => {
             Ok(Some(trusted_mcp_actor_policy_decision(
                 root,
@@ -5271,6 +5453,18 @@ fn business_os_mcp_policy_decision(
                 BusinessOsPermission::DataRead,
             )?))
         }
+        "decision_hub.request_decision" => Ok(Some(business_os_mcp_module_data_decision(
+            root,
+            context,
+            "kundenpipeline",
+            BusinessOsPermission::DataWrite,
+        )?)),
+        "decision_hub.get_decision" => Ok(Some(business_os_mcp_module_data_decision(
+            root,
+            context,
+            "kundenpipeline",
+            BusinessOsPermission::DataRead,
+        )?)),
         "business_os.query_records"
         | "business_os.search_records"
         | "business_os.get_record_context"
@@ -5694,6 +5888,7 @@ fn collection_requires_typed_mcp_tool(collection: &str) -> bool {
             | "business_credentials"
             | "ctox_runtime_settings"
             | "ctox_task_approval_requests"
+            | "kundenpipeline_entscheidungen"
             | "desktop_files"
             | "desktop_file_chunks"
     )
@@ -5843,6 +6038,10 @@ fn enforce_argument_scope_policy(
                 enforce_module_policy(root, &module_id)?;
             }
         }
+        "decision_hub.request_decision" | "decision_hub.get_decision" => {
+            enforce_module_policy(root, "kundenpipeline")?;
+            enforce_collection_policy(root, "kundenpipeline_entscheidungen")?;
+        }
         "business_os.create_app" => {
             if let Ok(module_id) = app_module_id_from_arguments(
                 arguments,
@@ -5972,7 +6171,9 @@ enum McpToolPolicyClass {
 
 fn tool_policy_class(tool_name: &str) -> McpToolPolicyClass {
     match tool_name {
-        "business_os.approve" | "web_browser_automate" => McpToolPolicyClass::ExternalEffect,
+        "business_os.approve" | "web_browser_automate" | "meeting.schedule" => {
+            McpToolPolicyClass::ExternalEffect
+        }
         "business_os.reject" | "business_os.request_changes" => McpToolPolicyClass::Approval,
         "web_browser_prepare"
         | "business_os.execute_action"
@@ -5996,7 +6197,10 @@ fn tool_policy_class(tool_name: &str) -> McpToolPolicyClass {
         | "business_os.write_app_file"
         | "business_os.validate_app"
         | "business_os.smoke_app"
-        | "business_os.e2e_app" => McpToolPolicyClass::Write,
+        | "business_os.e2e_app"
+        | "meeting.cancel"
+        | "meeting.delete" => McpToolPolicyClass::Write,
+        "decision_hub.request_decision" => McpToolPolicyClass::Write,
         _ => McpToolPolicyClass::Read,
     }
 }
@@ -6136,6 +6340,8 @@ fn argument_business_scope_metadata(tool_name: &str, arguments: &Value) -> Value
             "run_id",
             "artifact_id",
             "approval_id",
+            "decision_id",
+            "decision_key",
             "limit",
             "path",
             "query",
@@ -6217,7 +6423,9 @@ fn context_from_arguments_with_trusted_gateway_context(
             .or_else(|| string_field(context, "workspace"))
             .unwrap_or_else(|| "local".to_string()),
         tool: tool_name.to_string(),
-        request_id: string_field(context, "request_id")
+        request_id: internal_context
+            .and_then(|context| string_field(context, "command_id"))
+            .or_else(|| string_field(context, "request_id"))
             .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
         confirmation_state: if internal_context.is_some()
             && tool_name == "business_os.execute_action"
@@ -6293,6 +6501,13 @@ fn enforce_internal_command_session_scope(
                     operation_ids.iter().any(|allowed| allowed == operation_id),
                     "Business OS operation `{operation_id}` is outside the command writeback contract"
                 );
+                if action_id == "web_stack.person_research" {
+                    let record_id = required_arg(arguments, "record_id")?;
+                    anyhow::ensure!(
+                        record_id == operation_id,
+                        "Business OS person-research record_id must match its scoped operation_id"
+                    );
+                }
             }
         }
         "business_os.get_module"
@@ -6683,6 +6898,23 @@ fn destructive_tool(
     }
 }
 
+fn external_effect_tool(
+    name: &str,
+    description: &str,
+    input_schema: Value,
+) -> BusinessOsMcpToolDescriptor {
+    BusinessOsMcpToolDescriptor {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema,
+        annotations: Some(serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "openWorldHint": true
+        })),
+    }
+}
+
 fn object_schema(properties: Vec<(&'static str, Value, bool)>) -> Value {
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
@@ -6698,6 +6930,93 @@ fn object_schema(properties: Vec<(&'static str, Value, bool)>) -> Value {
         "required": required,
         "additionalProperties": false
     })
+}
+
+fn decision_hub_request_schema() -> Value {
+    object_schema(vec![
+        (
+            "decision_key",
+            serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 240 }),
+            true,
+        ),
+        (
+            "title",
+            serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 160 }),
+            true,
+        ),
+        (
+            "question",
+            serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 2000 }),
+            true,
+        ),
+        (
+            "context",
+            serde_json::json!({ "type": "string", "maxLength": 8000 }),
+            false,
+        ),
+        (
+            "options",
+            serde_json::json!({
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+                        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+                        "description": { "type": "string", "maxLength": 1000 }
+                    },
+                    "required": ["id", "label"],
+                    "additionalProperties": false
+                }
+            }),
+            true,
+        ),
+        (
+            "recommendation",
+            serde_json::json!({ "type": "string", "maxLength": 120 }),
+            false,
+        ),
+        (
+            "urgency",
+            serde_json::json!({ "type": "string", "enum": ["normal", "high", "critical"] }),
+            false,
+        ),
+        (
+            "expires_at_ms",
+            serde_json::json!({ "type": "integer", "minimum": 1 }),
+            false,
+        ),
+        (
+            "source",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "authority": { "type": "string", "minLength": 1, "maxLength": 120 },
+                    "environment_id": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "thread_id": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "workjet_instance_id": { "type": "string", "maxLength": 240 }
+                },
+                "required": ["environment_id", "thread_id"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        (
+            "correlation",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "turn_id": { "type": "string", "maxLength": 240 },
+                    "idempotency_key": { "type": "string", "maxLength": 240 }
+                },
+                "required": ["idempotency_key"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+    ])
 }
 
 fn required_string(name: &'static str) -> (&'static str, Value, bool) {
@@ -6739,11 +7058,23 @@ fn optional_boolean(name: &'static str) -> (&'static str, Value, bool) {
     (name, serde_json::json!({ "type": "boolean" }), false)
 }
 
-fn optional_object(name: &'static str) -> (&'static str, Value, bool) {
+fn optional_action_payload(name: &'static str) -> (&'static str, Value, bool) {
     (
         name,
         serde_json::json!({
             "type": "object",
+            "properties": {
+                "operation_id": { "type": "string" },
+                "company": { "type": "string" },
+                "country": { "type": "string", "enum": ["DE", "AT", "CH"] },
+                "mode": {
+                    "type": "string",
+                    "enum": ["new_record", "update_firm", "update_person", "update_inventory_general", "have_data"]
+                },
+                "fields": { "type": "array", "items": { "type": "string" } },
+                "include_private": { "type": "array", "items": { "type": "string" } },
+                "auto_browser_capture": { "type": "boolean" }
+            },
             "additionalProperties": true
         }),
         false,
@@ -6818,8 +7149,6 @@ fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescrip
         "required": ["record_id", "payload"],
         "properties": {
             "record_id": { "type": "string", "minLength": 1 },
-            "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 200 },
-            "run_key": { "type": "string", "minLength": 1, "maxLength": 200 },
             "payload": {
                 "type": "object",
                 "required": ["operation_id", "company", "country", "mode"],
@@ -6831,8 +7160,8 @@ fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescrip
                         "type": "string",
                         "enum": ["new_record", "update_firm", "update_person", "update_inventory_general", "have_data"]
                     },
-                    "fields": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-                    "include_private": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                    "fields": { "type": "array", "items": { "type": "string" } },
+                    "include_private": { "type": "array", "items": { "type": "string" } },
                     "auto_browser_capture": { "type": "boolean" }
                 },
                 "additionalProperties": false
@@ -6944,179 +7273,6 @@ fn validate_person_research_action_arguments(
             &format!("payload.{field}"),
             format!("unsupported web_stack.person_research payload field `{field}`"),
         )));
-    }
-    Ok(())
-}
-
-fn person_research_idempotency_key(arguments: &Value, record_id: &str) -> anyhow::Result<String> {
-    let idempotency_key = optional_string_arg(arguments, "idempotency_key");
-    let run_key = optional_string_arg(arguments, "run_key");
-    if let (Some(idempotency_key), Some(run_key)) = (&idempotency_key, &run_key) {
-        anyhow::ensure!(
-            idempotency_key == run_key,
-            BusinessOsMcpError::validation(
-                "run_key",
-                "idempotency_key and run_key must match when both are supplied",
-            )
-        );
-    }
-    let value = idempotency_key
-        .or(run_key)
-        .unwrap_or_else(|| format!("operation:{record_id}"));
-    let value = value.trim();
-    anyhow::ensure!(
-        !value.is_empty() && value.len() <= 200,
-        BusinessOsMcpError::validation(
-            "idempotency_key",
-            "idempotency_key must be a non-empty string of at most 200 characters",
-        )
-    );
-    Ok(value.to_string())
-}
-
-fn person_research_command_id(
-    context: &McpChannelRequestContext,
-    proposal: &BusinessOsActionProposal,
-    arguments: &Value,
-) -> anyhow::Result<String> {
-    let record_id = proposal
-        .record_id
-        .as_deref()
-        .context("person research action requires record_id")?;
-    let key = person_research_idempotency_key(arguments, record_id)?;
-    let material = format!(
-        "person-research:v1:{}:{}:{}:{}:{}:{}",
-        context.workspace, context.actor, proposal.module_id, proposal.command_type, record_id, key
-    );
-    Ok(format!(
-        "cmd_person_research_{}",
-        crate::mission::channels::stable_digest(&material)
-    ))
-}
-
-fn validate_person_research_record_binding(
-    root: &Path,
-    context: &McpChannelRequestContext,
-    module_id: &str,
-    record_id: &str,
-    payload: &Value,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        module_id == "outbound-lead-generation",
-        BusinessOsMcpError::validation(
-            "module_id",
-            "web_stack.person_research is scoped to outbound-lead-generation",
-        )
-    );
-    let owning_modules = module_ids_for_collection(root, "outbound_lead_generation_leads")?;
-    anyhow::ensure!(
-        owning_modules
-            .iter()
-            .any(|candidate| candidate == module_id),
-        BusinessOsMcpError::validation(
-            "collection",
-            "outbound_lead_generation_leads is not declared by the calling module",
-        )
-    );
-    let record = store::pull_collection_record(root, "outbound_lead_generation_leads", record_id)?
-        .ok_or_else(|| {
-            anyhow::Error::new(BusinessOsMcpError::not_found(
-                BusinessOsMcpErrorCode::RecordNotFound,
-                "the scoped Outbound Lead Generation record does not exist",
-            ))
-        })?;
-    let record_object = record.as_object().ok_or_else(|| {
-        anyhow::Error::new(BusinessOsMcpError::validation(
-            "record_id",
-            "the scoped lead record must be an object",
-        ))
-    })?;
-    for (field, expected) in [
-        ("module_id", "outbound-lead-generation"),
-        ("module", "outbound-lead-generation"),
-        ("collection", "outbound_lead_generation_leads"),
-    ] {
-        if let Some(actual) = record_object.get(field).and_then(Value::as_str) {
-            anyhow::ensure!(
-                actual == expected,
-                BusinessOsMcpError::validation(
-                    field,
-                    format!("lead record is not bound to {expected}"),
-                )
-            );
-        }
-    }
-    for field in ["tenant_id", "tenant", "workspace", "workspace_id"] {
-        if let Some(actual) = record_object.get(field).and_then(Value::as_str) {
-            anyhow::ensure!(
-                actual == context.workspace,
-                BusinessOsMcpError::validation(
-                    field,
-                    "lead record is bound to a different tenant workspace",
-                )
-            );
-        }
-    }
-    let company = payload
-        .get("company")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let bound_company = record_object
-        .get("company")
-        .or_else(|| record_object.get("company_name"))
-        .or_else(|| record_object.get("title"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    anyhow::ensure!(
-        !bound_company.is_empty() && company == bound_company,
-        BusinessOsMcpError::validation(
-            "payload.company",
-            "payload.company must match the existing lead record",
-        )
-    );
-    let country = payload
-        .get("country")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let bound_country = record_object
-        .get("country")
-        .or_else(|| record_object.get("country_code"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    anyhow::ensure!(
-        !bound_country.is_empty() && country == bound_country,
-        BusinessOsMcpError::validation(
-            "payload.country",
-            "payload.country must match the existing lead record",
-        )
-    );
-    if let Some(bound_payload) = ["person_research_payload", "research_payload", "payload"]
-        .iter()
-        .find_map(|field| record_object.get(*field).and_then(Value::as_object))
-    {
-        for field in [
-            "operation_id",
-            "company",
-            "country",
-            "mode",
-            "fields",
-            "include_private",
-            "auto_browser_capture",
-        ] {
-            if let Some(expected) = bound_payload.get(field) {
-                anyhow::ensure!(
-                    payload.get(field) == Some(expected),
-                    BusinessOsMcpError::validation(
-                        &format!("payload.{field}"),
-                        "person research payload does not match the bound lead record",
-                    )
-                );
-            }
-        }
     }
     Ok(())
 }
@@ -7313,6 +7469,7 @@ mod tests {
     fn internal_command_session_overrides_actor_and_bounds_writeback() -> anyhow::Result<()> {
         let trusted = serde_json::json!({
             "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+            "command_id": "parent-command-1",
             "channel": "ctox_internal_business_command",
             "surface": "business_os_command_session",
             "actor": "user:trusted",
@@ -7342,6 +7499,7 @@ mod tests {
         )?;
         assert_eq!(context.actor, "user:trusted");
         assert_eq!(context.workspace, "workspace:trusted");
+        assert_eq!(context.request_id, "parent-command-1");
         assert_eq!(context.trusted_role.as_deref(), Some("admin"));
         assert_eq!(
             context.trusted_role_source.as_deref(),
@@ -7382,7 +7540,81 @@ mod tests {
             Some(&trusted),
         )
         .is_err());
+
+        let research_trusted = serde_json::json!({
+            "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+            "allowed_actions": [{
+                "module_id": "outbound-lead-generation",
+                "action_id": "web_stack.person_research",
+                "operation_ids": ["lead_1"]
+            }]
+        });
+        let scoped_research = serde_json::json!({
+            "module_id": "outbound-lead-generation",
+            "action_id": "web_stack.person_research",
+            "record_id": "lead_1",
+            "payload": { "operation_id": "lead_1", "company": "Acme GmbH" }
+        });
+        enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &scoped_research,
+            Some(&research_trusted),
+        )?;
+        let wrong_research_record = serde_json::json!({
+            "module_id": "outbound-lead-generation",
+            "action_id": "web_stack.person_research",
+            "record_id": "lead_2",
+            "payload": { "operation_id": "lead_1", "company": "Acme GmbH" }
+        });
+        assert!(enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &wrong_research_record,
+            Some(&research_trusted),
+        )
+        .is_err());
         Ok(())
+    }
+
+    #[test]
+    fn internal_native_action_command_ids_are_idempotent_per_parent_operation() {
+        let context = McpChannelRequestContext {
+            request_id: "parent-command-1".to_string(),
+            trusted_role_source: Some(MCP_INTERNAL_SESSION_AUTH_SOURCE.to_string()),
+            ..test_context("business_os.execute_action")
+        };
+        let payload = serde_json::json!({ "operation_id": "lead_1" });
+        let first = native_mcp_control_command_id(
+            &context,
+            "outbound-lead-generation",
+            "web_stack.person_research",
+            &payload,
+        );
+        let replay = native_mcp_control_command_id(
+            &context,
+            "outbound-lead-generation",
+            "web_stack.person_research",
+            &payload,
+        );
+        assert_eq!(first, replay);
+
+        let next_operation = native_mcp_control_command_id(
+            &context,
+            "outbound-lead-generation",
+            "web_stack.person_research",
+            &serde_json::json!({ "operation_id": "lead_2" }),
+        );
+        assert_ne!(first, next_operation);
+
+        let next_parent = native_mcp_control_command_id(
+            &McpChannelRequestContext {
+                request_id: "parent-command-2".to_string(),
+                ..context
+            },
+            "outbound-lead-generation",
+            "web_stack.person_research",
+            &payload,
+        );
+        assert_ne!(first, next_parent);
     }
 
     #[test]
@@ -7821,18 +8053,6 @@ mod tests {
             &["customer_accounts", "business_users"],
         )?;
         seed_default_mcp_admin(root)?;
-        store::push_collection_records(
-            root,
-            serde_json::json!({
-                "collection": "outbound_lead_generation_leads",
-                "documents": [{
-                    "id": "lead_1",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "workspace": "test-workspace"
-                }]
-            }),
-        )?;
 
         let entities = list_entities(
             root,
@@ -7900,76 +8120,6 @@ mod tests {
             records.items[0].deep_link.url_fragment,
             "#module=customer_accounts&record=acct_1"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn query_records_merges_browser_only_rxdb_rows_with_mcp_upserts() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        write_module(root, "customers", "Customers", &["customer_accounts"])?;
-        seed_default_mcp_admin(root)?;
-        let rxdb = store::rxdb_store_path(root);
-        if let Some(parent) = rxdb.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let rxdb_conn = rusqlite::Connection::open(&rxdb)?;
-        rxdb_conn.execute_batch(
-            "CREATE TABLE ctox_business_os__customer_accounts__v0 (
-                id TEXT PRIMARY KEY NOT NULL,
-                revision TEXT,
-                deleted INTEGER NOT NULL,
-                lastWriteTime REAL NOT NULL,
-                data TEXT NOT NULL
-            );",
-        )?;
-        rxdb_conn.execute(
-            "INSERT INTO ctox_business_os__customer_accounts__v0
-                (id, revision, deleted, lastWriteTime, data)
-             VALUES (?1, ?2, 0, ?3, ?4)",
-            rusqlite::params![
-                "acct_browser",
-                "1-browser",
-                42.0_f64,
-                serde_json::json!({
-                    "id": "acct_browser",
-                    "name": "Browser Account",
-                    "status": "active",
-                    "updated_at_ms": 42
-                })
-                .to_string()
-            ],
-        )?;
-        drop(rxdb_conn);
-
-        upsert_record(
-            root,
-            &test_context("business_os.upsert_record"),
-            &serde_json::json!({
-                "collection": "customer_accounts",
-                "record_id": "acct_mcp",
-                "record": {
-                    "id": "acct_mcp",
-                    "name": "MCP Account",
-                    "status": "active"
-                }
-            }),
-        )?;
-
-        let records = query_records(
-            root,
-            &test_context("business_os.query_records"),
-            "customer_accounts",
-            Some(10),
-        )?;
-        let ids = records
-            .items
-            .iter()
-            .map(|record| record.id.as_str())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(records.count, 2);
-        assert!(ids.contains("acct_browser"));
-        assert!(ids.contains("acct_mcp"));
         Ok(())
     }
 
@@ -11655,49 +11805,58 @@ mod tests {
     }
 
     #[test]
-    fn outbound_lead_generation_exposes_bounded_native_person_research() -> anyhow::Result<()> {
+    fn outbound_lead_generation_exposes_native_scoped_person_research() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
             root,
             "outbound-lead-generation",
             "Outbound Lead Generation",
-            "1.0.0",
+            "1.0.5",
             &["outbound_lead_generation_leads"],
-            None,
+            Some(serde_json::json!({ "public": true })),
         )?;
         seed_default_mcp_admin(root)?;
-        store::push_collection_records(
-            root,
-            serde_json::json!({
-                "collection": "outbound_lead_generation_leads",
-                "documents": [{
-                    "id": "lead_1",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "workspace": "test-workspace"
-                }]
-            }),
-        )?;
 
         let actions = list_module_actions(
             root,
             &test_context("business_os.list_module_actions"),
             "outbound-lead-generation",
         )?;
-        let research = actions
+        assert!(actions
+            .items
+            .iter()
+            .any(|action| action.action_id == "web_stack.person_research"));
+        let research_action = actions
             .items
             .iter()
             .find(|action| action.action_id == "web_stack.person_research")
             .context("person research action")?;
         assert_eq!(
-            research
+            research_action
+                .input_schema
+                .pointer("/properties/payload/required"),
+            Some(&serde_json::json!([
+                "operation_id",
+                "company",
+                "country",
+                "mode"
+            ]))
+        );
+        assert_eq!(
+            research_action
                 .input_schema
                 .pointer("/properties/payload/additionalProperties")
                 .and_then(Value::as_bool),
             Some(false)
         );
 
+        let payload = serde_json::json!({
+            "operation_id": "lead_1",
+            "company": "Acme GmbH",
+            "country": "DE",
+            "mode": "new_record"
+        });
         let proposal = propose_action(
             root,
             &test_context("business_os.propose_action"),
@@ -11705,20 +11864,15 @@ mod tests {
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
-                "idempotency_key": "research-1",
-                "payload": {
-                    "operation_id": "lead_1",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "mode": "update_person",
-                    "fields": ["person_vorname", "person_nachname"],
-                    "include_private": [],
-                    "auto_browser_capture": true
-                }
+                "payload": payload.clone()
             }),
         )?;
         assert_eq!(proposal.command_type, "web_stack.person_research");
         assert_eq!(proposal.record_id.as_deref(), Some("lead_1"));
+        assert_eq!(proposal.payload["operation_id"], payload["operation_id"]);
+        assert_eq!(proposal.payload["company"], payload["company"]);
+        assert_eq!(proposal.payload["country"], payload["country"]);
+        assert_eq!(proposal.payload["mode"], payload["mode"]);
         assert_eq!(
             proposal.payload["writeback_contract"],
             serde_json::json!({
@@ -11726,20 +11880,15 @@ mod tests {
                 "allowed_collections": ["outbound_lead_generation_leads"],
                 "record_ids": ["lead_1"],
                 "command_type": "web_stack.person_research",
-                "min_independent_sources": 2,
-                "workspace": "test-workspace"
+                "min_independent_sources": 2
             })
-        );
-        assert_eq!(
-            proposal.client_context["writeback_contract"],
-            "person_research/native"
         );
         assert!(is_native_mcp_control_action(
             "outbound-lead-generation",
             "web_stack.person_research"
         ));
 
-        let error = propose_action(
+        let malformed = propose_action(
             root,
             &test_context("business_os.propose_action"),
             "outbound-lead-generation",
@@ -11747,174 +11896,40 @@ mod tests {
             &serde_json::json!({
                 "record_id": "lead_1",
                 "payload": {
-                    "operation_id": "lead_2",
+                    "operation_id": "lead_1",
                     "company": "Acme GmbH",
                     "country": "DE",
-                    "mode": "update_person"
+                    "mode": "new_record",
+                    "fields": { "item": ["firma_name"] },
+                    "include_private": "",
+                    "auto_browser_capture": "true"
                 }
             }),
         )
-        .expect_err("record and operation scope must match");
-        let typed = error
+        .expect_err("transport-coerced person-research payload must be rejected before enqueue");
+        let typed = malformed
             .downcast_ref::<BusinessOsMcpError>()
-            .context("typed validation error")?;
+            .context("typed payload validation error")?;
         assert_eq!(typed.code, BusinessOsMcpErrorCode::ValidationFailed);
-        assert_eq!(typed.field.as_deref(), Some("payload.operation_id"));
-        Ok(())
-    }
+        assert_eq!(typed.field.as_deref(), Some("payload.fields"));
 
-    #[test]
-    fn person_research_execute_is_idempotent_and_record_bound() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        write_installed_module(
-            root,
-            "outbound-lead-generation",
-            "Outbound Lead Generation",
-            "1.0.0",
-            &["outbound_lead_generation_leads"],
-            None,
-        )?;
-        seed_default_mcp_admin(root)?;
-        store::push_collection_records(
-            root,
-            serde_json::json!({
-                "collection": "outbound_lead_generation_leads",
-                "documents": [{
-                    "id": "lead_1",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "workspace": "test-workspace"
-                }]
-            }),
-        )?;
-        let args = serde_json::json!({
-            "record_id": "lead_1",
-            "idempotency_key": "research-1",
-            "payload": {
-                "operation_id": "lead_1",
-                "company": "Acme GmbH",
-                "country": "DE",
-                "mode": "update_person"
-            }
-        });
-        let context = test_context("business_os.execute_action");
-        let (first, second) = std::thread::scope(|scope| {
-            let first_context = context.clone();
-            let first_args = args.clone();
-            let first = scope.spawn(move || {
-                execute_action(
-                    root,
-                    &first_context,
-                    "outbound-lead-generation",
-                    "web_stack.person_research",
-                    &first_args,
-                )
-            });
-            let second_context = context.clone();
-            let second_args = args.clone();
-            let second = scope.spawn(move || {
-                execute_action(
-                    root,
-                    &second_context,
-                    "outbound-lead-generation",
-                    "web_stack.person_research",
-                    &second_args,
-                )
-            });
-            (
-                first.join().expect("first execute thread"),
-                second.join().expect("second execute thread"),
-            )
-        });
-        let first = first?;
-        let second = second?;
-        assert_eq!(first.command_id, second.command_id);
-        assert_eq!(
-            second.client_context["writeback_contract"],
-            "person_research/native"
-        );
-        let commands = store::pull_collection_records(root, "business_commands", None, Some(100))?;
-        let person_commands = commands["documents"]
-            .as_array()
+        let execute_tool = tool_descriptors()
             .into_iter()
-            .flatten()
-            .filter(|document| document["command_type"] == "web_stack.person_research")
-            .collect::<Vec<_>>();
-        assert_eq!(person_commands.len(), 1);
-
-        let third = execute_action(
-            root,
-            &context,
-            "outbound-lead-generation",
-            "web_stack.person_research",
-            &serde_json::json!({
-                "record_id": "lead_1",
-                "run_key": "research-2",
-                "payload": {
-                    "operation_id": "lead_1",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "mode": "update_person"
-                }
-            }),
-        )?;
-        assert_ne!(first.command_id, third.command_id);
-        let commands = store::pull_collection_records(root, "business_commands", None, Some(100))?;
-        let person_commands = commands["documents"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|document| document["command_type"] == "web_stack.person_research")
-            .collect::<Vec<_>>();
-        assert_eq!(person_commands.len(), 2);
-
-        let missing = execute_action(
-            root,
-            &context,
-            "outbound-lead-generation",
-            "web_stack.person_research",
-            &serde_json::json!({
-                "record_id": "missing",
-                "idempotency_key": "missing-1",
-                "payload": {
-                    "operation_id": "missing",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "mode": "update_person"
-                }
-            }),
-        )
-        .expect_err("missing lead must be rejected before command acceptance");
+            .find(|tool| tool.name == "business_os.execute_action")
+            .context("execute action tool descriptor")?;
         assert_eq!(
-            missing
-                .downcast_ref::<BusinessOsMcpError>()
-                .map(|error| &error.code),
-            Some(&BusinessOsMcpErrorCode::RecordNotFound)
+            execute_tool
+                .input_schema
+                .pointer("/properties/payload/properties/fields/type")
+                .and_then(Value::as_str),
+            Some("array")
         );
-
-        let mismatch = propose_action(
-            root,
-            &context,
-            "outbound-lead-generation",
-            "web_stack.person_research",
-            &serde_json::json!({
-                "record_id": "lead_1",
-                "idempotency_key": "mismatch-1",
-                "payload": {
-                    "operation_id": "lead_1",
-                    "company": "Other GmbH",
-                    "country": "DE",
-                    "mode": "update_person"
-                }
-            }),
-        )
-        .expect_err("company mismatch must be rejected");
         assert_eq!(
-            mismatch
-                .downcast_ref::<BusinessOsMcpError>()
-                .and_then(|error| error.field.as_deref()),
-            Some("payload.company")
+            execute_tool
+                .input_schema
+                .pointer("/properties/payload/properties/auto_browser_capture/type")
+                .and_then(Value::as_str),
+            Some("boolean")
         );
         Ok(())
     }

@@ -378,8 +378,8 @@ fn module_catalog_projection_service_session() -> BusinessOsSession {
 pub fn module_catalog_for_rxdb(root: &Path) -> anyhow::Result<Value> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let modules = load_module_manifests(&app_root, &installed_app_root)?;
-    let marketplace = load_marketplace_module_manifests(&app_root)?;
+    let modules = load_module_manifests(root, &app_root, &installed_app_root)?;
+    let marketplace = load_marketplace_module_manifests(root, &app_root)?;
     let templates = load_template_manifests(&app_root)?;
     let mut governance = module_governance_map(root, &module_catalog_projection_service_session())?;
     let version_states = module_version_states(root, &app_root).unwrap_or(Value::Null);

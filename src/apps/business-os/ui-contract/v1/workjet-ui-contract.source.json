@@ -1,0 +1,319 @@
+{
+  "schema": "workjet.ui.contract.snapshot-source.v1",
+  "sourcePath": "packages/workjet-ui-contract/src/contract.json",
+  "sourceSha256": "6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6",
+  "payload": {
+    "schema": "workjet.ui.contract.v1",
+    "version": 1,
+    "product": "Workjet",
+    "themes": {
+      "light": {
+        "surfaces": {
+          "canvas": "#fcfcfc",
+          "chrome": "#fcfcfc",
+          "surface": "#ffffff",
+          "raised": "#fcfcfc",
+          "overlay": "#ffffff",
+          "sunken": "#f4f4f5"
+        },
+        "text": {
+          "primary": "#27272a",
+          "secondary": "#52525b",
+          "muted": "#71717b",
+          "onAccent": "#ffffff"
+        },
+        "borders": {
+          "subtle": "#f4f4f5",
+          "default": "#e4e4e7",
+          "strong": "#d4d4d8"
+        },
+        "accent": {
+          "value": "#1b4ed8",
+          "foreground": "#ffffff",
+          "soft": "#e0e6f7",
+          "focus": "#1b4ed8"
+        }
+      },
+      "dark": {
+        "surfaces": {
+          "canvas": "#0a0a0a",
+          "chrome": "#0a0a0a",
+          "surface": "#111111",
+          "raised": "#141414",
+          "overlay": "#191919",
+          "sunken": "#0f0f0f"
+        },
+        "text": {
+          "primary": "#f5f5f5",
+          "secondary": "#d4d4d8",
+          "muted": "#818181",
+          "onAccent": "#ffffff"
+        },
+        "borders": {
+          "subtle": "#141414",
+          "default": "#191919",
+          "strong": "#343434"
+        },
+        "accent": {
+          "value": "#346bf1",
+          "foreground": "#ffffff",
+          "soft": "#16264f",
+          "focus": "#346bf1"
+        }
+      }
+    },
+    "typography": {
+      "fontFamily": {
+        "sans": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif",
+        "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+      },
+      "scale": {
+        "micro": {
+          "fontSize": 11,
+          "lineHeight": 14
+        },
+        "caption": {
+          "fontSize": 12,
+          "lineHeight": 16
+        },
+        "label": {
+          "fontSize": 13,
+          "lineHeight": 17
+        },
+        "body": {
+          "fontSize": 16,
+          "lineHeight": 23
+        },
+        "headline": {
+          "fontSize": 18,
+          "lineHeight": 23
+        },
+        "title": {
+          "fontSize": 21,
+          "lineHeight": 28
+        },
+        "display": {
+          "fontSize": 30,
+          "lineHeight": 36
+        }
+      },
+      "weights": {
+        "regular": 400,
+        "medium": 500,
+        "semibold": 600,
+        "bold": 700
+      },
+      "tracking": {
+        "tight": "-0.02em",
+        "normal": "0em",
+        "wide": "0.02em"
+      }
+    },
+    "spacing": {
+      "0": 0,
+      "1": 4,
+      "2": 8,
+      "3": 12,
+      "4": 16,
+      "5": 20,
+      "6": 24,
+      "8": 32,
+      "10": 40,
+      "12": 48
+    },
+    "radii": {
+      "none": 0,
+      "control": 6,
+      "panel": 10,
+      "card": 14,
+      "pill": 999
+    },
+    "focus": {
+      "outlineWidth": 2,
+      "outlineOffset": 2,
+      "ringAlpha": 0.24,
+      "minContrastRatio": 3
+    },
+    "elevation": {
+      "none": "none",
+      "low": "0 1px 2px rgb(0 0 0 / 0.08)",
+      "panel": "0 4px 12px rgb(0 0 0 / 0.12)",
+      "overlay": "0 16px 44px rgb(0 0 0 / 0.18)"
+    },
+    "categories": {
+      "Workspace": {
+        "accent": "#2563eb",
+        "foreground": "#ffffff",
+        "softLight": "#dbeafe",
+        "softDark": "#172554",
+        "borderLight": "#93c5fd",
+        "borderDark": "#1d4ed8"
+      },
+      "Collaboration": {
+        "accent": "#0891b2",
+        "foreground": "#111827",
+        "softLight": "#cffafe",
+        "softDark": "#083344",
+        "borderLight": "#67e8f9",
+        "borderDark": "#0e7490"
+      },
+      "Productivity": {
+        "accent": "#0ea5e9",
+        "foreground": "#111827",
+        "softLight": "#e0f2fe",
+        "softDark": "#082f49",
+        "borderLight": "#7dd3fc",
+        "borderDark": "#0369a1"
+      },
+      "Development": {
+        "accent": "#4f46e5",
+        "foreground": "#ffffff",
+        "softLight": "#e0e7ff",
+        "softDark": "#1e1b4b",
+        "borderLight": "#a5b4fc",
+        "borderDark": "#4338ca"
+      },
+      "Engineering": {
+        "accent": "#7c3aed",
+        "foreground": "#ffffff",
+        "softLight": "#ede9fe",
+        "softDark": "#2e1065",
+        "borderLight": "#c4b5fd",
+        "borderDark": "#6d28d9"
+      },
+      "Knowledge": {
+        "accent": "#9333ea",
+        "foreground": "#ffffff",
+        "softLight": "#f3e8ff",
+        "softDark": "#3b0764",
+        "borderLight": "#d8b4fe",
+        "borderDark": "#7e22ce"
+      },
+      "Research": {
+        "accent": "#0d9488",
+        "foreground": "#111827",
+        "softLight": "#ccfbf1",
+        "softDark": "#042f2e",
+        "borderLight": "#5eead4",
+        "borderDark": "#0f766e"
+      },
+      "Sales": {
+        "accent": "#059669",
+        "foreground": "#111827",
+        "softLight": "#d1fae5",
+        "softDark": "#022c22",
+        "borderLight": "#6ee7b7",
+        "borderDark": "#047857"
+      },
+      "Recruiting": {
+        "accent": "#db2777",
+        "foreground": "#ffffff",
+        "softLight": "#fce7f3",
+        "softDark": "#500724",
+        "borderLight": "#f9a8d4",
+        "borderDark": "#be185d"
+      },
+      "Finance": {
+        "accent": "#d97706",
+        "foreground": "#111827",
+        "softLight": "#fef3c7",
+        "softDark": "#451a03",
+        "borderLight": "#fcd34d",
+        "borderDark": "#b45309"
+      },
+      "Operations": {
+        "accent": "#ea580c",
+        "foreground": "#111827",
+        "softLight": "#ffedd5",
+        "softDark": "#431407",
+        "borderLight": "#fdba74",
+        "borderDark": "#c2410c"
+      },
+      "Governance": {
+        "accent": "#0f766e",
+        "foreground": "#ffffff",
+        "softLight": "#ccfbf1",
+        "softDark": "#042f2e",
+        "borderLight": "#5eead4",
+        "borderDark": "#115e59"
+      },
+      "Security": {
+        "accent": "#dc2626",
+        "foreground": "#ffffff",
+        "softLight": "#fee2e2",
+        "softDark": "#450a0a",
+        "borderLight": "#fca5a5",
+        "borderDark": "#b91c1c"
+      },
+      "Analytics": {
+        "accent": "#6366f1",
+        "foreground": "#ffffff",
+        "softLight": "#e0e7ff",
+        "softDark": "#1e1b4b",
+        "borderLight": "#a5b4fc",
+        "borderDark": "#4f46e5"
+      },
+      "System": {
+        "accent": "#64748b",
+        "foreground": "#ffffff",
+        "softLight": "#e2e8f0",
+        "softDark": "#1e293b",
+        "borderLight": "#94a3b8",
+        "borderDark": "#475569"
+      },
+      "Imported": {
+        "accent": "#71717a",
+        "foreground": "#ffffff",
+        "softLight": "#e4e4e7",
+        "softDark": "#27272a",
+        "borderLight": "#a1a1aa",
+        "borderDark": "#52525b"
+      }
+    },
+    "vocabulary": {
+      "userTerms": [
+        "Workjet",
+        "Workspace",
+        "App",
+        "Settings",
+        "Appearance",
+        "Light",
+        "Dark",
+        "Category",
+        "Focus",
+        "Surface",
+        "Accent",
+        "Search",
+        "Open",
+        "Close",
+        "Save",
+        "Cancel",
+        "Back",
+        "More"
+      ],
+      "forbiddenTerms": [
+        "daemon",
+        "RxDB",
+        "WebRTC",
+        "Guest",
+        "Sidecar",
+        "Native",
+        "Binary",
+        "Room",
+        "Signaling",
+        "DataChannel",
+        "replication",
+        "tenant",
+        "module catalog",
+        "internal module",
+        "runtime store",
+        "control plane",
+        "peer session"
+      ],
+      "forbiddenPatterns": [
+        "\\b(?:daemon|RxDB|WebRTC|DataChannel|Guest|Sidecar|Native|Binary|Room|Signaling)\\b",
+        "\\b(?:tenant|replication|control plane)\\b"
+      ]
+    }
+  }
+}

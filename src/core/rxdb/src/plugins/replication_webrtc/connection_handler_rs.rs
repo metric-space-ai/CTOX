@@ -370,6 +370,21 @@ impl PeerSendQueue {
         None
     }
 
+    /// Pop one small High-priority frame that is safe to interleave between
+    /// windows of an already-running chunked transfer. A second chunked frame
+    /// must stay queued: nesting two transfer state machines on the same data
+    /// channel would make their ACK/retry lifecycles contend. This mirrors the
+    /// browser transport's `drainHighPriorityInlineFrames` behavior.
+    fn pop_high_priority_inline(&mut self) -> Option<QueuedSend> {
+        let index = self
+            .high
+            .iter()
+            .position(|item| item.text.len() <= MAX_INLINE_FRAME_BYTES)?;
+        let item = self.high.remove(index)?;
+        self.queued_bytes = self.queued_bytes.saturating_sub(item.text.len());
+        Some(item)
+    }
+
     fn pop_high_fair(&mut self) -> Option<QueuedSend> {
         // Human input is sparse and bounded, and must not inherit the fairness
         // delay deliberately imposed on the continuous JPEG stream. It may
@@ -2089,6 +2104,8 @@ impl WebRTCRsConnectionHandler {
         self.record_sent_transport_frame(&start);
 
         for window_start in (0..chunks.len()).step_by(FRAME_ACK_WINDOW) {
+            self.drain_high_priority_inline_frames(peer, &data_channel)
+                .await?;
             let window_end = usize::min(window_start + FRAME_ACK_WINDOW, chunks.len()) - 1;
             let ack_key = PendingFrameAckKey::new(peer, &transfer_id, window_end);
             let mut attempt = transfer_attempt;
@@ -2135,9 +2152,30 @@ impl WebRTCRsConnectionHandler {
                     tokio::time::sleep(SEND_FRAME_PAUSE).await;
                 }
 
-                match tokio::time::timeout(FRAME_ACK_TIMEOUT, ack_rx).await {
-                    Ok(Ok(())) => break,
-                    Ok(Err(_)) => {
+                // A chunked cold-start response can take many ACK windows. Do
+                // not let it head-of-line-block small control/masterWrite
+                // responses that arrive while we wait for the browser ACK.
+                // Polling at 50 ms preserves the original ACK deadline while
+                // keeping interactive round trips bounded.
+                let deadline = tokio::time::Instant::now() + FRAME_ACK_TIMEOUT;
+                tokio::pin!(ack_rx);
+                let ack_result = loop {
+                    self.drain_high_priority_inline_frames(peer, &data_channel)
+                        .await?;
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        break None;
+                    }
+                    tokio::select! {
+                        result = &mut ack_rx => break Some(result),
+                        _ = tokio::time::sleep(
+                            Duration::from_millis(50).min(deadline.saturating_duration_since(now))
+                        ) => {}
+                    }
+                };
+                match ack_result {
+                    Some(Ok(())) => break,
+                    Some(Err(_)) => {
                         self.pending_frame_acks.lock().remove(&ack_key);
                         self.refresh_dynamic_transport_status();
                         return Err(new_rx_error(
@@ -2150,7 +2188,7 @@ impl WebRTCRsConnectionHandler {
                             })),
                         ));
                     }
-                    Err(_) => {
+                    None => {
                         self.pending_frame_acks.lock().remove(&ack_key);
                         self.refresh_dynamic_transport_status();
                         if self
@@ -2189,6 +2227,50 @@ impl WebRTCRsConnectionHandler {
                         .await;
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    async fn drain_high_priority_inline_frames(
+        &self,
+        peer: &WebRTCRsPeer,
+        data_channel: &Arc<dyn DataChannel>,
+    ) -> Result<(), RxError> {
+        loop {
+            let item = {
+                let mut queues = self.send_queues.lock();
+                queues
+                    .get_mut(peer)
+                    .and_then(PeerSendQueue::pop_high_priority_inline)
+            };
+            let Some(item) = item else {
+                break;
+            };
+            self.refresh_send_queue_status();
+            self.record_status(|status| {
+                status.sent_scheduled_frames = status.sent_scheduled_frames.saturating_add(1);
+                status.last_send_priority = SendPriority::High.as_str();
+            });
+            let send_result = match self.wait_for_send_capacity(peer).await {
+                Ok(()) => data_channel
+                    .send_text(&item.text)
+                    .await
+                    .map_err(|error| webrtc_error("send interleaved high-priority frame", error)),
+                Err(error) => Err(error),
+            };
+            let failure = send_result.as_ref().err().map(|error| error.to_string());
+            let _ = item.result.send(send_result);
+            if let Some(message) = failure {
+                return Err(new_rx_error(
+                    "RC_WEBRTC_PEER",
+                    Some(serde_json::json!({
+                        "message": format!(
+                            "interleaved high-priority frame failed during chunked transfer: {message}"
+                        ),
+                        "peer": peer,
+                    })),
+                ));
             }
         }
         Ok(())
@@ -2744,7 +2826,10 @@ impl PeerConnectionEventHandler for RsPeerConnectionEvents {
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
         let label = data_channel.label().await.unwrap_or_default();
-        if label == "ctox-browser-live-v1" {
+        if matches!(
+            label.as_str(),
+            "ctox-browser-live-v1" | "ctox.workjet.device.v1"
+        ) {
             install_auxiliary_data_channel(
                 Arc::clone(&self.handler),
                 self.remote_peer_id.clone(),
@@ -4326,6 +4411,41 @@ mod tests {
         );
         let next = queue.pop_next().expect("waiting sync response");
         assert_eq!(next.collection.as_deref(), Some("business_commands"));
+    }
+
+    #[test]
+    fn chunked_transfer_preemption_selects_only_small_high_priority_frames() {
+        let mut queue = PeerSendQueue::default();
+        let make = |text: String, collection: &str| {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            QueuedSend {
+                text,
+                priority: SendPriority::High,
+                collection: Some(collection.to_string()),
+                intrinsic_high: true,
+                oversized_write: false,
+                queued_at_ms: now_ms(),
+                result: tx,
+            }
+        };
+        let large_len = MAX_INLINE_FRAME_BYTES + 1;
+        queue.push(make("x".repeat(large_len), "large-response"));
+        queue.push(make("{}".to_string(), "interactive-response"));
+
+        let selected = queue
+            .pop_high_priority_inline()
+            .expect("small high-priority response must preempt the chunked transfer");
+        assert_eq!(selected.collection.as_deref(), Some("interactive-response"));
+        assert_eq!(queue.high.len(), 1);
+        assert_eq!(
+            queue
+                .high
+                .front()
+                .and_then(|item| item.collection.as_deref()),
+            Some("large-response")
+        );
+        assert_eq!(queue.queued_bytes, large_len);
+        assert!(queue.pop_high_priority_inline().is_none());
     }
 
     #[test]

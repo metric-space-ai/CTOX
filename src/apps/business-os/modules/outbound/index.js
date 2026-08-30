@@ -355,7 +355,7 @@ const CAMPAIGN_IDEA_TEMPLATES = Object.freeze({
     {
       id: 'en-mail-property-management',
       title: 'Property managers for owner portal',
-      text: 'I want to email property management companies with 500 to 5,000 units in Germany and sell an owner and tenant portal. Please focus on firms with many service requests, document workflows, or visible modernization initiatives.',
+      text: 'I want to email property management companies with 500 to 5,000 units in Germany and sell an owner and resident portal. Please focus on firms with many service requests, document workflows, or visible modernization initiatives.',
     },
     {
       id: 'en-mail-manufacturing-qm',
@@ -415,7 +415,7 @@ const CAMPAIGN_IDEA_TEMPLATES = Object.freeze({
     {
       id: 'en-letter-hotels',
       title: 'Hotels by letter',
-      text: 'I want to send physical letters to owner-managed hotels and introduce a solution for guest communication, upselling, and review management. Please prepare printable letters and let the user manually mark which hotels were actually mailed.',
+      text: 'I want to send physical letters to owner-managed hotels and introduce a solution for visitor communication, upselling, and review management. Please prepare printable letters and let the user manually mark which hotels were actually mailed.',
     },
     {
       id: 'en-mail-consulting-partners',
@@ -968,7 +968,7 @@ function slugId(value) {
 
 async function knowledgeCommand(args) {
   if (!state.ctx?.commandBus?.dispatch) {
-    throw new Error('RxDB command bus is not available');
+    throw new Error('The local command service is not available.');
   }
   const commandId = `cmd_knowledge_${crypto.randomUUID()}`;
   const dispatched = await state.ctx.commandBus.dispatch({
@@ -2809,8 +2809,8 @@ function campaignColumnMarkup() {
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search value="${escapeHtml(state.campaignSearch)}" placeholder="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}" aria-label="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}">
         <div class="ctox-view-toggle" role="group" aria-label="${escapeHtml(t('view', 'Darstellung'))}">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeHtml(t('cardsView', 'Shard-Ansicht'))}" title="${escapeHtml(t('cardsView', 'Shard-Ansicht'))}">${cardsViewIcon()}</button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeHtml(t('listView', 'Listen-Ansicht'))}" title="${escapeHtml(t('listView', 'Listen-Ansicht'))}">${listViewIcon()}</button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeHtml(t('cardsView', 'Kachelansicht'))}" title="${escapeHtml(t('cardsView', 'Kachelansicht'))}">${cardsViewIcon()}</button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeHtml(t('listView', 'Listenansicht'))}" title="${escapeHtml(t('listView', 'Listenansicht'))}">${listViewIcon()}</button>
         </div>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="${escapeHtml(t('filter', 'Filter'))}" title="${escapeHtml(t('filter', 'Filter'))}">${filterIcon()}</button>
       </div>
@@ -5419,7 +5419,12 @@ function browserAuthAssistLaunchArgs(authAssist) {
       ? authAssist.allowed_domains.map((entry) => String(entry || '').trim()).filter(Boolean)
       : [],
     capture_script: String(authAssist.capture_script || '').trim(),
+    verify_selector: String(authAssist.verify_selector || '').trim(),
     secret_name: String(authAssist.required_secret_name || '').trim(),
+    auth_assist_command_id: String(authAssist.command_id || '').trim(),
+    auth_assist_task_id: String(authAssist.task_id || authAssist.execution_task_id || '').trim(),
+    requesting_task_id: String(authAssist.requesting_task_id || '').trim(),
+    instruction: String(authAssist.instruction || '').trim(),
     auth_assist_status: 'pending',
     profile_mode: 'persistent',
     secret_value_in_rxdb: false,
@@ -6660,7 +6665,7 @@ function campaignSetupPrompt(campaign, commandId, template) {
     'Nicht verhandelbar:',
     '- Keine Nachricht senden.',
     '- Keine E-Mail, keinen Brief und keine externe HTTP-Integration ausloesen.',
-    '- Alle Daten- und App-Aenderungen nur ueber CTOX Business OS Commands/RxDB zurueckschreiben.',
+    '- Alle Daten- und App-Aenderungen nur ueber den CTOX Business-OS-Befehlspfad zurueckschreiben.',
     '- Outbound-Kommunikation bleibt approval-gated.',
     '- Wenn ein Wunsch nicht durch vorhandene Outbound-Settings abbildbar ist, schreibe ihn als konkreten App-Extension-Request in den Writeback.',
     '',

@@ -1071,3 +1071,40 @@
     padding: 10px;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes interaktive
+   Control erreicht das 44px-Minimum, Icon-Buttons in beiden Dimensionen.
+   Das Spalten-Stacking selbst steuern die @container-Regeln oben
+   (1100px/640px); hier nur Tap-Ziele. Desktop (fine pointer) unveraendert.
+   -------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  .fibu-module button,
+  .fibu-module input,
+  .fibu-module select,
+  .fibu-module textarea {
+    min-height: 44px;
+  }
+
+  .fibu-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .fibu-module .ctox-pane-tab,
+  .fibu-module .fibu-toolbar-actions .ctox-button {
+    min-height: 44px;
+  }
+
+  .fibu-module .ctox-sort-dir,
+  .fibu-module .dropzone-icon {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .fibu-module .fibu-booking-row,
+  .fibu-module .fibu-tree-row,
+  .fibu-module .ctox-list-item {
+    min-height: 44px;
+  }
+}

@@ -1,13 +1,21 @@
 # Product
 
-## Register
+## Product Register
 
-product
+- **Workjet** is the user-facing desktop, mobile and web application.
+- **CTOX** is the self-hosted runtime, backend, sync engine and open-source app
+  platform used by Workjet.
+- **Business OS** is a Workjet workspace powered by CTOX, not a separate
+  competing product name.
+
+Technical protocol, database, crate and API identifiers keep their existing
+CTOX names.
 
 ## Users
 
-CTOX Business OS is used by founders, administrators, operators, specialists,
-and business teams who need to work directly with records, queues, documents,
+Workjet's Business OS workspace is used by founders, administrators,
+operators, specialists, and business teams who need to work directly with
+records, queues, documents,
 approvals, and automations. It is also used by coding agents that create or
 modify Business OS apps through the same governed platform contracts.
 
@@ -18,9 +26,9 @@ configuration sites.
 
 ## Product Purpose
 
-CTOX Business OS makes typical business and productivity apps quick to create,
-safe to distribute, and predictable to operate. Apps remain flexible HTML,
-CSS, and JavaScript surfaces while the platform supplies local-first
+Workjet makes typical business and productivity apps quick to create, safe to
+distribute, and predictable to operate. Apps remain flexible HTML, CSS, and
+JavaScript surfaces while the CTOX platform supplies local-first
 persistence, synchronization, authorization, commands, delegation, release
 governance, window management, and reusable interaction patterns.
 

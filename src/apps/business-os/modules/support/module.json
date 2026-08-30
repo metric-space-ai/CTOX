@@ -1,7 +1,7 @@
 {
   "id": "support",
   "title": "Support",
-  "description": "Native CTOX Support Desk for omnichannel support queues, customer context, ticket links, SLA, macros, and CTOX Harness-assisted drafts.",
+  "description": "CTOX Support Desk for omnichannel support queues, customer context, ticket links, SLA, macros, and CTOX Harness-assisted drafts.",
   "entry": "modules/support/index.html",
   "collections": [
     "business_commands",
@@ -55,7 +55,7 @@
     "agent"
   ],
   "store": {
-    "summary": "CTOX-native support desk layered over communication, ticket, customer, and harness projections.",
+    "summary": "CTOX support desk layered over communication, ticket, customer, and harness projections.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/support",
     "installable": true,

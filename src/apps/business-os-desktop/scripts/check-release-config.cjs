@@ -87,13 +87,17 @@ function main() {
   assertReleaseWorkflowMatrix();
   assertDedicatedDesktopReleaseWorkflow();
 
-  console.log("desktop release config OK");
+  console.log("legacy desktop quarantine config OK");
 }
 
 function assertDedicatedDesktopReleaseWorkflow() {
   const workflowPath = path.join(repoRoot, ".github", "workflows", "business-os-desktop-release.yml");
   const workflow = fs.readFileSync(workflowPath, "utf8");
-  assert.match(workflow, /business-os-desktop-v\*/);
+  assert.doesNotMatch(workflow, /business-os-desktop-v\*/, "legacy desktop tags must not trigger releases");
+  assert.match(workflow, /workflow_dispatch:/, "the quarantined workflow remains inspectable manually");
+  assert.match(workflow, /build:\n\s+# Quarantined donor only\.[\s\S]*?if: \$\{\{ false \}\}/);
+  assert.match(workflow, /release:\n\s+if: \$\{\{ false \}\}/);
+  return;
   for (const artifact of [
     "ctox-business-os-desktop-macos-arm64",
     "ctox-business-os-desktop-macos-x64",
@@ -181,7 +185,18 @@ function assertCiWorkflowMatrix() {
 function assertReleaseWorkflowMatrix() {
   const releaseWorkflowPath = path.join(repoRoot, ".github", "workflows", "release.yml");
   const workflow = fs.readFileSync(releaseWorkflowPath, "utf8");
-  assert.match(workflow, /^\s{2}build-business-os-desktop:/m, "release workflow is missing Business OS Desktop job");
+  assert.match(
+    workflow,
+    /^\s{2}build-business-os-desktop:\n\s+# Legacy donor only\.[\s\S]*?\n\s+if: \$\{\{ false \}\}/m,
+    "legacy Business OS Desktop build must remain disabled",
+  );
+  const releaseNeeds = workflow.match(/^\s{4}needs: \[business-os-production-gate[^\n]+\]/m)?.[0] || "";
+  assert.doesNotMatch(
+    releaseNeeds,
+    /build-business-os-desktop/,
+    "CTOX releases must not wait for or publish legacy desktop artifacts",
+  );
+  return;
   for (const artifact of [
     "ctox-business-os-desktop-macos-arm64",
     "ctox-business-os-desktop-macos-x64",

@@ -464,3 +464,45 @@
     padding: 6px;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Touch-Bedienung auf groben Zeigern (Telefon/Tablet): alle Kit-Controls im
+   Modul erreichen das 44px-Minimum, Icon-Buttons in beiden Dimensionen, die
+   Record-/Runbook-Karten bekommen fingerhohe Zeilen. Das Drittanbieter-Grid
+   behaelt seine Zellgeometrie (die Bibliothek rechnet mit Inline-Groessen);
+   es scrollt ohnehin in .spreadsheets-editor-canvas (overflow: auto).
+   -------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  .spreadsheets-module button,
+  .spreadsheets-module input,
+  .spreadsheets-module select,
+  .spreadsheets-module textarea {
+    min-height: 44px;
+  }
+
+  .spreadsheets-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .spreadsheets-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .spreadsheets-module .spreadsheets-card,
+  .spreadsheets-module .spreadsheets-runbook-card,
+  .spreadsheets-module .ctox-list-item {
+    min-height: 44px;
+  }
+
+  /* Ueberlagerter Manage-Button auf den Record-Karten: volle 44px-Flaeche,
+     Karten-Inhalt weicht entsprechend weiter aus. */
+  .spreadsheets-card .spreadsheets-card-manage {
+    top: 0;
+    right: 0;
+  }
+
+  .spreadsheets-card-main {
+    padding-right: 48px;
+  }
+}

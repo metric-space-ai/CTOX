@@ -1,4 +1,4 @@
-import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
 
@@ -175,7 +175,7 @@ const labels = {
     auxHide: 'Status & Quellen ausblenden',
     harnessKicker: 'Harness',
     taskSearch: 'Tasks suchen',
-    cardsView: 'Shard-Ansicht',
+    cardsView: 'Kachelansicht',
     compactFlowView: 'Kompakter Live Flow',
     filters: 'Filter',
     resetFilters: 'Filter zurücksetzen',
@@ -353,7 +353,7 @@ const labels = {
     auxHide: 'Hide status & sources',
     harnessKicker: 'Harness',
     taskSearch: 'Search tasks',
-    cardsView: 'Shard view',
+    cardsView: 'Card view',
     compactFlowView: 'Compact live flow',
     filters: 'Filters',
     resetFilters: 'Reset filters',

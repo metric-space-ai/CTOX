@@ -24,15 +24,9 @@ const BROWSER_SYNC_COLLECTIONS = [
 const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
   // Core Outbound campaigns.
   'outbound_research_adapters',
-  // Tenant-local managed tenant campaigns. The managed tenant module owns this collection;
+  // Tenant-local customer tenant campaigns. The customer tenant module owns this collection;
   // reading only the core collection made its complete adapter list disappear.
   'outbound_lead_generation_adapters',
-]);
-const SCRAPING_SOURCE_COLLECTIONS = Object.freeze([
-  // Source activation is owned by the tenant Outbound app. Adapter execution
-  // status and source activation used to drift because they are separate
-  // records; the Browser must show the source-owned activation state.
-  'outbound_lead_generation_sources',
 ]);
 
 export async function mount(ctx) {
@@ -213,35 +207,6 @@ export async function mount(ctx) {
       });
   }
 
-  // Befund aus dem UX-Review: Ist das Browser-Fenster bereits offen, feuert
-  // die Shell fuer einen erneuten App-Start `ctox-business-os-app-launch` auf
-  // das Fenster -- und niemand hoerte zu. Der Bediener klickte in der
-  // Outbound-App auf "Im CTOX-Browser anmelden", das Fenster kam nach vorn
-  // und zeigte die alte Ansicht: das Icon wirkte tot. Der Listener reicht die
-  // Launch-Args an denselben Pfad weiter, den der Erstoeffnungsfall nimmt.
-  const onAppLaunch = (event) => {
-    const args = event?.detail?.args || event?.detail || {};
-    if (!browserSessionIdFromArgs(args)) return;
-    openRequestedBrowserSession(args);
-  };
-  ctx.host?.addEventListener?.('ctox-business-os-app-launch', onAppLaunch);
-  cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', onAppLaunch));
-
-  // Die Adapter-Leiste wird ausserhalb dieses Scopes gebaut und braucht denselben
-  // Weg in eine Anmeldesitzung -- ohne diese Bruecke lief ihr Klick in einen
-  // ReferenceError und tat sichtbar nichts.
-  state.openAuthSession = openRequestedBrowserSession;
-  cleanups.push(() => { state.openAuthSession = null; });
-  // Die Buehne liegt ausserhalb dieses Bereichs, braucht aber den Wiederstart:
-  // sie forderte bisher "Starten Sie die Sitzung erneut" ohne jeden Weg dahin.
-  state.resumeSession = (session) => {
-    const id = String(session?.id || '').trim();
-    if (!id) return;
-    const url = String(session.url || session.payload?.url || refs.address?.value || 'https://example.com');
-    startNewBrowserSession(url, { sessionId: id, tabId: session.tab_id || session.payload?.tab_id || null });
-  };
-  cleanups.push(() => { state.resumeSession = null; });
-
   function selectRequestedBrowserSession(detail = {}) {
     const sessionId = browserSessionIdFromArgs(detail);
     if (!sessionId) return;
@@ -339,10 +304,7 @@ export async function mount(ctx) {
     const hidden = refs.advanced.classList.toggle('is-advanced-hidden');
     refs.toggleAdvanced.setAttribute('aria-pressed', hidden ? 'false' : 'true');
   });
-  // wiederaufnahme: die bestehende session_id behalten. Das persistente
-  // Browserprofil haengt an ihr - eine neue id waere ein neues, leeres Profil
-  // und alle Anmeldungen der Quelle waeren verloren.
-  const startNewBrowserSession = (url = refs.address?.value || 'https://example.com', wiederaufnahme = null) => {
+  const startNewBrowserSession = (url = refs.address?.value || 'https://example.com') => {
     const now = Date.now();
     // Jeder Aufruf vergibt eine NEUE Sitzungskennung und startet einen eigenen
     // Chrome. Ohne Sperre wird aus zwei Klicks zweimal alles.
@@ -358,8 +320,8 @@ export async function mount(ctx) {
       return;
     }
     state.startPendingSince = now;
-    const sessionId = wiederaufnahme?.sessionId || `${userSessionPrefix(ctx.session)}_${now}`;
-    const tabId = wiederaufnahme?.tabId || `browser_tab_${now}`;
+    const sessionId = `${userSessionPrefix(ctx.session)}_${now}`;
+    const tabId = `browser_tab_${now}`;
     const viewport = selectedViewport(refs.viewport);
     console.info(`[browser] session start clicked session_id=${sessionId} tab_id=${tabId}`);
     state.addressDirty = false;
@@ -385,7 +347,7 @@ export async function mount(ctx) {
       viewport_h: viewport.height,
       profile_mode: refs.privateMode?.checked ? 'private' : 'persistent',
       lease_id: state.controllerLeaseId,
-      new_session: !wiederaufnahme,
+      new_session: true,
     };
     const command = () => dispatchBrowserCommand(ctx, state, 'browser.session.start', startPayload);
     const directStart = async () => {
@@ -1184,17 +1146,16 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
   // Chrome-Prozess, keine Protokollzeile in 20 Minuten — und weder der
   // Start-Knopf noch das Plus-Symbol bewirkten etwas. Es lief vorher; nach
   // einem Dienstneustart nie wieder.
-  // Der replizierte Sitzungsstatus ist keine Prozess-Liveness. Nach einem
-  // Dienstneustart oder einem abgestuerzten Chromium kann im Dokument noch
-  // `runtime_status=active` stehen, obwohl der native Manager keinen Handle
-  // mehr besitzt. Genau dann uebersprang die bisherige Abfrage den Start und
-  // die sichtbare Flaeche blieb endlos bei "Browser-Inhalt wird geladen".
-  //
-  // `browser.session.start` ist fuer die stabile Auth-Session-ID nativ ein
-  // idempotentes ensure: ein lebender Prozess wird wiederverwendet, ein toter
-  // neu gestartet, und das persistente Profil bleibt dasselbe. Deshalb muss
-  // ein ausdruecklicher Auth-Klick den Ensure-Befehl immer senden. Nur ein
-  // bereits laufender Ensure derselben ID wird lokal dedupliziert.
+  // Deshalb zuerst den Zustand lesen, dann die Merkliste bewerten: was nicht
+  // mehr laeuft, ist auch nicht mehr "in Arbeit".
+  const existing = await browserCollection(ctx, 'browser_sessions')?.findOne(request.session_id).exec();
+  const existingData = existing?.toJSON?.() || existing;
+  if (!browserSessionNeedsStart(existingData)) {
+    // Laeuft bereits — Merkliste aufraeumen, damit ein spaeteres Wegbrechen
+    // wieder startbar ist.
+    state.requestedSessionStarts.delete(request.session_id);
+    return false;
+  }
   if (state.requestedSessionStarts.has(request.session_id)) {
     console.info('[browser] Start bereits angefordert, warte auf Ergebnis', request.session_id);
     return false;
@@ -1208,8 +1169,9 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
       lease_id: state.controllerLeaseId,
     });
     return true;
-  } finally {
+  } catch (error) {
     state.requestedSessionStarts.delete(request.session_id);
+    throw error;
   }
 }
 
@@ -1337,22 +1299,6 @@ function userSessionPrefix(session) {
   const raw = String(session?.user?.id || session?.userId || 'browser-user');
   const safe = raw.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
   return `browser_session_${safe || 'user'}`;
-}
-
-function rxdbIdSlug(value) {
-  const slug = String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return slug || 'source';
-}
-
-// The native auth-assist command uses the same stable source/user identity.
-// A timestamp here creates a new persistent Chromium profile on every click
-// and forces the user to log in again for each scrape.
-function webStackAuthSessionId(sourceId, session) {
-  const owner = browserActorIds(session)[0] || 'browser-user';
-  return `browser_session_web_stack_auth_${rxdbIdSlug(sourceId)}_${rxdbIdSlug(owner)}`;
 }
 
 function selectedViewport(select) {
@@ -2263,7 +2209,7 @@ function installAddressClearControl(form, address, go) {
   button.className = 'ctox-icon-button';
   button.dataset.browserAddressClear = '';
   button.setAttribute('aria-label', 'Adresse löschen');
-  button.title = t('btnClearAddress', 'Adresse löschen');
+  button.title = 'Adresse löschen';
   button.textContent = '×';
   form.insertBefore(button, go || null);
   return button;
@@ -2417,37 +2363,6 @@ function browserInputPayload(event) {
   };
 }
 
-// Fuehrt zwei Adaptersaetze derselben Quelle zusammen. Der neuere Satz gibt
-// den Grundstand vor; Felder, die dort fehlen oder leer sind, werden aus dem
-// aelteren ergaenzt. So ueberlebt ein Pruefergebnis aus der Kern-Sammlung eine
-// frische, aber magere Projektion aus der tenant-lokalen Sammlung.
-// Felder, die EINE Aussage bilden. Sie duerfen nicht feldweise aus zwei
-// Staenden gemischt werden: auf der Produktivinstanz trug der aeltere Satz
-// requires_credential=false, der neuere auth_status=required. Feldweise
-// ergaenzt gewann das vier Monate alte "kein Zugang noetig" gegen das
-// aktuelle "Anmeldung erforderlich" - die Karte widersprach sich selbst.
-const ADAPTER_FELDGRUPPEN = Object.freeze([
-  ['auth_status', 'requires_credential', 'auth_mode', 'credential_secret_name'],
-  ['status', 'last_error', 'last_test', 'latency_ms', 'test_ok', 'evidence'],
-]);
-
-function mergeScrapingAdapterRows(a, b) {
-  const [neuer, aelter] = Number(a?.updated_at_ms || 0) >= Number(b?.updated_at_ms || 0) ? [a, b] : [b, a];
-  const leer = (wert) => wert === undefined || wert === null || wert === '';
-  const zusammen = { ...aelter, ...neuer };
-  for (const [feld, wert] of Object.entries(aelter || {})) {
-    if (leer(zusammen[feld])) zusammen[feld] = wert;
-  }
-  // Sagt der neuere Stand zu einer Gruppe ueberhaupt etwas, gilt er dort
-  // allein; die uebrigen Felder der Gruppe werden nicht aus dem aelteren
-  // nachgefuellt, sondern bleiben ungesetzt.
-  for (const gruppe of ADAPTER_FELDGRUPPEN) {
-    if (!gruppe.some((feld) => !leer(neuer?.[feld]))) continue;
-    for (const feld of gruppe) zusammen[feld] = neuer?.[feld];
-  }
-  return zusammen;
-}
-
 async function readCollection(collection, options = {}) {
   if (!collection?.find) return [];
   const limit = Number.isFinite(options.limit) ? options.limit : 100;
@@ -2467,25 +2382,7 @@ async function readDocument(collection, id) {
 }
 
 function mergeRequestedSession(sessions, requestedSession) {
-  if (!requestedSession?.id) return sessions;
-  const existing = sessions.find((session) => session.id === requestedSession.id);
-  if (!existing) return [requestedSession, ...sessions];
-
-  // The direct session list, the local RxDB projection, and the optimistic
-  // live response converge independently. A reduced/older summary must never
-  // replace canonical fields (especially payload.purpose/auth_assist_status)
-  // that another path already delivered. Prefer the newest top-level values
-  // while merging payload objects so an otherwise fresh summary cannot erase
-  // authentication metadata merely because it omits `payload` entirely.
-  const requestedIsNewer = Number(requestedSession.updated_at_ms || 0)
-    >= Number(existing.updated_at_ms || 0);
-  const older = requestedIsNewer ? existing : requestedSession;
-  const newer = requestedIsNewer ? requestedSession : existing;
-  const merged = { ...older, ...newer };
-  const olderPayload = older.payload && typeof older.payload === 'object' ? older.payload : null;
-  const newerPayload = newer.payload && typeof newer.payload === 'object' ? newer.payload : null;
-  if (olderPayload || newerPayload) merged.payload = { ...(olderPayload || {}), ...(newerPayload || {}) };
-  return [merged, ...sessions.filter((session) => session.id !== requestedSession.id)];
+  return mergeRequestedDocument(sessions, requestedSession);
 }
 
 function mergeRequestedDocument(documents, requestedDocument) {
@@ -2604,96 +2501,28 @@ async function ladeScrapingAdapter(ctx, state) {
   state.adapterLadedauer = (async () => {
     const rows = [];
     const errors = [];
-    const leer = [];
     state.adapterLeases ||= [];
     for (const collectionName of SCRAPING_ADAPTER_COLLECTIONS) {
       try {
-        const collection = browserCollection(ctx, collectionName);
-        if (!collection) throw new Error('Sammlung ist für das Browser-Modul nicht freigegeben');
         if (typeof ctx.sync?.leaseCollection === 'function') {
-          const lease = await ctx.sync.leaseCollection(
-            collectionName,
-            `browser:scraping-adapters:${collectionName}`,
-          );
+          const lease = await ctx.sync.leaseCollection(collectionName, `browser:scraping-adapters:${collectionName}`);
           if (lease) state.adapterLeases.push(lease);
         }
-        const collectionRows = await readCollection(collection, {
+        const collectionRows = await readCollection(browserCollection(ctx, collectionName), {
           limit: 200,
           sort: [{ updated_at_ms: 'desc' }],
         });
         rows.push(...collectionRows.map((row) => ({ ...row, adapter_collection: collectionName })));
-        // Eine Sammlung, deren Demand-Sync noch nicht gefuellt hat, liefert
-        // NULL ZEILEN OHNE FEHLER - vom Ergebnis her nicht von "wirklich leer"
-        // zu unterscheiden. Genau so verschwand die tenant-lokale Sammlung
-        // still aus der Leiste: 15 Karten aus der Kern-Sammlung sahen
-        // vollstaendig aus, waehrend jeder aktuelle Zugangszustand fehlte.
-        if (!collectionRows.length) leer.push(collectionName);
       } catch (error) {
         errors.push(`${collectionName}: ${String(error?.message || error)}`);
       }
     }
-    const sourceRows = [];
-    for (const collectionName of SCRAPING_SOURCE_COLLECTIONS) {
-      try {
-        const collection = browserCollection(ctx, collectionName);
-        if (!collection) continue;
-        if (typeof ctx.sync?.leaseCollection === 'function') {
-          const lease = await ctx.sync.leaseCollection(
-            collectionName,
-            `browser:scraping-sources:${collectionName}`,
-          );
-          if (lease) state.adapterLeases.push(lease);
-        }
-        sourceRows.push(...await readCollection(collection, {
-          limit: 200,
-          sort: [{ updated_at_ms: 'desc' }],
-        }));
-      } catch (error) {
-        // Source reconciliation enriches the adapter rail but must not hide
-        // otherwise usable core adapters if a tenant has no source collection.
-        console.warn(`[browser] scraping source collection unavailable: ${collectionName}`, error);
-      }
-    }
-    const sourceById = new Map(
-      sourceRows
-        .filter((row) => row && row.is_deleted !== true && row.id)
-        .map((row) => [String(row.id), row]),
-    );
-    // Dieselbe Quelle liegt in beiden Adaptersammlungen, mit identischer id.
-    // Nach Sammlung getrennt zu schluesseln zeigte jede Quelle doppelt. Nach
-    // Quelle zu schluesseln und eine Seite zu verwerfen verliert dagegen
-    // Information: die Kern-Saetze tragen die Pruefergebnisse (last_test,
-    // latency_ms, test_ok, evidence), die tenant-lokalen sind aktueller.
-    // Deshalb wird zusammengefuehrt statt ausgewaehlt.
     const deduplicated = new Map();
     for (const row of rows) {
       if (!row || row.is_deleted === true) continue;
-      const schluessel = String(row.source_id || row.id || '');
-      if (!schluessel) continue;
-      const vorhanden = deduplicated.get(schluessel);
-      deduplicated.set(schluessel, vorhanden ? mergeScrapingAdapterRows(vorhanden, row) : row);
-    }
-    for (const [schluessel, row] of deduplicated) {
-      deduplicated.set(
-        schluessel,
-        mergeScrapingAdapterSource(row, sourceById.get(String(row.source_id || ''))),
-      );
+      deduplicated.set(`${row.adapter_collection}:${row.id || row.source_id}`, row);
     }
     state.adapters = [...deduplicated.values()];
-    // Eine Sammlung, die beim Oeffnen noch nicht bereit war, lieferte still
-    // nichts: die Leiste laed nur einmal und zeigte dann dauerhaft eine
-    // unvollstaendige Liste. Der Vermerk erlaubt gezieltes Nachladen.
-    // Begrenzt nachfassen: eine dauerhaft leere Sammlung ist ein zulaessiger
-    // Zustand und darf nicht endlos pollen.
-    state.adapterLeerVersuche = leer.length ? Number(state.adapterLeerVersuche || 0) + 1 : 0;
-    const nochNachfassen = leer.length > 0 && state.adapterLeerVersuche <= 5;
-    state.adapterUnvollstaendig = errors.length > 0 || nochNachfassen;
-    state.adapterZuletztGeladenMs = Date.now();
-    if (errors.length) console.warn(`[browser] Adaptersammlung nicht lesbar: ${errors.join(' | ')}`);
-    if (leer.length) {
-      console.warn(`[browser] Adaptersammlung lieferte keine Zeilen: ${leer.join(', ')}`
-        + ` (Versuch ${state.adapterLeerVersuche}${nochNachfassen ? ', wird nachgeladen' : ', akzeptiert'})`);
-    }
     state.adapterFehler = errors.length === SCRAPING_ADAPTER_COLLECTIONS.length
       ? errors.join(' | ')
       : '';
@@ -2702,144 +2531,17 @@ async function ladeScrapingAdapter(ctx, state) {
   return state.adapterLadedauer;
 }
 
-function mergeScrapingAdapterSource(adapter, source) {
-  if (!source) return adapter;
-  return {
-    ...adapter,
-    // Activation is a source setting. Operational adapter status remains on
-    // the adapter record because it is the newer execution evidence.
-    enabled: typeof source.enabled === 'boolean' ? source.enabled : adapter.enabled,
-    label: adapter.label || source.label,
-    url: adapter.url || source.url,
-    requires_credential: typeof source.requires_credential === 'boolean'
-      ? source.requires_credential
-      : adapter.requires_credential,
-    credential_secret_name: adapter.credential_secret_name || source.credential_secret_name,
-  };
-}
-
-// Zwei GETRENNTE Wahrheiten pro Adapter -- der Kern der Verstaendlichkeit:
-// "Zugang" (gibt es gueltige Anmeldedaten?) und "Funktion" (lief die letzte
-// Pruefung durch?). Beide in einen Topf zu werfen hiess vorher: "Zugang fehlt"
-// stand auch da, wenn der Zugang existierte und nur die Pruefung scheiterte.
-// Statuswerte, die eine eigene Aussage ueber den Zugang treffen. Sie haben
-// Vorrang vor dem Flag requires_credential: das Flag bedeutet "braucht keine
-// GESPEICHERTEN Zugangsdaten" und schliesst eine noetige Browseranmeldung
-// nicht aus. Auf der Produktivinstanz trug rocketreach.com
-// requires_credential=false (aus der Quelle) und zugleich
-// auth_status=browser_session_requested mit dem Fehler "Anmeldung im Browser
-// erforderlich" - die Karte zeigte "Kein Zugang noetig" und widersprach sich.
-const ADAPTER_AUTH_AUSSAGEKRAEFTIG = Object.freeze([
-  'missing', 'required', 'auth_required', 'credential_missing', 'expired',
-  'invalid', 'denied', 'logged_out', 'auth_requested', 'browser_session_requested',
-  'ok', 'valid', 'ready', 'active', 'signed_in', 'authenticated',
-  'session_authenticated', 'credential_available', 'authorized',
-]);
-
-// Der Testzeitpunkt steht im last_test-Objekt als tested_at_ms. Der Code las
-// at_ms, das es dort nicht gibt, fiel deshalb immer auf updated_at_ms zurueck
-// und zeigte das Aenderungsdatum als Testzeitpunkt: die Karte behauptete einen
-// Test am 28.08., der in Wahrheit am 27.08. lief. Wenn kein Testzeitpunkt
-// bekannt ist, wird das Datum als Aenderung gekennzeichnet statt als Test.
-function adapterZeitpunkt(adapter) {
-  const test = Number(adapter?.last_test?.tested_at_ms || adapter?.last_test?.at_ms || 0);
-  if (test > 0) return { ms: test, titel: t('metaTested', 'Zuletzt geprüft') };
-  const geaendert = Number(adapter?.updated_at_ms || 0);
-  if (geaendert > 0) return { ms: geaendert, titel: t('metaChanged', 'Zuletzt geändert') };
-  return { ms: 0, titel: '' };
-}
-
-function adapterZugang(adapter) {
-  // Exakte Statuslisten -- Substring-Muster matchten `required` auch in
-  // `not_required`, und jeder Adapter ohne Anmeldepflicht stand auf
-  // "Zugang fehlt" (Review-Befund; der Server schreibt `not_required`).
+function adapterZustand(adapter) {
   const auth = String(adapter.auth_status || '').toLowerCase();
-  if (adapter.requires_credential === false && !ADAPTER_AUTH_AUSSAGEKRAEFTIG.includes(auth)) {
-    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
-  }
-  if (auth === 'not_required') {
-    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
-  }
-  if (['ok', 'valid', 'ready', 'active', 'signed_in', 'authenticated',
-    'session_authenticated', 'credential_available', 'authorized'].includes(auth)) {
-    return { klasse: 'is-ok', text: t('chipAuthOk', 'Zugang OK') };
-  }
-  if (['missing', 'required', 'auth_required', 'credential_missing', 'expired',
-    'invalid', 'denied', 'logged_out'].includes(auth)) {
-    return { klasse: 'is-error', text: t('chipAuthMissing', 'Zugang fehlt') };
-  }
-  if (['auth_requested', 'browser_session_requested'].includes(auth)) {
-    return { klasse: 'is-warn', text: t('chipAuthPending', 'Anmeldung angefordert') };
-  }
-  return { klasse: 'is-neutral', text: t('chipAuthUnknown', 'Zugang ungeprüft') };
-}
-
-// Die Quellen liefern Maschinendiagnosen wie
-// "status=temporary_unreachable; reason=command_timed_out; records_found=0;
-// expected_fields=[...]". Roh angezeigt und bei 60 Zeichen mitten im Wort
-// abgeschnitten liest sich das wie ein Absturz, nicht wie ein Betriebszustand.
-// Diese Tabelle uebersetzt die tatsaechlich auftretenden Muster in einen Satz.
-// Reihenfolge ist Rangfolge: Das erste passende Muster gewinnt, denn eine
-// Diagnose nennt oft mehrere Symptome derselben Ursache. Ein Captcha erklaert
-// die Zeitueberschreitung, nicht umgekehrt.
-const ADAPTER_FEHLERMUSTER = Object.freeze([
-  [/captcha/i, 'Captcha verlangt', 'Die Quelle verlangt ein Captcha. Melden Sie sich einmal im Browser an.'],
-  [/blocked|forbidden|403/i, 'Zugriff blockiert', 'Die Quelle hat den Zugriff blockiert.'],
-  [/auth|login|credential|401/i, 'Anmeldung nötig', 'Die Quelle verlangt eine Anmeldung.'],
-  [/command_timed_out|timeout|timed_out/i, 'Zeitüberschreitung', 'Die Quelle hat nicht rechtzeitig geantwortet.'],
-  // Vor der generischen Huelle: "temporary_unreachable" ist oft nur der
-  // Statuscode um eine konkretere Aussage herum.
-  [/no exact company match|records_found=0/i, 'Kein Treffer', 'Die Quelle lieferte keinen passenden Treffer.'],
-  [/temporary_unreachable|unreachable|network/i, 'Nicht erreichbar', 'Die Quelle hat beim letzten Versuch nicht geantwortet.'],
-]);
-
-// Kurzform fuer den Statuschip: ein bis zwei Woerter, nie ein Rohstring.
-function adapterFehlerKurz(rohtext) {
-  const text = String(rohtext || '');
-  if (!text) return '';
-  for (const [muster, kurz] of ADAPTER_FEHLERMUSTER) if (muster.test(text)) return kurz;
-  return '';
-}
-
-// Langform fuer die Fehlerzeile. Erkannte Muster werden zu einem Satz; alles
-// Unbekannte wird an der Wortgrenze gekuerzt statt mitten im Wort.
-function adapterFehlerText(rohtext) {
-  const text = String(rohtext || '').trim();
-  if (!text) return '';
-  const treffer = ADAPTER_FEHLERMUSTER.find(([muster]) => muster.test(text));
-  if (treffer) return treffer[2];
-  const klartext = text.split('|')[0].replace(/\b[a-z_]+=\S+/g, '').replace(/\s+/g, ' ').trim();
-  const quelle = klartext || text;
-  if (quelle.length <= 90) return quelle;
-  const gekuerzt = quelle.slice(0, 90);
-  const grenze = gekuerzt.lastIndexOf(' ');
-  return (grenze > 40 ? gekuerzt.slice(0, grenze) : gekuerzt) + ' …';
-}
-
-// Ein Adapter ohne label zeigte seine nackte Domain neben gepflegten Namen wie
-// "D&B Hoovers". Aus der Domain laesst sich ein passabler Name ableiten.
-function adapterName(adapter) {
-  const label = String(adapter?.label || '').trim();
-  if (label) return label;
-  const quelle = String(adapter?.source_id || adapter?.id || '').trim();
-  if (!quelle) return '';
-  const kern = quelle.replace(/^www\./, '').split('.')[0];
-  if (!kern) return quelle;
-  const bekannt = { linkedin: 'LinkedIn', xing: 'XING', dnbhoovers: 'D&B Hoovers', companyhouse: 'CompanyHouse', northdata: 'Northdata', firmenabc: 'FirmenABC', moneyhouse: 'Moneyhouse', zefix: 'Zefix', rocketreach: 'RocketReach', leadfeeder: 'Leadfeeder', handelsregister: 'Handelsregister', bundesanzeiger: 'Bundesanzeiger', experte: 'Experte', maps: 'Google Maps', google: 'Google' };
-  return bekannt[kern.toLowerCase()] || (kern.charAt(0).toUpperCase() + kern.slice(1));
-}
-
-function adapterFunktion(adapter) {
-  if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
   const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
-  if (/(unreachable|fail|error|blocked|captcha|timeout)/.test(status) || adapter.last_error) {
-    const grund = adapterFehlerKurz(adapter.last_error || status);
-    return { klasse: 'is-warn', text: t('chipFnFail', 'Prüfung fehlgeschlagen') + (grund ? ` · ${grund}` : '') };
+  if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
+  if (auth.includes('missing') || auth.includes('required') || status.includes('auth')) {
+    return { klasse: 'is-error', text: t('adapterAuthMissing', 'Zugang fehlt') };
   }
-  if (/(ok|ready|passed|success)/.test(status)) {
-    return { klasse: 'is-ok', text: t('chipFnOk', 'Funktion geprüft') };
+  if (status.includes('unreachable') || status.includes('fail') || adapter.last_error) {
+    return { klasse: 'is-warn', text: t('adapterUnreachable', 'Letzte Prüfung fehlgeschlagen') };
   }
-  return { klasse: 'is-neutral', text: t('chipFnUntested', 'Ungeprüft') };
+  return { klasse: 'is-ok', text: t('adapterReady', 'Bereit') };
 }
 
 // Eine Schiene, zwei Inhalte: Sitzungen oder Scraping-Adapter, je nach Band.
@@ -2855,14 +2557,6 @@ function renderAdapterRail(ctx, refs, state) {
   const rail = refs.sessions;
   if (!rail) return;
   if (refs.adapterCount) refs.adapterCount.textContent = String((state.adapters || []).length || '');
-  const nachladenFaellig = state.adapterUnvollstaendig
-    && Date.now() - Number(state.adapterZuletztGeladenMs || 0) > 5000;
-  if (nachladenFaellig) {
-    state.adapterUnvollstaendig = false;
-    ladeScrapingAdapter(ctx, state).then(() => {
-      if (state.leftView?.band === 'adapters') renderAdapterRail(ctx, refs, state);
-    });
-  }
   if (!Array.isArray(state.adapters)) {
     rail.replaceChildren();
     const laden = document.createElement('div');
@@ -2891,107 +2585,33 @@ function renderAdapterRail(ctx, refs, state) {
   }
   const suche = String(state.leftView?.search || '');
   for (const adapter of state.adapters) {
-    const label = adapterName(adapter);
+    const label = String(adapter.label || adapter.source_id || adapter.id || '');
     if (suche && !label.toLowerCase().includes(suche)) continue;
-    const zugang = adapterZugang(adapter);
-    const funktion = adapterFunktion(adapter);
+    const zustand = adapterZustand(adapter);
     const karte = document.createElement('div');
     karte.className = 'browser-adapter-card';
     const kopf = document.createElement('div');
     kopf.className = 'browser-adapter-head';
     const punkt = document.createElement('span');
-    punkt.className = `browser-adapter-dot ${zugang.klasse === 'is-error' ? 'is-error' : funktion.klasse}`;
+    punkt.className = `browser-adapter-dot ${zustand.klasse}`;
     const name = document.createElement('strong');
     name.textContent = label;
-    // Namen kommen aus den Daten und sind gelegentlich lang (ein Adapter hiess
-    // "Handelsregister DE repair slice (German app-error detection)"). Gekuerzt
-    // anzeigen, vollstaendig im Tooltip - raten waere schlechter als kuerzen.
-    name.title = label;
     kopf.append(punkt, name);
-    const chips = document.createElement('div');
-    chips.className = 'browser-adapter-chips';
-    for (const c of [zugang, funktion]) {
-      const chip = document.createElement('span');
-      chip.className = `browser-adapter-chip ${c.klasse}`;
-      chip.textContent = c.text;
-      chips.appendChild(chip);
-    }
     const meta = document.createElement('div');
     meta.className = 'browser-adapter-meta';
-    const zeitpunkt = adapterZeitpunkt(adapter);
+    const getestet = Number(adapter.last_test?.at_ms || adapter.updated_at_ms || 0);
     const latenz = Number(adapter.latency_ms || adapter.last_test?.latency_ms || 0);
-    if (zeitpunkt.titel) meta.title = zeitpunkt.titel;
     meta.textContent = [
       String(adapter.source_id || ''),
-      zeitpunkt.ms ? new Date(zeitpunkt.ms).toLocaleString() : '',
+      zustand.text,
+      getestet ? new Date(getestet).toLocaleString() : '',
       latenz ? `${latenz} ms` : '',
     ].filter(Boolean).join(' · ');
-    const aktionen = document.createElement('div');
-    aktionen.className = 'browser-adapter-actions';
-    // "Direkt im Browser erledigen": Sitzung auf der Quelle starten, dort
-    // anmelden. source_id ist eine Domain, also traegt sie als Start-URL.
-    if (adapter.requires_credential !== false) {
-      const anmelden = document.createElement('button');
-      anmelden.type = 'button';
-      anmelden.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
-      anmelden.textContent = t('btnAdapterLogin', 'Im Browser anmelden');
-      anmelden.addEventListener('click', () => {
-        // Eine ANMELDE-Sitzung, keine gewoehnliche: nur mit
-        // purpose=web_stack_auth erkennt die Buehne den Vorgang und zeigt
-        // "Zugangsdaten einsetzen" und "Ich bin angemeldet" -- und nur der
-        // Sitzungspraefix browser_session_web_stack_auth_ gibt der Quelle ihr
-        // eigenes, dauerhaftes Browserprofil, in dem die Anmeldung bestehen
-        // bleibt. Ohne beides startete zwar ein Fenster, aber der Kreis liess
-        // sich nicht schliessen.
-        const quelle = String(adapter.source_id || '').trim();
-        const url = String(adapter.url || adapter.payload?.url || (quelle ? `https://${quelle}` : ''));
-        if (!url) {
-          state.notice = t('adapterNoUrl', 'Für diese Quelle ist keine Adresse hinterlegt.');
-          state.refresh?.();
-          return;
-        }
-        const sessionId = webStackAuthSessionId(quelle, ctx.session);
-        if (typeof state.openAuthSession !== 'function') {
-          state.notice = t('adapterLoginUnavailable', 'Anmeldesitzung ist gerade nicht verfügbar.');
-          state.refresh?.();
-          return;
-        }
-        state.openAuthSession({
-          session_id: sessionId,
-          tab_id: `browser_tab_${sessionId}`,
-          purpose: 'web_stack_auth',
-          target_url: url,
-          source_id: quelle,
-          allowed_domains: [quelle].filter(Boolean),
-          secret_name: String(adapter.credential_secret_name || ''),
-        });
-        ctx.notifications?.show?.({
-          type: 'info',
-          title: 'Browser',
-          message: t('adapterLoginStarted', 'Anmeldesitzung geöffnet — dort anmelden und "Ich bin angemeldet" bestätigen.'),
-        });
-      });
-      aktionen.appendChild(anmelden);
-    }
-    if (typeof ctx.openDesktopApp === 'function') {
-      const pruefen = document.createElement('button');
-      pruefen.type = 'button';
-      pruefen.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
-      pruefen.textContent = t('btnAdapterCheck', 'Prüfen (Outbound)');
-      pruefen.addEventListener('click', () => ctx.openDesktopApp('outbound-lead-generation'));
-      aktionen.appendChild(pruefen);
-    }
-    karte.append(kopf, chips, meta);
-    if (aktionen.childElementCount) karte.appendChild(aktionen);
-    // Der Chip nennt den Grund bereits in Kurzform. Eine Zeile, die exakt
-    // dasselbe wiederholt, ist Laerm - sie erscheint nur, wenn sie mehr sagt.
-    const fehlertext = adapterFehlerText(adapter.last_error);
-    const chipNennt = funktion.text.includes(adapterFehlerKurz(adapter.last_error || ''));
-    if (fehlertext && !(chipNennt && fehlertext.replace(/\.$/, '') === adapterFehlerKurz(adapter.last_error || ''))) {
+    karte.append(kopf, meta);
+    if (adapter.last_error) {
       const fehlerzeile = document.createElement('div');
       fehlerzeile.className = 'browser-adapter-error';
-      fehlerzeile.textContent = fehlertext;
-      fehlerzeile.title = String(adapter.last_error);
+      fehlerzeile.textContent = String(adapter.last_error).slice(0, 160);
       karte.appendChild(fehlerzeile);
     }
     rail.appendChild(karte);
@@ -3580,7 +3200,7 @@ async function renderFrame(refs, frame, state) {
   const skriptSichtbar = state.ansicht === 'script';
   if (!frame?.data || state.drawing) {
     refs.empty.hidden = skriptSichtbar || Boolean(frame?.data);
-    if (!frame?.data) renderFrameEmpty(refs.empty, state);
+    if (!frame?.data) refs.empty.textContent = frameEmptyText(state);
     return;
   }
   state.drawing = true;
@@ -3606,40 +3226,6 @@ async function renderFrame(refs, frame, state) {
   }
 }
 
-// Der Platzhalter trug bisher nur Text. Bei einer beendeten Sitzung stand dort
-// "Starten Sie die Sitzung erneut" - ohne jeden Weg dahin: eine Aufforderung
-// ohne Knopf. Das persistente Profil haengt an der session_id, ein Wiederstart
-// mit derselben id bringt die Anmeldungen der Quelle zurueck.
-function frameEmptyResumable(state) {
-  const session = state.latestSession;
-  if (!session?.id || typeof state.resumeSession !== 'function') return null;
-  const status = String(session.runtime_status || session.status || '').toLowerCase();
-  return ['disconnected', 'offline', 'stopped', 'closed', 'failed', 'error'].includes(status)
-    ? session
-    : null;
-}
-
-function renderFrameEmpty(host, state) {
-  if (!host) return;
-  host.replaceChildren();
-  const text = document.createElement('div');
-  text.className = 'browser-empty-text';
-  text.textContent = frameEmptyText(state);
-  host.appendChild(text);
-  const session = frameEmptyResumable(state);
-  if (!session) return;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'ctox-btn browser-empty-action';
-  button.textContent = t('btnSessionResume', 'Sitzung fortsetzen');
-  button.title = t('btnSessionResumeHint', 'Startet dieselbe Sitzung neu. Angemeldete Zugänge bleiben erhalten.');
-  button.addEventListener('click', () => {
-    button.disabled = true;
-    state.resumeSession(session);
-  });
-  host.appendChild(button);
-}
-
 function frameEmptyText(state) {
   const session = state.latestSession;
   const commandError = commandErrorMessage(state.latestCommand);
@@ -3651,7 +3237,7 @@ function frameEmptyText(state) {
     return runtimeError || t('frameStartFailed', 'Der Browser konnte nicht gestartet werden');
   }
   if (['disconnected', 'offline'].includes(status)) {
-    return runtimeError || t('frameDisconnected', 'Kein laufender Browser-Prozess. Sitzung fortsetzen, um weiterzuarbeiten.');
+    return runtimeError || 'Kein laufender Browser-Prozess. Starten Sie die Sitzung erneut.';
   }
   if (status === 'stopped' || status === 'closed') return t('frameClosed', 'Browser-Fenster geschlossen');
   if (status === 'requested' || status === 'starting' || status === 'pending_command') return t('frameStarting', 'Browser wird gestartet');
@@ -4094,22 +3680,11 @@ function escapeHtml(value) {
 
 export const __browserTestHooks = {
   SCRAPING_ADAPTER_COLLECTIONS,
-  SCRAPING_SOURCE_COLLECTIONS,
-  mergeScrapingAdapterSource,
-  mergeScrapingAdapterRows,
-  adapterZugang,
-  adapterFunktion,
-  adapterZeitpunkt,
-  adapterFehlerKurz,
-  adapterFehlerText,
-  adapterName,
   normalizeUrl,
   browserSessionIdFromArgs,
   formatBytes,
   titleCase,
   userSessionPrefix,
-  rxdbIdSlug,
-  webStackAuthSessionId,
   selectedViewport,
   browserAuthRequestFromArgs,
   shouldRenewControllerLease,
@@ -4135,7 +3710,6 @@ export const __browserTestHooks = {
   browserUiState,
   browserStatusLabel,
   frameEmptyText,
-  frameEmptyResumable,
   sessionListSignature,
   browserWorkbenchVisible,
   browserSessionShardMeta,

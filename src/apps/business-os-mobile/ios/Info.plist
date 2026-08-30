@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleDisplayName</key><string>CTOX Business OS</string>
+<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIdentifier</key><string>dev.ctox.business-os-mobile</string>
+<key>CFBundleName</key><string>CTOXBusinessOSMobile</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>UILaunchScreen</key><dict/>
+<key>NSCameraUsageDescription</key><string>Scan a CTOX Business OS pairing QR code while the scanner is visible.</string>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>dev.ctox.business-os-mobile.pair</string><key>CFBundleURLSchemes</key><array><string>ctox-business-os-mobile</string></array></dict></array>
+<key>CTOXBusinessOSSourceRevision</key><string>$(CTOX_BUSINESS_OS_SOURCE_REVISION)</string>
+<key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+</dict></plist>

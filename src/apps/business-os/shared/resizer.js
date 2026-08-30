@@ -33,12 +33,14 @@ export class CtoxResizer {
     this.resizeRaf = 0;
     this.pendingPointerPosition = null;
     this.activePointerId = null;
+    this.isPointerActive = false;
     this.step = 24;
 
     // Binde Event-Methoden fest an die Instanz
     this.onPointerDown = this.onPointerDown.bind(this);
     this.onPointerMove = this.onPointerMove.bind(this);
     this.onPointerUp = this.onPointerUp.bind(this);
+    this.onLostPointerCapture = this.onLostPointerCapture.bind(this);
     this.onKeyDown = this.onKeyDown.bind(this);
 
     this.init();
@@ -46,6 +48,7 @@ export class CtoxResizer {
 
   init() {
     this.resizerEl.addEventListener('pointerdown', this.onPointerDown);
+    this.resizerEl.addEventListener('lostpointercapture', this.onLostPointerCapture);
     this.resizerEl.addEventListener('keydown', this.onKeyDown);
     // Stelle sicher, dass die Pointer-Events auf dem Resizer-Element aktiv sind
     this.resizerEl.style.touchAction = 'none';
@@ -59,8 +62,10 @@ export class CtoxResizer {
 
   onPointerDown(e) {
     e.preventDefault();
-    if (this.activePointerId !== null) this.onPointerUp();
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (this.isPointerActive) this.finishPointerResize();
     this.activePointerId = Number.isFinite(e.pointerId) ? e.pointerId : null;
+    this.isPointerActive = true;
     if (this.activePointerId !== null) {
       try { this.resizerEl.setPointerCapture?.(this.activePointerId); } catch {}
     }
@@ -81,6 +86,8 @@ export class CtoxResizer {
   }
 
   onPointerMove(e) {
+    if (!this.isPointerActive) return;
+    if (this.activePointerId !== null && e.pointerId !== this.activePointerId) return;
     if (this.resizeRaf) cancelAnimationFrame(this.resizeRaf);
     this.pendingPointerPosition = this.orientation === 'horizontal' ? e.clientY : e.clientX;
 
@@ -90,7 +97,19 @@ export class CtoxResizer {
     });
   }
 
-  onPointerUp() {
+  onPointerUp(e) {
+    if (!this.isPointerActive) return;
+    if (this.activePointerId !== null && e && e.pointerId !== this.activePointerId) return;
+    this.finishPointerResize();
+  }
+
+  onLostPointerCapture(e) {
+    if (!this.isPointerActive) return;
+    if (this.activePointerId !== null && e?.pointerId !== this.activePointerId) return;
+    this.finishPointerResize({ releaseCapture: false });
+  }
+
+  finishPointerResize({ releaseCapture = true } = {}) {
     if (this.resizeRaf) {
       cancelAnimationFrame(this.resizeRaf);
       this.applyPendingPointerPosition();
@@ -108,7 +127,8 @@ export class CtoxResizer {
     window.removeEventListener('pointercancel', this.onPointerUp);
     const pointerId = this.activePointerId;
     this.activePointerId = null;
-    if (pointerId !== null) {
+    this.isPointerActive = false;
+    if (releaseCapture && pointerId !== null) {
       try {
         if (this.resizerEl.hasPointerCapture?.(pointerId)) {
           this.resizerEl.releasePointerCapture?.(pointerId);
@@ -197,7 +217,8 @@ export class CtoxResizer {
    */
   destroy() {
     this.resizerEl.removeEventListener('pointerdown', this.onPointerDown);
+    this.resizerEl.removeEventListener('lostpointercapture', this.onLostPointerCapture);
     this.resizerEl.removeEventListener('keydown', this.onKeyDown);
-    this.onPointerUp();
+    if (this.isPointerActive) this.finishPointerResize();
   }
 }

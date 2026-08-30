@@ -14,6 +14,8 @@ pub mod reset;
 pub mod state_invariants;
 pub mod state_write_guard;
 pub mod turn_ledger;
+#[cfg(windows)]
+pub mod windows_service;
 pub mod working_hours;
 
 #[path = "service.rs"]

@@ -22,7 +22,7 @@ import {
 } from './businessOsDataSource.js';
 import { createSyncFeedback } from './syncFeedback.js';
 import { getActiveMatchingDefinition, matchingText, setActiveMatchingDefinition } from './matchingDefinition.js';
-import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../../shared/i18n.js';
 import { renderListOrState } from '../../../shared/list-state.js';
 
@@ -1029,8 +1029,8 @@ function updateMatchingInitialSyncFeedback() {
   syncFeedback.upsertProgress?.(MATCHING_SYNC_PROGRESS_ID, {
     title: uiText('syncingTitle', 'Matching wird synchronisiert'),
     detail: pending
-      ? uiText('syncingCollections', 'RxDB lädt gerade: {collections}.', { collections: pending })
-      : uiText('syncingPreparing', 'RxDB bereitet die lokalen Daten vor.'),
+      ? uiText('syncingCollections', 'Daten werden gerade geladen: {collections}.', { collections: pending })
+      : uiText('syncingPreparing', 'Lokale Daten werden vorbereitet.'),
     meta: `${progress.ready}/${progress.total}`,
     value: (progress.ready / progress.total) * 100,
     indeterminate: false,
@@ -9394,7 +9394,7 @@ async function createRequirementFromForm({ sourceName, title, description }) {
     await loadFromRxdb();
   }
   if (!rxdb?.sources || !rxdb?.requirements) {
-    throw new Error('RxDB collections sind nicht bereit.');
+    throw new Error('Die lokalen Daten sind noch nicht bereit.');
   }
   const now = Date.now();
   const sourceId = `manualsrc_${now}_${Math.random().toString(16).slice(2, 8)}`;

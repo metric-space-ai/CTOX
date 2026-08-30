@@ -786,7 +786,7 @@ details[open] > .conv-message-details-summary::before {
   }
 }
 
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 767px) {
   .conv-module {
     grid-template-rows: minmax(190px, 34vh) minmax(320px, 1fr) minmax(220px, 36vh);
   }
@@ -800,6 +800,39 @@ details[open] > .conv-message-details-summary::before {
   }
 
   .conv-thread-item {
-    min-height: 42px;
+    min-height: 44px;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, plus
+   the horizontally scrolling channel tab band and the thread rows. */
+@media (pointer: coarse) {
+  .conv-module button,
+  .conv-module input,
+  .conv-module select,
+  .conv-module textarea {
+    min-height: 44px;
+  }
+
+  .conv-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .conv-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .conv-module .conv-thread-item {
+    min-height: 44px;
+  }
+
+  /* The details/summary disclosure inside messages is the only way to reach
+     the technical metadata — full finger-height hit area. */
+  .conv-module .conv-message-details-summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
   }
 }

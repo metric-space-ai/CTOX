@@ -12,7 +12,7 @@ export async function mount(container, ctx) {
   let teardown = null;
   let disposed = false;
   Promise.resolve().then(async () => {
-    const mod = await import('../../modules/creator/index.js?v=20260811-fremde-collection-mitladen-v106');
+    const mod = await import('../../modules/creator/index.js?v=20260816-browser-sync-guards-v141');
     if (disposed) return;
     container.innerHTML = '';
     const moduleCtx = {

@@ -1,0 +1,53 @@
+{
+  "schema": "workjet.icon-provenance.v1",
+  "app_id": "knowledge",
+  "candidate_id": "candidate-01",
+  "operator_approved_for_pilot": true,
+  "source": {
+    "media_type": "image/jpeg",
+    "path": "knowledge-candidate-01-original.jpg",
+    "sha256": "6aaaac3c849a444f1bc8af3e4f019eb4eded5ad64ac70ec85eee5c54cdb06e3b",
+    "width": 1024,
+    "height": 1024,
+    "provider": "grok",
+    "provider_mode": "agentic-image-generation"
+  },
+  "derivatives": [
+    {
+      "path": "knowledge-1024.png",
+      "media_type": "image/png",
+      "size_px": 1024,
+      "sha256": "d8c2b54b52f9b41de4098fd36c4b058edf7b88db2898e0171cc4b8e81d95e825"
+    },
+    {
+      "path": "knowledge-512.png",
+      "media_type": "image/png",
+      "size_px": 512,
+      "sha256": "64c5cc0b883c770754923bc9fc132cc89c8e8cf430607e6e53c157a1e3c64b8d"
+    },
+    {
+      "path": "knowledge-256.png",
+      "media_type": "image/png",
+      "size_px": 256,
+      "sha256": "257526ec6c932c287be864be47e7e7708f32d136d587ab2d17da6cc62629c220"
+    },
+    {
+      "path": "knowledge-144.png",
+      "media_type": "image/png",
+      "size_px": 144,
+      "sha256": "e756262f5c5a2e3089d31091205df27bfc7a014023ac618a2612a283fe585bca"
+    },
+    {
+      "path": "knowledge-60.png",
+      "media_type": "image/png",
+      "size_px": 60,
+      "sha256": "d7e1a31e6225944870d2eb50ddce4dc2017876459a5a4401a6c760a2268e729f"
+    }
+  ],
+  "vector": null,
+  "validation": {
+    "strict_reference_review_passed": false,
+    "production_svg_available": false,
+    "note": "The operator explicitly approved this exact hash as the Knowledge Shell-v2 pilot raster. No SVG is declared or embedded."
+  }
+}

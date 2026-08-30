@@ -38,6 +38,20 @@ test('business chat renders no agent scope panel without visible scope context',
   assert.equal(renderChatAgentScopeHtml({ client_context: { module: 'inventory' } }), '');
 });
 
+test('background control commands cannot steal focus when their result arrives', () => {
+  assert.equal(__businessChatTestInternals.chatAllowsAutoFocus({
+    contextMeta: {
+      client_context: { business_chat_auto_focus: false },
+    },
+  }), false);
+  assert.equal(__businessChatTestInternals.chatAllowsAutoFocus({
+    contextMeta: {
+      client_context: { business_chat_auto_focus: true },
+    },
+  }), true);
+  assert.equal(__businessChatTestInternals.chatAllowsAutoFocus({}), true);
+});
+
 test('business chat stage renders only the active chat window', () => {
   const active = { id: 'chat-active' };
   assert.deepEqual(__businessChatTestInternals.stageWindowChats(active), [active]);
@@ -2349,4 +2363,21 @@ test('eine Antwort auf einen alten Chat holt sich die Ansicht nicht', () => {
   }
   assert.equal(state.selectedDate, heute);
   assert.notEqual(state.selectedDate, '2026-07-26');
+});
+
+test('die Chat-Leiste faengt nur dort Klicks, wo sie etwas anzeigt', () => {
+  // Am 11.08.2026 lag die Empfaengerauswahl von Outbound Lead Generation im
+  // durchsichtigen Zwischenraum des Docks. Der Detailbereich war bis zum
+  // Anschlag gescrollt, das Haekchen sichtbar — und jeder Klick landete im
+  // Dock. elementsFromPoint zeigte SECTION.ctox-chat-dock zuoberst. Ohne
+  // Empfaenger keine Sellify-Uebergabe, kein Serienbrief, keine Serien-E-Mail:
+  // die gesamte Kette endete an einem unsichtbaren Rechteck.
+  const css = businessChatSource;
+  const dockRegel = css.slice(css.indexOf('.ctox-chat-dock {'), css.indexOf('.ctox-chat-dock {') + 400);
+  assert.match(dockRegel, /pointer-events:\s*none/,
+    'Der Dock-Container darf keine Klicks der App darunter abfangen');
+
+  // Und die Bedienelemente muessen sie zurueckbekommen, sonst ist die Leiste tot.
+  assert.match(css, /\.ctox-chat-dock > \*,[\s\S]{0,200}pointer-events:\s*auto/,
+    'Die sichtbaren Kinder des Docks brauchen pointer-events: auto');
 });

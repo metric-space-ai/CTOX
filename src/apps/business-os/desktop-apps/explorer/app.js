@@ -3,7 +3,7 @@ import {
   FILE_CONTENT_HASH_SCHEME,
   readStoredFileFromDemandChunks,
   sha256Hex,
-} from '../../shared/file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 export const manifest = {
   id: 'explorer',
@@ -1173,7 +1173,7 @@ async function waitForReplicationBridge(bridge, collection, timeoutMs = 20000) {
   await Promise.race([
     wait(),
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`${collection} replication did not become ready in time`)), timeoutMs);
+      setTimeout(() => reject(new Error(`${collection} data did not become ready in time`)), timeoutMs);
     }),
   ]);
 }

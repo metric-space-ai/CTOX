@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  isShellSurfaceModule,
   launchesInWindow,
   resolvePresentation,
   usesLegacyWorkspace,
@@ -27,10 +28,26 @@ test('presentation contract resolves explicit window configuration', () => {
 
 test('presentation contract retains bounded legacy behavior', () => {
   const windowed = { layout: { shell: 'desktop-window' } };
-  const workspace = { layout: { shell: 'full-workspace' } };
+  const workspace = { id: 'desktop', layout: { shell: 'full-workspace' } };
+  const projectedDesktop = { id: 'desktop' };
+  const importedLegacyWorkspace = { id: 'imported-legacy', layout: { shell: 'full-workspace' } };
   const ordinaryPaneModule = {};
 
   assert.equal(launchesInWindow(windowed), true);
+  assert.equal(isShellSurfaceModule(workspace), true);
+  assert.equal(usesLegacyWorkspace(projectedDesktop), true);
+  assert.equal(isShellSurfaceModule(importedLegacyWorkspace), false);
   assert.equal(usesLegacyWorkspace(workspace), true);
+  assert.equal(launchesInWindow(importedLegacyWorkspace), true);
+  assert.equal(usesLegacyWorkspace(importedLegacyWorkspace), false);
   assert.equal(usesLegacyWorkspace(ordinaryPaneModule), false);
+});
+
+test('modules without a presentation contract still launch in the shared window shell', () => {
+  const runtimeModule = { id: 'runtime-imported-app', title: 'Imported app' };
+  const presentation = resolvePresentation(runtimeModule);
+
+  assert.equal(presentation.defaultMode, 'window');
+  assert.ok(presentation.supportedModes.includes('window'));
+  assert.equal(launchesInWindow(runtimeModule), true);
 });

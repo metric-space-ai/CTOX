@@ -1,7 +1,7 @@
 {
   "id": "customers",
   "title": "Kunden",
-  "description": "Native CRM-App für Bestandskunden, Kontakte, Opportunities, Aufgaben, Notizen, Aktivitäten und Outbound-Handoffs.",
+  "description": "CRM-App für Bestandskunden, Kontakte, Opportunities, Aufgaben, Notizen, Aktivitäten und Outbound-Handoffs.",
   "entry": "modules/customers/index.html",
   "collections": [
     "business_commands",

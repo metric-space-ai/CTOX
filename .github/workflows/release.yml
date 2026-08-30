@@ -128,6 +128,7 @@ jobs:
           node --check src/apps/business-os/scripts/assert-module-conformance.mjs
           node --check src/apps/business-os/scripts/assert-production-release-docs.mjs
           node --check src/apps/business-os/scripts/assert-security-privacy-signoff.mjs
+          node --check src/apps/business-os/scripts/audit-business-os-content.mjs
           node src/apps/business-os/scripts/assert-rxdb-only.mjs
           node src/apps/business-os/scripts/assert-module-conformance.mjs
           node src/core/rxdb/tools/assert_sync_production_readiness_95.js
@@ -146,6 +147,7 @@ jobs:
           node src/apps/business-os/scripts/assert-production-release-docs.mjs
           node src/apps/business-os/scripts/assert-security-privacy-signoff.mjs --self-test
           node src/apps/business-os/scripts/assert-security-privacy-signoff.mjs
+          node src/apps/business-os/scripts/audit-business-os-content.mjs
           SMOKE_MATRIX_SELF_TEST=1 node src/core/rxdb/tools/browser_rust_smoke_matrix.js
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon
           cargo test --locked --bin ctox business_os --quiet
@@ -456,6 +458,8 @@ jobs:
           path: ctox-desktop-windows-x64.msi
 
   build-business-os-desktop:
+    # Legacy donor only. The canonical user-facing desktop app ships from metric-space-ai/workjet.
+    if: ${{ false }}
     needs: business-os-production-gate
     strategy:
       fail-fast: false
@@ -709,7 +713,7 @@ jobs:
           cp src/apps/business-os/rxdb/dist/ctox-rxdb-js.mjs bundle/rxdb-js/app-local/dist/
           cp src/apps/business-os/rxdb/src/*.mjs bundle/rxdb-js/app-local/src/
           cp src/apps/business-os/rxdb/tests/*.mjs bundle/rxdb-js/app-local/tests/
-          cp install.sh bundle/
+          cp install.sh install.ps1 bundle/
           cp LICENSE bundle/
           cp docs/legal/NOTICE bundle/NOTICE
           # Runtime source assets the installed daemon serves (validated by
@@ -751,8 +755,29 @@ jobs:
           Copy-Item -Path "src\apps\business-os\rxdb\dist\ctox-rxdb-js.mjs" -Destination "bundle\rxdb-js\app-local\dist\"
           Copy-Item -Path "src\apps\business-os\rxdb\src\*.mjs" -Destination "bundle\rxdb-js\app-local\src\"
           Copy-Item -Path "src\apps\business-os\rxdb\tests\*.mjs" -Destination "bundle\rxdb-js\app-local\tests\"
-          Copy-Item -Path "install.sh", "LICENSE" -Destination "bundle\"
+          Copy-Item -Path "install.sh", "install.ps1", "LICENSE" -Destination "bundle\"
           Copy-Item -Path "docs\legal\NOTICE" -Destination "bundle\NOTICE"
+          Copy-Item -Path "Cargo.toml" -Destination "bundle\"
+          New-Item -ItemType Directory -Force bundle\contracts | Out-Null
+          Copy-Item -Path "contracts\source_origins_manifest.json" -Destination "bundle\contracts\"
+          Copy-Item -Path "contracts\binary_bundle_manifest.txt" -Destination "bundle\contracts\"
+          New-Item -ItemType Directory -Force bundle\src\apps | Out-Null
+          Copy-Item -Path "src\apps\business-os" -Destination "bundle\src\apps\business-os" -Recurse
+          New-Item -ItemType Directory -Force bundle\src\core\harness | Out-Null
+          New-Item -ItemType Directory -Force bundle\src\core\rxdb\tools | Out-Null
+          Copy-Item -Path "src\core\harness\Cargo.toml" -Destination "bundle\src\core\harness\"
+          Copy-Item -Path "src\core\rxdb\Cargo.toml" -Destination "bundle\src\core\rxdb\"
+          Copy-Item -Path "src\core\rxdb\tools\local_signaling_server.js" -Destination "bundle\src\core\rxdb\tools\"
+          New-Item -ItemType Directory -Force bundle\src\skills | Out-Null
+          Copy-Item -Path "src\skills\system" -Destination "bundle\src\skills\system" -Recurse
+          Get-Content "contracts\binary_bundle_manifest.txt" | ForEach-Object {
+            $requiredPath = $_.Trim()
+            if ($requiredPath -and -not $requiredPath.StartsWith("#")) {
+              if (-not (Test-Path -LiteralPath (Join-Path "bundle" $requiredPath))) {
+                throw "bundle missing required path: $requiredPath"
+              }
+            }
+          }
           Compress-Archive -Path "bundle\*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
           $hash = (Get-FileHash "${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  ${{ matrix.artifact }}.zip" | Set-Content "${{ matrix.artifact }}.zip.sha256" -NoNewline
@@ -769,11 +794,14 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [business-os-production-gate, build-desktop-macos, build-desktop-linux, build-desktop-windows, build-business-os-desktop, build-ctox]
+    needs: [business-os-production-gate, build-desktop-macos, build-desktop-linux, build-desktop-windows, build-ctox]
     runs-on: ubuntu-latest
     name: Create GitHub Release
 
     steps:
+      - name: Check out release metadata generator
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -782,6 +810,17 @@ jobs:
 
       - name: List artifacts
         run: ls -la artifacts/
+
+      - name: Stage release bootstrap installers
+        run: cp install.sh install.ps1 artifacts/
+
+      - name: Create machine-readable install manifest
+        run: |
+          node src/scripts/generate-install-manifest.mjs \
+            --artifacts-dir artifacts \
+            --tag "${GITHUB_REF_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --output artifacts/ctox-install-manifest-v1.json
 
       - name: Create release checksums
         working-directory: artifacts

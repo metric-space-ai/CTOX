@@ -38,14 +38,9 @@
   grid-row: 1 / -1;
 }
 
-/* Module special: "feature" badge role on top of the shared .ctox-badge —
-   the shell has no matching semantic token (dark value below). */
+/* Feature badges use the module's Governance category accent. */
 .reports-module {
-  --reports-feature: #1d6fa8;
-}
-
-:root[data-theme="dark"] .reports-module {
-  --reports-feature: #8dc4f0;
+  --reports-feature: var(--app-accent);
 }
 
 .reports-module .ctox-badge.is-feature {
@@ -133,7 +128,12 @@
 /* custom: narrow windows stack the three panes vertically so the detail
    keeps a readable width without horizontal squeezing. */
 @container business-app-window (max-width: 1180px) {
-  .reports-module {
+  /* Match the higher-specificity desktop collapse rule as well. Without the
+     second selector, `.reports-module.is-actions-hidden` keeps the desktop
+     three-column template while the resizers below are removed from layout.
+     The detail pane then falls into the 12px resizer column and looks empty. */
+  .reports-module,
+  .reports-module.is-actions-hidden {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(200px, 34vh) minmax(380px, 1fr) minmax(220px, 36vh);
     height: auto;
@@ -164,9 +164,44 @@
   }
 }
 
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 767px) {
   .reports-module {
     grid-template-rows: minmax(220px, 38vh) minmax(420px, 1fr) minmax(260px, 42vh);
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, plus
+   the fixed 28px filter-tray controls and the report list rows. */
+@media (pointer: coarse) {
+  .reports-module button,
+  .reports-module input,
+  .reports-module select,
+  .reports-module textarea {
+    min-height: 44px;
+  }
+
+  .reports-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .reports-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .reports-module .reports-select {
+    height: 44px;
+  }
+
+  .reports-module .reports-sort-dir {
+    width: 44px;
+    height: 44px;
+  }
+
+  .reports-module .report-row,
+  .reports-module .report-row-compact {
+    min-height: 44px;
   }
 }
 /* ============================================================================

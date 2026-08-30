@@ -499,3 +499,83 @@
     flex-wrap: wrap;
   }
 }
+
+/* -------------------------------------------------------------
+   Phase 2 — mobile operability (phone sheet, container <= 767px).
+   The pane stacking itself already happens at 1024px/768px above; this block
+   covers what those breakpoints do not: horizontal-scroll safety for the
+   EventCalendar time grids and full-width drawer geometry.
+   ------------------------------------------------------------- */
+@container business-app-window (max-width: 767px) {
+  /* Week/day time grids crush below ~520px. Give the vendor widget a real
+     floor and let .calendar-grid-container (overflow: auto) scroll it
+     horizontally inside the pane — never the whole sheet. Month/list views
+     stay fluid via :has(). */
+  .ec-theme-business-os.ec:has(.ec-time-grid),
+  .ec-theme-business-os .ec:has(.ec-time-grid) {
+    min-width: 560px;
+  }
+
+  /* The drawer is a bottom sheet inside the app window; on the phone sheet it
+     spans the full width and nearly the full height, still clearing the
+     shell's fixed chat dock at the bottom of the viewport. */
+  .ctox-bottom-drawer {
+    bottom: calc(var(--calendar-shell-dock-offset, 52px) + env(safe-area-inset-bottom, 0px));
+    height: calc(100% - var(--calendar-shell-dock-offset, 52px) - env(safe-area-inset-bottom, 0px) - 8px);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+  }
+
+  .calendar-drawer-actions {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions. */
+@media (pointer: coarse) {
+  .calendar-app button,
+  .calendar-app input,
+  .calendar-app select,
+  .calendar-app textarea {
+    min-height: 44px;
+  }
+
+  .calendar-app .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .calendar-app .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .calendar-app .ctox-list-item {
+    min-height: 44px;
+  }
+
+  /* Native color well keeps its look but becomes tappable. */
+  .calendar-app input[type="color"].ctox-input {
+    height: 44px;
+  }
+
+  /* The visibility checkbox is a tap target of its own. */
+  .calendar-app .calendar-item-checkbox {
+    width: 22px;
+    height: 22px;
+  }
+
+  /* EventCalendar header buttons (Monat/Woche/Tag/Liste) are vendor markup. */
+  .ec-theme-business-os .ec-header .ec-button,
+  .ec-theme-business-os.ec .ec-header .ec-button {
+    min-height: 44px;
+    padding-inline: 12px;
+  }
+
+  /* Touch equivalent for the hover-reveal row actions: on coarse pointers
+     there is no hover, so the row actions are always visible. */
+  .calendar-item-actions,
+  .booking-page-item-actions {
+    opacity: 1;
+  }
+}

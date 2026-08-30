@@ -1,361 +1,450 @@
-/**
- * Public Booking Funnel client script.
- * Talks to Rust HTTP intake gateway.
- */
+/** Public Workjet booking surface. Talks only to the calendar intake control plane. */
+
+const locale = document.documentElement.lang === 'de' ? 'de-DE' : 'en-US';
+const language = locale.startsWith('de') ? 'de' : 'en';
+
+const COPY = Object.freeze({
+  de: Object.freeze({
+    pageTitle: 'Termin buchen | Workjet',
+    poweredBy: 'Bereitgestellt mit',
+    chooseDateTime: 'Datum und Uhrzeit wählen',
+    previousMonth: 'Vorheriger Monat',
+    nextMonth: 'Nächster Monat',
+    calendar: 'Kalender',
+    selectedDate: 'Ausgewähltes Datum',
+    chooseDate: 'Wählen Sie zuerst ein Datum.',
+    backToTimes: '← Zurück zur Zeitauswahl',
+    enterDetails: 'Kontaktdaten eingeben',
+    nameLabel: 'Name *',
+    namePlaceholder: 'z. B. Max Mustermann',
+    emailLabel: 'E-Mail-Adresse *',
+    phoneLabel: 'Telefonnummer (optional)',
+    notesLabel: 'Notizen (optional)',
+    notesPlaceholder: 'Welche Themen möchten Sie besprechen?',
+    confirmBooking: 'Termin verbindlich buchen',
+    confirming: 'Termin wird gebucht …',
+    bookingConfirmed: 'Termin bestätigt',
+    confirmationSent: 'Der Termin wurde eingetragen. Eine Bestätigung mit den Details wurde per E-Mail versendet.',
+    appointmentType: 'Termin:',
+    when: 'Zeit:',
+    where: 'Ort:',
+    closeWindow: 'Sie können dieses Fenster jetzt schließen.',
+    defaultDescription: 'Wählen Sie einen passenden Termin. Anschließend können Sie Ihre Kontaktdaten eingeben.',
+    onlineAppointment: 'Online-Termin',
+    phoneAppointment: 'Telefontermin',
+    inPersonAppointment: 'Termin vor Ort',
+    phoneCallback: 'Telefonischer Rückruf',
+    minutes: (value) => `${value} Minuten`,
+    durationShort: (value) => `${value} Min.`,
+    loadingTimes: 'Freie Zeiten werden geladen …',
+    noTimes: 'An diesem Tag sind keine freien Termine verfügbar.',
+    invalidLink: 'Dieser Buchungslink ist ungültig.',
+    pageUnavailable: 'Die Buchungsseite ist zurzeit nicht verfügbar.',
+    timesUnavailable: 'Freie Zeiten konnten nicht geladen werden. Bitte versuchen Sie es erneut.',
+    slotUnavailable: 'Dieser Termin ist nicht mehr verfügbar. Bitte wählen Sie einen anderen.',
+    bookingFailed: 'Der Termin konnte nicht gebucht werden. Bitte versuchen Sie es erneut.',
+    errorTitle: 'Buchung nicht möglich',
+    weekdays: ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'],
+  }),
+  en: Object.freeze({
+    pageTitle: 'Book an appointment | Workjet',
+    poweredBy: 'Provided with',
+    chooseDateTime: 'Choose a date and time',
+    previousMonth: 'Previous month',
+    nextMonth: 'Next month',
+    calendar: 'Calendar',
+    selectedDate: 'Selected date',
+    chooseDate: 'Choose a date first.',
+    backToTimes: '← Back to available times',
+    enterDetails: 'Enter your contact details',
+    nameLabel: 'Name *',
+    namePlaceholder: 'e.g. Alex Morgan',
+    emailLabel: 'Email address *',
+    phoneLabel: 'Phone number (optional)',
+    notesLabel: 'Notes (optional)',
+    notesPlaceholder: 'What would you like to discuss?',
+    confirmBooking: 'Confirm appointment',
+    confirming: 'Booking appointment …',
+    bookingConfirmed: 'Appointment confirmed',
+    confirmationSent: 'The appointment has been booked. A confirmation with the details was sent by email.',
+    appointmentType: 'Appointment:',
+    when: 'Time:',
+    where: 'Location:',
+    closeWindow: 'You can close this window now.',
+    defaultDescription: 'Choose a suitable time. You can enter your contact details in the next step.',
+    onlineAppointment: 'Online appointment',
+    phoneAppointment: 'Phone appointment',
+    inPersonAppointment: 'In-person appointment',
+    phoneCallback: 'Phone callback',
+    minutes: (value) => `${value} minutes`,
+    durationShort: (value) => `${value} min`,
+    loadingTimes: 'Loading available times …',
+    noTimes: 'There are no available appointments on this day.',
+    invalidLink: 'This booking link is invalid.',
+    pageUnavailable: 'The booking page is currently unavailable.',
+    timesUnavailable: 'Available times could not be loaded. Please try again.',
+    slotUnavailable: 'This appointment is no longer available. Please choose another.',
+    bookingFailed: 'The appointment could not be booked. Please try again.',
+    errorTitle: 'Unable to book appointment',
+    weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+  }),
+});
+
+const copy = COPY[language];
 
 const state = {
   slug: '',
   bookingPage: null,
-
-  // Date Picker State
   currentDate: new Date(),
   selectedDate: null,
-
-  // Slots State
   slots: [],
   selectedSlot: null,
-  activeHold: null // { id, token }
+  activeHold: null,
 };
 
 const els = {
+  card: document.getElementById('bookingMainCard'),
+  status: document.getElementById('bookingStatus'),
   eventTitle: document.getElementById('eventTitle'),
   eventDuration: document.getElementById('eventDuration'),
   eventLocation: document.getElementById('eventLocation'),
   eventDescription: document.getElementById('eventDescription'),
-
-  // Steps Panels
   stepSlots: document.getElementById('stepSlots'),
   stepForm: document.getElementById('stepForm'),
   stepSuccess: document.getElementById('stepSuccess'),
-
-  // Datepicker Elements
   monthYearTitle: document.getElementById('monthYearTitle'),
   btnPrevMonth: document.getElementById('btnPrevMonth'),
   btnNextMonth: document.getElementById('btnNextMonth'),
   datepickerGrid: document.getElementById('datepickerGrid'),
-
-  // Timeslots Elements
   timeslotPane: document.getElementById('timeslotPane'),
   selectedDateTitle: document.getElementById('selectedDateTitle'),
   timeslotList: document.getElementById('timeslotList'),
-
-  // Form Elements
   btnBackToSlots: document.getElementById('btnBackToSlots'),
   bookingAttendeeForm: document.getElementById('bookingAttendeeForm'),
+  confirmButton: document.querySelector('.confirm-btn'),
   attendeeName: document.getElementById('attendeeName'),
   attendeeEmail: document.getElementById('attendeeEmail'),
   attendeePhone: document.getElementById('attendeePhone'),
   attendeeNotes: document.getElementById('attendeeNotes'),
-
-  // Success Summary
   summaryTitle: document.getElementById('summaryTitle'),
   summaryTime: document.getElementById('summaryTime'),
   summaryLocationRow: document.getElementById('summaryLocationRow'),
-  summaryLocation: document.getElementById('summaryLocation')
+  summaryLocation: document.getElementById('summaryLocation'),
 };
 
-// ----------------------------------------------------
-// INITIALIZATION
-// ----------------------------------------------------
-
 document.addEventListener('DOMContentLoaded', () => {
-  // Parse slug from URL: /book/:slug
+  applyTranslations();
   const paths = window.location.pathname.split('/').filter(Boolean);
-  state.slug = paths.pop() || '';
+  state.slug = paths.at(-1) || '';
 
   if (!state.slug || state.slug === 'book') {
-    renderErrorState('Ungültiger Buchungs-Link.');
+    renderErrorState(copy.invalidLink);
     return;
   }
 
-  loadBookingPageDetails();
   wireEvents();
+  void loadBookingPageDetails();
 });
+
+function applyTranslations() {
+  document.title = copy.pageTitle;
+  for (const element of document.querySelectorAll('[data-i18n]')) {
+    const value = copy[element.dataset.i18n];
+    if (typeof value === 'string') element.textContent = value;
+  }
+  for (const element of document.querySelectorAll('[data-i18n-aria-label]')) {
+    const value = copy[element.dataset.i18nAriaLabel];
+    if (typeof value === 'string') element.setAttribute('aria-label', value);
+  }
+  for (const element of document.querySelectorAll('[data-i18n-placeholder]')) {
+    const value = copy[element.dataset.i18nPlaceholder];
+    if (typeof value === 'string') element.setAttribute('placeholder', value);
+  }
+  document.querySelectorAll('[data-weekday]').forEach((element) => {
+    element.textContent = copy.weekdays[Number(element.dataset.weekday)] || '';
+  });
+}
 
 function wireEvents() {
   els.btnPrevMonth.addEventListener('click', () => {
-    state.currentDate.setMonth(state.currentDate.getMonth() - 1);
+    state.currentDate = new Date(state.currentDate.getFullYear(), state.currentDate.getMonth() - 1, 1);
     renderDatePicker();
   });
 
   els.btnNextMonth.addEventListener('click', () => {
-    state.currentDate.setMonth(state.currentDate.getMonth() + 1);
+    state.currentDate = new Date(state.currentDate.getFullYear(), state.currentDate.getMonth() + 1, 1);
     renderDatePicker();
   });
 
   els.btnBackToSlots.addEventListener('click', () => {
     transitionToStep('slots');
-    // Release hold if back is clicked
-    releaseHold();
+    void releaseHold();
   });
 
   els.bookingAttendeeForm.addEventListener('submit', handleFormSubmit);
 }
 
-// ----------------------------------------------------
-// API REQUESTS
-// ----------------------------------------------------
-
 async function loadBookingPageDetails() {
   try {
-    const response = await fetch(`/api/public/calendar/${state.slug}/slots?info_only=true`);
-    if (!response.ok) {
-      throw new Error('Buchungsseite nicht gefunden.');
-    }
+    const response = await fetch(`/api/public/calendar/${encodeURIComponent(state.slug)}/slots?info_only=true`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error('page-unavailable');
     const data = await response.json();
+    if (!data?.booking_page) throw new Error('page-unavailable');
     state.bookingPage = data.booking_page;
 
-    // Set titles in HTML
-    els.eventTitle.textContent = state.bookingPage.title;
-    els.eventDuration.textContent = `${state.bookingPage.duration_minutes} Minuten`;
-
-    const locMode = state.bookingPage.location_mode;
-    els.eventLocation.textContent = locMode === 'link' ? 'Online-Meeting' : (locMode === 'phone' ? 'Telefontermin' : 'Physisches Treffen');
-    els.eventDescription.textContent = state.bookingPage.description || 'Laden Sie sich ein und wählen Sie ein passendes Zeitfenster.';
-
+    els.eventTitle.textContent = String(state.bookingPage.title || '');
+    els.eventDuration.textContent = copy.minutes(Number(state.bookingPage.duration_minutes) || 0);
+    els.eventLocation.textContent = locationLabel(state.bookingPage.location_mode);
+    els.eventDescription.textContent = String(state.bookingPage.description || copy.defaultDescription);
     renderDatePicker();
-  } catch (error) {
-    console.error(error);
-    renderErrorState(error.message);
+  } catch {
+    renderErrorState(copy.pageUnavailable);
   }
 }
 
 async function loadSlotsForDate(date) {
-  els.timeslotList.innerHTML = '<div style="text-align:center; padding: 20px;"><span class="spinner">Lade Slots...</span></div>';
-
+  replaceWithMessage(els.timeslotList, copy.loadingTimes, 'spinner');
   const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
 
   try {
-    const response = await fetch(`/api/public/calendar/${state.slug}/slots?start=${startOfDay.getTime()}&end=${endOfDay.getTime()}`);
-    if (!response.ok) throw new Error('Fehler beim Laden der Slots.');
+    const response = await fetch(`/api/public/calendar/${encodeURIComponent(state.slug)}/slots?start=${startOfDay.getTime()}&end=${endOfDay.getTime()}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error('times-unavailable');
     const data = await response.json();
-    state.slots = data.slots || [];
-
+    state.slots = Array.isArray(data?.slots) ? data.slots : [];
     renderSlots();
-  } catch (error) {
-    console.error(error);
-    els.timeslotList.innerHTML = `<div class="timeslot-empty-state" style="color:#ef4444;">${error.message}</div>`;
+  } catch {
+    replaceWithMessage(els.timeslotList, copy.timesUnavailable);
   }
 }
 
 async function reserveHold(slot) {
+  clearStatus();
   try {
-    const response = await fetch(`/api/public/calendar/${state.slug}/hold`, {
+    const response = await fetch(`/api/public/calendar/${encodeURIComponent(state.slug)}/hold`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        slot_start_ms: slot.start_ms,
-        slot_end_ms: slot.end_ms
-      })
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ slot_start_ms: slot.start_ms, slot_end_ms: slot.end_ms }),
     });
-
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error || 'Dieser Slot ist leider nicht mehr verfügbar.');
-    }
-
+    if (!response.ok) throw new Error('slot-unavailable');
     const hold = await response.json();
-    state.activeHold = {
-      id: hold.id,
-      token: hold.token
-    };
+    if (!hold?.id || !hold?.token) throw new Error('slot-unavailable');
+    state.activeHold = { id: hold.id, token: hold.token };
     state.selectedSlot = slot;
-
     transitionToStep('form');
-  } catch (error) {
-    alert(error.message);
+  } catch {
+    showStatus(copy.slotUnavailable);
   }
 }
 
 async function releaseHold() {
   if (!state.activeHold) return;
-
-  // Background fire-and-forget release call
-  fetch(`/api/public/calendar/${state.slug}/hold`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      hold_id: state.activeHold.id,
-      hold_token: state.activeHold.token
-    })
-  }).catch(e => console.warn('Failed to release hold:', e));
-
+  const hold = state.activeHold;
   state.activeHold = null;
   state.selectedSlot = null;
+  try {
+    await fetch(`/api/public/calendar/${encodeURIComponent(state.slug)}/hold`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ hold_id: hold.id, hold_token: hold.token }),
+    });
+  } catch {
+    // Expiring holds are cleaned up server-side. No secret or transport detail is exposed.
+  }
 }
 
-async function handleFormSubmit(e) {
-  e.preventDefault();
-  if (!state.activeHold) return;
+async function handleFormSubmit(event) {
+  event.preventDefault();
+  if (!state.activeHold || !state.bookingPage) return;
+  clearStatus();
+  setSubmitting(true);
 
   const attendee = {
-    name: els.attendeeName.value,
-    email: els.attendeeEmail.value,
-    phone: els.attendeePhone.value,
-    notes: els.attendeeNotes.value
+    name: els.attendeeName.value.trim(),
+    email: els.attendeeEmail.value.trim(),
+    phone: els.attendeePhone.value.trim(),
+    notes: els.attendeeNotes.value.trim(),
   };
 
   try {
-    const response = await fetch(`/api/public/calendar/${state.slug}/book`, {
+    const response = await fetch(`/api/public/calendar/${encodeURIComponent(state.slug)}/book`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
         hold_id: state.activeHold.id,
         hold_token: state.activeHold.token,
         attendee_name: attendee.name,
         attendee_email: attendee.email,
         attendee_phone: attendee.phone,
-        answers: { notes: attendee.notes }
-      })
+        answers: { notes: attendee.notes },
+      }),
     });
-
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error || 'Fehler beim Bestätigen der Buchung.');
-    }
-
+    if (!response.ok) throw new Error('booking-failed');
     const booking = await response.json();
+    if (!Number.isFinite(Number(booking?.slot_start_ms))) throw new Error('booking-failed');
 
-    // Set success details
-    els.summaryTitle.textContent = state.bookingPage.title;
-    els.summaryTime.textContent = `${new Date(booking.slot_start_ms).toLocaleString()} (${state.bookingPage.duration_minutes} Min)`;
+    els.summaryTitle.textContent = String(state.bookingPage.title || '');
+    els.summaryTime.textContent = `${new Date(Number(booking.slot_start_ms)).toLocaleString(locale)} (${copy.durationShort(Number(state.bookingPage.duration_minutes) || 0)})`;
 
-    const locMode = state.bookingPage.location_mode;
-    if (locMode === 'link') {
-      els.summaryLocation.textContent = 'Jami Online Meeting';
-      els.summaryLocationRow.style.display = 'flex';
-    } else if (locMode === 'phone') {
-      els.summaryLocation.textContent = attendee.phone || 'Telefonrückruf';
-      els.summaryLocationRow.style.display = 'flex';
+    const locationMode = state.bookingPage.location_mode;
+    if (locationMode === 'link') {
+      els.summaryLocation.textContent = copy.onlineAppointment;
+      els.summaryLocationRow.hidden = false;
+    } else if (locationMode === 'phone') {
+      els.summaryLocation.textContent = attendee.phone || copy.phoneCallback;
+      els.summaryLocationRow.hidden = false;
     } else {
-      els.summaryLocationRow.style.display = 'none';
+      els.summaryLocationRow.hidden = true;
     }
 
+    state.activeHold = null;
     transitionToStep('success');
-  } catch (error) {
-    alert(error.message);
+  } catch {
+    showStatus(copy.bookingFailed);
+  } finally {
+    setSubmitting(false);
   }
 }
-
-// ----------------------------------------------------
-// UI RENDERING & DATE UTILS
-// ----------------------------------------------------
 
 function renderDatePicker() {
   const year = state.currentDate.getFullYear();
   const month = state.currentDate.getMonth();
+  els.monthYearTitle.textContent = new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(new Date(year, month, 1));
 
-  const monthNames = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
-  els.monthYearTitle.textContent = `${monthNames[month]} ${year}`;
-
-  // First day of month (0 = Sunday, 1 = Monday, etc.)
   let firstDayIndex = new Date(year, month, 1).getDay();
-  // Adjust so Monday is 0, Sunday is 6
   firstDayIndex = firstDayIndex === 0 ? 6 : firstDayIndex - 1;
-
   const totalDays = new Date(year, month + 1, 0).getDate();
+  els.datepickerGrid.replaceChildren();
 
-  els.datepickerGrid.innerHTML = '';
-
-  // Render empty padding cells for previous month
-  for (let i = 0; i < firstDayIndex; i++) {
-    const emptyCell = document.createElement('div');
-    els.datepickerGrid.appendChild(emptyCell);
+  for (let index = 0; index < firstDayIndex; index += 1) {
+    const emptyCell = document.createElement('span');
+    emptyCell.setAttribute('aria-hidden', 'true');
+    els.datepickerGrid.append(emptyCell);
   }
 
   const today = new Date();
+  const comparisonDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const dateLabelFormatter = new Intl.DateTimeFormat(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
-  // Render day cells
-  for (let day = 1; day <= totalDays; day++) {
+  for (let day = 1; day <= totalDays; day += 1) {
     const cellDate = new Date(year, month, day);
-    const cellBtn = document.createElement('button');
-    cellBtn.type = 'button';
-    cellBtn.className = 'date-cell';
-    cellBtn.textContent = day;
+    const cellButton = document.createElement('button');
+    cellButton.type = 'button';
+    cellButton.className = 'date-cell';
+    cellButton.textContent = String(day);
+    cellButton.setAttribute('aria-label', dateLabelFormatter.format(cellDate));
 
-    // Highlight today
-    if (cellDate.toDateString() === today.toDateString()) {
-      cellBtn.classList.add('today-dot');
-    }
-
-    // Highlight selected
-    if (state.selectedDate && cellDate.toDateString() === state.selectedDate.toDateString()) {
-      cellBtn.classList.add('active');
-    }
-
-    // Disable past days
-    const comparisonDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    if (cellDate < comparisonDate) {
-      cellBtn.disabled = true;
+    if (sameDate(cellDate, today)) cellButton.classList.add('today-dot');
+    if (state.selectedDate && sameDate(cellDate, state.selectedDate)) {
+      cellButton.classList.add('active');
+      cellButton.setAttribute('aria-pressed', 'true');
     } else {
-      cellBtn.addEventListener('click', () => {
-        // Toggle selected state in UI
-        const active = els.datepickerGrid.querySelector('.date-cell.active');
-        if (active) active.classList.remove('active');
-        cellBtn.classList.add('active');
-
-        state.selectedDate = cellDate;
-
-        // Show timeslots pane
-        els.timeslotPane.style.display = 'flex';
-        els.selectedDateTitle.textContent = cellDate.toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: 'long' });
-
-        loadSlotsForDate(cellDate);
-      });
+      cellButton.setAttribute('aria-pressed', 'false');
     }
 
-    els.datepickerGrid.appendChild(cellBtn);
+    if (cellDate < comparisonDate) {
+      cellButton.disabled = true;
+    } else {
+      cellButton.addEventListener('click', () => selectDate(cellDate, cellButton));
+    }
+    els.datepickerGrid.append(cellButton);
   }
+}
+
+function selectDate(cellDate, cellButton) {
+  clearStatus();
+  for (const active of els.datepickerGrid.querySelectorAll('.date-cell.active')) {
+    active.classList.remove('active');
+    active.setAttribute('aria-pressed', 'false');
+  }
+  cellButton.classList.add('active');
+  cellButton.setAttribute('aria-pressed', 'true');
+  state.selectedDate = cellDate;
+  els.selectedDateTitle.textContent = new Intl.DateTimeFormat(locale, { weekday: 'long', day: '2-digit', month: 'long' }).format(cellDate);
+  void loadSlotsForDate(cellDate);
 }
 
 function renderSlots() {
-  els.timeslotList.innerHTML = '';
-
+  els.timeslotList.replaceChildren();
   if (state.slots.length === 0) {
-    els.timeslotList.innerHTML = '<div class="timeslot-empty-state">Keine freien Termine für diesen Tag.</div>';
+    replaceWithMessage(els.timeslotList, copy.noTimes);
     return;
   }
 
-  state.slots.forEach(slot => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'timeslot-btn';
-
-    const timeStr = new Date(slot.start_ms).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
-    btn.textContent = timeStr;
-
-    btn.addEventListener('click', () => {
-      // Hold slot and continue
-      reserveHold(slot);
-    });
-
-    els.timeslotList.appendChild(btn);
-  });
-}
-
-function transitionToStep(step) {
-  els.stepSlots.classList.add('hidden');
-  els.stepForm.classList.add('hidden');
-  els.stepSuccess.classList.add('hidden');
-
-  if (step === 'slots') {
-    els.stepSlots.classList.remove('hidden');
-  } else if (step === 'form') {
-    els.stepForm.classList.remove('hidden');
-    els.attendeeName.focus();
-  } else if (step === 'success') {
-    els.stepSuccess.classList.remove('hidden');
+  const timeFormatter = new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit' });
+  for (const slot of state.slots) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'timeslot-btn';
+    button.textContent = timeFormatter.format(new Date(slot.start_ms));
+    button.addEventListener('click', () => void reserveHold(slot));
+    els.timeslotList.append(button);
   }
 }
 
+function transitionToStep(step) {
+  clearStatus();
+  els.stepSlots.classList.toggle('hidden', step !== 'slots');
+  els.stepForm.classList.toggle('hidden', step !== 'form');
+  els.stepSuccess.classList.toggle('hidden', step !== 'success');
+
+  if (step === 'form') els.attendeeName.focus();
+  if (step === 'success') els.stepSuccess.focus();
+  if (step === 'slots') els.selectedDateTitle.focus?.();
+}
+
 function renderErrorState(message) {
-  const card = document.getElementById('bookingMainCard');
-  card.innerHTML = `
-    <div style="padding: 60px; text-align: center; width: 100%;">
-      <h1 style="color: #ef4444; font-family:'Outfit', sans-serif; font-size:24px; margin-bottom:16px;">Hoppla! ⚠️</h1>
-      <p style="color: var(--text); font-size: 14px; margin-bottom: 24px;">${message}</p>
-      <div style="font-size: 12px; color: var(--muted);">Powered by Business OS</div>
-    </div>
-  `;
+  const wrapper = document.createElement('section');
+  wrapper.className = 'error-state';
+  wrapper.setAttribute('role', 'alert');
+
+  const title = document.createElement('h1');
+  title.textContent = copy.errorTitle;
+  const description = document.createElement('p');
+  description.textContent = String(message);
+  const footer = document.createElement('div');
+  footer.className = 'error-state-footer';
+  footer.textContent = `Workjet`;
+
+  wrapper.append(title, description, footer);
+  els.card.replaceChildren(wrapper);
+}
+
+function replaceWithMessage(container, message, extraClass = '') {
+  const element = document.createElement('div');
+  element.className = ['timeslot-empty-state', extraClass].filter(Boolean).join(' ');
+  element.textContent = message;
+  container.replaceChildren(element);
+}
+
+function showStatus(message) {
+  els.status.textContent = message;
+  els.status.classList.remove('hidden');
+  els.status.focus?.();
+}
+
+function clearStatus() {
+  els.status.textContent = '';
+  els.status.classList.add('hidden');
+}
+
+function setSubmitting(submitting) {
+  els.confirmButton.disabled = submitting;
+  els.confirmButton.textContent = submitting ? copy.confirming : copy.confirmBooking;
+}
+
+function locationLabel(mode) {
+  if (mode === 'link') return copy.onlineAppointment;
+  if (mode === 'phone') return copy.phoneAppointment;
+  return copy.inPersonAppointment;
+}
+
+function sameDate(left, right) {
+  return left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate();
 }

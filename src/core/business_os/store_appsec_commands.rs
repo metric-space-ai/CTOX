@@ -14,6 +14,9 @@ pub(super) fn handle_appsec_business_command(
     session: &BusinessOsSession,
     command: &BusinessCommand,
 ) -> anyhow::Result<Value> {
+    if command.command_type == "ctox.appsec.app.audit" {
+        return handle_appsec_app_audit_command(root, &command.payload);
+    }
     let mut args = Vec::new();
     if command.command_type != "ctox.appsec.state.sync" {
         push_appsec_state_dir_arg(root, &command.payload, &mut args)?;
@@ -759,6 +762,39 @@ pub(super) fn handle_appsec_business_command(
     crate::run_projected_appsec_command(root, &args)
 }
 
+fn handle_appsec_app_audit_command(root: &Path, payload: &Value) -> anyhow::Result<Value> {
+    let module_id = appsec_payload_string(payload, "module_id")
+        .context("ctox.appsec.app.audit payload.module_id is required")?;
+    let profile = appsec_payload_string(payload, "profile").unwrap_or_else(|| "release".into());
+    anyhow::ensure!(
+        matches!(profile.as_str(), "quick" | "release" | "full"),
+        "ctox.appsec.app.audit payload.profile must be quick, release, or full"
+    );
+    let mode = appsec_payload_string(payload, "mode").unwrap_or_else(|| "installed".into());
+    anyhow::ensure!(
+        matches!(mode.as_str(), "installed" | "source"),
+        "ctox.appsec.app.audit payload.mode must be installed or source"
+    );
+
+    // Resolve the source server-side from module_id + mode. Business OS
+    // callers cannot inject a filesystem target or turn the shell hash route
+    // into an HTTP scanner target.
+    let mut args = vec![format!("--{mode}"), "--profile".into(), profile];
+    for (key, flag) in [
+        ("shell_url", "--url"),
+        ("deployed_url", "--deployed-url"),
+        ("approval_id", "--approval-id"),
+    ] {
+        if let Some(value) = appsec_payload_string(payload, key) {
+            args.extend([flag.to_string(), value]);
+        }
+    }
+    if payload.get("active").and_then(Value::as_bool) == Some(true) {
+        args.push("--active".into());
+    }
+    crate::service::business_os_app_testing::run_business_os_app_audit(root, &module_id, &args)
+}
+
 fn push_appsec_state_dir_arg(
     root: &Path,
     payload: &Value,
@@ -1267,6 +1303,36 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    #[test]
+    fn app_audit_command_is_write_gated_and_rejects_unbounded_payloads() -> anyhow::Result<()> {
+        assert!(appsec_business_command_requires_data_write(
+            "ctox.appsec.app.audit"
+        ));
+        let root = tempdir()?;
+        let mut command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_appsec_app_audit".into()),
+            module: APPSEC_MODULE_ID.into(),
+            command_type: "ctox.appsec.app.audit".into(),
+            record_id: None,
+            payload: serde_json::json!({"source_path": "/tmp/untrusted"}),
+            client_context: Value::Null,
+        };
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("module id is mandatory");
+        assert!(error.to_string().contains("payload.module_id"), "{error:#}");
+
+        command.payload = serde_json::json!({
+            "module_id": "sample-app",
+            "profile": "release",
+            "active": true
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("active audit needs an isolated deployment and approval");
+        assert!(error.to_string().contains("--deployed-url"), "{error:#}");
+        Ok(())
+    }
 
     #[test]
     fn appsec_assessment_run_is_a_write_command_with_bounded_active_gates() -> anyhow::Result<()> {

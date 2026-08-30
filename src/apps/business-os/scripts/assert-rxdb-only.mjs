@@ -407,6 +407,19 @@ function assertLoginDoesNotDefaultToAdmin() {
   if (!/globalThis\.CTOX_BUSINESS_OS_SESSION\s*=\s*config\.session/.test(appContent)) {
     offenders.push('src/apps/business-os/app.js: URL-packed desktop sessions must publish their native capability before the WebRTC handshake');
   }
+  const launchContextStart = appContent.indexOf('async function loadLaunchContext()');
+  const launchContextEnd = appContent.indexOf('\nasync function fetchBusinessOsControlJson', launchContextStart);
+  const launchContext = launchContextStart >= 0 && launchContextEnd > launchContextStart
+    ? appContent.slice(launchContextStart, launchContextEnd)
+    : '';
+  if (
+    !launchContext.includes('const pairedConfig = await readBusinessOsLaunchConfig()')
+    || !launchContext.includes('window.CTOX_BUSINESS_OS_CONFIG = pairedConfig')
+    || launchContext.indexOf('const pairedConfig = await readBusinessOsLaunchConfig()')
+      > launchContext.indexOf("fetchBusinessOsControlJson('/api/business-os/launch-context')")
+  ) {
+    offenders.push('src/apps/business-os/app.js: static Workjet shells must resolve URL pairing before the hosted launch-context fallback');
+  }
   const loadSessionStart = appContent.indexOf('async function loadSession()');
   const loadSessionEnd = appContent.indexOf('\nfunction allowsPairingConfigSession', loadSessionStart);
   if (loadSessionStart < 0 || loadSessionEnd < 0) {

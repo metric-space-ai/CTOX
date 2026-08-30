@@ -1,0 +1,58 @@
+{
+  "now": "2030-01-01T00:00:00.000Z",
+  "valid": {
+    "type": "ctox-business-os-invite",
+    "version": 1,
+    "display_name": "Synthetic Laboratory",
+    "instance_id": "biz_synthetic_mobile",
+    "sync_room": "ctox-business-os:biz_synthetic_mobile",
+    "native_peer_id": "ctox-native-synthetic",
+    "signaling_urls": ["wss://signal.example.test/ws"],
+    "signaling_room_password": "fixture-room-credential-not-real",
+    "transport": "webrtc",
+    "expires_at": "2030-01-02T00:00:00.000Z",
+    "data_plane": "rxdb-webrtc",
+    "http_bridge_available": false,
+    "secret_value_in_payload": true,
+    "session": {
+      "authenticated": true,
+      "source": "desktop_invite",
+      "capability_token": "fixture-capability-credential-not-real",
+      "capability_expires_at_ms": 1893540600000,
+      "user": {
+        "id": "synthetic-owner",
+        "display_name": "Synthetic Owner",
+        "role": "chef",
+        "is_admin": true
+      }
+    },
+    "desktop_link": "removed-by-transition-helper"
+  },
+  "rejections": [
+    { "name": "wrong type", "path": "type", "value": "other", "code": "type" },
+    { "name": "string version", "path": "version", "value": "1", "code": "version" },
+    { "name": "wrong version", "path": "version", "value": 2, "code": "version" },
+    { "name": "missing display", "path": "display_name", "value": "", "code": "display_name" },
+    { "name": "missing instance", "path": "instance_id", "value": "", "code": "instance_id" },
+    { "name": "wrong room", "path": "sync_room", "value": "public-room", "code": "sync_room" },
+    { "name": "missing native peer", "path": "native_peer_id", "value": "", "code": "native_peer_id" },
+    { "name": "empty signaling", "path": "signaling_urls", "value": [], "code": "signaling_urls" },
+    { "name": "insecure production signaling", "path": "signaling_urls", "value": ["ws://signal.example.test/ws"], "code": "signaling_url" },
+    { "name": "insecure loopback signaling", "path": "signaling_urls", "value": ["ws://127.0.0.1:9301/ws"], "code": "signaling_url" },
+    { "name": "wrong signaling protocol", "path": "signaling_urls", "value": ["https://signal.example.test/ws"], "code": "signaling_url" },
+    { "name": "missing password", "path": "signaling_room_password", "value": "", "code": "password" },
+    { "name": "wrong transport", "path": "transport", "value": "websocket", "code": "transport" },
+    { "name": "expired invite", "path": "expires_at", "value": "2029-12-31T23:59:59.000Z", "code": "expired" },
+    { "name": "invalid expiry", "path": "expires_at", "value": "tomorrow", "code": "expires_at" },
+    { "name": "wrong data plane", "path": "data_plane", "value": "http", "code": "data_plane" },
+    { "name": "http bridge true", "path": "http_bridge_available", "value": true, "code": "http_bridge" },
+    { "name": "unauthenticated", "path": "session.authenticated", "value": false, "code": "session" },
+    { "name": "missing capability", "path": "session.capability_token", "value": "", "code": "capability_token" },
+    { "name": "expired capability", "path": "session.capability_expires_at_ms", "value": 1893455999000, "code": "capability_expired" },
+    { "name": "capability beyond invite", "path": "session.capability_expires_at_ms", "value": 1893628800000, "code": "capability_expiry" },
+    { "name": "missing user", "path": "session.user", "value": null, "code": "user" },
+    { "name": "missing user id", "path": "session.user.id", "value": "", "code": "user_id" },
+    { "name": "missing user name", "path": "session.user.display_name", "value": "", "code": "user_display_name" },
+    { "name": "unsupported user role", "path": "session.user.role", "value": "viewer", "code": "user_role" }
+  ]
+}

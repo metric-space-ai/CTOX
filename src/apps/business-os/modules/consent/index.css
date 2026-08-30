@@ -95,3 +95,26 @@
   .consent-rail { grid-column: 1; }
   .consent-main { grid-column: 1; }
 }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, and
+   consent rows keep a full finger-height hit area. The narrow-viewport pane
+   stacking itself is handled by the @container business-app-window rule
+   above (760px); compact-form action rows are kit-owned (base.css). */
+@media (pointer: coarse) {
+  .consent-module button,
+  .consent-module input,
+  .consent-module select,
+  .consent-module textarea {
+    min-height: 44px;
+  }
+
+  .consent-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .consent-module .ctox-record-list .ctox-list-item {
+    min-height: 44px;
+  }
+}

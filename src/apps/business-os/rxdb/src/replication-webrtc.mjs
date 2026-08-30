@@ -74,12 +74,15 @@ const DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
 export const CTOX_BROWSER_LIVE_CAPABILITY = 'ctox-browser-live-v1';
 const CTOX_BROWSER_LIVE_CHANNEL = 'ctox-browser-live-v1';
 const CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD = 'ctox.outbound.sellify_lookup.v1';
+export const CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY = 'ctox-workjet-device-control-v1';
+const CTOX_WORKJET_DEVICE_CONTROL_CHANNEL = 'ctox.workjet.device.v1';
 
 const BROWSER_CAPABILITIES = [
   'ctox-rxdb-browser-v1',
   'ctox-file-chunks-v1',
   'ctox-schema-hash-v1',
   'ctox-peer-session-v1',
+  'ctox-device-proof-v1',
   'ctox-checkpoint-epoch-v1',
   CTOX_CHECKPOINT_GENERATION_CAPABILITY,
   CTOX_APP_RUNTIME_CAPABILITY,
@@ -87,6 +90,7 @@ const BROWSER_CAPABILITIES = [
   CTOX_PRESENCE_CAPABILITY,
   CTOX_COMMAND_LIFECYCLE_CAPABILITY,
   CTOX_BROWSER_LIVE_CAPABILITY,
+  CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY,
 ];
 
 // Presence is optional on the wire: a native peer that predates
@@ -189,7 +193,6 @@ export const replicationWebRtcTestInternals = Object.freeze({
   shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
-  protocolHandshakeIsMultiplexed,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -199,17 +202,6 @@ export const replicationWebRtcTestInternals = Object.freeze({
   getSharedRoomPeerClass: () => SharedRoomPeer,
   getReplicationStateClass: () => CtoxWebRtcReplicationState,
 });
-
-function protocolHandshakeIsMultiplexed(collectionCount, localProtocol, remoteProtocol) {
-  const advertisedCollectionCount = (protocol) => (
-    protocol?.collectionSchemas && typeof protocol.collectionSchemas === 'object'
-      ? Object.keys(protocol.collectionSchemas).length
-      : 0
-  );
-  return collectionCount > 1
-    || advertisedCollectionCount(localProtocol) > 1
-    || advertisedCollectionCount(remoteProtocol) > 1;
-}
 
 function isTransientSharedPeerError(error) {
   const message = String(error?.message || error || '');
@@ -534,7 +526,7 @@ class SharedRoomPeer {
       iceServersRefreshUrl: this.iceServersRefreshUrl,
       refreshIceServers: this.refreshIceServers,
       expectedNativePeerId: this.expectedNativePeerId || '',
-      protocolPayload: async ({ collection } = {}) => this.buildProtocolPayload(collection),
+      protocolPayload: async ({ collection, params } = {}) => this.buildProtocolPayload(collection, params),
       requestHandlers: {
         masterChangesSince: async ({ params, peerId, collection }) =>
           this.routeMasterChangesSince(collection, params, peerId),
@@ -547,6 +539,7 @@ class SharedRoomPeer {
     // dedicated SCTP stream in the initial SDP. Live input/JPEG traffic then
     // cannot be stranded behind collection replication on the rxdb channel.
     this.peer.openAuxChannel('', CTOX_BROWSER_LIVE_CHANNEL, { ordered: true });
+    this.peer.openAuxChannel('', CTOX_WORKJET_DEVICE_CONTROL_CHANNEL, { ordered: true });
     this.demandTransport.attach(this.peer);
     this.peer.on('error', (event) => this.fanout('error', event.detail || event));
     this.peer.on('transport-status', (event) => this.fanout('transport-status', event.detail || event));
@@ -714,11 +707,11 @@ class SharedRoomPeer {
     }
   }
 
-  async buildProtocolPayload(collection) {
-    return this.buildProtocolPayloadUncached(collection);
+  async buildProtocolPayload(collection, params = []) {
+    return this.buildProtocolPayloadUncached(collection, params);
   }
 
-  async buildProtocolPayloadUncached(collection) {
+  async buildProtocolPayloadUncached(collection, params = []) {
     // Resolve the protocol payload for the collection the remote asked about
     // (multiplex), or the representative when none was tagged.
     const registration = (collection && this.collections.get(collection))
@@ -731,45 +724,34 @@ class SharedRoomPeer {
         capabilities: BROWSER_CAPABILITIES,
       });
     }
-    const acquireCollectionMapsBuild = () => {
-      let build = this.protocolCollectionMapsBuildPromise;
-      if (!build) {
-        // The native CTOX peer is always master when the remote role is the
-        // Business OS browser. It validates the browser's collectionSchemas,
-        // but never consumes browser collectionCheckpoints. Reading every
-        // IndexedDB checkpoint here made the symmetric ctoxProtocol response
-        // take longer than the native 60 s handshake on production rooms with
-        // ~192 collections. Native therefore never advanced to its token
-        // request and the browser retried forever. Keep the browser response
-        // authoritative for schema compatibility while leaving checkpoint
-        // evidence in the native->browser payload, where remoteProtocolForCollection
-        // actually consumes it for fork catch-up validity.
-        build = this.collectCollectionSchemas().then((collectionSchemas) => ({
+    let collectionMapsBuild = null;
+    if (this.collections.size > 1) {
+      collectionMapsBuild = this.protocolCollectionMapsBuildPromise;
+      if (!collectionMapsBuild) {
+        collectionMapsBuild = Promise.all([
+          this.collectCollectionSchemas(),
+          this.collectCollectionCheckpoints(),
+        ]).then(([collectionSchemas, collectionCheckpoints]) => ({
           collectionSchemas,
+          collectionCheckpoints,
         }));
-        this.protocolCollectionMapsBuildPromise = build;
+        this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
       }
-      return build;
-    };
-    let collectionMapsBuild = this.collections.size > 1
-      ? acquireCollectionMapsBuild()
+    }
+    const deviceProofNonce = Array.isArray(params)
+      ? params[0]?.peerSession?.deviceProofNonce
       : null;
-    const payload = await registration.state.buildProtocolPayload();
+    const payload = await registration.state.buildProtocolPayload(deviceProofNonce);
     // Phase 3 schema-validation hardening: under multiplex the handshake runs
     // ONCE off the representative collection, so attach the per-collection
     // schema-hash map for EVERY collection on this connection. The remote
     // validates each entry individually instead of skipping schema validation.
     // Single-collection rooms omit the map (payload stays legacy-identical).
     if (this.collections.size > 1) {
-      // Runtime-installed collections can register while the representative
-      // payload above awaits IndexedDB. The method may therefore enter as a
-      // single-collection room and become multiplexed before this branch. Do
-      // not await the initial null snapshot: acquire a current map build for
-      // the expanded room.
-      collectionMapsBuild ||= acquireCollectionMapsBuild();
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;
+        payload.collectionCheckpoints = maps.collectionCheckpoints;
       } finally {
         if (this.protocolCollectionMapsBuildPromise === collectionMapsBuild) {
           this.protocolCollectionMapsBuildPromise = null;
@@ -900,17 +882,7 @@ class SharedRoomPeer {
     );
     const normalizedRemoteProtocol = normalizeRemoteProtocol(remoteProtocol);
     if (!this.isPeerOpen(peerId)) return null;
-    // Startup is asymmetric: the browser can begin negotiation with its first
-    // collection while the native peer already advertises the complete room.
-    // Looking only at the browser's current registration count misclassifies
-    // that handshake as single-collection and compares unrelated representative
-    // envelopes (for example outbound_lead_generation_leads vs desktop_files). Treat the
-    // room as multiplexed whenever EITHER payload advertises multiple schemas.
-    const multiplexed = protocolHandshakeIsMultiplexed(
-      this.collections.size,
-      localProtocol,
-      normalizedRemoteProtocol,
-    );
+    const multiplexed = this.collections.size > 1;
     try {
       assertCompatibleProtocol(localProtocol, normalizedRemoteProtocol, {
         requiredCapabilities: CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
@@ -1164,6 +1136,15 @@ class CtoxWebRtcReplicationState {
     // native peer send it immediately rather than queueing behind replication
     // bulk. The response uses the ACK-safe primary lane and its active-
     // collection priority marker.
+    if (String(method || '') === 'ctox.workjet.device.v1') {
+      return this.peer.requestAuxiliary(
+        negotiated.peerId,
+        CTOX_WORKJET_DEVICE_CONTROL_CHANNEL,
+        String(method || ''),
+        [params],
+        timeoutMs,
+      );
+    }
     return this.peer.request(negotiated.peerId, String(method || ''), [params], timeoutMs, this.collection);
   }
 
@@ -1260,13 +1241,14 @@ class CtoxWebRtcReplicationState {
     this.error$.next(error);
   }
 
-  async buildProtocolPayload() {
+  async buildProtocolPayload(deviceProofNonce = null) {
     const checkpoint = await this.collection.storageCollection.replicationCheckpointStatus(this.schemaHashValue);
     // #12c: attach the browser's CTOX capability token so the native (master)
     // peer can bind this peer to its role for per-collection read authz. Best
     // effort — a missing/failed token simply omits the field (native treats it
     // as least privilege). Never let token resolution break the handshake.
     const capabilityToken = await resolveCapabilityToken(this.ctox);
+    const deviceProof = await resolveDeviceProof(this.ctox, deviceProofNonce);
     return buildProtocolPayload({
       collectionName: this.collection.name,
       schemaVersion: this.collection.schema.version,
@@ -1278,6 +1260,7 @@ class CtoxWebRtcReplicationState {
       role: 'browser',
       capabilities: BROWSER_CAPABILITIES,
       capabilityToken: typeof capabilityToken === 'string' ? capabilityToken : null,
+      deviceProof,
     });
   }
 
@@ -1994,15 +1977,6 @@ class CtoxWebRtcReplicationState {
   awaitInSync() {
     return Promise.resolve()
       .then(() => this.awaitInitialReplication())
-      // `pullFromRemotePeers()` deliberately resolves when no peer is open so
-      // background master-change/retry paths stay non-blocking. An explicit
-      // awaitInSync() call has a stronger contract: callers use its completion
-      // as permission to read an authoritative projection. After the native
-      // peer performs a controlled schema reconfiguration, reporting success
-      // here while offline lets those callers read the stale pre-restart row.
-      // Wait for the negotiated collection peer before running the pull; the
-      // bounded caller still owns the user-visible deadline.
-      .then(() => this.waitForOpenPeerId())
       .then(() => this.pullFromRemotePeers())
       .then(() => this.pushToRemotePeers());
   }
@@ -2779,6 +2753,28 @@ async function resolveCapabilityToken(ctox = {}) {
     }
   }
   return typeof source === 'string' && source.trim() ? source.trim() : null;
+}
+
+export async function resolveDeviceProof(ctox = {}, nonce = null) {
+  const cleanNonce = typeof nonce === 'string' ? nonce.trim() : '';
+  if (!/^[A-Za-z0-9_-]{43}$/.test(cleanNonce)) return null;
+  const provider = ctox?.deviceProofProvider;
+  if (typeof provider !== 'function') return null;
+  try {
+    // The provider boundary is intentionally nonce-only. Workjet owns the
+    // hardware/private key and returns only a signature plus public JWK.
+    const response = await provider(cleanNonce);
+    return {
+      version: 'ctox-device-proof-v1',
+      nonce: cleanNonce,
+      publicJwk: response?.publicJwk,
+      signature: response?.signature,
+    };
+  } catch {
+    // Legacy unbound sessions can continue. Bound capabilities fail closed in
+    // the native validator because their proof is absent.
+    return null;
+  }
 }
 
 // SYNC-12: decode the permission-relevant claims from a capability token WITHOUT

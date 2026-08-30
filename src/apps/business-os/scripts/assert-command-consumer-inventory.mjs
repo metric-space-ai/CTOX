@@ -57,7 +57,12 @@ function relative(file) {
 }
 
 function excluded(file) {
-  return file.startsWith('rxdb/dist/')
+  // Runtime-installed tenant modules are mutable deployment state, not part of
+  // the repository's static command-consumer contract. Including this ignored
+  // directory made the guard depend on whichever local tenant happened to be
+  // installed on the developer machine.
+  return file.startsWith('installed-modules/')
+    || file.startsWith('rxdb/dist/')
     || file.startsWith('rxdb/src/')
     || file.startsWith('rxdb/tests/')
     || file.startsWith('scripts/')

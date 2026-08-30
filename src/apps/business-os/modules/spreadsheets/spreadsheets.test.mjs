@@ -104,7 +104,7 @@ test('browser-provided Research lineage is retained but cannot self-authorize fa
 
   assert.equal(ingestion.kind, 'research_generated');
   assert.equal(ingestion.valid, false);
-  assert.match(ingestion.message, /native Business OS command path/i);
+  assert.match(ingestion.message, /confirmed provenance/i);
   assert.deepEqual(ingestion.linkedRecords, [
     { kind: 'source_receipt', id: 'source-7', snapshot_hash: snapshotHash },
     { kind: 'claim', id: 'claim-7', evidence_id: 'evidence-7' },
@@ -121,7 +121,7 @@ test('Research spreadsheet ingestion fails closed when lineage is incomplete', (
   });
 
   assert.equal(ingestion.valid, false);
-  assert.match(ingestion.message, /native Business OS command path/i);
+  assert.match(ingestion.message, /confirmed provenance/i);
   assert.throws(() => hooks.assertSpreadsheetIngestionAllowed(ingestion), (error) => {
     assert.equal(error.code, 'SPREADSHEET_LINEAGE_REQUIRED');
     return true;

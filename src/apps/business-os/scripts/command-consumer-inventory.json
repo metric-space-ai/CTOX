@@ -39,7 +39,6 @@
     "office-engine/src/business-os-bridge.mjs",
     "shared/app-actions.js",
     "shared/business-chat.js",
-    "shared/business-reporter.js",
     "shared/react-settings.js",
     "shared/universal-importer.js"
   ],

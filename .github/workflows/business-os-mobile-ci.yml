@@ -1,0 +1,205 @@
+name: Business OS Mobile CI
+
+on:
+  pull_request:
+    paths:
+      - "src/apps/business-os-mobile/**"
+      - ".github/workflows/business-os-mobile-ci.yml"
+      - "docs/ctox-business-os-mobile.md"
+      - "src/apps/business-os/**"
+  push:
+    branches: [main]
+    paths:
+      - "src/apps/business-os-mobile/**"
+      - ".github/workflows/business-os-mobile-ci.yml"
+      - "docs/ctox-business-os-mobile.md"
+      - "src/apps/business-os/**"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: business-os-mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MOBILE_ROOT: src/apps/business-os-mobile
+
+jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/apps/business-os-mobile/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: ${{ env.MOBILE_ROOT }}
+      - run: npm test
+        working-directory: ${{ env.MOBILE_ROOT }}
+      - run: npm run guard
+        working-directory: ${{ env.MOBILE_ROOT }}
+      - run: npm run stage && npm run verify:stage && npm run scan:secrets
+        working-directory: ${{ env.MOBILE_ROOT }}
+      - name: Package manifests and checksums
+        run: |
+          mkdir -p "$RUNNER_TEMP/mobile-contract-artifacts"
+          cp "$MOBILE_ROOT/dist/base-manifest.json" "$MOBILE_ROOT/dist/office-pack-manifest.json" "$RUNNER_TEMP/mobile-contract-artifacts/"
+          cd "$RUNNER_TEMP/mobile-contract-artifacts"
+          sha256sum *.json > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: business-os-mobile-contracts
+          path: ${{ runner.temp }}/mobile-contract-artifacts
+          if-no-files-found: error
+      - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
+        with:
+          subject-path: ${{ runner.temp }}/mobile-contract-artifacts/*
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/apps/business-os-mobile/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: ${{ env.MOBILE_ROOT }}
+      - run: node generate-xcode-project.mjs
+        working-directory: ${{ env.MOBILE_ROOT }}/ios
+      - run: swift test
+        working-directory: ${{ env.MOBILE_ROOT }}/ios
+      - name: Build and test without signing
+        working-directory: ${{ env.MOBILE_ROOT }}/ios
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j | python3 -c 'import json,pathlib,os,sys; devices=[device for runtime in json.load(sys.stdin)["devices"].values() for device in runtime]; root=pathlib.Path(os.environ["RUNNER_TEMP"]); root.joinpath("ios-phone-destination").write_text("platform=iOS Simulator,id="+next(device["udid"] for device in devices if "iPhone" in device["name"])); root.joinpath("ios-tablet-destination").write_text("platform=iOS Simulator,id="+next(device["udid"] for device in devices if "iPad" in device["name"]))'
+          xcodebuild -project CTOXBusinessOSMobile.xcodeproj -scheme CTOXBusinessOSMobile \
+            -configuration Debug -destination "$(cat "$RUNNER_TEMP/ios-phone-destination")" -derivedDataPath DerivedData-phone \
+            CODE_SIGNING_ALLOWED=NO test
+          xcodebuild -project CTOXBusinessOSMobile.xcodeproj -scheme CTOXBusinessOSMobile \
+            -configuration Debug -destination "$(cat "$RUNNER_TEMP/ios-tablet-destination")" -derivedDataPath DerivedData-tablet \
+            CODE_SIGNING_ALLOWED=NO test
+      - name: Phone and 3:4 tablet launch smokes
+        working-directory: ${{ env.MOBILE_ROOT }}/ios
+        run: |
+          set -euo pipefail
+          for kind in phone tablet; do
+            destination=$(cat "$RUNNER_TEMP/ios-$kind-destination")
+            udid=${destination##*=}
+            xcrun simctl boot "$udid" 2>/dev/null || true
+            xcrun simctl bootstatus "$udid" -b
+            app="$PWD/DerivedData-$kind/Build/Products/Debug-iphonesimulator/CTOXBusinessOSMobile.app"
+            xcrun simctl install "$udid" "$app"
+            xcrun simctl launch "$udid" dev.ctox.business-os-mobile
+            xcrun simctl io "$udid" screenshot "$RUNNER_TEMP/ios-$kind.png"
+          done
+      - name: Package unsigned app
+        working-directory: ${{ env.MOBILE_ROOT }}/ios
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            DerivedData-phone/Build/Products/Debug-iphonesimulator/CTOXBusinessOSMobile.app \
+            "$RUNNER_TEMP/CTOXBusinessOSMobile-ios-simulator.zip"
+          shasum -a 256 "$RUNNER_TEMP/CTOXBusinessOSMobile-ios-simulator.zip" > "$RUNNER_TEMP/CTOXBusinessOSMobile-ios-simulator.zip.sha256"
+          cp ../dist/base-manifest.json ../dist/office-pack-manifest.json "$RUNNER_TEMP/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: business-os-mobile-ios-unsigned
+          path: |
+            ${{ runner.temp }}/CTOXBusinessOSMobile-ios-simulator.zip
+            ${{ runner.temp }}/CTOXBusinessOSMobile-ios-simulator.zip.sha256
+            ${{ runner.temp }}/base-manifest.json
+            ${{ runner.temp }}/office-pack-manifest.json
+            ${{ runner.temp }}/ios-phone.png
+            ${{ runner.temp }}/ios-tablet.png
+      - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
+        with:
+          subject-path: ${{ runner.temp }}/CTOXBusinessOSMobile-ios-simulator.zip
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/apps/business-os-mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "emulator" "system-images;android-35;google_apis;x86_64"
+      - run: npm ci --ignore-scripts
+        working-directory: ${{ env.MOBILE_ROOT }}
+      - name: Unit tests and unsigned debug build
+        working-directory: ${{ env.MOBILE_ROOT }}/android
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+      - name: Emulator launch smoke
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity
+            adb exec-out screencap -p > "$RUNNER_TEMP/android-phone.png"
+      - name: 4:3 tablet launch smoke
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: "Nexus 9"
+          disable-animations: true
+          script: |
+            adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            adb shell settings put system accelerometer_rotation 0
+            adb shell settings put system user_rotation 1
+            adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity
+            sleep 2
+            adb exec-out screencap -p > "$RUNNER_TEMP/android-tablet-4x3.png"
+            python3 - <<'PY'
+            import os, struct
+            path = os.path.join(os.environ["RUNNER_TEMP"], "android-tablet-4x3.png")
+            with open(path, "rb") as image:
+                header = image.read(24)
+            width, height = struct.unpack(">II", header[16:24])
+            assert width > height, f"tablet did not rotate to landscape: {width}x{height}"
+            assert abs((width / height) - (4 / 3)) < 0.08, f"tablet is not 4:3: {width}x{height}"
+            PY
+      - name: Package checksums and manifests
+        run: |
+          cp "$MOBILE_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$RUNNER_TEMP/CTOXBusinessOSMobile-android-debug.apk"
+          sha256sum "$RUNNER_TEMP/CTOXBusinessOSMobile-android-debug.apk" > "$RUNNER_TEMP/CTOXBusinessOSMobile-android-debug.apk.sha256"
+          cp "$MOBILE_ROOT/dist/base-manifest.json" "$MOBILE_ROOT/dist/office-pack-manifest.json" "$RUNNER_TEMP/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: business-os-mobile-android-unsigned
+          path: |
+            ${{ runner.temp }}/CTOXBusinessOSMobile-android-debug.apk
+            ${{ runner.temp }}/CTOXBusinessOSMobile-android-debug.apk.sha256
+            ${{ runner.temp }}/base-manifest.json
+            ${{ runner.temp }}/office-pack-manifest.json
+            ${{ runner.temp }}/android-phone.png
+            ${{ runner.temp }}/android-tablet-4x3.png
+      - uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
+        with:
+          subject-path: ${{ runner.temp }}/CTOXBusinessOSMobile-android-debug.apk

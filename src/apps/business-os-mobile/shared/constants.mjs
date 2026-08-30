@@ -1,0 +1,11 @@
+export const MOBILE_SCHEME = "ctox-business-os-mobile";
+export const MOBILE_HOST = "pair";
+export const INVITE_TYPE = "ctox-business-os-invite";
+export const INVITE_VERSION = 1;
+export const DATA_PLANE = "rxdb-webrtc";
+export const TRANSPORT = "webrtc";
+export const ROOM_PREFIX = "ctox-business-os:";
+export const PACK_FORMAT = "ctox.mobile.shell-pack.v1";
+export const PACK_ID = "ctox-office";
+export const ANDROID_ORIGIN = "https://appassets.androidplatform.net";
+export const ANDROID_ENTRY = `${ANDROID_ORIGIN}/business-os/index.html`;

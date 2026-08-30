@@ -276,6 +276,73 @@ test("managed ctox.dev read-only token blocks upsert_record at the gateway", asy
   assert.equal(routed, false);
 });
 
+test("decision hub tools obey managed read and write policy", async () => {
+  let routed = 0;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({
+      ok: true,
+      context: {
+        channel: "ctox_dev_managed_mcp",
+        surface: "business_os_mcp",
+        actor: "ctox-dev:user:user_1",
+        workspace: "tenant:tenant_1",
+        client_id: "ctox-dev:mcp-token:token_1",
+        instance_id: "ninja.ctox.dev",
+        auth_source: "ctox_dev_managed_mcp_token"
+      },
+      policy: {
+        allowReads: true,
+        allowWrites: false,
+        allowApprovals: false,
+        allowExternalEffects: false,
+        allowedTools: ["decision_hub.request_decision", "decision_hub.get_decision"],
+        deniedTools: []
+      }
+    }),
+    { headers: { "content-type": "application/json" } }
+  );
+  const env = {
+    CTOX_MANAGED_MCP_AUTH_URL: "https://ctox.dev/api/managed-mcp/client-auth",
+    CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret",
+    MCP_REQUIRE_CLIENT_IDENTITY: "true",
+    BUSINESS_OS_MCP_SESSIONS: fakeSessionsBinding(async () => {
+      routed += 1;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
+    })
+  };
+
+  const read = await handleRequest(
+    new Request("https://mcp.ctox.dev/mcp/ninja.ctox.dev", {
+      method: "POST",
+      headers: { authorization: "Bearer ctox_mcp_live_token" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "decision_hub.get_decision", arguments: { decision_id: "dec_1" } }
+      })
+    }),
+    env
+  );
+  const write = await handleRequest(
+    new Request("https://mcp.ctox.dev/mcp/ninja.ctox.dev", {
+      method: "POST",
+      headers: { authorization: "Bearer ctox_mcp_live_token" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "decision_hub.request_decision", arguments: {} }
+      })
+    }),
+    env
+  );
+
+  assert.equal(read.status, 200);
+  assert.equal(write.status, 403);
+  assert.equal(routed, 1);
+});
+
 test("instance connect auth is optional unless INSTANCE_CONNECT_TOKEN is configured", () => {
   const request = new Request("https://mcp.ctox.dev/connect/desk_123");
 
@@ -738,6 +805,43 @@ test("session object relays request bodies through the connected CTOX socket", a
   assert.equal(statusBody.stats.failed_requests, 0);
   assert.ok(statusBody.stats.last_request_at_ms > 0);
   assert.ok(statusBody.stats.last_response_at_ms > 0);
+});
+
+test("session object enforces the effective managed token rate limit per client", async () => {
+  const session = new BusinessOsMcpSession({}, {});
+  const socket = new FakeSocket((message) => {
+    const envelope = JSON.parse(message);
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "mcp_response",
+        request_id: envelope.request_id,
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 21, result: { ok: true } })
+      })
+    );
+  });
+  session.bindSocket(socket);
+  const request = () =>
+    new Request("https://session.local/mcp", {
+      method: "POST",
+      headers: {
+        "x-ctox-mcp-rate-limit-per-minute": "1",
+        "x-ctox-mcp-gateway-context": JSON.stringify({
+          actor: "ctox-dev:user:user_1",
+          workspace: "tenant:tenant_1",
+          client_id: "ctox-dev:mcp-token:token_1"
+        })
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 21, method: "tools/list" })
+    });
+
+  assert.equal((await session.fetch(request())).status, 200);
+  const limited = await session.fetch(request());
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.json()).error.data.code, "rate_limited");
+  assert.equal(socket.sent.length, 1);
 });
 
 test("session object sends gateway-authenticated context in CTOX envelope", async () => {

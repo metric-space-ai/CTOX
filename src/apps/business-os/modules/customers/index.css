@@ -664,3 +664,45 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions; the
+   dense inline stage select and the clickable mini rows grow to finger
+   height. Pane stacking and the board's narrow columns are handled by the
+   @container business-app-window rules above (820px/600px); wide tables and
+   the pipeline board scroll horizontally inside their own kit wrappers
+   (.ctox-table-wrap / .customers-workbench-scroll). */
+@media (pointer: coarse) {
+  .customers-module button,
+  .customers-module input,
+  .customers-module select,
+  .customers-module textarea {
+    min-height: 44px;
+  }
+
+  .customers-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .customers-module .ctox-select.customers-inline-select {
+    min-height: 44px;
+  }
+
+  .customers-module .customers-account-list .ctox-list-item,
+  .customers-module .customers-mini-row {
+    min-height: 44px;
+  }
+
+  /* The primary-contact checkbox keeps a compact box; its label row is the
+     tap target. */
+  .customers-module .customers-checkbox {
+    min-height: 44px;
+  }
+
+  .customers-module .customers-checkbox input {
+    min-height: 0;
+    width: 20px;
+    height: 20px;
+  }
+}

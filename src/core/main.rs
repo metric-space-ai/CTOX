@@ -167,6 +167,8 @@ INSTALL / UPGRADE
                                  run a real browser smoke for a Business OS app module
   ctox business-os app e2e <module-id> [--url <business-os-url>]
                                  run save/reload/command-bus E2E for a Business OS app
+  ctox business-os app audit <module-id> [--profile quick|release|full]
+                                 run a scoped CTOX-native app audit with durable evidence
   ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k
                                  submit the five-app Business OS app creation bench
   ctox business-os skills list|enable|disable
@@ -275,15 +277,23 @@ fn raise_open_file_limit() {
 #[cfg(not(unix))]
 fn raise_open_file_limit() {}
 
+/// Select one process-wide Rustls provider before any background subsystem can
+/// build a TLS client. CTOX enables both provider features through independent
+/// integrations, so Rustls cannot infer the provider reliably at first use.
+fn install_process_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 fn main() -> anyhow::Result<()> {
     // Keep the generated argv0 aliases alive for the process lifetime. On
     // Linux, child tool executions re-enter this binary as
     // `ctox-linux-sandbox`; arg0_dispatch performs that dispatch before the
     // regular CTOX startup path runs.
     let _arg0_dispatch = ctox_arg0::arg0_dispatch();
+    install_process_rustls_crypto_provider();
     raise_open_file_limit();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let root = resolve_workspace_root()?;
+    let root = resolve_explicit_or_workspace_root(&args)?;
     if args.first().map(String::as_str) == Some("__native-qwen3-embedding-service") {
         return handle_native_qwen3_embedding_service(&args[1..]);
     }
@@ -340,7 +350,8 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
         match first {
             // Recovery / inspection commands — must work even when the
             // runtime DB is wedged.
-            "upgrade" | "update" | "version" | "status" | "doctor" | "mailserver" | "appsec" => {
+            "upgrade" | "update" | "version" | "status" | "doctor" | "service" | "mailserver"
+            | "appsec" => {
                 return true;
             }
             // Agent-facing web-stack calls persist their evidence in the
@@ -354,6 +365,15 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
             "knowledge" => return true,
             "business-os" | "business"
                 if matches!(args.get(1).map(String::as_str), Some("serve" | "status")) =>
+            {
+                return true;
+            }
+            // Workjet's authenticated device-pairing control plane owns the
+            // operation evidence. Opening the daemon-owned SQLite turn ledger
+            // in the short-lived CLI child can block behind the service and
+            // outlive the HTTP request deadline.
+            "business-os" | "business"
+                if args.get(1).map(String::as_str) == Some("mobile-invite") =>
             {
                 return true;
             }
@@ -596,6 +616,24 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
         },
         Some("service") => {
             let flags: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            #[cfg(windows)]
+            if flags.contains(&"--windows-service") {
+                return service::windows_service::run_dispatcher(root);
+            }
+            #[cfg(windows)]
+            if args.get(1).map(String::as_str) == Some("install") {
+                let status = service::windows_service::install_current_executable(root)?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                return Ok(());
+            }
+            #[cfg(windows)]
+            if args.get(1).map(String::as_str) == Some("status") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&service::windows_service::status()?)?
+                );
+                return Ok(());
+            }
             let foreground = flags.contains(&"--foreground");
             if !foreground {
                 anyhow::bail!(
@@ -1287,32 +1325,10 @@ fn appsec_state_dir_for_args(root: &Path, args: &[String]) -> PathBuf {
 }
 
 pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyhow::Result<Value> {
-    let registry_auth_material = prepare_appsec_oci_registry_auth(root, args)?;
-    let logic_bearer_credential = prepare_appsec_logic_bearer_credential(root, args)?;
-    let grpc_bearer_credential = prepare_appsec_grpc_bearer_credential(root, args)?;
-    let transport_session_credential = prepare_appsec_transport_session_credential(root, args)?;
-    let cloud_credential_material = prepare_appsec_cloud_credential(root, args)?;
-    let browser_runtime_executor = prepare_appsec_browser_runtime_executor(root, args);
     let args = append_appsec_credential_proof_arg(root, args)?;
     let forwarded = build_appsec_forwarded_args(root, &args);
-    let execution_context = ctox_appsec_pentest::NativeExecutionContext {
-        registry_auth_config: registry_auth_material
-            .as_ref()
-            .map(|material| material.path().to_path_buf()),
-        logic_bearer_credential,
-        grpc_bearer_credential,
-        transport_session_credential,
-        cloud_credential: cloud_credential_material
-            .as_ref()
-            .map(|material| material.credential.clone()),
-        browser_runtime_executor,
-    };
-    let mut output = ctox_appsec_pentest::run_cli_json_with_context(
-        forwarded.clone(),
-        Some(root.to_path_buf()),
-        execution_context,
-    )
-    .context("ctox appsec command failed")?;
+    let mut output = ctox_appsec_pentest::run_cli_json(forwarded.clone(), Some(root.to_path_buf()))
+        .context("ctox appsec command failed")?;
     let ok = output.get("ok").and_then(serde_json::Value::as_bool) != Some(false);
     if ok && is_appsec_pipeline_enqueue(&args) {
         let enqueue = enqueue_appsec_pipeline_queue_tasks(root, &output)
@@ -1327,473 +1343,6 @@ pub(crate) fn run_projected_appsec_command(root: &Path, args: &[String]) -> anyh
         object.insert("ctox_durable_projection".to_string(), projection);
     }
     Ok(output)
-}
-
-fn prepare_appsec_browser_runtime_executor(
-    root: &Path,
-    args: &[String],
-) -> Option<ctox_appsec_pentest::NativeBrowserRuntimeExecutor> {
-    if !matches!(
-        appsec_command_pair(args),
-        Some(("scan", Some("browser-runtime")))
-    ) || arg_value(args, "--url").is_none()
-    {
-        return None;
-    }
-    let root = root.to_path_buf();
-    Some(ctox_appsec_pentest::NativeBrowserRuntimeExecutor::new(
-        move |request| {
-            let mut web_stack_args = vec![
-                "authenticated-automation".to_string(),
-                "--source-id".to_string(),
-                request.source_id.clone(),
-                "--target-url".to_string(),
-                request.target_url.clone(),
-                "--credential-ref".to_string(),
-                request.credential_reference.clone(),
-                "--verify-selector".to_string(),
-                request.verify_selector.clone(),
-                "--timeout-ms".to_string(),
-                request.timeout_ms.to_string(),
-            ];
-            if let Some(selector) = request.credential_selector.as_ref() {
-                web_stack_args.push("--credential-selector".to_string());
-                web_stack_args.push(selector.clone());
-            }
-            crate::service::business_os::run_business_os_web_stack_authenticated_automation(
-                &root,
-                &web_stack_args,
-                &request.probe_source,
-            )
-            .context("authenticated AppSec browser runtime execution failed")
-        },
-    ))
-}
-
-struct AppsecCloudCredentialMaterial {
-    credential: ctox_appsec_pentest::NativeCloudCredential,
-    _private_root: Option<tempfile::TempDir>,
-}
-
-fn prepare_appsec_cloud_credential(
-    root: &Path,
-    args: &[String],
-) -> anyhow::Result<Option<AppsecCloudCredentialMaterial>> {
-    if !matches!(appsec_command_pair(args), Some(("scan", Some("cloud")))) {
-        return Ok(None);
-    }
-    let provider = arg_value(args, "--provider").unwrap_or_default();
-    if !matches!(provider.as_str(), "azure" | "gcp") {
-        return Ok(None);
-    }
-    let reference_count = args
-        .iter()
-        .filter(|argument| argument.as_str() == "--credential-ref")
-        .count();
-    if reference_count == 0 {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        reference_count == 1,
-        "scan cloud accepts exactly one --credential-ref"
-    );
-    let reference = arg_value(args, "--credential-ref")
-        .context("scan cloud --credential-ref requires a value")?;
-    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
-        "--credential-ref must be an exact local ctox-secret://scope/name reference"
-    })?;
-    let secret = zeroize::Zeroizing::new(
-        crate::secrets::read_secret_value(root, &scope, &name)
-            .context("failed to resolve cloud credential from CTOX Secret Store")?,
-    );
-
-    if provider == "azure" {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct AzureServicePrincipalCredential {
-            tenant_id: String,
-            client_id: String,
-            client_secret: String,
-        }
-        impl Drop for AzureServicePrincipalCredential {
-            fn drop(&mut self) {
-                use zeroize::Zeroize;
-                self.tenant_id.zeroize();
-                self.client_id.zeroize();
-                self.client_secret.zeroize();
-            }
-        }
-        let mut value: AzureServicePrincipalCredential = serde_json::from_str(&secret).context(
-            "Azure credential secret must contain exactly non-empty `tenant_id`, `client_id`, and `client_secret` strings",
-        )?;
-        let credential = ctox_appsec_pentest::NativeCloudCredential::azure_service_principal(
-            reference,
-            std::mem::take(&mut value.tenant_id),
-            std::mem::take(&mut value.client_id),
-            std::mem::take(&mut value.client_secret),
-        )
-        .context("Azure service-principal credential is invalid")?;
-        return Ok(Some(AppsecCloudCredentialMaterial {
-            credential,
-            _private_root: None,
-        }));
-    }
-
-    #[derive(serde::Deserialize, serde::Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct GcpServiceAccountCredential {
-        #[serde(rename = "type")]
-        credential_type: String,
-        project_id: String,
-        private_key_id: String,
-        private_key: String,
-        client_email: String,
-        client_id: String,
-        auth_uri: String,
-        token_uri: String,
-        auth_provider_x509_cert_url: String,
-        client_x509_cert_url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        universe_domain: Option<String>,
-    }
-    impl Drop for GcpServiceAccountCredential {
-        fn drop(&mut self) {
-            use zeroize::Zeroize;
-            self.credential_type.zeroize();
-            self.project_id.zeroize();
-            self.private_key_id.zeroize();
-            self.private_key.zeroize();
-            self.client_email.zeroize();
-            self.client_id.zeroize();
-            self.auth_uri.zeroize();
-            self.token_uri.zeroize();
-            self.auth_provider_x509_cert_url.zeroize();
-            self.client_x509_cert_url.zeroize();
-            if let Some(value) = self.universe_domain.as_mut() {
-                value.zeroize();
-            }
-        }
-    }
-    let value: GcpServiceAccountCredential = serde_json::from_str(&secret)
-        .context("GCP credential secret must be an exact standard service-account JSON document")?;
-    anyhow::ensure!(
-        value.credential_type == "service_account",
-        "GCP credential `type` must be `service_account`"
-    );
-    let requested_project =
-        arg_value(args, "--scope-id").context("GCP scan cloud requires --scope-id")?;
-    anyhow::ensure!(
-        value.project_id == requested_project,
-        "GCP credential project_id must exactly match scan cloud --scope-id"
-    );
-    let private_base = root.join("runtime/appsec/credential-material");
-    fs::create_dir_all(&private_base)
-        .with_context(|| format!("failed to create {}", private_base.display()))?;
-    let mut private_root_builder = tempfile::Builder::new();
-    private_root_builder.prefix("gcp-");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        private_root_builder.permissions(fs::Permissions::from_mode(0o700));
-    }
-    let private_root = private_root_builder
-        .tempdir_in(&private_base)
-        .context("failed to create private ephemeral GCP credential directory")?;
-    let credential_path = private_root.path().join("service-account.json");
-    let serialized = zeroize::Zeroizing::new(
-        serde_json::to_vec(&value).context("failed to serialize GCP service-account credential")?,
-    );
-    write_private_appsec_credential_file(&credential_path, &serialized)?;
-    let credential = ctox_appsec_pentest::NativeCloudCredential::gcp_service_account(
-        reference,
-        requested_project,
-        credential_path,
-    )
-    .context("GCP service-account credential is invalid")?;
-    Ok(Some(AppsecCloudCredentialMaterial {
-        credential,
-        _private_root: Some(private_root),
-    }))
-}
-
-fn write_private_appsec_credential_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).with_context(|| {
-        format!(
-            "failed to create private credential file {}",
-            path.display()
-        )
-    })?;
-    file.write_all(bytes)
-        .with_context(|| format!("failed to write private credential file {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync private credential file {}", path.display()))?;
-    Ok(())
-}
-
-fn prepare_appsec_logic_bearer_credential(
-    root: &Path,
-    args: &[String],
-) -> anyhow::Result<Option<ctox_appsec_pentest::NativeBearerCredential>> {
-    if !matches!(appsec_command_pair(args), Some(("logic", Some("contract")))) {
-        return Ok(None);
-    }
-    let Some(reference) = arg_value(args, "--credential-ref") else {
-        return Ok(None);
-    };
-    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
-        "--credential-ref must be an exact local ctox-secret://scope/name reference"
-    })?;
-
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LogicBearerCredential {
-        bearer_token: String,
-    }
-    impl Drop for LogicBearerCredential {
-        fn drop(&mut self) {
-            use zeroize::Zeroize;
-            self.bearer_token.zeroize();
-        }
-    }
-
-    let secret = zeroize::Zeroizing::new(
-        crate::secrets::read_secret_value(root, &scope, &name)
-            .context("failed to resolve logic credential from CTOX Secret Store")?,
-    );
-    let mut credential: LogicBearerCredential = serde_json::from_str(&secret).context(
-        "logic credential secret must be JSON with exactly one non-empty `bearer_token` string",
-    )?;
-    let token = std::mem::take(&mut credential.bearer_token);
-    let credential = ctox_appsec_pentest::NativeBearerCredential::new(reference, token)
-        .context("logic bearer credential is invalid")?;
-    Ok(Some(credential))
-}
-
-fn prepare_appsec_grpc_bearer_credential(
-    root: &Path,
-    args: &[String],
-) -> anyhow::Result<Option<ctox_appsec_pentest::NativeGrpcCredential>> {
-    if !matches!(appsec_command_pair(args), Some(("scan", Some("grpc")))) {
-        return Ok(None);
-    }
-    let reference_count = args
-        .iter()
-        .filter(|argument| argument.as_str() == "--credential-ref")
-        .count();
-    if reference_count == 0 {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        reference_count == 1,
-        "scan grpc accepts exactly one --credential-ref"
-    );
-    let Some(reference) = arg_value(args, "--credential-ref") else {
-        anyhow::bail!("scan grpc --credential-ref requires a value");
-    };
-    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
-        "--credential-ref must be an exact local ctox-secret://scope/name reference"
-    })?;
-
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct GrpcBearerCredential {
-        bearer_token: String,
-    }
-    impl Drop for GrpcBearerCredential {
-        fn drop(&mut self) {
-            use zeroize::Zeroize;
-            self.bearer_token.zeroize();
-        }
-    }
-
-    let secret = zeroize::Zeroizing::new(
-        crate::secrets::read_secret_value(root, &scope, &name)
-            .context("failed to resolve gRPC credential from CTOX Secret Store")?,
-    );
-    let mut credential: GrpcBearerCredential = serde_json::from_str(&secret).context(
-        "gRPC credential secret must be JSON with exactly one non-empty `bearer_token` string",
-    )?;
-    let token = std::mem::take(&mut credential.bearer_token);
-    let credential = ctox_appsec_pentest::NativeGrpcCredential::new(reference, token)
-        .context("gRPC bearer credential is invalid")?;
-    Ok(Some(credential))
-}
-
-fn prepare_appsec_transport_session_credential(
-    root: &Path,
-    args: &[String],
-) -> anyhow::Result<Option<ctox_appsec_pentest::NativeTransportCredential>> {
-    if !matches!(appsec_command_pair(args), Some(("scan", Some("transport")))) {
-        return Ok(None);
-    }
-    let reference_count = args
-        .iter()
-        .filter(|argument| argument.as_str() == "--credential-ref")
-        .count();
-    if reference_count == 0 {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        reference_count == 1,
-        "scan transport accepts exactly one --credential-ref"
-    );
-    let Some(reference) = arg_value(args, "--credential-ref") else {
-        anyhow::bail!("scan transport --credential-ref requires a value");
-    };
-    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
-        "--credential-ref must be an exact local ctox-secret://scope/name reference"
-    })?;
-
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct TransportSessionCredential {
-        cookie_header: String,
-    }
-    impl Drop for TransportSessionCredential {
-        fn drop(&mut self) {
-            use zeroize::Zeroize;
-            self.cookie_header.zeroize();
-        }
-    }
-
-    let secret = zeroize::Zeroizing::new(
-        crate::secrets::read_secret_value(root, &scope, &name)
-            .context("failed to resolve transport session credential from CTOX Secret Store")?,
-    );
-    let mut credential: TransportSessionCredential = serde_json::from_str(&secret).context(
-        "transport credential secret must be JSON with exactly one non-empty `cookie_header` string",
-    )?;
-    let cookie_header = std::mem::take(&mut credential.cookie_header);
-    let credential = ctox_appsec_pentest::NativeTransportCredential::new(reference, cookie_header)
-        .context("transport session credential is invalid")?;
-    Ok(Some(credential))
-}
-
-fn prepare_appsec_oci_registry_auth(
-    root: &Path,
-    args: &[String],
-) -> anyhow::Result<Option<tempfile::TempDir>> {
-    if !matches!(appsec_command_pair(args), Some(("scan", Some("oci")))) {
-        return Ok(None);
-    }
-    let Some(reference) = arg_value(args, "--registry-credential-ref") else {
-        return Ok(None);
-    };
-    let (scope, name) = parse_appsec_ctox_secret_ref(&reference).with_context(|| {
-        "--registry-credential-ref must be an exact local ctox-secret://scope/name reference"
-    })?;
-    let image = arg_value(args, "--image")
-        .context("scan oci requires --image before private-registry credentials can be resolved")?;
-    let registry_host = appsec_oci_registry_host(&image)?;
-
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct RegistryCredential {
-        username: String,
-        password: String,
-    }
-    impl Drop for RegistryCredential {
-        fn drop(&mut self) {
-            use zeroize::Zeroize;
-            self.username.zeroize();
-            self.password.zeroize();
-        }
-    }
-
-    let secret = zeroize::Zeroizing::new(
-        crate::secrets::read_secret_value(root, &scope, &name)
-            .context("failed to resolve OCI registry credential from CTOX Secret Store")?,
-    );
-    let credential: RegistryCredential = serde_json::from_str(&secret).context(
-        "OCI registry secret must be JSON with exactly non-empty `username` and `password` strings",
-    )?;
-    anyhow::ensure!(
-        !credential.username.is_empty() && !credential.password.is_empty(),
-        "OCI registry secret username and password must both be non-empty"
-    );
-
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use base64::Engine;
-    let basic = zeroize::Zeroizing::new(format!("{}:{}", credential.username, credential.password));
-    let encoded = zeroize::Zeroizing::new(BASE64_STANDARD.encode(basic.as_bytes()));
-    let config = zeroize::Zeroizing::new(format!(
-        "{{\"auths\":{{\"{registry_host}\":{{\"auth\":\"{}\"}}}}}}",
-        encoded.as_str()
-    ));
-
-    let auth_parent = root.join("runtime/appsec/registry-auth");
-    fs::create_dir_all(&auth_parent).with_context(|| {
-        format!(
-            "failed to create private AppSec registry auth parent {}",
-            auth_parent.display()
-        )
-    })?;
-    let auth_dir = tempfile::Builder::new()
-        .prefix("oci-")
-        .tempdir_in(&auth_parent)
-        .context("failed to create short-lived OCI registry auth directory")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(auth_dir.path(), fs::Permissions::from_mode(0o700))?;
-    }
-    let config_path = auth_dir.path().join("config.json");
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&config_path)
-        .context("failed to create short-lived OCI registry auth config")?;
-    {
-        use std::io::Write;
-        file.write_all(config.as_bytes())
-            .context("failed to write short-lived OCI registry auth config")?;
-        file.sync_all()
-            .context("failed to sync short-lived OCI registry auth config")?;
-    }
-    drop(file);
-
-    Ok(Some(auth_dir))
-}
-
-fn appsec_oci_registry_host(image: &str) -> anyhow::Result<String> {
-    let image = image.trim();
-    anyhow::ensure!(
-        !image.is_empty()
-            && !image.contains(char::is_whitespace)
-            && !image.contains("://")
-            && !image.starts_with('-'),
-        "OCI image reference is malformed"
-    );
-    let name = image.rsplit_once('@').map_or(image, |(name, _)| name);
-    anyhow::ensure!(
-        !name.is_empty()
-            && name.split('/').all(|segment| !segment.is_empty())
-            && name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':')),
-        "OCI repository name is malformed"
-    );
-    let first = name.split('/').next().unwrap_or_default();
-    Ok(
-        if first == "localhost" || first.contains('.') || first.contains(':') {
-            first.to_string()
-        } else {
-            "docker.io".to_string()
-        },
-    )
 }
 
 fn append_appsec_credential_proof_arg(root: &Path, args: &[String]) -> anyhow::Result<Vec<String>> {
@@ -4895,6 +4444,19 @@ fn resolve_workspace_root() -> anyhow::Result<PathBuf> {
     Ok(current_dir)
 }
 
+fn resolve_explicit_or_workspace_root(args: &[String]) -> anyhow::Result<PathBuf> {
+    let Some(explicit) = find_flag_value(args, "--root") else {
+        return resolve_workspace_root();
+    };
+    let explicit = PathBuf::from(explicit);
+    anyhow::ensure!(
+        looks_like_ctox_root(&explicit),
+        "--root does not point to a CTOX source or binary-bundle root: {}",
+        explicit.display()
+    );
+    Ok(explicit)
+}
+
 fn openrouter_tool_smoke_json(root: &Path, args: &[String]) -> anyhow::Result<serde_json::Value> {
     let model = find_flag_value(args, "--model").unwrap_or("deepseek/deepseek-v4-flash");
     let requested_tool_choice = find_flag_value(args, "--tool-choice").unwrap_or("all");
@@ -5214,13 +4776,17 @@ fn resolve_runtime_ctox_root(current_exe: &Path, home_dir: Option<&Path>) -> Opt
 }
 
 fn looks_like_ctox_root(candidate: &Path) -> bool {
-    let has_entrypoint =
-        candidate.join("src/main.rs").is_file() || candidate.join("src/core/main.rs").is_file();
-    candidate.join("Cargo.toml").is_file()
-        && has_entrypoint
+    let source_checkout = (candidate.join("src/main.rs").is_file()
+        || candidate.join("src/core/main.rs").is_file())
         && candidate
             .join("contracts/history/creation-ledger.md")
-            .is_file()
+            .is_file();
+    let binary_bundle = candidate
+        .join("contracts/binary_bundle_manifest.txt")
+        .is_file()
+        && candidate.join("src/apps/business-os/index.html").is_file()
+        && (candidate.join("bin/ctox").is_file() || candidate.join("bin/ctox.exe").is_file());
+    candidate.join("Cargo.toml").is_file() && (source_checkout || binary_bundle)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -5494,19 +5060,24 @@ mod tests {
         appsec_web_stack_output_is_transient, browser_automation_source_from_stage_command,
         build_appsec_forwarded_args, chat_wait_assistant_completion, execute_appsec_stage_commands,
         find_ctox_root_from_ancestors, handle_appsec_pipeline_work, handle_continuity_update,
-        looks_like_ctox_root, openrouter_tool_smoke_summary,
-        persist_appsec_command_expected_artifact, persist_runtime_turn_timeout,
-        prepare_appsec_cloud_credential, prepare_appsec_grpc_bearer_credential,
-        prepare_appsec_logic_bearer_credential, prepare_appsec_oci_registry_auth,
-        prepare_appsec_transport_session_credential, record_appsec_stage_artifact_bindings,
+        install_process_rustls_crypto_provider, looks_like_ctox_root,
+        openrouter_tool_smoke_summary, persist_appsec_command_expected_artifact,
+        persist_runtime_turn_timeout, record_appsec_stage_artifact_bindings,
         record_appsec_stage_session_bindings, resolve_appsec_stage_command_placeholders,
-        resolve_chat_attachment_paths, resolve_runtime_ctox_root, run_projected_appsec_command,
-        validated_workspace_root_override, AppsecStageExecutionContext,
+        resolve_chat_attachment_paths, resolve_explicit_or_workspace_root,
+        resolve_runtime_ctox_root, run_projected_appsec_command, validated_workspace_root_override,
+        AppsecStageExecutionContext,
     };
     use crate::execution::models::runtime_env;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn process_startup_selects_a_rustls_crypto_provider() {
+        install_process_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 
     #[test]
     fn business_command_dispatch_skips_caller_side_turn_ledger() {
@@ -5521,6 +5092,50 @@ mod tests {
             .map(str::to_string)
             .collect::<Vec<_>>();
         assert!(!super::skips_cli_turn_ledger(&inspect));
+    }
+
+    #[test]
+    fn mobile_invite_skips_daemon_owned_turn_ledger() {
+        for args in [
+            vec![
+                "business-os",
+                "mobile-invite",
+                "create",
+                "--ttl-seconds",
+                "300",
+            ],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "revoke",
+                "--invite-id",
+                "opaque-id",
+            ],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "create",
+                "--device-pairing-id",
+                "pairing-id",
+                "--device-id",
+                "device-id",
+                "--proof-key-thumbprint",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "revoke",
+                "--device-pairing-id",
+                "pairing-id",
+            ],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(
+                super::skips_cli_turn_ledger(&args),
+                "device pairing must not contend with the daemon turn ledger: {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -5680,6 +5295,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_explicit_binary_bundle_root_for_windows_service_launch() {
+        let root = unique_test_dir("binary-bundle-root");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("contracts")).unwrap();
+        fs::create_dir_all(root.join("src/apps/business-os")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'\n").unwrap();
+        fs::write(root.join("bin/ctox.exe"), "fixture").unwrap();
+        fs::write(root.join("contracts/binary_bundle_manifest.txt"), "fixture").unwrap();
+        fs::write(root.join("src/apps/business-os/index.html"), "fixture").unwrap();
+
+        let args = vec![
+            "service".to_string(),
+            "--windows-service".to_string(),
+            "--root".to_string(),
+            root.to_string_lossy().to_string(),
+        ];
+        assert_eq!(resolve_explicit_or_workspace_root(&args).unwrap(), root);
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
     fn workspace_root_override_accepts_valid_ctox_root_only() {
         let root = make_fake_ctox_root("env-valid-root");
         let invalid = unique_test_dir("env-invalid-root");
@@ -5820,409 +5457,6 @@ mod tests {
                     && row.get("status").and_then(serde_json::Value::as_str) == Some("missing")
             }));
 
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_oci_registry_credentials_are_ephemeral_and_never_enter_argv() {
-        let root = make_fake_ctox_root("appsec-oci-registry-auth");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "private-registry",
-            r#"{"username":"audit-user","password":"super-sensitive-password"}"#,
-            Some("test OCI registry credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "scan".to_string(),
-            "oci".to_string(),
-            "--image".to_string(),
-            format!("registry.example.test/team/app@sha256:{}", "a".repeat(64)),
-            "--registry-credential-ref".to_string(),
-            "ctox-secret://appsec/private-registry".to_string(),
-        ];
-
-        let material = prepare_appsec_oci_registry_auth(&root, &args)
-            .unwrap()
-            .expect("ephemeral registry auth material");
-        let config_dir = material.path().to_path_buf();
-        let argv = args.join(" ");
-        assert!(!argv.contains("audit-user"));
-        assert!(!argv.contains("super-sensitive-password"));
-        assert!(!argv.contains("--registry-auth-config"));
-        assert!(!argv.contains(config_dir.to_string_lossy().as_ref()));
-        let config = fs::read_to_string(config_dir.join("config.json")).unwrap();
-        assert!(config.contains("registry.example.test"));
-        assert!(!config.contains("audit-user"));
-        assert!(!config.contains("super-sensitive-password"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&config_dir).unwrap().permissions().mode() & 0o077,
-                0
-            );
-            assert_eq!(
-                fs::metadata(config_dir.join("config.json"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o077,
-                0
-            );
-        }
-        drop(material);
-        assert!(!config_dir.exists());
-
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_oci_registry_credentials_reject_invalid_refs_and_malformed_secret() {
-        let root = make_fake_ctox_root("appsec-oci-registry-auth-invalid");
-        let image = format!("registry.example.test/team/app@sha256:{}", "b".repeat(64));
-        let invalid_ref = vec![
-            "scan".to_string(),
-            "oci".to_string(),
-            "--image".to_string(),
-            image.clone(),
-            "--registry-credential-ref".to_string(),
-            "ctox-secret://appsec/private?leak=yes".to_string(),
-        ];
-        assert!(prepare_appsec_oci_registry_auth(&root, &invalid_ref)
-            .unwrap_err()
-            .to_string()
-            .contains("exact local"));
-
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "malformed",
-            r#"{"username":"audit-user","token":"not-supported"}"#,
-            Some("invalid test OCI registry credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let malformed = vec![
-            "scan".to_string(),
-            "oci".to_string(),
-            "--image".to_string(),
-            image,
-            "--registry-credential-ref".to_string(),
-            "ctox-secret://appsec/malformed".to_string(),
-        ];
-        assert!(prepare_appsec_oci_registry_auth(&root, &malformed)
-            .unwrap_err()
-            .to_string()
-            .contains("exactly non-empty"));
-
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_logic_bearer_credentials_resolve_only_from_exact_secret_refs() {
-        let root = make_fake_ctox_root("appsec-logic-bearer-auth");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "logic-operator",
-            r#"{"bearer_token":"super-sensitive-logic-token"}"#,
-            Some("test logic credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "logic".to_string(),
-            "contract".to_string(),
-            "--file".to_string(),
-            "contract.json".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/logic-operator".to_string(),
-        ];
-        let credential = prepare_appsec_logic_bearer_credential(&root, &args)
-            .unwrap()
-            .expect("native bearer credential");
-        assert!(!args.join(" ").contains("super-sensitive-logic-token"));
-        assert!(!format!("{credential:?}").contains("super-sensitive-logic-token"));
-
-        let invalid = vec![
-            "logic".to_string(),
-            "contract".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/logic-operator?leak=yes".to_string(),
-        ];
-        assert!(prepare_appsec_logic_bearer_credential(&root, &invalid)
-            .unwrap_err()
-            .to_string()
-            .contains("exact local"));
-
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_logic_bearer_credentials_reject_malformed_secret_shapes() {
-        let root = make_fake_ctox_root("appsec-logic-bearer-auth-invalid");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "malformed-logic",
-            r#"{"bearer_token":"token","extra":"not-allowed"}"#,
-            Some("invalid test logic credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "logic".to_string(),
-            "contract".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/malformed-logic".to_string(),
-        ];
-        assert!(prepare_appsec_logic_bearer_credential(&root, &args)
-            .unwrap_err()
-            .to_string()
-            .contains("exactly one"));
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_grpc_bearer_credentials_resolve_only_from_exact_secret_refs() {
-        let root = make_fake_ctox_root("appsec-grpc-bearer-auth");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "grpc-operator",
-            r#"{"bearer_token":"super-sensitive-grpc-token"}"#,
-            Some("test gRPC credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "scan".to_string(),
-            "grpc".to_string(),
-            "--host".to_string(),
-            "api.example.test:443".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/grpc-operator".to_string(),
-        ];
-        let credential = prepare_appsec_grpc_bearer_credential(&root, &args)
-            .unwrap()
-            .expect("native gRPC bearer credential");
-        assert!(!args.join(" ").contains("super-sensitive-grpc-token"));
-        assert!(!format!("{credential:?}").contains("super-sensitive-grpc-token"));
-
-        let invalid = vec![
-            "scan".to_string(),
-            "grpc".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/grpc-operator?leak=yes".to_string(),
-        ];
-        assert!(prepare_appsec_grpc_bearer_credential(&root, &invalid)
-            .unwrap_err()
-            .to_string()
-            .contains("exact local"));
-        let duplicate = vec![
-            "scan".to_string(),
-            "grpc".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/grpc-operator".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/grpc-operator".to_string(),
-        ];
-        assert!(prepare_appsec_grpc_bearer_credential(&root, &duplicate)
-            .unwrap_err()
-            .to_string()
-            .contains("exactly one"));
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_grpc_bearer_credentials_reject_malformed_secret_shapes() {
-        let root = make_fake_ctox_root("appsec-grpc-bearer-auth-invalid");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "malformed-grpc",
-            r#"{"bearer_token":"token","extra":"not-allowed"}"#,
-            Some("invalid test gRPC credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "scan".to_string(),
-            "grpc".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/malformed-grpc".to_string(),
-        ];
-        assert!(prepare_appsec_grpc_bearer_credential(&root, &args)
-            .unwrap_err()
-            .to_string()
-            .contains("exactly one"));
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_transport_session_credentials_are_exact_secret_refs_and_redacted() {
-        let root = make_fake_ctox_root("appsec-transport-session-auth");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "transport-user",
-            r#"{"cookie_header":"session=super-sensitive-transport-cookie"}"#,
-            Some("test transport session credential".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "scan".to_string(),
-            "transport".to_string(),
-            "--kind".to_string(),
-            "websocket".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/transport-user".to_string(),
-        ];
-        let credential = prepare_appsec_transport_session_credential(&root, &args)
-            .unwrap()
-            .expect("native transport session credential");
-        assert!(!args.join(" ").contains("super-sensitive-transport-cookie"));
-        assert!(!format!("{credential:?}").contains("super-sensitive-transport-cookie"));
-
-        let duplicate = vec![
-            "scan".to_string(),
-            "transport".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/transport-user".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/transport-user".to_string(),
-        ];
-        assert!(
-            prepare_appsec_transport_session_credential(&root, &duplicate)
-                .unwrap_err()
-                .to_string()
-                .contains("exactly one")
-        );
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_azure_cloud_credentials_resolve_exact_schema_without_argv_leak() {
-        let root = make_fake_ctox_root("appsec-azure-cloud-auth");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "azure-prod",
-            r#"{"tenant_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","client_id":"11111111-2222-3333-4444-555555555555","client_secret":"secret-sensitive"}"#,
-            Some("test Azure service principal".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "scan".to_string(),
-            "cloud".to_string(),
-            "--provider".to_string(),
-            "azure".to_string(),
-            "--scope-id".to_string(),
-            "11111111-2222-3333-4444-555555555555".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/azure-prod".to_string(),
-        ];
-        let material = prepare_appsec_cloud_credential(&root, &args)
-            .unwrap()
-            .expect("native Azure credential");
-        let debug = format!("{:?}", material.credential);
-        assert!(!args.join(" ").contains("secret-sensitive"));
-        assert!(!debug.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
-        assert!(!debug.contains("11111111-2222-3333-4444-555555555555"));
-        assert!(!debug.contains("secret-sensitive"));
-
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "azure-malformed",
-            r#"{"tenant_id":"tenant","client_id":"client","client_secret":"secret","extra":"forbidden"}"#,
-            Some("invalid Azure service principal".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let malformed = args
-            .iter()
-            .map(|argument| {
-                if argument == "ctox-secret://appsec/azure-prod" {
-                    "ctox-secret://appsec/azure-malformed".to_string()
-                } else {
-                    argument.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        assert!(prepare_appsec_cloud_credential(&root, &malformed)
-            .err()
-            .expect("malformed Azure credential must fail")
-            .to_string()
-            .contains("exactly"));
-        cleanup_test_dir(&root);
-    }
-
-    #[test]
-    fn appsec_gcp_cloud_credentials_are_project_bound_private_and_ephemeral() {
-        let root = make_fake_ctox_root("appsec-gcp-cloud-auth");
-        crate::secrets::write_secret_record(
-            &root,
-            "appsec",
-            "gcp-prod",
-            r#"{"type":"service_account","project_id":"ctox-prod-123","private_key_id":"key-id","private_key":"-----BEGIN PRIVATE KEY-----\nprivate-sensitive\n-----END PRIVATE KEY-----\n","client_email":"scanner@ctox-prod-123.iam.gserviceaccount.com","client_id":"123456789","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs","client_x509_cert_url":"https://www.googleapis.com/robot/v1/metadata/x509/scanner%40ctox-prod-123.iam.gserviceaccount.com","universe_domain":"googleapis.com"}"#,
-            Some("test GCP service account".to_string()),
-            serde_json::json!({"source": "test"}),
-        )
-        .unwrap();
-        let args = vec![
-            "scan".to_string(),
-            "cloud".to_string(),
-            "--provider".to_string(),
-            "gcp".to_string(),
-            "--scope-id".to_string(),
-            "ctox-prod-123".to_string(),
-            "--credential-ref".to_string(),
-            "ctox-secret://appsec/gcp-prod".to_string(),
-        ];
-        let material = prepare_appsec_cloud_credential(&root, &args)
-            .unwrap()
-            .expect("native GCP credential");
-        let credential_path = material
-            ._private_root
-            .as_ref()
-            .expect("GCP private credential root")
-            .path()
-            .join("service-account.json");
-        assert!(credential_path.is_file());
-        assert!(!args.join(" ").contains("private-sensitive"));
-        assert!(!format!("{:?}", material.credential).contains("private-sensitive"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&credential_path).unwrap().permissions().mode() & 0o077,
-                0
-            );
-        }
-        drop(material);
-        assert!(!credential_path.exists());
-
-        let wrong_project = args
-            .iter()
-            .map(|argument| {
-                if argument == "ctox-prod-123" {
-                    "ctox-other-123".to_string()
-                } else {
-                    argument.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        assert!(prepare_appsec_cloud_credential(&root, &wrong_project)
-            .err()
-            .expect("GCP project mismatch must fail")
-            .to_string()
-            .contains("exactly match"));
         cleanup_test_dir(&root);
     }
 

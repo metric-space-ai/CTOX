@@ -68,9 +68,13 @@ assert.equal(horizontal.container.style.getPropertyValue('--bottom'), '244px');
 assert.equal(horizontal.handle.getAttribute('aria-orientation'), 'horizontal');
 horizontal.resizer.onPointerDown({ pointerId: 7, clientX: 0, clientY: 300, preventDefault() {} });
 assert.equal(horizontal.handle.capturedPointers.has(7), true);
-horizontal.resizer.onPointerMove({ clientX: 0, clientY: 260 });
+horizontal.resizer.onPointerMove({ pointerId: 99, clientX: 0, clientY: 100 });
+assert.equal(horizontal.container.style.getPropertyValue('--bottom'), '244px');
+horizontal.resizer.onPointerMove({ pointerId: 7, clientX: 0, clientY: 260 });
 assert.equal(horizontal.container.style.getPropertyValue('--bottom'), '284px');
-horizontal.resizer.onPointerUp();
+horizontal.resizer.onPointerUp({ pointerId: 99 });
+assert.equal(horizontal.handle.capturedPointers.has(7), true);
+horizontal.resizer.onPointerUp({ pointerId: 7 });
 assert.equal(horizontal.handle.capturedPointers.has(7), false);
 assert.equal(body.classList.values.has('is-resizing-horizontal'), false);
 
@@ -79,14 +83,27 @@ assert.equal(body.classList.values.has('is-resizing-horizontal'), false);
 let queuedFrame = null;
 globalThis.requestAnimationFrame = (callback) => { queuedFrame = callback; return 2; };
 const delayed = fixture({ orientation: 'vertical', side: 'left', cssVar: '--delayed', initial: 200 });
-delayed.resizer.onPointerDown({ clientX: 100, clientY: 0, preventDefault() {} });
-delayed.resizer.onPointerMove({ clientX: 148, clientY: 0 });
+delayed.resizer.onPointerDown({ pointerId: 8, clientX: 100, clientY: 0, preventDefault() {} });
+delayed.resizer.onPointerMove({ pointerId: 8, clientX: 148, clientY: 0 });
 assert.equal(delayed.container.style.getPropertyValue('--delayed'), '200px');
-delayed.resizer.onPointerUp();
+delayed.resizer.onPointerUp({ pointerId: 8 });
 assert.equal(delayed.container.style.getPropertyValue('--delayed'), '248px');
 assert.equal(queuedFrame !== null, true);
+
+const cancelled = fixture({ orientation: 'vertical', side: 'left', cssVar: '--cancelled', initial: 210 });
+cancelled.resizer.onPointerDown({ pointerId: 12, pointerType: 'touch', clientX: 100, clientY: 0, preventDefault() {} });
+cancelled.resizer.onPointerMove({ pointerId: 12, clientX: 140, clientY: 0 });
+cancelled.resizer.onLostPointerCapture({ pointerId: 12 });
+assert.equal(cancelled.container.style.getPropertyValue('--cancelled'), '250px');
+assert.equal(cancelled.resizer.isPointerActive, false);
+
+const secondaryMouse = fixture({ orientation: 'vertical', side: 'left', cssVar: '--secondary', initial: 200 });
+secondaryMouse.resizer.onPointerDown({ pointerId: 15, pointerType: 'mouse', button: 2, clientX: 100, clientY: 0, preventDefault() {} });
+assert.equal(secondaryMouse.resizer.isPointerActive, false);
 
 vertical.resizer.destroy();
 horizontal.resizer.destroy();
 delayed.resizer.destroy();
+cancelled.resizer.destroy();
+secondaryMouse.resizer.destroy();
 console.log('Business OS resizer vertical/horizontal test OK');

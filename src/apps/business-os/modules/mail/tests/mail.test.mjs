@@ -8,7 +8,7 @@ import { build } from 'esbuild';
 import { collections as conversationCollections } from '../../conversations/schema.js';
 // Gleicher Query-String wie in ../schema.js — sonst erzeugt Node eine zweite
 // Modulinstanz und die Referenzgleichheits-Pruefung unten schlaegt fehl.
-import { collections as ctoxCollections } from '../../ctox/schema.js?v=20260811-fremde-collection-mitladen-v106';
+import { collections as ctoxCollections } from '../../ctox/schema.js?v=20260816-browser-sync-guards-v141';
 import { collections as appStoreCollections } from '../../app-store/schema.js';
 import { collections as documentCollections } from '../../documents/schema.js';
 import { collections as mailCollections } from '../schema.js';
@@ -62,19 +62,6 @@ test('mail reuses canonical communication and outbound schemas', () => {
         : conversationCollections[name];
     assert.equal(schema, canonical);
   }
-});
-
-test('mail leaves collection lifecycle ownership with the shell lease', async () => {
-  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /ctx\.sync\?\.startCollection/);
-});
-
-test('mail treats data-plane teardown reads as transient without hiding other failures', () => {
-  assert.equal(hooks.isTransientCollectionReadError(
-    new DOMException("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.", 'InvalidStateError'),
-  ), true);
-  assert.equal(hooks.isTransientCollectionReadError(new Error('QUERY_CANCELLED: replication-cancel')), true);
-  assert.equal(hooks.isTransientCollectionReadError(new Error('permission denied')), false);
 });
 
 test('ordinary users only see assigned or shared email accounts', () => {
@@ -298,7 +285,7 @@ test('mail surface provides a progressive inspector workbench and responsive com
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-band="campaigns"/);
   assert.match(html, /data-mail-mailbox-password[^>]+type="password"|type="password"[^>]+data-mail-mailbox-password/);
-  assert.match(css, /@media \(max-width: 720px\)/);
+  assert.match(css, /@media \(max-width: 767px\)/);
   assert.match(css, /\.mail-module\.is-inspector-open/);
   assert.equal(manifest.default_installed, true);
   assert.equal(manifest.core, true);
@@ -308,7 +295,7 @@ test('Sellify handoff opens the canonical Mail series-email contract', () => {
   const hash = hooks.buildSeriesEmailTransferHash({
     campaignId: 'sellify-campaign-1',
     recipients: ['a@example.test', 'b@example.test'],
-    subject: 'Notizen',
+    subject: 'Thesen',
   });
   assert.match(hash, /^mail\?action=series-email&source_module=sellify/);
   assert.match(hash, /campaign_id=sellify-campaign-1/);

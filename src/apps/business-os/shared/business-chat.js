@@ -1,11 +1,15 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from './dialogs.js?v=20260816-browser-sync-guards-v141';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+} from './file-integrity.js?v=20260816-browser-sync-guards-v141';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260816-browser-sync-guards-v141';
+import {
+  normalizeWorkjetCategory,
+  workjetCategoryStyle,
+} from './workjet-theme.js?v=20260826-workjet-ui-contract-v1';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -502,6 +506,18 @@ function shouldCreateChatForExternalSubmit(detail = {}) {
   return action === 'context-chat';
 }
 
+function chatAllowsAutoFocus(chat) {
+  const meta = chat?.contextMeta && typeof chat.contextMeta === 'object'
+    ? chat.contextMeta
+    : {};
+  const clientContext = meta.client_context && typeof meta.client_context === 'object'
+    ? meta.client_context
+    : {};
+  return meta.business_chat_auto_focus !== false
+    && clientContext.business_chat_auto_focus !== false
+    && clientContext.auto_focus !== false;
+}
+
 function alignChatWindows(root) {
   if (!root) return;
   const strip = root.querySelector('[data-chat-strip]');
@@ -766,6 +782,14 @@ function setStyleIfChanged(element, prop, value) {
   return true;
 }
 
+function setInlineStyleIfChanged(element, value) {
+  if (!element?.style) return false;
+  const next = String(value ?? '');
+  if (element.style.cssText === next) return false;
+  element.style.cssText = next;
+  return true;
+}
+
 function stageWindowChats(activeExpandedChat) {
   return activeExpandedChat ? [activeExpandedChat] : [];
 }
@@ -793,10 +817,12 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const activeExpandedChat = activeChat && !activeChat.minimized
     ? activeChat
     : expandedChats.find((chat) => chat.id === state.activeChatId) || expandedChats[0] || null;
+  const dockCollapsed = Boolean(state.dockCollapsed);
   // The dock already provides navigation between chats. Rendering historical
   // chats as translucent cards behind the active one made covered app controls
   // look clickable while an inactive chat surface intercepted the click.
   const visibleWindowChats = stageWindowChats(activeExpandedChat);
+  const stagedWindowCount = dockCollapsed ? 0 : visibleWindowChats.length;
   const hiddenChatCount = Math.max(0, openChats.length - visibleChats.length);
   const hasVisibleChats = openChats.length > 0;
   const showChatStrip = !Boolean(state.dockCollapsed) && hasVisibleChats;
@@ -811,7 +837,6 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     hiddenChatCount > 0 ? 'has-overflow-chats' : '',
     showChatNav ? 'has-nav' : 'has-no-nav',
   ].filter(Boolean).join(' ');
-  const dockCollapsed = Boolean(state.dockCollapsed);
   const wasCollapsed = root.classList.contains('is-collapsed');
   root.classList.toggle('is-collapsed', dockCollapsed);
 
@@ -870,6 +895,15 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       const chatId = chip.dataset.chatFocus;
       const chat = openChats.find(c => c.id === chatId);
       if (chat) {
+        const category = chatWorkjetCategory(chat);
+        const categoryChanged = setDatasetIfChanged(chip, 'workjetCategory', category);
+        if (categoryChanged) {
+          if (typeof chip.getAttribute === 'function') {
+            if (setAttrIfChanged(chip, 'style', chatWorkjetCategoryStyleText(category))) inPlaceDomChanged = true;
+          } else if (setInlineStyleIfChanged(chip, chatWorkjetCategoryStyleText(category))) {
+            inPlaceDomChanged = true;
+          }
+        }
         const taskState = getTaskState(chat);
         const status = chatDockStatusText(chat, taskState);
         const aria = chatDockAriaLabel(chat, status);
@@ -908,6 +942,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     let messagesDomChanged = false;
     existingWindows.forEach((win, idx) => {
       const chat = visibleWindowChats[idx];
+      const category = chatWorkjetCategory(chat);
       const relation = idx < activeIndex ? 'left' : idx > activeIndex ? 'right' : 'center';
       const taskState = getTaskState(chat);
 
@@ -920,6 +955,14 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         `is-task-${taskState}`,
       ].filter(Boolean).join(' ');
       if (setClassNameIfChanged(win, nextWindowClass)) inPlaceDomChanged = true;
+      const categoryChanged = setDatasetIfChanged(win, 'workjetCategory', category);
+      if (categoryChanged) {
+        if (typeof win.getAttribute === 'function') {
+          if (setAttrIfChanged(win, 'style', chatWorkjetCategoryStyleText(category))) inPlaceDomChanged = true;
+        } else if (setInlineStyleIfChanged(win, chatWorkjetCategoryStyleText(category))) {
+          inPlaceDomChanged = true;
+        }
+      }
       if (setDatasetIfChanged(win, 'chatRel', relation)) inPlaceDomChanged = true;
       // Interactive tabindex/aria-hidden churn is only needed when the active
       // window actually changes. Re-applying it every tick was pure DOM noise.
@@ -1032,7 +1075,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     ${state.dateWorkloadOpen ? dateWorkloadPanel({ chats: state.chats, selectedDate }) : ''}
     ${state.chatListOpen && openChats.length > MAX_RENDERED_CHAT_TABS ? chatBusyPanel({ chats: openChats, selectedDate, state }) : ''}
     <div class="ctox-chat-stage" data-chat-stage>
-      <div class="ctox-chat-stage-inner ${hasMaximized ? 'has-maximized' : ''}">
+      <div class="ctox-chat-stage-inner ${stagedWindowCount === 0 ? 'is-empty' : ''} ${hasMaximized ? 'has-maximized' : ''}">
         ${dockCollapsed ? '' : (() => {
           const activeIndex = visibleWindowChats.findIndex((c) => c.id === activeExpandedChat?.id);
           return visibleWindowChats.map((chat, idx) => {
@@ -1612,9 +1655,15 @@ function expandChatOnly(state, activeChat) {
   activeChat.minimized = false;
 }
 
-// Den angezeigten Tag wechselt nur, wer ausdruecklich dorthin navigiert. Diese
-// Funktion wird aus sechs Richtungen gerufen, die meisten davon Hintergrund-
-// vorgaenge; jede davon zog die Leiste sonst in die Vergangenheit.
+// Den angezeigten Tag wechselt nur, wer ausdruecklich dorthin navigiert.
+// Vorher setzte diese Funktion selectedDate bedingungslos auf das Datum des
+// Chats — und sie wird aus sechs Richtungen gerufen, die meisten davon
+// Hintergrundvorgaenge: Wiederherstellung beim Laden, Statusabgleich eines
+// alten Vorgangs, Oeffnen eines Lead-Chats. Am 11.08.2026 zog jeder dieser
+// Wege die Leiste auf den 26. Juli und riss ein WITTENSTEIN-Fenster von damals
+// auf. Ich habe das zuerst an den Aufrufstellen einzeln abgefangen; das war
+// Symptombekaempfung, es blieb immer noch ein Weg uebrig. Die Regel gehoert
+// hierher: rueckwaerts in die Vergangenheit nur auf ausdrueckliches Verlangen.
 function focusChatForUser(state, chat, { openDock = true, allowDateChange = false } = {}) {
   if (!state || !chat) return null;
   const chatDate = getLocalDateString(chat.createdAt || Date.now());
@@ -1652,7 +1701,12 @@ function findChatForOpenDetail(state, detail = {}) {
 function resolveChatForOpenDetail(state, session, detail = {}) {
   const trackedChat = findChatForOpenDetail(state, detail);
   // Nur ein Chat von HEUTE wird wiederverwendet. Ein Lead behaelt seinen
-  // Kennschluessel ueber Wochen; sonst kehrt der Chat des letzten Laufs zurueck.
+  // Kennschluessel ueber Wochen; findChatForOpenDetail lieferte deshalb den
+  // Chat des letzten Laufs zurueck, und focusChatForUser zog die Leiste auf
+  // dessen Tag. Am 11.08.2026 sprang sie beim Wechsel in eine Kampagne so auf
+  // den 26. Juli und riss ein WITTENSTEIN-Fenster von damals auf, waehrend die
+  // Laeufe des Tages unsichtbar blieben. Ein heutiger Lauf gehoert zu heute;
+  // der alte Verlauf bleibt ueber die Datumsauswahl vollstaendig erreichbar.
   if (trackedChat && getLocalDateString(trackedChat.createdAt) === getLocalDateString(Date.now())) {
     return trackedChat;
   }
@@ -1694,7 +1748,12 @@ function preferredChatForDockOpen(state) {
   if (!chats.length) return null;
   const today = getLocalDateString(Date.now());
   // NUR heute. Der Rueckfall auf chats[0] holte den neuesten Chat aus IRGENDEINEM
-  // Tag und zog die Leiste auf dessen Datum.
+  // Tag und zog die Leiste auf dessen Datum: am 11.08.2026 sprang sie beim
+  // Oeffnen von Outbound auf den 28. Juli und zeigte 26 alte Fehlversuche, waehrend
+  // die elf erfolgreichen Laeufe des Tages unsichtbar blieben. Findet sich fuer
+  // heute nichts, bleibt die Leiste leer auf heute stehen — vergangene Tage
+  // erreicht man ueber die Datumsauswahl, nicht durch einen Sprung hinter dem
+  // Ruecken des Nutzers.
   return chats.find((chat) => getLocalDateString(chat.createdAt) === today) || null;
 }
 
@@ -1773,8 +1832,26 @@ export function renderChatAgentScopeHtml(contextMeta = {}) {
   return renderGlobalCtoxAgentScopeHtml({ view });
 }
 
+function chatWorkjetCategory(chat) {
+  return normalizeWorkjetCategory(
+    chat?.contextMeta?.workjet_category || chat?.contextMeta?.workjetCategory,
+  );
+}
+
+function chatWorkjetCategoryStyleText(category) {
+  const style = workjetCategoryStyle(category);
+  return [
+    `--shell-category-accent:${style.accent}`,
+    `--shell-category-foreground:${style.foreground}`,
+    `--shell-category-soft:${style.soft}`,
+    `--shell-category-border:${style.border}`,
+  ].join(';');
+}
+
 function chatWindow(chat, activeId, relation = 'center') {
   const moduleName = chat.contextMeta?.module || 'ctox';
+  const category = chatWorkjetCategory(chat);
+  const categoryStyleText = chatWorkjetCategoryStyleText(category);
   const taskState = getTaskState(chat);
   const isFuture = chat.createdAt > Date.now();
   const agentScopeHtml = renderChatAgentScopeHtml(chat.contextMeta);
@@ -1955,7 +2032,7 @@ function chatWindow(chat, activeId, relation = 'center') {
   }
 
   return `
-    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}">
+    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}">
       <header>
         <button class="ctox-chat-title" type="button" data-chat-title="${escapeAttr(chat.id)}">
           <div style="display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 0;">
@@ -2409,10 +2486,12 @@ function chatDockItem(chat, activeId) {
   const taskState = getTaskState(chat);
   const status = chatDockStatusText(chat, taskState);
   const moduleName = chat.contextMeta?.module || 'ctox';
+  const category = chatWorkjetCategory(chat);
+  const categoryStyleText = chatWorkjetCategoryStyleText(category);
   const markHtml = chatChipMarkHtml(taskState);
 
   return `
-    <button class="${chatDockClassName(chat, activeId, taskState)}" type="button" data-chat-focus="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" aria-label="${escapeAttr(chatDockAriaLabel(chat, status))}" title="${escapeAttr(chatDockAriaLabel(chat, status))}">
+    <button class="${chatDockClassName(chat, activeId, taskState)}" type="button" data-chat-focus="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" aria-label="${escapeAttr(chatDockAriaLabel(chat, status))}" title="${escapeAttr(chatDockAriaLabel(chat, status))}">
       ${markHtml}
       <span class="ctox-chat-chip-copy">
         <strong>${escapeHtml(chat.title || 'CTOX')}</strong>
@@ -2940,7 +3019,18 @@ async function syncTrackedMessages({ state, db, sync = null }) {
     }
     if (chatChanged) {
       applyChatTrackingSummary(chat);
-      if (shouldFocusChat) focusChatForUser(state, chat);
+      // Eine Statusmeldung im Hintergrund darf die Ansicht nicht entfuehren.
+      // Wenn der Abgleich einen Vorgang vom 26. Juli endlich als abgeschlossen
+      // verbucht, wurde hier der zugehoerige Juli-Chat fokussiert und
+      // focusChatForUser zog die Leiste auf dessen Tag — am 11.08.2026 riss so
+      // ein WITTENSTEIN-Fenster von damals auf, waehrend der Nutzer in einer
+      // heutigen Kampagne arbeitete. Alte Chats werden weiterhin aktualisiert,
+      // nur nicht mehr in den Vordergrund gezogen.
+      if (shouldFocusChat
+        && chatAllowsAutoFocus(chat)
+        && getLocalDateString(chat.createdAt) === getLocalDateString(Date.now())) {
+        focusChatForUser(state, chat);
+      }
     }
   }
   return changed;
@@ -3320,6 +3410,11 @@ function chatContextMetaFromDetail(detail = {}) {
     instruction: detail.instruction || '',
     inbound_channel: detail.inbound_channel || detail.inboundChannel || '',
     command_type: detail.command_type || detail.commandType || '',
+    workjet_category: detail.workjet_category
+      || detail.workjetCategory
+      || clientContext.workjet_category
+      || clientContext.workjetCategory
+      || '',
     payload,
     client_context: clientContext,
   };
@@ -3611,9 +3706,18 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
     : merged;
   state.remoteHydrationComplete = true;
   if (freshRemoteBaseline) {
-    if (preserveActiveChat) {
-      const activeChat = state.chats.find((chat) => chat.id === localActiveChatId);
-      if (activeChat) focusChatForUser(state, activeChat);
+    const activeChat = preserveActiveChat
+      ? state.chats.find((chat) => chat.id === localActiveChatId)
+      : null;
+    // Einen aktiven Chat wiederherstellen heisst nicht, die Leiste in seine
+    // Vergangenheit zu ziehen. focusChatForUser setzt selectedDate auf das Datum
+    // des Chats; stammte der gespeicherte aktive Chat aus dem Juli, sprang die
+    // Leiste beim Oeffnen dorthin — am 11.08.2026 auf den 26. Juli, samt eines
+    // aufgerissenen WITTENSTEIN-Fensters von damals. Wiederhergestellt wird nur,
+    // was zum heutigen Tag gehoert; ein ausdruecklicher Klick des Nutzers
+    // (focusChatId weiter unten) darf den Tag weiterhin wechseln.
+    if (activeChat && getLocalDateString(activeChat.createdAt) === getLocalDateString(Date.now())) {
+      focusChatForUser(state, activeChat);
     } else {
       state.activeChatId = '';
     }
@@ -3627,7 +3731,9 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
     // den 26. Juli. Der Chip des alten Chats aktualisiert sich weiterhin; er
     // bleibt ueber die Datumsauswahl erreichbar, holt sich die Ansicht aber
     // nicht mehr selbst.
-    if (focusChat && getLocalDateString(focusChat.createdAt) === getLocalDateString(Date.now())) {
+    if (focusChat
+      && chatAllowsAutoFocus(focusChat)
+      && getLocalDateString(focusChat.createdAt) === getLocalDateString(Date.now())) {
       focusChatForUser(state, focusChat, { allowDateChange: true });
     }
   }
@@ -3884,7 +3990,18 @@ function installChatStyles() {
     }
     .ctox-chat-dock {
       --ctox-date-pill-width: 146px;
-      pointer-events: auto;
+      /* Die Leiste faengt nur dort Klicks, wo sie etwas anzeigt.
+         .ctox-chat-root steht bewusst auf pointer-events:none, damit die App
+         darunter bedienbar bleibt — das Dock hob das fuer seine GESAMTE Flaeche
+         wieder auf, einschliesslich der durchsichtigen Zwischenraeume zwischen
+         Knopf, Datumspille und Streifen. Am 11.08.2026 lag die
+         Empfaengerauswahl von Outbound Lead Generation genau in diesem toten Streifen:
+         der Detailbereich war bis zum Anschlag gescrollt, das Haekchen sichtbar,
+         und jeder Klick landete im Dock. Ohne Empfaenger keine Sellify-Uebergabe,
+         kein Serienbrief, keine Serien-E-Mail — die gesamte Kette endete an
+         einem unsichtbaren Rechteck.
+         Die Kinder holen sich pointer-events unten einzeln zurueck. */
+      pointer-events: none;
       grid-row: 2;
       display: grid;
       grid-template-columns: 88px var(--ctox-date-pill-width) 34px;
@@ -3894,12 +4011,12 @@ function installChatStyles() {
       width: max-content;
       max-width: 100%;
       padding: 6px;
-      border: 1px solid color-mix(in srgb, var(--line) 35%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 35%, transparent);
-      backdrop-filter: blur(20px) saturate(180%);
-      -webkit-backdrop-filter: blur(20px) saturate(180%);
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+      border: 1px solid var(--line);
+      border-radius: var(--control-radius);
+      background: var(--surface-2);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      box-shadow: var(--workjet-shadow-panel, var(--shadow-md));
       transition: border-color var(--motion-slow) var(--ease-spring), box-shadow var(--motion-slow) var(--ease-spring);
     }
     .ctox-chat-dock:hover {
@@ -3912,8 +4029,9 @@ function installChatStyles() {
       grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, auto) 28px 34px;
     }
     .ctox-chat-dock.has-many-chats {
-      grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, 1fr) 28px 34px;
-      width: 100%;
+      grid-template-columns: 88px var(--ctox-date-pill-width) 28px minmax(0, min(420px, 40dvw)) 28px 34px;
+      width: max-content;
+      max-width: min(860px, calc(100dvw - 132px));
     }
     .ctox-chat-dock.has-one-chat .ctox-chat-strip {
       width: 148px;
@@ -3925,6 +4043,18 @@ function installChatStyles() {
     .ctox-chat-dock.has-many-chats .ctox-chat-strip {
       width: auto;
     }
+    /* Die sichtbaren Bedienelemente des Docks holen sich die Klicks zurueck,
+       die der Container oben abgegeben hat. Alles, was hier NICHT steht, ist
+       durchsichtiger Zwischenraum — und der gehoert der App darunter. */
+    .ctox-chat-dock > *,
+    .ctox-chat-fab,
+    .ctox-chat-date-pill,
+    .ctox-chat-nav,
+    .ctox-chat-strip,
+    .ctox-chat-new {
+      pointer-events: auto;
+    }
+
     .ctox-chat-date-pill {
       display: inline-flex;
       align-items: center;
@@ -4218,12 +4348,12 @@ function installChatStyles() {
       grid-template-rows: auto auto auto minmax(0, 1fr);
       gap: 10px;
       padding: var(--space-3);
-      border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 88%, transparent);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
-      box-shadow: 0 20px 52px rgba(0, 0, 0, 0.22);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg));
       color: var(--text);
       z-index: 70;
     }
@@ -4236,12 +4366,12 @@ function installChatStyles() {
       display: grid;
       gap: 10px;
       padding: var(--space-3);
-      border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
-      border-radius: 14px;
-      background: color-mix(in srgb, var(--surface) 90%, transparent);
-      backdrop-filter: blur(20px) saturate(160%);
-      -webkit-backdrop-filter: blur(20px) saturate(160%);
-      box-shadow: 0 20px 52px rgba(0, 0, 0, 0.22);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg));
       color: var(--text);
       z-index: 71;
     }
@@ -4521,40 +4651,8 @@ function installChatStyles() {
       cursor: pointer;
       animation: ctoxChipSlideIn var(--motion-slow) var(--ease-spring) both;
       transition: transform var(--motion-slow) var(--ease-spring), background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-spring);
-      --accent: var(--theme-accent, #10b981);
-      --accent-soft: var(--theme-accent-soft, rgba(16, 185, 129, 0.12));
-    }
-    .ctox-chat-chip[data-chat-module="ctox"] {
-      --accent: #10b981 !important;
-      --accent-soft: rgba(16, 185, 129, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="documents"] {
-      --accent: #3b82f6 !important;
-      --accent-soft: rgba(59, 130, 246, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="knowledge"] {
-      --accent: #a855f7 !important;
-      --accent-soft: rgba(168, 85, 247, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="research"] {
-      --accent: #06b6d4 !important;
-      --accent-soft: rgba(6, 182, 212, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="matching"] {
-      --accent: #f59e0b !important;
-      --accent-soft: rgba(245, 158, 11, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="reports"] {
-      --accent: #ef4444 !important;
-      --accent-soft: rgba(239, 68, 68, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="conversations"] {
-      --accent: #6366f1 !important;
-      --accent-soft: rgba(99, 102, 241, 0.12) !important;
-    }
-    .ctox-chat-chip[data-chat-module="outbound"] {
-      --accent: #f43f5e !important;
-      --accent-soft: rgba(244, 63, 94, 0.12) !important;
+      --accent: var(--shell-category-accent, var(--workjet-accent, #1b4ed8));
+      --accent-soft: var(--shell-category-soft, var(--workjet-accent-soft, #e0e6f7));
     }
     .ctox-chat-chip.is-task-running {
       --status-color: var(--accent);
@@ -4607,9 +4705,9 @@ function installChatStyles() {
       background: color-mix(in srgb, var(--status-color) 18%, var(--surface-2)) !important;
     }
     .ctox-chat-chip.is-expanded:not(.is-active) {
-      border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-      background: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
-      color: color-mix(in srgb, var(--text) 95%, var(--accent));
+      border-color: color-mix(in srgb, var(--line) 45%, transparent);
+      background: var(--surface-2);
+      color: var(--text);
       opacity: 0.96;
     }
     .ctox-chat-chip.is-active {
@@ -4751,6 +4849,11 @@ function installChatStyles() {
       perspective: 1200px;
       transform-style: preserve-3d;
     }
+    .ctox-chat-stage-inner.is-empty {
+      height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
     .ctox-chat-stage-inner.has-maximized {
       height: min(480px, calc(100dvh - 132px));
     }
@@ -4782,14 +4885,14 @@ function installChatStyles() {
       overflow: hidden;
       box-sizing: border-box;
       max-width: min(440px, calc(100dvw - 24px));
-      border: 1px solid color-mix(in srgb, var(--line) 25%, transparent);
-      border-radius: 16px;
-      background: color-mix(in srgb, var(--surface) 94%, transparent);
-      backdrop-filter: blur(24px) saturate(180%);
-      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
       color: var(--text);
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.12), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
-      font-family: var(--font-family, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg));
+      font-family: var(--font-sans, var(--workjet-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif));
       font-size: var(--fs-sm);
       line-height: 1.4;
       animation: ctoxChatSlideIn var(--motion-slow) var(--ease-spring);
@@ -4803,42 +4906,10 @@ function installChatStyles() {
         border-color var(--motion-slow) var(--ease-standard),
         box-shadow var(--motion-slow) var(--ease-standard),
         filter var(--motion-slow) var(--ease-standard);
-      --accent: var(--theme-accent, #10b981);
-      --accent-soft: var(--theme-accent-soft, rgba(16, 185, 129, 0.12));
+      --accent: var(--shell-category-accent, var(--workjet-accent, #1b4ed8));
+      --accent-soft: var(--shell-category-soft, var(--workjet-accent-soft, #e0e6f7));
       transform-style: preserve-3d;
       backface-visibility: hidden;
-    }
-    .ctox-chat-window[data-chat-module="ctox"] {
-      --accent: #10b981 !important;
-      --accent-soft: rgba(16, 185, 129, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="documents"] {
-      --accent: #3b82f6 !important;
-      --accent-soft: rgba(59, 130, 246, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="knowledge"] {
-      --accent: #a855f7 !important;
-      --accent-soft: rgba(168, 85, 247, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="research"] {
-      --accent: #06b6d4 !important;
-      --accent-soft: rgba(6, 182, 212, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="matching"] {
-      --accent: #f59e0b !important;
-      --accent-soft: rgba(245, 158, 11, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="reports"] {
-      --accent: #ef4444 !important;
-      --accent-soft: rgba(239, 68, 68, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="conversations"] {
-      --accent: #6366f1 !important;
-      --accent-soft: rgba(99, 102, 241, 0.12) !important;
-    }
-    .ctox-chat-window[data-chat-module="outbound"] {
-      --accent: #f43f5e !important;
-      --accent-soft: rgba(244, 63, 94, 0.12) !important;
     }
     .ctox-chat-window:not(.is-active) {
       opacity: 0;
@@ -4983,8 +5054,8 @@ function installChatStyles() {
       animation: ctoxPulseQueued 2s infinite ease-in-out;
     }
     .ctox-chat-window.is-task-success {
-      border-color: #10b981 !important;
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.2), 0 0 20px rgba(16, 185, 129, 0.35) !important;
+      border-color: var(--success, var(--accent)) !important;
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg)), 0 0 20px color-mix(in srgb, var(--success, var(--accent)) 35%, transparent) !important;
     }
     .ctox-chat-window.is-task-failed {
       animation: ctoxPulseFailed 2.5s infinite ease-in-out;
@@ -4995,8 +5066,8 @@ function installChatStyles() {
       align-items: center;
       justify-content: space-between;
       gap: var(--space-2);
-      border-bottom: 1px solid color-mix(in srgb, var(--line) 30%, transparent);
-      background: color-mix(in srgb, var(--surface) 20%, transparent);
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
       padding: 0 6px 0 10px;
       height: 38px;
       min-width: 0;
@@ -5580,7 +5651,7 @@ function installChatStyles() {
     }
 
     @media (max-height: 680px) {
-      .ctox-chat-stage-inner {
+      .ctox-chat-stage-inner:not(.is-empty) {
         height: min(240px, calc(100vh - 132px));
       }
       .ctox-chat-stage-inner.has-maximized {
@@ -5620,13 +5691,13 @@ function installChatStyles() {
         justify-content: flex-start !important;
         gap: 6px !important;
         overflow-x: auto !important;
-        width: 100% !important;
-        max-width: 100% !important;
+        width: max-content !important;
+        max-width: calc(100vw - 16px) !important;
         box-sizing: border-box !important;
         scrollbar-width: none !important;
       }
       .ctox-chat-dock.has-many-chats {
-        width: 100% !important;
+        width: min(860px, calc(100vw - 16px)) !important;
       }
       .ctox-chat-dock::-webkit-scrollbar {
         display: none !important;
@@ -6544,6 +6615,7 @@ async function cancelScheduledChat(state, chat, db, root, commandBus, getActiveM
 
 export const __businessChatTestInternals = Object.freeze({
   clearSchedulerLoop,
+  chatAllowsAutoFocus,
   collectScheduledChatEntries,
   collectTrackedMessages,
   collapseRestoredTerminalChat,
@@ -6559,7 +6631,6 @@ export const __businessChatTestInternals = Object.freeze({
   initSchedulerLoop,
   isChatEmptyForDeletion,
   isScrolledToBottom,
-  focusChatForUser,
   preferredChatForDockOpen,
   readChatState,
   renderChatRoot,

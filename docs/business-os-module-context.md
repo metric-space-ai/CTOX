@@ -53,7 +53,7 @@ Grundregeln (aus `docs/ctox-rxdb.md` und den AGENTS-Guardrails):
 |---|---|---|
 | `db` | facade | Guarded/scoped Collection-Zugriff (Live-Facade; runtime-installierte Module bekommen den Data-Guard). Kein direkter Bundle-Import. |
 | `documents` | facade | Generischer DOCX-Vertrag: `loadVersion`, `createDocx`, `open`. Bytes laufen ausschließlich über `documents`, `document_versions` und `document_blob_chunks` im shell-gelieferten `db`-Facade. |
-| `sync` | facade | `startCollection`, `stopCollection`, `restartCollection(s)`, `suspendCollections`, `resumeCollections`, `stop`; `collectionReadiness(name)` und `subscribeCollectionReadiness(name, listener)`; Getter `mode`, `config`, `diagnostics` (inkl. per-Collection `pullCheckpointAgeMs`, §OS-A3). |
+| `sync` | facade | `startCollection`, `stopCollection`, `restartCollection(s)`, `suspendCollections`, `resumeCollections`, `stop`; `collectionReadiness(name)` und `subscribeCollectionReadiness(name, listener)`; `requestNative(method, params, options)` für explizit capability-gatete, ephemere WebRTC-Steuerpfade ohne RxDB-Dokumente; Getter `mode`, `config`, `diagnostics` (inkl. per-Collection `pullCheckpointAgeMs`, §OS-A3). |
 | `syncConfig` | object | Momentaufnahme der Sync-Konfiguration. |
 | `storageScope` | facade | Modul-, Workspace- und Actor-gescopte UI-Ablage: `key`, `get`, `set`, `remove`. Module greifen nicht direkt auf Browser Storage zu. |
 | `runtimeCapabilities` | frozen object | Trust-/Fähigkeitsmatrix (`business-os-runtime-capabilities-v1`): trust_model, code_origin, database.guarded, … |

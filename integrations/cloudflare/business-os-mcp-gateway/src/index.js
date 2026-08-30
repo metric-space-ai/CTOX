@@ -11,6 +11,7 @@ const DEFAULT_MAX_PENDING_REQUESTS = 16;
 const DEFAULT_CONNECT_REPLAY_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_CONNECT_NONCES = 128;
 const GATEWAY_CONTEXT_HEADER = "x-ctox-mcp-gateway-context";
+const GATEWAY_RATE_LIMIT_HEADER = "x-ctox-mcp-rate-limit-per-minute";
 
 export default {
   async fetch(request, env) {
@@ -26,6 +27,7 @@ export class BusinessOsMcpSession {
     this.pending = new Map();
     this.connectNonces = new Map();
     this.commandStatuses = new Map();
+    this.managedRateBuckets = new Map();
     this.sessionInfo = null;
     this.stats = makeSessionStats();
   }
@@ -91,6 +93,14 @@ export class BusinessOsMcpSession {
         503,
         { code: "runtime_unavailable" }
       );
+    }
+    const managedRate = enforceManagedSessionRate(this.managedRateBuckets, request);
+    if (!managedRate.ok) {
+      recordRejected(this.stats);
+      return jsonRpcError(null, -32009, "Managed MCP rate limit exceeded", 429, {
+        code: "rate_limited",
+        limit: managedRate.limit
+      });
     }
     const pendingLimit = maxPendingRequests(this.env);
     if (this.pending.size >= pendingLimit) {
@@ -391,7 +401,12 @@ export async function handleManagedMcp(request, env = {}, instanceId) {
       { code: "sync_not_ready" }
     );
   }
-  return stub.fetch(withGatewayContext(new Request(`https://session.local${MCP_PATH}`, request), auth.context));
+  return stub.fetch(
+    withGatewayPolicy(
+      withGatewayContext(new Request(`https://session.local${MCP_PATH}`, request), auth.context),
+      auth.policy
+    )
+  );
 }
 
 export async function handleManagedConnect(request, env = {}, instanceId) {
@@ -868,6 +883,31 @@ function withGatewayContext(request, context) {
   return new Request(request, { headers });
 }
 
+function withGatewayPolicy(request, policy) {
+  if (!policy) return request;
+  const headers = new Headers(request.headers);
+  headers.set(GATEWAY_RATE_LIMIT_HEADER, String(policy.rateLimitPerMinute));
+  return new Request(request, { headers });
+}
+
+function enforceManagedSessionRate(buckets, request, now = Date.now()) {
+  const rawLimit = request.headers.get(GATEWAY_RATE_LIMIT_HEADER);
+  if (rawLimit === null) return { ok: true };
+  const limit = Number.parseInt(rawLimit, 10);
+  const clientId = gatewayContextFromHeader(request)?.client_id;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 600 || !clientId) {
+    return { ok: false, limit: 0 };
+  }
+  const window = Math.floor(now / 60_000);
+  const key = `${clientId}:${window}`;
+  for (const bucketKey of buckets.keys()) {
+    if (!bucketKey.endsWith(`:${window}`)) buckets.delete(bucketKey);
+  }
+  const count = (buckets.get(key) || 0) + 1;
+  buckets.set(key, count);
+  return count <= limit ? { ok: true } : { ok: false, limit };
+}
+
 function gatewayContextFromHeader(request) {
   const raw = request.headers.get(GATEWAY_CONTEXT_HEADER);
   if (!raw) {
@@ -1018,7 +1058,8 @@ const READ_TOOLS = new Set([
   "business_os.list_app_files",
   "business_os.read_app_file",
   "business_os.search_app_source",
-  "business_os.get_command_status"
+  "business_os.get_command_status",
+  "decision_hub.get_decision"
 ]);
 
 const WRITE_TOOLS = new Set([
@@ -1032,7 +1073,8 @@ const WRITE_TOOLS = new Set([
   "business_os.validate_app",
   "business_os.smoke_app",
   "business_os.e2e_app",
-  "business_os.execute_action"
+  "business_os.execute_action",
+  "decision_hub.request_decision"
 ]);
 
 const APPROVAL_TOOLS = new Set([
@@ -1048,6 +1090,7 @@ function normalizeManagedMcpPolicy(value) {
     allowWrites: booleanOr(source.allowWrites, false),
     allowApprovals: booleanOr(source.allowApprovals, false),
     allowExternalEffects: booleanOr(source.allowExternalEffects, false),
+    rateLimitPerMinute: integerBetween(source.rateLimitPerMinute, 1, 600, 60),
     allowedTools: stringList(source.allowedTools).slice(0, 50),
     deniedTools: stringList(source.deniedTools).slice(0, 50)
   };
@@ -1055,6 +1098,10 @@ function normalizeManagedMcpPolicy(value) {
 
 function booleanOr(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function integerBetween(value, minimum, maximum, fallback) {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : fallback;
 }
 
 function stringOr(value, fallback) {

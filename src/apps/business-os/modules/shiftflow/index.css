@@ -1145,3 +1145,74 @@
     flex-wrap: wrap;
   }
 }
+
+/* ----------------------------------------------------------------------------
+   Phone layout (≤767px container): the 820px collapse above already stacks
+   panes, hides the resizer and turns the detail inspector into an overlay;
+   this block stacks the drawer form rows and keeps action rows wrappable.
+   The week grid keeps its 784px min-width and scrolls horizontally inside
+   .shiftflow-scheduler-container — never the page.
+   -------------------------------------------------------------------------- */
+@container business-app-window (max-width: 767px) {
+  .shiftflow-drawer-form .form-row,
+  .shiftflow-drawer-actions,
+  .shiftflow-drawer-actions.has-danger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .timesheet-card-actions {
+    flex-wrap: wrap;
+  }
+
+  .shiftflow-publish-status {
+    max-width: 40%;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum. Critically, the "add shift" affordance is
+   hover-only on desktop (.grid-shift-cell:hover) — on touch it stays
+   permanently visible so empty slots remain operable. */
+@media (pointer: coarse) {
+  .shiftflow-app button,
+  .shiftflow-app input:not([type="checkbox"]):not([type="radio"]),
+  .shiftflow-app select,
+  .shiftflow-app textarea,
+  .shiftflow-drawer-body button,
+  .shiftflow-drawer-body input:not([type="checkbox"]):not([type="radio"]),
+  .shiftflow-drawer-body select,
+  .shiftflow-drawer-body textarea {
+    min-height: 44px;
+  }
+
+  .shiftflow-app .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .shiftflow-app .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .add-shift-hover-btn {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, -50%) scale(1);
+    min-height: 44px;
+    padding-inline: 14px;
+  }
+
+  .quick-assign-day-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .color-option-label {
+    width: 44px;
+    height: 44px;
+  }
+
+  .shiftflow-shift-select {
+    min-height: 44px;
+  }
+}

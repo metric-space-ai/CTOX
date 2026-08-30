@@ -4,6 +4,12 @@ import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  loadAppAuditScenarios,
+  renderScenarioValue,
+  scenarioTargetSelector,
+  selectAppAuditScenarios,
+} from './app-audit-scenarios.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const RELEASE_ROOT = resolve(SCRIPT_DIR, '../../../..');
@@ -21,10 +27,11 @@ function findRuntimeChromiumExecutable(root) {
   const cacheDir = join(root, 'runtime/browser/interactive-reference/ms-playwright');
   if (!existsSync(cacheDir)) return null;
   for (const entry of readdirSync(cacheDir)) {
-    if (!entry.startsWith('chromium-')) continue;
+    if (!entry.startsWith('chromium-') && !entry.startsWith('chromium_headless_shell-')) continue;
     const base = join(cacheDir, entry);
     const candidates = [
       join(base, 'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'),
+      join(base, 'chrome-mac/headless_shell'),
       join(base, 'chrome-linux/chrome'),
       join(base, 'chrome-linux64/chrome'),
       join(base, 'chrome-headless-shell-linux64/chrome-headless-shell'),
@@ -75,7 +82,7 @@ const browserRuntime = loadBrowserRuntime();
 
 function usage() {
   return [
-    'Usage: node src/apps/business-os/scripts/e2e-app-module.mjs <module-id> [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>] [--marker <value>]',
+    'Usage: node src/apps/business-os/scripts/e2e-app-module.mjs <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>] [--marker <value>] [--profile quick|release|full] [--scenario <id>] [--require-scenario]',
     '',
     'Runs a real-browser save/reload/command-bus E2E against a runtime-installed CTOX Business OS app.',
   ].join('\n');
@@ -90,6 +97,10 @@ function parseArgs(argv) {
     output: null,
     screenshot: null,
     marker: null,
+    mode: 'installed',
+    scenarioId: null,
+    requireScenario: false,
+    profile: 'release',
   };
   for (let idx = 0; idx < argv.length; idx += 1) {
     const arg = argv[idx];
@@ -118,11 +129,22 @@ function parseArgs(argv) {
       if (!value) throw new Error('--marker requires a value');
       options.marker = value;
       idx += 1;
+    } else if (arg === '--scenario') {
+      const value = argv[idx + 1];
+      if (!value) throw new Error('--scenario requires a value');
+      options.scenarioId = value;
+      idx += 1;
+    } else if (arg === '--profile') {
+      const value = argv[idx + 1];
+      if (!['quick', 'release', 'full'].includes(value)) throw new Error('--profile must be quick, release, or full');
+      options.profile = value;
+      idx += 1;
+    } else if (arg === '--require-scenario') {
+      options.requireScenario = true;
     } else if (arg === '--json') {
       options.json = true;
     } else if (arg === '--installed' || arg === '--source') {
-      // Accepted for CLI symmetry with validate/smoke. This E2E always mounts
-      // through the live Business OS shell catalog.
+      options.mode = arg.slice(2);
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else if (arg.startsWith('-')) {
@@ -149,6 +171,15 @@ function withModuleHash(baseUrl, moduleId) {
   return url.href;
 }
 
+function redactedRequestUrl(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return '<invalid-url>';
+  }
+}
+
 function printResult(result, json) {
   if (json) {
     console.log(JSON.stringify(result, null, 2));
@@ -160,12 +191,14 @@ function printResult(result, json) {
   }
 }
 
-function moduleDir(moduleId) {
-  return join(RELEASE_ROOT, 'runtime/business-os/installed-modules', moduleId);
+function moduleDir(moduleId, mode = 'installed') {
+  return mode === 'source'
+    ? join(RELEASE_ROOT, 'src/apps/business-os/modules', moduleId)
+    : join(RELEASE_ROOT, 'runtime/business-os/installed-modules', moduleId);
 }
 
-function readModuleCollections(moduleId) {
-  const path = join(moduleDir(moduleId), 'collections.schema.json');
+function readModuleCollections(moduleId, mode) {
+  const path = join(moduleDir(moduleId, mode), 'collections.schema.json');
   if (!existsSync(path)) return [];
   const parsed = JSON.parse(readFileSync(path, 'utf8'));
   return Object.entries(parsed.collections || {}).map(([name, schema]) => ({
@@ -324,11 +357,11 @@ async function collectBrowserDiagnostics(page, moduleId, rootSelector) {
       const roots = Array.from(document.querySelectorAll('[data-module-root]')).map((el) => ({
         module_root: el.getAttribute('data-module-root') || '',
         visible: visible(el),
-        text: String(el.innerText || '').slice(0, 500),
+        text_length: String(el.innerText || '').length,
       }));
       const actions = Array.from(document.querySelectorAll('[data-action]')).map((el) => ({
         action: el.getAttribute('data-action') || '',
-        text: String(el.textContent || el.value || '').trim().slice(0, 160),
+        text_length: String(el.textContent || el.value || '').trim().length,
         visible: visible(el),
         disabled: Boolean(el.disabled),
         module_root: el.closest('[data-module-root]')?.getAttribute('data-module-root') || '',
@@ -345,7 +378,7 @@ async function collectBrowserDiagnostics(page, moduleId, rootSelector) {
         root_present: Boolean(document.querySelector(rootSelector)),
         roots,
         actions: actions.slice(0, 80),
-        body_text: String(document.body.innerText || '').slice(0, 1200),
+        body_text_length: String(document.body.innerText || '').length,
       };
     }, { moduleId, rootSelector });
   } catch (error) {
@@ -547,6 +580,48 @@ async function clickAutomation(page, rootSelector, marker) {
   }, { selector: rootSelector, marker });
 }
 
+async function runDeclaredScenario(page, options, scenario) {
+  let rootSelector = `[data-module-root="${options.moduleId}"]`;
+  const evidence = [];
+  for (let index = 0; index < scenario.steps.length; index += 1) {
+    const step = scenario.steps[index];
+    const selector = step.target ? `${rootSelector} ${scenarioTargetSelector(step.target)}` : null;
+    if (step.op === 'click') {
+      await page.locator(selector).click({ timeout: step.timeout_ms });
+    } else if (step.op === 'fill') {
+      const value = renderScenarioValue(step.value, options.marker);
+      const locator = page.locator(selector);
+      await locator.waitFor({ state: 'visible', timeout: step.timeout_ms });
+      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+      if (tagName === 'select') await locator.selectOption(value);
+      else await locator.fill(value);
+    } else if (step.op === 'assert_visible') {
+      await page.locator(selector).waitFor({ state: 'visible', timeout: step.timeout_ms });
+    } else if (step.op === 'assert_text') {
+      const contains = renderScenarioValue(step.contains, options.marker);
+      await page.waitForFunction(({ rootSelector: root, targetSelector, expected }) => {
+        const moduleRoot = document.querySelector(root);
+        const target = moduleRoot?.querySelector(targetSelector);
+        return Boolean(target && String(target.textContent || '').includes(expected));
+      }, {
+        rootSelector,
+        targetSelector: scenarioTargetSelector(step.target),
+        expected: contains,
+      }, { timeout: step.timeout_ms, polling: 250 });
+    } else if (step.op === 'reload') {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: step.timeout_ms });
+      rootSelector = await openModule(page, options.moduleId, options.url, step.timeout_ms);
+    }
+    evidence.push({
+      index,
+      op: step.op,
+      target: step.target || null,
+      status: 'passed',
+    });
+  }
+  return evidence;
+}
+
 async function runE2e(options) {
   const result = {
     ok: false,
@@ -557,7 +632,7 @@ async function runE2e(options) {
     evidence: {},
   };
 
-  const collections = readModuleCollections(options.moduleId);
+  const collections = readModuleCollections(options.moduleId, options.mode);
   result.evidence.collections = collections;
   result.evidence.browser_runtime = browserRuntime.evidence;
   const sqlitePath = join(RELEASE_ROOT, 'runtime/business-os-rxdb.sqlite3');
@@ -602,13 +677,45 @@ async function runE2e(options) {
   });
   page.on('requestfailed', (request) => {
     failedRequests.push({
-      url: request.url(),
+      url: redactedRequestUrl(request.url()),
       error: request.failure()?.errorText || '',
     });
   });
 
   try {
     let rootSelector = await openModule(page, options.moduleId, options.url, options.timeoutMs);
+    const loadedScenarios = loadAppAuditScenarios(moduleDir(options.moduleId, options.mode));
+    const selectedScenarios = selectAppAuditScenarios(
+      loadedScenarios.scenarios,
+      options.profile,
+      options.scenarioId,
+    );
+    result.evidence.scenario_contract = {
+      path: loadedScenarios.path,
+      present: loadedScenarios.document != null,
+      profile: options.profile,
+      selected: selectedScenarios.map((scenario) => scenario.id),
+    };
+    if (options.scenarioId && selectedScenarios.length === 0) {
+      result.failures.push(`declared audit scenario not found: ${options.scenarioId}`);
+      return result;
+    }
+    if (selectedScenarios.length) {
+      result.evidence.scenarios = [];
+      for (const scenario of selectedScenarios) {
+        await openModule(page, options.moduleId, options.url, options.timeoutMs);
+        const scenarioOptions = { ...options, marker: `${options.marker}_${scenario.id}` };
+        const steps = await runDeclaredScenario(page, scenarioOptions, scenario);
+        result.evidence.scenarios.push({ id: scenario.id, marker: scenarioOptions.marker, steps, status: 'passed' });
+      }
+      result.evidence.scenario_status = 'passed';
+      return result;
+    }
+    if (options.requireScenario) {
+      result.failures.push(`${options.profile} app E2E requires at least one matching scenario in tests/audit-scenarios.json`);
+      return result;
+    }
+    result.evidence.scenario_status = 'legacy-heuristic-fallback';
     const action = await waitForPrimaryCreateAction(page, rootSelector, options.timeoutMs);
     result.evidence.create_action = action;
     if (!action) {

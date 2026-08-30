@@ -1,6 +1,6 @@
 {
-  "title": "Nachweise",
-  "subtitle": "Generischer Nachweis-/Zertifikats-Tresor: ablaufende, verifizierte Artefakte (Zertifikate, Lizenzen, Arbeitserlaubnis) je Subjekt mit Ablauf-Warnung und Einsatz-Gate.",
+  "title": "Credentials",
+  "subtitle": "Generic credential and certificate vault: expiring, verified artifacts (certificates, licenses, work permits) for each subject with expiration warnings and an assignment gate.",
   "add": "Create",
   "empty": "No entries yet.",
   "newAction": "New credential",

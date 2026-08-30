@@ -854,6 +854,7 @@ fn load_desktop_file_bytes(root: &Path, file_id: &str) -> anyhow::Result<Vec<u8>
 }
 
 pub(super) fn load_installed_module_manifests(
+    root: &Path,
     app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("installed-modules");
@@ -872,7 +873,14 @@ pub(super) fn load_installed_module_manifests(
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.manifest_sha256 = hex_sha256(text.as_bytes());
         manifest.asset_revision = module_asset_revision(&entry.path())?;
@@ -1094,6 +1102,7 @@ fn install_template_module(
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
 
     let activation = (|| -> anyhow::Result<()> {
+        super::customer_apps::authorize_runtime_module(root, &staging, &manifest_value)?;
         // CTOX Marketplace apps are authored against the catalog contract and
         // then rewritten to an installed runtime path. Validate them with the
         // dedicated catalog-installed profile; the stricter generated-app
@@ -1640,56 +1649,89 @@ pub fn rollback_module_to_version(
         .context("version not found for module")?
     };
     let target_files: Vec<Value> = serde_json::from_str(&files_json).unwrap_or_default();
-    let (_, source_app_root) = resolve_module_source_root_for_root(root, app_root, &module_id)?;
+    let (module_root, source_app_root) =
+        resolve_module_source_root_for_root(root, app_root, &module_id)?;
+    let module_parent = module_root
+        .parent()
+        .context("module source root has no parent")?;
+    let staging = module_parent.join(format!(
+        ".rollback-stage-{module_id}-{}",
+        Uuid::new_v4()
+    ));
+    let backup = module_parent.join(format!(
+        ".rollback-backup-{module_id}-{}",
+        Uuid::new_v4()
+    ));
 
+    let current = compute_module_bundle(&source_app_root, &module_id)?;
     let mut target_paths = std::collections::BTreeSet::new();
     let mut restored = 0usize;
-    for file in &target_files {
-        let path = file.get("path").and_then(Value::as_str).unwrap_or_default();
-        let content = file
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if path.is_empty() {
-            continue;
-        }
-        target_paths.insert(path.to_string());
-        save_module_source_record(
-            root,
-            ModuleSourceSaveMutation {
-                module_id: module_id.clone(),
-                path: path.to_string(),
-                content: content.to_string(),
-            },
-        )?;
-        restored += 1;
-    }
-
-    // Remove editable source files that were added after the target version,
-    // snapshotting each one first so the removal is itself reversible.
     let mut removed = 0usize;
-    let current = compute_module_bundle(&source_app_root, &module_id)?;
-    let module_root = resolve_module_source_root(&source_app_root, &module_id)?;
-    for file in &current.files {
-        let path = file.get("path").and_then(Value::as_str).unwrap_or_default();
-        if path.is_empty() || target_paths.contains(path) {
-            continue;
+    let stage_result = (|| -> anyhow::Result<()> {
+        // Preserve non-source assets such as operator-approved PNG icons while
+        // replacing the complete versioned text bundle in an isolated sibling.
+        copy_dir_recursive(&module_root, &staging)?;
+        for file in &target_files {
+            let path = file.get("path").and_then(Value::as_str).unwrap_or_default();
+            let content = file
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if path.is_empty() {
+                continue;
+            }
+            let rel = normalize_source_relative_path(path)?;
+            anyhow::ensure!(
+                is_allowed_source_path(&rel),
+                "version contains a disallowed source path: {}",
+                rel.display()
+            );
+            target_paths.insert(rel.to_string_lossy().to_string());
+            let target = staging.join(&rel);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&target, content.as_bytes())
+                .with_context(|| format!("failed to stage {}", target.display()))?;
+            restored += 1;
         }
-        let Ok(rel) = normalize_source_relative_path(path) else {
-            continue;
-        };
-        if !is_allowed_source_path(&rel) {
-            continue;
+
+        for file in &current.files {
+            let path = file.get("path").and_then(Value::as_str).unwrap_or_default();
+            if path.is_empty() {
+                continue;
+            }
+            let rel = normalize_source_relative_path(path)?;
+            let rel_display = rel.to_string_lossy().to_string();
+            if target_paths.contains(&rel_display) || !is_allowed_source_path(&rel) {
+                continue;
+            }
+            let live = module_root.join(&rel);
+            if let Ok(content) = fs::read_to_string(&live) {
+                let previous_sha = hex_sha256(content.as_bytes());
+                let _ = write_module_source_snapshot(
+                    root,
+                    &module_id,
+                    &rel,
+                    &content,
+                    Some(&previous_sha),
+                );
+            }
+            let staged = staging.join(&rel);
+            if staged.is_file() {
+                fs::remove_file(&staged)
+                    .with_context(|| format!("failed to remove staged {}", staged.display()))?;
+                removed += 1;
+            }
         }
-        let abs = module_root.join(&rel);
-        if let Ok(content) = fs::read_to_string(&abs) {
-            let prev_sha = hex_sha256(content.as_bytes());
-            let _ = write_module_source_snapshot(root, &module_id, &rel, &content, Some(&prev_sha));
-        }
-        if abs.is_file() {
-            fs::remove_file(&abs).with_context(|| format!("failed to remove {}", abs.display()))?;
-            removed += 1;
-        }
+
+        ensure_rollback_collection_schema_compatible(&module_root, &staging)?;
+        validate_staged_catalog_module(root, &module_id, &staging)?;
+        activate_staged_module_directory(&staging, &module_root, &backup)
+    })();
+    if let Err(error) = stage_result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error.context("module rollback stage/validate/atomic-swap failed"));
     }
 
     let created_by = session_user_id(session).unwrap_or("").to_string();
@@ -1710,6 +1752,36 @@ pub fn rollback_module_to_version(
         "restored_files": restored,
         "removed_files": removed
     }))
+}
+
+fn ensure_rollback_collection_schema_compatible(
+    live_module: &Path,
+    staged_module: &Path,
+) -> anyhow::Result<()> {
+    let live_path = live_module.join("collections.schema.json");
+    let staged_path = staged_module.join("collections.schema.json");
+    match (live_path.is_file(), staged_path.is_file()) {
+        (false, false) => return Ok(()),
+        (true, true) => {}
+        _ => anyhow::bail!(
+            "rollback rejected: collections.schema.json presence differs from the active module"
+        ),
+    }
+    let live: Value = serde_json::from_str(
+        &fs::read_to_string(&live_path)
+            .with_context(|| format!("failed to read {}", live_path.display()))?,
+    )
+    .context("active collection schema is invalid")?;
+    let staged: Value = serde_json::from_str(
+        &fs::read_to_string(&staged_path)
+            .with_context(|| format!("failed to read {}", staged_path.display()))?,
+    )
+    .context("staged collection schema is invalid")?;
+    anyhow::ensure!(
+        live.get("collections") == staged.get("collections"),
+        "rollback rejected: target version has an incompatible collection schema"
+    );
+    Ok(())
 }
 
 /// Download an archive over the SSRF-guarded agent and read it into memory.
@@ -1902,6 +1974,7 @@ pub fn install_app_module(
         )
         .with_context(|| format!("Failed to rewrite staged manifest for {module_id}"))?;
 
+        super::customer_apps::authorize_runtime_module(root, &staging, &manifest)?;
         validate_staged_catalog_module(root, &module_id, &staging)?;
 
         activate_staged_module_directory(&staging, &dest_dir, &backup)
@@ -1947,9 +2020,10 @@ mod tests {
     };
     use super::{
         compute_module_bundle, copy_dir_recursive, delete_installed_module, list_module_versions,
-        module_catalog_source_id, module_policy_decision, normalize_catalog_installed_manifest,
-        record_module_release, record_module_version, release_managed_shadow_source,
-        rollback_module_to_version, sync_module_version_records, validate_staged_catalog_module,
+        ensure_rollback_collection_schema_compatible, module_catalog_source_id,
+        module_policy_decision, normalize_catalog_installed_manifest, record_module_release,
+        record_module_version, release_managed_shadow_source, rollback_module_to_version,
+        sync_module_version_records, validate_staged_catalog_module,
     };
     use rusqlite::{params, Connection};
     use serde_json::Value;
@@ -2740,6 +2814,30 @@ mod tests {
                 .and_then(Value::as_str),
             Some("rollback")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_rejects_incompatible_collection_schema_before_swap() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let live = temp.path().join("live");
+        let staged = temp.path().join("staged");
+        fs::create_dir_all(&live)?;
+        fs::create_dir_all(&staged)?;
+        fs::write(
+            live.join("collections.schema.json"),
+            r#"{"collections":[{"name":"knowledge","schema":{"version":0}}]}"#,
+        )?;
+        fs::write(
+            staged.join("collections.schema.json"),
+            r#"{"collections":[{"name":"knowledge","schema":{"version":1}}]}"#,
+        )?;
+
+        let error = ensure_rollback_collection_schema_compatible(&live, &staged)
+            .expect_err("schema-changing rollback must fail closed");
+        assert!(error
+            .to_string()
+            .contains("incompatible collection schema"));
         Ok(())
     }
 
