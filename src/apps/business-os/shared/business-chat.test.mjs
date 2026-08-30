@@ -69,6 +69,68 @@ test('crew identities and SVG bodies are stable per work stream', () => {
   assert.match(__businessChatTestInternals.crewCreatureHtml(chat, 'running', 'window'), /<svg viewBox="0 0 64 64"/);
 });
 
+test('crew creatures sleep when not working and use X eyes only for failures', () => {
+  const chat = { id: 'chat-resting', title: 'Warten', messages: [] };
+  const idle = __businessChatTestInternals.crewCreatureHtml(chat, 'idle');
+  const queued = __businessChatTestInternals.crewCreatureHtml(chat, 'queued');
+  const scheduled = __businessChatTestInternals.crewCreatureHtml(chat, 'scheduled');
+  for (const markup of [idle, queued, scheduled]) {
+    assert.match(markup, /is-sleeping/);
+    assert.match(markup, /ctox-crew-eyes-sleeping/);
+    assert.doesNotMatch(markup, /ctox-crew-eyes-x/);
+  }
+
+  const failed = __businessChatTestInternals.crewCreatureHtml(chat, 'failed');
+  assert.match(failed, /is-failed/);
+  assert.match(failed, /ctox-crew-eyes-x/);
+  assert.doesNotMatch(failed, /ctox-crew-eyes-sleeping/);
+});
+
+test('review progress selects a distinct creature mode with deterministic motion phases', () => {
+  const reviewChat = {
+    id: 'chat-review',
+    title: 'Prüfen',
+    lastTrackingId: 'task-review',
+    messages: [{
+      taskId: 'task-review',
+      status: 'running',
+      executionProgress: {
+        phase: 'review',
+        percent: 82,
+        steps: [{ position: 1, label: 'Prüfen', status: 'completed', activity_turns: 4 }],
+        review: { status: 'in_progress' },
+        activity_turns: { total: 6, last_kind: 'thinking' },
+      },
+    }],
+  };
+  assert.equal(__businessChatTestInternals.crewCreatureMode(reviewChat, 'running'), 'review');
+  const review = __businessChatTestInternals.crewCreatureHtml(reviewChat, 'running', 'window');
+  assert.match(review, /is-running is-review/);
+  assert.match(review, /data-crew-mode="review"/);
+  assert.match(review, /--crew-review-drift:/);
+  assert.doesNotMatch(review, /ctox-crew-eyes-sleeping|ctox-crew-eyes-x/);
+
+  const workChat = { ...reviewChat, id: 'chat-working' };
+  workChat.messages = [{
+    ...reviewChat.messages[0],
+    executionProgress: { ...reviewChat.messages[0].executionProgress, phase: 'work' },
+  }];
+  const work = __businessChatTestInternals.crewCreatureHtml(workChat, 'running', 'window');
+  assert.match(work, /is-running is-working/);
+  assert.match(work, /--crew-work-drift:/);
+  assert.doesNotMatch(work, /is-review/);
+  assert.notEqual(review.match(/--crew-review-drift:[^;]+/)[0], work.match(/--crew-review-drift:[^;]+/)[0]);
+  assert.equal(review, __businessChatTestInternals.crewCreatureHtml(reviewChat, 'running', 'window'));
+});
+
+test('crew motion CSS is work-only, review-specific, finite on failure, and reduced-motion safe', () => {
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-working[\s\S]*?animation: ctoxCrewWorkDrift/);
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-review[\s\S]*?animation: ctoxCrewReviewDrift/);
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-failed[\s\S]*?animation: ctoxCrewOops 860ms[^;]* 1 both/);
+  assert.match(businessChatSource, /\.ctox-crew-creature,\n\s+\.ctox-crew-creature \*/);
+  assert.doesNotMatch(businessChatSource, /\.ctox-crew-creature\.is-(idle|queued|scheduled|success|blocked)[^}]*animation:/);
+});
+
 test('business chat does not restore terminal task windows over app content', () => {
   const state = {
     activeChatId: 'chat-terminal',
@@ -171,6 +233,54 @@ test('business chat task submission returns the real queue id after rendering pe
     globalThis.document = previousDocument;
     globalThis.location = previousLocation;
   }
+});
+
+test('business chat keeps the execution prompt intact while showing compact app copy', async () => {
+  const previousDocument = globalThis.document;
+  const previousLocation = globalThis.location;
+  globalThis.document = { documentElement: { lang: 'de' } };
+  globalThis.location = { href: 'https://customer.example.test/#desktop' };
+  const state = { ownerUserId: 'user-1', chats: [] };
+  const chat = { id: 'chat-display-copy', title: 'CTOX', messages: [], contextMeta: {} };
+  const fullPrompt = 'SYSTEM_PAYLOAD::{"record_ids":["123"],"operation":"reconcile"}';
+  try {
+    await __businessChatTestInternals.submitChatMessage({
+      state,
+      chat,
+      text: fullPrompt,
+      commandBus: {
+        async dispatch(command) {
+          assert.equal(command.payload.prompt, fullPrompt);
+          assert.equal(command.payload.instruction, fullPrompt);
+          assert.equal(command.payload.display_title, 'Rechnungen abgleichen');
+          assert.equal(command.payload.display_prompt, 'Drei offene Rechnungen mit dem Bankkonto abgleichen.');
+          return { status: 'queued', command_id: command.id, task_id: 'queue-display-copy' };
+        },
+      },
+      db: null,
+      sync: null,
+      getActiveModule: () => ({ id: 'finance', title: 'Finanzen' }),
+      meta: {
+        command_id: 'cmd-display-copy',
+        display_title: 'Rechnungen abgleichen',
+        display_prompt: 'Drei offene Rechnungen mit dem Bankkonto abgleichen.',
+      },
+    });
+    assert.equal(chat.title, 'Rechnungen abgleichen');
+    assert.equal(chat.messages[0].text, 'Drei offene Rechnungen mit dem Bankkonto abgleichen.');
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.location = previousLocation;
+  }
+});
+
+test('business chat collapses long visible prompts without losing the full text', () => {
+  const longPrompt = `Erstelle einen vollständigen Bericht. ${'Viele wichtige Details. '.repeat(16)}`;
+  const html = __businessChatTestInternals.messageMarkup({ role: 'user', text: longPrompt });
+  assert.match(html, /ctox-chat-prompt/);
+  assert.match(html, />Mehr</);
+  assert.match(html, />Weniger</);
+  assert.match(html, /Viele wichtige Details/);
 });
 
 test('business chat tracks a terminal native control command without inventing a queue task', async () => {
@@ -429,6 +539,67 @@ test('business chat tracking sync follows business command execution phase', asy
   assert.equal(changed, true);
   assert.equal(state.chats[0].messages[0].taskId, 'queue:system::running');
   assert.equal(state.chats[0].messages[0].status, 'running');
+});
+
+test('business chat projects durable execution progress into the tracked crew message', async () => {
+  const progress = {
+    version: 1,
+    revision: 2,
+    phase: 'work',
+    percent: 30,
+    current_step: 2,
+    completed_steps: 1,
+    total_steps: 3,
+    steps: [
+      { position: 1, label: 'Daten laden', status: 'completed', activity_turns: 2 },
+      { position: 2, label: 'Daten prüfen', status: 'in_progress', activity_turns: 4 },
+      { position: 3, label: 'Ergebnis schreiben', status: 'pending', activity_turns: 0 },
+    ],
+    review: { status: 'pending' },
+    activity_turns: { total: 7, thinking: 3, tools: 4, last_kind: 'tool' },
+    updated_at_ms: 1234,
+  };
+  const commands = makeBatchCollection([{
+    id: 'cmd-progress',
+    task_id: 'task-progress',
+    execution_phase: 'running',
+    execution_progress: progress,
+  }]);
+  const queue = makeBatchCollection([{
+    id: 'task-progress',
+    command_id: 'cmd-progress',
+    status: 'running',
+    execution_progress: progress,
+  }]);
+  const state = {
+    chats: [{
+      id: 'chat-progress',
+      messages: [{ id: 'message-progress', commandId: 'cmd-progress', status: 'queued', createdAt: Date.now() }],
+    }],
+  };
+
+  assert.equal(await __businessChatTestInternals.syncTrackedMessages({
+    state,
+    db: { raw: { business_commands: commands, ctox_queue_tasks: queue } },
+  }), true);
+  const message = state.chats[0].messages[0];
+  assert.equal(message.executionProgress.percent, 30);
+  assert.equal(message.executionProgress.activity_turns.total, 7);
+  const card = __businessChatTestInternals.delegationProgressCardHtml(state.chats[0], {
+    taskId: 'task-progress',
+    commandId: 'cmd-progress',
+    taskStatus: 'running',
+  });
+  assert.match(card, /30%/);
+  assert.match(card, /4\/7 Turns/);
+  assert.match(card, /Daten prüfen/);
+  assert.match(card, /→ Ergebnis schreiben/);
+  assert.match(card, /Plan v2/);
+  assert.match(card, /ctox-progress-activity/);
+  assert.match(card, /--ctox-turn-angle:24deg/);
+  assert.doesNotMatch(card, /ctox-progress-summary/);
+  assert.doesNotMatch(card, /ctox-progress-current-copy/);
+  assert.doesNotMatch(card, /Live-Harness/);
 });
 
 test('business chat tracking sync flushes command collections before reading status', async () => {

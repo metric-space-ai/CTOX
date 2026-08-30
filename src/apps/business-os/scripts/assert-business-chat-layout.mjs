@@ -63,11 +63,11 @@ expectIncludes(source, 'function updateChatStripOverflowState(root)', 'Scrollabl
 expectIncludes(source, '.ctox-chat-strip.is-scrollable::-webkit-scrollbar', 'Scrollable chat strips need a visible scrollbar hint');
 expectIncludes(source, '.ctox-chat-strip.is-scrollable:not(.is-at-start):not(.is-at-end)', 'Scrollable chat strips need edge overflow shadows');
 expectIncludes(source, 'chatDockClassName(chat, activeChat?.id, taskState)', 'Chat chips must use shared state classes during in-place updates');
-expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskState(chat))', 'Chat chips need user-facing status labels');
+expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskState(chat))', 'Chat chips need status text for hover and accessibility hints');
 expectIncludes(source, '`is-task-${taskState}`', 'Chat chips must include task-state classes');
 expectIncludes(source, '.ctox-chat-chip.is-minimized:not(.is-task-idle)', 'Minimized non-idle chats must keep visible status styling');
 expectIncludes(source, 'function chatDateAriaLabel(dateStr, total = 0)', 'Date history control needs a clear accessible label');
-expectIncludes(source, "<span class=\"ctox-date-scope\">${chatUiIsGerman() ? 'Einsätze' : 'Missions'}</span>", 'Date control must visibly explain it contains crew missions');
+expectIncludes(source, 'title="${escapeAttr(chatDateAriaLabel(selectedDate, workload.total))}"', 'Date control must explain its scope on hover');
 expectIncludes(source, 'chatBusyPanel({ chats: openChats, selectedDate, state })', 'Busy days need a filterable list panel');
 expectIncludes(source, 'data-chat-list-filter="source"', 'Busy-day list must include source filtering');
 expectIncludes(source, 'data-chat-list-filter="group"', 'Busy-day list must include grouping control');

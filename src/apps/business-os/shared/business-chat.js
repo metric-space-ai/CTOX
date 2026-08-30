@@ -554,7 +554,8 @@ function alignChatWindows(root) {
   windows.forEach((win) => {
     const chatId = win.dataset.chatId;
     const chip = strip.querySelector(`[data-chat-focus="${chatId}"]`);
-    const winWidth = win.classList.contains('is-maximized') ? 440 : 320;
+    const winWidth = win.getBoundingClientRect().width
+      || (win.classList.contains('is-maximized') ? 560 : 460);
     let preferredLeft = 8;
 
     if (chip) {
@@ -621,9 +622,8 @@ function alignChatWindows(root) {
     });
   }
 
-  positions.forEach(({ win, left }) => {
+  positions.forEach(({ win, left, width }) => {
     setStyleIfChanged(win, 'position', 'absolute');
-    const width = win.classList.contains('is-maximized') ? 440 : 320;
     const nextLeft = fitsSideBySide || win.classList.contains('is-active')
       ? clampChatWindowLeft(left, width, layoutFrame)
       : left;
@@ -905,7 +905,10 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
           const markHasCorrectState = markStateClass
             ? markEl.classList.contains(markStateClass)
             : markEl.className.trim() === 'ctox-chat-chip-mark';
-          if (!markHasCorrectState) {
+          const markCreature = markEl.querySelector?.('.ctox-crew-creature');
+          const markHasCorrectMode = !markCreature
+            || markCreature.dataset?.crewMode === crewCreatureMode(chat, taskState);
+          if (!markHasCorrectState || !markHasCorrectMode) {
             markEl.outerHTML = chatChipMarkHtml(chat, taskState);
             inPlaceDomChanged = true;
           }
@@ -921,6 +924,9 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       const category = chatWorkjetCategory(chat);
       const relation = idx < activeIndex ? 'left' : idx > activeIndex ? 'right' : 'center';
       const taskState = getTaskState(chat);
+      const creatureMode = crewCreatureMode(chat, taskState);
+      const activityClass = executionActivityClass(chat);
+      const activityTurns = executionProgressForChat(chat)?.activity_turns?.total || 0;
 
       const isActiveWindow = chat.id === activeExpandedChat?.id;
       const wasActiveWindow = win.classList.contains('is-active');
@@ -929,8 +935,17 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         chat.maximized ? 'is-maximized' : '',
         isActiveWindow ? 'is-active' : '',
         `is-task-${taskState}`,
+        creatureMode === 'review' ? 'is-task-review' : '',
+        activityClass,
       ].filter(Boolean).join(' ');
       if (setClassNameIfChanged(win, nextWindowClass)) inPlaceDomChanged = true;
+      const activityChanged = setDatasetIfChanged(win, 'activityTurns', activityTurns);
+      if (activityChanged && activityClass) {
+        win.classList.remove(activityClass);
+        void win.offsetWidth;
+        win.classList.add(activityClass);
+        inPlaceDomChanged = true;
+      }
       const categoryChanged = setDatasetIfChanged(win, 'workjetCategory', category);
       if (categoryChanged) {
         if (typeof win.getAttribute === 'function') {
@@ -951,6 +966,50 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       if (titleStrong && setTextIfChanged(titleStrong, crewIdentity(chat).name)) inPlaceDomChanged = true;
       const titleTask = win.querySelector('.ctox-chat-title-task');
       if (titleTask && setTextIfChanged(titleTask, chat.title || (chatUiIsGerman() ? 'Neue Aufgabe' : 'New task'))) inPlaceDomChanged = true;
+      const titleCopy = win.querySelector('.ctox-chat-title-copy');
+      const progressHead = win.querySelector('.ctox-chat-progress-head');
+      const expectedProgressHead = executionProgressHeaderHtml(chat);
+      if (progressHead && !expectedProgressHead) {
+        progressHead.remove();
+        inPlaceDomChanged = true;
+      } else if (!progressHead && expectedProgressHead && titleCopy) {
+        titleCopy.insertAdjacentHTML('beforeend', expectedProgressHead);
+        inPlaceDomChanged = true;
+      } else if (progressHead && expectedProgressHead) {
+        const progress = executionProgressForChat(chat);
+        const turns = progress?.activity_turns?.total || 0;
+        if (setTextIfChanged(progressHead, `${progress?.percent || 0}% · ${turns}T`)) inPlaceDomChanged = true;
+        if (setAttrIfChanged(progressHead, 'title', `${turns} Aktivitäts-Turns`)) inPlaceDomChanged = true;
+      }
+
+      const creature = win.querySelector('.ctox-crew-creature');
+      if (creature && creature.dataset?.crewMode !== creatureMode) {
+        creature.outerHTML = crewCreatureHtml(chat, taskState, 'window');
+        inPlaceDomChanged = true;
+      }
+
+      if (taskState === 'queued' || taskState === 'running' || taskState === 'blocked') {
+        const trackingMessage = latestTrackingMessage(chat);
+        const taskId = trackingMessage?.taskId || '';
+        const commandId = trackingMessage?.commandId || chat.lastTrackingId || '';
+        const taskStatus = trackingMessage?.status || 'queued';
+        const progressCard = win.querySelector('.ctox-chat-delegation-card');
+        const nextSignature = executionProgressSignature(chat);
+        if (progressCard?.dataset.progressSignature !== nextSignature) {
+          const expectedCard = delegationProgressCardHtml(chat, { taskId, commandId, taskStatus });
+          let cardUpdated = false;
+          if (progressCard) {
+            progressCard.outerHTML = expectedCard;
+            cardUpdated = true;
+          } else if (typeof win.querySelector('header')?.insertAdjacentHTML === 'function') {
+            win.querySelector('header').insertAdjacentHTML('beforeend', expectedCard);
+            cardUpdated = true;
+          }
+          if (cardUpdated) {
+            inPlaceDomChanged = true;
+          }
+        }
+      }
 
       // Update maximize icon in window header only when maximized state flipped.
       const maxBtn = win.querySelector('[data-chat-maximize]');
@@ -1011,7 +1070,10 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   root.innerHTML = `
     <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
       <button class="ctox-chat-fab" type="button" data-chat-open aria-label="${dockCollapsed ? (chatUiIsGerman() ? 'Crew öffnen' : 'Open crew') : (chatUiIsGerman() ? 'Crew einklappen' : 'Collapse crew')}">
-        <span>Crew</span><b>${openChats.length || ''}</b>
+        <span class="ctox-chat-fab-label">Crew</span>
+        <span class="ctox-chat-fab-creatures" aria-hidden="true">
+          ${(openChats.length ? openChats : [{ id: 'ctox-crew', title: 'CTOX' }]).slice(0, 3).map((chat) => crewCreatureHtml(chat, getTaskState(chat), 'fab')).join('')}
+        </span>
       </button>
 
       <div class="ctox-chat-date-pill">
@@ -1019,14 +1081,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         </button>
         <div class="ctox-date-picker-trigger" role="button" tabindex="0" aria-label="${escapeAttr(chatDateAriaLabel(selectedDate, workload.total))}" title="${escapeAttr(chatDateAriaLabel(selectedDate, workload.total))}">
-          <span class="ctox-date-copy">
-            <span class="ctox-date-scope">${chatUiIsGerman() ? 'Einsätze' : 'Missions'}</span>
-            <span class="ctox-date-row">
-              <span class="ctox-date-label">${formatGermanDateLabel(selectedDate)}</span>
-              ${workload.total > 0 ? `<span class="ctox-date-workload-badge" title="${escapeAttr(workload.total)} Tasks">${formatCompactCount(workload.total)}</span>` : ''}
-            </span>
-          </span>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
           <input type="date" class="ctox-date-native-picker" data-chat-date-picker value="${selectedDate}" max="${maxDateVal}" tabindex="-1" aria-hidden="true" />
         </div>
         <button class="ctox-date-nav-btn" type="button" data-chat-date-next aria-label="${chatUiIsGerman() ? 'Nächster Tag' : 'Next day'}">
@@ -1842,23 +1897,233 @@ function crewBodyMarkup(shape) {
   return '<path d="M32 7c15 0 26 10 26 25S48 58 32 58 7 48 7 32 17 7 32 7Z" />';
 }
 
-function crewEyesMarkup(shape) {
+function crewEyesMarkupForMode(shape, mode = 'working') {
   const y = shape === 'triangle' ? 36 : 30;
+  if (mode === 'failed') {
+    return `
+      <g class="ctox-crew-eyes-x">
+        <path d="M21 ${y - 5}l10 10M31 ${y - 5}L21 ${y + 5}" />
+        <path d="M36 ${y - 5}l10 10M46 ${y - 5}L36 ${y + 5}" />
+      </g>
+    `;
+  }
+  if (mode === 'sleeping') {
+    return `
+      <g class="ctox-crew-eyes-sleeping">
+        <path d="M21 ${y + 2}q5 5 10 0" />
+        <path d="M36 ${y + 2}q5 5 10 0" />
+      </g>
+    `;
+  }
   return `
     <path d="M25 ${y - 3}l3 8" />
     <path d="M40 ${y - 4}l3 8" />
   `;
 }
 
+function crewCreatureMode(chat, taskState = getTaskState(chat)) {
+  if (taskState === 'failed') return 'failed';
+  if (taskState === 'running') {
+    return executionProgressForChat(chat)?.phase === 'review' ? 'review' : 'working';
+  }
+  if (taskState === 'idle' || taskState === 'queued' || taskState === 'scheduled') return 'sleeping';
+  return taskState;
+}
+
+function crewMotionStyle(chat) {
+  const hash = crewHash(chat?.id || chat?.createdAt || chat?.title);
+  const tenths = (offset, min, span) => (min + ((hash >>> offset) % span) / 10).toFixed(2);
+  const delay = (offset, duration) => (-((hash >>> offset) % 1000) / 1000 * duration).toFixed(2);
+  const workDrift = tenths(3, 3.7, 21);
+  const workBody = tenths(11, 2.3, 27);
+  const workEyes = tenths(19, 4.1, 31);
+  const reviewDrift = tenths(7, 4.4, 25);
+  const reviewBody = tenths(15, 2.7, 29);
+  const reviewEyes = tenths(23, 5.2, 37);
+  return [
+    `--crew-work-drift:${workDrift}s`,
+    `--crew-work-body:${workBody}s`,
+    `--crew-work-eyes:${workEyes}s`,
+    `--crew-review-drift:${reviewDrift}s`,
+    `--crew-review-body:${reviewBody}s`,
+    `--crew-review-eyes:${reviewEyes}s`,
+    `--crew-work-delay:${delay(5, Number(workDrift))}s`,
+    `--crew-work-body-delay:${delay(13, Number(workBody))}s`,
+    `--crew-work-eyes-delay:${delay(21, Number(workEyes))}s`,
+    `--crew-review-delay:${delay(9, Number(reviewDrift))}s`,
+    `--crew-review-body-delay:${delay(17, Number(reviewBody))}s`,
+    `--crew-review-eyes-delay:${delay(25, Number(reviewEyes))}s`,
+  ].join(';');
+}
+
 function crewCreatureHtml(chat, taskState = getTaskState(chat), placement = 'dock') {
   const crew = crewIdentity(chat);
+  const mode = crewCreatureMode(chat, taskState);
+  const progress = executionProgressForChat(chat);
+  const progressAngle = Math.max(0, Math.min(360, Number(progress?.percent || 0) * 3.6));
   return `
-    <span class="ctox-crew-creature is-${escapeAttr(taskState)} is-${escapeAttr(crew.shape)} is-${escapeAttr(placement)}" style="--crew-color:${escapeAttr(crew.color)}" aria-hidden="true">
+    <span class="ctox-crew-creature is-${escapeAttr(taskState)} is-${escapeAttr(mode)} is-${escapeAttr(crew.shape)} is-${escapeAttr(placement)}" data-crew-mode="${escapeAttr(mode)}" style="--crew-color:${escapeAttr(crew.color)};--ctox-progress-angle:${progressAngle}deg;${crewMotionStyle(chat)}" aria-hidden="true">
       <svg viewBox="0 0 64 64" focusable="false">
         <g class="ctox-crew-body">${crewBodyMarkup(crew.shape)}</g>
-        <g class="ctox-crew-eyes">${crewEyesMarkup(crew.shape)}</g>
+        <g class="ctox-crew-eyes is-${escapeAttr(mode)}">${crewEyesMarkupForMode(crew.shape, mode)}</g>
       </svg>
     </span>
+  `;
+}
+
+function normalizeExecutionProgress(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const steps = Array.isArray(value.steps)
+    ? value.steps.map((step, index) => ({
+        position: Number(step?.position) || index + 1,
+        label: String(step?.label || `Schritt ${index + 1}`),
+        status: String(step?.status || 'pending').toLowerCase(),
+        activity_turns: Math.max(0, Number(step?.activity_turns) || 0),
+      }))
+    : [];
+  if (!steps.length) return null;
+  const activity = value.activity_turns && typeof value.activity_turns === 'object'
+    ? value.activity_turns
+    : {};
+  return {
+    version: Number(value.version) || 1,
+    revision: Math.max(1, Number(value.revision) || 1),
+    phase: String(value.phase || 'work'),
+    percent: Math.max(0, Math.min(100, Number(value.percent) || 0)),
+    current_step: Number(value.current_step) || null,
+    completed_steps: Math.max(0, Number(value.completed_steps) || 0),
+    total_steps: Math.max(steps.length, Number(value.total_steps) || 0),
+    steps,
+    review: value.review && typeof value.review === 'object'
+      ? { status: String(value.review.status || 'pending').toLowerCase() }
+      : { status: 'pending' },
+    activity_turns: {
+      total: Math.max(0, Number(activity.total) || 0),
+      thinking: Math.max(0, Number(activity.thinking) || 0),
+      tools: Math.max(0, Number(activity.tools) || 0),
+      last_kind: String(activity.last_kind || '').toLowerCase(),
+    },
+    updated_at_ms: Math.max(0, Number(value.updated_at_ms) || 0),
+  };
+}
+
+function latestTrackingMessage(chat) {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+  return [...messages].reverse().find((message) => (
+    message?.executionProgress
+    || message?.taskId
+    || message?.commandId
+  )) || null;
+}
+
+function executionProgressForChat(chat) {
+  return normalizeExecutionProgress(latestTrackingMessage(chat)?.executionProgress);
+}
+
+function executionProgressSignature(chat) {
+  const progress = executionProgressForChat(chat);
+  if (!progress) return 'planning';
+  return [
+    progress.revision,
+    progress.percent,
+    progress.phase,
+    progress.review.status,
+    progress.activity_turns.total,
+    progress.activity_turns.last_kind,
+    progress.updated_at_ms,
+  ].join(':');
+}
+
+function executionActivityClass(chat) {
+  const kind = executionProgressForChat(chat)?.activity_turns?.last_kind;
+  if (kind === 'thinking' || kind === 'tool') return `has-activity-${kind}`;
+  return '';
+}
+
+function executionProgressHeaderHtml(chat) {
+  return '';
+}
+
+function executionStepStatusLabel(status) {
+  if (status === 'completed') return 'Erledigt';
+  if (status === 'in_progress') return 'Aktiv';
+  return 'Offen';
+}
+
+function executionProgressTooltip(progress) {
+  if (!progress) return chatUiIsGerman() ? 'Plan wird erstellt' : 'Creating plan';
+  const isReviewPhase = progress.phase === 'review' || progress.phase === 'completed';
+  const current = isReviewPhase
+    ? null
+    : progress.steps.find((step) => step.position === progress.current_step)
+      || progress.steps.find((step) => step.status === 'in_progress')
+      || progress.steps.at(-1);
+  const attributedTurns = progress.steps.reduce((total, step) => total + step.activity_turns, 0);
+  const stepTurns = isReviewPhase
+    ? Math.max(0, progress.activity_turns.total - attributedTurns)
+    : Math.max(0, Number(current?.activity_turns) || 0);
+  const nextIndex = Math.max(0, progress.steps.findIndex((step) => step.position === current?.position));
+  const next = isReviewPhase
+    ? null
+    : progress.steps.slice(nextIndex + 1).find((step) => step.status !== 'completed');
+  const lines = [
+    isReviewPhase ? 'CTOX-Prüfung' : current?.label || 'CTOX',
+    `${progress.percent}% · ${stepTurns}/${progress.activity_turns.total} Turns · Plan v${progress.revision}`,
+    ...progress.steps.map((step) => `${step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '●' : '○'} ${step.label}`),
+  ];
+  if (next) lines.push(`→ ${next.label}`);
+  return lines.join('\n');
+}
+
+function delegationProgressCardHtml(chat, { taskId = '', commandId = '', taskStatus = 'queued' } = {}) {
+  const progress = executionProgressForChat(chat);
+  if (!progress) {
+    const isPlanning = taskStatus === 'queued' || taskStatus === 'running' || taskStatus === 'blocked';
+    const tooltip = isPlanning
+      ? (chatUiIsGerman() ? 'Plan wird erstellt' : 'Creating plan')
+      : (chatUiIsGerman() ? 'Noch kein Ausführungsplan' : 'No execution plan yet');
+    return `
+      <div class="ctox-chat-delegation-card ${isPlanning ? 'is-planning' : 'is-dormant'}" data-progress-signature="planning">
+        <button class="ctox-progress-visual ${isPlanning ? 'is-planning' : 'is-dormant'}" type="button" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}" aria-label="${escapeAttr(tooltip)}" title="${escapeAttr(tooltip)}">
+          <span class="ctox-progress-activity" style="--ctox-turn-angle:0deg" aria-hidden="true"><i></i></span>
+          <span class="ctox-progress-track">
+            <span class="ctox-progress-work"><span class="ctox-progress-segment is-pending"></span></span>
+            <span class="ctox-progress-review is-pending"></span>
+          </span>
+        </button>
+      </div>
+    `;
+  }
+
+  const isReviewPhase = progress.phase === 'review' || progress.phase === 'completed';
+  const current = isReviewPhase
+    ? null
+    : progress.steps.find((step) => step.position === progress.current_step)
+      || progress.steps.find((step) => step.status === 'in_progress')
+      || progress.steps.at(-1);
+  const lastKind = progress.activity_turns.last_kind;
+  const activityClass = lastKind === 'thinking' || lastKind === 'tool' ? `is-${lastKind}` : '';
+  const reviewStatus = progress.review.status;
+  const attributedTurns = progress.steps.reduce((total, step) => total + step.activity_turns, 0);
+  const stepTurns = isReviewPhase
+    ? Math.max(0, progress.activity_turns.total - attributedTurns)
+    : Math.max(0, Number(current?.activity_turns) || 0);
+  const turnAngle = (stepTurns % 60) * 6;
+  const workSegments = progress.steps.map((step) => `
+    <span class="ctox-progress-segment is-${escapeAttr(step.status)}" title="${escapeAttr(`${step.position}. ${step.label}: ${executionStepStatusLabel(step.status)}`)}"></span>
+  `).join('');
+  const tooltip = executionProgressTooltip(progress);
+
+  return `
+    <div class="ctox-chat-delegation-card ${activityClass}" data-progress-signature="${escapeAttr(executionProgressSignature(chat))}">
+      <button class="ctox-progress-visual" type="button" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}" aria-label="${escapeAttr(tooltip)}" title="${escapeAttr(tooltip)}">
+        <span class="ctox-progress-activity" style="--ctox-turn-angle:${turnAngle}deg" aria-hidden="true"><i></i></span>
+        <span class="ctox-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}">
+          <div class="ctox-progress-work">${workSegments}</div>
+          <span class="ctox-progress-review is-${escapeAttr(reviewStatus)}" title="CTOX-Prüfung: ${escapeAttr(reviewStatus)}"></span>
+        </span>
+      </button>
+    </div>
   `;
 }
 
@@ -1883,6 +2148,7 @@ function chatWindow(chat, activeId, relation = 'center') {
   const category = chatWorkjetCategory(chat);
   const categoryStyleText = chatWorkjetCategoryStyleText(category);
   const taskState = getTaskState(chat);
+  const creatureMode = crewCreatureMode(chat, taskState);
   const crew = crewIdentity(chat);
   const isFuture = chat.createdAt > Date.now();
   const agentScopeHtml = renderChatAgentScopeHtml(chat.contextMeta);
@@ -1950,6 +2216,7 @@ function chatWindow(chat, activeId, relation = 'center') {
 
   // Determine what to show at the bottom
   let bottomHtml = '';
+  let headerProgressHtml = delegationProgressCardHtml(chat, { taskStatus: taskState });
   if (taskState === 'scheduled') {
     const timeText = getFormattedDateTime(chat.createdAt);
     bottomHtml = `
@@ -1973,8 +2240,8 @@ function chatWindow(chat, activeId, relation = 'center') {
       </div>
     `;
   } else if (taskState === 'queued' || taskState === 'running' || taskState === 'blocked') {
-    // Hide input, show active progress card — blocked work is still tracked,
-    // so the user keeps the progress view rather than a dead-end follow-up form.
+    // Active work keeps the composer hidden. Its progress lives in the header,
+    // so the content area remains exclusively for the conversation.
     const trackingMsg = [...chat.messages].reverse().find(m => 
       (m.commandId && m.commandId === chat.lastTrackingId) || 
       (m.taskId && m.taskId === chat.lastTrackingId)
@@ -1983,22 +2250,7 @@ function chatWindow(chat, activeId, relation = 'center') {
     const commandId = trackingMsg?.commandId || chat.lastTrackingId || '';
     const taskStatus = trackingMsg?.status || 'queued';
     
-    bottomHtml = `
-      <div class="ctox-chat-delegation-card">
-        <div class="ctox-delegation-glow"></div>
-        <div class="ctox-delegation-header">
-          <span class="ctox-delegation-spinner"></span>
-          <div class="ctox-delegation-info">
-            <strong>Aufgabe delegiert &amp; aktiv</strong>
-            <span>CTOX verarbeitet deine Anfrage...</span>
-          </div>
-        </div>
-        <button class="ctox-delegation-watch-btn" type="button" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-          <span>Live-Harness beobachten</span>
-        </button>
-      </div>
-    `;
+    headerProgressHtml = delegationProgressCardHtml(chat, { taskId, commandId, taskStatus });
   } else if (taskState === 'success' || taskState === 'failed') {
     if (chat.showFollowUp) {
       bottomHtml = `
@@ -2043,6 +2295,11 @@ function chatWindow(chat, activeId, relation = 'center') {
 
   const isMinimizedClass = chat.minimized ? 'is-minimized' : '';
   const taskStateClass = `is-task-${taskState}`;
+  const windowTitle = [
+    `${crew.name} · ${chat.title || (chatUiIsGerman() ? 'Neue Aufgabe' : 'New task')}`,
+    taskState,
+    executionProgressTooltip(executionProgressForChat(chat)),
+  ].filter(Boolean).join('\n');
 
   let schedulerBarHtml = '';
   if (isFuture) {
@@ -2063,31 +2320,25 @@ function chatWindow(chat, activeId, relation = 'center') {
   }
 
   return `
-    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}">
+    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass} ${creatureMode === 'review' ? 'is-task-review' : ''} ${executionActivityClass(chat)}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}" data-activity-turns="${escapeAttr(executionProgressForChat(chat)?.activity_turns?.total || 0)}">
       <header>
-        <button class="ctox-chat-title" type="button" data-chat-title="${escapeAttr(chat.id)}">
+        <button class="ctox-chat-title" type="button" data-chat-title="${escapeAttr(chat.id)}" aria-label="${escapeAttr(windowTitle)}" title="${escapeAttr(windowTitle)}">
           ${crewCreatureHtml(chat, taskState, 'window')}
-          <span class="ctox-chat-title-copy">
-            <strong>${escapeHtml(crew.name)}</strong>
-            <span class="ctox-chat-title-task">${escapeHtml(chat.title || (chatUiIsGerman() ? 'Neue Aufgabe' : 'New task'))}</span>
-          </span>
-          <span class="ctox-chat-title-status">
-            ${statusBadgeHtml}
-          </span>
         </button>
         <div class="ctox-chat-header-actions">
-          <button type="button" data-chat-maximize aria-label="${chat.maximized ? 'Arbeitsfenster wiederherstellen' : 'Arbeitsfenster maximieren'}">
+          <button type="button" data-chat-maximize aria-label="${chat.maximized ? 'Arbeitsfenster wiederherstellen' : 'Arbeitsfenster maximieren'}" title="${chat.maximized ? 'Wiederherstellen' : 'Maximieren'}">
             ${chat.maximized 
               ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="10" y1="14" x2="3" y2="21"></line></svg>` 
               : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`}
           </button>
-          <button type="button" data-chat-minimize aria-label="Wesen einklappen">
+          <button type="button" data-chat-minimize aria-label="Wesen einklappen" title="Einklappen">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           </button>
-          <button type="button" data-chat-delete aria-label="Wesen aus der Crew entfernen" class="is-delete">
+          <button type="button" data-chat-delete aria-label="Wesen aus der Crew entfernen" title="Entfernen" class="is-delete">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
           </button>
         </div>
+        ${headerProgressHtml}
       </header>
       <div class="ctox-chat-drag-overlay">
         <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -2147,9 +2398,8 @@ function formatCompactCount(count) {
 
 function chatOverflowItem(hiddenCount, active) {
   return `
-    <button class="ctox-chat-overflow-chip ${active ? 'is-active' : ''}" type="button" data-chat-overflow-open aria-label="${escapeAttr(hiddenCount)} weitere Crew-Mitglieder anzeigen">
-      <span>+${formatCompactCount(hiddenCount)}</span>
-      <small>mehr</small>
+    <button class="ctox-chat-overflow-chip ${active ? 'is-active' : ''}" type="button" data-chat-overflow-open aria-label="${escapeAttr(hiddenCount)} weitere Crew-Mitglieder anzeigen" title="${escapeAttr(hiddenCount)} weitere Wesen">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg>
     </button>
   `;
 }
@@ -2530,10 +2780,6 @@ function chatDockItem(chat, activeId) {
   return `
     <button class="${chatDockClassName(chat, activeId, taskState)}" type="button" data-chat-focus="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-workjet-category="${escapeAttr(category)}" style="${escapeAttr(categoryStyleText)}" aria-label="${escapeAttr(chatDockAriaLabel(chat, status))}" title="${escapeAttr(`${crew.name} · ${taskTitle} · ${status}`)}">
       ${markHtml}
-      <span class="ctox-chat-chip-copy">
-        <strong>${escapeHtml(crew.name)}</strong>
-        <small>${escapeHtml(status)}</small>
-      </span>
     </button>
   `;
 }
@@ -2731,13 +2977,26 @@ function formatChatBodyHtml(rawText) {
 function messageMarkup(message) {
   const trackId = message.taskId || message.commandId;
   const tracking = message.trackable === false ? '' : (message.commandId || message.taskId)
-    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(trackId)}">${escapeHtml(trackButtonLabel(message))}</button>`
+    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(trackButtonLabel(message))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path></svg></button>`
     : '';
-  const meta = [message.status, message.detail].filter(Boolean).join(' · ');
+  const rawText = String(message.text || '');
+  const promptIsLong = message.role === 'user'
+    && (rawText.length > 180 || rawText.split('\n').length > 2);
+  const compactText = rawText.replace(/\s+/g, ' ').trim();
+  const promptBody = promptIsLong
+    ? `<details class="ctox-chat-prompt">
+        <summary>
+          <span class="ctox-chat-prompt-preview">${escapeHtml(compactText.slice(0, 180))}${compactText.length > 180 ? '…' : ''}</span>
+          <span class="ctox-chat-prompt-more">Mehr</span>
+          <span class="ctox-chat-prompt-less">Weniger</span>
+        </summary>
+        <div class="ctox-chat-prompt-full">${formatChatBodyHtml(rawText)}</div>
+      </details>`
+    : formatChatBodyHtml(rawText);
   return `
     <article class="ctox-chat-message is-${escapeAttr(message.role || 'ctox')}">
-      <div class="ctox-chat-body">${formatChatBodyHtml(message.text || '')}</div>
-      ${tracking || meta ? `<footer>${tracking}${meta ? `<span>${escapeHtml(meta)}</span>` : ''}</footer>` : ''}
+      <div class="ctox-chat-body">${promptBody}</div>
+      ${tracking ? `<footer>${tracking}</footer>` : ''}
     </article>
   `;
 }
@@ -2771,6 +3030,22 @@ async function submitChatMessage({
   const messageId = `chatmsg_${crypto.randomUUID()}`;
   const threadKey = meta.thread_key || meta.threadKey || extraPayload.thread_key || extraPayload.threadKey || chat.contextMeta?.thread_key || `business-os/chat/${chat.id}`;
   const sourceTracking = followUpSubmission ? chatTrackingSummary(chat) : null;
+  const displayTitle = String(
+    meta.display_title
+    || meta.displayTitle
+    || extraPayload.display_title
+    || extraPayload.displayTitle
+    || meta.title
+    || extraPayload.title
+    || titleFromText(text),
+  ).trim();
+  const displayPrompt = String(followUpSubmission
+    ? text
+    : meta.display_prompt
+      || meta.displayPrompt
+      || extraPayload.display_prompt
+      || extraPayload.displayPrompt
+      || text).trim();
   chat.contextMeta = {
     ...(chat.contextMeta && typeof chat.contextMeta === 'object' ? chat.contextMeta : {}),
     module: sourceModule,
@@ -2783,11 +3058,11 @@ async function submitChatMessage({
   chat.messages.push({
     id: messageId,
     role: 'user',
-    text,
+    text: displayPrompt,
     createdAt: now,
     attachments: attachments.map(chatMessageAttachmentSummary),
   });
-  chat.title = chat.title === 'CTOX' ? titleFromText(text) : chat.title;
+  chat.title = chat.title === 'CTOX' ? displayTitle : chat.title;
   const pendingMessage = {
     id: `status_${commandId}`,
     role: 'ctox',
@@ -2825,7 +3100,9 @@ async function submitChatMessage({
       inbound_channel: meta.inbound_channel || CHAT_CHANNEL,
       payload: {
         ...extraPayload,
-        title: meta.title || extraPayload.title || titleFromText(text),
+        title: displayTitle,
+        display_title: displayTitle,
+        display_prompt: displayPrompt,
         instruction: followUpSubmission ? text : meta.instruction || extraPayload.instruction || text,
         prompt: followUpSubmission ? text : meta.prompt || extraPayload.prompt || text,
         ...(followUpSubmission ? {
@@ -2990,6 +3267,17 @@ async function syncTrackedMessages({ state, db, sync = null }) {
       const nextTaskId = taskId || resolvedTaskId || taskDoc?.id || '';
       const orphanedTracking = !commandDoc && !taskDoc && isActiveTrackingStatus(message.status) && trackingMessageAgeMs(message) > 10 * 60 * 1000;
       const nextStatus = orphanedTracking ? 'failed' : preferredTrackingStatus(commandDoc, taskDoc, message.status);
+      const nextProgress = taskDoc?.execution_progress
+        || taskDoc?.executionProgress
+        || commandDoc?.execution_progress
+        || commandDoc?.executionProgress
+        || null;
+      const normalizedProgress = normalizeExecutionProgress(nextProgress);
+      if (JSON.stringify(message.executionProgress || null) !== JSON.stringify(normalizedProgress)) {
+        message.executionProgress = normalizedProgress;
+        changed = true;
+        chatChanged = true;
+      }
       if (orphanedTracking && message.trackable !== false) {
         message.trackable = false;
         changed = true;
@@ -4813,70 +5101,100 @@ function installChatStyles() {
       transform-box: fill-box;
       transform-origin: center;
     }
+    .ctox-crew-eyes-x,
+    .ctox-crew-eyes-sleeping {
+      fill: none;
+      stroke: #090a0c;
+      stroke-width: 5;
+      stroke-linecap: round;
+    }
     .ctox-crew-creature.is-window {
       width: 38px;
       height: 38px;
       flex: 0 0 38px;
     }
-    .ctox-crew-creature.is-idle,
-    .ctox-chat-window.is-task-idle .ctox-crew-creature {
-      animation: ctoxCrewBreathe 2.8s ease-in-out infinite;
+    /* Resting, queued and scheduled crew members deliberately stay still. */
+    .ctox-crew-creature.is-working,
+    .ctox-chat-window.is-task-running:not(.is-task-review) .ctox-crew-creature {
+      animation: ctoxCrewWorkDrift var(--crew-work-drift) ease-in-out infinite;
+      animation-delay: var(--crew-work-delay);
     }
-    .ctox-crew-creature.is-running,
-    .ctox-chat-window.is-task-running .ctox-crew-creature {
-      animation: ctoxCrewWork 0.9s ease-in-out infinite;
+    .ctox-crew-creature.is-working .ctox-crew-body,
+    .ctox-chat-window.is-task-running:not(.is-task-review) .ctox-crew-body {
+      animation: ctoxCrewWorkBody var(--crew-work-body) ease-in-out infinite;
+      animation-delay: var(--crew-work-body-delay);
     }
-    .ctox-crew-creature.is-running .ctox-crew-eyes,
-    .ctox-chat-window.is-task-running .ctox-crew-eyes {
-      animation: ctoxCrewLook 1.7s ease-in-out infinite;
+    .ctox-crew-creature.is-working .ctox-crew-eyes,
+    .ctox-chat-window.is-task-running:not(.is-task-review) .ctox-crew-eyes {
+      animation: ctoxCrewWorkEyes var(--crew-work-eyes) ease-in-out infinite;
+      animation-delay: var(--crew-work-eyes-delay);
     }
-    .ctox-crew-creature.is-queued,
-    .ctox-crew-creature.is-scheduled,
-    .ctox-chat-window:is(.is-task-queued, .is-task-scheduled) .ctox-crew-creature {
-      animation: ctoxCrewWait 1.8s ease-in-out infinite;
+    .ctox-crew-creature.is-review,
+    .ctox-chat-window.is-task-review .ctox-crew-creature {
+      animation: ctoxCrewReviewDrift var(--crew-review-drift) ease-in-out infinite;
+      animation-delay: var(--crew-review-delay);
     }
-    .ctox-crew-creature.is-success,
-    .ctox-chat-window.is-task-success .ctox-crew-creature {
-      animation: ctoxCrewCelebrate 1.3s var(--ease-spring) infinite;
+    .ctox-crew-creature.is-review .ctox-crew-body,
+    .ctox-chat-window.is-task-review .ctox-crew-body {
+      animation: ctoxCrewReviewBody var(--crew-review-body) ease-in-out infinite;
+      animation-delay: var(--crew-review-body-delay);
     }
-    .ctox-crew-creature.is-blocked,
-    .ctox-chat-window.is-task-blocked .ctox-crew-creature {
-      animation: ctoxCrewBlocked 2.2s ease-in-out infinite;
+    .ctox-crew-creature.is-review .ctox-crew-eyes,
+    .ctox-chat-window.is-task-review .ctox-crew-eyes {
+      animation: ctoxCrewReviewEyes var(--crew-review-eyes) ease-in-out infinite;
+      animation-delay: var(--crew-review-eyes-delay);
     }
     .ctox-crew-creature.is-failed,
     .ctox-chat-window.is-task-failed .ctox-crew-creature {
-      animation: ctoxCrewOops 2s ease-in-out infinite;
+      animation: ctoxCrewOops 860ms cubic-bezier(.22,.75,.35,1) 1 both;
     }
+    @keyframes ctoxCrewWorkDrift {
+      0%, 19%, 100% { transform: translate3d(0, 0, 0) rotate(-1.5deg); }
+      33% { transform: translate3d(0, -2px, 0) rotate(1deg); }
+      57% { transform: translate3d(1px, 1px, 0) rotate(2.5deg); }
+      78% { transform: translate3d(-1px, -1px, 0) rotate(-2deg); }
+    }
+    @keyframes ctoxCrewWorkBody {
+      0%, 100% { transform: scale(1, 1); }
+      27% { transform: scale(1.035, .97) skewX(-1deg); }
+      52% { transform: scale(.975, 1.025) skewX(1.5deg); }
+      81% { transform: scale(1.018, .988) skewX(-.5deg); }
+    }
+    @keyframes ctoxCrewWorkEyes {
+      0%, 23%, 100% { transform: translateX(0) rotate(0); }
+      41% { transform: translateX(2px) rotate(-2deg); }
+      63% { transform: translateX(-1px) rotate(1deg); }
+      86% { transform: translateX(1px) rotate(-1deg); }
+    }
+    @keyframes ctoxCrewReviewDrift {
+      0%, 100% { transform: translate3d(0, 0, 0) rotate(2deg); }
+      24% { transform: translate3d(-1px, -1px, 0) rotate(-2deg); }
+      49% { transform: translate3d(1px, 1px, 0) rotate(3deg); }
+      73% { transform: translate3d(-1px, 0, 0) rotate(-1deg); }
+    }
+    @keyframes ctoxCrewReviewBody {
+      0%, 100% { transform: scale(1) rotate(0); }
+      18% { transform: scale(.965, 1.03) rotate(-2deg); }
+      46% { transform: scale(1.025, .975) rotate(1.5deg); }
+      68% { transform: scale(.985, 1.015) rotate(3deg); }
+      88% { transform: scale(1.012, .99) rotate(-1deg); }
+    }
+    @keyframes ctoxCrewReviewEyes {
+      0%, 100% { transform: translateX(-1px) rotate(2deg); }
+      31% { transform: translateX(3px) rotate(-3deg); }
+      59% { transform: translateX(-3px) rotate(2deg); }
+      82% { transform: translateX(1px) rotate(-1deg); }
+    }
+    @keyframes ctoxCrewOops {
+      0%, 68%, 100% { transform: translate3d(0, 0, 0) rotate(0); }
+      76% { transform: translate3d(-2px, 0, 0) rotate(-3deg); }
+      84% { transform: translate3d(2px, 0, 0) rotate(3deg); }
+      92% { transform: translate3d(-1px, 0, 0) rotate(-1deg); }
+    }
+    /* Kept for the planning indicator; creature bodies never use this loop. */
     @keyframes ctoxCrewBreathe {
       0%, 100% { transform: scale(1); }
       50% { transform: scale(1.045, 0.965) translateY(1px); }
-    }
-    @keyframes ctoxCrewWork {
-      0%, 100% { transform: translateY(0) rotate(-2deg) scale(1, 1); }
-      50% { transform: translateY(-3px) rotate(2deg) scale(1.04, 0.96); }
-    }
-    @keyframes ctoxCrewLook {
-      0%, 35%, 100% { transform: translateX(0); }
-      55%, 75% { transform: translateX(3px); }
-    }
-    @keyframes ctoxCrewWait {
-      0%, 100% { transform: translateY(0) rotate(-1deg); }
-      50% { transform: translateY(-2px) rotate(2deg); }
-    }
-    @keyframes ctoxCrewCelebrate {
-      0%, 55%, 100% { transform: translateY(0) scale(1); }
-      25% { transform: translateY(-5px) scale(0.96, 1.05) rotate(-3deg); }
-      40% { transform: translateY(0) scale(1.06, 0.94) rotate(2deg); }
-    }
-    @keyframes ctoxCrewBlocked {
-      0%, 100% { transform: translateY(2px) scale(1.04, 0.94); opacity: 0.82; }
-      50% { transform: translateY(0) scale(1); opacity: 1; }
-    }
-    @keyframes ctoxCrewOops {
-      0%, 70%, 100% { transform: translateX(0) rotate(0); }
-      76% { transform: translateX(-2px) rotate(-3deg); }
-      82% { transform: translateX(2px) rotate(3deg); }
-      88% { transform: translateX(-1px) rotate(-2deg); }
     }
     .ctox-crew-state-dot {
       position: absolute;
@@ -5245,7 +5563,7 @@ function installChatStyles() {
       gap: 7px !important;
       min-width: 0 !important;
       flex: 1 1 auto !important;
-      max-width: calc(100% - 136px) !important;
+      max-width: calc(100% - 104px) !important;
       text-align: left !important;
       padding: 0 !important;
       width: auto !important;
@@ -5262,6 +5580,7 @@ function installChatStyles() {
     }
     .ctox-chat-title-copy {
       display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 1px;
       min-width: 0;
       flex: 1 1 auto;
@@ -5277,6 +5596,8 @@ function installChatStyles() {
       max-width: 100%;
     }
     .ctox-chat-title-copy strong {
+      grid-column: 1;
+      grid-row: 1;
       color: var(--text);
       font-size: var(--fs-sm);
       font-weight: 820;
@@ -5284,15 +5605,32 @@ function installChatStyles() {
       min-width: 0;
     }
     .ctox-chat-title-task {
+      grid-column: 1 / -1;
+      grid-row: 2;
       color: var(--muted);
       font-size: var(--fs-meta);
     }
     .ctox-chat-title-status {
       display: flex;
       align-items: center;
+      gap: 5px;
       width: auto !important;
       flex: 0 0 auto;
       overflow: visible !important;
+    }
+    .ctox-chat-progress-head {
+      grid-column: 2;
+      grid-row: 1;
+      color: var(--accent);
+      font-size: var(--fs-meta);
+      font-weight: 820;
+      white-space: nowrap;
+    }
+    .ctox-chat-window:has(.ctox-chat-progress-head) .ctox-chat-status-badge > span:last-child {
+      display: none;
+    }
+    .ctox-chat-window:has(.ctox-chat-progress-head) .ctox-chat-title-status {
+      display: none;
     }
     .ctox-chat-messages {
       display: flex;
@@ -5481,6 +5819,50 @@ function installChatStyles() {
       word-break: break-word;
       overflow-wrap: anywhere;
     }
+    .ctox-chat-prompt {
+      display: block;
+      min-width: 0;
+    }
+    .ctox-chat-prompt summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      cursor: pointer;
+      list-style: none;
+      color: inherit;
+    }
+    .ctox-chat-prompt summary::-webkit-details-marker {
+      display: none;
+    }
+    .ctox-chat-prompt-preview {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      line-height: 1.4;
+    }
+    .ctox-chat-prompt-more,
+    .ctox-chat-prompt-less {
+      align-self: end;
+      color: var(--accent);
+      font-size: var(--fs-meta);
+      font-weight: 780;
+      white-space: nowrap;
+    }
+    .ctox-chat-prompt-less,
+    .ctox-chat-prompt[open] .ctox-chat-prompt-more,
+    .ctox-chat-prompt[open] .ctox-chat-prompt-preview {
+      display: none;
+    }
+    .ctox-chat-prompt[open] .ctox-chat-prompt-less {
+      display: inline;
+    }
+    .ctox-chat-prompt-full {
+      padding-top: 7px;
+      border-top: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+      margin-top: 7px;
+    }
     .ctox-chat-message footer {
       display: flex;
       flex-wrap: wrap;
@@ -5606,6 +5988,231 @@ function installChatStyles() {
       min-width: 0;
       max-width: 100%;
       box-sizing: border-box;
+    }
+    .ctox-execution-progress {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .ctox-progress-summary {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--space-2);
+    }
+    .ctox-progress-summary > div {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      min-width: 0;
+    }
+    .ctox-progress-summary small,
+    .ctox-progress-summary span,
+    .ctox-progress-current-copy small,
+    .ctox-progress-current-copy span,
+    .ctox-progress-next small,
+    .ctox-progress-plan small {
+      color: var(--muted);
+      font-size: var(--fs-meta);
+    }
+    .ctox-progress-summary strong {
+      color: var(--accent);
+      font-size: var(--fs-sm);
+      font-weight: 860;
+    }
+    .ctox-progress-summary > span {
+      font-weight: 760;
+      white-space: nowrap;
+    }
+    .ctox-progress-track {
+      display: flex;
+      gap: 3px;
+      width: 100%;
+      height: 6px;
+    }
+    .ctox-progress-work {
+      display: flex;
+      flex: 0 0 calc(90% - 2px);
+      gap: 2px;
+      min-width: 0;
+    }
+    .ctox-progress-segment,
+    .ctox-progress-review {
+      display: block;
+      min-width: 0;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--line) 60%, transparent);
+    }
+    .ctox-progress-segment {
+      flex: 1 1 0;
+    }
+    .ctox-progress-review {
+      flex: 1 1 10%;
+      border-radius: 2px 999px 999px 2px;
+    }
+    .ctox-progress-segment.is-completed,
+    .ctox-progress-review.is-completed {
+      background: var(--accent);
+    }
+    .ctox-progress-segment.is-in_progress,
+    .ctox-progress-review:is(.is-running, .is-pending) {
+      background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 78%, transparent), color-mix(in srgb, var(--accent) 30%, var(--line)));
+    }
+    .ctox-progress-review.is-failed {
+      background: #ef4444;
+    }
+    .ctox-progress-current {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+    }
+    .ctox-turn-clock {
+      position: relative;
+      width: 32px;
+      height: 32px;
+      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 62%, transparent) inset;
+    }
+    .ctox-turn-clock::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 4px;
+      width: 1px;
+      height: 3px;
+      background: color-mix(in srgb, var(--accent) 55%, var(--muted));
+    }
+    .ctox-turn-clock-hand {
+      position: absolute;
+      left: calc(50% - 1px);
+      bottom: 50%;
+      width: 2px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--accent);
+      transform: rotate(var(--ctox-turn-angle)) translateY(1px);
+      transform-origin: 50% 100%;
+      transition: transform var(--motion-slow) var(--ease-spring);
+    }
+    .ctox-turn-clock i {
+      position: absolute;
+      left: calc(50% - 2px);
+      top: calc(50% - 2px);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .ctox-progress-current-copy {
+      display: grid;
+      gap: 1px;
+      min-width: 0;
+    }
+    .ctox-progress-current-copy strong,
+    .ctox-progress-next span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text);
+      font-size: var(--fs-meta);
+      font-weight: 780;
+    }
+    .ctox-progress-next {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 7px;
+      padding-left: 43px;
+    }
+    .ctox-progress-plan {
+      border-top: 1px solid color-mix(in srgb, var(--line) 38%, transparent);
+      padding-top: 6px;
+    }
+    .ctox-progress-plan summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: var(--fs-meta);
+      font-weight: 760;
+    }
+    .ctox-progress-plan summary span {
+      color: var(--accent);
+      white-space: nowrap;
+    }
+    .ctox-progress-plan ol {
+      display: grid;
+      gap: 4px;
+      margin: 7px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .ctox-progress-plan li,
+    .ctox-progress-review-row {
+      display: grid;
+      grid-template-columns: 8px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: var(--fs-meta);
+    }
+    .ctox-progress-plan li.is-in_progress,
+    .ctox-progress-plan li.is-completed {
+      color: var(--text);
+    }
+    .ctox-plan-step-mark {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--line) 75%, transparent);
+    }
+    .ctox-progress-plan li.is-completed .ctox-plan-step-mark,
+    .ctox-progress-plan li.is-in_progress .ctox-plan-step-mark {
+      background: var(--accent);
+    }
+    .ctox-progress-review-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      padding: 6px 0 0 15px;
+    }
+    .ctox-progress-review-row.is-completed {
+      color: var(--text);
+    }
+    @keyframes ctoxCrewThinkingTick {
+      0% { transform: rotate(0deg) translateY(0); }
+      45% { transform: rotate(-7deg) translateY(-1px); }
+      100% { transform: rotate(0deg) translateY(0); }
+    }
+    @keyframes ctoxCrewToolTick {
+      0% { transform: scale(1, 1); }
+      42% { transform: scale(1.12, 0.88) translateY(2px); }
+      72% { transform: scale(0.96, 1.06) translateY(-1px); }
+      100% { transform: scale(1, 1); }
+    }
+    .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-thinking .ctox-chat-title .ctox-crew-creature {
+      animation: ctoxCrewThinkingTick 560ms var(--ease-spring) both;
+    }
+    .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-thinking .ctox-chat-title .ctox-crew-eyes {
+      transform: translateX(2px) rotate(-4deg);
+    }
+    .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-tool .ctox-chat-title .ctox-crew-creature {
+      animation: ctoxCrewToolTick 440ms var(--ease-spring) both;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ctox-crew-creature,
+      .ctox-crew-creature *,
+      .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-thinking .ctox-chat-title .ctox-crew-creature,
+      .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-tool .ctox-chat-title .ctox-crew-creature,
+      .ctox-delegation-spinner,
+      .ctox-turn-clock-hand {
+        animation: none !important;
+        transition: none !important;
+      }
     }
     .ctox-delegation-glow {
       position: absolute;
@@ -6140,6 +6747,376 @@ function installChatStyles() {
     
     .ctox-chat-drag-overlay svg {
       animation: ctoxClockPulse 2s infinite ease-in-out;
+    }
+
+    /* Quiet crew surface: chat copy is the only persistent copy. */
+    .ctox-chat-window,
+    .ctox-chat-window.is-active,
+    .ctox-chat-window[class*="is-task-"] {
+      grid-template-rows: 64px minmax(0, 1fr) 56px;
+      width: min(460px, calc(100dvw - 24px));
+      max-width: min(460px, calc(100dvw - 24px));
+      height: min(580px, calc(100dvh - 132px)) !important;
+      min-height: min(420px, calc(100dvh - 132px));
+      max-height: min(580px, calc(100dvh - 132px));
+      border-color: var(--line) !important;
+      border-radius: 14px !important;
+      background: var(--surface) !important;
+      box-shadow: var(--shadow-lg) !important;
+      animation: none !important;
+    }
+    .ctox-chat-window.is-active {
+      border-color: color-mix(in srgb, var(--accent) 28%, var(--line)) !important;
+      box-shadow: var(--shadow-lg) !important;
+    }
+    .ctox-chat-stage-inner,
+    .ctox-chat-stage-inner.has-maximized {
+      height: min(600px, calc(100dvh - 112px));
+    }
+    .ctox-chat-window:not(:has(.ctox-chat-form)):not(:has(.ctox-followup-container)):not(:has(.ctox-chat-scheduler-card)) {
+      grid-template-rows: 64px minmax(0, 1fr);
+    }
+    .ctox-chat-window header {
+      position: relative;
+      box-sizing: border-box;
+      height: 64px;
+      padding: 10px;
+      border-bottom-color: var(--line);
+      background: var(--surface);
+    }
+    .ctox-chat-title {
+      flex: 0 0 40px !important;
+      width: 40px !important;
+      max-width: 40px !important;
+      justify-content: flex-start !important;
+      overflow: visible !important;
+    }
+    .ctox-chat-title-copy,
+    .ctox-chat-title-status,
+    .ctox-chat-progress-head,
+    .ctox-progress-summary,
+    .ctox-progress-current,
+    .ctox-progress-next,
+    .ctox-progress-plan,
+    .ctox-delegation-watch-btn,
+    .ctox-delegation-info {
+      display: none !important;
+    }
+    .ctox-crew-creature.is-window {
+      position: relative;
+      width: 40px;
+      height: 40px;
+      flex-basis: 40px;
+      isolation: isolate;
+    }
+    .ctox-crew-creature.is-window::before {
+      content: '';
+      position: absolute;
+      inset: -2px;
+      z-index: -1;
+      border-radius: 50%;
+      background: conic-gradient(from -90deg,
+        color-mix(in srgb, var(--crew-color) 72%, transparent) 0 var(--ctox-progress-angle),
+        color-mix(in srgb, var(--line) 34%, transparent) var(--ctox-progress-angle) 360deg);
+      -webkit-mask: radial-gradient(circle, transparent 66%, #000 68%);
+      mask: radial-gradient(circle, transparent 66%, #000 68%);
+      opacity: 0.75;
+    }
+    .ctox-chat-header-actions {
+      gap: 1px;
+      opacity: 0.38;
+      transition: opacity var(--motion-fast) var(--ease-standard);
+    }
+    .ctox-chat-window header:hover .ctox-chat-header-actions,
+    .ctox-chat-header-actions:focus-within { opacity: 0.9; }
+    .ctox-chat-window header button:not(.ctox-chat-title) {
+      width: 24px;
+      min-width: 24px;
+      height: 24px;
+      min-height: 24px;
+    }
+    .ctox-chat-window:not(.is-maximized) .ctox-chat-messages {
+      max-height: none;
+    }
+    .ctox-chat-messages {
+      gap: 10px;
+      padding: 12px;
+      background: var(--surface);
+    }
+    .ctox-chat-message.is-ctox {
+      margin: 0 !important;
+      padding: 2px 0 !important;
+      border-left: 0 !important;
+    }
+    .ctox-chat-message.is-user {
+      padding: 7px 9px !important;
+      border-radius: 10px !important;
+      background: color-mix(in srgb, var(--accent) 7%, var(--surface-2)) !important;
+      box-shadow: none !important;
+    }
+    .ctox-chat-message footer { min-height: 0; margin-top: 3px; }
+    .ctox-chat-track {
+      display: grid !important;
+      place-items: center;
+      width: 24px;
+      height: 20px;
+      min-width: 24px;
+      padding: 0 !important;
+      border: 0 !important;
+      background: transparent !important;
+      color: color-mix(in srgb, var(--muted) 68%, transparent) !important;
+    }
+    .ctox-chat-track:hover,
+    .ctox-chat-track:focus-visible { color: var(--accent) !important; }
+    .ctox-chat-delegation-card {
+      position: absolute;
+      left: 60px;
+      right: 90px;
+      top: 50%;
+      bottom: auto;
+      transform: translateY(-50%);
+      z-index: 2;
+      min-height: 0;
+      height: 28px;
+      padding: 0 !important;
+      gap: 0;
+      border: 0 !important;
+      background: transparent !important;
+      overflow: visible;
+    }
+    .ctox-progress-visual {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      min-width: 0;
+      height: 28px;
+      padding: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      cursor: help;
+      gap: 9px;
+    }
+    .ctox-chat-window header button.ctox-progress-visual {
+      width: 100%;
+      min-width: 0;
+      height: 28px;
+      min-height: 28px;
+    }
+    .ctox-progress-activity {
+      position: relative;
+      display: block;
+      flex: 0 0 28px;
+      width: 28px;
+      height: 28px;
+      border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+      border-radius: 50%;
+      opacity: 0.68;
+      transition: opacity var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-spring);
+    }
+    .ctox-progress-activity::after {
+      content: '';
+      position: absolute;
+      left: calc(50% - 0.5px);
+      bottom: 50%;
+      width: 1px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+      transform: rotate(var(--ctox-turn-angle, 0deg));
+      transform-origin: 50% 100%;
+      transition: transform var(--motion-slow) var(--ease-spring);
+    }
+    .ctox-progress-activity i {
+      position: absolute;
+      left: calc(50% - 2px);
+      top: calc(50% - 2px);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .ctox-progress-visual:hover .ctox-progress-activity,
+    .ctox-progress-visual:focus-visible .ctox-progress-activity {
+      opacity: 1;
+      transform: scale(1.08);
+    }
+    .ctox-progress-track {
+      display: flex;
+      gap: 3px;
+      width: 100%;
+      height: 6px;
+      overflow: visible;
+    }
+    .ctox-progress-segment,
+    .ctox-progress-review {
+      background: color-mix(in srgb, var(--line) 38%, transparent);
+      opacity: 0.72;
+    }
+    .ctox-progress-segment.is-completed,
+    .ctox-progress-review.is-completed {
+      background: color-mix(in srgb, var(--accent) 74%, var(--crew-color));
+      opacity: 0.9;
+    }
+    .ctox-progress-segment.is-in_progress,
+    .ctox-progress-review:is(.is-running, .is-pending) {
+      background: color-mix(in srgb, var(--accent) 56%, var(--line));
+      opacity: 1;
+      animation: ctoxQuietProgress 1.8s ease-in-out infinite;
+    }
+    .ctox-progress-planning-line {
+      display: block;
+      width: 38%;
+      height: 100%;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--accent) 60%, var(--line));
+      animation: ctoxQuietPlanning 1.8s ease-in-out infinite alternate;
+    }
+    .ctox-progress-visual.is-planning .ctox-progress-activity {
+      animation: ctoxCrewBreathe 1.8s ease-in-out infinite;
+    }
+    .ctox-progress-visual.is-dormant .ctox-progress-track,
+    .ctox-progress-visual.is-dormant .ctox-progress-activity {
+      opacity: 0.68;
+    }
+    .ctox-chat-form {
+      display: grid !important;
+      grid-template-columns: 36px minmax(0, 1fr) 36px;
+      align-items: center !important;
+      gap: 8px !important;
+      height: 56px;
+      padding: 7px 10px !important;
+      border-top-color: var(--line) !important;
+      background: var(--surface) !important;
+    }
+    .ctox-chat-form textarea {
+      box-sizing: border-box;
+      width: 100%;
+      height: 40px;
+      min-height: 40px;
+      max-height: 40px;
+      padding: 9px 11px !important;
+      border: 1px solid var(--line) !important;
+      border-radius: 10px !important;
+      background: var(--surface-2) !important;
+      line-height: 20px;
+    }
+    .ctox-chat-form button,
+    .ctox-chat-clip-btn {
+      align-self: center !important;
+      width: 36px !important;
+      min-width: 36px !important;
+      height: 36px !important;
+      min-height: 36px !important;
+    }
+    @keyframes ctoxQuietProgress {
+      0%, 100% { opacity: 0.52; }
+      50% { opacity: 1; }
+    }
+    @keyframes ctoxQuietPlanning {
+      0% { width: 18%; opacity: 0.45; }
+      100% { width: 58%; opacity: 0.9; }
+    }
+    .ctox-chat-dock {
+      --ctox-date-pill-width: 42px;
+      grid-template-columns: 108px var(--ctox-date-pill-width) 36px;
+      gap: 6px;
+      padding: 5px;
+      border-color: color-mix(in srgb, var(--line) 48%, transparent);
+      border-radius: 16px;
+      background: var(--surface);
+    }
+    .ctox-chat-dock.has-visible-chats {
+      grid-template-columns: 108px var(--ctox-date-pill-width) minmax(48px, auto) 36px;
+    }
+    .ctox-chat-dock.has-nav {
+      grid-template-columns: 108px var(--ctox-date-pill-width) 26px minmax(0, auto) 26px 36px;
+    }
+    .ctox-chat-dock.has-many-chats {
+      grid-template-columns: 108px var(--ctox-date-pill-width) 26px minmax(0, min(350px, 36dvw)) 26px 36px;
+    }
+    .ctox-chat-fab {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 6px;
+      width: 108px;
+      min-width: 108px;
+      height: 42px;
+      padding: 0 8px;
+      border-color: transparent;
+      background: transparent;
+    }
+    .ctox-chat-fab-creatures {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      width: 100%;
+      height: 34px;
+      padding-left: 8px;
+    }
+    .ctox-chat-fab-label {
+      color: var(--text-strong);
+      font-size: var(--fs-sm);
+      font-weight: 760;
+    }
+    .ctox-chat-fab-creatures .ctox-crew-creature {
+      width: 28px;
+      height: 28px;
+      flex: 0 0 28px;
+      margin-left: -8px;
+      filter: saturate(0.9);
+    }
+    .ctox-chat-date-pill {
+      height: 42px;
+      border-color: transparent;
+      background: transparent;
+    }
+    .ctox-date-picker-trigger {
+      justify-content: center;
+      flex: 0 0 30px;
+      padding: 0;
+    }
+    .ctox-date-copy,
+    .ctox-date-workload-badge { display: none !important; }
+    .ctox-chat-strip { gap: 5px; }
+    .ctox-chat-dock.has-one-chat .ctox-chat-strip { width: 48px; }
+    .ctox-chat-chip {
+      flex: 0 0 46px;
+      display: grid;
+      grid-template-columns: 1fr;
+      place-items: center;
+      width: 46px;
+      height: 42px;
+      padding: 4px;
+      border-color: transparent;
+      border-radius: 13px;
+    }
+    .ctox-chat-chip-copy { display: none !important; }
+    .ctox-chat-chip.is-expanded:not(.is-active) {
+      border-color: transparent;
+      background: transparent;
+    }
+    .ctox-chat-chip.is-active {
+      border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      box-shadow: none;
+      transform: translateY(-1px);
+    }
+    .ctox-chat-overflow-chip {
+      width: 40px;
+      min-width: 40px;
+      padding: 0;
+    }
+    .ctox-chat-overflow-chip span,
+    .ctox-chat-overflow-chip small { display: none !important; }
+    @media (prefers-reduced-motion: reduce) {
+      .ctox-progress-segment.is-in_progress,
+      .ctox-progress-review:is(.is-running, .is-pending),
+      .ctox-progress-planning-line,
+      .ctox-progress-visual.is-planning .ctox-progress-activity {
+        animation: none !important;
+      }
     }
   `;
   document.head.append(style);
@@ -6763,7 +7740,14 @@ export const __businessChatTestInternals = Object.freeze({
   collectTrackedMessages,
   collapseRestoredTerminalChat,
   crewCreatureHtml,
+  crewCreatureMode,
   crewIdentity,
+  delegationProgressCardHtml,
+  executionProgressForChat,
+  executionProgressHeaderHtml,
+  executionProgressSignature,
+  messageMarkup,
+  normalizeExecutionProgress,
   createTrackedMessageWatch,
   findDocsByIds,
   findChatForOpenDetail,

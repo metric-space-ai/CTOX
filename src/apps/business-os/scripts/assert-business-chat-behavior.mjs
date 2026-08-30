@@ -13,6 +13,8 @@ const outputDir = process.env.BUSINESS_CHAT_BEHAVIOR_OUTPUT_DIR
 const reportPath = path.join(outputDir, 'business-chat-behavior.json');
 const screenshotPath = path.join(outputDir, 'business-chat-behavior.png');
 const groupedScreenshotPath = path.join(outputDir, 'business-chat-grouped.png');
+const progressScreenshotPath = path.join(outputDir, 'business-chat-progress.png');
+const compactPromptScreenshotPath = path.join(outputDir, 'business-chat-compact-prompt.png');
 const headless = process.env.BUSINESS_CHAT_BEHAVIOR_HEADLESS !== '0';
 
 fs.mkdirSync(outputDir, { recursive: true });
@@ -124,7 +126,7 @@ try {
     expect(m.navCount === 0, 'one chat must not show prev/next controls');
     expect(m.stripCount === 1, 'one chat renders one strip');
     expect(m.headerNewCount === 0, 'window header must not contain new-chat plus button');
-    expect(m.dateScopeText === 'Einsätze', `date control must explain crew mission scope, got ${m.dateScopeText}`);
+    expect(m.dateScopeText === '', `date control must stay icon-only, got ${m.dateScopeText}`);
     expect(m.dateTriggerLabel.includes('Crew-Einsätze'), `date trigger needs an accessible mission label, got ${m.dateTriggerLabel}`);
     expect(m.dockWidth < 520, `one-chat dock should stay compact, got ${m.dockWidth}`);
     expect(m.activeChipCenterWithinWindow === true, 'one-chat active chip center must sit under the active window');
@@ -147,7 +149,7 @@ try {
   await scenario(page, 'six-chats-not-full-width', { count: 6, activeIndex: 3 }, (m) => {
     expect(m.chipCount === 6, 'six chats render six chips');
     expect(m.navCount === 2, 'six chats show strip nav');
-    expect(m.dockWidth > 900, `six-chat dock should keep visible chips, got ${m.dockWidth}`);
+    expect(m.dockWidth > 480, `six-chat dock should keep visible creatures, got ${m.dockWidth}`);
     expect(m.dockWidth < m.viewportWidth * 0.75, `six-chat dock should not be full width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'six-chat active chip center must sit under the active window');
     expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'six-member gallery must keep its active window inside the viewport');
@@ -156,8 +158,7 @@ try {
   await scenario(page, 'eight-chats-scrolls-but-not-full-width', { count: 8, activeIndex: 4 }, (m) => {
     expect(m.chipCount === 8, 'eight chats render eight chips');
     expect(m.navCount === 2, 'eight chats show strip nav');
-    expect(m.stripHasOverflow === true, 'eight-chat strip must be horizontally scrollable');
-    expect(m.stripClasses.includes('is-scrollable'), `overflowing strip must expose scroll affordance class, got ${m.stripClasses}`);
+    expect(m.stripHasOverflow === false, 'eight compact creature chips should fit without needless scrolling');
     expect(m.dockWidth < m.viewportWidth * 0.75, `eight-chat dock should avoid premature full width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'eight-chat active chip center must sit under the active window');
     expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'eight-member gallery must keep its active window inside the viewport');
@@ -178,7 +179,7 @@ try {
     expect(m.chipCount <= 12, `thousand-chat dock must cap rendered chips, got ${m.chipCount}`);
     expect(m.windowCount <= 12, `thousand-chat dock must cap rendered windows, got ${m.windowCount}`);
     expect(m.overflowCount === 1, 'thousand-chat dock must expose one overflow chip');
-    expect(m.workloadBadgeText === '1k', `date workload badge should compact 1000, got ${m.workloadBadgeText}`);
+    expect(m.dateTriggerLabel.includes('1k Tasks'), `date hover hint should expose compact workload, got ${m.dateTriggerLabel}`);
     const open = await page.evaluate(async () => {
       document.querySelector('[data-chat-overflow-open]').click();
       await window.chatHarness.waitFor(() => document.querySelector('[data-chat-busy-panel]'));
@@ -230,7 +231,31 @@ try {
     expect(m.stageClasses.includes('is-side-by-side'), `three crew windows should arrange side by side, got ${m.stageClasses}`);
     expect(m.windowCreatureCount === 3, `each work window needs its own creature, got ${m.windowCreatureCount}`);
     expect(m.dockCreatureCount === 3, `the dock must show the same three crew members, got ${m.dockCreatureCount}`);
-    expect(m.dockLabel === 'Crew', `the surface must be named Crew, got ${m.dockLabel}`);
+    expect(m.dockLabel === 'Crew', `crew navigation label must remain visible, got ${m.dockLabel}`);
+  });
+
+  await scenario(page, 'crew-task-renders-quiet-visual-progress', {
+    count: 1,
+    activeIndex: 0,
+    groupedResearch: true,
+    staticTracking: true,
+    progressTracking: true,
+  }, async (m) => {
+    expect(m.progressCardCount === 1, `running crew task needs one progress card, got ${m.progressCardCount}`);
+    expect(m.progressHeaderText === '', `window header must not duplicate progress copy, got ${m.progressHeaderText}`);
+    expect(m.progressSegmentCount === 4, `three work steps plus review segment expected, got ${m.progressSegmentCount}`);
+    expect(m.progressTooltip.includes('Daten prüfen'), `hover hint must expose the active step, got ${m.progressTooltip}`);
+    expect(m.progressTooltip.includes('30% · 4/7 Turns · Plan v2'), `hover hint must expose exact progress, got ${m.progressTooltip}`);
+    expect(m.progressTooltip.includes('→ Ergebnis schreiben'), `hover hint must expose the next step, got ${m.progressTooltip}`);
+    expect(m.progressCurrentText === '' && m.progressNextText === '' && m.progressPlanText === '', 'progress labels must not be persistently visible');
+    expect(m.progressInHeader === true, 'visual progress must live inside the window header');
+    expect(m.progressClockCount === 1, `header needs one visual turn clock, got ${m.progressClockCount}`);
+    expect(m.progressTrackWidth >= 180, `header step progress must remain clearly visible, got ${m.progressTrackWidth}px`);
+    expect(m.headerHeight >= 60 && m.headerHeight <= 68, `header must stay readable at about 64px, got ${m.headerHeight}`);
+    expect(m.firstMessageTop >= m.headerBottom - 0.5, `chat copy must start below the header: ${m.firstMessageTop} < ${m.headerBottom}`);
+    expect(m.activeWindowHeight >= 420, `crew window must retain a readable work area, got ${m.activeWindowHeight}`);
+    expect(m.visibleChromeText === '', `status chrome must be text-free, got ${m.visibleChromeText}`);
+    await page.screenshot({ path: progressScreenshotPath, fullPage: true });
   });
 
   await scenario(page, 'overflowing-crew-folds-into-3d-gallery', { count: 7, activeIndex: 3 }, async (m) => {
@@ -238,6 +263,19 @@ try {
     expect(!m.stageClasses.includes('is-side-by-side'), `seven windows should overflow into the gallery, got ${m.stageClasses}`);
     expect(m.inactiveVisible === true, 'inactive gallery windows must remain visibly folded behind the active window');
     expect(m.inactiveTransform !== 'none', `inactive gallery windows need a 3D transform, got ${m.inactiveTransform}`);
+  });
+
+  await scenario(page, 'long-app-prompt-stays-collapsed-and-compact', {
+    count: 1,
+    messagesPerChat: 1,
+    longMessages: true,
+  }, async (m) => {
+    expect(m.compactPromptCount === 1, `long prompt needs one compact disclosure, got ${m.compactPromptCount}`);
+    expect(m.compactPromptOpen === false, 'long prompt must start collapsed');
+    expect(m.compactPromptPreviewHeight <= 46, `collapsed prompt preview must stay within two lines, got ${m.compactPromptPreviewHeight}`);
+    expect(m.activeWindowHeight >= 420, `collapsed prompt must retain the readable work area, got ${m.activeWindowHeight}`);
+    expect(m.composerInline === true, 'attachment, input and send must share one aligned composer row');
+    await page.screenshot({ path: compactPromptScreenshotPath, fullPage: true });
   });
 
   await scenario(page, 'minimized-active-window-leaves-chip-only', { count: 2, activeIndex: 0 }, async () => {
@@ -272,7 +310,7 @@ try {
     });
     results.push({ scenario: 'minimized-running-chip-after-click', metrics: after });
     expect(after.minimizedRunningChipCount === 1, `minimized running chat must keep running status styling, got ${after.minimizedRunningChipCount}`);
-    expect(after.minimizedRunningStatusText === 'Aktiv', `running minimized chat should show Aktiv, got ${after.minimizedRunningStatusText}`);
+    expect(after.minimizedRunningTitle.includes('Aktiv'), `running minimized chat hover hint should expose Aktiv, got ${after.minimizedRunningTitle}`);
   });
 
   await scenario(page, 'keyboard-focus-skips-hidden-and-inactive-controls', { count: 4, activeIndex: 1 }, async () => {
@@ -437,7 +475,7 @@ try {
     expect(after.activeTaskClass.includes('is-task-queued'), `transient command timeout must keep chat queued, got ${after.activeTaskClass}`);
     expect(!after.activeTaskClass.includes('is-task-failed'), `transient command timeout must not mark failed, got ${after.activeTaskClass}`);
     expect(after.activeMessageText.includes('Warte auf die CTOX Queue-Projektion'), 'transient command timeout must explain that tracking continues');
-    expect(after.activeMessageText.includes('queued'), `transient command timeout should keep queued status text, got ${after.activeMessageText}`);
+    expect(!after.activeMessageText.includes('queued'), `transient status must not leak as chrome text, got ${after.activeMessageText}`);
   });
 
   await scenario(page, 'active-message-pane-scrolls', { count: 1, messagesPerChat: 28, longMessages: true }, async (m) => {
@@ -598,13 +636,15 @@ function harnessHtml() {
   <title>CTOX Chatbar Harness</title>
   <style>
     :root {
-      --background: #081014;
-      --surface: #10181e;
-      --surface-2: #17232b;
-      --line: #2a3842;
-      --text: #e6edf3;
-      --muted: #9aa8b4;
-      --accent: #10b981;
+      --background: #0a0a0a;
+      --bg: #0a0a0a;
+      --surface: #111111;
+      --surface-2: #141414;
+      --line: #2a2a2a;
+      --text: #d4d4d8;
+      --text-strong: #f5f5f5;
+      --muted: #818181;
+      --accent: #346bf1;
       --font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     html, body { margin: 0; width: 100%; height: 100%; background: var(--background); color: var(--text); font-family: var(--font-family); }
@@ -715,7 +755,7 @@ function harnessHtml() {
           : '';
       if (groupedResearch) {
         const statuses = ['running', 'queued', 'success', 'success', 'success', 'failed'];
-        messages.push({
+        const trackingMessage = {
           id: 'status_research_' + index,
           role: 'ctox',
           text: 'Web Research Schritt ' + (index + 1) + ' verarbeitet.',
@@ -724,7 +764,27 @@ function harnessHtml() {
           status: statuses[index % statuses.length],
           trackable: options.staticTracking ? false : undefined,
           createdAt: createdAt + 500,
-        });
+        };
+        if (options.progressTracking && index === Number(options.activeIndex || 0)) {
+          trackingMessage.executionProgress = {
+            version: 1,
+            revision: 2,
+            phase: 'working',
+            percent: 30,
+            current_step: 2,
+            completed_steps: 1,
+            total_steps: 3,
+            steps: [
+              { position: 1, label: 'Daten laden', status: 'completed', activity_turns: 2 },
+              { position: 2, label: 'Daten prüfen', status: 'in_progress', activity_turns: 4 },
+              { position: 3, label: 'Ergebnis schreiben', status: 'pending', activity_turns: 0 },
+            ],
+            review: { status: 'pending' },
+            activity_turns: { total: 7, thinking: 3, tools: 4, last_kind: 'tool' },
+            updated_at_ms: createdAt + 500,
+          };
+        }
+        messages.push(trackingMessage);
       } else if (failedChat) {
         messages.push({
           id: 'status_failed_' + index,
@@ -873,7 +933,7 @@ function harnessHtml() {
           ? Math.max(0, dockRect.x - activeWindowRect.x, activeWindowRect.x + activeWindowRect.width - (dockRect.x + dockRect.width))
           : 0,
         dateScopeText: document.querySelector('.ctox-date-scope')?.textContent || '',
-        dockLabel: document.querySelector('.ctox-chat-fab span')?.textContent || '',
+        dockLabel: (document.querySelector('.ctox-chat-fab span')?.textContent || '').trim(),
         dateTriggerLabel: document.querySelector('.ctox-date-picker-trigger')?.getAttribute('aria-label') || '',
         stripCount: document.querySelectorAll('[data-chat-strip]').length,
         navCount: document.querySelectorAll('[data-chat-prev], [data-chat-next]').length,
@@ -897,6 +957,35 @@ function harnessHtml() {
         windowCount: document.querySelectorAll('.ctox-chat-window').length,
         windowCreatureCount: document.querySelectorAll('.ctox-chat-window .ctox-crew-creature').length,
         dockCreatureCount: document.querySelectorAll('.ctox-chat-chip .ctox-crew-creature').length,
+        progressCardCount: document.querySelectorAll('.ctox-chat-delegation-card .ctox-progress-visual').length,
+        progressHeaderText: document.querySelector('.ctox-chat-progress-head')?.textContent || '',
+        progressSegmentCount: document.querySelectorAll('.ctox-progress-segment, .ctox-progress-review').length,
+        progressCurrentText: document.querySelector('.ctox-progress-current-copy')?.textContent || '',
+        progressNextText: document.querySelector('.ctox-progress-next')?.textContent || '',
+        progressPlanText: document.querySelector('.ctox-progress-plan summary')?.textContent || '',
+        progressTooltip: document.querySelector('.ctox-progress-visual')?.getAttribute('title') || '',
+        progressInHeader: Boolean(document.querySelector('.ctox-chat-window header > .ctox-chat-delegation-card')),
+        progressClockCount: document.querySelectorAll('.ctox-chat-window header .ctox-progress-activity').length,
+        progressTrackWidth: document.querySelector('.ctox-chat-window header .ctox-progress-track')?.getBoundingClientRect().width || 0,
+        headerHeight: document.querySelector('.ctox-chat-window header')?.getBoundingClientRect().height || 0,
+        headerBottom: document.querySelector('.ctox-chat-window header')?.getBoundingClientRect().bottom || 0,
+        firstMessageTop: document.querySelector('.ctox-chat-window .ctox-chat-message')?.getBoundingClientRect().top || 0,
+        activeWindowHeight: activeWindowRect.height || 0,
+        compactPromptCount: document.querySelectorAll('.ctox-chat-prompt').length,
+        compactPromptOpen: Boolean(document.querySelector('.ctox-chat-prompt')?.open),
+        compactPromptPreviewHeight: document.querySelector('.ctox-chat-prompt-preview')?.getBoundingClientRect().height || 0,
+        composerInline: (() => {
+          const clip = document.querySelector('.ctox-chat-window.is-active .ctox-chat-clip-btn')?.getBoundingClientRect();
+          const input = document.querySelector('.ctox-chat-window.is-active textarea')?.getBoundingClientRect();
+          const send = document.querySelector('.ctox-chat-window.is-active [data-chat-send]')?.getBoundingClientRect();
+          if (!clip || !input || !send) return false;
+          const centers = [clip, input, send].map((rect) => rect.top + rect.height / 2);
+          return clip.right <= input.left && input.right <= send.left && Math.max(...centers) - Math.min(...centers) <= 1;
+        })(),
+        visibleChromeText: [
+          document.querySelector('.ctox-chat-window header')?.innerText || '',
+          document.querySelector('.ctox-chat-delegation-card')?.innerText || '',
+        ].join('').trim(),
         stageClasses: stageInner?.className || '',
         inactiveVisible: firstInactiveWindow ? isVisible(firstInactiveWindow) : false,
         inactiveTransform: firstInactiveWindow ? getComputedStyle(firstInactiveWindow).transform : 'none',
@@ -909,6 +998,7 @@ function harnessHtml() {
         minimizedChipIds: Array.from(document.querySelectorAll('.ctox-chat-chip.is-minimized')).map((node) => node.dataset.chatFocus || ''),
         minimizedRunningChipCount: document.querySelectorAll('.ctox-chat-chip.is-minimized.is-task-running').length,
         minimizedRunningStatusText: document.querySelector('.ctox-chat-chip.is-minimized.is-task-running .ctox-chat-chip-copy small')?.textContent || '',
+        minimizedRunningTitle: document.querySelector('.ctox-chat-chip.is-minimized.is-task-running')?.getAttribute('title') || '',
         minimizedWindowCount: document.querySelectorAll('.ctox-chat-window.is-minimized').length,
         inactiveFocusable: inactiveControls.filter((node) => node.tabIndex >= 0 && isVisible(node)).length,
         inactiveVisibleActions: inactiveActions.filter(isVisible).length,
