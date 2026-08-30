@@ -1,5 +1,5 @@
-import { collections as ctoxCollections } from '../ctox/schema.js?v=20260811-fremde-collection-mitladen-v106';
-import { collections as desktopCollections } from '../desktop/schema.js?v=20260811-fremde-collection-mitladen-v106';
+import { collections as ctoxCollections } from '../ctox/schema.js?v=20260816-browser-sync-guards-v141';
+import { collections as desktopCollections } from '../desktop/schema.js?v=20260816-browser-sync-guards-v141';
 import { collections as documentCollections } from '../documents/schema.js';
 
 export const collections = {

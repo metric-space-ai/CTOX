@@ -87,6 +87,30 @@ export function clampNormalWindowPosition({ left, top, width, height }, viewport
   };
 }
 
+export function detectSnapZone(x, y, viewport) {
+  const vp = viewport || {};
+  const leftEdge = Number(vp.left) || 0;
+  const rightEdge = (Number(vp.w) || 0) - (Number(vp.right) || 0);
+  const topEdge = Number(vp.top) || 0;
+  const bottomEdge = (Number(vp.h) || 0) - (Number(vp.bottom) || 0);
+  const edge = CONST.SNAP_EDGE;
+  // A corner must fit inside both edge bands. SNAP_CORNER is intentionally
+  // capped because its larger interaction radius must not consume an edge.
+  const corner = Math.min(CONST.SNAP_CORNER, edge);
+  const xc = Math.min(Math.max(x, leftEdge), rightEdge);
+  const yc = Math.min(Math.max(y, topEdge), bottomEdge);
+
+  if (yc < topEdge + corner && xc < leftEdge + corner) return 'top-left';
+  if (yc < topEdge + corner && xc > rightEdge - corner) return 'top-right';
+  if (yc > bottomEdge - corner && xc < leftEdge + corner) return 'bottom-left';
+  if (yc > bottomEdge - corner && xc > rightEdge - corner) return 'bottom-right';
+  if (yc < topEdge + edge) return 'top';
+  if (yc > bottomEdge - edge) return 'bottom';
+  if (xc < leftEdge + edge) return 'left';
+  if (xc > rightEdge - edge) return 'right';
+  return null;
+}
+
 export function createWindowManager({
   windowLayer,
   surfaceEl,
@@ -822,8 +846,6 @@ export function createWindowManager({
       const el = win.element;
       let initialX = downEvent.clientX;
       let initialY = downEvent.clientY;
-      const dragStartX = downEvent.clientX;
-      const dragStartY = downEvent.clientY;
       let currentX = initialX;
       let currentY = initialY;
       let dragging = true;
@@ -847,7 +869,7 @@ export function createWindowManager({
         }, vp);
         el.style.top = `${top}px`;
         el.style.left = `${left}px`;
-        applySnapPreview(currentX, currentY, { dragStartX, dragStartY });
+        applySnapPreview(currentX, currentY);
         if (trackDynamicShadow) updateDynamicShadow(el);
       }
 
@@ -1008,37 +1030,17 @@ export function createWindowManager({
     });
   }
 
-  function applySnapPreview(clientX, clientY, { dragStartX = clientX, dragStartY = clientY } = {}) {
+  function applySnapPreview(clientX, clientY) {
     if (!snapPreviewEl) return;
     const layerRect = windowLayer.getBoundingClientRect();
     const vp = getViewport();
     const x = clientX - layerRect.left;
     const y = clientY - layerRect.top;
-    const leftEdge = vp.left;
-    const rightEdge = vp.w - vp.right;
-    const topEdge = vp.top;
-    const bottomEdge = vp.h - vp.bottom;
-    const edge = CONST.SNAP_EDGE;
-    const corner = CONST.SNAP_CORNER;
-    const horizontalDrag = Math.abs(clientX - dragStartX) > Math.abs(clientY - dragStartY) + 12;
-    let zone = null;
     // A pointer past an inset boundary (chat dock, menubar, taskbar) means
     // "dock at that edge", not "abort" — clamp into the usable area instead of
-    // cancelling. Cancelling here is why left/right docking never triggered
-    // whenever a side inset was present: the natural drag to the physical
-    // screen edge overshoots the inner edge band and killed the preview.
-    const xc = Math.min(Math.max(x, leftEdge), rightEdge);
-    const yc = Math.min(Math.max(y, topEdge), bottomEdge);
-    if (horizontalDrag && xc < leftEdge + edge) zone = 'left';
-    else if (horizontalDrag && xc > rightEdge - edge) zone = 'right';
-    else if (yc < topEdge + corner && xc < leftEdge + corner) zone = 'top-left';
-    else if (yc < topEdge + corner && xc > rightEdge - corner) zone = 'top-right';
-    else if (yc > bottomEdge - corner && xc < leftEdge + corner) zone = 'bottom-left';
-    else if (yc > bottomEdge - corner && xc > rightEdge - corner) zone = 'bottom-right';
-    else if (yc < topEdge + edge) zone = 'top';
-    else if (yc > bottomEdge - edge) zone = 'bottom';
-    else if (xc < leftEdge + edge) zone = 'left';
-    else if (xc > rightEdge - edge) zone = 'right';
+    // cancelling. Zone selection depends only on the pointer's edge bands;
+    // drag direction must not suppress left or right docking.
+    const zone = detectSnapZone(x, y, vp);
 
     if (!zone) {
       snapPreviewEl.removeAttribute('data-snap');

@@ -18,6 +18,8 @@ import {
 const STYLE_BUILD = '20260826-workjet-ui-contract-v1';
 const LAYOUT_DOC_ID = 'layout';
 const ICON_POSITION_CACHE_KEY = 'ctox.businessOs.desktopIconPositions';
+const ICON_POSITION_CACHE_VERSION = 2;
+const ROW_MAJOR_LAYOUT_MIGRATION = 'row-major-v2';
 const DESKTOP_SYNC_COLLECTIONS = Object.freeze([
   'desktop_icons',
   'desktop_layout',
@@ -513,8 +515,9 @@ export async function mount(ctx) {
     el.className = 'desktop-icon';
     el.dataset.iconId = doc.id;
     el.dataset.target = doc.target_module || '';
-    el.style.left = `${doc.x ?? DEFAULT_GRID.offset}px`;
-    el.style.top = `${doc.y ?? DEFAULT_GRID.offset}px`;
+    const position = clampIconPosition(doc, doc, currentGrid());
+    el.style.left = `${position.x}px`;
+    el.style.top = `${position.y}px`;
     el.innerHTML = `
       <div class="desktop-icon-glyph" aria-hidden="true"></div>
       <div class="desktop-icon-label"></div>
@@ -552,7 +555,10 @@ export async function mount(ctx) {
     makeIconDraggable(el, {
       surface: refs.surface,
       iconId: doc.id,
-      grid: currentGrid(),
+      grid: {
+        ...currentGrid(),
+        flow: document.documentElement.dataset.workjetMobileHost === 'true' || currentGrid().compact,
+      },
       onSelect: () => {
         for (const node of refs.icons.querySelectorAll('.desktop-icon.selected')) {
           node.classList.remove('selected');
@@ -569,6 +575,7 @@ export async function mount(ctx) {
           togglePinnedTarget(doc.target_module, true);
         }
       },
+      onReorder: reorderIcons,
     });
 
     return el;
@@ -595,6 +602,12 @@ export async function mount(ctx) {
   function onIconContextMenu(event, doc) {
     event.preventDefault();
     event.stopPropagation();
+    // Android WebView emits a synthetic contextmenu during the same long-press
+    // gesture that enters launcher edit mode. Mobile reserves long-press for
+    // full-cell reordering; opening the desktop menu here steals the drop and
+    // can even activate a menu action under the moving finger.
+    if (document.documentElement.dataset.workjetMobileHost === 'true') return;
+    if (event.currentTarget?.classList?.contains('touch-reordering')) return;
     if (!ctx.contextMenu) return;
     const pinned = isPinnedTarget(doc.target_module);
     const app = moduleForDesktopTarget(doc.target_module);
@@ -943,6 +956,44 @@ export async function mount(ctx) {
     await renderIcons();
   }
 
+  async function reorderIcons(orderedIconIds) {
+    if (!iconsCollection || !Array.isArray(orderedIconIds) || !orderedIconIds.length) return;
+    const docs = await iconsCollection.find().exec();
+    const docsById = new Map(docs.map((doc) => [doc.id, doc]));
+    const visibleIds = orderedIconIds.filter((id) => {
+      const doc = docsById.get(id);
+      return doc && !doc.hidden && launcher.knows(doc.target_module);
+    });
+    const remainingIds = docs
+      .filter((doc) => !doc.hidden && launcher.knows(doc.target_module) && !visibleIds.includes(doc.id))
+      .sort((a, b) => (a.sort_index ?? 0) - (b.sort_index ?? 0))
+      .map((doc) => doc.id);
+    const nextIds = [...visibleIds, ...remainingIds];
+    if (nextIds.length < 2) return;
+    const updatedAt = Date.now();
+    const updates = nextIds.map((id, sortIndex) => {
+      const plain = plainIconDoc(docsById.get(id));
+      const persisted = Object.fromEntries(
+        Object.entries(plain).filter(([key]) => DESKTOP_ICON_PERSISTED_FIELDS.has(key)),
+      );
+      return {
+        ...persisted,
+        sort_index: sortIndex,
+        updated_at_ms: updatedAt + sortIndex,
+      };
+    });
+    if (typeof iconsCollection.bulkUpsert === 'function') {
+      await iconsCollection.bulkUpsert(updates);
+    } else {
+      await Promise.all(updates.map((update) => docsById.get(update.id)?.incrementalPatch({
+        sort_index: update.sort_index,
+        updated_at_ms: update.updated_at_ms,
+      })));
+    }
+    renderIcons.lastSignature = '';
+    await renderIcons();
+  }
+
   function subscribeIcons() {
     if (!iconsCollection?.$) return () => {};
     const sub = iconsCollection.$.subscribe(() => {
@@ -1089,6 +1140,7 @@ export async function mount(ctx) {
     try {
       const raw = window.localStorage.getItem(desktopIconPositionCacheStorageKey());
       const parsed = JSON.parse(raw || 'null');
+      if (parsed?.version !== ICON_POSITION_CACHE_VERSION) return positions;
       const entries = parsed?.positions && typeof parsed.positions === 'object' ? parsed.positions : {};
       for (const [id, value] of Object.entries(entries)) {
         const x = Number(value?.x);
@@ -1116,7 +1168,7 @@ export async function mount(ctx) {
     }
     try {
       window.localStorage.setItem(desktopIconPositionCacheStorageKey(), JSON.stringify({
-        version: 1,
+        version: ICON_POSITION_CACHE_VERSION,
         positions,
       }));
     } catch {}
@@ -1185,11 +1237,11 @@ export async function mount(ctx) {
 
   function gridPosition(index, grid = currentGrid()) {
     const surfaceRect = refs.surface?.getBoundingClientRect();
-    const usableHeight = Math.max(grid.cellH, (surfaceRect?.height || 720) - grid.offset * 2);
-    const rows = Math.max(1, Math.floor(usableHeight / grid.cellH));
+    const usableWidth = Math.max(grid.cellW, (surfaceRect?.width || 1024) - grid.offset * 2);
+    const columns = Math.max(1, Math.floor(usableWidth / grid.cellW));
     return {
-      x: grid.offset + Math.floor(index / rows) * grid.cellW,
-      y: grid.offset + (index % rows) * grid.cellH,
+      x: grid.offset + (index % columns) * grid.cellW,
+      y: grid.offset + Math.floor(index / columns) * grid.cellH,
     };
   }
 
@@ -1294,6 +1346,11 @@ export async function mount(ctx) {
     const docs = (await collection.find().exec())
       .filter((doc) => !doc.hidden && launcherRef.knows(doc.target_module))
       .sort((a, b) => (a.sort_index ?? 0) - (b.sort_index ?? 0));
+    const migrationKey = `${desktopIconPositionCacheStorageKey()}.${ROW_MAJOR_LAYOUT_MIGRATION}`;
+    let needsRowMajorMigration = true;
+    try {
+      needsRowMajorMigration = window.localStorage.getItem(migrationKey) !== 'complete';
+    } catch {}
     const seen = new Set();
     let hasCollision = false;
     for (const doc of docs) {
@@ -1304,10 +1361,15 @@ export async function mount(ctx) {
       }
       seen.add(key);
     }
-    if (!hasCollision) return;
+    if (!hasCollision && !needsRowMajorMigration) return;
     const grid = currentGrid();
     await Promise.all(docs.map((doc, index) => {
       const position = gridPosition(index, grid);
+      iconPositionCache.set(doc.id, {
+        x: position.x,
+        y: position.y,
+        updated_at_ms: Date.now() + index,
+      });
       return doc.incrementalPatch({
         x: position.x,
         y: position.y,
@@ -1315,6 +1377,10 @@ export async function mount(ctx) {
         updated_at_ms: Date.now(),
       });
     }));
+    writeIconPositionCache();
+    try {
+      window.localStorage.setItem(migrationKey, 'complete');
+    } catch {}
   }
 
   async function upsertSeed(collection, id, seed) {

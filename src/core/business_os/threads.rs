@@ -242,6 +242,10 @@ const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
     // projected from native channel/account records.
     "communication_accounts",
     "channel_pairing_state",
+    // Workjet project identity and local checkout bindings are native-authored
+    // through exact business_commands; peers render their projections only.
+    "workjet_projects",
+    "workjet_working_copies",
 ];
 
 /// A collection whose documents are server-authored (native core writes them,
@@ -2531,6 +2535,16 @@ fn app_thread_status(collection: &str, document: &Value) -> String {
         }
     })
     .to_ascii_lowercase();
+    // A Workjet escalation is already the explicit request for an owner
+    // decision. Treating its native `offen` status as a generic open record
+    // would create the Threads row without an unread notification, so neither
+    // desktop nor mobile clients could raise an OS-level alert.
+    if collection == "kundenpipeline_entscheidungen"
+        && document.get("typ").and_then(Value::as_str) == Some("agent_escalation")
+        && status == "offen"
+    {
+        return "needs_review".to_owned();
+    }
     match status.as_str() {
         "pending" | "pending_review" | "review" | "needs_review" | "requested" => {
             "needs_review".to_owned()
@@ -6629,6 +6643,73 @@ mod tests {
             .context("answered decision thread")?;
         assert_eq!(value_string(&closed, "status"), "completed");
 
+        Ok(())
+    }
+
+    #[test]
+    fn agent_escalation_projects_as_owner_review_without_changing_legacy_decisions() {
+        assert_eq!(
+            app_thread_status(
+                "kundenpipeline_entscheidungen",
+                &json!({ "typ": "agent_escalation", "status": "offen" }),
+            ),
+            "needs_review"
+        );
+        assert_eq!(
+            app_thread_status(
+                "kundenpipeline_entscheidungen",
+                &json!({ "typ": "triage", "status": "offen" }),
+            ),
+            "open"
+        );
+    }
+
+    #[test]
+    fn agent_escalation_creates_unread_owner_notification() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let now = now_ms();
+        let conn = store::open_store(temp.path())?;
+        store::upsert_business_record(
+            &conn,
+            "kundenpipeline_entscheidungen",
+            "kpl-e-agent-1",
+            now,
+            json!({
+                "id": "kpl-e-agent-1",
+                "typ": "agent_escalation",
+                "titel": "Architektur freigeben",
+                "status": "offen",
+                "owner_user_id": "michael",
+                "assigned_user_id": "michael",
+                "participant_ids": ["michael"],
+                "updated_at_ms": now
+            }),
+        )?;
+        drop(conn);
+
+        let projected =
+            project_app_relevance(temp.path(), &[("kundenpipeline_entscheidungen", 0)], 50)?;
+        let (_, notification_id) = projected
+            .projections
+            .iter()
+            .find(|(collection, _)| *collection == "user_notifications")
+            .context("projected Decision Hub notification")?;
+        let notification = load_record(temp.path(), "user_notifications", notification_id)?
+            .context("Decision Hub notification record")?;
+        assert_eq!(value_string(&notification, "user_id"), "michael");
+        assert_eq!(value_string(&notification, "status"), "unread");
+        assert_eq!(
+            value_string(&notification, "notification_type"),
+            "approval_requested"
+        );
+        assert_eq!(
+            value_string(&notification, "source_module"),
+            "kundenpipeline"
+        );
+        assert_eq!(
+            value_string(&notification, "source_record_id"),
+            "kpl-e-agent-1"
+        );
         Ok(())
     }
 

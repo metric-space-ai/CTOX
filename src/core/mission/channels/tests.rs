@@ -6018,6 +6018,75 @@ fn business_command_cannot_complete_before_typed_result_review_and_validation() 
 }
 
 #[test]
+fn failed_queue_ack_terminalizes_linked_business_command() {
+    let root = business_command_test_root("ctox-business-command-failed-queue-ack");
+    let claimed = claim_business_command_with_queue(
+        &root,
+        business_command_claim("command-failed-queue-ack", "sha256:failed-queue-ack"),
+        QueueTaskCreateRequest {
+            title: "Terminal failure projection".to_string(),
+            prompt: "Fail the linked command with the queue task.".to_string(),
+            thread_key: "business-os/tests/failed-queue-ack".to_string(),
+            workspace_root: Some(root.display().to_string()),
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+            extra_metadata: Some(json!({"idempotency_key": "command-failed-queue-ack"})),
+        },
+    )
+    .expect("claim command");
+    let task_id = claimed.task.message_key;
+    lease_queue_task(&root, &task_id, "ctox-test").expect("lease queue task");
+    transition_business_command_for_task(
+        &root,
+        &task_id,
+        "leased",
+        None,
+        None,
+        None,
+        "worker leased",
+    )
+    .expect("lease command");
+    transition_business_command_for_task(
+        &root,
+        &task_id,
+        "running",
+        None,
+        None,
+        None,
+        "worker started",
+    )
+    .expect("start command");
+
+    ack_leased_messages_with_failure_reason(
+        &root,
+        std::slice::from_ref(&task_id),
+        "failed",
+        "finite review budget exhausted",
+    )
+    .expect("fail linked queue task and command atomically");
+
+    let projection = business_command_projection(&root, "command-failed-queue-ack")
+        .expect("load terminal command projection");
+    assert_eq!(projection["execution_phase"], "terminal");
+    assert_eq!(projection["terminal_status"], "failed");
+    assert_eq!(projection["error_code"], "queue_terminal_failure");
+    assert_eq!(
+        projection["error_message"],
+        "finite review budget exhausted"
+    );
+    let task = load_queue_task(&root, &task_id)
+        .expect("load failed queue task")
+        .expect("failed queue task remains inspectable");
+    assert_eq!(task.route_status, "failed");
+    assert_eq!(
+        task.status_note.as_deref(),
+        Some("finite review budget exhausted")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn waiting_dependency_command_promotes_once_to_one_queue_task() {
     let root = business_command_test_root("ctox-business-command-dependency-promotion");
     let claim = business_command_claim("command-dependency", "sha256:dependency");
@@ -6386,6 +6455,85 @@ fn legacy_cancelled_queue_command_migration_runs_once_per_database() {
     assert_eq!(
         second_apply["legacy_cancelled_queue_command_migration"]["applied_now"],
         false
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn reconciler_repairs_failed_queue_with_nonterminal_command() {
+    let root = business_command_test_root("ctox-business-command-reconcile-failed");
+    let claimed = claim_business_command_with_queue(
+        &root,
+        business_command_claim("command-reconcile-failed", "sha256:reconcile-failed"),
+        QueueTaskCreateRequest {
+            title: "Repair failed work".to_string(),
+            prompt: "Simulate a legacy split-brain terminal failure.".to_string(),
+            thread_key: "business-os/tests/reconcile-failed".to_string(),
+            workspace_root: Some(root.display().to_string()),
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+            extra_metadata: Some(json!({"idempotency_key": "command-reconcile-failed"})),
+        },
+    )
+    .expect("claim command");
+    let task_id = claimed.task.message_key;
+    lease_queue_task(&root, &task_id, "ctox-test").expect("lease queue task");
+    transition_business_command_for_task(
+        &root,
+        &task_id,
+        "leased",
+        None,
+        None,
+        None,
+        "initial lease",
+    )
+    .expect("lease command");
+    transition_business_command_for_task(
+        &root,
+        &task_id,
+        "running",
+        None,
+        None,
+        None,
+        "initial execution",
+    )
+    .expect("run command");
+    let conn = open_channel_db(&resolve_db_path(&root, None)).expect("open core db");
+    conn.execute(
+        "UPDATE communication_routing_state
+         SET route_status = 'failed', lease_owner = NULL, leased_at = NULL,
+             lease_expires_at = NULL, last_error = 'finite review budget exhausted'
+         WHERE message_key = ?1",
+        params![task_id],
+    )
+    .expect("seed legacy failed route");
+    drop(conn);
+
+    let report = audit_and_migrate_business_command_storage(&root, false)
+        .expect("report failed queue/command drift");
+    assert_eq!(
+        report["terminal_failure_queue_command_drift"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let applied = audit_and_migrate_business_command_storage(&root, true)
+        .expect("repair failed queue/command drift");
+    assert_eq!(applied["repaired_terminal_failure_queue_commands"], 1);
+    assert_eq!(
+        applied["terminal_failure_queue_command_drift"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    let projection = business_command_projection(&root, "command-reconcile-failed")
+        .expect("load reconciled failed command");
+    assert_eq!(projection["execution_phase"], "terminal");
+    assert_eq!(projection["terminal_status"], "failed");
+    assert_eq!(
+        projection["error_code"],
+        "queue_terminal_failure_reconciled"
     );
     let _ = fs::remove_dir_all(root);
 }

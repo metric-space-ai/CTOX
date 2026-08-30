@@ -1,11 +1,21 @@
 # Business OS shell releases
 
-Stand: 2026-08-26
+Stand: 2026-08-29
 
 Business-OS-Shells werden unabhängig vom CTOX-Backend als unveränderliche
 Release-Artefakte veröffentlicht. Stable-Tags folgen
 `business-os-shell-v<SemVer>`; Vorabversionen werden den Kanälen `beta` oder
 `nightly` zugeordnet.
+
+## Auslieferungsgrenze
+
+Jede CTOX-Instanz ist alleinige Autorität für ihre Shell. Der native
+Business-OS-Server löst den verifizierten aktiven Slot, instanzspezifische
+Runtime-Module, Launch-Kontext, MIME-Typen und Cache-Regeln auf. Eine verwaltete
+`*.ctox.dev`-URL darf diese Antworten nur transparent über die bestehende
+Instanzverbindung weiterleiten. ctox.dev besitzt keine Standard-Shell, liest
+keine Shell-Dateien aus Source-/Runtime-Verzeichnissen und überschreibt weder
+HTML noch Modul-Registry oder Cache-Policy.
 
 ## Vertrauenskette
 

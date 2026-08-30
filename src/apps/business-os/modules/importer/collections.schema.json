@@ -1,4 +1,5 @@
 {
-  "schema_format": "ctox-business-os-module-collections-v1",
-  "collections": {}
+  "collections": {},
+  "module_id": "importer",
+  "schema_format": "ctox-business-os-module-collections-v1"
 }

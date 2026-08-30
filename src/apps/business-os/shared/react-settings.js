@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-fremde-collection-mitladen-v106';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from './dialogs.js?v=20260816-browser-sync-guards-v141';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260816-browser-sync-guards-v141';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260811-fremde-collection-mitladen-v106';
+} from './permissions.js?v=20260816-browser-sync-guards-v141';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260811-fremde-collection-mitladen-v106';
+} from './branding.js?v=20260816-browser-sync-guards-v141';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260811-fremde-collection-mitladen-v106';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+} from './roles.js?v=20260816-browser-sync-guards-v141';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260816-browser-sync-guards-v141';
 
 const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
   codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),

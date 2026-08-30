@@ -3,13 +3,12 @@
 
 use super::registry::{count_rows, open_db, resolve_db_path, show_api};
 use super::{
-    build_target_api_contract, load_all_latest_active_records, load_last_successful_run,
-    load_target_view, record_matches_filters, resolve_workspace_dir, LatestRecordView,
-    RecentRunView,
+    LatestRecordView, RecentRunView, build_target_api_contract, load_all_latest_active_records,
+    load_last_successful_run, load_target_view, record_matches_filters, resolve_workspace_dir,
 };
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
 use std::path::Path;
 
 pub(super) fn summary_payload(root: &Path) -> Result<Value> {

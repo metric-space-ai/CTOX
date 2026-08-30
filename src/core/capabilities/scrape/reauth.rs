@@ -4,8 +4,8 @@
 
 use super::classify::{Classification, ScrapeRunStatus};
 use super::execute::ProbeResult;
-use super::{host_within_domains, url_host_lower, RegisteredTarget};
-use serde_json::{json, Value};
+use super::{RegisteredTarget, host_within_domains, url_host_lower};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 

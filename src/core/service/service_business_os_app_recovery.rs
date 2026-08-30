@@ -71,10 +71,13 @@ fn maybe_lease_next_durable_queue_prompt(
     state: &Arc<Mutex<SharedState>>,
     guard: DurableQueueDispatchGuard,
 ) -> Result<Option<QueuedPrompt>> {
-    let Some(_lease_attempt) = begin_durable_queue_lease_attempt(state, guard) else {
+    let Some(lease_attempt) = begin_durable_queue_lease_attempt(root, state, guard) else {
         return Ok(None);
     };
     let mut app_queue_lease_active = leased_business_os_app_queue_task_exists(root)?;
+    if !lease_attempt.is_current() {
+        return Ok(None);
+    }
     if mark_business_os_app_recovery_preflight_due(root) {
         let recovery = if app_queue_lease_active {
             recover_stale_business_os_app_queue_tasks(
@@ -111,6 +114,9 @@ fn maybe_lease_next_durable_queue_prompt(
             ),
         }
         app_queue_lease_active = leased_business_os_app_queue_task_exists(root)?;
+        if !lease_attempt.is_current() {
+            return Ok(None);
+        }
     }
     match quarantine_synthetic_e2e_queue_tasks_before_dispatch(root) {
         Ok(blocked) if blocked > 0 => push_event(
@@ -129,6 +135,9 @@ fn maybe_lease_next_durable_queue_prompt(
         ),
     }
     if !app_queue_lease_active {
+        if !lease_attempt.is_current() {
+            return Ok(None);
+        }
         if let Some(prompt) = maybe_lease_business_os_app_validation_rework(root, state)? {
             clear_idle_durable_queue_empty_gate(root);
             return Ok(Some(prompt));
@@ -157,6 +166,9 @@ fn maybe_lease_next_durable_queue_prompt(
         }
         if durable_queue_task_already_enqueued_in_memory_or_clear_stale(state, &task.message_key) {
             continue;
+        }
+        if !lease_attempt.is_current() {
+            return Ok(None);
         }
         let leased =
             channels::lease_queue_task(root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)?;
@@ -347,6 +359,13 @@ fn maybe_lease_next_durable_queue_after_worker_idle(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
 ) -> Result<Option<QueuedPrompt>> {
+    // A worker can move its own durable task from `review_rework` back to
+    // `pending` while the idle dispatcher still holds an "empty queue" gate.
+    // The source-stamp cache may not observe that transition immediately when
+    // SQLite writes land in the WAL. A worker-idle kick is an explicit signal
+    // that finalization may have made durable work runnable, so it must bypass
+    // the stale empty result instead of waiting for the hourly safety poll.
+    clear_idle_durable_queue_empty_gate(root);
     maybe_lease_next_durable_queue_prompt_for_idle_dispatch(root, state)
 }
 

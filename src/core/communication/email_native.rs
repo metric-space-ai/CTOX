@@ -196,11 +196,17 @@ pub(crate) fn service_sync(
             continue;
         }
         let mut account_settings = settings.clone();
-        account_settings.extend(super::email_accounts::account_runtime_overrides(root, &account));
+        account_settings.extend(super::email_accounts::account_runtime_overrides(
+            root, &account,
+        ));
         let entry = match service_sync_single(root, &account_settings) {
-            Ok(Some(value)) => json!({ "account": account.address, "scope": "personal", "result": value }),
+            Ok(Some(value)) => {
+                json!({ "account": account.address, "scope": "personal", "result": value })
+            }
             Ok(None) => json!({ "account": account.address, "scope": "personal", "skipped": true }),
-            Err(error) => json!({ "account": account.address, "scope": "personal", "error": error.to_string() }),
+            Err(error) => {
+                json!({ "account": account.address, "scope": "personal", "error": error.to_string() })
+            }
         };
         results.push(entry);
     }
@@ -210,10 +216,7 @@ pub(crate) fn service_sync(
     Ok(Some(json!({ "accounts": results })))
 }
 
-fn service_sync_single(
-    root: &Path,
-    settings: &BTreeMap<String, String>,
-) -> Result<Option<Value>> {
+fn service_sync_single(root: &Path, settings: &BTreeMap<String, String>) -> Result<Option<Value>> {
     let email = setting(settings, "CTO_EMAIL_ADDRESS");
     if email.is_empty() {
         return Ok(None);

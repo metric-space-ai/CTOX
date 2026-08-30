@@ -207,7 +207,7 @@ export async function mount(ctx) {
       });
   }
 
-  const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', (detail = {}) => {
+  function selectRequestedBrowserSession(detail = {}) {
     const sessionId = browserSessionIdFromArgs(detail);
     if (!sessionId) return;
     if (sessionId !== state.selectedSessionId) state.controllerLeaseId = '';
@@ -216,10 +216,26 @@ export async function mount(ctx) {
     state.requestedSessionId = sessionId;
     scheduleRefresh();
     openRequestedBrowserSession(detail);
-  });
+  }
+
+  const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', selectRequestedBrowserSession);
   if (sessionSelectionToken && ctx.eventBus?.off) {
     cleanups.push(() => ctx.eventBus.off('browser:select-session', sessionSelectionToken));
   }
+  // `openDesktopApp('browser', { args })` focuses an already open Browser and
+  // delivers the new launch request as this DOM event. The Browser previously
+  // consumed only the initial `ctx.args`; a later auth handoff therefore kept
+  // showing whichever ended session happened to be selected and never sent
+  // `browser.session.start`. Consume every launch so protected-source buttons
+  // work whether the Browser was closed, open, or pre-opened as immediate
+  // feedback while the server prepares the authoritative session arguments.
+  const handleDesktopAppLaunch = (event) => {
+    const detail = event?.detail || {};
+    if (detail.appId && detail.appId !== 'browser') return;
+    selectRequestedBrowserSession(detail.args || {});
+  };
+  ctx.host?.addEventListener?.('ctox-business-os-app-launch', handleDesktopAppLaunch);
+  cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', handleDesktopAppLaunch));
   const handleFocusRefresh = () => {
     scheduleRefresh();
     renewControllerLeaseIfNeeded();

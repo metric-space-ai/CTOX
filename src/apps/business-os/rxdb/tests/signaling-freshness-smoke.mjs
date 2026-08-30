@@ -68,7 +68,31 @@ try {
     'unbounded init.yourPeerId is rejected rather than truncated',
   );
 
-  // --- 3. backoff resets on joined, not on open ----------------------------
+  // --- 3. authenticated signaling ICE arrives before joined ---------------
+  const managedIceServers = [
+    { urls: ['stun:stun.cloudflare.com:3478'] },
+    {
+      urls: ['turn:turn.cloudflare.com:3478?transport=udp'],
+      username: `${Math.floor(Date.now() / 1000) + 3600}:test`,
+      credential: 'ephemeral-turn-secret',
+    },
+  ];
+  peer.handleSignalingMessage(JSON.stringify({
+    type: 'ctoxIceServers',
+    iceServers: managedIceServers,
+  }));
+  assert(peer.options.iceServers.length === 2, 'signaling ICE config is installed before joined');
+  assert(
+    peer.getTransportStatus().turnCredentialExpiresAtMs > Date.now(),
+    'signaling TURN expiry is exposed without exposing credentials',
+  );
+  peer.handleSignalingMessage(JSON.stringify({
+    type: 'ctoxIceServers',
+    iceServers: [{ urls: 'https://not-an-ice-server.invalid' }],
+  }));
+  assert(peer.options.iceServers.length === 2, 'invalid signaling ICE cannot replace valid config');
+
+  // --- 4. backoff resets on joined, not on open ----------------------------
   peer.signalingReconnectDelayMs = 30_000; // pretend we backed off heavily
   peer.handleSignalingMessage(JSON.stringify({ type: 'joined', otherPeerIds: [] }));
   assert(
@@ -76,7 +100,7 @@ try {
     `joined broadcast resets the reconnect backoff (still ${peer.signalingReconnectDelayMs})`,
   );
 
-  // --- 4. socket and peer close clear the ephemeral status -----------------
+  // --- 5. socket and peer close clear the ephemeral status -----------------
   peer.socket.onclose();
   assert(peer.getTransportStatus().localSignalingPeerId == null, 'signaling socket close clears the local signaling id');
   assert(

@@ -79,6 +79,29 @@ const MAX_CONCURRENT_MASTER_PULLS: usize = 4;
 const MAX_CONCURRENT_REQUEST_TASKS: usize = 32;
 const MAX_CONCURRENT_AUXILIARY_REQUESTS: usize = 8;
 const BROWSER_LIVE_METHOD: &str = "ctox.browser.live.v1";
+const OUTBOUND_SELLIFY_LOOKUP_METHOD: &str = "ctox.outbound.sellify_lookup.v1";
+const OUTBOUND_SELLIFY_RESPONSE_COLLECTION: &str = "thesen_outbound_leads";
+
+fn auxiliary_response_collection(method: &str, operation: &str) -> Option<String> {
+    if method == BROWSER_LIVE_METHOD {
+        return Some(
+            if operation == "input" {
+                CTOX_BROWSER_INPUT_RESPONSE_COLLECTION
+            } else {
+                CTOX_BROWSER_LIVE_RESPONSE_COLLECTION
+            }
+            .to_string(),
+        );
+    }
+    // Sellify lookups are read-only requests issued while the THESEN lead
+    // collection is foreground. Tag only their response for the normal
+    // active-collection priority lane so it cannot sit behind a cold full
+    // replication backlog and exhaust the browser's bounded request budget.
+    if method == OUTBOUND_SELLIFY_LOOKUP_METHOD {
+        return Some(OUTBOUND_SELLIFY_RESPONSE_COLLECTION.to_string());
+    }
+    None
+}
 
 static BROWSER_LIVE_WIRE_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static BROWSER_LIVE_HANDLER_FOUND: AtomicU64 = AtomicU64::new(0);
@@ -1111,6 +1134,8 @@ where
                         .and_then(Value::as_str)
                         .unwrap_or("live")
                         .to_string();
+                    let response_collection =
+                        auxiliary_response_collection(&request.method, &browser_operation);
                     let peer_identity = handler.peer_identity(&peer);
                     let capability_token = handler.peer_capability_token(&peer).unwrap_or_default();
                     pool_clone.spawn_auxiliary_tracked(async move {
@@ -1129,14 +1154,7 @@ where
                             // and input ACKs jump ahead of the normal sync
                             // response backlog while staying on the single,
                             // ACK-safe primary transport.
-                            collection: Some(
-                                if browser_operation == "input" {
-                                    CTOX_BROWSER_INPUT_RESPONSE_COLLECTION
-                                } else {
-                                    CTOX_BROWSER_LIVE_RESPONSE_COLLECTION
-                                }
-                                .to_string(),
-                            ),
+                            collection: response_collection,
                         };
                         // Browser -> native live requests use the dedicated
                         // auxiliary channel so input is never queued behind a
@@ -2644,6 +2662,26 @@ fn rx_error_to_value(error: &RxError) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_response_priority_marker_covers_latency_sensitive_foreground_reads() {
+        assert_eq!(
+            auxiliary_response_collection(BROWSER_LIVE_METHOD, "input").as_deref(),
+            Some(CTOX_BROWSER_INPUT_RESPONSE_COLLECTION)
+        );
+        assert_eq!(
+            auxiliary_response_collection(BROWSER_LIVE_METHOD, "session.list").as_deref(),
+            Some(CTOX_BROWSER_LIVE_RESPONSE_COLLECTION)
+        );
+        assert_eq!(
+            auxiliary_response_collection(OUTBOUND_SELLIFY_LOOKUP_METHOD, "live").as_deref(),
+            Some(OUTBOUND_SELLIFY_RESPONSE_COLLECTION)
+        );
+        assert_eq!(
+            auxiliary_response_collection("ctox.unknown.v1", "live"),
+            None
+        );
+    }
 
     /// Backlog OS-G1: the error-classification corpus
     /// (tests/fixtures/replication-error-classification.json) is consumed by

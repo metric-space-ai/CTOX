@@ -11,6 +11,10 @@ const appCss = readFileSync(join(businessOsDir, 'app.css'), 'utf8');
 const baseCss = readFileSync(join(businessOsDir, 'shared', 'base.css'), 'utf8');
 const chatJs = readFileSync(join(businessOsDir, 'shared', 'business-chat.js'), 'utf8');
 const appJs = readFileSync(join(businessOsDir, 'app.js'), 'utf8');
+const shellReleaseStatusJs = readFileSync(
+  join(businessOsDir, 'shared', 'shell-release-status.js'),
+  'utf8',
+);
 const indexHtml = readFileSync(join(businessOsDir, 'index.html'), 'utf8');
 const html = readFileSync(join(qaDir, 'ctox-desktop-shell.html'), 'utf8');
 const js = readFileSync(join(qaDir, 'ctox-desktop-shell.js'), 'utf8');
@@ -196,8 +200,18 @@ test('a scrubbed Workjet launch remains reloadable without storing another secre
 
 test('the static Workjet shell never probes a nonexistent HTTP maintenance plane', () => {
   assert.match(appJs, /if \(isWorkjetStaticShellLaunch\(\)\) \{[\s\S]*?return;[\s\S]*?\}/);
+  assert.match(
+    appJs,
+    /document\.documentElement\.dataset\.workjetMobileHost === 'true'/,
+    'the native RxDB\/WebRTC host must never probe the maintenance HTTP plane',
+  );
   assert.match(appJs, /'local_daemon',[\s\S]*?'ssh_managed',[\s\S]*?'pairing_invite'/);
   assert.match(appJs, /fetchBusinessOsControlJson\('\/api\/business-os\/ctox\/maintenance'\)/);
+  assert.match(
+    shellReleaseStatusJs,
+    /document\.documentElement\.dataset\.workjetMobileHost === 'true'\) return;/,
+    'the native host owns shell-pack status and must not fetch a relative manifest',
+  );
 });
 
 // Responsive behaviour is the shell's, and there is exactly one of it. The

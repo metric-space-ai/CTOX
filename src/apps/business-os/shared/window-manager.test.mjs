@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { clampNormalWindowPosition } from './window-manager.js';
+import { clampNormalWindowPosition, detectSnapZone } from './window-manager.js';
 
 const viewport = {
   w: 1200,
@@ -60,4 +60,36 @@ test('respects shell insets such as a visible side panel or chat rail', () => {
     left: 220,
     top: 310,
   });
+});
+
+test('detects all four snap edges', () => {
+  assert.equal(detectSnapZone(15, 300, viewport), 'left');
+  assert.equal(detectSnapZone(1185, 300, viewport), 'right');
+  assert.equal(detectSnapZone(300, 67, viewport), 'top');
+  assert.equal(detectSnapZone(300, 815, viewport), 'bottom');
+});
+
+test('detects all four snap corners only inside both edge bands', () => {
+  assert.equal(detectSnapZone(15, 67, viewport), 'top-left');
+  assert.equal(detectSnapZone(1185, 67, viewport), 'top-right');
+  assert.equal(detectSnapZone(15, 815, viewport), 'bottom-left');
+  assert.equal(detectSnapZone(1185, 815, viewport), 'bottom-right');
+
+  // SNAP_CORNER is 60, but the effective corner band must not swallow the
+  // 30px edge band when only one axis is actually near the corner.
+  assert.equal(detectSnapZone(15, 100, viewport), 'left');
+  assert.equal(detectSnapZone(45, 67, viewport), 'top');
+});
+
+test('left docking does not depend on a horizontal-only drag', () => {
+  const dragStart = { x: 215, y: 150 };
+  const pointer = { x: 15, y: 300 };
+  assert.deepEqual({
+    dx: pointer.x - dragStart.x,
+    dy: pointer.y - dragStart.y,
+  }, {
+    dx: -200,
+    dy: 150,
+  });
+  assert.equal(detectSnapZone(pointer.x, pointer.y, viewport), 'left');
 });

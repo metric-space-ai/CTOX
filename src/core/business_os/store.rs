@@ -508,7 +508,6 @@ pub(crate) struct BusinessOsMobileInviteSyncConfig {
     pub(crate) signaling_browser_token_hash: String,
     pub(crate) signaling_native_token_hash: String,
 }
-
 #[derive(Debug, Clone, Serialize)]
 pub struct BusinessOsUser {
     pub id: String,
@@ -1223,6 +1222,15 @@ fn attached_rxdb_table_columns(conn: &Connection, table: &str) -> anyhow::Result
     Ok(columns)
 }
 
+fn next_direct_rxdb_revision(previous: Option<&str>) -> String {
+    let height = previous
+        .and_then(|revision| revision.split_once('-').map(|(height, _)| height))
+        .and_then(|height| height.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    format!("{height}-{}", Uuid::new_v4().simple())
+}
+
 fn upsert_attached_rxdb_record(
     conn: &Connection,
     collection: &str,
@@ -1237,6 +1245,7 @@ fn upsert_attached_rxdb_record(
         "business_os_rxdb_projection.{}",
         sqlite_quote_identifier(&table)
     );
+    let mut previous_revision = None;
     if let Some(existing_json) = conn
         .query_row(
             &format!("SELECT data FROM {qualified_table} WHERE id = ?1"),
@@ -1246,13 +1255,18 @@ fn upsert_attached_rxdb_record(
         .optional()?
     {
         if let Ok(mut existing) = serde_json::from_str::<Value>(&existing_json) {
+            previous_revision = existing
+                .get("_rev")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             merge_json_object_values(&mut existing, &payload);
             payload = existing;
         }
     }
-    let rev = format!("rev_{}", Uuid::new_v4());
+    let rev = next_direct_rxdb_revision(previous_revision.as_deref());
     if let Some(object) = payload.as_object_mut() {
         object.insert("id".to_string(), Value::String(record_id.to_string()));
+        object.insert("_rev".to_string(), Value::String(rev.clone()));
         object.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
     }
     redact_document_client_context_secrets(&mut payload);
@@ -1542,6 +1556,8 @@ pub(crate) fn reusable_web_stack_auth_assist_request(
             "credential_selector": payload.get("credential_selector").and_then(Value::as_str).unwrap_or_default(),
             "capture_script": payload.get("capture_script").and_then(Value::as_str).unwrap_or_default(),
             "dedupe_key": payload.get("dedupe_key").and_then(Value::as_str).unwrap_or_default(),
+            "requesting_task_id": payload.get("requesting_task_id").and_then(Value::as_str).unwrap_or_default(),
+            "instruction": payload.get("instruction").and_then(Value::as_str).unwrap_or_default(),
             "deduped_by_active_auth_assist": true,
             "browser_stream": "rxdb",
             "secret_value_in_payload": false,
@@ -10192,7 +10208,7 @@ pub(super) fn load_rxdb_collection_records(
         .collect())
 }
 
-fn find_rxdb_collection_record_by_string_field(
+pub(super) fn find_rxdb_collection_record_by_string_field(
     root: &Path,
     collection: &str,
     field: &str,
@@ -10239,6 +10255,59 @@ fn find_rxdb_collection_record_by_string_field(
             .or_insert_with(|| Value::String(id.clone()));
     }
     Ok(Some((id, record)))
+}
+
+pub(super) fn find_rxdb_collection_records_by_string_field(
+    root: &Path,
+    collection: &str,
+    field: &str,
+    expected: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    if !is_safe_rxdb_collection_name(collection) {
+        anyhow::bail!("invalid collection name `{collection}`");
+    }
+    if !field
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        anyhow::bail!("invalid RxDB JSON field `{field}`");
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let path = rxdb_store_path(root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&path)?;
+    let Some(table) = rxdb_collection_table_name(&path, &conn, collection) else {
+        return Ok(Vec::new());
+    };
+    let json_path = format!("$.{field}");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, data
+         FROM {table}
+         WHERE CAST(json_extract(data, ?1) AS TEXT) = ?2
+         ORDER BY CAST(COALESCE(json_extract(data, '$.updated_at_ms'), 0) AS INTEGER) DESC, id DESC
+         LIMIT ?3"
+    ))?;
+    let rows = stmt
+        .query_map(params![json_path, expected, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, raw)| {
+            let mut record: Value = serde_json::from_str(&raw)?;
+            if let Some(object) = record.as_object_mut() {
+                object
+                    .entry("id".to_string())
+                    .or_insert_with(|| Value::String(id.clone()));
+            }
+            Ok((id, record))
+        })
+        .collect()
 }
 
 pub(super) fn upsert_rxdb_collection_record(
@@ -10535,6 +10604,7 @@ fn upsert_rxdb_collection_record_with_writer(
     mut payload: Value,
     deleted: bool,
 ) -> anyhow::Result<()> {
+    let mut previous_revision = None;
     if let Some(existing_json) = conn
         .query_row(
             &format!("SELECT data FROM {table} WHERE id = ?1"),
@@ -10544,13 +10614,18 @@ fn upsert_rxdb_collection_record_with_writer(
         .optional()?
     {
         if let Ok(mut existing) = serde_json::from_str::<Value>(&existing_json) {
+            previous_revision = existing
+                .get("_rev")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             merge_json_object_values(&mut existing, &payload);
             payload = existing;
         }
     }
-    let rev = format!("rev_{}", Uuid::new_v4());
+    let rev = next_direct_rxdb_revision(previous_revision.as_deref());
     if let Some(object) = payload.as_object_mut() {
         object.insert("id".to_string(), Value::String(record_id.to_string()));
+        object.insert("_rev".to_string(), Value::String(rev.clone()));
         object.insert(
             "updated_at_ms".to_string(),
             Value::Number(serde_json::Number::from(payload_updated_at_ms)),
@@ -11894,6 +11969,7 @@ pub(crate) fn is_recoverable_background_control_command_type(command_type: &str)
             "outbound.research_source.generate_adapter"
                 | "outbound.research_source.test"
                 | "outbound.research_source.auth_assist"
+                | "outbound.sellify.lookup"
         )
 }
 
@@ -11941,6 +12017,8 @@ fn recoverable_background_control_permission(command_type: &str) -> Option<Busin
             | "outbound.research_source.auth_assist"
     ) {
         Some(BusinessOsPermission::DataWrite)
+    } else if command_type == "outbound.sellify.lookup" {
+        Some(BusinessOsPermission::DataRead)
     } else {
         None
     }
@@ -14553,6 +14631,7 @@ pub(super) fn is_outbound_active_command(command_type: &str) -> bool {
             | "outbound.research_source.generate_adapter"
             | "outbound.research_source.test"
             | "outbound.research_source.auth_assist"
+            | "outbound.sellify.lookup"
     )
 }
 
@@ -15892,7 +15971,21 @@ pub(super) fn terminal_person_research_projection_candidates(
     })?;
     let mut statement = conn.prepare(
         "SELECT command.command_id, command.module, command.record_id,
-                command.payload_json, command.client_context_json, command.status
+                command.payload_json, command.client_context_json, command.status,
+                CASE WHEN command.module = 'thesen-outbound'
+                       AND command.record_id <> ''
+                       AND json_extract(command.client_context_json, '$.surface') = 'business_os_command_session'
+                       AND json_type(command.payload_json, '$.writeback_contract') IS NULL
+                       AND COALESCE(json_extract(lead.payload_json, '$.payload.last_research_command_id'), '') <> command.command_id
+                       AND NOT EXISTS (
+                         SELECT 1 FROM business_commands AS later
+                          WHERE later.command_type = 'web_stack.person_research'
+                            AND later.module = command.module
+                            AND later.record_id = command.record_id
+                            AND later.status IN ('completed', 'failed', 'cancelled')
+                            AND later.observed_at_ms > command.observed_at_ms
+                       )
+                     THEN 1 ELSE 0 END AS needs_legacy_lead_writeback
          FROM business_commands AS command
          LEFT JOIN business_records AS stored
            ON stored.collection = 'business_commands'
@@ -15900,6 +15993,10 @@ pub(super) fn terminal_person_research_projection_candidates(
           AND stored.deleted = 0
          LEFT JOIN canonical_person_research.business_command_aggregates AS canonical
            ON canonical.command_id = command.command_id
+         LEFT JOIN business_records AS lead
+           ON lead.collection = 'thesen_outbound_leads'
+          AND lead.record_id = command.record_id
+          AND lead.deleted = 0
          WHERE command.command_type = 'web_stack.person_research'
            AND command.status IN ('completed', 'failed', 'cancelled')
            AND (
@@ -15907,6 +16004,21 @@ pub(super) fn terminal_person_research_projection_candidates(
                NOT IN ('completed', 'failed', 'cancelled')
              OR COALESCE(canonical.terminal_status, 'none')
                NOT IN ('completed', 'failed', 'cancelled')
+             OR (
+               command.module = 'thesen-outbound'
+               AND command.record_id <> ''
+               AND json_extract(command.client_context_json, '$.surface') = 'business_os_command_session'
+               AND json_type(command.payload_json, '$.writeback_contract') IS NULL
+               AND COALESCE(json_extract(lead.payload_json, '$.payload.last_research_command_id'), '') <> command.command_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM business_commands AS later
+                  WHERE later.command_type = 'web_stack.person_research'
+                    AND later.module = command.module
+                    AND later.record_id = command.record_id
+                    AND later.status IN ('completed', 'failed', 'cancelled')
+                    AND later.observed_at_ms > command.observed_at_ms
+               )
+             )
            )
          ORDER BY command.observed_at_ms ASC",
     )?;
@@ -15918,12 +16030,20 @@ pub(super) fn terminal_person_research_projection_candidates(
             row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
+            row.get::<_, bool>(6)?,
         ))
     })?;
     let mut candidates = Vec::new();
     for row in rows {
-        let (command_id, module, record_id, payload_json, client_context_json, terminal_status) =
-            row?;
+        let (
+            command_id,
+            module,
+            record_id,
+            payload_json,
+            client_context_json,
+            terminal_status,
+            needs_legacy_lead_writeback,
+        ) = row?;
         let stored =
             stored_rxdb_business_command_outcome(&conn, &command_id)?.with_context(|| {
                 format!("terminal person-research projection missing for {command_id}")
@@ -15937,7 +16057,10 @@ pub(super) fn terminal_person_research_projection_candidates(
             .get("terminal_status")
             .and_then(Value::as_str)
             .unwrap_or("none");
-        if canonical_terminal == terminal_status && stored_terminal == terminal_status {
+        if canonical_terminal == terminal_status
+            && stored_terminal == terminal_status
+            && !needs_legacy_lead_writeback
+        {
             continue;
         }
         let recovery_terminal_status =
@@ -15959,13 +16082,24 @@ pub(super) fn terminal_person_research_projection_candidates(
             .or_else(|| result.get("error"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let mut payload = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+        if needs_legacy_lead_writeback {
+            payload["writeback_contract"] = serde_json::json!({
+                "collection": "thesen_outbound_leads",
+                "allowed_collections": ["thesen_outbound_leads"],
+                "record_ids": [record_id],
+                "command_type": "web_stack.person_research",
+                "min_independent_sources": 2,
+                "recovered_from": "missing_execute_action_writeback_contract"
+            });
+        }
         candidates.push(TerminalPersonResearchProjectionCandidate {
             command: BusinessCommand {
                 id: Some(command_id),
                 module,
                 command_type: "web_stack.person_research".to_string(),
                 record_id: (!record_id.trim().is_empty()).then_some(record_id),
-                payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+                payload,
                 client_context: serde_json::from_str(&client_context_json).unwrap_or(Value::Null),
                 origin: CommandOrigin::TrustedLocal,
             },
@@ -22371,7 +22505,7 @@ pub(super) fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
+pub(super) fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
     let runtime = root.join("runtime");
     std::fs::create_dir_all(&runtime)
         .with_context(|| format!("failed to create runtime dir {}", runtime.display()))?;
@@ -33451,6 +33585,24 @@ pub(super) mod tests {
         let first = sync_config(root)?;
         let rotated = rotate_sync_room_password(root)?;
         let reloaded = sync_config(root)?;
+
+        assert_eq!(
+            first.signaling_auth_version,
+            BUSINESS_OS_SIGNALING_AUTH_VERSION
+        );
+        assert_eq!(first.native_peer_id, first.peer_id);
+        assert_ne!(
+            first.signaling_browser_token_hash, first.signaling_native_token_hash,
+            "browser and native signaling roles must never share a credential"
+        );
+        assert_ne!(
+            first.signaling_browser_token_hash, rotated.signaling_browser_token_hash,
+            "room rotation must revoke the browser-side signaling credential"
+        );
+        assert_eq!(
+            first.signaling_native_token_hash, rotated.signaling_native_token_hash,
+            "the native-only credential must remain stable across room rotation"
+        );
 
         assert_ne!(
             first.signaling_room_password,

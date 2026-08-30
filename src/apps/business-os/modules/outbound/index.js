@@ -5419,7 +5419,12 @@ function browserAuthAssistLaunchArgs(authAssist) {
       ? authAssist.allowed_domains.map((entry) => String(entry || '').trim()).filter(Boolean)
       : [],
     capture_script: String(authAssist.capture_script || '').trim(),
+    verify_selector: String(authAssist.verify_selector || '').trim(),
     secret_name: String(authAssist.required_secret_name || '').trim(),
+    auth_assist_command_id: String(authAssist.command_id || '').trim(),
+    auth_assist_task_id: String(authAssist.task_id || authAssist.execution_task_id || '').trim(),
+    requesting_task_id: String(authAssist.requesting_task_id || '').trim(),
+    instruction: String(authAssist.instruction || '').trim(),
     auth_assist_status: 'pending',
     profile_mode: 'persistent',
     secret_value_in_rxdb: false,

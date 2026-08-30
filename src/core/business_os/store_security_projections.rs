@@ -145,7 +145,8 @@ pub(in crate::business_os) fn is_appsec_business_command(command_type: &str) -> 
 pub(crate) fn appsec_business_command_requires_data_write(command_type: &str) -> bool {
     matches!(
         command_type,
-        "ctox.appsec.assessment.create"
+        "ctox.appsec.app.audit"
+            | "ctox.appsec.assessment.create"
             | "ctox.appsec.assessment.run"
             | "ctox.appsec.assessment.archive"
             | "ctox.appsec.audit.run"
@@ -1057,7 +1058,10 @@ fn read_core_db_business_record(
     }
 }
 
-pub(in crate::business_os) fn find_queue_task_for_command(root: &Path, command_id: &str) -> Option<String> {
+pub(in crate::business_os) fn find_queue_task_for_command(
+    root: &Path,
+    command_id: &str,
+) -> Option<String> {
     let command_id = command_id.trim();
     if command_id.is_empty() {
         return None;

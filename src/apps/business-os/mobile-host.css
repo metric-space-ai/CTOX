@@ -16,11 +16,132 @@ html[data-workjet-mobile-host="true"] .drawer-backdrop,
 html[data-workjet-mobile-host="true"] .drawer,
 html[data-workjet-mobile-host="true"] .shell-window-switcher,
 html[data-workjet-mobile-host="true"] .shell-notifications,
-html[data-workjet-mobile-host="true"] .desktop-module,
 html[data-workjet-mobile-host="true"] [data-shell-start-menu],
 html[data-workjet-mobile-host="true"] [data-chat-dock],
 html[data-workjet-mobile-host="true"] [data-taskbar] {
   display: none !important;
+}
+
+/* Workjet mobile hosts the same Business OS home as desktop. The outer
+   Workjet chrome already supplies product/instance navigation, so only CTOX's
+   duplicate top-level chrome is suppressed; the canonical desktop module and
+   its app ordering remain visible and responsive. */
+html[data-workjet-mobile-host="true"] .desktop-module {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  --desktop-mobile-icon-size: 64px;
+  --desktop-mobile-cell-height: 132px;
+}
+
+/* The Fold/tablet viewport is wider than the phone breakpoint even though it
+   is still a touch launcher. Never fall back to the absolute-positioned
+   desktop canvas in a mobile host: it produces a tiny seven-column strip and
+   a large dead area. The application order and contents remain canonical;
+   only the host geometry becomes an adaptive touch grid. */
+html[data-workjet-mobile-host="true"] .desktop-icons {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-rows: var(--desktop-mobile-cell-height);
+  align-content: start;
+  align-items: start;
+  justify-items: center;
+  gap: 12px 8px;
+  padding: 20px 16px 72px;
+  overflow-x: auto;
+  overflow-y: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icon {
+  position: relative;
+  left: auto !important;
+  top: auto !important;
+  width: min(116px, 100%);
+  height: 124px;
+  gap: 9px;
+  padding: 8px 4px 10px;
+  touch-action: pan-x pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The shared button focus rule draws a card-sized halo around every launcher
+   cell. Launcher selection belongs to the artwork mask only; never restore
+   the old outer card on touch. */
+html[data-workjet-mobile-host="true"] .desktop-icon:focus,
+html[data-workjet-mobile-host="true"] .desktop-icon:focus-visible,
+html[data-workjet-mobile-host="true"] .desktop-icon.selected {
+  outline: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icon.selected .desktop-icon-glyph,
+html[data-workjet-mobile-host="true"] .desktop-icon:focus-visible .desktop-icon-glyph {
+  outline: 0 !important;
+  box-shadow: none !important;
+  filter: drop-shadow(0 7px 10px color-mix(in srgb, var(--accent) 34%, transparent));
+  transform: scale(1.035);
+}
+
+/* Touch edit mode uses the full app cell, never a tiny corner handle. A
+   deliberate long-press lifts the icon; moving over another complete cell
+   selects the insertion target. The DOM/order contract stays the canonical
+   desktop_icons sort_index contract and is committed once on drop. */
+html[data-workjet-mobile-host="true"] .desktop-icon.touch-reordering {
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0.92;
+  transform: translate(var(--touch-drag-x, 0), var(--touch-drag-y, 0)) scale(1.04) !important;
+  filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.32));
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icon.touch-drop-target .desktop-icon-glyph {
+  outline: 3px solid color-mix(in srgb, var(--accent) 82%, white 8%);
+  outline-offset: 5px;
+  transform: scale(1.06);
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icons.is-touch-reordering {
+  overflow: hidden;
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icon .desktop-icon-glyph {
+  width: var(--desktop-mobile-icon-size);
+  height: var(--desktop-mobile-icon-size);
+  border-radius: 16px;
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icon .desktop-icon-glyph > svg {
+  width: 56px;
+  height: 56px;
+}
+
+html[data-workjet-mobile-host="true"] .desktop-icon .desktop-icon-label {
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+@media (min-width: 600px) {
+  html[data-workjet-mobile-host="true"] .desktop-icons {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap-inline: 12px;
+    padding-inline: 24px;
+  }
+}
+
+@media (min-width: 840px) {
+  html[data-workjet-mobile-host="true"] .desktop-icons {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap-inline: 16px;
+    padding-inline: 32px;
+  }
 }
 
 html[data-workjet-mobile-host="true"] .workspace-frame {
@@ -114,6 +235,29 @@ html[data-workjet-mobile-host="true"] .shell-window-content > .shell-window-modu
 html[data-workjet-mobile-host="true"] .shell-window-content > .shell-window-module-root {
   grid-template-columns: minmax(0, 1fr) !important;
   overflow: auto;
+}
+
+/* The desktop shell places module content in grid column 2 between optional
+   side panes. Mobile collapses that grid to one column, so the inherited
+   column assignment must collapse with it. Otherwise CSS creates an implicit
+   empty first column and renders every app in only the right half. */
+html[data-workjet-mobile-host="true"] .shell-window-module-root > .module-content {
+  grid-column: 1 !important;
+  grid-row: 1 !important;
+  width: 100%;
+  min-width: 0;
+}
+
+/* The canonical modules keep their desktop information architecture, while
+   the host raises pointer geometry to a near-field touch baseline. This does
+   not add mobile-only controls or alter application ordering. */
+html[data-workjet-mobile-host="true"] :where(button, select, input, [role="button"]) {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+html[data-workjet-mobile-host="true"] :where(button, [role="button"]):has(> svg:only-child) {
+  min-width: 44px;
 }
 
 @media (min-width: 600px) and (max-width: 839px) {

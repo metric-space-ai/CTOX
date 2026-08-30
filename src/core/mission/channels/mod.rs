@@ -1,13 +1,13 @@
-mod outbound_review;
 mod account_helpers;
-use account_helpers::*;
-pub(crate) use account_helpers::{
-    record_communication_sync_run, stable_digest, upsert_communication_account,
-};
+mod outbound_review;
 use crate::communication_store::parse_string_json_array;
 pub(crate) use crate::communication_store::{
     now_iso_string, open_channel_db, preview_text, refresh_thread, refresh_thread_tx,
     upsert_communication_message, upsert_communication_message_tx, UpsertMessage,
+};
+use account_helpers::*;
+pub(crate) use account_helpers::{
+    record_communication_sync_run, stable_digest, upsert_communication_account,
 };
 use outbound_review::{
     cached_queue_task_count, cached_queue_task_list, channel_projection_tables_exist,
@@ -5621,17 +5621,18 @@ fn ack_messages_in_transaction(
     let mut updated = 0usize;
     for message_key in message_keys {
         let transition_reason = ack_reason.or(failure_note).unwrap_or("ack_messages");
-        if status == QueueRouteStatus::Cancelled
-            && transition_business_command_for_task_in_transaction(
-                tx,
-                message_key,
-                status.as_str(),
-                None,
-                None,
-                None,
-                transition_reason,
-            )?
-        {
+        if matches!(
+            status,
+            QueueRouteStatus::Cancelled | QueueRouteStatus::Failed
+        ) && transition_business_command_for_task_in_transaction(
+            tx,
+            message_key,
+            status.as_str(),
+            None,
+            (status == QueueRouteStatus::Failed).then_some("queue_terminal_failure"),
+            failure_note,
+            transition_reason,
+        )? {
             updated = updated.saturating_add(1);
             tx.execute(
                 "UPDATE communication_messages SET seen = 1 WHERE message_key = ?1",
@@ -6981,7 +6982,6 @@ fn load_owner_name(conn: &Connection) -> Result<Option<String>> {
         .optional()?
         .filter(|name| !name.trim().is_empty()))
 }
-
 
 #[cfg(test)]
 mod queue_task_metadata_tests {

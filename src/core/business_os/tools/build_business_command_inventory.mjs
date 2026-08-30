@@ -11,7 +11,7 @@ const repoRoot = path.resolve(businessOsDir, '../../..');
 // path is the other half of that repair.
 const storePath = path.join(businessOsDir, 'store.rs');
 const commandPlanePath = path.join(businessOsDir, 'command_plane.rs');
-const peerPath = path.join(businessOsDir, 'rxdb_peer.rs');
+const browserPeerPath = path.join(businessOsDir, 'rxdb_peer_browser.rs');
 const browserRoot = path.join(repoRoot, 'src/apps/business-os');
 const outputPath = path.join(businessOsDir, 'business_command_inventory.json');
 const storeSource = fs.readFileSync(storePath, 'utf8');
@@ -19,7 +19,7 @@ const commandPlaneSource = fs.readFileSync(commandPlanePath, 'utf8');
 // The classifier lives wherever the dispatcher lives; the helpers it needs may
 // still be in either file, so both are searched.
 const source = `${commandPlaneSource}\n${storeSource}`;
-const peerSource = fs.readFileSync(peerPath, 'utf8');
+const browserPeerSource = fs.readFileSync(browserPeerPath, 'utf8');
 const functionStart = source.indexOf('pub fn accept_rxdb_business_command_with_origin');
 const matchStart = source.indexOf('match command.command_type.as_str()', functionStart);
 const fallback = source.indexOf('        _ => {}', matchStart);
@@ -57,7 +57,7 @@ const controlPrefixes = [...new Set(
     .flatMap((body) => [...body.matchAll(/\.starts_with\("([^"]+)"\)/g)].map((match) => match[1])),
 )].sort();
 const browserRuntimeTypes = [...new Set(
-  [...functionBody(peerSource, 'is_browser_runtime_command').matchAll(/"([a-z][a-z0-9_-]*(?:\.[a-z0-9_:-]+)+)"/g)]
+  [...functionBody(browserPeerSource, 'is_browser_runtime_command').matchAll(/"([a-z][a-z0-9_-]*(?:\.[a-z0-9_:-]+)+)"/g)]
     .map((match) => match[1]),
 )].sort();
 const browserLiteralTypes = [...new Set(
@@ -71,10 +71,14 @@ const browserLiteralTypes = [...new Set(
           .map((match) => [match[1], match[2]]),
       );
       const propertyPattern = /\b(command_type|commandType|type)\s*:\s*(?:['"]([a-z][a-z0-9_-]*(?:\.[a-z0-9_:-]+)+)['"]|([A-Z][A-Z0-9_]*))/g;
-      return [...text.matchAll(propertyPattern)]
+      const propertyTypes = [...text.matchAll(propertyPattern)]
         .filter((match) => match[1] !== 'type' || legacyTypeLooksLikeCommand(text, match.index))
         .map((match) => match[2] || constants.get(match[3]) || '')
         .filter(Boolean);
+      const positionalDispatchTypes = [
+        ...text.matchAll(/\bdispatchCommand\s*\(\s*['"][^'"\n]+['"]\s*,\s*['"]([a-z][a-z0-9_-]*(?:\.[a-z0-9_:-]+)+)['"]/g),
+      ].map((match) => match[1]);
+      return [...propertyTypes, ...positionalDispatchTypes];
     }),
 )].sort();
 

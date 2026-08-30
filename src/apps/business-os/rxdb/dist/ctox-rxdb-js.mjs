@@ -4668,6 +4668,21 @@ var CtoxWebRtcNativePeer = class {
       this.events.emit("error", { code: "ctox_signaling_invalid_json", message: error.message });
       return;
     }
+    if (message.type === "ctoxIceServers") {
+      const iceServers = signalingIceServers(message.iceServers);
+      if (!iceServers.length) {
+        this.events.emit("error", { code: "ctox_signaling_ice_servers_invalid" });
+        return;
+      }
+      this.options.iceServers = iceServers;
+      const turnCredentialExpiresAtMs = turnCredentialExpiryMs(iceServers);
+      this.recordTransportStatus({ turnCredentialExpiresAtMs });
+      this.events.emit("ice-servers", {
+        count: iceServers.length,
+        turnCredentialExpiresAtMs
+      });
+      return;
+    }
     if (message.type === "init" || message.type === "joined" || message.type === "ctoxPresence") {
       if (message.type === "init") {
         const assignedPeerId = boundedLocalSignalingPeerId(message.yourPeerId);
@@ -6177,6 +6192,25 @@ function turnCredentialExpiryMs(iceServers = []) {
     if (Number.isFinite(expirySeconds) && expirySeconds > 0) expiries.push(expirySeconds * 1e3);
   }
   return expiries.length ? Math.min(...expiries) : 0;
+}
+function signalingIceServers(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) return [];
+  const servers = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") return [];
+    const rawUrls = typeof entry.urls === "string" ? [entry.urls] : Array.isArray(entry.urls) ? entry.urls : [];
+    const urls = rawUrls.filter((url) => typeof url === "string").map((url) => url.trim()).filter((url) => /^(?:stun|turn|turns):[^\s]{1,2048}$/i.test(url));
+    if (!urls.length || urls.length !== rawUrls.length) return [];
+    const server = { urls: typeof entry.urls === "string" ? urls[0] : urls };
+    if (typeof entry.username === "string" && entry.username.length <= 1024) {
+      server.username = entry.username;
+    }
+    if (typeof entry.credential === "string" && entry.credential.length <= 4096) {
+      server.credential = entry.credential;
+    }
+    servers.push(server);
+  }
+  return servers;
 }
 function peerConnectionSnapshot(connection) {
   const peer = connection?.peer;

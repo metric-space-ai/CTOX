@@ -616,7 +616,10 @@ function delegationPromptFor(report) {
 function openDelegateDialog(report) {
   const host = state.ctx.host;
   host.querySelector('[data-delegate-modal]')?.remove();
-  const actorId = state.ctx.session?.user_id || state.ctx.session?.userId || '';
+  const actorId = state.ctx.session?.user?.id
+    || state.ctx.session?.user_id
+    || state.ctx.session?.userId
+    || '';
   // The reviewer must themselves be authorized to run coding turns for the
   // module (server policy refuses otherwise) — offer only admin/chef roles.
   const reviewers = (state.users || []).filter((user) => (user.id || user.user_id) !== actorId

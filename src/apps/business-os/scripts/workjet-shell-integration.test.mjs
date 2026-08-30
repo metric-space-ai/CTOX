@@ -55,3 +55,17 @@ test('chat dock and windows use contract category metadata instead of module pal
   assert.doesNotMatch(chat, /\.ctox-chat-(?:chip|window)\[data-chat-module=/,
     'chat accent must not be selected by module id');
 });
+
+test('mobile Home ignores stale focused windows and opens apps only from real icon activation', async () => {
+  const mobileHost = await read('mobile-host.js');
+
+  assert.match(
+    mobileHost,
+    /activeAppId !== 'desktop' && focusedAppId && focusedAppId !== activeAppId/,
+    'a stale focused window must never replace the canonical mobile Home desk',
+  );
+  assert.match(mobileHost, /\.desktop-icon\[data-target\]/);
+  assert.match(mobileHost, /document\.addEventListener\('click',[\s\S]*applyActiveAppMetadata\(appId\)/);
+  assert.match(mobileHost, /document\.addEventListener\('keydown',[\s\S]*applyActiveAppMetadata\(appId\)/);
+  assert.doesNotMatch(mobileHost, /code: 'native-home-route'/);
+});

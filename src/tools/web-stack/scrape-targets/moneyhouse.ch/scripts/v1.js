@@ -84,6 +84,48 @@ function legalFormMatches(company, title) {
   return expected === null || legalForm(title) === expected;
 }
 
+function decodeEntities(value) {
+  // Moneyhouse embeds HTML entities INSIDE its JSON-LD strings, so a plain
+  // JSON.parse yields "Lindt &amp; Sprüngli AG".
+  return String(value || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, "\"");
+}
+
+function profileSlug(value) {
+  try {
+    return decodeURIComponent(new URL(value).pathname).replace(/-\d+\/?$/, "");
+  } catch (_err) {
+    return "";
+  }
+}
+
+// Identity + legal form alone are too coarse: "Novartis AG" matches
+// "Novartis Foundation", and "Lindt & Sprüngli AG" matches "Pensionskasse
+// Lindt & Sprüngli AG". Rank exact names first, then the URL slug, and only
+// then fall back to the tolerant matchers.
+function rankedHits(company, hits) {
+  const wanted = normalized(company);
+  const named = hits.filter((hit) => hit && hit.url);
+  const tiers = [
+    (hit) => normalized(decodeEntities(hit.name)) === wanted,
+    (hit) => normalized(profileSlug(hit.url)).endsWith(wanted),
+    (hit) => identityMatches(company, decodeEntities(hit.name))
+      && legalFormMatches(company, decodeEntities(hit.name)),
+    (hit) => identityMatches(company, profileSlug(hit.url))
+      && legalFormMatches(company, profileSlug(hit.url)),
+  ];
+  const ordered = [];
+  for (const tier of tiers) {
+    for (const hit of named) {
+      if (tier(hit) && !ordered.includes(hit)) ordered.push(hit);
+    }
+  }
+  return ordered;
+}
+
 function isAllowedUrl(value) {
   try {
     const url = new URL(value);
@@ -177,6 +219,16 @@ function searchHits(company, country) {
   return [...new Set(hits)].slice(0, MAX_HITS);
 }
 
+// The search page repeats every company as a "/network" sublink labelled
+// "Netzwerk ansehen"; those duplicates otherwise consume the MAX_HITS budget.
+function isBaseProfileUrl(value) {
+  try {
+    return /^\/(de|en|fr|it)\/company\/[^/]+\/?$/i.test(new URL(value).pathname);
+  } catch (_err) {
+    return false;
+  }
+}
+
 function searchHitsFromHtml(html) {
   const hits = [];
   const pattern = /<a[^>]+href=(?:"|')([^"']*\/company\/[^"'?#]+)(?:"|')[^>]*>([\s\S]*?)<\/a>/gi;
@@ -191,7 +243,8 @@ function searchHitsFromHtml(html) {
       .replace(/\s+/g, " ")
       .trim();
     try {
-      hits.push({ name, url: new URL(match[1], `https://www.${ALLOWED_HOST}/`).href });
+      const url = new URL(match[1], `https://www.${ALLOWED_HOST}/`).href;
+      if (isBaseProfileUrl(url)) hits.push({ name, url });
     } catch (_err) {}
   }
   return hits;
@@ -223,7 +276,8 @@ function portalSearch(company, country = "CH") {
       body_text: (document.body?.innerText || "").slice(0, 12000),
       hits: Array.from(document.querySelectorAll('a[href*="/company/"]'))
         .map((node) => ({ name: (node.textContent || "").trim(), url: node.href }))
-        .filter((hit) => hit.name && hit.url)
+        .filter((hit) => hit.name && hit.url
+          && /^\\/(de|en|fr|it)\\/company\\/[^/]+\\/?$/i.test(new URL(hit.url).pathname))
         .slice(0, 40),
     })).then((result) => ({ ...result, http_status: response?.status() || null }));
   `;
@@ -242,8 +296,7 @@ function candidateUrls(input, company, country) {
   if (explicit.length > 0) return { urls: [...new Set(explicit)], discovery: null };
 
   const discovery = portalSearch(company, country);
-  const portalHits = (discovery?.hits || [])
-    .filter((hit) => identityMatches(company, hit.name) && legalFormMatches(company, hit.name))
+  const portalHits = rankedHits(company, discovery?.hits || [])
     .map((hit) => managementUrl(hit.url))
     .filter(Boolean);
   const fallbackHits = portalHits.length > 0 ? [] : searchHits(company, country);
@@ -503,15 +556,15 @@ function recordsFromPage(page) {
   }
   for (const org of jsonLdOrganizations(page)) {
     const address = org.address || {};
-    push("firma_name", org.legalName || org.name, "high", "Moneyhouse JSON-LD");
-    push("firma_anschrift", address.streetAddress, "high", "Moneyhouse JSON-LD");
-    push("firma_plz", address.postalCode, "high", "Moneyhouse JSON-LD");
-    push("firma_ort", address.addressLocality, "high", "Moneyhouse JSON-LD");
+    push("firma_name", decodeEntities(org.legalName || org.name), "high", "Moneyhouse JSON-LD");
+    push("firma_anschrift", decodeEntities(address.streetAddress), "high", "Moneyhouse JSON-LD");
+    push("firma_plz", decodeEntities(address.postalCode), "high", "Moneyhouse JSON-LD");
+    push("firma_ort", decodeEntities(address.addressLocality), "high", "Moneyhouse JSON-LD");
   }
-  push("firma_name", page?.profile?.name, "high", "Moneyhouse JSON-LD");
-  push("firma_anschrift", page?.profile?.street, "high", "Moneyhouse JSON-LD");
-  push("firma_plz", page?.profile?.postalCode, "high", "Moneyhouse JSON-LD");
-  push("firma_ort", page?.profile?.locality, "high", "Moneyhouse JSON-LD");
+  push("firma_name", decodeEntities(page?.profile?.name), "high", "Moneyhouse JSON-LD");
+  push("firma_anschrift", decodeEntities(page?.profile?.street), "high", "Moneyhouse JSON-LD");
+  push("firma_plz", decodeEntities(page?.profile?.postalCode), "high", "Moneyhouse JSON-LD");
+  push("firma_ort", decodeEntities(page?.profile?.locality), "high", "Moneyhouse JSON-LD");
   for (const person of managementPeople(page)) {
     const slug = normalized(`${person.first} ${person.last}`).replace(/\s+/g, "-");
     const personUrl = isAllowedUrl(person.sourceUrl)
@@ -578,14 +631,17 @@ module.exports = {
   blockingMarkers,
   browserCapturePage,
   candidateUrls,
+  decodeEntities,
   directPortalSearchResult,
   failureResult,
   identityMatches,
+  isBaseProfileUrl,
   jsonLdOrganizations,
   managementFromHtml,
   managementPeople,
   managementUrl,
   portalSearch,
+  rankedHits,
   searchHitsFromHtml,
   recordsFromPage,
   validatedPage,

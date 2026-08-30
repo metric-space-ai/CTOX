@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 
 export const manifest = {
   id: 'code-editor',

@@ -1,7 +1,7 @@
 import {
   FILE_CHUNK_ERROR_CODES,
   readStoredFileFromDemandChunks,
-} from '../../shared/file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const TEXT_PREVIEW_RANGE_BYTES = 256 * 1024;
 

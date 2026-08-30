@@ -178,6 +178,7 @@ test('module wires canonical collection readiness for the data-driven empty stat
   // empties keep ctox-empty.
   assert.match(js, /class="ctox-syncing" role="status" aria-live="polite"/);
   assert.match(js, /resolveReportsDataState\(\{ sourceCount: allItems\.length, readiness: reportsDataReadiness\(\) \}\)/);
+  assert.match(js, /state\.ctx\.session\?\.user\?\.id/);
 });
 
 test('presentation layer stays compact and shell-native', async () => {
@@ -203,6 +204,7 @@ test('presentation layer stays compact and shell-native', async () => {
   assert.match(css, /--ctox-right-width: 340px/);
   // Collapsed actions column is two-pane; resizers hide on narrow viewports.
   assert.match(css, /\.reports-module\.is-actions-hidden[\s\S]*grid-template-columns: var\(--ctox-left-width, 320px\) 12px minmax\(0, 1fr\)/);
+  assert.match(css, /@container business-app-window \(max-width: 1180px\)[\s\S]*\.reports-module,\s*\.reports-module\.is-actions-hidden\s*\{\s*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(css, /\.reports-module[^\{]*\[data-resizer\][\s\S]*display: none !important/);
   assert.match(css, /@container business-app-window \(max-width: 1180px\)/);
   assert.match(css, /@container business-app-window \(max-width: 767px\)/);

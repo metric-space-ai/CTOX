@@ -2,16 +2,16 @@
 // root-relative path persistence, and script registration.
 
 use super::{
+    RegisteredTarget, SCHEMA, ScrapeScriptRevisionRecord, ScrapeTargetView,
     build_target_api_contract, compute_sha256, default_entry_command, ensure_target_workspace,
     load_script_revisions, load_source_revisions, load_target_view, map_target_row,
     normalize_target_config, now_iso_string, registered_script_matches, resolve_input_path,
     resolve_registered_workspace, resolve_runtime_root, script_extension, slugify, stable_digest,
-    target_sources, write_target_manifest, RegisteredTarget, ScrapeScriptRevisionRecord,
-    ScrapeTargetView, SCHEMA,
+    target_sources, write_target_manifest,
 };
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{json, Value};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 

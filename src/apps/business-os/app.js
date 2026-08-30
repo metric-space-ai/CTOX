@@ -79,7 +79,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260829-workjet-runtime-v257';
+const APP_BUILD = '20260830-reports-flow-v258';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -388,6 +388,7 @@ function installAdvancedStatusInterface() {
   };
   window.CTOX_BUSINESS_OS_STATUS = api;
   window.CTOX_BUSINESS_OS_APP = state;
+  globalThis.workjetProjectControl = workjetProjectControl;
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
 }
 
@@ -8370,10 +8371,18 @@ function canViewModuleSource(mod, governance = state.governance) {
 }
 
 async function reportCurrentModule(details = {}) {
-  const mod = details.module || state.activeModule;
-  const { dispatchBusinessReport } = await loadBusinessReporterModule();
-  const result = await dispatchBusinessReport({
-    commandBus: createLiveCommandBusFacade(),
+  const reporterModule = await loadBusinessReporterModule();
+  const mod = details.module || reporterModule.resolveBusinessReporterModule({
+    activeModule: state.activeModule,
+    modules: state.modules,
+    windowManager: state.windowManager,
+  });
+  const reportsModule = state.modules.find((candidate) => candidate.id === 'reports');
+  if (!reportsModule) throw new Error('Bugs & Features ist noch nicht im Modulkatalog verfügbar.');
+  await registerModuleSchemas(reportsModule);
+  const result = await reporterModule.saveBusinessReportLocally({
+    db: createScopedSystemDbFacade('business-reporter-module-api', BUSINESS_REPORTER_DB_COLLECTIONS),
+    sync: createLiveSyncFacade(),
     session: state.session,
     module: mod,
     kind: details.kind || 'bug',
@@ -8411,13 +8420,21 @@ function loadBusinessChatModule() {
 
 function scheduleBusinessCompanions() {
   loadBusinessReporterModule()
-    .then(({ initBusinessReporter }) => {
+    .then(({ initBusinessReporter, resolveBusinessReporterModule }) => {
       initBusinessReporter({
         session: state.session,
-        getActiveModule: () => state.activeModule,
-        commandBus: createLiveCommandBusFacade(),
+        getActiveModule: () => resolveBusinessReporterModule({
+          activeModule: state.activeModule,
+          modules: state.modules,
+          windowManager: state.windowManager,
+        }),
         db: createScopedSystemDbFacade('business-reporter-companion', BUSINESS_REPORTER_DB_COLLECTIONS),
         sync: createLiveSyncFacade(),
+        ensureReportCollections: async () => {
+          const reportsModule = state.modules.find((mod) => mod.id === 'reports');
+          if (!reportsModule) throw new Error('Bugs & Features ist noch nicht im Modulkatalog verfügbar.');
+          await registerModuleSchemas(reportsModule);
+        },
       });
     })
     .catch((error) => {
@@ -8936,6 +8953,7 @@ function startMaintenanceMonitor() {
 }
 
 function isWorkjetStaticShellLaunch() {
+  if (document.documentElement.dataset.workjetMobileHost === 'true') return true;
   const source = String(launchConfigForPageSession?.desktop_instance?.source || '').trim();
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
   return loopback && [
@@ -10517,20 +10535,24 @@ function getOfflineFallbackCatalog() {
         "ctox_bug_reports",
         "business_module_releases",
         "business_commands",
-        "ctox_queue_tasks"
+        "ctox_queue_tasks",
+        "ctox_task_approval_requests",
+        "business_users"
       ],
       "layout": {
         "shell": "windowed",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-reports\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-reports\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#ef4444\" /><stop offset=\"100%\" stop-color=\"#f97316\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-reports)\" fill-opacity=\"0.12\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M18 17V10M12 17V6M6 17v-4\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"6\" r=\"2\" fill=\"#ffffff\" stroke=\"url(#grad-reports)\" stroke-width=\"1.2\"></circle></svg>",
         "left": "Bug and feature filters and history",
         "center": "Selected report evidence, CTOX change log, and rollback",
+        "right": "CTOX task, coding-agent delegation, and rollback actions for the selected report",
+        "third_pane_justification": "Die Aktions-Spalte (CTOX Task zeigen, Übergabe an den Coding Agent, Modul-Rollback) gehört zum selektierten Report und muss in breiten Fenstern neben Liste und Detail sichtbar bleiben; sie ist default-eingeklappt und öffnet über den Aktionen-Toggle im Detail-Header.",
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
         "min_height": 480
       },
       "category": "Governance",
-      "version": "v1",
+      "version": "1.1.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -10876,6 +10898,340 @@ async function dispatchShellModuleCommand({
       actor: actorContext(state.session),
     },
   }, { until: 'accepted' });
+}
+
+const WORKJET_PROJECT_CONTROL_MAX_RESULTS = 100;
+const WORKJET_PROJECT_CONTROL_MAX_WORKING_COPIES = 500;
+const WORKJET_PROJECT_CONTROL_TIMEOUT_MS = 30_000;
+
+async function workjetProjectControl(request = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('Workjet project control request must be an object.');
+  }
+  const action = boundedWorkjetProjectText(request.action, 'action', 64);
+  const ownerUserId = boundedWorkjetProjectText(actorContext(state.session).id, 'owner_user_id', 256);
+  const { projectBridge, workingCopyBridge } = await requireWorkjetProjectDataPlane();
+
+  if (action === 'project.list') {
+    assertWorkjetProjectPayloadKeys(request, new Set(['action']));
+    const commandId = `cmd_workjet_project_list_${newId()}`;
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.project.list',
+      record_id: ownerUserId,
+      payload: { limit: WORKJET_PROJECT_CONTROL_MAX_RESULTS },
+      client_context: {
+        source: 'workjet-project-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_PROJECT_CONTROL_TIMEOUT_MS });
+    await waitForSyncBridgeReady(projectBridge, WORKJET_PROJECT_CONTROL_TIMEOUT_MS);
+    await waitForSyncBridgeReady(workingCopyBridge, WORKJET_PROJECT_CONTROL_TIMEOUT_MS);
+    const workingCopies = await listProjectedWorkjetWorkingCopies(ownerUserId);
+    const projects = await listProjectedWorkjetProjects(
+      ownerUserId,
+      WORKJET_PROJECT_CONTROL_MAX_RESULTS,
+      workingCopies,
+    );
+    return { action: 'project.list', projects };
+  }
+
+  if (action === 'project.create') {
+    assertWorkjetProjectPayloadKeys(request, new Set([
+      'action',
+      'commandId',
+      'projectId',
+      'title',
+      'createdAt',
+      'workingCopy',
+    ]));
+    const commandId = boundedWorkjetProjectText(request.commandId, 'commandId', 128);
+    const projectId = boundedWorkjetProjectText(request.projectId, 'projectId', 128);
+    const title = boundedWorkjetProjectText(request.title, 'title', 256);
+    const requestedCreatedAt = boundedWorkjetProjectIsoDate(request.createdAt, 'createdAt');
+    const requestedWorkingCopy = boundedWorkjetWorkingCopyRequest(request.workingCopy);
+    await state.commandBus.dispatch({
+      id: commandId,
+      command_id: commandId,
+      module: 'ctox',
+      command_type: 'ctox.workjet.project.upsert',
+      record_id: projectId,
+      payload: {
+        project_id: projectId,
+        name: title,
+      },
+      client_context: {
+        source: 'workjet-project-control',
+        actor: actorContext(state.session),
+      },
+    }, { until: 'terminal', timeoutMs: WORKJET_PROJECT_CONTROL_TIMEOUT_MS });
+    await waitForProjectedWorkjetProject(
+      projectId,
+      title,
+      ownerUserId,
+      projectBridge,
+      WORKJET_PROJECT_CONTROL_TIMEOUT_MS,
+    );
+    if (requestedWorkingCopy) {
+      const workingCopyCommandId = await workjetProjectChildCommandId(commandId, 'working-copy');
+      await state.commandBus.dispatch({
+        id: workingCopyCommandId,
+        command_id: workingCopyCommandId,
+        module: 'ctox',
+        command_type: 'ctox.workjet.working_copy.upsert',
+        record_id: projectId,
+        payload: {
+          project_id: projectId,
+          computer_id: requestedWorkingCopy.computerId,
+          path: requestedWorkingCopy.path,
+          active: true,
+        },
+        client_context: {
+          source: 'workjet-project-control',
+          actor: actorContext(state.session),
+        },
+      }, { until: 'terminal', timeoutMs: WORKJET_PROJECT_CONTROL_TIMEOUT_MS });
+      await waitForProjectedWorkjetWorkingCopy(
+        projectId,
+        requestedWorkingCopy,
+        ownerUserId,
+        workingCopyBridge,
+        WORKJET_PROJECT_CONTROL_TIMEOUT_MS,
+      );
+    }
+    const workingCopies = (await listProjectedWorkjetWorkingCopies(ownerUserId))
+      .filter((copy) => copy.projectId === projectId);
+    const project = await waitForProjectedWorkjetProject(
+      projectId,
+      title,
+      ownerUserId,
+      projectBridge,
+      WORKJET_PROJECT_CONTROL_TIMEOUT_MS,
+      workingCopies,
+    );
+    return {
+      action: 'project.create',
+      project: {
+        ...project,
+        createdAt: project.createdAt || requestedCreatedAt,
+      },
+    };
+  }
+
+  throw new Error(`Unsupported Workjet project control action: ${action}`);
+}
+
+async function requireWorkjetProjectDataPlane() {
+  if (!state.commandBus?.dispatch || !state.db?.collection?.('business_commands')) {
+    throw new Error('Workjet project control is not ready.');
+  }
+  const collection = state.db?.collection?.('workjet_projects');
+  if (!collection) throw new Error('workjet_projects collection is not registered.');
+  const commandBridge = await state.sync?.startCollection?.('business_commands');
+  await waitForSyncBridgeReady(commandBridge, 15_000);
+  const projectBridge = await state.sync?.startCollection?.('workjet_projects');
+  await waitForSyncBridgeReady(projectBridge, 15_000);
+  const workingCopyBridge = await state.sync?.startCollection?.('workjet_working_copies');
+  await waitForSyncBridgeReady(workingCopyBridge, 15_000);
+  return { projectBridge, workingCopyBridge };
+}
+
+async function listProjectedWorkjetProjects(ownerUserId, limit, workingCopies = []) {
+  const collection = state.db?.collection?.('workjet_projects');
+  const docs = await collection.find({
+    selector: { owner_user_id: { $eq: ownerUserId } },
+    limit: Math.min(limit, WORKJET_PROJECT_CONTROL_MAX_RESULTS),
+  }).exec();
+  const projects = docs
+    .map((doc) => {
+      const project = boundedWorkjetProjectResult(doc?.toJSON?.() || doc);
+      if (!project) return null;
+      return Object.freeze({
+        ...project,
+        workingCopies: Object.freeze(
+          workingCopies.filter((copy) => copy.projectId === project.id)
+            .map(publicWorkjetWorkingCopyResult),
+        ),
+      });
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftCreatedAt = Date.parse(left.createdAt || '') || 0;
+      const rightCreatedAt = Date.parse(right.createdAt || '') || 0;
+      return rightCreatedAt - leftCreatedAt || left.id.localeCompare(right.id);
+    });
+  return projects;
+}
+
+async function waitForProjectedWorkjetProject(
+  projectId,
+  expectedTitle,
+  ownerUserId,
+  bridge,
+  timeoutMs,
+  workingCopies = [],
+) {
+  const collection = state.db?.collection?.('workjet_projects');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await bridge?.awaitInSync?.();
+      const doc = await collection.findOne(projectId).exec();
+      const rawProject = doc?.toJSON?.() || doc;
+      if (rawProject?.owner_user_id === ownerUserId
+        && rawProject?.name === expectedTitle
+        && rawProject?.status === 'active') {
+        const project = boundedWorkjetProjectResult(rawProject);
+        if (project) return Object.freeze({
+          ...project,
+          workingCopies: Object.freeze(workingCopies.map(publicWorkjetWorkingCopyResult)),
+        });
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  const error = new Error(`Workjet project projection did not arrive for ${projectId}.`);
+  error.code = 'workjet_project_projection_timeout';
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+async function listProjectedWorkjetWorkingCopies(ownerUserId) {
+  const collection = state.db?.collection?.('workjet_working_copies');
+  const docs = await collection.find({
+    selector: { owner_user_id: { $eq: ownerUserId } },
+    limit: WORKJET_PROJECT_CONTROL_MAX_WORKING_COPIES,
+  }).exec();
+  return docs
+    .map((doc) => boundedWorkjetWorkingCopyResult(doc?.toJSON?.() || doc))
+    .filter(Boolean)
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+async function waitForProjectedWorkjetWorkingCopy(
+  projectId,
+  expected,
+  ownerUserId,
+  bridge,
+  timeoutMs,
+) {
+  const collection = state.db?.collection?.('workjet_working_copies');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await bridge?.awaitInSync?.();
+      const docs = await collection.find({
+        selector: {
+          project_id: { $eq: projectId },
+          computer_id: { $eq: expected.computerId },
+          status: { $eq: 'active' },
+        },
+        limit: 2,
+      }).exec();
+      const matches = docs
+        .map((doc) => boundedWorkjetWorkingCopyResult(doc?.toJSON?.() || doc))
+        .filter((copy) => copy?.ownerUserId === ownerUserId && copy.path === expected.path);
+      if (matches.length === 1) return matches[0];
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  const error = new Error(`Workjet working-copy projection did not arrive for ${projectId}.`);
+  error.code = 'workjet_working_copy_projection_timeout';
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+function boundedWorkjetWorkingCopyRequest(value) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid Workjet project workingCopy.');
+  }
+  assertWorkjetProjectPayloadKeys(value, new Set(['computerId', 'path']));
+  return Object.freeze({
+    computerId: boundedWorkjetProjectText(value.computerId, 'workingCopy.computerId', 256),
+    path: boundedWorkjetProjectText(value.path, 'workingCopy.path', 4096),
+  });
+}
+
+function boundedWorkjetWorkingCopyResult(value) {
+  if (!value || typeof value !== 'object' || value._deleted === true
+    || value.is_deleted === true || !['active', 'detached'].includes(value.status)) {
+    return null;
+  }
+  return Object.freeze({
+    id: boundedWorkjetProjectText(value.id, 'workingCopy.id', 160),
+    projectId: boundedWorkjetProjectText(value.project_id, 'workingCopy.projectId', 128),
+    computerId: boundedWorkjetProjectText(value.computer_id, 'workingCopy.computerId', 256),
+    path: boundedWorkjetProjectText(value.path, 'workingCopy.path', 4096),
+    status: value.status,
+    ownerUserId: boundedWorkjetProjectText(value.owner_user_id, 'workingCopy.ownerUserId', 256),
+  });
+}
+
+function publicWorkjetWorkingCopyResult(value) {
+  return Object.freeze({
+    id: value.id,
+    computerId: value.computerId,
+    path: value.path,
+    status: value.status,
+  });
+}
+
+async function workjetProjectChildCommandId(parentCommandId, kind) {
+  if (!crypto?.subtle) throw new Error('Secure Workjet command IDs are unavailable.');
+  const bytes = new TextEncoder().encode(`${kind}\0${parentCommandId}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  return `cmd_workjet_${kind.replaceAll('-', '_')}_${hex}`;
+}
+
+function boundedWorkjetProjectResult(value) {
+  if (!value || typeof value !== 'object' || value._deleted === true || value.is_deleted === true) {
+    return null;
+  }
+  const result = {
+    id: boundedWorkjetProjectText(value.id, 'project.id', 128),
+    title: boundedWorkjetProjectText(value.name, 'project.name', 256),
+  };
+  const createdAtMs = Number(value.created_at_ms);
+  if (Number.isFinite(createdAtMs) && createdAtMs >= 0) {
+    result.createdAt = new Date(createdAtMs).toISOString();
+  }
+  return Object.freeze(result);
+}
+
+function boundedWorkjetProjectText(value, field, maxLength, { allowEmpty = false } = {}) {
+  const text = String(value ?? '').trim();
+  if ((!allowEmpty && !text) || text.length > maxLength || /[\u0000-\u001f\u007f]/u.test(text)) {
+    throw new Error(`Invalid Workjet project ${field}.`);
+  }
+  return text;
+}
+
+function assertWorkjetProjectPayloadKeys(payload, allowed) {
+  const unexpected = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (unexpected.length) {
+    throw new Error(`Unsupported Workjet project payload field: ${unexpected[0]}`);
+  }
+}
+
+function boundedWorkjetProjectIsoDate(value, field) {
+  const text = boundedWorkjetProjectText(value, field, 64);
+  const date = new Date(text);
+  if (!Number.isFinite(date.getTime())) {
+    throw new Error(`Invalid Workjet project ${field}.`);
+  }
+  return date.toISOString();
 }
 
 async function waitForSyncBridgeReady(bridge, timeoutMs = 15000) {

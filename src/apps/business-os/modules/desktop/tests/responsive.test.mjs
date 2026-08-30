@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('../index.css', import.meta.url), 'utf8');
 const js = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+const dragJs = readFileSync(new URL('../iconDrag.js', import.meta.url), 'utf8');
 
 assert.match(css, /\.desktop-module\s*\{[\s\S]*container-type:\s*inline-size/);
 assert.match(css, /@container \(max-width: 1320px\)\s*\{[\s\S]*\.desktop-widget-container\s*\{[\s\S]*display:\s*none/);
@@ -32,5 +33,17 @@ assert.match(js, /height:\s*116,/u, 'drag bounds use the rendered desktop icon h
 assert.match(js, /return 'CTOX Backend';/u);
 assert.match(js, /el\.setAttribute\('role', 'button'\)/u);
 assert.match(js, /el\.setAttribute\('aria-label', label\)/u);
+assert.match(js, /const columns = Math\.max\(1, Math\.floor\(usableWidth \/ grid\.cellW\)\)/u);
+assert.match(js, /x: grid\.offset \+ \(index % columns\) \* grid\.cellW/u);
+assert.match(js, /ROW_MAJOR_LAYOUT_MIGRATION = 'row-major-v2'/u);
+assert.match(js, /const position = clampIconPosition\(doc, doc, currentGrid\(\)\)/u);
+assert.doesNotMatch(js, /const rows = Math\.max\(1, Math\.floor\(usableHeight \/ grid\.cellH\)\)/u);
+assert.match(js, /onReorder: reorderIcons/u);
+assert.match(js, /dataset\.workjetMobileHost === 'true'\) return/u);
+assert.match(js, /await iconsCollection\.bulkUpsert\(updates\)/u);
+assert.match(dragJs, /TOUCH_REORDER_HOLD_MS = 360/u);
+assert.match(dragJs, /addEventListener\('touchstart', onTouchStart/u);
+assert.match(dragJs, /addEventListener\('touchmove', onTouchMove, \{ passive: false \}\)/u);
+assert.match(dragJs, /\.desktop-icon\[data-icon-id\]/u);
 
-console.log('ok - desktop icons keep one unboxed surface and unclipped compact rows');
+console.log('ok - desktop icons keep one unboxed surface and responsive row-major layout');

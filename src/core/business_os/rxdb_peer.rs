@@ -85,6 +85,7 @@ use super::rxdb_peer_workjet_devices::{
     handle_workjet_device_webrtc_request, WORKJET_DEVICE_WEBRTC_METHOD,
 };
 use super::store;
+use super::store_outbound_commands::outbound_sellify_lookup;
 use crate::command_lifecycle::generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
 use crate::mission::channels;
 use crate::mission::tickets;
@@ -701,6 +702,7 @@ enum NativePeerExit {
 /// that produced the canonical zombie (heartbeat "running", zero replication,
 /// no retry). See docs/ctox-rxdb.md §4.
 const NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS: u64 = 20;
+const OUTBOUND_SELLIFY_LOOKUP_WEBRTC_METHOD: &str = "ctox.outbound.sellify_lookup.v1";
 const DEVICE_PROOF_VERSION: &str = "ctox-device-proof-v1";
 
 fn validate_device_bound_peer_session(
@@ -2619,6 +2621,8 @@ async fn run_native_peer(
         stable_native_peer_id,
         signaling_auth,
     );
+    // Mint an ephemeral TURN credential for the native peer too (no-op unless
+    // a TURN URL + secret are configured). Re-derived on each peer bring-up.
     if let Some(turn) = store::ephemeral_turn_server(&root, &peer_session_id) {
         sync_config.ice_servers.push(turn);
     }
@@ -2634,6 +2638,11 @@ async fn run_native_peer(
         peer_session_id.clone(),
         database_path.clone(),
     );
+    let repaired_revisions = repair_legacy_business_command_revisions(&database_path)
+        .context("repair legacy Business OS command revisions")?;
+    if repaired_revisions > 0 {
+        eprintln!("[business-os] repaired {repaired_revisions} legacy business_commands revisions");
+    }
     let database = open_database(database_path.clone()).await?;
     let database_write_lock = Arc::new(AsyncMutex::new(()));
 
@@ -2859,6 +2868,29 @@ async fn run_native_peer(
                                 params,
                             )
                             .await
+                        })
+                    }),
+                );
+                let outbound_lookup_root = root.clone();
+                pool.set_auxiliary_request_handler(
+                    OUTBOUND_SELLIFY_LOOKUP_WEBRTC_METHOD,
+                    Arc::new(move |_peer_identity, capability_token, params| {
+                        let root = outbound_lookup_root.clone();
+                        Box::pin(async move {
+                            if !store::capability_allows_collection_permission(
+                                &root,
+                                &capability_token,
+                                "thesen_outbound_leads",
+                                crate::business_os::policy::BusinessOsPermission::DataRead,
+                            ) {
+                                return Err(
+                                    "outbound Sellify lookup capability may not read THESEN leads"
+                                        .to_string(),
+                                );
+                            }
+                            let payload = params.first().cloned().unwrap_or(Value::Null);
+                            outbound_sellify_lookup(&root, &payload)
+                                .map_err(|error| error.to_string())
                         })
                     }),
                 );
@@ -7828,6 +7860,62 @@ pub(super) fn mime_type_for_path(path: &Path) -> &'static str {
     }
 }
 
+fn valid_rxdb_revision(revision: &str) -> bool {
+    let Some((height, hash)) = revision.split_once('-') else {
+        return false;
+    };
+    !hash.is_empty() && !hash.contains('-') && height.parse::<u64>().is_ok()
+}
+
+fn repair_legacy_business_command_revisions(database_path: &Path) -> anyhow::Result<usize> {
+    if !database_path.is_file() {
+        return Ok(0);
+    }
+    let mut conn = Connection::open(database_path)?;
+    let Some(table) = store::rxdb_collection_table_name(database_path, &conn, "business_commands")
+    else {
+        return Ok(0);
+    };
+    let quoted = sqlite_quote_identifier(&table);
+    let rows = {
+        let mut statement = conn.prepare(&format!("SELECT id, revision, data FROM {quoted}"))?;
+        let mapped = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let transaction = conn.transaction()?;
+    let mut repaired = 0usize;
+    for (id, stored_revision, raw) in rows {
+        let mut document: Value = serde_json::from_str(&raw)?;
+        let document_revision = document.get("_rev").and_then(Value::as_str).unwrap_or("");
+        if valid_rxdb_revision(&stored_revision) && document_revision == stored_revision {
+            continue;
+        }
+        let revision = if valid_rxdb_revision(&stored_revision) {
+            stored_revision
+        } else if valid_rxdb_revision(document_revision) {
+            document_revision.to_string()
+        } else {
+            format!("1-{}", Uuid::new_v4().simple())
+        };
+        if let Some(object) = document.as_object_mut() {
+            object.insert("_rev".to_string(), Value::String(revision.clone()));
+        }
+        transaction.execute(
+            &format!("UPDATE {quoted} SET revision = ?1, data = ?2 WHERE id = ?3"),
+            params![revision, serde_json::to_string(&document)?, id],
+        )?;
+        repaired += 1;
+    }
+    transaction.commit()?;
+    Ok(repaired)
+}
+
 pub(super) async fn open_database(database_path: PathBuf) -> anyhow::Result<Arc<RxDatabase>> {
     let storage = get_rx_storage_sqlite(RxStorageSqliteSettings { database_path });
     create_rx_database(RxDatabaseCreator {
@@ -11885,7 +11973,8 @@ pub(in crate::business_os) mod tests {
         let query_pairs = parsed.query_pairs().into_owned().collect::<HashMap<_, _>>();
         assert_eq!(
             query_pairs.get("token").map(String::as_str),
-            Some(expected_native_token.as_str())
+            Some(expected_native_token.as_str()),
+            "native peers must never authenticate with the browser room token"
         );
         assert_eq!(
             query_pairs.get("auth_version").map(String::as_str),
@@ -14588,6 +14677,57 @@ pub(in crate::business_os) mod tests {
             .block_on(business_record_projection_source_stamp(root.path()))
             .expect("updated projection stamp");
         assert_ne!(before.knowledge, after.knowledge);
+    }
+
+    #[test]
+    fn repair_legacy_business_command_revisions_updates_storage_and_document() {
+        let root = tempfile::tempdir().expect("temp root");
+        let path = store::rxdb_store_path(root.path());
+        std::fs::create_dir_all(path.parent().expect("rxdb parent")).expect("create rxdb parent");
+        let conn = Connection::open(&path).expect("open rxdb sqlite");
+        conn.execute_batch(
+            "CREATE TABLE ctox_business_os__business_commands__v1 (
+                id TEXT PRIMARY KEY,
+                revision TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .expect("create command projection table");
+        let malformed = json!({
+            "id": "cmd_legacy_revision",
+            "_rev": "rev_legacy_uuid",
+            "status": "completed",
+            "updated_at_ms": 1
+        });
+        conn.execute(
+            "INSERT INTO ctox_business_os__business_commands__v1 (id, revision, data)
+             VALUES ('cmd_legacy_revision', 'rev_legacy_uuid', ?1)",
+            [serde_json::to_string(&malformed).expect("serialize malformed command")],
+        )
+        .expect("insert malformed command");
+        drop(conn);
+
+        assert_eq!(
+            repair_legacy_business_command_revisions(&path).expect("repair revisions"),
+            1
+        );
+
+        let conn = Connection::open(path).expect("reopen rxdb sqlite");
+        let (revision, raw): (String, String) = conn
+            .query_row(
+                "SELECT revision, data
+                 FROM ctox_business_os__business_commands__v1
+                 WHERE id = 'cmd_legacy_revision'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load repaired command");
+        let document: Value = serde_json::from_str(&raw).expect("parse repaired command");
+        assert!(valid_rxdb_revision(&revision));
+        assert_eq!(
+            document.get("_rev").and_then(Value::as_str),
+            Some(revision.as_str())
+        );
     }
 
     #[test]

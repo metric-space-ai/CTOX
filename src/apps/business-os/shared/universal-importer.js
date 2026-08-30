@@ -1,6 +1,7 @@
-import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';
+const IMPORTER_STYLE_BUILD = '20260827-thesen-import-preview-v1';
 
 export async function openUniversalImporter(ctx, config = {}) {
   await ensureImporterStyles();
@@ -294,6 +295,24 @@ export async function openUniversalImporter(ctx, config = {}) {
     status.textContent = config.submittingLabel || 'Import wird vorbereitet...';
     try {
       const payload = await buildImportPayload(drawer, config);
+      if (typeof config.previewImport === 'function') {
+        const signature = importPreviewSignature(payload);
+        const preview = await config.previewImport({ payload, drawer });
+        if (drawer.importPreviewSignature !== signature) {
+          renderImportPreview(drawer, preview);
+          drawer.importPreviewSignature = signature;
+          submitButton.textContent = preview?.canProceed === false
+            ? (config.submitLabel || 'Vorschau erneut prüfen')
+            : (config.confirmSubmitLabel || 'Gültige Datensätze importieren');
+          submitButton?.removeAttribute('disabled');
+          status.textContent = preview?.message || 'Vorschau geprüft. Bitte den Import bestätigen.';
+          return;
+        }
+        if (preview?.canProceed === false) {
+          renderImportPreview(drawer, preview);
+          throw new Error(preview?.message || 'Der Import enthält keine gültigen Datensätze.');
+        }
+      }
       const command = {
         id: payload.record_id,
         module: config.moduleId || 'business-os',
@@ -851,11 +870,39 @@ function importerTemplate(config) {
         >${escapeHtml(config.defaultFilterPrompt || '')}</textarea>
       </label>
       ${config.helperText ? `<p class="universal-importer-help">${escapeHtml(config.helperText)}</p>` : ''}
+      <section class="universal-importer-preview" data-import-preview hidden aria-live="polite"></section>
       <footer>
         <span data-import-status></span>
         <button type="button" data-action="submit-importer">${escapeHtml(config.submitLabel || 'Importieren')}</button>
       </footer>
     </div>
+  `;
+}
+
+function importPreviewSignature(payload) {
+  return JSON.stringify({
+    title: payload?.title || '',
+    source_type: payload?.source_type || '',
+    text: payload?.source?.text || '',
+    url: payload?.source?.url || '',
+    files: (payload?.source?.files || []).map((file) => ({
+      name: file?.name || '',
+      size: Number(file?.size) || 0,
+      lastModified: Number(file?.lastModified) || 0,
+    })),
+  });
+}
+
+function renderImportPreview(drawer, preview = {}) {
+  const section = drawer.querySelector('[data-import-preview]');
+  if (!section) return;
+  const items = Array.isArray(preview.items) ? preview.items : [];
+  section.hidden = false;
+  section.innerHTML = `
+    <strong>${escapeHtml(preview.heading || 'Importvorschau')}</strong>
+    ${items.length
+      ? `<ul>${items.map((item) => `<li data-kind="${escapeHtml(item?.kind || 'info')}">${escapeHtml(item?.text || '')}</li>`).join('')}</ul>`
+      : `<p>${escapeHtml(preview.message || 'Keine prüfbaren Datensätze gefunden.')}</p>`}
   `;
 }
 
@@ -873,7 +920,7 @@ function updateImporterFields(drawer) {
 }
 
 async function ensureImporterStyles() {
-  const href = new URL('./universal-importer.css', import.meta.url).pathname;
+  const href = new URL(`./universal-importer.css?v=${IMPORTER_STYLE_BUILD}`, import.meta.url).href;
   if (document.querySelector(`link[href="${href}"]`)) return;
   const link = document.createElement('link');
   link.rel = 'stylesheet';

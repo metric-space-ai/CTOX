@@ -312,7 +312,12 @@ test('research auth assist opens the exact protected-source browser session with
         target_url: 'https://app.dnbhoovers.com/login',
         allowed_domains: ['dnbhoovers.com', 'app.dnbhoovers.com'],
         capture_script: 'dnb-hoovers-company-v1',
+        verify_selector: '.account-menu',
         required_secret_name: 'DNB_HOOVERS_BROWSER_LOGIN',
+        command_id: 'web_stack_auth_assist_dnb_1',
+        task_id: 'queue:auth-assist-1',
+        requesting_task_id: 'queue:research-1',
+        instruction: 'Anmelden und danach fortsetzen.',
         secret_value_in_payload: false,
       },
     },
@@ -323,6 +328,11 @@ test('research auth assist opens the exact protected-source browser session with
   assert.equal(args.session_id, 'browser_session_web_stack_auth_dnbhoovers_com_cmd_1');
   assert.equal(args.target_url, 'https://app.dnbhoovers.com/login');
   assert.equal(args.secret_name, 'DNB_HOOVERS_BROWSER_LOGIN');
+  assert.equal(args.verify_selector, '.account-menu');
+  assert.equal(args.auth_assist_command_id, 'web_stack_auth_assist_dnb_1');
+  assert.equal(args.auth_assist_task_id, 'queue:auth-assist-1');
+  assert.equal(args.requesting_task_id, 'queue:research-1');
+  assert.equal(args.instruction, 'Anmelden und danach fortsetzen.');
   assert.deepEqual(args.allowed_domains, ['dnbhoovers.com', 'app.dnbhoovers.com']);
   assert.equal(args.secret_value_in_rxdb, false);
   assert.equal(JSON.stringify(args).includes('credential_ref'), false);

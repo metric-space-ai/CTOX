@@ -1,11 +1,11 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from './dialogs.js?v=20260816-browser-sync-guards-v141';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+} from './file-integrity.js?v=20260816-browser-sync-guards-v141';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260816-browser-sync-guards-v141';
 import {
   normalizeWorkjetCategory,
   workjetCategoryStyle,
@@ -504,6 +504,18 @@ function shouldCreateChatForExternalSubmit(detail = {}) {
   if (detail.reuseActive === false) return true;
   const action = detail.action || detail.client_context?.action || detail.clientContext?.action || '';
   return action === 'context-chat';
+}
+
+function chatAllowsAutoFocus(chat) {
+  const meta = chat?.contextMeta && typeof chat.contextMeta === 'object'
+    ? chat.contextMeta
+    : {};
+  const clientContext = meta.client_context && typeof meta.client_context === 'object'
+    ? meta.client_context
+    : {};
+  return meta.business_chat_auto_focus !== false
+    && clientContext.business_chat_auto_focus !== false
+    && clientContext.auto_focus !== false;
 }
 
 function alignChatWindows(root) {
@@ -1642,9 +1654,15 @@ function expandChatOnly(state, activeChat) {
   activeChat.minimized = false;
 }
 
-// Den angezeigten Tag wechselt nur, wer ausdruecklich dorthin navigiert. Diese
-// Funktion wird aus sechs Richtungen gerufen, die meisten davon Hintergrund-
-// vorgaenge; jede davon zog die Leiste sonst in die Vergangenheit.
+// Den angezeigten Tag wechselt nur, wer ausdruecklich dorthin navigiert.
+// Vorher setzte diese Funktion selectedDate bedingungslos auf das Datum des
+// Chats — und sie wird aus sechs Richtungen gerufen, die meisten davon
+// Hintergrundvorgaenge: Wiederherstellung beim Laden, Statusabgleich eines
+// alten Vorgangs, Oeffnen eines Lead-Chats. Am 11.08.2026 zog jeder dieser
+// Wege die Leiste auf den 26. Juli und riss ein WITTENSTEIN-Fenster von damals
+// auf. Ich habe das zuerst an den Aufrufstellen einzeln abgefangen; das war
+// Symptombekaempfung, es blieb immer noch ein Weg uebrig. Die Regel gehoert
+// hierher: rueckwaerts in die Vergangenheit nur auf ausdrueckliches Verlangen.
 function focusChatForUser(state, chat, { openDock = true, allowDateChange = false } = {}) {
   if (!state || !chat) return null;
   const chatDate = getLocalDateString(chat.createdAt || Date.now());
@@ -1682,7 +1700,12 @@ function findChatForOpenDetail(state, detail = {}) {
 function resolveChatForOpenDetail(state, session, detail = {}) {
   const trackedChat = findChatForOpenDetail(state, detail);
   // Nur ein Chat von HEUTE wird wiederverwendet. Ein Lead behaelt seinen
-  // Kennschluessel ueber Wochen; sonst kehrt der Chat des letzten Laufs zurueck.
+  // Kennschluessel ueber Wochen; findChatForOpenDetail lieferte deshalb den
+  // Chat des letzten Laufs zurueck, und focusChatForUser zog die Leiste auf
+  // dessen Tag. Am 11.08.2026 sprang sie beim Wechsel in eine Kampagne so auf
+  // den 26. Juli und riss ein WITTENSTEIN-Fenster von damals auf, waehrend die
+  // Laeufe des Tages unsichtbar blieben. Ein heutiger Lauf gehoert zu heute;
+  // der alte Verlauf bleibt ueber die Datumsauswahl vollstaendig erreichbar.
   if (trackedChat && getLocalDateString(trackedChat.createdAt) === getLocalDateString(Date.now())) {
     return trackedChat;
   }
@@ -1724,7 +1747,12 @@ function preferredChatForDockOpen(state) {
   if (!chats.length) return null;
   const today = getLocalDateString(Date.now());
   // NUR heute. Der Rueckfall auf chats[0] holte den neuesten Chat aus IRGENDEINEM
-  // Tag und zog die Leiste auf dessen Datum.
+  // Tag und zog die Leiste auf dessen Datum: am 11.08.2026 sprang sie beim
+  // Oeffnen von Outbound auf den 28. Juli und zeigte 26 alte Fehlversuche, waehrend
+  // die elf erfolgreichen Laeufe des Tages unsichtbar blieben. Findet sich fuer
+  // heute nichts, bleibt die Leiste leer auf heute stehen — vergangene Tage
+  // erreicht man ueber die Datumsauswahl, nicht durch einen Sprung hinter dem
+  // Ruecken des Nutzers.
   return chats.find((chat) => getLocalDateString(chat.createdAt) === today) || null;
 }
 
@@ -2990,7 +3018,18 @@ async function syncTrackedMessages({ state, db, sync = null }) {
     }
     if (chatChanged) {
       applyChatTrackingSummary(chat);
-      if (shouldFocusChat) focusChatForUser(state, chat);
+      // Eine Statusmeldung im Hintergrund darf die Ansicht nicht entfuehren.
+      // Wenn der Abgleich einen Vorgang vom 26. Juli endlich als abgeschlossen
+      // verbucht, wurde hier der zugehoerige Juli-Chat fokussiert und
+      // focusChatForUser zog die Leiste auf dessen Tag — am 11.08.2026 riss so
+      // ein WITTENSTEIN-Fenster von damals auf, waehrend der Nutzer in einer
+      // heutigen Kampagne arbeitete. Alte Chats werden weiterhin aktualisiert,
+      // nur nicht mehr in den Vordergrund gezogen.
+      if (shouldFocusChat
+        && chatAllowsAutoFocus(chat)
+        && getLocalDateString(chat.createdAt) === getLocalDateString(Date.now())) {
+        focusChatForUser(state, chat);
+      }
     }
   }
   return changed;
@@ -3666,9 +3705,18 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
     : merged;
   state.remoteHydrationComplete = true;
   if (freshRemoteBaseline) {
-    if (preserveActiveChat) {
-      const activeChat = state.chats.find((chat) => chat.id === localActiveChatId);
-      if (activeChat) focusChatForUser(state, activeChat);
+    const activeChat = preserveActiveChat
+      ? state.chats.find((chat) => chat.id === localActiveChatId)
+      : null;
+    // Einen aktiven Chat wiederherstellen heisst nicht, die Leiste in seine
+    // Vergangenheit zu ziehen. focusChatForUser setzt selectedDate auf das Datum
+    // des Chats; stammte der gespeicherte aktive Chat aus dem Juli, sprang die
+    // Leiste beim Oeffnen dorthin — am 11.08.2026 auf den 26. Juli, samt eines
+    // aufgerissenen WITTENSTEIN-Fensters von damals. Wiederhergestellt wird nur,
+    // was zum heutigen Tag gehoert; ein ausdruecklicher Klick des Nutzers
+    // (focusChatId weiter unten) darf den Tag weiterhin wechseln.
+    if (activeChat && getLocalDateString(activeChat.createdAt) === getLocalDateString(Date.now())) {
+      focusChatForUser(state, activeChat);
     } else {
       state.activeChatId = '';
     }
@@ -3682,7 +3730,9 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
     // den 26. Juli. Der Chip des alten Chats aktualisiert sich weiterhin; er
     // bleibt ueber die Datumsauswahl erreichbar, holt sich die Ansicht aber
     // nicht mehr selbst.
-    if (focusChat && getLocalDateString(focusChat.createdAt) === getLocalDateString(Date.now())) {
+    if (focusChat
+      && chatAllowsAutoFocus(focusChat)
+      && getLocalDateString(focusChat.createdAt) === getLocalDateString(Date.now())) {
       focusChatForUser(state, focusChat, { allowDateChange: true });
     }
   }
@@ -3939,7 +3989,18 @@ function installChatStyles() {
     }
     .ctox-chat-dock {
       --ctox-date-pill-width: 146px;
-      pointer-events: auto;
+      /* Die Leiste faengt nur dort Klicks, wo sie etwas anzeigt.
+         .ctox-chat-root steht bewusst auf pointer-events:none, damit die App
+         darunter bedienbar bleibt — das Dock hob das fuer seine GESAMTE Flaeche
+         wieder auf, einschliesslich der durchsichtigen Zwischenraeume zwischen
+         Knopf, Datumspille und Streifen. Am 11.08.2026 lag die
+         Empfaengerauswahl von THESEN Outbound genau in diesem toten Streifen:
+         der Detailbereich war bis zum Anschlag gescrollt, das Haekchen sichtbar,
+         und jeder Klick landete im Dock. Ohne Empfaenger keine Sellify-Uebergabe,
+         kein Serienbrief, keine Serien-E-Mail — die gesamte Kette endete an
+         einem unsichtbaren Rechteck.
+         Die Kinder holen sich pointer-events unten einzeln zurueck. */
+      pointer-events: none;
       grid-row: 2;
       display: grid;
       grid-template-columns: 88px var(--ctox-date-pill-width) 34px;
@@ -3981,6 +4042,18 @@ function installChatStyles() {
     .ctox-chat-dock.has-many-chats .ctox-chat-strip {
       width: auto;
     }
+    /* Die sichtbaren Bedienelemente des Docks holen sich die Klicks zurueck,
+       die der Container oben abgegeben hat. Alles, was hier NICHT steht, ist
+       durchsichtiger Zwischenraum — und der gehoert der App darunter. */
+    .ctox-chat-dock > *,
+    .ctox-chat-fab,
+    .ctox-chat-date-pill,
+    .ctox-chat-nav,
+    .ctox-chat-strip,
+    .ctox-chat-new {
+      pointer-events: auto;
+    }
+
     .ctox-chat-date-pill {
       display: inline-flex;
       align-items: center;
@@ -6536,6 +6609,7 @@ async function cancelScheduledChat(state, chat, db, root, commandBus, getActiveM
 
 export const __businessChatTestInternals = Object.freeze({
   clearSchedulerLoop,
+  chatAllowsAutoFocus,
   collectScheduledChatEntries,
   collectTrackedMessages,
   collapseRestoredTerminalChat,
@@ -6551,7 +6625,6 @@ export const __businessChatTestInternals = Object.freeze({
   initSchedulerLoop,
   isChatEmptyForDeletion,
   isScrolledToBottom,
-  focusChatForUser,
   preferredChatForDockOpen,
   readChatState,
   renderChatRoot,

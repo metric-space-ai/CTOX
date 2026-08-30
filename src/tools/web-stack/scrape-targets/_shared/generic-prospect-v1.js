@@ -35,6 +35,12 @@ const PROTECTED_SOURCE_CONFIG = Object.freeze({
     capture_supported: true,
     public_fields: ["firma_name"],
   },
+  "linkedin.com": {
+    login_url: "https://www.linkedin.com/login",
+    allowed_domains: ["linkedin.com", "www.linkedin.com", "login.linkedin.com", "api.linkedin.com"],
+    credential_ref: "ctox-secret://credentials/LINKEDIN_BROWSER_LOGIN",
+    capture_supported: true,
+  },
   "xing.com": {
     login_url: "https://login.xing.com/",
     allowed_domains: ["xing.com", "www.xing.com", "login.xing.com", "api.xing.com"],
@@ -67,6 +73,7 @@ const SOURCE_CONFIG = Object.freeze({
   "firmenabc.at": { native: true, domains: ["firmenabc.at"] },
   "handelsregister.de": { native: true, domains: ["handelsregister.de"] },
   "leadfeeder.com": { native: true, native_only: true, domains: ["leadfeeder.com", "app.leadfeeder.com", "api.leadfeeder.com"] },
+  "linkedin.com": { native: true, native_only: true, domains: ["linkedin.com", "www.linkedin.com", "login.linkedin.com", "api.linkedin.com"] },
   "moneyhouse.ch": { native: false, domains: ["moneyhouse.ch"] },
   "northdata.de": { native: true, domains: ["northdata.de"] },
   "xing.com": { native: true, native_only: true, domains: ["xing.com", "api.xing.com"] },

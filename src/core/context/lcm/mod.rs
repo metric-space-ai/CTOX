@@ -1,18 +1,5 @@
 mod mission_state;
 mod runtime_support;
-use runtime_support::*;
-pub(crate) use runtime_support::seed_mission_state_for_queue_with;
-pub use runtime_support::{
-    run_add_assistant_turn, run_add_message, run_begin_worker_attempt_finalization, run_compact,
-    run_context_retrieve, run_continuity_apply, run_continuity_build_prompt,
-    run_continuity_forgotten, run_continuity_full_replace, run_continuity_init,
-    run_continuity_log, run_continuity_rebuild, run_continuity_show,
-    run_continuity_string_replace, run_describe, run_dump, run_ensure_worker_attempt_assistant_message,
-    run_expand, run_fixture, run_grep, run_init, run_mark_worker_attempt_effects_completed,
-    run_mark_worker_attempt_recovery_effects_applied, run_recoverable_worker_attempt,
-    run_record_worker_attempt_artifact_check, run_refresh_continuity, run_secret_rewrite,
-    run_show_continuity, run_terminalize_worker_attempt, run_worker_attempt,
-};
 pub(crate) use mission_state::drain_pending_mission_state_clobbers;
 #[cfg(test)]
 pub(crate) use mission_state::drain_pending_mission_state_clobbers_for_test;
@@ -27,6 +14,19 @@ pub use mission_state::{
     ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
 };
 use mission_state::{focus_semantic_conflicts_local, normalize_mission_text};
+pub(crate) use runtime_support::seed_mission_state_for_queue_with;
+use runtime_support::*;
+pub use runtime_support::{
+    run_add_assistant_turn, run_add_message, run_begin_worker_attempt_finalization, run_compact,
+    run_context_retrieve, run_continuity_apply, run_continuity_build_prompt,
+    run_continuity_forgotten, run_continuity_full_replace, run_continuity_init, run_continuity_log,
+    run_continuity_rebuild, run_continuity_show, run_continuity_string_replace, run_describe,
+    run_dump, run_ensure_worker_attempt_assistant_message, run_expand, run_fixture, run_grep,
+    run_init, run_mark_worker_attempt_effects_completed,
+    run_mark_worker_attempt_recovery_effects_applied, run_record_worker_attempt_artifact_check,
+    run_recoverable_worker_attempt, run_refresh_continuity, run_secret_rewrite,
+    run_show_continuity, run_terminalize_worker_attempt, run_worker_attempt,
+};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -4677,7 +4677,6 @@ impl LcmEngine {
         Ok(out)
     }
 }
-
 
 #[cfg(test)]
 fn verification_run_id(

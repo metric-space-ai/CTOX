@@ -167,6 +167,8 @@ INSTALL / UPGRADE
                                  run a real browser smoke for a Business OS app module
   ctox business-os app e2e <module-id> [--url <business-os-url>]
                                  run save/reload/command-bus E2E for a Business OS app
+  ctox business-os app audit <module-id> [--profile quick|release|full]
+                                 run a scoped CTOX-native app audit with durable evidence
   ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k
                                  submit the five-app Business OS app creation bench
   ctox business-os skills list|enable|disable
@@ -275,12 +277,20 @@ fn raise_open_file_limit() {
 #[cfg(not(unix))]
 fn raise_open_file_limit() {}
 
+/// Select one process-wide Rustls provider before any background subsystem can
+/// build a TLS client. CTOX enables both provider features through independent
+/// integrations, so Rustls cannot infer the provider reliably at first use.
+fn install_process_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 fn main() -> anyhow::Result<()> {
     // Keep the generated argv0 aliases alive for the process lifetime. On
     // Linux, child tool executions re-enter this binary as
     // `ctox-linux-sandbox`; arg0_dispatch performs that dispatch before the
     // regular CTOX startup path runs.
     let _arg0_dispatch = ctox_arg0::arg0_dispatch();
+    install_process_rustls_crypto_provider();
     raise_open_file_limit();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = resolve_explicit_or_workspace_root(&args)?;
@@ -5050,18 +5060,24 @@ mod tests {
         appsec_web_stack_output_is_transient, browser_automation_source_from_stage_command,
         build_appsec_forwarded_args, chat_wait_assistant_completion, execute_appsec_stage_commands,
         find_ctox_root_from_ancestors, handle_appsec_pipeline_work, handle_continuity_update,
-        looks_like_ctox_root, openrouter_tool_smoke_summary,
-        persist_appsec_command_expected_artifact, persist_runtime_turn_timeout,
-        record_appsec_stage_artifact_bindings, record_appsec_stage_session_bindings,
-        resolve_appsec_stage_command_placeholders, resolve_chat_attachment_paths,
-        resolve_explicit_or_workspace_root, resolve_runtime_ctox_root,
-        run_projected_appsec_command, validated_workspace_root_override,
+        install_process_rustls_crypto_provider, looks_like_ctox_root,
+        openrouter_tool_smoke_summary, persist_appsec_command_expected_artifact,
+        persist_runtime_turn_timeout, record_appsec_stage_artifact_bindings,
+        record_appsec_stage_session_bindings, resolve_appsec_stage_command_placeholders,
+        resolve_chat_attachment_paths, resolve_explicit_or_workspace_root,
+        resolve_runtime_ctox_root, run_projected_appsec_command, validated_workspace_root_override,
         AppsecStageExecutionContext,
     };
     use crate::execution::models::runtime_env;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn process_startup_selects_a_rustls_crypto_provider() {
+        install_process_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 
     #[test]
     fn business_command_dispatch_skips_caller_side_turn_ledger() {
@@ -5081,8 +5097,20 @@ mod tests {
     #[test]
     fn mobile_invite_skips_daemon_owned_turn_ledger() {
         for args in [
-            vec!["business-os", "mobile-invite", "create", "--ttl-seconds", "300"],
-            vec!["business-os", "mobile-invite", "revoke", "--invite-id", "opaque-id"],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "create",
+                "--ttl-seconds",
+                "300",
+            ],
+            vec![
+                "business-os",
+                "mobile-invite",
+                "revoke",
+                "--invite-id",
+                "opaque-id",
+            ],
             vec![
                 "business-os",
                 "mobile-invite",

@@ -2,13 +2,13 @@
 // License: AGPL-3.0-only
 
 use anyhow::Context;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use ring::hmac;
-use rusqlite::params;
+use ring::{digest, hmac};
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -24,13 +24,13 @@ use tiny_http::Request;
 use tiny_http::Response;
 use tiny_http::Server;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::policy::{
-    allow_decision, normalize_role, BusinessOsPermission, BusinessOsScope, BusinessOsScopeType,
-    PolicyDecision,
+    BusinessOsPermission, BusinessOsScope, BusinessOsScopeType, PolicyDecision, allow_decision,
+    normalize_role,
 };
 use super::store;
 
@@ -1097,6 +1097,46 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
             "Use this when you need CTOX Business OS MCP channel and runtime status.",
             object_schema(vec![]),
         ),
+        external_effect_tool(
+            "meeting.schedule",
+            "Schedule one consent-backed Microsoft Teams guest meeting for the managed CTOX meeting runtime.",
+            object_schema(vec![
+                required_string("external_id"),
+                required_string("provider"),
+                required_string("join_url"),
+                required_string("starts_at"),
+                required_string("bot_name"),
+                required_string("consent_ref"),
+                required_string("tenant_ref"),
+                required_string("lead_ref"),
+            ]),
+        ),
+        read_tool(
+            "meeting.status",
+            "Read managed meeting schedule or runtime status without returning transcript content.",
+            object_schema(vec![required_string("meeting_id")]),
+        ),
+        write_tool(
+            "meeting.cancel",
+            "Cancel a scheduled managed meeting or stop its active guest participation.",
+            object_schema(vec![
+                required_string("meeting_id"),
+                optional_string("reason"),
+            ]),
+        ),
+        read_tool(
+            "meeting.get_transcript",
+            "Read the encrypted-at-rest transcript through CTOX, including source-backed speaker segments and confidence.",
+            object_schema(vec![required_string("meeting_id")]),
+        ),
+        destructive_tool(
+            "meeting.delete",
+            "Permanently delete a managed meeting transcript and all remaining audio artifacts.",
+            object_schema(vec![
+                required_string("meeting_id"),
+                optional_string("reason"),
+            ]),
+        ),
         read_tool(
             "business_os.list_modules",
             "Use this when you need the installed Business OS module catalog.",
@@ -1137,6 +1177,16 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
             "business_os.list_entities",
             "Use this when you need the entity/collection contract exposed by a module.",
             object_schema(vec![required_string("module_id")]),
+        ),
+        write_tool(
+            "decision_hub.request_decision",
+            "Escalate one bounded, blocking owner decision to the CTOX Decision Hub. This creates no external side effects.",
+            decision_hub_request_schema(),
+        ),
+        read_tool(
+            "decision_hub.get_decision",
+            "Read the bounded status and resolution of one Decision Hub escalation.",
+            object_schema(vec![required_string("decision_id")]),
         ),
         read_tool(
             "business_os.query_records",
@@ -1382,7 +1432,7 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
                 optional_string("record_id"),
                 optional_string("title"),
                 optional_string("objective"),
-                optional_object("payload"),
+                optional_action_payload("payload"),
             ]),
         ),
         write_tool(
@@ -1394,7 +1444,7 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
                 optional_string("record_id"),
                 optional_string("title"),
                 optional_string("objective"),
-                optional_object("payload"),
+                optional_action_payload("payload"),
             ]),
         ),
         read_tool(
@@ -2586,6 +2636,55 @@ fn call_tool_inner(
     enforce_argument_scope_policy(root, &context, tool_name, &arguments)?;
     enforce_rate_limit(root, &context)?;
     let result = match tool_name {
+        "meeting.schedule" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            let provider = required_arg(&arguments, "provider")?;
+            anyhow::ensure!(provider == "teams", "meeting provider must be `teams`");
+            crate::communication::meeting_native::schedule_managed_meeting(
+                root,
+                &required_arg(&arguments, "external_id")?,
+                &required_arg(&arguments, "join_url")?,
+                &required_arg(&arguments, "starts_at")?,
+                &required_arg(&arguments, "bot_name")?,
+                &required_arg(&arguments, "consent_ref")?,
+                &required_arg(&arguments, "tenant_ref")?,
+                &required_arg(&arguments, "lead_ref")?,
+            )?
+        }
+        "meeting.status" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::managed_meeting_status(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+            )?
+        }
+        "meeting.cancel" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::cancel_managed_meeting(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+                optional_string_arg(&arguments, "reason")
+                    .as_deref()
+                    .unwrap_or(""),
+            )?
+        }
+        "meeting.get_transcript" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::managed_meeting_transcript(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+            )?
+        }
+        "meeting.delete" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            crate::communication::meeting_native::delete_managed_meeting(
+                root,
+                &required_arg(&arguments, "meeting_id")?,
+                optional_string_arg(&arguments, "reason")
+                    .as_deref()
+                    .unwrap_or(""),
+            )?
+        }
         "business_os.status" => mcp_status(root, &context)?,
         "business_os.list_modules" => serde_json::to_value(list_modules(root, &context)?)?,
         "business_os.list_design_templates" => super::server::list_design_template_documents(root)?,
@@ -2634,6 +2733,35 @@ fn call_tool_inner(
         "business_os.list_entities" => {
             let module_id = required_arg(&arguments, "module_id")?;
             serde_json::to_value(list_entities(root, &context, &module_id)?)?
+        }
+        "decision_hub.request_decision" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            let command_id = format!("cmd_{}", uuid::Uuid::new_v4());
+            let outcome = store::accept_rxdb_business_command(
+                root,
+                serde_json::json!({
+                    "id": command_id,
+                    "command_id": command_id,
+                    "module": "kundenpipeline",
+                    "command_type": "kundenpipeline.decision.request",
+                    "payload": arguments,
+                    "client_context": {
+                        "channel": &context.channel,
+                        "surface": &context.surface,
+                        "actor": resolved_mcp_actor_context(root, &context)?,
+                        "mcp_actor": &context.actor,
+                        "workspace": &context.workspace,
+                        "request_id": &context.request_id,
+                        "mcp_tool": tool_name,
+                    }
+                }),
+            )?;
+            outcome.get("result").cloned().unwrap_or(outcome)
+        }
+        "decision_hub.get_decision" => {
+            enforce_business_os_mcp_policy(root, &context, tool_name, &arguments)?;
+            let decision_id = required_arg(&arguments, "decision_id")?;
+            super::decision_hub::get_agent_decision(root, &decision_id)?
         }
         "business_os.query_records" => {
             let collection = required_arg(&arguments, "collection")?;
@@ -4332,6 +4460,7 @@ pub fn list_module_actions(
                 false,
             ),
         ],
+        "thesen-outbound" => vec![person_research_action_descriptor(&module.id)],
         _ => Vec::new(),
     });
     let has_external_sql = store::local_external_data_source_declarations(root)?
@@ -4390,10 +4519,26 @@ pub fn propose_action(
     let title = optional_string_arg(arguments, "title").unwrap_or_else(|| action.title.clone());
     let objective =
         optional_string_arg(arguments, "objective").unwrap_or_else(|| action.description.clone());
-    let payload = arguments
-        .get("payload")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut payload = normalize_native_mcp_action_payload(
+        action_id,
+        arguments
+            .get("payload")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    );
+    if action.action_id == "web_stack.person_research" {
+        validate_person_research_action_arguments(arguments, &payload)?;
+        let scoped_record_id = record_id
+            .as_deref()
+            .context("person research action requires record_id")?;
+        payload["writeback_contract"] = serde_json::json!({
+            "collection": "thesen_outbound_leads",
+            "allowed_collections": ["thesen_outbound_leads"],
+            "record_ids": [scoped_record_id],
+            "command_type": "web_stack.person_research",
+            "min_independent_sources": 2
+        });
+    }
     if is_native_mcp_control_action(module_id, &action.action_id) {
         return Ok(BusinessOsActionProposal {
             ok: true,
@@ -4516,7 +4661,8 @@ pub fn execute_action(
         "mcp_tool": &context.tool
     });
     if is_native_mcp_control_action(module_id, action_id) {
-        let command_id = format!("cmd_{}", uuid::Uuid::new_v4());
+        let command_id =
+            native_mcp_control_command_id(context, module_id, action_id, &proposal.payload);
         let outcome = store::accept_rxdb_business_command(
             root,
             serde_json::json!({
@@ -4589,8 +4735,79 @@ fn is_native_mcp_control_action(module_id: &str, action_id: &str) -> bool {
     !module_id.trim().is_empty()
         && matches!(
             action_id,
-            "external_sql.sync.refresh" | "external_sql.write"
+            "external_sql.sync.refresh" | "external_sql.write" | "web_stack.person_research"
         )
+}
+
+fn normalize_native_mcp_action_payload(action_id: &str, mut payload: Value) -> Value {
+    if action_id != "web_stack.person_research" {
+        return payload;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    for field in ["fields", "include_private"] {
+        let Some(value) = object.get_mut(field) else {
+            continue;
+        };
+        let mut normalized = value.clone();
+        loop {
+            let replacement = match &normalized {
+                Value::Object(wrapper) if wrapper.len() == 1 => wrapper.get("item").cloned(),
+                _ => None,
+            };
+            let Some(replacement) = replacement else {
+                break;
+            };
+            normalized = replacement;
+        }
+        *value = match normalized {
+            Value::Array(_) => normalized,
+            Value::Null => Value::Array(Vec::new()),
+            item => Value::Array(vec![item]),
+        };
+    }
+    if let Some(Value::String(value)) = object.get_mut("auto_browser_capture") {
+        if value.eq_ignore_ascii_case("true") {
+            object.insert("auto_browser_capture".to_string(), Value::Bool(true));
+        } else if value.eq_ignore_ascii_case("false") {
+            object.insert("auto_browser_capture".to_string(), Value::Bool(false));
+        }
+    }
+    payload
+}
+
+fn native_mcp_control_command_id(
+    context: &McpChannelRequestContext,
+    module_id: &str,
+    action_id: &str,
+    payload: &Value,
+) -> String {
+    let operation_id = payload
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if context.trusted_role_source.as_deref() == Some(MCP_INTERNAL_SESSION_AUTH_SOURCE) {
+        if let Some(operation_id) = operation_id {
+            let identity = format!(
+                "{}\0{}\0{}\0{}",
+                context.request_id.trim(),
+                module_id.trim(),
+                action_id.trim(),
+                operation_id
+            );
+            let hash = digest::digest(&digest::SHA256, identity.as_bytes());
+            let suffix = hash
+                .as_ref()
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            return format!("cmd_{suffix}");
+        }
+    }
+    format!("cmd_{}", uuid::Uuid::new_v4())
 }
 
 fn ensure_non_empty(field: &str, value: &str) -> Result<(), BusinessOsMcpError> {
@@ -5166,6 +5383,22 @@ fn business_os_mcp_policy_decision(
     arguments: &Value,
 ) -> anyhow::Result<Option<PolicyDecision>> {
     match tool_name {
+        "meeting.status" | "meeting.get_transcript" => Ok(Some(trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::DataRead,
+            BusinessOsScopeType::Workspace,
+            None,
+        )?)),
+        "meeting.schedule" | "meeting.cancel" | "meeting.delete" => {
+            Ok(Some(trusted_mcp_actor_policy_decision(
+                root,
+                context,
+                BusinessOsPermission::DataWrite,
+                BusinessOsScopeType::Workspace,
+                None,
+            )?))
+        }
         "web_search" | "web_read" | "web_deep_research" => {
             Ok(Some(trusted_mcp_actor_policy_decision(
                 root,
@@ -5220,6 +5453,18 @@ fn business_os_mcp_policy_decision(
                 BusinessOsPermission::DataRead,
             )?))
         }
+        "decision_hub.request_decision" => Ok(Some(business_os_mcp_module_data_decision(
+            root,
+            context,
+            "kundenpipeline",
+            BusinessOsPermission::DataWrite,
+        )?)),
+        "decision_hub.get_decision" => Ok(Some(business_os_mcp_module_data_decision(
+            root,
+            context,
+            "kundenpipeline",
+            BusinessOsPermission::DataRead,
+        )?)),
         "business_os.query_records"
         | "business_os.search_records"
         | "business_os.get_record_context"
@@ -5643,6 +5888,7 @@ fn collection_requires_typed_mcp_tool(collection: &str) -> bool {
             | "business_credentials"
             | "ctox_runtime_settings"
             | "ctox_task_approval_requests"
+            | "kundenpipeline_entscheidungen"
             | "desktop_files"
             | "desktop_file_chunks"
     )
@@ -5792,6 +6038,10 @@ fn enforce_argument_scope_policy(
                 enforce_module_policy(root, &module_id)?;
             }
         }
+        "decision_hub.request_decision" | "decision_hub.get_decision" => {
+            enforce_module_policy(root, "kundenpipeline")?;
+            enforce_collection_policy(root, "kundenpipeline_entscheidungen")?;
+        }
         "business_os.create_app" => {
             if let Ok(module_id) = app_module_id_from_arguments(
                 arguments,
@@ -5921,7 +6171,9 @@ enum McpToolPolicyClass {
 
 fn tool_policy_class(tool_name: &str) -> McpToolPolicyClass {
     match tool_name {
-        "business_os.approve" | "web_browser_automate" => McpToolPolicyClass::ExternalEffect,
+        "business_os.approve" | "web_browser_automate" | "meeting.schedule" => {
+            McpToolPolicyClass::ExternalEffect
+        }
         "business_os.reject" | "business_os.request_changes" => McpToolPolicyClass::Approval,
         "web_browser_prepare"
         | "business_os.execute_action"
@@ -5945,7 +6197,10 @@ fn tool_policy_class(tool_name: &str) -> McpToolPolicyClass {
         | "business_os.write_app_file"
         | "business_os.validate_app"
         | "business_os.smoke_app"
-        | "business_os.e2e_app" => McpToolPolicyClass::Write,
+        | "business_os.e2e_app"
+        | "meeting.cancel"
+        | "meeting.delete" => McpToolPolicyClass::Write,
+        "decision_hub.request_decision" => McpToolPolicyClass::Write,
         _ => McpToolPolicyClass::Read,
     }
 }
@@ -6085,6 +6340,8 @@ fn argument_business_scope_metadata(tool_name: &str, arguments: &Value) -> Value
             "run_id",
             "artifact_id",
             "approval_id",
+            "decision_id",
+            "decision_key",
             "limit",
             "path",
             "query",
@@ -6166,7 +6423,9 @@ fn context_from_arguments_with_trusted_gateway_context(
             .or_else(|| string_field(context, "workspace"))
             .unwrap_or_else(|| "local".to_string()),
         tool: tool_name.to_string(),
-        request_id: string_field(context, "request_id")
+        request_id: internal_context
+            .and_then(|context| string_field(context, "command_id"))
+            .or_else(|| string_field(context, "request_id"))
             .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
         confirmation_state: if internal_context.is_some()
             && tool_name == "business_os.execute_action"
@@ -6242,6 +6501,13 @@ fn enforce_internal_command_session_scope(
                     operation_ids.iter().any(|allowed| allowed == operation_id),
                     "Business OS operation `{operation_id}` is outside the command writeback contract"
                 );
+                if action_id == "web_stack.person_research" {
+                    let record_id = required_arg(arguments, "record_id")?;
+                    anyhow::ensure!(
+                        record_id == operation_id,
+                        "Business OS person-research record_id must match its scoped operation_id"
+                    );
+                }
             }
         }
         "business_os.get_module"
@@ -6632,6 +6898,23 @@ fn destructive_tool(
     }
 }
 
+fn external_effect_tool(
+    name: &str,
+    description: &str,
+    input_schema: Value,
+) -> BusinessOsMcpToolDescriptor {
+    BusinessOsMcpToolDescriptor {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema,
+        annotations: Some(serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "openWorldHint": true
+        })),
+    }
+}
+
 fn object_schema(properties: Vec<(&'static str, Value, bool)>) -> Value {
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
@@ -6647,6 +6930,93 @@ fn object_schema(properties: Vec<(&'static str, Value, bool)>) -> Value {
         "required": required,
         "additionalProperties": false
     })
+}
+
+fn decision_hub_request_schema() -> Value {
+    object_schema(vec![
+        (
+            "decision_key",
+            serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 240 }),
+            true,
+        ),
+        (
+            "title",
+            serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 160 }),
+            true,
+        ),
+        (
+            "question",
+            serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 2000 }),
+            true,
+        ),
+        (
+            "context",
+            serde_json::json!({ "type": "string", "maxLength": 8000 }),
+            false,
+        ),
+        (
+            "options",
+            serde_json::json!({
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+                        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+                        "description": { "type": "string", "maxLength": 1000 }
+                    },
+                    "required": ["id", "label"],
+                    "additionalProperties": false
+                }
+            }),
+            true,
+        ),
+        (
+            "recommendation",
+            serde_json::json!({ "type": "string", "maxLength": 120 }),
+            false,
+        ),
+        (
+            "urgency",
+            serde_json::json!({ "type": "string", "enum": ["normal", "high", "critical"] }),
+            false,
+        ),
+        (
+            "expires_at_ms",
+            serde_json::json!({ "type": "integer", "minimum": 1 }),
+            false,
+        ),
+        (
+            "source",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "authority": { "type": "string", "minLength": 1, "maxLength": 120 },
+                    "environment_id": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "thread_id": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "workjet_instance_id": { "type": "string", "maxLength": 240 }
+                },
+                "required": ["environment_id", "thread_id"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        (
+            "correlation",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "turn_id": { "type": "string", "maxLength": 240 },
+                    "idempotency_key": { "type": "string", "maxLength": 240 }
+                },
+                "required": ["idempotency_key"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+    ])
 }
 
 fn required_string(name: &'static str) -> (&'static str, Value, bool) {
@@ -6688,11 +7058,23 @@ fn optional_boolean(name: &'static str) -> (&'static str, Value, bool) {
     (name, serde_json::json!({ "type": "boolean" }), false)
 }
 
-fn optional_object(name: &'static str) -> (&'static str, Value, bool) {
+fn optional_action_payload(name: &'static str) -> (&'static str, Value, bool) {
     (
         name,
         serde_json::json!({
             "type": "object",
+            "properties": {
+                "operation_id": { "type": "string" },
+                "company": { "type": "string" },
+                "country": { "type": "string", "enum": ["DE", "AT", "CH"] },
+                "mode": {
+                    "type": "string",
+                    "enum": ["new_record", "update_firm", "update_person", "update_inventory_general", "have_data"]
+                },
+                "fields": { "type": "array", "items": { "type": "string" } },
+                "include_private": { "type": "array", "items": { "type": "string" } },
+                "auto_browser_capture": { "type": "boolean" }
+            },
             "additionalProperties": true
         }),
         false,
@@ -6750,6 +7132,149 @@ fn action_descriptor(
             "additionalProperties": true
         }),
     }
+}
+
+fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescriptor {
+    let mut descriptor = action_descriptor(
+        "web_stack.person_research",
+        module_id,
+        "Research one campaign lead",
+        "Run the native Web Stack person-research workflow for one explicitly scoped THESEN Outbound lead.",
+        "long_running",
+        false,
+        false,
+    );
+    descriptor.input_schema = serde_json::json!({
+        "type": "object",
+        "required": ["record_id", "payload"],
+        "properties": {
+            "record_id": { "type": "string", "minLength": 1 },
+            "payload": {
+                "type": "object",
+                "required": ["operation_id", "company", "country", "mode"],
+                "properties": {
+                    "operation_id": { "type": "string", "minLength": 1 },
+                    "company": { "type": "string", "minLength": 1 },
+                    "country": { "type": "string", "enum": ["DE", "AT", "CH"] },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["new_record", "update_firm", "update_person", "update_inventory_general", "have_data"]
+                    },
+                    "fields": { "type": "array", "items": { "type": "string" } },
+                    "include_private": { "type": "array", "items": { "type": "string" } },
+                    "auto_browser_capture": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": true
+    });
+    descriptor
+}
+
+fn validate_person_research_action_arguments(
+    arguments: &Value,
+    payload: &Value,
+) -> anyhow::Result<()> {
+    let record_id = required_arg(arguments, "record_id")?;
+    let object = payload.as_object().ok_or_else(|| {
+        anyhow::Error::new(BusinessOsMcpError::validation(
+            "payload",
+            "web_stack.person_research payload must be an object",
+        ))
+    })?;
+    let required_payload_string = |field: &str| -> anyhow::Result<&str> {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::Error::new(BusinessOsMcpError::validation(
+                    &format!("payload.{field}"),
+                    format!("web_stack.person_research requires a non-empty string `{field}`"),
+                ))
+            })
+    };
+    let operation_id = required_payload_string("operation_id")?;
+    anyhow::ensure!(
+        operation_id == record_id,
+        BusinessOsMcpError::validation(
+            "payload.operation_id",
+            "web_stack.person_research payload.operation_id must match record_id",
+        )
+    );
+    required_payload_string("company")?;
+    let country = required_payload_string("country")?;
+    anyhow::ensure!(
+        matches!(country, "DE" | "AT" | "CH"),
+        BusinessOsMcpError::validation(
+            "payload.country",
+            "web_stack.person_research country must be DE, AT or CH",
+        )
+    );
+    let mode = required_payload_string("mode")?;
+    anyhow::ensure!(
+        matches!(
+            mode,
+            "new_record"
+                | "update_firm"
+                | "update_person"
+                | "update_inventory_general"
+                | "have_data"
+        ),
+        BusinessOsMcpError::validation(
+            "payload.mode",
+            "web_stack.person_research mode is unsupported",
+        )
+    );
+    for field in ["fields", "include_private"] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let valid = value.as_array().is_some_and(|items| {
+            items.iter().all(|item| {
+                item.as_str()
+                    .map(str::trim)
+                    .is_some_and(|item| !item.is_empty())
+            })
+        });
+        anyhow::ensure!(
+            valid,
+            BusinessOsMcpError::validation(
+                &format!("payload.{field}"),
+                format!("web_stack.person_research `{field}` must be an array of strings"),
+            )
+        );
+    }
+    if let Some(value) = object.get("auto_browser_capture") {
+        anyhow::ensure!(
+            value.is_boolean(),
+            BusinessOsMcpError::validation(
+                "payload.auto_browser_capture",
+                "web_stack.person_research auto_browser_capture must be boolean",
+            )
+        );
+    }
+    let allowed = [
+        "operation_id",
+        "company",
+        "country",
+        "mode",
+        "fields",
+        "include_private",
+        "auto_browser_capture",
+    ];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(anyhow::Error::new(BusinessOsMcpError::validation(
+            &format!("payload.{field}"),
+            format!("unsupported web_stack.person_research payload field `{field}`"),
+        )));
+    }
+    Ok(())
 }
 
 fn module_descriptor_from_value(value: Value) -> anyhow::Result<BusinessOsModuleDescriptor> {
@@ -6944,6 +7469,7 @@ mod tests {
     fn internal_command_session_overrides_actor_and_bounds_writeback() -> anyhow::Result<()> {
         let trusted = serde_json::json!({
             "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+            "command_id": "parent-command-1",
             "channel": "ctox_internal_business_command",
             "surface": "business_os_command_session",
             "actor": "user:trusted",
@@ -6973,6 +7499,7 @@ mod tests {
         )?;
         assert_eq!(context.actor, "user:trusted");
         assert_eq!(context.workspace, "workspace:trusted");
+        assert_eq!(context.request_id, "parent-command-1");
         assert_eq!(context.trusted_role.as_deref(), Some("admin"));
         assert_eq!(
             context.trusted_role_source.as_deref(),
@@ -7000,25 +7527,105 @@ mod tests {
             "action_id": "external_sql.write",
             "payload": { "operation_id": "person_delete" }
         });
-        assert!(enforce_internal_command_session_scope(
-            "business_os.execute_action",
-            &wrong_operation,
-            Some(&trusted),
-        )
-        .is_err());
+        assert!(
+            enforce_internal_command_session_scope(
+                "business_os.execute_action",
+                &wrong_operation,
+                Some(&trusted),
+            )
+            .is_err()
+        );
         let wrong_collection = serde_json::json!({ "collection": "other_records" });
-        assert!(enforce_internal_command_session_scope(
-            "business_os.query_records",
-            &wrong_collection,
-            Some(&trusted),
-        )
-        .is_err());
+        assert!(
+            enforce_internal_command_session_scope(
+                "business_os.query_records",
+                &wrong_collection,
+                Some(&trusted),
+            )
+            .is_err()
+        );
+
+        let research_trusted = serde_json::json!({
+            "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+            "allowed_actions": [{
+                "module_id": "thesen-outbound",
+                "action_id": "web_stack.person_research",
+                "operation_ids": ["lead_1"]
+            }]
+        });
+        let scoped_research = serde_json::json!({
+            "module_id": "thesen-outbound",
+            "action_id": "web_stack.person_research",
+            "record_id": "lead_1",
+            "payload": { "operation_id": "lead_1", "company": "Acme GmbH" }
+        });
+        enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &scoped_research,
+            Some(&research_trusted),
+        )?;
+        let wrong_research_record = serde_json::json!({
+            "module_id": "thesen-outbound",
+            "action_id": "web_stack.person_research",
+            "record_id": "lead_2",
+            "payload": { "operation_id": "lead_1", "company": "Acme GmbH" }
+        });
+        assert!(
+            enforce_internal_command_session_scope(
+                "business_os.execute_action",
+                &wrong_research_record,
+                Some(&research_trusted),
+            )
+            .is_err()
+        );
         Ok(())
     }
 
     #[test]
-    fn internal_command_session_executes_bounded_action_without_weakening_external_confirmation(
-    ) -> anyhow::Result<()> {
+    fn internal_native_action_command_ids_are_idempotent_per_parent_operation() {
+        let context = McpChannelRequestContext {
+            request_id: "parent-command-1".to_string(),
+            trusted_role_source: Some(MCP_INTERNAL_SESSION_AUTH_SOURCE.to_string()),
+            ..test_context("business_os.execute_action")
+        };
+        let payload = serde_json::json!({ "operation_id": "lead_1" });
+        let first = native_mcp_control_command_id(
+            &context,
+            "thesen-outbound",
+            "web_stack.person_research",
+            &payload,
+        );
+        let replay = native_mcp_control_command_id(
+            &context,
+            "thesen-outbound",
+            "web_stack.person_research",
+            &payload,
+        );
+        assert_eq!(first, replay);
+
+        let next_operation = native_mcp_control_command_id(
+            &context,
+            "thesen-outbound",
+            "web_stack.person_research",
+            &serde_json::json!({ "operation_id": "lead_2" }),
+        );
+        assert_ne!(first, next_operation);
+
+        let next_parent = native_mcp_control_command_id(
+            &McpChannelRequestContext {
+                request_id: "parent-command-2".to_string(),
+                ..context
+            },
+            "thesen-outbound",
+            "web_stack.person_research",
+            &payload,
+        );
+        assert_ne!(first, next_parent);
+    }
+
+    #[test]
+    fn internal_command_session_executes_bounded_action_without_weakening_external_confirmation()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -8106,10 +8713,12 @@ mod tests {
             assert!(!persisted.contains("browser-value"));
             assert!(event.metadata.get("argument_keys").is_some());
             assert!(event.metadata.pointer("/business_scope/tool").is_some());
-            assert!(event
-                .metadata
-                .pointer("/business_scope/capability")
-                .is_some());
+            assert!(
+                event
+                    .metadata
+                    .pointer("/business_scope/capability")
+                    .is_some()
+            );
             assert!(event.metadata.pointer("/business_scope/contract").is_some());
         }
         Ok(())
@@ -8139,96 +8748,150 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.query_records"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.execute_action"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.upsert_record"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.upsert_user"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.create_app"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.modify_app"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.prepare_app_source"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.list_app_files"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.read_app_file"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.read_app_skill_resource"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.search_app_source"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.write_app_file"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.validate_app"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.smoke_app"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.query_records")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.execute_action")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.upsert_record")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.upsert_user")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.create_app")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.modify_app")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.prepare_app_source")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.list_app_files")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.read_app_file")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.read_app_skill_resource")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.search_app_source")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.write_app_file")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.validate_app")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.smoke_app")
+        );
         assert!(tools.iter().any(|tool| tool.name == "business_os.e2e_app"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.get_command_status"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.get_record_context"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.list_runs"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.list_approvals"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.get_command_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.get_record_context")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.list_runs")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.list_approvals")
+        );
         assert!(tools.iter().any(|tool| tool.name == "business_os.approve"));
         assert!(tools.iter().any(|tool| tool.name == "business_os.reject"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "business_os.request_changes"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_assessment_create"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "business_os.request_changes")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_assessment_create")
+        );
         assert!(tools.iter().any(|tool| tool.name == "appsec_lab_create"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_lab_run"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_assessment_status"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_completion_review"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_assessment_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_completion_review")
+        );
         assert!(tools.iter().any(|tool| tool.name == "appsec_tools_doctor"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_authz_plan"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_authz_credential_proof_template"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_authz_credential_proof_from_evidence"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_authz_preflight"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_authz_credential_proof_template")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_authz_credential_proof_from_evidence")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_authz_preflight")
+        );
         assert!(tools.iter().any(|tool| tool.name == "appsec_authz_run"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_authz_status"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_authz_build_matrix"));
-        assert!(tools
-            .iter()
-            .any(|tool| tool.name == "appsec_pipeline_rework"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_authz_build_matrix")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "appsec_pipeline_rework")
+        );
         assert!(tools.iter().any(|tool| tool.name == "appsec_report_get"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_finding_get"));
         for forbidden in [
@@ -8288,10 +8951,12 @@ mod tests {
             "business_os.get_design_template",
             serde_json::json!({ "id": "hypo-rem", "_context": context.clone() }),
         )?;
-        assert!(fetched
-            .pointer("/template/css")
-            .and_then(Value::as_str)
-            .is_some_and(|css| css.contains("--accent")));
+        assert!(
+            fetched
+                .pointer("/template/css")
+                .and_then(Value::as_str)
+                .is_some_and(|css| css.contains("--accent"))
+        );
 
         let deleted = call_tool(
             root,
@@ -8354,10 +9019,12 @@ mod tests {
                 "business-os-skill://business-os-app-module-development/references/design-guide.md"
             )
         );
-        assert!(result
-            .get("content")
-            .and_then(Value::as_str)
-            .is_some_and(|content| content.contains("Design Guide")));
+        assert!(
+            result
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("Design Guide"))
+        );
         let traversal = read_app_skill_resource(temp.path(), &context, "../../AGENTS.md");
         assert!(
             traversal.is_err(),
@@ -8408,9 +9075,10 @@ mod tests {
             lab.get("module_id").and_then(Value::as_str),
             Some(APPSEC_MCP_MODULE_ID)
         );
-        assert!(root
-            .join("runtime/appsec/default/lab/vulnerable-webapp/ctox-vulnerable-webapp.py")
-            .is_file());
+        assert!(
+            root.join("runtime/appsec/default/lab/vulnerable-webapp/ctox-vulnerable-webapp.py")
+                .is_file()
+        );
 
         let status = call_tool(
             root,
@@ -8445,9 +9113,10 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
-        assert!(root
-            .join("runtime/appsec/default/completion-review.json")
-            .is_file());
+        assert!(
+            root.join("runtime/appsec/default/completion-review.json")
+                .is_file()
+        );
 
         let doctor = call_tool(
             root,
@@ -8626,10 +9295,12 @@ mod tests {
         );
         let authz_run_artifact = authz_run.get("artifact").and_then(Value::as_str).unwrap();
         assert!(Path::new(authz_run_artifact).is_file());
-        assert!(authz_run
-            .pointer("/run/web_stack_tasks")
-            .and_then(Value::as_array)
-            .is_some_and(|tasks| !tasks.is_empty()));
+        assert!(
+            authz_run
+                .pointer("/run/web_stack_tasks")
+                .and_then(Value::as_array)
+                .is_some_and(|tasks| !tasks.is_empty())
+        );
         let authz_status = call_tool(
             root,
             "appsec_authz_status",
@@ -8646,14 +9317,18 @@ mod tests {
             Some("appsec_authz_status")
         );
         assert_eq!(authz_status.get("ok").and_then(Value::as_bool), Some(true));
-        assert!(authz_status
-            .get("runs")
-            .and_then(Value::as_array)
-            .is_some_and(|runs| !runs.is_empty()));
-        assert!(authz_status
-            .get("preflights")
-            .and_then(Value::as_array)
-            .is_some_and(|preflights| !preflights.is_empty()));
+        assert!(
+            authz_status
+                .get("runs")
+                .and_then(Value::as_array)
+                .is_some_and(|runs| !runs.is_empty())
+        );
+        assert!(
+            authz_status
+                .get("preflights")
+                .and_then(Value::as_array)
+                .is_some_and(|preflights| !preflights.is_empty())
+        );
 
         let authz_evidence_dir = root.join("runtime/appsec/default/authz/mcp-evidence");
         fs::create_dir_all(&authz_evidence_dir)?;
@@ -9015,13 +9690,15 @@ mod tests {
                 .and_then(Value::as_str),
             Some("ctox business-os app validate mcp-inventory --installed")
         );
-        assert!(result
-            .pointer("/development_contract/source_files")
-            .and_then(Value::as_array)
-            .context("expected development_contract.source_files")?
-            .iter()
-            .any(|path| path.as_str()
-                == Some("runtime/business-os/installed-modules/mcp-inventory/module.json")));
+        assert!(
+            result
+                .pointer("/development_contract/source_files")
+                .and_then(Value::as_array)
+                .context("expected development_contract.source_files")?
+                .iter()
+                .any(|path| path.as_str()
+                    == Some("runtime/business-os/installed-modules/mcp-inventory/module.json"))
+        );
         let skill_resources = result
             .pointer("/development_contract/skill_resources")
             .and_then(Value::as_array)
@@ -9085,15 +9762,18 @@ mod tests {
             result.get("app_directory").and_then(Value::as_str),
             Some("runtime/business-os/installed-modules/mcp-direct-app")
         );
-        assert!(root
-            .join("runtime/business-os/installed-modules/mcp-direct-app/module.json")
-            .is_file());
-        assert!(result
-            .pointer("/development_contract/source_tools")
-            .and_then(Value::as_array)
-            .context("expected source tools")?
-            .iter()
-            .any(|tool| tool.as_str() == Some("business_os.write_app_file")));
+        assert!(
+            root.join("runtime/business-os/installed-modules/mcp-direct-app/module.json")
+                .is_file()
+        );
+        assert!(
+            result
+                .pointer("/development_contract/source_tools")
+                .and_then(Value::as_array)
+                .context("expected source tools")?
+                .iter()
+                .any(|tool| tool.as_str() == Some("business_os.write_app_file"))
+        );
         Ok(())
     }
 
@@ -9252,16 +9932,20 @@ mod tests {
         )?;
 
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
-        assert!(result
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .contains("validate-app-module.mjs"));
-        assert!(result
-            .get("stdout")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .contains("\"module_id\":\"mcp-source\""));
+        assert!(
+            result
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("validate-app-module.mjs")
+        );
+        assert!(
+            result
+                .get("stdout")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("\"module_id\":\"mcp-source\"")
+        );
         Ok(())
     }
 
@@ -9313,9 +9997,10 @@ mod tests {
             Some("business-os-app-module-development")
         );
         assert!(task.prompt.contains("ctox.business_os.app.modify"));
-        assert!(task
-            .prompt
-            .contains("runtime/business-os/installed-modules/mcp-inventory"));
+        assert!(
+            task.prompt
+                .contains("runtime/business-os/installed-modules/mcp-inventory")
+        );
         Ok(())
     }
 
@@ -9959,8 +10644,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_unpersisted_service_actor_grant_and_audits_identity(
-    ) -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_unpersisted_service_actor_grant_and_audits_identity()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_module(root, "customers", "Customers", &["customer_accounts"])?;
@@ -10042,8 +10727,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_exact_approval_grant_without_outbound_module_grant(
-    ) -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_exact_approval_grant_without_outbound_module_grant()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         store::push_collection_records(
@@ -10366,8 +11051,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_exact_record_grant_without_collection_read(
-    ) -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_exact_record_grant_without_collection_read()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         store::push_collection_records(
@@ -10546,8 +11231,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_filters_module_list_by_app_visibility_not_data_read(
-    ) -> anyhow::Result<()> {
+    fn mcp_business_os_policy_filters_module_list_by_app_visibility_not_data_read()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -10744,8 +11429,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_denies_hidden_action_execution_even_with_data_write(
-    ) -> anyhow::Result<()> {
+    fn mcp_business_os_policy_denies_hidden_action_execution_even_with_data_write()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -10931,8 +11616,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_module_link_with_app_view_without_data_read(
-    ) -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_module_link_with_app_view_without_data_read()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -11200,6 +11885,138 @@ mod tests {
         assert!(action_ids.contains(&"support.agent.writeback"));
         assert!(action_ids.contains(&"support.agent.apply_suggestion"));
         assert!(action_ids.contains(&"support.agent.reject_suggestion"));
+        Ok(())
+    }
+
+    #[test]
+    fn thesen_outbound_exposes_native_scoped_person_research() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_installed_module(
+            root,
+            "thesen-outbound",
+            "THESEN Outbound",
+            "1.0.5",
+            &["thesen_outbound_leads"],
+            Some(serde_json::json!({ "public": true })),
+        )?;
+        seed_default_mcp_admin(root)?;
+
+        let actions = list_module_actions(
+            root,
+            &test_context("business_os.list_module_actions"),
+            "thesen-outbound",
+        )?;
+        assert!(
+            actions
+                .items
+                .iter()
+                .any(|action| action.action_id == "web_stack.person_research")
+        );
+        let research_action = actions
+            .items
+            .iter()
+            .find(|action| action.action_id == "web_stack.person_research")
+            .context("person research action")?;
+        assert_eq!(
+            research_action
+                .input_schema
+                .pointer("/properties/payload/required"),
+            Some(&serde_json::json!([
+                "operation_id",
+                "company",
+                "country",
+                "mode"
+            ]))
+        );
+        assert_eq!(
+            research_action
+                .input_schema
+                .pointer("/properties/payload/additionalProperties")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let payload = serde_json::json!({
+            "operation_id": "lead_1",
+            "company": "Acme GmbH",
+            "country": "DE",
+            "mode": "new_record"
+        });
+        let proposal = propose_action(
+            root,
+            &test_context("business_os.propose_action"),
+            "thesen-outbound",
+            "web_stack.person_research",
+            &serde_json::json!({
+                "record_id": "lead_1",
+                "payload": payload.clone()
+            }),
+        )?;
+        assert_eq!(proposal.command_type, "web_stack.person_research");
+        assert_eq!(proposal.record_id.as_deref(), Some("lead_1"));
+        assert_eq!(proposal.payload["operation_id"], payload["operation_id"]);
+        assert_eq!(proposal.payload["company"], payload["company"]);
+        assert_eq!(proposal.payload["country"], payload["country"]);
+        assert_eq!(proposal.payload["mode"], payload["mode"]);
+        assert_eq!(
+            proposal.payload["writeback_contract"],
+            serde_json::json!({
+                "collection": "thesen_outbound_leads",
+                "allowed_collections": ["thesen_outbound_leads"],
+                "record_ids": ["lead_1"],
+                "command_type": "web_stack.person_research",
+                "min_independent_sources": 2
+            })
+        );
+        assert!(is_native_mcp_control_action(
+            "thesen-outbound",
+            "web_stack.person_research"
+        ));
+
+        let malformed = propose_action(
+            root,
+            &test_context("business_os.propose_action"),
+            "thesen-outbound",
+            "web_stack.person_research",
+            &serde_json::json!({
+                "record_id": "lead_1",
+                "payload": {
+                    "operation_id": "lead_1",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "mode": "new_record",
+                    "fields": { "item": ["firma_name"] },
+                    "include_private": "",
+                    "auto_browser_capture": "true"
+                }
+            }),
+        )
+        .expect_err("transport-coerced person-research payload must be rejected before enqueue");
+        let typed = malformed
+            .downcast_ref::<BusinessOsMcpError>()
+            .context("typed payload validation error")?;
+        assert_eq!(typed.code, BusinessOsMcpErrorCode::ValidationFailed);
+        assert_eq!(typed.field.as_deref(), Some("payload.fields"));
+
+        let execute_tool = tool_descriptors()
+            .into_iter()
+            .find(|tool| tool.name == "business_os.execute_action")
+            .context("execute action tool descriptor")?;
+        assert_eq!(
+            execute_tool
+                .input_schema
+                .pointer("/properties/payload/properties/fields/type")
+                .and_then(Value::as_str),
+            Some("array")
+        );
+        assert_eq!(
+            execute_tool
+                .input_schema
+                .pointer("/properties/payload/properties/auto_browser_capture/type")
+                .and_then(Value::as_str),
+            Some("boolean")
+        );
         Ok(())
     }
 
@@ -11760,9 +12577,11 @@ mod tests {
 
         assert_eq!(envelope.get("status").and_then(Value::as_u64), Some(200));
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
-        assert!(users
-            .iter()
-            .any(|user| user.get("id").and_then(Value::as_str) == Some("claude:user_3")));
+        assert!(
+            users
+                .iter()
+                .any(|user| user.get("id").and_then(Value::as_str) == Some("claude:user_3"))
+        );
         Ok(())
     }
 
@@ -11816,12 +12635,14 @@ mod tests {
             hello.get("mcp_protocol_version").and_then(Value::as_str),
             Some(MCP_PROTOCOL_VERSION)
         );
-        assert!(hello
-            .get("capabilities")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .any(|value| value.as_str() == Some("business_os_mcp_channel_v1")));
+        assert!(
+            hello
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str() == Some("business_os_mcp_channel_v1"))
+        );
         assert!(
             hello
                 .get("connected_at_ms")

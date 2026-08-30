@@ -128,7 +128,12 @@
 /* custom: narrow windows stack the three panes vertically so the detail
    keeps a readable width without horizontal squeezing. */
 @container business-app-window (max-width: 1180px) {
-  .reports-module {
+  /* Match the higher-specificity desktop collapse rule as well. Without the
+     second selector, `.reports-module.is-actions-hidden` keeps the desktop
+     three-column template while the resizers below are removed from layout.
+     The detail pane then falls into the 12px resizer column and looks empty. */
+  .reports-module,
+  .reports-module.is-actions-hidden {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(200px, 34vh) minmax(380px, 1fr) minmax(220px, 36vh);
     height: auto;

@@ -542,6 +542,39 @@
   min-height: 190px;
 }
 
+.universal-importer-preview {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line, oklch(0.84 0.012 235));
+  border-radius: var(--radius-control, 6px);
+  background: var(--surface-2, oklch(0.944 0.008 235));
+  font-size: 12px;
+}
+
+.universal-importer-preview[hidden] {
+  display: none;
+}
+
+.universal-importer-preview ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.universal-importer-preview li[data-kind="error"] {
+  color: var(--danger, #b4232d);
+}
+
+.universal-importer-preview li[data-kind="warning"] {
+  color: var(--warning, #9a6500);
+}
+
+.universal-importer-preview li[data-kind="success"] {
+  color: var(--success, #167349);
+}
+
 .universal-importer-panel footer {
   bottom: -18px;
   padding-bottom: 18px;

@@ -115,6 +115,11 @@ async function loadEmbeddedIdentity() {
 }
 
 function start() {
+  // The native Workjet host supplies the verified shell-pack identity and
+  // lifecycle status across its typed bridge. A relative fetch here would be
+  // an accidental HTTP control/data fallback against appassets and must not
+  // run in the RxDB/WebRTC-only mobile host.
+  if (document.documentElement.dataset.workjetMobileHost === 'true') return;
   const root = document.querySelector('[data-shell-release]');
   if (!root) return;
   const button = root.querySelector('[data-shell-release-status]');

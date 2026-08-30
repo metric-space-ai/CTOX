@@ -1,9 +1,9 @@
 // Origin: CTOX
 // License: Apache-2.0
 
-use super::store_outbound_delivery_policy::*;
 use super::backup_restore::file_sha256;
 use super::store::{
+    find_rxdb_collection_record_by_string_field, find_rxdb_collection_records_by_string_field,
     insert_business_event, is_safe_rxdb_collection_name, load_rxdb_collection_record, now_ms,
     open_store, outbound_first_string, outbound_id_from_command, outbound_load_record,
     outbound_load_records_by_string_field, outbound_load_required, outbound_merge_fields,
@@ -13,6 +13,7 @@ use super::store::{
     outbound_string, runtime_app_starter_collection_name, session_audit_actor_context,
     upsert_rxdb_collection_record, BusinessCommand, BusinessOsSession,
 };
+use super::store_outbound_delivery_policy::*;
 use super::store_projections::upsert_business_record;
 use crate::capabilities::scrape;
 use crate::mission::channels;
@@ -1168,8 +1169,108 @@ pub(super) fn handle_outbound_active_command(
         "outbound.research_source.auth_assist" => {
             outbound_handle_research_source_adapter(root, &conn, command, now, "auth_requested")
         }
+        "outbound.sellify.lookup" => outbound_handle_sellify_lookup(root, command),
         other => anyhow::bail!("unsupported active outbound command: {other}"),
     }
+}
+
+fn outbound_handle_sellify_lookup(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    outbound_sellify_lookup(root, &command.payload)
+}
+
+pub(super) fn outbound_sellify_lookup(root: &Path, payload: &Value) -> anyhow::Result<Value> {
+    let entity = outbound_required_string(payload, &["entity"])?;
+    let (collection, allowed_fields): (&str, &[&str]) = match entity.as_str() {
+        "company" => (
+            "sellify_companies",
+            &[
+                "contact_id",
+                "name",
+                "company_name",
+                "website",
+                "email",
+                "phone",
+            ],
+        ),
+        "person" => (
+            "sellify_people",
+            &[
+                "person_id",
+                "contact_id",
+                "email",
+                "phone",
+                "name",
+                "display_name",
+                "first_name",
+                "last_name",
+            ],
+        ),
+        _ => anyhow::bail!("entity must be company or person"),
+    };
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(25)
+        .clamp(1, 100) as usize;
+    let mut records = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(ids) = payload.get("ids").and_then(Value::as_array) {
+        for id in ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if records.len() >= limit {
+                break;
+            }
+            if let Some(record) = load_rxdb_collection_record(root, collection, id)? {
+                if seen.insert(id.to_string()) {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    if let Some(selectors) = payload.get("selectors").and_then(Value::as_array) {
+        for selector in selectors {
+            if records.len() >= limit {
+                break;
+            }
+            let field = selector
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let expected = selector
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            anyhow::ensure!(
+                allowed_fields.contains(&field),
+                "unsupported {entity} lookup field `{field}`"
+            );
+            if expected.is_empty() {
+                continue;
+            }
+            for (id, record) in find_rxdb_collection_records_by_string_field(
+                root,
+                collection,
+                field,
+                expected,
+                limit.saturating_sub(records.len()),
+            )? {
+                if seen.insert(id) {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "entity": entity,
+        "records": records,
+    }))
 }
 
 fn outbound_handle_research_source_adapter(
@@ -5104,7 +5205,6 @@ fn outbound_record_send_failure(
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

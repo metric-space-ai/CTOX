@@ -49,9 +49,12 @@ const COMMAND_LIFECYCLE_TIMING_MARKS = Object.freeze({
 });
 let activeCommandWatcherCount = 0;
 const commandTimingProbes = new Map();
-// Four finite exact-id retries. Their cumulative 375 ms window covers normal
-// native processing without adding collection pulls or an unbounded poller.
-const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([25, 50, 100, 200]);
+// Finite exact-id retries cover normal native handlers even when a multiplexed
+// master-change frame is lost. The cumulative 11.175 s window stays below the
+// default 15 s command deadline and never performs a collection-wide pull.
+const COMMAND_TERMINAL_REVALIDATE_DELAYS_MS = Object.freeze([
+  25, 50, 100, 200, 400, 800, 1600, 3000, 5000,
+]);
 
 function commandProgressToken(command) {
   if (!command) return '';
@@ -132,6 +135,38 @@ export function createCommandBus({ db, sync = null, session = null } = {}) {
     async getStatus(commandId) {
       const currentDb = await resolveCommandDb(db);
       return findDoc(currentDb?.raw?.business_commands, commandId, { swallowErrors: false });
+    },
+    async getStatusesByRecordIds(recordIds, { commandType = '' } = {}) {
+      const ids = [...new Set((Array.isArray(recordIds) ? recordIds : [])
+        .map(cleanContextText)
+        .filter(Boolean))];
+      if (!ids.length) return [];
+      if (ids.length > MAX_SIMULTANEOUS_COMMAND_WATCHERS) {
+        throw commandError('', `Too many command record ids: ${ids.length}`, {
+          code: 'query_limit',
+          retryable: false,
+        });
+      }
+      const currentDb = await resolveCommandDb(db);
+      const collection = currentDb?.raw?.business_commands;
+      if (!collection?.find) return [];
+      const normalizedType = cleanContextText(commandType);
+      if (!normalizedType) {
+        throw commandError('', 'commandType is required for record status lookup.', {
+          code: 'invalid_query',
+          retryable: false,
+        });
+      }
+      const selector = { command_type: { $eq: normalizedType } };
+      const docs = await collection.find({
+        selector,
+        limit: 512,
+        requireRevision: `command-record-status:${Date.now()}:${ids.length}`,
+      }).exec();
+      const recordIdsSet = new Set(ids);
+      return docs
+        .map((doc) => doc?.toJSON?.() || doc)
+        .filter((doc) => doc && recordIdsSet.has(cleanContextText(doc.record_id)));
     },
     subscribe(commandId, observer) {
       return subscribeToCommand({ db, sync, commandId, observer });
@@ -432,6 +467,19 @@ async function submitRxdbCommand({ db, sync, session, command, dispatchStartedAt
     await insertOrPatchCommandDocument(collection, commandId, doc);
     emitCommandLifecycle(commandId, command.command_type || command.type, 'local_inserted', submitStartedAt);
     recordCommandMetric(sync, 'local_submit', commandId, Date.now() - localWriteStartedAt);
+
+    // A small set of local-first intake surfaces (currently the global
+    // bug/feature reporter) must retain an already-authorized immutable intent
+    // even while the native peer is recovering. The live replication bridge
+    // observes this local insert and delivers it when the peer returns. This
+    // opt-in never bypasses capability acquisition above and never applies to
+    // commands with data dependencies, which still have to flush first.
+    if (command?.allow_local_intent_without_peer === true) {
+      rememberActiveCommandId(commandId);
+      emitCommandLifecycle(commandId, command.command_type || command.type, 'push_unconfirmed', submitStartedAt);
+      recordCommandMetric(sync, 'submit_receipt', commandId, Date.now() - submitStartedAt);
+      return localCommandReceipt({ db, sync, commandId, pushConfirmed: false });
+    }
 
     let pushConfirmed = false;
     try {
@@ -793,8 +841,11 @@ async function prepareCommandSync({ db, sync, command = null }) {
       : null;
     const submitBridges = [commandBridge].filter(Boolean);
     const afterCommand = [commandBridge, queueBridge].filter(Boolean);
+    const bridgesRequiredBeforeInsert = command?.allow_local_intent_without_peer === true
+      ? dependencyBridges
+      : [...dependencyBridges, ...submitBridges];
     await Promise.all(
-      [...dependencyBridges, ...submitBridges].map((bridge) => (
+      bridgesRequiredBeforeInsert.map((bridge) => (
         waitForSyncBridgeReady(bridge, readyTimeoutMs)
       )),
     );
@@ -1114,6 +1165,11 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
       let authoritativeRebindPending = false;
       let authoritativeRevision = 0;
       let revalidationTimer = null;
+      // A reactive RxDB stream may synchronously emit the current command from
+      // subscribe(). Keep the timer binding initialized before bind() can call
+      // settle(); otherwise terminal commands hit the temporal dead zone and
+      // leave their watcher behind.
+      let progressTimer = null;
       const settle = (handler, value) => {
         if (settled) return;
         settled = true;
@@ -1186,7 +1242,7 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
             requireRevision,
           }));
         } catch (error) {
-          if (isUnsupportedCommandTrackingQueryError(error)) {
+          if (isLocalFallbackCommandTrackingQueryError(error)) {
             try {
               inspect(await findLocalDoc(currentDb?.raw?.business_commands, commandId));
             } catch {}
@@ -1217,8 +1273,8 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
       }, timeoutMs);
       // Demand-only command projections do not receive an unsolicited full
       // collection pull. A native master-change hint immediately revalidates
-      // this exact command id. Four scheduled retries are only a finite safety
-      // net for a lost hint; they never restart the room or full-pull history.
+      // this exact command id. Scheduled retries are only a finite safety net
+      // for a lost hint; they never restart the room or full-pull history.
       const scheduleTerminalRevalidation = (index = 0) => {
         if (settled || index >= COMMAND_TERMINAL_REVALIDATE_DELAYS_MS.length) return;
         revalidationTimer = setTimeout(() => {
@@ -1245,7 +1301,7 @@ async function waitForCommandState({ db, sync, commandId, until, options = {} })
         if (masterChangeSubscription) masterChangeSubscriptions.push(masterChangeSubscription);
       }
       scheduleTerminalRevalidation();
-      const progressTimer = setInterval(() => {
+      progressTimer = setInterval(() => {
         if (settled) return;
         const evaluation = evaluateCommandDataPlaneProgress(sync);
         if (evaluation.ok !== false) return;
@@ -1410,11 +1466,17 @@ async function findLocalDoc(collection, id) {
   return doc?.toJSON?.() || doc;
 }
 
-function isUnsupportedCommandTrackingQueryError(error) {
+function isLocalFallbackCommandTrackingQueryError(error) {
   const codes = [error?.code, error?.cause?.code, error?.data?.code]
     .map((code) => String(code || ''));
   const message = String(error?.message || error || '');
-  return ['SQLITE_QUERY_STREAM_UNSUPPORTED', 'QUERY_FETCH_STREAM_UNSUPPORTED', 'QUERY_NOT_SUPPORTED']
+  return [
+    'SQLITE_QUERY_STREAM_UNSUPPORTED',
+    'QUERY_FETCH_STREAM_UNSUPPORTED',
+    'QUERY_NOT_SUPPORTED',
+    'QUERY_QUEUE_LIMIT',
+    'STREAM_LIMIT_EXCEEDED',
+  ]
     .some((code) => codes.includes(code) || message.includes(code));
 }
 

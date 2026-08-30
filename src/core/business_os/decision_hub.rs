@@ -33,6 +33,7 @@ use crate::mission::channels;
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const MODULE_ID: &str = "kundenpipeline";
@@ -41,6 +42,14 @@ const COL_ENTSCHEIDUNGEN: &str = "kundenpipeline_entscheidungen";
 const COL_PROJEKTE: &str = "kundenpipeline_projekte";
 const WRAP_WIDTH: usize = 52;
 const PROJECTION_BATCH: usize = 200;
+const AGENT_DECISION_TYPE: &str = "agent_escalation";
+const AGENT_DECISION_MIN_OPTIONS: usize = 2;
+const AGENT_DECISION_MAX_OPTIONS: usize = 8;
+const AGENT_DECISION_MAX_TITLE_CHARS: usize = 160;
+const AGENT_DECISION_MAX_QUESTION_CHARS: usize = 2_000;
+const AGENT_DECISION_MAX_CONTEXT_CHARS: usize = 8_000;
+const AGENT_DECISION_MAX_OPTION_LABEL_CHARS: usize = 120;
+const AGENT_DECISION_MAX_OPTION_DESCRIPTION_CHARS: usize = 1_000;
 
 // ---------------------------------------------------------------------------
 // Ingest projection
@@ -230,6 +239,8 @@ pub fn handle_command(
 ) -> anyhow::Result<Value> {
     match command.command_type.as_str() {
         "kundenpipeline.triage.write" => handle_triage_write(root, command),
+        "kundenpipeline.decision.request" => handle_decision_request(root, command),
+        "kundenpipeline.decision.resolve" => handle_decision_resolve(root, command),
         "kundenpipeline.decision.answer" => handle_decision_answer(root, command),
         "kundenpipeline.mail.send" => handle_mail_send(root, command),
         "kundenpipeline.delegate" => handle_delegate(root, command),
@@ -242,6 +253,259 @@ fn write_requirement() -> CommandPolicyRequirement {
         BusinessOsPermission::DataWrite,
         BusinessOsScope::collection(COL_VORGAENGE),
     )
+}
+
+fn decision_write_requirement() -> CommandPolicyRequirement {
+    CommandPolicyRequirement::scoped(
+        BusinessOsPermission::DataWrite,
+        BusinessOsScope::collection(COL_ENTSCHEIDUNGEN),
+    )
+}
+
+fn handle_decision_request(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    let payload = command.payload.clone();
+    enforce_command_policy(
+        root,
+        command,
+        |_| Ok(decision_write_requirement()),
+        |session| {
+            let actor = session
+                .user
+                .as_ref()
+                .map(|user| user.id.as_str())
+                .unwrap_or("decision-hub-agent");
+            request_agent_decision(root, &payload, actor)
+        },
+    )?
+    .into_outcome()
+}
+
+fn handle_decision_resolve(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
+    let payload = command.payload.clone();
+    enforce_command_policy(
+        root,
+        command,
+        |_| Ok(decision_write_requirement()),
+        |session| resolve_agent_decision(root, &payload, session),
+    )?
+    .into_outcome()
+}
+
+/// Create or return one idempotent Workjet escalation. The native command path
+/// and the dedicated MCP tool both call this function after their respective
+/// policy gates, so browser and external-agent writes cannot diverge.
+pub(super) fn request_agent_decision(
+    root: &Path,
+    payload: &Value,
+    actor: &str,
+) -> anyhow::Result<Value> {
+    let normalized = normalize_agent_decision_request(payload)?;
+    let source = normalized
+        .get("source")
+        .and_then(Value::as_object)
+        .context("source is required")?;
+    let identity = format!(
+        "{}\0{}\0{}\0{}",
+        source
+            .get("authority")
+            .and_then(Value::as_str)
+            .unwrap_or("workjet"),
+        source
+            .get("environment_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        source
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        normalized
+            .get("decision_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    let decision_id = sha256_id("kpl-e-agent", identity.as_bytes());
+    let request_fingerprint = sha256_hex(&serde_json::to_vec(&normalized)?);
+
+    if let Some(existing) = load_any_record(root, COL_ENTSCHEIDUNGEN, &decision_id)? {
+        anyhow::ensure!(
+            existing
+                .get("request_fingerprint")
+                .and_then(Value::as_str)
+                == Some(request_fingerprint.as_str()),
+            "decision_key_conflict: the same Decision Hub key was already used with different content"
+        );
+        return agent_decision_response(&existing);
+    }
+
+    let now = now_ms() as i64;
+    let title = normalized
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let question = normalized
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let context = normalized
+        .get("context")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let options = normalized
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = wrap_text(question, WRAP_WIDTH);
+    if !context.is_empty() {
+        lines.push(String::new());
+        lines.extend(wrap_text(context, WRAP_WIDTH));
+    }
+    let users = workspace_decision_user_ids(root);
+    let owner_user_id = users.first().cloned().unwrap_or_default();
+    let actions = options
+        .iter()
+        .map(|option| {
+            json!({
+                "wert": option.get("id").and_then(Value::as_str).unwrap_or_default(),
+                "label": option.get("label").and_then(Value::as_str).unwrap_or_default(),
+                "description": option.get("description").and_then(Value::as_str).unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut decision = json!({
+        "id": decision_id,
+        "vorgang_id": "",
+        "typ": AGENT_DECISION_TYPE,
+        "titel": title,
+        "title": title,
+        "frage_json": {
+            "question": question,
+            "context": context,
+            "recommendation": normalized.get("recommendation").cloned().unwrap_or(Value::Null),
+            "urgency": normalized.get("urgency").cloned().unwrap_or_else(|| json!("normal")),
+        },
+        "zeilen_json": lines,
+        "detail_seiten_json": [],
+        "aktionen_json": actions,
+        "backing_ref": "",
+        "source_json": normalized.get("source").cloned().unwrap_or_else(|| json!({})),
+        "correlation_json": normalized.get("correlation").cloned().unwrap_or_else(|| json!({})),
+        "request_fingerprint": request_fingerprint,
+        "status": "offen",
+        "antwort_json": {},
+        "expires_at_ms": normalized.get("expires_at_ms").cloned().unwrap_or(Value::Null),
+        "requested_by": actor,
+        "owner_user_id": owner_user_id,
+        "assigned_user_id": owner_user_id,
+        "participant_ids": users,
+        "is_deleted": false,
+        "created_at_ms": now,
+        "updated_at_ms": now,
+    });
+    if decision.get("expires_at_ms").is_some_and(Value::is_null) {
+        decision
+            .as_object_mut()
+            .expect("Decision Hub records are objects")
+            .remove("expires_at_ms");
+    }
+    upsert_projection_record(
+        root,
+        COL_ENTSCHEIDUNGEN,
+        decision["id"].as_str().unwrap_or_default(),
+        now,
+        decision.clone(),
+    )?;
+    agent_decision_response(&decision)
+}
+
+/// Return only the bounded state Workjet needs to resume a suspended thread.
+pub(super) fn get_agent_decision(root: &Path, decision_id: &str) -> anyhow::Result<Value> {
+    let decision = load_any_record(root, COL_ENTSCHEIDUNGEN, decision_id)?
+        .with_context(|| format!("unknown Decision Hub decision `{decision_id}`"))?;
+    anyhow::ensure!(
+        decision.get("typ").and_then(Value::as_str) == Some(AGENT_DECISION_TYPE),
+        "decision `{decision_id}` is not an agent escalation"
+    );
+    agent_decision_response(&decision)
+}
+
+fn resolve_agent_decision(
+    root: &Path,
+    payload: &Value,
+    session: &super::store::BusinessOsSession,
+) -> anyhow::Result<Value> {
+    let decision_id = required_trimmed(payload, "entscheidung_id", 180)?;
+    let option_id = required_trimmed(payload, "option_id", 120)?;
+    let comment = optional_trimmed(payload, "comment", 2_000)?;
+    let channel = optional_trimmed(payload, "kanal", 80)?.unwrap_or_else(|| "desktop".to_string());
+    let mut decision = load_any_record(root, COL_ENTSCHEIDUNGEN, &decision_id)?
+        .with_context(|| format!("unknown Entscheidung `{decision_id}`"))?;
+    anyhow::ensure!(
+        decision.get("typ").and_then(Value::as_str) == Some(AGENT_DECISION_TYPE),
+        "kundenpipeline.decision.resolve only accepts agent_escalation decisions"
+    );
+    let option = decision
+        .get("aktionen_json")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option.get("wert").and_then(Value::as_str) == Some(&option_id))
+        })
+        .cloned()
+        .with_context(|| format!("unknown Decision Hub option `{option_id}`"))?;
+
+    if decision.get("status").and_then(Value::as_str) == Some("entschieden") {
+        anyhow::ensure!(
+            decision
+                .pointer("/antwort_json/option_id")
+                .and_then(Value::as_str)
+                == Some(option_id.as_str())
+                && decision
+                    .pointer("/antwort_json/comment")
+                    .and_then(Value::as_str)
+                    == Some(comment.as_deref().unwrap_or("")),
+            "decision_resolution_conflict: decision was already resolved differently"
+        );
+        return agent_decision_response(&decision);
+    }
+    anyhow::ensure!(
+        decision.get("status").and_then(Value::as_str) == Some("offen"),
+        "Decision Hub decision is not open"
+    );
+    let now = now_ms() as i64;
+    anyhow::ensure!(
+        decision
+            .get("expires_at_ms")
+            .and_then(Value::as_i64)
+            .is_none_or(|expires_at_ms| expires_at_ms > now),
+        "Decision Hub decision has expired"
+    );
+    let actor = session
+        .user
+        .as_ref()
+        .map(|user| user.id.clone())
+        .unwrap_or_else(|| "owner".to_string());
+    decision["status"] = json!("entschieden");
+    decision["updated_at_ms"] = json!(now);
+    decision["antwort_json"] = json!({
+        "option_id": option_id,
+        "wert": option.get("wert").cloned().unwrap_or(Value::Null),
+        "label": option.get("label").cloned().unwrap_or(Value::Null),
+        "comment": comment.unwrap_or_default(),
+        "kanal": channel,
+        "akteur": actor,
+        "resolved_at_ms": now,
+        "zeit_ms": now,
+    });
+    upsert_projection_record(
+        root,
+        COL_ENTSCHEIDUNGEN,
+        &decision_id,
+        now,
+        decision.clone(),
+    )?;
+    agent_decision_response(&decision)
 }
 
 /// Record the owner's answer natively. The app also patches the decision in
@@ -266,11 +530,6 @@ fn handle_decision_answer(root: &Path, command: &BusinessCommand) -> anyhow::Res
                 .unwrap_or_default()
                 .trim()
                 .to_string();
-            let status = match wert.as_str() {
-                "annehmen" => "entschieden",
-                "ablehnen" => "abgelehnt",
-                other => anyhow::bail!("unknown decision answer `{other}`"),
-            };
             let kanal = payload
                 .get("kanal")
                 .and_then(Value::as_str)
@@ -278,6 +537,23 @@ fn handle_decision_answer(root: &Path, command: &BusinessCommand) -> anyhow::Res
                 .to_string();
             let mut decision = load_any_record(root, COL_ENTSCHEIDUNGEN, &decision_id)?
                 .with_context(|| format!("unknown Entscheidung `{decision_id}`"))?;
+            if decision.get("typ").and_then(Value::as_str) == Some(AGENT_DECISION_TYPE) {
+                return resolve_agent_decision(
+                    root,
+                    &json!({
+                        "entscheidung_id": decision_id,
+                        "option_id": wert,
+                        "comment": payload.get("comment").cloned().unwrap_or(Value::Null),
+                        "kanal": kanal,
+                    }),
+                    session,
+                );
+            }
+            let status = match wert.as_str() {
+                "annehmen" => "entschieden",
+                "ablehnen" => "abgelehnt",
+                other => anyhow::bail!("unknown decision answer `{other}`"),
+            };
             let now = now_ms() as i64;
             let akteur = session
                 .user
@@ -697,6 +973,172 @@ fn handle_delegate(root: &Path, command: &BusinessCommand) -> anyhow::Result<Val
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn normalize_agent_decision_request(payload: &Value) -> anyhow::Result<Value> {
+    let decision_key = required_trimmed(payload, "decision_key", 200)?;
+    let title = required_trimmed(payload, "title", AGENT_DECISION_MAX_TITLE_CHARS)?;
+    let question = required_trimmed(payload, "question", AGENT_DECISION_MAX_QUESTION_CHARS)?;
+    let context =
+        optional_trimmed(payload, "context", AGENT_DECISION_MAX_CONTEXT_CHARS)?.unwrap_or_default();
+    let recommendation = optional_trimmed(payload, "recommendation", 120)?;
+    let urgency = optional_trimmed(payload, "urgency", 16)?.unwrap_or_else(|| "normal".to_string());
+    anyhow::ensure!(
+        matches!(urgency.as_str(), "normal" | "high" | "critical"),
+        "urgency must be normal, high, or critical"
+    );
+    let source = payload
+        .get("source")
+        .and_then(Value::as_object)
+        .context("source object is required")?;
+    let authority = source
+        .get("authority")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("workjet");
+    let environment_id = required_trimmed(&Value::Object(source.clone()), "environment_id", 200)?;
+    let thread_id = required_trimmed(&Value::Object(source.clone()), "thread_id", 200)?;
+    let workjet_instance_id =
+        optional_trimmed(&Value::Object(source.clone()), "workjet_instance_id", 200)?;
+    let correlation = payload
+        .get("correlation")
+        .and_then(Value::as_object)
+        .context("correlation object is required")?;
+    let turn_id = optional_trimmed(&Value::Object(correlation.clone()), "turn_id", 200)?;
+    let idempotency_key =
+        required_trimmed(&Value::Object(correlation.clone()), "idempotency_key", 200)?;
+    anyhow::ensure!(
+        idempotency_key == decision_key,
+        "correlation.idempotency_key must equal decision_key"
+    );
+    let options = payload
+        .get("options")
+        .and_then(Value::as_array)
+        .context("options array is required")?;
+    anyhow::ensure!(
+        (AGENT_DECISION_MIN_OPTIONS..=AGENT_DECISION_MAX_OPTIONS).contains(&options.len()),
+        "options must contain between {AGENT_DECISION_MIN_OPTIONS} and {AGENT_DECISION_MAX_OPTIONS} entries"
+    );
+    let mut normalized_options = Vec::with_capacity(options.len());
+    let mut option_ids = std::collections::BTreeSet::new();
+    for option in options {
+        let id = required_trimmed(option, "id", 120)?;
+        anyhow::ensure!(option_ids.insert(id.clone()), "option ids must be unique");
+        let label = required_trimmed(option, "label", AGENT_DECISION_MAX_OPTION_LABEL_CHARS)?;
+        let description = optional_trimmed(
+            option,
+            "description",
+            AGENT_DECISION_MAX_OPTION_DESCRIPTION_CHARS,
+        )?
+        .unwrap_or_default();
+        normalized_options.push(json!({
+            "id": id,
+            "label": label,
+            "description": description,
+        }));
+    }
+    if let Some(recommended) = recommendation.as_deref() {
+        anyhow::ensure!(
+            option_ids.contains(recommended),
+            "recommendation must name one option id"
+        );
+    }
+    let expires_at_ms = payload.get("expires_at_ms").and_then(Value::as_i64);
+    if let Some(expires_at_ms) = expires_at_ms {
+        let now = now_ms() as i64;
+        anyhow::ensure!(expires_at_ms > now, "expires_at_ms must be in the future");
+        anyhow::ensure!(
+            expires_at_ms <= now.saturating_add(30 * 24 * 60 * 60 * 1_000),
+            "expires_at_ms may be at most 30 days in the future"
+        );
+    }
+    Ok(json!({
+        "decision_key": decision_key,
+        "title": title,
+        "question": question,
+        "context": context,
+        "options": normalized_options,
+        "recommendation": recommendation,
+        "urgency": urgency,
+        "expires_at_ms": expires_at_ms,
+        "source": {
+            "authority": authority,
+            "environment_id": environment_id,
+            "thread_id": thread_id,
+            "workjet_instance_id": workjet_instance_id,
+        },
+        "correlation": {
+            "decision_key": decision_key,
+            "turn_id": turn_id,
+            "idempotency_key": idempotency_key,
+        },
+    }))
+}
+
+fn agent_decision_response(decision: &Value) -> anyhow::Result<Value> {
+    let persisted_status = decision.get("status").and_then(Value::as_str);
+    let expired = persisted_status == Some("offen")
+        && decision
+            .get("expires_at_ms")
+            .and_then(Value::as_i64)
+            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms() as i64);
+    let status = match persisted_status {
+        _ if expired => "expired",
+        Some("offen") => "open",
+        Some("entschieden") | Some("abgelehnt") => "resolved",
+        Some("abgelaufen") => "expired",
+        Some(other) => other,
+        None => "open",
+    };
+    Ok(json!({
+        "ok": true,
+        "decision_id": decision.get("id").cloned().unwrap_or(Value::Null),
+        "status": status,
+        "resolution": if status == "resolved" {
+            decision.get("antwort_json").cloned().unwrap_or_else(|| json!({}))
+        } else {
+            Value::Null
+        },
+        "correlation": decision.get("correlation_json").cloned().unwrap_or_else(|| json!({})),
+        "updated_at_ms": decision.get("updated_at_ms").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn required_trimmed(value: &Value, field: &str, max_chars: usize) -> anyhow::Result<String> {
+    optional_trimmed(value, field, max_chars)?
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("{field} is required"))
+}
+
+fn optional_trimmed(
+    value: &Value,
+    field: &str,
+    max_chars: usize,
+) -> anyhow::Result<Option<String>> {
+    let Some(raw) = value.get(field) else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let raw = raw
+        .as_str()
+        .with_context(|| format!("{field} must be a string"))?
+        .trim();
+    anyhow::ensure!(
+        raw.chars().count() <= max_chars,
+        "{field} exceeds the {max_chars} character limit"
+    );
+    Ok(Some(raw.to_string()))
+}
+
+fn sha256_id(prefix: &str, bytes: &[u8]) -> String {
+    format!("{prefix}-{}", sha256_hex(bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 struct Projekt {
     id: String,
     name: String,
@@ -977,5 +1419,99 @@ fn kurz(text: &str, max: usize) -> String {
         let mut cut: String = trimmed.chars().take(max.saturating_sub(1)).collect();
         cut.push('…');
         cut
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::business_os::store::tests::test_session;
+    use tempfile::tempdir;
+
+    fn request_payload() -> Value {
+        json!({
+            "decision_key": "choose-storage",
+            "title": "Speicherstrategie festlegen",
+            "question": "Welche Speicherstrategie soll umgesetzt werden?",
+            "context": "Variante A ist robuster, Variante B schneller verfügbar.",
+            "options": [
+                { "id": "robust", "label": "Robust", "description": "Mehr Vorarbeit" },
+                { "id": "fast", "label": "Schnell", "description": "Früher verfügbar" }
+            ],
+            "recommendation": "robust",
+            "urgency": "high",
+            "source": {
+                "authority": "workjet",
+                "environment_id": "env-1",
+                "thread_id": "thread-1"
+            },
+            "correlation": {
+                "turn_id": "turn-1",
+                "idempotency_key": "choose-storage"
+            }
+        })
+    }
+
+    #[test]
+    fn agent_decision_request_is_idempotent_and_conflict_detecting() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let first = request_agent_decision(root.path(), &request_payload(), "agent:orchestrator")?;
+        let second = request_agent_decision(root.path(), &request_payload(), "agent:orchestrator")?;
+        assert_eq!(first["decision_id"], second["decision_id"]);
+        assert_eq!(first["status"], "open");
+
+        let mut changed = request_payload();
+        changed["question"] = json!("Eine andere Frage unter demselben Key");
+        let error = request_agent_decision(root.path(), &changed, "agent:orchestrator")
+            .expect_err("different content must conflict");
+        assert!(error.to_string().contains("decision_key_conflict"));
+        Ok(())
+    }
+
+    #[test]
+    fn agent_decision_resolution_accepts_one_declared_option_once() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created =
+            request_agent_decision(root.path(), &request_payload(), "agent:orchestrator")?;
+        let decision_id = created["decision_id"].as_str().unwrap_or_default();
+        let session = test_session("owner", "chef");
+        let resolved = resolve_agent_decision(
+            root.path(),
+            &json!({
+                "entscheidung_id": decision_id,
+                "option_id": "robust",
+                "comment": "Bitte mit Migration umsetzen.",
+                "kanal": "desktop"
+            }),
+            &session,
+        )?;
+        assert_eq!(resolved["status"], "resolved");
+        assert_eq!(resolved["resolution"]["option_id"], "robust");
+
+        let replay = resolve_agent_decision(
+            root.path(),
+            &json!({
+                "entscheidung_id": decision_id,
+                "option_id": "robust",
+                "comment": "Bitte mit Migration umsetzen.",
+                "kanal": "desktop"
+            }),
+            &session,
+        )?;
+        assert_eq!(replay["resolution"]["option_id"], "robust");
+        Ok(())
+    }
+
+    #[test]
+    fn agent_decision_request_rejects_unbounded_or_duplicate_options() {
+        let mut payload = request_payload();
+        payload["options"] = json!([{ "id": "only", "label": "Only" }]);
+        assert!(normalize_agent_decision_request(&payload).is_err());
+
+        payload["options"] = json!([
+            { "id": "same", "label": "First" },
+            { "id": "same", "label": "Second" }
+        ]);
+        assert!(normalize_agent_decision_request(&payload).is_err());
     }
 }

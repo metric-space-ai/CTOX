@@ -1,7 +1,10 @@
 // Origin: CTOX
 // License: Apache-2.0
 
-use super::store::{outbound_first_string, outbound_load_record, outbound_put_i64, outbound_put_string, outbound_string};
+use super::store::{
+    outbound_first_string, outbound_load_record, outbound_put_i64, outbound_put_string,
+    outbound_string,
+};
 use super::store_outbound_commands::{outbound_email_account_key_from, outbound_payload_insert};
 use super::store_projections::upsert_business_record;
 use crate::mission::channels;
@@ -32,7 +35,10 @@ pub(super) fn outbound_has_matching_approval(
     Ok(false)
 }
 
-pub(super) fn outbound_recipient_suppressed(conn: &Connection, recipient_email: &str) -> anyhow::Result<bool> {
+pub(super) fn outbound_recipient_suppressed(
+    conn: &Connection,
+    recipient_email: &str,
+) -> anyhow::Result<bool> {
     Ok(outbound_recipient_suppression_reason(conn, recipient_email)?.is_some())
 }
 

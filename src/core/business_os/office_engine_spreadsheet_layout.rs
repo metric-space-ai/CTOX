@@ -329,7 +329,10 @@ fn spreadsheet_drawing_point_xml(
     )
 }
 
-pub(super) fn replace_spreadsheet_chart_style(xml: Vec<u8>, style: Option<u8>) -> anyhow::Result<Vec<u8>> {
+pub(super) fn replace_spreadsheet_chart_style(
+    xml: Vec<u8>,
+    style: Option<u8>,
+) -> anyhow::Result<Vec<u8>> {
     let mut output = String::from_utf8(xml).context("spreadsheet chart is not UTF-8")?;
     let style_regex = Regex::new(r#"<c:style\b[^>]*/>"#)?;
     output = style_regex.replace_all(&output, "").into_owned();
@@ -528,7 +531,9 @@ pub(super) fn write_ooxml_spreadsheet_comment_vml(
     Ok(output.into_bytes())
 }
 
-pub(super) fn write_ooxml_spreadsheet_comments(comments: &[EditorSpreadsheetCommentManifest]) -> Vec<u8> {
+pub(super) fn write_ooxml_spreadsheet_comments(
+    comments: &[EditorSpreadsheetCommentManifest],
+) -> Vec<u8> {
     let mut authors = Vec::<String>::new();
     for comment in comments {
         if !authors.contains(&comment.author) {

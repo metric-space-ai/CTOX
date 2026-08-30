@@ -5,7 +5,7 @@ use registry::{
 };
 mod execute;
 pub(crate) use execute::execute_scrape_with_outcome;
-use execute::{execute_scrape, CommandExecution, ProbeResult};
+use execute::{CommandExecution, ProbeResult, execute_scrape};
 mod semantic_enrichment;
 pub(crate) use semantic_enrichment::service_semantic_search;
 use semantic_enrichment::{
@@ -31,13 +31,13 @@ pub(crate) use classify::ScrapeRunStatus;
 
 use anyhow::Context;
 use anyhow::Result;
-use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 #[cfg(test)]
@@ -1205,7 +1205,7 @@ fn build_run_artifacts(
     Ok(artifacts)
 }
 
-fn invoke_responses_text(
+pub(crate) fn invoke_responses_text(
     root: &Path,
     model: &str,
     prompt: &str,
@@ -1940,8 +1940,8 @@ use reauth::{
 use registry::load_registered_target;
 #[cfg(test)]
 use semantic_enrichment::{
-    apply_enrichment_updates, embed_texts_via_local_socket, ensure_semantic_records,
-    load_semantic_matches, EnrichmentConfig,
+    EnrichmentConfig, apply_enrichment_updates, embed_texts_via_local_socket,
+    ensure_semantic_records, load_semantic_matches,
 };
 
 #[cfg(test)]

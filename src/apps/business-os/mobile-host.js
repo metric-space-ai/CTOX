@@ -15,10 +15,34 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
 
   const descriptor = (appId) => catalog?.apps?.find((app) => app.id === appId) || null;
 
+  const appIdForWindow = (element) => {
+    const ownerId = String(element?.dataset?.ownerId || '');
+    const appId = ownerId.replace(/^(?:module|desktop-app):/, '');
+    return SAFE_ID.test(appId) ? appId : null;
+  };
+
+  const applyActiveAppMetadata = (appId) => {
+    activeAppId = appId;
+    document.body.dataset.workjetMobileApp = appId;
+    const presentation = descriptor(appId)?.mobilePresentation;
+    if (presentation) document.body.dataset.workjetMobilePresentation = presentation;
+    else delete document.body.dataset.workjetMobilePresentation;
+  };
+
   const markActiveWindow = () => {
     document.querySelectorAll('.shell-window[data-workjet-mobile-active]').forEach((element) => {
       delete element.dataset.workjetMobileActive;
     });
+    // A focused window is authoritative only while an app is already active.
+    // When Home is active, a previously focused window may still exist in the
+    // shared window manager. Promoting that stale focus here used to replace
+    // the freshly opened Home desk with Threads immediately.
+    const focused = document.querySelector('.shell-window.is-focused');
+    const focusedAppId = appIdForWindow(focused);
+    if (activeAppId !== 'desktop' && focusedAppId && focusedAppId !== activeAppId) {
+      applyActiveAppMetadata(focusedAppId);
+      publishState('active');
+    }
     if (!activeAppId) return;
     const ownerIds = [`module:${activeAppId}`, `desktop-app:${activeAppId}`, activeAppId];
     const active = [...document.querySelectorAll('.shell-window')].find((element) =>
@@ -33,7 +57,7 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
     post({
       type: 'app.state',
       appId: activeAppId,
-      title: app?.title || activeAppId,
+      title: app?.title || (activeAppId === 'desktop' ? 'Business OS' : activeAppId),
       canGoBack: false,
       state,
       actions: [],
@@ -43,7 +67,9 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
   const openApp = (appId) => {
     if (!SAFE_ID.test(appId)) return;
     if (appId === 'desktop') {
-      post({ type: 'shell.error', code: 'native-home-route', retryable: false });
+      applyActiveAppMetadata(appId);
+      if (location.hash.replace(/^#/, '').split('?')[0] !== appId) location.hash = appId;
+      publishState('active');
       return;
     }
     const app = descriptor(appId);
@@ -51,9 +77,7 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
       post({ type: 'shell.error', code: 'mobile-presentation-unavailable', retryable: false });
       return;
     }
-    activeAppId = appId;
-    document.body.dataset.workjetMobileApp = appId;
-    document.body.dataset.workjetMobilePresentation = app.mobilePresentation;
+    applyActiveAppMetadata(appId);
     post({
       type: 'app.state',
       appId,
@@ -125,10 +149,50 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
             message: String(error?.message || 'Device control failed.').slice(0, 512),
           },
         }));
+      return;
+    }
+    if (command.type === 'project.control' && allowedKeys(command, ['protocol', 'type', 'requestId', 'request'])) {
+      if (!SAFE_ID.test(command.requestId) || typeof globalThis.workjetProjectControl !== 'function') return;
+      Promise.resolve(globalThis.workjetProjectControl(command.request))
+        .then((result) => post({ type: 'project.control.result', requestId: command.requestId, result }))
+        .catch((error) => post({
+          type: 'project.control.result',
+          requestId: command.requestId,
+          error: {
+            code: String(error?.code || 'project-control-failed').slice(0, 128),
+            message: String(error?.message || 'Project control failed.').slice(0, 512),
+          },
+        }));
     }
   };
 
   globalThis.addEventListener('workjet-business-os-host-command', receive);
+  // Desktop icons open apps through the canonical CTOX launcher rather than
+  // through the host bridge. Capture the actual user activation so Home can
+  // remain stable in the presence of stale window-manager focus while icon
+  // clicks still promote the selected app to the responsive fullscreen view.
+  document.addEventListener('click', (event) => {
+    if (activeAppId !== 'desktop') return;
+    const icon = event.target?.closest?.('.desktop-icon[data-target]');
+    const appId = String(icon?.dataset?.target || '');
+    if (!SAFE_ID.test(appId)) return;
+    applyActiveAppMetadata(appId);
+    queueMicrotask(() => {
+      markActiveWindow();
+      publishState('active');
+    });
+  }, true);
+  document.addEventListener('keydown', (event) => {
+    if (activeAppId !== 'desktop' || !['Enter', ' '].includes(event.key)) return;
+    const icon = event.target?.closest?.('.desktop-icon[data-target]');
+    const appId = String(icon?.dataset?.target || '');
+    if (!SAFE_ID.test(appId)) return;
+    applyActiveAppMetadata(appId);
+    queueMicrotask(() => {
+      markActiveWindow();
+      publishState('active');
+    });
+  }, true);
   new MutationObserver(markActiveWindow).observe(document.documentElement, {
     childList: true,
     subtree: true,

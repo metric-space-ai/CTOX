@@ -39,7 +39,9 @@ pub(super) fn parse_founder_email_addresses(settings: &BTreeMap<String, String>)
         .collect()
 }
 
-pub(super) fn parse_founder_email_roles(settings: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+pub(super) fn parse_founder_email_roles(
+    settings: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let raw = settings
         .get("CTOX_FOUNDER_EMAIL_ROLES")
         .map(String::as_str)
@@ -78,7 +80,9 @@ pub(super) fn founder_email_role_summaries(settings: &BTreeMap<String, String>) 
         .collect()
 }
 
-pub(super) fn parse_admin_email_policies(settings: &BTreeMap<String, String>) -> Vec<AdminEmailPolicy> {
+pub(super) fn parse_admin_email_policies(
+    settings: &BTreeMap<String, String>,
+) -> Vec<AdminEmailPolicy> {
     let raw = settings
         .get("CTOX_EMAIL_ADMIN_POLICIES")
         .map(String::as_str)
@@ -121,7 +125,9 @@ pub(super) fn normalize_email_address(value: &str) -> String {
         .to_lowercase()
 }
 
-pub(super) fn normalized_allowed_email_domain(settings: &BTreeMap<String, String>) -> Option<String> {
+pub(super) fn normalized_allowed_email_domain(
+    settings: &BTreeMap<String, String>,
+) -> Option<String> {
     settings
         .get("CTOX_ALLOWED_EMAIL_DOMAIN")
         .map(|value| value.trim().trim_start_matches('@').to_lowercase())
@@ -239,7 +245,10 @@ pub(super) struct AccountConfig {
     pub(super) profile_json: Value,
 }
 
-pub(super) fn load_account_config(conn: &Connection, account_key: &str) -> Result<Option<AccountConfig>> {
+pub(super) fn load_account_config(
+    conn: &Connection,
+    account_key: &str,
+) -> Result<Option<AccountConfig>> {
     let row = conn
         .query_row(
             r#"
@@ -270,7 +279,9 @@ pub(super) fn jami_address_from_account_key(account_key: &str) -> String {
         .to_string()
 }
 
-pub(super) fn teams_tenant_from_account_config(account_config: Option<&AccountConfig>) -> Option<String> {
+pub(super) fn teams_tenant_from_account_config(
+    account_config: Option<&AccountConfig>,
+) -> Option<String> {
     account_config
         .and_then(|config| config.profile_json.get("tenantId"))
         .and_then(Value::as_str)
@@ -279,7 +290,11 @@ pub(super) fn teams_tenant_from_account_config(account_config: Option<&AccountCo
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn resolve_account_key(conn: &Connection, channel: &str, explicit: Option<&str>) -> Result<String> {
+pub(super) fn resolve_account_key(
+    conn: &Connection,
+    channel: &str,
+    explicit: Option<&str>,
+) -> Result<String> {
     if let Some(value) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
         return Ok(value.to_string());
     }

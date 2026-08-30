@@ -2,11 +2,11 @@
 // subcommand fan-out into the sibling modules.
 
 use super::{
-    count_rows, execute_scrape, find_flag_value, list_targets, load_json_file, open_db,
-    parse_where_filters, print_json, promote_template, query_records, rebuild_semantic_index,
-    record_template_example, register_script, register_source_module, required_flag_value,
-    resolve_db_path, semantic_search, show_api, show_latest, show_target, summary_payload,
-    upsert_target, DEFAULT_RUNTIME_ROOT,
+    DEFAULT_RUNTIME_ROOT, count_rows, execute_scrape, find_flag_value, list_targets,
+    load_json_file, open_db, parse_where_filters, print_json, promote_template, query_records,
+    rebuild_semantic_index, record_template_example, register_script, register_source_module,
+    required_flag_value, resolve_db_path, semantic_search, show_api, show_latest, show_target,
+    summary_payload, upsert_target,
 };
 use anyhow::{Context, Result};
 use serde_json::json;

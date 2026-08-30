@@ -1,22 +1,23 @@
 // Run execution: the outcome orchestrator, the sandboxed runner spawn
 // (env-clear + allowlist, process-group kill), the per-target run lock
 // with holder-liveness reclaim, and the portal health probe.
-use super::classify::{classify_outcome, Classification, ScrapeRunStatus};
+use super::classify::{Classification, ScrapeRunStatus, classify_outcome};
 use super::registry::{load_registered_target, open_db};
 use super::{
-    bind_scrape_record_provenance, build_repair_prompt, build_run_artifacts,
-    contains_human_verification, default_entry_command, emit_reauthorization_handoff,
-    extracted_record_fields, find_flag_value, latest_source_revision_map, load_last_successful_run,
-    materialize_latest_records, maybe_record_template_from_target, maybe_run_llm_enrichment,
-    normalize_records, now_iso_string, parse_execution_payload, print_json, probe_to_json,
-    read_response_excerpt, record_run, repair_skill_for_status, required_flag_value,
-    resolve_workspace_dir, scrape_error_diagnostic, session_expiry_reauthorization, stable_digest,
-    tail_excerpt, target_sources, url_host_lower, write_repair_request, RecordRunRequest,
-    RegisteredTarget, ScrapeExecutionOutcome, DEFAULT_QUEUE_PRIORITY, SCRAPE_RUNNER_ENV_ALLOWLIST,
+    DEFAULT_QUEUE_PRIORITY, RecordRunRequest, RegisteredTarget, SCRAPE_RUNNER_ENV_ALLOWLIST,
+    ScrapeExecutionOutcome, bind_scrape_record_provenance, build_repair_prompt,
+    build_run_artifacts, contains_human_verification, default_entry_command,
+    emit_reauthorization_handoff, extracted_record_fields, find_flag_value,
+    latest_source_revision_map, load_last_successful_run, materialize_latest_records,
+    maybe_record_template_from_target, maybe_run_llm_enrichment, normalize_records, now_iso_string,
+    parse_execution_payload, print_json, probe_to_json, read_response_excerpt, record_run,
+    repair_skill_for_status, required_flag_value, resolve_workspace_dir, scrape_error_diagnostic,
+    session_expiry_reauthorization, stable_digest, tail_excerpt, target_sources, url_host_lower,
+    write_repair_request,
 };
 use crate::channels;
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Read as _;

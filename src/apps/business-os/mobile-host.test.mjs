@@ -5,7 +5,7 @@ import { test } from 'node:test';
 const root = new URL('./', import.meta.url);
 const read = (name) => readFile(new URL(name, root), 'utf8');
 
-test('mobile host is additive and removes all desktop chrome', async () => {
+test('mobile host is additive, keeps the canonical home, and removes duplicate chrome', async () => {
   const [index, css, script] = await Promise.all([
     read('index.html'),
     read('mobile-host.css'),
@@ -19,7 +19,6 @@ test('mobile host is additive and removes all desktop chrome', async () => {
     '.shell-window-header',
     '.shell-window-resize',
     '.shell-window-switcher',
-    '.desktop-module',
     '[data-chat-dock]',
     '[data-taskbar]',
   ]) {
@@ -27,7 +26,10 @@ test('mobile host is additive and removes all desktop chrome', async () => {
   }
   assert.match(script, /workjet\.business-os-shell\.v1/);
   assert.match(script, /appId === 'desktop'/);
-  assert.match(script, /native-home-route/);
+  assert.match(script, /\.shell-window\.is-focused/);
+  assert.match(script, /applyActiveAppMetadata\(focusedAppId\)/);
+  assert.doesNotMatch(script, /native-home-route/);
+  assert.match(css, /\.desktop-module\s*\{[\s\S]*min-height:\s*100%/);
   assert.doesNotMatch(script, /capabilityToken|roomPassword|signalingUrls|businessRecords/);
 });
 

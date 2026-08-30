@@ -497,6 +497,10 @@ pub fn sync_config(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
     let peer_id = format!("ctox-core-{}", short_hash(&connection.instance_id));
     let native_rxdb_peer_available = super::rxdb_peer::is_native_peer_running_for_root(root);
     let native_rxdb_peer_status = super::rxdb_peer::native_peer_status(root);
+    // This is an identity, not a process-session id. Keeping it stable across
+    // supervised respawns lets browsers fail closed to one native endpoint;
+    // the random peer_session_id remains available in native_rxdb_peer_status
+    // for checkpoint/lifecycle invalidation.
     let native_peer_id = peer_id.clone();
     let ice_servers = ice_servers_config(root);
     let ice_diagnostics = ice_diagnostics(&ice_servers);
@@ -554,7 +558,6 @@ pub(crate) fn mobile_invite_sync_config(
         signaling_native_token_hash: signaling_auth.native_token_hash,
     })
 }
-
 pub(crate) const BUSINESS_OS_SIGNALING_AUTH_VERSION: &str = "ctox-role-bound-v1";
 
 pub(crate) fn signaling_auth_config(

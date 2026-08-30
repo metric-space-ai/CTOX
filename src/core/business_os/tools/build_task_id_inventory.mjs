@@ -5,11 +5,18 @@ import { fileURLToPath } from 'node:url';
 const toolDir = path.dirname(fileURLToPath(import.meta.url));
 const businessOsDir = path.resolve(toolDir, '..');
 const outputPath = path.join(businessOsDir, 'task_id_inventory.json');
-const sourceFiles = ['store.rs', 'rxdb_peer.rs'];
+const sourceFiles = [
+  'command_plane.rs',
+  'rxdb_peer.rs',
+  'store.rs',
+  'store_outbound_commands.rs',
+  'store_projections.rs',
+];
 const classifications = new Map(Object.entries({
   accept_rxdb_business_command_with_origin: ['compatibility_mixed', 'return explicit execution_task_id/target fields'],
   complete_business_command_from_app_validation_success: ['execution_link', 'execution_task_id'],
   delete_ctox_task: ['target_task', 'target_task_id'],
+  dispatch_business_command: ['compatibility_mixed', 'return explicit execution_task_id/target fields'],
   fail_business_command_from_queue_error: ['execution_link', 'execution_task_id'],
   outbound_queue_research_scraper_generation: ['domain_queue_reference', 'target_task_id or a domain-specific queue reference'],
   persist_systematic_research_failure: ['execution_link', 'execution_task_id'],
@@ -32,7 +39,7 @@ const sites = [];
 const occurrences = new Map();
 for (const file of sourceFiles) {
   const source = fs.readFileSync(path.join(businessOsDir, file), 'utf8');
-  const production = source.split(/\n#\[cfg\(test\)\]\nmod tests \{/)[0];
+  const production = source.split(/\n#\[cfg\(test\)\]\n(?:pub(?:\([^)]*\))?\s+)?mod tests \{/)[0];
   let currentFunction = '<module>';
   for (const [index, line] of production.split('\n').entries()) {
     const functionMatch = line.match(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)/);
