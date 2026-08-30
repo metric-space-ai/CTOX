@@ -1491,7 +1491,7 @@ function normalizeWorkjetPairingInvite(response) {
 
 async function createWorkjetPairingInvite(sync, displayName, retryDelaysMs = [0, 750, 1_500]) {
   if (typeof sync?.requestNative !== 'function') {
-    throw new Error('Der CTOX-WebRTC-Kanal ist noch nicht bereit.');
+    throw new Error('Der CTOX-Gerätekanal ist noch nicht bereit.');
   }
   let lastError = null;
   for (const [index, retryDelayMs] of retryDelaysMs.entries()) {
@@ -1513,7 +1513,7 @@ async function createWorkjetPairingInvite(sync, displayName, retryDelaysMs = [0,
       if (!transient || index === retryDelaysMs.length - 1) throw error;
     }
   }
-  throw lastError || new Error('Der CTOX-WebRTC-Kanal ist noch nicht bereit.');
+  throw lastError || new Error('Der CTOX-Gerätekanal ist noch nicht bereit.');
 }
 
 function appearancePanel(branding = {}) {
