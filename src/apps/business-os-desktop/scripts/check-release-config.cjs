@@ -95,8 +95,8 @@ function assertDedicatedDesktopReleaseWorkflow() {
   const workflow = fs.readFileSync(workflowPath, "utf8");
   assert.doesNotMatch(workflow, /business-os-desktop-v\*/, "legacy desktop tags must not trigger releases");
   assert.match(workflow, /workflow_dispatch:/, "the quarantined workflow remains inspectable manually");
-  assert.match(workflow, /build:\n\s+# Quarantined donor only\.[\s\S]*?if: \$\{\{ false \}\}/);
-  assert.match(workflow, /release:\n\s+if: \$\{\{ false \}\}/);
+  assert.match(workflow, /build:\r?\n\s+# Quarantined donor only\.[\s\S]*?if: \$\{\{ false \}\}/);
+  assert.match(workflow, /release:\r?\n\s+if: \$\{\{ false \}\}/);
   return;
   for (const artifact of [
     "ctox-business-os-desktop-macos-arm64",

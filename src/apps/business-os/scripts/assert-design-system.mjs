@@ -9,8 +9,8 @@ const baseCss = readFileSync(join(root, 'shared/base.css'), 'utf8');
 const lab = readFileSync(join(root, 'design-lab.html'), 'utf8');
 const readModule = (id, file) => readFileSync(join(root, 'modules', id, file), 'utf8');
 
-assert.match(appCss, /--panel-radius:\s*4px/);
-assert.match(appCss, /--control-radius:\s*3px/);
+assert.match(appCss, /--panel-radius:\s*6px/);
+assert.match(appCss, /--control-radius:\s*4px/);
 assert.match(appCss, /Operational Instrument contract/);
 assert.match(baseCss, /\.ctox-run-control\s*\{/);
 assert.match(baseCss, /\.ctox-action-strip\s*\{/);
