@@ -815,14 +815,33 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
             request.mode
         )
     })?;
-    let fields = request
-        .fields
-        .iter()
-        .map(|field| {
-            FieldKey::from_str(field)
-                .with_context(|| format!("unsupported person-research field `{field}`"))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Ein einzelnes unbekanntes Feld brach bisher die gesamte Recherche ab.
+    // Auf der Produktivinstanz forderte das Tenant-Modul rund zwanzig Felder an,
+    // von denen `FieldKey` sieben kennt; jeder Lauf scheiterte deshalb an
+    // `firma_fruehere_namen`, obwohl Name, Anschrift, Ort, PLZ, Domain, E-Mail
+    // und Telefon lieferbar gewesen waeren. Unbekannte Feldschluessel werden
+    // jetzt uebersprungen und im Ergebnis benannt; nur wenn KEIN einziges Feld
+    // erkannt wird, bleibt es beim harten Fehler.
+    let mut fields = Vec::new();
+    let mut unsupported_fields = Vec::new();
+    for field in &request.fields {
+        match FieldKey::from_str(field) {
+            Some(key) => fields.push(key),
+            None => unsupported_fields.push(field.clone()),
+        }
+    }
+    anyhow::ensure!(
+        !(fields.is_empty() && !unsupported_fields.is_empty()),
+        "no supported person-research field requested; unsupported: {}",
+        unsupported_fields.join(", ")
+    );
+    if !unsupported_fields.is_empty() {
+        eprintln!(
+            "[business-os] person-research skipping {} unsupported field(s): {}",
+            unsupported_fields.len(),
+            unsupported_fields.join(", ")
+        );
+    }
     let workspace =
         root.join("runtime")
             .join("research")
@@ -844,6 +863,21 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
         persist_workspace: true,
     };
     let mut result = ctox_web_stack::run_ctox_person_research_tool(root, &research_request)?;
+    if !unsupported_fields.is_empty() {
+        // Uebersprungene Feldschluessel gehoeren ins Ergebnis, sonst wirkt eine
+        // Teilrecherche wie eine vollstaendige.
+        if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "unsupported_fields".to_string(),
+                Value::Array(
+                    unsupported_fields
+                        .iter()
+                        .map(|field| Value::String(field.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    }
     if auto_browser_capture {
         let capture_tasks =
             crate::service::business_os::authenticated_person_research_capture_tasks(&result);

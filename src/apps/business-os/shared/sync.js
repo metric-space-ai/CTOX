@@ -27,6 +27,13 @@ import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260816-browse
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
+// Multi-tab leadership may span a rolling Business OS release: an already
+// open tab keeps its Web Lock and continues to heartbeat while a freshly
+// loaded tab runs the new sync protocol. Sharing one coordinator room across
+// those builds made the new tab follow the old, failed bridge forever. The
+// release epoch isolates only the local BroadcastChannel/Web Lock; both builds
+// still replicate through the same server-authoritative WebRTC room.
+const MULTI_TAB_COORDINATOR_EPOCH = '20260830-knowledge-shell-v2-dialogs-v292';
 const CTOX_BROWSER_CAPABILITIES = [
   'ctox-control-plane-v1',
   'ctox-role-bound-signaling-v1',

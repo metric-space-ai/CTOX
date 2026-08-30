@@ -1,10 +1,15 @@
 .universal-importer-drawer {
-  position: fixed;
+  /* Im Modulfenster verankert; nur ohne Wirtselement noch viewportweit. */
+  position: absolute;
   inset: 0;
   z-index: 1200;
   display: flex;
   justify-content: flex-end;
   background: color-mix(in srgb, var(--bg, oklch(0.22 0.015 235)) 52%, transparent);
+}
+
+.universal-importer-drawer[data-scope="shell"] {
+  position: fixed;
 }
 
 .universal-importer-drawer[data-side="left"] {
