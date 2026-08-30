@@ -1350,6 +1350,19 @@ fn outbound_handle_research_source_adapter(
         now,
         record.clone(),
     )?;
+    // Ohne diese Projektion bleibt der Adapter im nativen `business_records`
+    // stehen und erreicht den Browser nie: der Befehl meldet dann `completed`
+    // mit `ok: true`, waehrend die Oberflaeche keinen Adapter kennt. Auf der
+    // Produktivinstanz war der neu erzeugte Adapter der einzige von 19
+    // nativen Datensaetzen, der in der Replikationsdatenbank fehlte. Der
+    // writeback-Pfad weiter unten schreibt aus demselben Grund bereits durch.
+    upsert_rxdb_collection_record(
+        root,
+        "outbound_research_adapters",
+        &adapter_id,
+        now,
+        record.clone(),
+    )?;
     let auth_assist = if next_status == "auth_requested" {
         let secret_name = outbound_string(&record, &["credential_secret_name"]).unwrap_or_default();
         let credential_ref = (!secret_name.is_empty()).then(|| {
@@ -1392,6 +1405,13 @@ fn outbound_handle_research_source_adapter(
         outbound_put_i64(&mut record, "updated_at_ms", now);
         upsert_business_record(
             conn,
+            "outbound_research_adapters",
+            &adapter_id,
+            now,
+            record.clone(),
+        )?;
+        upsert_rxdb_collection_record(
+            root,
             "outbound_research_adapters",
             &adapter_id,
             now,
