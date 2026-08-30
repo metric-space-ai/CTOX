@@ -594,7 +594,7 @@ function mainHeader() {
     : '';
   return `
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${esc(path || t('main.kicker', 'CTOX IoT'))}</span>
           <h2 class="ctox-pane-title">${esc(title)}</h2>
@@ -604,7 +604,7 @@ function mainHeader() {
           <button class="ctox-pane-icon is-primary iot-order-action" type="button" data-act="new-auftrag" aria-label="${esc(t('cards.newAuftrag', 'Auftrag anlegen'))}" title="${esc(t('cards.newAuftrag', 'Auftrag anlegen'))}">${iconSvg(ICON.spark)}</button>
         </div>
       </div>
-      <div class="ctox-filterbar iot-main-tools">
+      <div class="ctox-filterbar iot-main-tools" data-shell-v2-header-row="2">
         <div class="ctox-view-toggle" role="group" aria-label="${esc(t('center.viewLabel', 'Ansicht'))}">
           <button type="button" class="ctox-pane-icon" data-act="view" data-view="cards" aria-pressed="${state.mainView === 'cards'}" aria-label="${esc(t('view.cards', 'Karten'))}" title="${esc(t('view.cards', 'Karten'))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
           <button type="button" class="ctox-pane-icon" data-act="view" data-view="list" aria-pressed="${state.mainView === 'list'}" aria-label="${esc(t('view.list', 'Liste'))}" title="${esc(t('view.list', 'Liste'))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
@@ -943,7 +943,8 @@ function openWidgetEditor(widgetId) {
     }
   });
   draw();
-  (state.ctx?.host || document.body).appendChild(host);
+  const mountTarget = state.ctx?.host;
+  if (mountTarget) mountTarget.appendChild(host);
 }
 
 /* ---------- mutations (all real commands; CTOX programs the watcher) ---------- */

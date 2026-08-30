@@ -541,3 +541,71 @@
     min-height: 64px;
   }
 }
+
+/* Shell-v2 surface contract. The app title, icon, drag affordance and close
+   control live in the shared window chrome; the importer keeps only its
+   workflow content. Reserve the icon corner in the rail and let the content
+   stage use the full remaining window without a second local titlebar. */
+.shell-window[data-shell-contract="v2"] .importer-module {
+  --imp-accent: var(--shell-v2-accent, var(--app-accent));
+  --imp-accent-strong: var(--shell-v2-accent, var(--app-accent-foreground));
+  --imp-accent-soft: color-mix(in srgb, var(--shell-v2-accent, var(--app-accent)) 14%, transparent);
+  grid-template-columns: minmax(190px, 230px) minmax(0, 1fr);
+  background: var(--shell-v2-surface, var(--surface));
+}
+
+.shell-window[data-shell-contract="v2"] .imp-rail {
+  min-width: 0;
+  padding: calc(var(--shell-v2-icon-size, 80px) + 8px) 16px 16px;
+  border-right-color: var(--line);
+  background: var(--shell-v2-surface, var(--surface));
+}
+
+.shell-window[data-shell-contract="v2"] .imp-steps {
+  margin-top: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .imp-workspace {
+  padding: clamp(24px, 4vw, 48px);
+  background: var(--shell-v2-surface, var(--surface));
+}
+
+.shell-window[data-shell-contract="v2"] .imp-stage-header {
+  margin-bottom: 24px;
+}
+
+.shell-window[data-shell-contract="v2"] .imp-stage-header h2,
+.shell-window[data-shell-contract="v2"] .imp-done-stage h2 {
+  font-size: clamp(22px, 3.2vw, 32px);
+}
+
+.shell-window[data-shell-contract="v2"] .imp-input-row,
+.shell-window[data-shell-contract="v2"] .imp-actions {
+  flex-wrap: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .imp-actions {
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+@media (max-width: 767px) {
+  .shell-window[data-shell-contract="v2"] .importer-module {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell-window[data-shell-contract="v2"] .imp-rail {
+    grid-template-columns: 1fr;
+    padding: 12px 16px;
+    border-right: 0;
+    border-bottom-color: var(--line);
+  }
+
+  .shell-window[data-shell-contract="v2"] .imp-steps {
+    justify-content: flex-start;
+  }
+
+  .shell-window[data-shell-contract="v2"] .imp-workspace {
+    padding: 24px 16px;
+  }
+}

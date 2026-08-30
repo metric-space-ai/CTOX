@@ -11,7 +11,6 @@
         <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
           <div class="ctox-pane-title-row">
             <div class="ctox-pane-titles">
-              <span class="ctox-pane-kicker" data-shell-v2-accent>Bibliothek</span>
               <h2 class="ctox-pane-title">Knowledge</h2>
             </div>
             <div class="ctox-pane-actions">
@@ -27,8 +26,7 @@
         <div class="knowledge-filterbar" data-shell-v2-header-row="2">
           <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen…" aria-label="Suchen" />
           <div class="knowledge-view-toggle" role="group" aria-label="Darstellung">
-            <button class="ctox-pane-icon" type="button" data-shell-v2-accent data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-            <button class="ctox-pane-icon" type="button" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+            <button class="ctox-pane-icon" type="button" data-pg-view="cards" data-pg-view-cycle="cards,list" aria-pressed="true" aria-label="Zur Listenansicht wechseln" title="Zur Listenansicht wechseln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
           </div>
           <button class="ctox-pane-icon knowledge-filter-toggle" type="button" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--knowledge-surface-muted)"/><circle cx="15" cy="12" r="2.4" fill="var(--knowledge-surface-muted)"/><circle cx="8" cy="17" r="2.4" fill="var(--knowledge-surface-muted)"/></svg></button>
         </div>
@@ -65,7 +63,7 @@
         <footer class="ctox-pane-footer knowledge-pane-footer"><span data-pg-footer></span></footer>
       </section>
 
-      <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--knowledge-left-width" data-resizer-min="300" data-resizer-max="720" aria-label="Spaltenbreite anpassen"></button>
+      <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--knowledge-left-width" data-resizer-min="220" data-resizer-max="560" aria-label="Spaltenbreite anpassen"></button>
 
       <section class="ctox-pane knowledge-pane knowledge-center" aria-label="Knowledge Dokument">
         <!-- Row 1: title (the content element's own actions live top-right of
@@ -74,8 +72,8 @@
           <div class="ctox-pane-title-row">
             <button class="ctox-pane-icon knowledge-mobile-back" type="button" data-action="mobile-back" aria-label="Zurück zur Liste" title="Zurück zur Liste"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
             <div class="ctox-pane-titles">
-              <span class="ctox-pane-kicker" data-selected-kind>Ausgewählt</span>
-              <h2 class="ctox-pane-title" data-selected-title>Kein Eintrag ausgewählt</h2>
+              <span data-selected-kind hidden></span>
+              <h2 class="ctox-pane-title" data-selected-title aria-live="polite"></h2>
             </div>
             <div class="ctox-pane-actions"></div>
           </div>

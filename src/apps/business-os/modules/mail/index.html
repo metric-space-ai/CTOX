@@ -3,7 +3,7 @@
        tray, reset and counted-band wiring through data-pg-* attributes. -->
   <aside class="ctox-pane mail-sidebar" data-mail-left-pane aria-label="Mail-Bereiche">
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">Mail</span>
           <h2 class="ctox-pane-title" data-mail-navigation-title>E-Mail-Queues</h2>
@@ -15,7 +15,7 @@
           <button type="button" class="ctox-pane-icon mail-mobile-only" data-mail-close-nav aria-label="Navigation schließen" title="Navigation schließen"></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
+      <div class="ctox-filterbar" data-shell-v2-header-row="2">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Bereiche suchen…" aria-label="Bereiche suchen" />
         <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
           <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"></button>
@@ -39,7 +39,7 @@
         </div>
       </div>
     </header>
-    <nav class="ctox-view-switch" aria-label="Mail-Queues">
+    <nav class="ctox-view-switch" aria-label="Mail-Queues" data-shell-v2-header-row="3">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="queues" aria-selected="true">Queues<span class="view-count" data-pg-count="queues"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="campaigns" aria-selected="false">E-Mail-Gruppen<span class="view-count" data-pg-count="campaigns"></span></button>
@@ -56,7 +56,7 @@
 
   <section class="ctox-pane mail-list-pane" data-mail-list-pane aria-label="Mail-Hauptansicht">
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <button type="button" class="ctox-pane-icon mail-mobile-only" data-mail-open-nav aria-label="Mail-Navigation öffnen" title="Mail-Navigation öffnen"></button>
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-mail-list-kicker>Postfach</span>
@@ -67,7 +67,7 @@
           <button type="button" class="ctox-pane-icon" data-mail-list-export aria-label="Mails exportieren" title="Mails exportieren"></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
+      <div class="ctox-filterbar" data-shell-v2-header-row="2">
         <input class="ctox-pane-search" type="search" data-pg-search data-mail-search placeholder="Mails durchsuchen…" aria-label="Mails durchsuchen" />
         <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
           <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"></button>
@@ -93,7 +93,7 @@
         </div>
       </div>
     </header>
-    <nav class="ctox-view-switch" aria-label="Mail-Verkehr">
+    <nav class="ctox-view-switch" aria-label="Mail-Verkehr" data-shell-v2-header-row="3">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true">Alle<span class="view-count" data-pg-count="all"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="inbound" aria-selected="false">Eingang<span class="view-count" data-pg-count="inbound"></span></button>
@@ -129,7 +129,7 @@
 
   <section class="ctox-pane mail-detail-pane" data-mail-detail-pane aria-label="Mail-Detail">
     <header class="ctox-pane-header ctox-pane-band mail-detail-chrome">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <button type="button" class="ctox-pane-icon mail-detail-back" data-mail-close-detail aria-label="Zurück zur Liste" title="Zurück zur Liste"></button>
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">Details</span>

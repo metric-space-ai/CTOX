@@ -4600,7 +4600,20 @@ function escapeAttribute(value) {
 // Kit action icons: monochrome stroke glyphs delivered by the shell
 // (shared/icons.js actionIconPaths) via the module context.
 function actionIcon(name) {
-  return state.ctx?.getActionIcon?.(name) || '';
+  const fromShell = state.ctx?.getActionIcon?.(name);
+  if (fromShell) return fromShell;
+  const paths = {
+    add: 'M12 5v14M5 12h14',
+    edit: 'M4 17.5V20h2.5L18.8 7.7l-2.5-2.5L4 17.5ZM14.8 6.2l3 3',
+    archive: 'M4 7h16M6 7v13h12V7M9 7V4h6v3M9 11h6',
+    download: 'M12 3v12M12 15l-4-4M12 15l4-4M5 21h14',
+    upload: 'M12 21V9M12 9l-4 4M12 9l4 4M5 3h14',
+    export: 'M12 21V9M12 9l-4 4M12 9l4 4M5 3h14',
+    columns: 'M4 5h6v14H4zM14 5h6v14h-6z',
+    close: 'M6 6l12 12M18 6L6 18',
+  };
+  const path = paths[name] || paths.edit;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"></path></svg>`;
 }
 
 // Status badge mapping onto the shared .ctox-badge variants. Parity with the

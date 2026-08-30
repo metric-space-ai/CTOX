@@ -1867,7 +1867,18 @@ function openBookingDetail(bkId) {
 // ----------------------------------------------------
 
 function actionIcon(name) {
-  return state.ctx?.getActionIcon?.(name) || '';
+  const fromShell = state.ctx?.getActionIcon?.(name);
+  if (fromShell) return fromShell;
+  const paths = {
+    add: 'M12 5v14M5 12h14',
+    edit: 'M4 17.5V20h2.5L18.8 7.7l-2.5-2.5L4 17.5ZM14.8 6.2l3 3',
+    download: 'M12 3v12M12 15l-4-4M12 15l4-4M5 21h14',
+    upload: 'M12 21V9M12 9l-4 4M12 9l4 4M5 3h14',
+    export: 'M12 21V9M12 9l-4 4M12 9l4 4M5 3h14',
+    close: 'M6 6l12 12M18 6L6 18',
+  };
+  const path = paths[name] || paths.edit;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"></path></svg>`;
 }
 
 function formToObject(form) {

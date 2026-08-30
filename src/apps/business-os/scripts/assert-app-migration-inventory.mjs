@@ -48,8 +48,21 @@ for (const app of inventory.sourceApps) {
   if (!['window', 'maximized', 'focus'].includes(presentation.default_mode)) {
     failures.push(`${app.id}: invalid presentation.default_mode ${JSON.stringify(presentation.default_mode)}`);
   }
-  if (presentation?.minimum_size?.width !== 640 || presentation?.minimum_size?.height !== 480) {
-    failures.push(`${app.id}: minimum_size must be exactly 640x480`);
+  const minimumWidth = Number(presentation?.minimum_size?.width);
+  const minimumHeight = Number(presentation?.minimum_size?.height);
+  const layoutMinimumWidth = Number(manifest?.layout?.min_width);
+  const layoutMinimumHeight = Number(manifest?.layout?.min_height);
+  if (!Number.isInteger(minimumWidth) || minimumWidth < 360 || minimumWidth > Number(presentation?.initial_size?.width)) {
+    failures.push(`${app.id}: minimum_size.width must be an integer between 360 and initial_size.width`);
+  }
+  if (!Number.isInteger(minimumHeight) || minimumHeight < 480 || minimumHeight > Number(presentation?.initial_size?.height)) {
+    failures.push(`${app.id}: minimum_size.height must be an integer between 480 and initial_size.height`);
+  }
+  if (Number.isFinite(layoutMinimumWidth) && layoutMinimumWidth !== minimumWidth) {
+    failures.push(`${app.id}: layout.min_width must match presentation.minimum_size.width when declared`);
+  }
+  if (Number.isFinite(layoutMinimumHeight) && layoutMinimumHeight !== minimumHeight) {
+    failures.push(`${app.id}: layout.min_height must match presentation.minimum_size.height when declared`);
   }
   if (presentation.multi_instance !== false) failures.push(`${app.id}: multi_instance must be false in migration v1`);
   if (presentation.auto_restore !== false) failures.push(`${app.id}: auto_restore must be false in migration v1`);

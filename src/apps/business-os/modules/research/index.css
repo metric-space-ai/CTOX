@@ -1278,6 +1278,20 @@
   max-height: 180px;
 }
 
+/* Research overlays are mounted inside the app root. Keep them bounded to
+   this shell window instead of painting over the desktop or another app. */
+.shell-window[data-shell-contract="v2"] .research-module-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  padding: 16px;
+}
+
+.shell-window[data-shell-contract="v2"] .research-module-overlay .ctox-modal-card {
+  width: min(860px, 100%);
+  max-height: 100%;
+}
+
 .research-field-note,
 .research-validation {
   margin: 0;
@@ -1623,6 +1637,77 @@
 /* Icon-only view-switch tabs can be narrower than text tabs. */
 .research-view-toggle .ctox-pane-tab {
   min-width: 32px;
+}
+
+/* Shell-v2 frame: app identity and window controls belong to the shared
+   window. Research panes stay flat and their own titles are one compact row. */
+.shell-window[data-shell-contract="v2"] .research-module {
+  grid-template-columns: minmax(220px, var(--research-left-width, 280px)) 6px minmax(300px, 1fr) 6px minmax(220px, var(--research-right-width, 280px));
+  padding: 0;
+  background: var(--shell-v2-surface, var(--bg));
+}
+.shell-window[data-shell-contract="v2"] .research-module .research-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+  box-shadow: none;
+}
+.shell-window[data-shell-contract="v2"] .research-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0;
+  border-bottom: 1px solid var(--research-line);
+  background: var(--shell-v2-surface-alt, var(--surface));
+}
+.shell-window[data-shell-contract="v2"] .research-left > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 8px);
+  padding-right: 8px;
+}
+.shell-window[data-shell-contract="v2"] .research-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .research-right > .ctox-pane-header {
+  padding-left: 8px;
+  padding-right: 62px;
+}
+.shell-window[data-shell-contract="v2"] .research-pane .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+  gap: 8px;
+}
+.shell-window[data-shell-contract="v2"] .research-pane .ctox-pane-titles {
+  min-width: 0;
+  overflow: hidden;
+}
+.shell-window[data-shell-contract="v2"] .research-pane > .ctox-pane-header .ctox-pane-kicker {
+  display: none;
+}
+.shell-window[data-shell-contract="v2"] .research-pane .ctox-pane-title {
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell-window[data-shell-contract="v2"] .research-pane .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 37px));
+  height: min(26px, var(--shell-v2-header-row-size, 37px));
+}
+.shell-window[data-shell-contract="v2"] .research-module .research-context-actions,
+.shell-window[data-shell-contract="v2"] .research-module .research-graph-actions {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+@container business-app-window (max-width: 900px) {
+  .shell-window[data-shell-contract="v2"] .research-module {
+    grid-template-columns: minmax(220px, var(--research-left-width, 280px)) 6px minmax(300px, 1fr);
+  }
+
+  .shell-window[data-shell-contract="v2"] .research-right,
+  .shell-window[data-shell-contract="v2"] .research-module > [data-resizer="right"] {
+    display: none;
+  }
 }
 
 .research-sources-shards-wrapper {

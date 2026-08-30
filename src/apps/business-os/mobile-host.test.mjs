@@ -47,7 +47,7 @@ test('signed mobile catalog follows the canonical system-app order', async () =>
   );
   assert.ok(catalog.apps.every((app) => !('iconSvg' in app) && !('iconUrl' in app)));
   assert.ok(catalog.apps.every((app) => app.id !== 'desktop'));
-  assert.equal(catalog.apps.length, 34);
-  assert.equal(new Set(catalog.apps.map((app) => app.iconAssetId)).size, 34);
+  assert.equal(catalog.apps.length, 35);
+  assert.equal(new Set(catalog.apps.map((app) => app.iconAssetId)).size, 35);
   assert.ok(catalog.apps.every((app) => app.iconFamilyVersion === 1 && app.iconRequired === true));
 });

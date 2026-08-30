@@ -581,7 +581,7 @@ async function waitForReplicationBridge(bridge, collection, timeoutMs = 20000) {
   await Promise.race([
     wait(),
     new Promise((_, reject) => {
-      window.setTimeout(() => reject(new Error(`${collection} replication did not become ready in time`)), timeoutMs);
+    window.setTimeout(() => reject(new Error(`${collection} sync did not become ready in time`)), timeoutMs);
     }),
   ]);
 }
@@ -1972,7 +1972,7 @@ function renderLeft() {
   const task = selectedTask();
   const rankedSources = evidenceRankedSources();
   root.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(state.t('webResearch', 'Web Research'))}</span>
@@ -2121,7 +2121,7 @@ function renderCenter() {
   const projection = currentGraphProjection(task);
   const visibleStatus = visibleResearchStatus();
   root.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band research-center-header">
+    <header class="ctox-pane-header ctox-pane-band research-center-header" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(task.knowledge_domain)}</span>
@@ -2779,7 +2779,7 @@ function graphLinkNodeId(value) {
 function renderNoTaskCenter() {
   const empty = emptyStateForNoTask();
   return `
-    <header class="ctox-pane-header ctox-pane-band research-center-header">
+    <header class="ctox-pane-header ctox-pane-band research-center-header" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(state.t('webResearch', 'Web Research'))}</span>
@@ -3733,7 +3733,7 @@ function renderRight() {
   const runInfo = researchRunInfo(task);
   const canBuildKnowledge = canBuildKnowledgeFromResearch(task);
   root.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(state.t('context', 'Context'))}</span>
@@ -3952,7 +3952,7 @@ function openTaskDialog(editTask = null) {
   const dimensionsText = formatDimensionLines(scoringDimensionsForTask(editTask));
   const domainOptions = knowledgeDomainOptionsMarkup(selectedDomain);
   const overlay = document.createElement('div');
-  overlay.className = 'ctox-modal research-task-dialog';
+  overlay.className = 'ctox-modal research-task-dialog research-module-overlay';
   overlay.innerHTML = `
     <section class="ctox-modal-card" role="dialog" aria-modal="true" aria-labelledby="research-create-title">
       <header class="ctox-modal-header">
@@ -4482,7 +4482,7 @@ function researchScoringContract(scoringDimensions) {
     dimensions: scoringDimensions,
     weights: scoringWeights(scoringDimensions),
     total_field: 'weighted_total',
-    rule: 'Only score rows passing the UI evidence gate and native receipt lineage: source_id, verification flags, HTTP 2xx, snapshot_id, snapshot_path, byte-hash-shaped snapshot_hash, canonical_url, evidence_id or claim_id, retrieved_at, allowed url_role/content_scope, evidence_eligible=true, and non-aggregated source_tier. Raw, legacy, metadata-only, off-topic, rejected, empty, or aggregated discovery candidates stay unscored.',
+      rule: 'Only score rows passing the UI evidence gate and server receipt lineage: source_id, verification flags, HTTP 2xx, snapshot_id, snapshot_path, byte-hash-shaped snapshot_hash, canonical_url, evidence_id or claim_id, retrieved_at, allowed url_role/content_scope, evidence_eligible=true, and non-aggregated source_tier. Raw, legacy, metadata-only, off-topic, rejected, empty, or aggregated discovery candidates stay unscored.',
     required_source_fields: ['source_id', 'verification_status', 'transport_verified', 'content_extracted', 'actual_full_text_or_data', 'evidence_relevance_score', 'http_status', 'snapshot_id', 'snapshot_path', 'snapshot_hash', 'canonical_url', 'evidence_id_or_claim_id', 'retrieved_at', 'url_role', 'content_scope', 'evidence_eligible', 'source_tier'],
     required_audits: ['source', 'data', 'claim'],
   };
@@ -5321,9 +5321,25 @@ function relativeTime(ms) {
 // Standard action icons come from the shell icon set (shared/icons.js via
 // ctx.getActionIcon): monochrome stroke glyphs that inherit currentColor.
 // Legacy local names are mapped onto the shared glyph names.
+const RESEARCH_ICON_FALLBACK_PATHS = Object.freeze({
+  add: 'M12 5v14M5 12h14',
+  close: 'M6 6l12 12M18 6L6 18',
+  eye: 'M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Zm10 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z',
+  file: 'M6 2h9l4 4v16H6V2Zm9 0v5h4',
+  focus: 'M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5',
+  grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
+  layers: 'm4 8 8-4 8 4-8 4-8-4Zm0 4 8 4 8-4M4 16l8 4 8-4',
+  refresh: 'M20 11a8 8 0 1 0 2 5M20 4v7h-7',
+  search: 'm21 21-4.3-4.3M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z',
+  columns: 'M4 4h16v16H4zM10 4v16M16 4v16',
+});
 function iconSvg(name) {
   const kitNames = { plus: 'add', table: 'columns', knowledge: 'knowledge' };
-  return state.ctx?.getActionIcon?.(kitNames[name] || name, 16, 1.8) || '';
+  const iconName = kitNames[name] || name;
+  const fromShell = state.ctx?.getActionIcon?.(iconName, 16, 1.8);
+  if (typeof fromShell === 'string' && fromShell.trim()) return fromShell;
+  const path = RESEARCH_ICON_FALLBACK_PATHS[iconName] || RESEARCH_ICON_FALLBACK_PATHS.add;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"></path></svg>`;
 }
 
 // Grade → kit badge state (A=success, B=info, C=warning, D=danger).
@@ -5845,7 +5861,7 @@ function showPromptViewer(filename) {
   const promptText = getPromptForFilename(filename);
   
   const backdrop = document.createElement("div");
-  backdrop.className = "ctox-modal";
+  backdrop.className = "ctox-modal research-prompt-viewer research-module-overlay";
   // Above module modals (240), below shell notifications (260).
   backdrop.style.zIndex = "250";
   backdrop.innerHTML = `
@@ -5855,14 +5871,18 @@ function showPromptViewer(filename) {
           <span class="ctox-pane-kicker">KI-Generierung</span>
           <h3 class="ctox-modal-title">System-Prompt des Fachberichts</h3>
         </div>
-        <button type="button" class="ctox-button" onclick="this.closest('.ctox-modal').remove()">Schließen</button>
+        <button type="button" class="ctox-button" data-close>Schließen</button>
       </header>
       <div class="ctox-modal-body">
         <div style="font-family: var(--font-mono, monospace); font-size: 11px; line-height: 1.6; color: var(--research-text); max-height: 380px; overflow-y: auto; white-space: pre-wrap; background: var(--research-surface-2); padding: 12px; border-radius: 6px; border: 1px solid var(--research-line); text-align: left;">\${escapeHtml(promptText)}</div>
       </div>
     </div>
   `;
-  document.body.appendChild(backdrop);
+  const mountTarget = state.ctx?.host?.querySelector('[data-research-root]');
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop || event.target.closest('[data-close]')) backdrop.remove();
+  });
+  if (mountTarget) mountTarget.appendChild(backdrop);
 }
 
 function parseMarkdown(md) {
@@ -5951,7 +5971,7 @@ async function loadReportContentFromRxdb(filename) {
   const documents = readableCollection('documents');
   if (!documents) {
     throw new Error(canReadCollection('documents')
-      ? 'RxDB-Dokumente nicht verfügbar'
+        ? 'Synchronisierte Dokumente nicht verfügbar'
       : 'Keine Datenfreigabe für Dokumente');
   }
   const matches = await documents.find({ selector: { filename } }).exec();
@@ -5969,7 +5989,7 @@ async function loadReportContentFromRxdb(filename) {
   const versionId = json.current_version_id;
   if (!versions || !blobChunks) {
     throw new Error(canReadCollection('document_versions') && canReadCollection('document_blob_chunks')
-      ? 'RxDB-Dokumentversionen nicht verfügbar'
+        ? 'Synchronisierte Dokumentversionen nicht verfügbar'
       : 'Keine Datenfreigabe für Dokumentinhalte');
   }
   if (versionId) {

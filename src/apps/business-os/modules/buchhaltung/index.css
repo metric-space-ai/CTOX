@@ -3,6 +3,20 @@
    empty states and callouts come from the shared kit (app.css + shared/base.css).
    This file keeps only what is genuinely module-specific (marked /* custom */). */
 
+/* Shell V2 keeps accounting pane headers compact and action rows single-line;
+   overflow is local to the pane instead of wrapping the header. */
+.shell-window[data-shell-contract="v2"] .fibu-module { position: relative; padding: 0; overflow: hidden; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .fibu-module > .ctox-context-menu { max-width: calc(100% - 16px); }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-filterbar,
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-workbench-tools { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-panel-toolbar { flex-wrap: nowrap; overflow-x: auto; }
+
 .fibu-module {
   --ctox-left-width: var(--fibu-left-width, 300px);
   --ctox-right-width: var(--fibu-right-width, 340px);

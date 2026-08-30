@@ -1,4 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { operatorIconFor } from '../../shared/operator-icon-selection.js?v=20260830-operator-raster-v1';
 
 // pi-coding workbench: pick a Business OS app, describe a task, delegate one
 // bounded coding turn to the built-in pi agent (`ctox.coding.turn`), then show
@@ -299,8 +300,8 @@ function wireEvents() {
     els.openEditor.addEventListener('click', () => {
       const mod = selectedModule();
       if (!mod) return;
-      // Cross-link into the app's source editor (the per-app IDE + agent thread).
-      state.ctx?.openDesktopApp?.('code-editor', { args: { moduleId: mod.id, moduleTitle: mod.title } });
+      // Source and versions belong to the selected app's own shell window.
+      state.ctx?.openModuleSource?.(mod.id);
     });
   }
 
@@ -470,11 +471,14 @@ function appFooterText() {
 }
 
 function moduleIconUrl(moduleId) {
+  const operatorAsset = operatorIconFor({ id: moduleId });
+  if (operatorAsset) return new URL(`../../${operatorAsset}`, import.meta.url).pathname;
   return new URL(`../${moduleId}/icon.svg`, import.meta.url).pathname;
 }
 
-// One shared floating name chip for the narrow rail. position:fixed so the
-// pane's overflow clipping cannot swallow it; skipped once inline labels show.
+// One shared floating name chip for the narrow rail. It is mounted in the
+// module root so it cannot escape the shell window; skipped once inline labels
+// show.
 let railChip = null;
 function showRailChip(item, title) {
   const rail = item.closest('.coding-agents-left');
@@ -482,12 +486,13 @@ function showRailChip(item, title) {
   if (!railChip) {
     railChip = document.createElement('div');
     railChip.className = 'coding-agents-rail-chip';
-    document.body.appendChild(railChip);
+    (els.root || state.ctx?.host)?.appendChild(railChip);
   }
   const rect = item.getBoundingClientRect();
+  const rootRect = (els.root || state.ctx?.host)?.getBoundingClientRect?.() || { left: 0, top: 0 };
   railChip.textContent = title;
-  railChip.style.left = `${Math.round(rect.right + 8)}px`;
-  railChip.style.top = `${Math.round(rect.top + rect.height / 2)}px`;
+  railChip.style.left = `${Math.round(rect.right - rootRect.left + 8)}px`;
+  railChip.style.top = `${Math.round(rect.top - rootRect.top + rect.height / 2)}px`;
   railChip.hidden = false;
 }
 function hideRailChip() {

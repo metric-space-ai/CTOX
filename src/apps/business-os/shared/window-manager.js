@@ -165,25 +165,45 @@ function colorSaturation([r, g, b]) {
  * frame flicker between nearly-identical colours. The manifest palette is a
  * loading/error fallback only; successful raster analysis is authoritative.
  */
-export function shellV2FramePaletteFromRgba(rgba) {
+export function shellV2FramePaletteFromRgba(rgba, width = 0, height = 0) {
   const buckets = new Map();
+  const edgeBuckets = { topRight: new Map(), bottomLeft: new Map() };
+  const luminous = [];
+  const pixelWidth = Number(width) > 0 ? Math.floor(Number(width)) : 0;
+  const pixelHeight = Number(height) > 0 ? Math.floor(Number(height)) : 0;
+  const addBucket = (target, rgb, alpha, saturation) => {
+    const quantised = rgb.map((value) => Math.min(255, Math.round(value / 24) * 24));
+    const key = quantised.join(',');
+    const entry = target.get(key) || { rgb: [0, 0, 0], weight: 0, count: 0 };
+    const weight = (alpha / 255) * (0.42 + saturation);
+    entry.rgb = entry.rgb.map((value, channel) => value + (rgb[channel] * weight));
+    entry.weight += weight;
+    entry.count += 1;
+    target.set(key, entry);
+  };
   for (let index = 0; index + 3 < rgba.length; index += 4) {
     const alpha = rgba[index + 3];
     if (alpha < 48) continue;
     const rgb = [rgba[index], rgba[index + 1], rgba[index + 2]];
     const luma = colorLuma(rgb);
     const saturation = colorSaturation(rgb);
+    if (luma >= 46 && luma <= 250) luminous.push({ rgb, score: luma + (saturation * 22) + (alpha / 255) });
     // Ignore white/black glyph ink and transparent padding. The frame should
     // continue the icon's coloured body, not its foreground pictogram.
     if (luma < 14 || luma > 244 || (luma > 214 && saturation < 0.18)) continue;
-    const quantised = rgb.map((value) => Math.min(255, Math.round(value / 24) * 24));
-    const key = quantised.join(',');
-    const entry = buckets.get(key) || { rgb: [0, 0, 0], weight: 0, count: 0 };
-    const weight = (alpha / 255) * (0.42 + saturation);
-    entry.rgb = entry.rgb.map((value, channel) => value + (rgb[channel] * weight));
-    entry.weight += weight;
-    entry.count += 1;
-    buckets.set(key, entry);
+    addBucket(buckets, rgb, alpha, saturation);
+    if (pixelWidth && pixelHeight) {
+      const pixel = index / 4;
+      const x = pixel % pixelWidth;
+      const y = Math.floor(pixel / pixelWidth);
+      // The 6px frame meets the artwork at two corners, not across the entire
+      // right/bottom edge. Sampling the local corner patches avoids averaging
+      // unrelated icon colours into a visibly discontinuous joint.
+      const edgeX = Math.max(2, Math.round(pixelWidth * 0.12));
+      const edgeY = Math.max(2, Math.round(pixelHeight * 0.12));
+      if (x >= pixelWidth - edgeX && y < edgeY) addBucket(edgeBuckets.topRight, rgb, alpha, saturation);
+      if (x < edgeX && y >= pixelHeight - edgeY) addBucket(edgeBuckets.bottomLeft, rgb, alpha, saturation);
+    }
   }
   const ranked = [...buckets.values()]
     .filter((entry) => entry.weight > 0)
@@ -205,8 +225,17 @@ export function shellV2FramePaletteFromRgba(rgba) {
   const end = [...candidates].sort((a, b) => colorLuma(a.rgb) - colorLuma(b.rgb))[0];
   const middle = candidates.find((entry) => entry !== start && entry !== end) || candidates[0];
   const mix = (from, to, amount) => from.map((value, channel) => value + ((to[channel] - value) * amount));
-  const topJoint = mix(start.rgb, middle.rgb, 0.72);
-  const leftJoint = mix(middle.rgb, end.rgb, 0.42);
+  const dominantEdge = (target, fallback) => {
+    const entry = [...target.values()]
+      .filter((item) => item.weight > 0)
+      .map((item) => ({ ...item, score: item.weight * Math.sqrt(item.count) }))
+      .sort((a, b) => b.score - a.score)[0];
+    return entry ? entry.rgb.map((value) => value / entry.weight) : fallback;
+  };
+  const topJoint = dominantEdge(edgeBuckets.topRight, mix(start.rgb, middle.rgb, 0.72));
+  const leftJoint = dominantEdge(edgeBuckets.bottomLeft, mix(middle.rgb, end.rgb, 0.42));
+  const contentAccent = luminous.sort((a, b) => b.score - a.score)[0]?.rgb || start.rgb;
+  const contentForeground = colorLuma(contentAccent) >= 154 ? [7, 16, 21] : [248, 250, 252];
   return {
     start: rgbToHex(start.rgb),
     middle: rgbToHex(middle.rgb),
@@ -214,6 +243,8 @@ export function shellV2FramePaletteFromRgba(rgba) {
     left_joint: rgbToHex(leftJoint),
     end: rgbToHex(end.rgb),
     accent: rgbToHex(topJoint),
+    content_accent: rgbToHex(contentAccent),
+    content_foreground: rgbToHex(contentForeground),
   };
 }
 
@@ -1016,7 +1047,7 @@ export function createWindowManager({
     const end = parseColor('--shell-v2-frame-end', [23, 52, 92]);
     const colors = { start, topJoint, leftJoint, end };
     const blend = (from, to, amount) => from.map((value, index) => Math.round(value + (to[index] - value) * amount));
-    const iconSize = parseFloat(style.getPropertyValue('--shell-v2-icon-size')) || 64;
+    const iconSize = parseFloat(style.getPropertyValue('--shell-v2-icon-size')) || 80;
     const iconWidthRatio = Math.max(0.001, Math.min(1, iconSize / windowRect.width));
     const iconHeightRatio = Math.max(0.001, Math.min(1, iconSize / windowRect.height));
     const colorAt = (sample) => {
@@ -1028,11 +1059,6 @@ export function createWindowManager({
       '[data-window-drag-region]',
       '[data-window-control]',
       '[data-window-resize]',
-      '.ctox-pane-icon',
-      '.ctox-pane-tab',
-      '.ctox-column-resizer',
-      '.shell-v2-module-title-trigger',
-      '[data-shell-v2-accent]',
     ].join(',');
     for (const element of win.element.querySelectorAll(selector)) {
       const rect = element.getBoundingClientRect();
@@ -1555,12 +1581,15 @@ export function createWindowManager({
   function makePointerDraggable(win) {
     const dragHandles = Array.from(win.element.querySelectorAll('[data-window-drag-region]'));
     if (!dragHandles.length) return;
+    const interactiveSelector = [
+      'button', 'a', 'input', 'select', 'textarea', '[contenteditable="true"]',
+      '[role="button"]', '[role="tab"]', '[data-window-controls]',
+      '[data-window-actions]', '[data-window-header-action]', '[data-resizer]',
+    ].join(', ');
     const beginDrag = (event, handle, borderOnly = false) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
       if (win.element.classList.contains('is-mobile-sheet')) return;
-      if (handle.matches?.('[data-window-header]') && event.target.closest?.(
-        'button, a, input, select, textarea, [role="button"], [data-window-controls], [data-window-actions]',
-      )) return;
+      if (handle.matches?.('[data-window-header]') && event.target.closest?.(interactiveSelector)) return;
       if (borderOnly) {
         if (event.target !== win.element) return;
         const rect = win.element.getBoundingClientRect();
@@ -1654,7 +1683,15 @@ export function createWindowManager({
     for (const handle of dragHandles) {
       handle.addEventListener('pointerdown', (event) => beginDrag(event, handle));
     }
-    win.element.addEventListener('pointerdown', (event) => beginDrag(event, win.element, true));
+    win.element.addEventListener('pointerdown', (event) => {
+      const moduleHeader = event.target.closest?.('[data-shell-v2-header-row="1"]');
+      if (moduleHeader && win.element.contains(moduleHeader)) {
+        if (event.target.closest?.(interactiveSelector)) return;
+        beginDrag(event, win.element);
+        return;
+      }
+      beginDrag(event, win.element, true);
+    });
   }
 
   function makePointerResizable(win, handle, direction) {
@@ -2178,6 +2215,8 @@ function applyFramePalette(element, palette = {}) {
     '--shell-v2-surface': palette?.surface,
     '--shell-v2-surface-alt': palette?.surface_alt ?? palette?.surfaceAlt,
     '--shell-v2-accent': palette?.accent,
+    '--shell-v2-content-accent': palette?.content_accent ?? palette?.contentAccent ?? palette?.accent,
+    '--shell-v2-content-foreground': palette?.content_foreground ?? palette?.contentForeground,
   };
   for (const [token, value] of Object.entries(tokens)) {
     if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) {
@@ -2195,7 +2234,11 @@ function framePaletteFromIcon(image) {
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) return null;
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return shellV2FramePaletteFromRgba(context.getImageData(0, 0, canvas.width, canvas.height).data);
+    return shellV2FramePaletteFromRgba(
+      context.getImageData(0, 0, canvas.width, canvas.height).data,
+      canvas.width,
+      canvas.height,
+    );
   } catch {
     // Cross-origin/runtime-installed artwork may be unreadable. The manifest
     // palette already applied above remains the explicit fail-closed fallback.

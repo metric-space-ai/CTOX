@@ -146,6 +146,7 @@ async function loadModuleMarkup() {
 }
 
 function bindElements(root) {
+  els.root = root;
   els.leftPane = root.querySelector('.store-left');
   els.centerPane = root.querySelector('.store-center');
   els.well = root.querySelector('.store-well');
@@ -184,8 +185,7 @@ function bindElements(root) {
 
 function applyHeaderActionIcons() {
   if (!els.exportCatalog) return;
-  els.exportCatalog.innerHTML = state.ctx?.getActionIcon?.('export')
-    || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7"></path></svg>';
+  els.exportCatalog.innerHTML = actionIcon('export');
 }
 
 function wireEvents() {
@@ -1606,7 +1606,7 @@ async function openVersionsDialog(item) {
     <div class="ctox-modal-card" role="dialog" aria-modal="true" aria-label="Versionen von ${escapeHtml(item.title)}">
       <header class="ctox-modal-header">
         <h3 class="ctox-modal-title">Versionen – ${escapeHtml(item.title)}</h3>
-        <button type="button" class="ctox-pane-icon" data-version-close aria-label="Schließen" title="Schließen">${state.ctx?.getActionIcon?.('close') || ''}</button>
+        <button type="button" class="ctox-pane-icon" data-version-close aria-label="Schließen" title="Schließen">${actionIcon('close')}</button>
       </header>
       <div class="ctox-modal-body">
         <ul class="app-version-list">${rows}</ul>
@@ -1633,7 +1633,7 @@ async function openVersionsDialog(item) {
   });
 
   window.addEventListener('keydown', onEscape);
-  document.body.append(overlay);
+  (els.root || state.ctx?.host)?.append(overlay);
 }
 
 async function rollbackToVersion(item, versionId) {
@@ -1676,7 +1676,7 @@ async function openReleaseDialog(item) {
     <form class="ctox-modal-card ctox-modal-card--wide app-release-dialog" role="dialog" aria-modal="true" aria-label="Freigabe von ${escapeAttr(item.title)}">
       <header class="ctox-modal-header">
         <h3 class="ctox-modal-title">Freigabe vorbereiten - ${escapeHtml(item.title)}</h3>
-        <button type="button" class="ctox-pane-icon" data-release-close aria-label="Schließen" title="Schließen">${state.ctx?.getActionIcon?.('close') || ''}</button>
+        <button type="button" class="ctox-pane-icon" data-release-close aria-label="Schließen" title="Schließen">${actionIcon('close')}</button>
       </header>
       <div class="ctox-modal-body app-release-form">
         <label>
@@ -1733,7 +1733,7 @@ async function openReleaseDialog(item) {
     await releaseModule(item, payload);
   });
   window.addEventListener('keydown', onEscape);
-  document.body.append(overlay);
+  (els.root || state.ctx?.host)?.append(overlay);
 }
 
 async function moduleBundleVersionsFor(moduleId, fallbackState = null, item = null) {
@@ -2438,6 +2438,19 @@ function externalLinkIcon() {
   return '<svg class="external-link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"></path><path d="M8 7h9v9"></path></svg>';
 }
 
+// Shell action icons are preferred, but the module must remain legible during
+// shell boot/recovery when the optional icon provider is not available yet.
+function actionIcon(name) {
+  const fromShell = state.ctx?.getActionIcon?.(name);
+  if (fromShell) return fromShell;
+  const paths = {
+    close: 'M6 6l12 12M18 6L6 18',
+    export: 'M12 21V9M12 9l-4 4M12 9l4 4M5 3h14',
+  };
+  const path = paths[name] || paths.export;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"></path></svg>`;
+}
+
 function sourceShort(item) {
   if (item.repo) return item.repo.split('/').slice(-1)[0];
   return item.source || item.kind;
@@ -2587,7 +2600,7 @@ function ensureAppStoreContextMenuElement(state) {
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu app-store-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  (els.root || state.ctx?.host)?.append(menu);
   state.contextMenu = menu;
   return menu;
 }
@@ -2752,10 +2765,11 @@ function renderAppStoreContextMenu(state, context, x, y) {
   menu.style.top = '0px';
   const rect = menu.getBoundingClientRect();
   const clampNumber = (val, min, max) => Math.min(max, Math.max(min, val));
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  menu.style.left = `${clampNumber(x, 8, maxLeft)}px`;
-  menu.style.top = `${clampNumber(y, 8, maxTop)}px`;
+  const hostRect = els.root?.getBoundingClientRect?.() || { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  const maxLeft = Math.max(8, hostRect.width - rect.width - 8);
+  const maxTop = Math.max(8, hostRect.height - rect.height - 8);
+  menu.style.left = `${clampNumber(x - hostRect.left, 8, maxLeft)}px`;
+  menu.style.top = `${clampNumber(y - hostRect.top, 8, maxTop)}px`;
 
   const form = menu.querySelector('[data-app-store-context-chat-form]');
   const textarea = menu.querySelector('[data-app-store-context-message]');

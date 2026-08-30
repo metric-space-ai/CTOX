@@ -4,7 +4,7 @@
        view-toggle/band; this module writes only markup + counts/footer. -->
   <aside class="ctox-pane esign-left" aria-label="Signatur-Anfragen" data-esign-list-pane data-left-content>
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-copy="kicker">E-SIGNATUR</span>
           <h2 class="ctox-pane-title" data-copy="listTitle">Anfragen</h2>
@@ -15,7 +15,7 @@
           <button type="button" class="ctox-pane-icon" data-action="export" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
+      <div class="ctox-filterbar" data-shell-v2-header-row="2">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Anfragen suchen" />
         <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
           <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
@@ -35,7 +35,7 @@
         </div>
       </div>
     </header>
-    <nav class="ctox-view-switch" aria-label="Ansichten">
+    <nav class="ctox-view-switch" aria-label="Ansichten" data-shell-v2-header-row="3">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-copy="viewAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="open" aria-selected="false"><span data-copy="viewOpen">Offen</span><span class="view-count" data-pg-count="open"></span></button>
@@ -54,7 +54,7 @@
        a request prefills it and auto-reveals the record detail + signer flow. -->
   <section class="ctox-pane esign-center" aria-label="Workbench" data-esign-workbench>
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-esign-wb-kicker data-copy="composerKicker">NEUE ANFRAGE</span>
           <h2 class="ctox-pane-title" data-esign-wb-title data-copy="composerTitle">Signatur anfordern</h2>

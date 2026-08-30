@@ -430,7 +430,8 @@ function initDocumentsContextMenu(state) {
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu documents-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  const root = state.ctx.host.querySelector('[data-documents-module]') || state.ctx.host;
+  root.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {
@@ -516,10 +517,11 @@ function renderDocumentsContextMenu(state, context, x, y) {
   state.contextMenu.style.left = '0px';
   state.contextMenu.style.top = '0px';
   const rect = state.contextMenu.getBoundingClientRect();
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  state.contextMenu.style.left = `${clampNumber(x, 8, maxLeft)}px`;
-  state.contextMenu.style.top = `${clampNumber(y, 8, maxTop)}px`;
+  const rootRect = state.contextMenu.parentElement.getBoundingClientRect();
+  const maxLeft = Math.max(8, rootRect.width - rect.width - 8);
+  const maxTop = Math.max(8, rootRect.height - rect.height - 8);
+  state.contextMenu.style.left = `${clampNumber(x - rootRect.left, 8, maxLeft)}px`;
+  state.contextMenu.style.top = `${clampNumber(y - rootRect.top, 8, maxTop)}px`;
 
   const form = state.contextMenu.querySelector('[data-documents-context-chat-form]');
   const textarea = state.contextMenu.querySelector('[data-documents-context-message]');
@@ -1226,12 +1228,15 @@ function renderLeft(state) {
   }
 
   const wrap = document.createElement('div');
-  wrap.className = 'documents-explorer';
+  // Mark the dynamically-rendered explorer as a shell grammar pane. The
+  // static host only provides the slot; this keeps the v2 shell wiring alive
+  // after every data refresh without introducing a module-owned toolbar.
+  wrap.className = 'documents-explorer ctox-pane';
   wrap.dataset.headerSig = headerSignature;
   wrap.innerHTML = `
 
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">Dateien</span>
           <h2 class="ctox-pane-title">${escapeHtml(state.t('documentsTitle', 'Dokumente'))}</h2>
@@ -1242,39 +1247,39 @@ function renderLeft(state) {
           <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" data-documents-export ${canExportDocument(state) ? '' : 'disabled aria-disabled="true"'}>${actionIcon(state, 'export')}</button>
         </div>
       </div>
-      <div class="ctox-pane-tools documents-filter-bar">
-        <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Dokument suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Dokumente suchen'))}" data-documents-search value="${escapeHtml(state.searchQuery)}">
+      <div class="ctox-filterbar documents-filter-bar" data-shell-v2-header-row="2">
+        <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Dokument suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Dokumente suchen'))}" data-documents-search data-pg-search value="${escapeHtml(state.searchQuery)}">
         <div class="documents-filter-summary">
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sortLabel', 'Dokumente sortieren'))}" data-documents-sort>
+          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sortLabel', 'Dokumente sortieren'))}" data-documents-sort data-pg-filter data-pg-name="sort" data-pg-default="updated_desc">
             <option value="updated_desc" ${state.sortBy === 'updated_desc' ? 'selected' : ''}>${escapeHtml(state.t('sortByNewest', 'Zuletzt geändert'))}</option>
             <option value="updated_asc" ${state.sortBy === 'updated_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByOldest', 'Älteste zuerst'))}</option>
             <option value="title_asc" ${state.sortBy === 'title_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByTitle', 'Titel A-Z'))}</option>
             <option value="creator_app" ${state.sortBy === 'creator_app' ? 'selected' : ''}>${escapeHtml(state.t('sortByCreatorApp', 'Ersteller-App'))}</option>
             <option value="status" ${state.sortBy === 'status' ? 'selected' : ''}>${escapeHtml(state.t('sortByStatus', 'Status'))}</option>
           </select>
-          <button class="ctox-button documents-filter-toggle" type="button" data-documents-filter-toggle aria-expanded="${String(state.filtersOpen)}">
+          <button class="ctox-pane-icon documents-filter-toggle ctox-filter-toggle" type="button" data-documents-filter-toggle data-pg-tray-toggle aria-expanded="${String(state.filtersOpen)}" aria-label="${escapeHtml(state.t('filters', 'Filter'))}" title="${escapeHtml(state.t('filters', 'Filter'))}">
             ${actionIcon(state, 'filter')}
             <span>${escapeHtml(state.t('filters', 'Filter'))}</span>
             ${activeFilterCount ? `<strong>${activeFilterCount}</strong>` : ''}
           </button>
         </div>
-        <div class="documents-filter-panel" data-documents-filter-panel ${state.filtersOpen ? '' : 'hidden'}>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('typeFilterLabel', 'Dokumenttyp filtern'))}" data-documents-type>
+        <div class="ctox-filter-tray documents-filter-panel" data-documents-filter-panel data-pg-tray ${state.filtersOpen ? '' : 'hidden'}>
+          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('typeFilterLabel', 'Dokumenttyp filtern'))}" data-documents-type data-pg-filter data-pg-name="type" data-pg-default="all">
             ${documentTypeFilterOptions(state)}
           </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('statusFilterLabel', 'Dokumentstatus filtern'))}" data-documents-status>
+          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('statusFilterLabel', 'Dokumentstatus filtern'))}" data-documents-status data-pg-filter data-pg-name="status" data-pg-default="all">
             ${documentStatusFilterOptions(state)}
           </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('appFilterLabel', 'Ersteller-App filtern'))}" data-documents-app>
+          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('appFilterLabel', 'Ersteller-App filtern'))}" data-documents-app data-pg-filter data-pg-name="app" data-pg-default="all">
             ${documentAppFilterOptions(state)}
           </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sourceFilterLabel', 'Quelle filtern'))}" data-documents-source>
+          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sourceFilterLabel', 'Quelle filtern'))}" data-documents-source data-pg-filter data-pg-name="source" data-pg-default="all">
             ${documentSourceFilterOptions(state)}
           </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('tagFilterLabel', 'Dokument-Tags filtern'))}" data-documents-tag>
+          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('tagFilterLabel', 'Dokument-Tags filtern'))}" data-documents-tag data-pg-filter data-pg-name="tag" data-pg-default="all">
             ${tagFilterOptions(state)}
           </select>
-          <button class="ctox-button documents-filter-reset" type="button" data-documents-clear-filters ${activeFilterCount ? '' : 'disabled aria-disabled="true"'}>
+          <button class="ctox-sort-dir documents-filter-reset" type="button" data-documents-clear-filters data-pg-reset aria-label="${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}" title="${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}" ${activeFilterCount ? '' : 'disabled aria-disabled="true"'}>
             ${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}
           </button>
         </div>

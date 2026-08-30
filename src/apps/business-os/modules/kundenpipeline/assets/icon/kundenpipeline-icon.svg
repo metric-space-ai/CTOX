@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Decision Hub">
+  <defs>
+    <linearGradient id="bg" x1="22" y1="20" x2="234" y2="240" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#12253d"/>
+      <stop offset="1" stop-color="#07131f"/>
+    </linearGradient>
+    <linearGradient id="route" x1="54" y1="59" x2="206" y2="198" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f2b45b"/>
+      <stop offset="1" stop-color="#59c6b1"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <path d="M65 71h72a20 20 0 0 1 20 20v24a20 20 0 0 1-20 20H99l-26 27v-27h-8a20 20 0 0 1-20-20V91a20 20 0 0 1 20-20Z" fill="#102b45" stroke="#f2b45b" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M68 96h67M68 113h44" stroke="#dce9f2" stroke-width="8" stroke-linecap="round" opacity=".9"/>
+  <path d="M153 105c31 0 50 13 50 37 0 22-17 40-42 40h-10" fill="none" stroke="url(#route)" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="151" cy="182" r="28" fill="#0e2236" stroke="#59c6b1" stroke-width="7"/>
+  <path d="m138 182 9 9 18-21" fill="none" stroke="#dff8ef" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

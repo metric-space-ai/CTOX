@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { build } from 'esbuild';
@@ -286,4 +287,11 @@ test('empty spreadsheet explorer shows syncing only while the collection is unre
     }),
     true,
   );
+});
+
+test('spreadsheets context menu remains scoped to the mounted module host', async () => {
+  const source = await fs.readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.match(source, /const moduleHost = state\.ctx\?\.host/);
+  assert.match(source, /moduleHost\.append\(menu\)/);
+  assert.doesNotMatch(source, /document\.body\.append\(menu\)/);
 });

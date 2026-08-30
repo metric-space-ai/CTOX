@@ -87,7 +87,12 @@ const registryJson = JSON.parse(await readFile(new URL('../registry.json', impor
 assert.equal(moduleJson.id, 'iot');
 assert.equal(moduleJson.entry, 'modules/iot/index.html');
 assert.equal(moduleJson.layout.shell, 'windowed');
-assert.equal(moduleJson.install_scope, 'store');
+assert.equal(moduleJson.layout.shell_contract, 'v2');
+assert.equal(moduleJson.install_scope, 'core');
+assert.equal(moduleJson.source, 'core');
+assert.equal(moduleJson.core, true);
+assert.equal(moduleJson.default_installed, true);
+assert.equal(moduleJson.deletable, false);
 assert.equal(moduleJson.collections[0], 'business_commands');
 assert.deepEqual(
   moduleJson.collections.slice(1).slice().sort(),
@@ -138,6 +143,13 @@ test('iot: IA-Karte — left selector + main dashboard, no third column', () => 
   assert.match(indexCss, /\.iot-center\s*\{\s*grid-column:\s*3/);
   assert.match(indexCss, /minmax\(300px,\s*1fr\)/, 'primary column keeps a hard minimum');
   assert.match(indexCss, /grid-template-rows:\s*auto auto minmax\(0,\s*1fr\)\s*auto/, 'left pane spans header/band/well/footer rows');
+});
+
+test('iot: widget editor overlay is bounded to the shell window', () => {
+  assert.match(indexJs, /host\.className = 'ctox-modal iot-modal-overlay'/);
+  assert.match(indexJs, /const mountTarget = state\.ctx\?\.host/);
+  assert.match(indexJs, /if \(mountTarget\) mountTarget\.appendChild\(host\)/);
+  assert.match(indexCss, /\.shell-window\[data-shell-contract="v2"\] \.iot-modal-overlay\s*\{[\s\S]*position:\s*absolute[\s\S]*inset:\s*0/);
 });
 
 test('iot: left column carries the canonical grammar markup pins', () => {

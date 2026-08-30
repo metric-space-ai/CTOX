@@ -117,3 +117,9 @@ test('data-driven empty states are gated by canonical collection readiness', () 
   assert.match(js, /Keine Belegevidenz für diese Banktransaktion verknüpft\./);
   assert.match(js, /Keine Hauptbuchungen für dieses Sachkonto vorhanden\./);
 });
+
+test('v2 accounting overlays stay inside the module and context actions clamp locally', () => {
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.fibu-module \{ position: relative;[\s\S]*overflow: hidden;/);
+  assert.match(js, /\(state\.els\.root \|\| state\.ctx\?\.host\)\?\.append\(menu\)/);
+  assert.match(js, /const rootRect = state\.els\.root\?\.getBoundingClientRect/);
+});

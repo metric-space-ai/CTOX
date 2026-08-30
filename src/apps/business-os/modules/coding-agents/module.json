@@ -33,9 +33,9 @@
     "summary": "Unified dashboard to manage, configure, license, and remotely run Antigravity, Claude, and Codex agents.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/coding-agents",
-    "installable": true,
-    "editable_after_install": true,
-    "distribution": "catalog-module"
+    "installable": false,
+    "editable_after_install": false,
+    "distribution": "system-module"
   },
   "install_scope": "core",
   "default_installed": true,
@@ -61,5 +61,5 @@
   "source": "core",
   "core": true,
   "editable": true,
-  "deletable": true
+  "deletable": false
 }

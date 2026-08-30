@@ -28,7 +28,7 @@
    * Resizer (.ctox-column-resizer[data-resizer-var="--knowledge-left-width"])
    * setzt --knowledge-left-width per Drag.
    */
-  grid-template-columns: minmax(300px, var(--knowledge-left-width, 390px)) 12px minmax(0, 1fr);
+  grid-template-columns: minmax(220px, min(var(--knowledge-left-width, 320px), 42cqw)) 8px minmax(300px, 1fr);
   gap: 0;
   height: 100%;
   min-height: 0;
@@ -49,10 +49,10 @@
   --knowledge-surface-muted: #19222d;
   --knowledge-text: #eef3f7;
   --knowledge-muted: #a8b2bc;
-  --knowledge-accent: var(--shell-v2-accent, var(--shell-v2-frame-top-joint, #936b63));
+  --knowledge-accent: var(--shell-v2-content-accent, var(--shell-v2-frame-start, #f0b56f));
   --knowledge-line: #2b3540;
   --knowledge-soft-line: #222c36;
-  grid-template-columns: minmax(300px, var(--knowledge-left-width, 500px)) 12px minmax(0, 1fr);
+  grid-template-columns: minmax(220px, min(var(--knowledge-left-width, 320px), 42cqw)) 8px minmax(300px, 1fr);
   padding: 0;
   background: var(--knowledge-bg);
 }
@@ -79,18 +79,14 @@
   background: var(--knowledge-surface);
 }
 
-/* A 64px window glyph leaves two 29px inner header rows next to the 6px
-   frame. Keep the semantic kicker and title, but place them on one baseline
-   so neither row clips or wastes vertical space. */
+/* The window glyph spans exactly two equal shell rows. */
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-title-row {
   height: 100%;
   gap: 8px;
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-titles {
-  flex-direction: row;
-  align-items: baseline;
-  gap: 8px;
+  display: block;
   padding-top: 0;
   overflow: hidden;
 }
@@ -101,8 +97,13 @@
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-title {
+  display: block;
+  max-width: 100%;
   margin-top: 0;
+  overflow: hidden;
   line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-icon {
@@ -112,14 +113,14 @@
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-left > .ctox-pane-header {
-  padding-left: calc(var(--shell-v2-icon-size, 64px) + 14px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 8px);
   padding-top: 0;
   padding-bottom: 0;
   padding-right: 8px;
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .ctox-pane-header {
-  padding-right: 70px;
+  padding: 0 54px 0 8px;
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar,
@@ -130,7 +131,7 @@
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar {
-  padding-left: calc(var(--shell-v2-icon-size, 64px) + 14px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 8px);
   padding-right: 8px;
   gap: 5px;
 }
@@ -155,11 +156,11 @@
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 3px;
+  width: 4px;
   height: 48px;
   border-radius: 999px;
   background: var(--shell-v2-local-accent, var(--shell-v2-frame-left-joint));
-  opacity: 0.5;
+  opacity: 0.92;
   transform: translate(-50%, -50%);
   transition: opacity 150ms ease, background-color 150ms ease, filter 150ms ease;
 }
@@ -171,7 +172,7 @@
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer:hover::before,
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer:focus-visible::before,
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer.is-active::before {
-  width: 4px;
+  width: 6px;
   background: var(--shell-v2-local-accent, var(--shell-v2-frame-left-joint));
   opacity: 1;
   filter: brightness(1.2);
@@ -351,6 +352,7 @@
 .knowledge-module .knowledge-tab-panel {
   min-height: 0;
   overflow: hidden;
+  background: color-mix(in srgb, #000 7%, var(--knowledge-surface));
 }
 
 .knowledge-module .knowledge-tab-panel[data-panel="skill"] {
@@ -425,6 +427,13 @@
   line-height: 1.5;
 }
 
+.knowledge-module .markdown-document.knowledge-detail-empty {
+  min-height: 100%;
+  border-top: 1px solid var(--knowledge-line);
+  background: color-mix(in srgb, #000 7%, var(--knowledge-surface));
+  padding: 24px;
+}
+
 .knowledge-module .markdown-document h1,
 .knowledge-module .markdown-document h2,
 .knowledge-module .markdown-document h3 {
@@ -492,6 +501,10 @@
   border-bottom: 1px solid var(--knowledge-line);
   background: var(--knowledge-surface);
   padding: 8px 12px;
+}
+
+.knowledge-module .knowledge-secondary-switcher:empty {
+  display: none;
 }
 
 .knowledge-module .table-switcher .ctox-chip,
@@ -774,6 +787,64 @@
   white-space: nowrap;
 }
 
+/* App-owned overlays stay clipped to the Knowledge window. Shell drawers are
+   desktop-global and must never be used for app workflows. */
+.knowledge-app-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: rgb(0 0 0 / 0.52);
+}
+
+.knowledge-app-dialog {
+  width: min(460px, 100%);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--knowledge-line);
+  background: var(--knowledge-surface);
+  box-shadow: none;
+}
+
+.knowledge-app-overlay--right {
+  justify-content: flex-end;
+}
+
+.knowledge-app-overlay--right .knowledge-app-dialog {
+  border-right: 0;
+  border-left: 1px solid var(--knowledge-line);
+  box-shadow: none;
+}
+
+.knowledge-app-overlay--bottom {
+  align-items: flex-end;
+}
+
+.knowledge-app-overlay--bottom .knowledge-app-dialog {
+  width: 100%;
+  height: min(260px, 55%);
+  border-top: 1px solid var(--knowledge-line);
+  border-right: 0;
+  box-shadow: none;
+}
+
+.knowledge-app-dialog > .drawer-body {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.knowledge-app-overlay--left .knowledge-app-dialog .drawer-header-row {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 8px);
+}
+
 .knowledge-module .ctox-context-menu {
   position: absolute;
   z-index: 2400;
@@ -867,49 +938,11 @@
 
 @container business-app-window (max-width: 1120px) {
   .knowledge-module {
-    grid-template-columns: minmax(280px, var(--knowledge-left-width, 340px)) 10px minmax(0, 1fr);
+    grid-template-columns: minmax(220px, min(var(--knowledge-left-width, 300px), 42cqw)) 8px minmax(300px, 1fr);
     padding: 10px;
   }
-}
-
-@container business-app-window (max-width: 760px) {
-  .knowledge-module {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(240px, 42vh) minmax(360px, 1fr);
-    gap: 8px;
-    overflow: auto;
-  }
-
-  .knowledge-module .knowledge-left,
-  .knowledge-module .knowledge-center {
-    grid-column: 1;
-  }
-
-  .knowledge-module .knowledge-left {
-    grid-row: 1;
-  }
-
-  .knowledge-module .knowledge-center {
-    grid-row: 2;
-  }
-
-  .knowledge-module .ctox-column-resizer {
-    display: none;
-  }
-
-  .knowledge-module .knowledge-center-head .ctox-pane-title-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .knowledge-module .knowledge-center-head .ctox-pane-tabs {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    width: 100%;
-  }
-
-  .knowledge-module .knowledge-center-head .ctox-pane-tab {
-    min-width: 0;
+  .shell-window[data-shell-contract="v2"] .knowledge-module {
+    padding: 0;
   }
 }
 
@@ -1295,11 +1328,57 @@
    Mobile (narrow): master-detail. List full-width; picking an entry shows the
    content full-width with a back button — no cramped stacking, no wasted space.
    ========================================================================== */
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-view-switch {
+  display: flex;
+  align-items: stretch;
+  height: var(--shell-v2-header-row-size);
+  min-height: var(--shell-v2-header-row-size);
+  margin: 0;
+  padding: 0 54px 0 8px;
+  border-top: 0;
+  border-radius: 0;
+  background: var(--knowledge-surface);
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-view-switch .ctox-pane-tabs {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-view-switch .ctox-pane-tab {
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-pane-footer {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  flex: 0 0 28px;
+  height: 28px;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 12px;
+  border-top: 1px solid var(--knowledge-line);
+  background: var(--knowledge-bg);
+  line-height: 1;
+}
+
 .knowledge-module .knowledge-mobile-back { display: none; }
-/* Mobile boundary = the shell-wide 767px (same convention as threads phase 1).
-   The JS toggles .is-detail unconditionally; only CSS gates the single-pane
-   master-detail, so widening the container query is a pure CSS change. */
-@container business-app-window (max-width: 767px) {
+/* Keep both panes through compact desktop widths. Only phone-sized windows
+   switch to the single-pane master/detail presentation. */
+@container business-app-window (max-width: 559px) {
   .knowledge-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);

@@ -211,6 +211,37 @@ function bindElements(root) {
   els.runbookStatus = root.querySelector('[data-runbook-status]');
 }
 
+function closeKnowledgeOverlay() {
+  els.root?.querySelector('[data-knowledge-overlay]')?.remove();
+}
+
+function openKnowledgeOverlay(body, { placement = 'left' } = {}) {
+  closeKnowledgeOverlay();
+  const overlay = document.createElement('div');
+  overlay.className = `knowledge-app-overlay knowledge-app-overlay--${placement}`;
+  overlay.dataset.knowledgeOverlay = '';
+  overlay.setAttribute('role', 'presentation');
+  const panel = document.createElement('section');
+  panel.className = 'knowledge-app-dialog';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.tabIndex = -1;
+  panel.append(body);
+  overlay.append(panel);
+  overlay.addEventListener('pointerdown', (event) => {
+    if (event.target === overlay) closeKnowledgeOverlay();
+  });
+  overlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeKnowledgeOverlay();
+    }
+  });
+  els.root?.append(overlay);
+  requestAnimationFrame(() => panel.focus({ preventScroll: true }));
+  return panel;
+}
+
 function wireEvents() {
   // Pane chrome is SHELL-owned canonical grammar (autoWirePaneGrammar wires
   // the data-pg-* markup once, debounced ~120ms after mount). The module only
@@ -614,17 +645,17 @@ function renderEmptyKnowledgeSelection() {
   state.selectedRunbookId = '';
   state.editing = false;
   state.activeTab = 'skill';
-  // Right-column header is the detail-view, not a second "Knowledge" heading.
-  // When no item is selected, show a neutral kicker/title that does not duplicate
-  // the left-column "Knowledge" heading.
-  els.selectedKind.textContent = copy.selected || 'Selected';
-  els.selectedTitle.textContent = copy.noSelection || (state.lang === 'en' ? 'No entry selected' : 'Kein Eintrag ausgewählt');
+  // The detail content already explains the empty selection. Keep the scarce
+  // header row available for the title of a real document.
+  els.selectedKind.textContent = '';
+  els.selectedTitle.textContent = '';
   els.markdownEditor.hidden = true;
   els.markdownView.hidden = false;
   els.markdownEditor.value = '';
   // The list-pane on the left already shows the "no entries" empty-state.
   // Do not repeat it inside the detail-view; show a brief hint instead.
-  els.markdownView.innerHTML = `<p>${escapeHtml(copy.detailEmptyHint || (state.lang === 'en' ? 'Pick a knowledge entry on the left to view it here.' : 'Wähle links einen Knowledge-Eintrag, um ihn hier anzuzeigen.'))}</p>`;
+  els.markdownView.classList.add('ctox-empty', 'knowledge-detail-empty');
+  els.markdownView.innerHTML = `<strong>${escapeHtml(copy.detailEmptyHint || (state.lang === 'en' ? 'Pick a knowledge entry on the left to view it here.' : 'Wähle links einen Knowledge-Eintrag, um ihn hier anzuzeigen.'))}</strong>`;
   els.tableHost.innerHTML = `<div class="ctox-empty"><strong>${escapeHtml(copy.tableUnavailable)}</strong></div>`;
   if (els.runbookSwitcher) els.runbookSwitcher.innerHTML = '';
   if (els.runbookView) els.runbookView.innerHTML = `<div class="ctox-empty"><strong>${escapeHtml(copy.noRunbooks)}</strong></div>`;
@@ -1361,6 +1392,7 @@ async function selectKnowledge(id) {
   els.markdownEditor.hidden = true;
   els.markdownView.hidden = false;
   els.markdownEditor.value = doc.markdown || '';
+  els.markdownView.classList.remove('ctox-empty', 'knowledge-detail-empty');
   els.markdownView.innerHTML = markdownToHtml(doc.markdown || '');
   syncMarkdownEditControls();
   syncKnowledgeTabControls();
@@ -1863,6 +1895,7 @@ async function queueMarkdownSave() {
   });
   if (els.skillStatus) els.skillStatus.textContent = result?.ok ? `${(state.messages || labels[state.lang]).queued} · ${result.task_id || result.command_id}` : (state.messages || labels[state.lang]).queueFailed;
   if (result?.ok) {
+    els.markdownView.classList.remove('ctox-empty', 'knowledge-detail-empty');
     els.markdownView.innerHTML = markdownToHtml(markdown || '');
     state.editing = false;
     els.markdownEditor.hidden = true;
@@ -1979,7 +2012,7 @@ async function dispatchKnowledgeCommand(command) {
 function showCommandStatus(result) {
   const copy = state.messages || labels[state.lang];
   const message = result?.ok ? `${copy.queued} · ${result.task_id || result.command_id}` : copy.queueFailed;
-  state.ctx.openBottomDrawer(drawerContent('Knowledge Command', message));
+  openKnowledgeOverlay(drawerContent('Knowledge Command', message), { placement: 'bottom' });
 }
 
 function openCreateKnowledgeBookDrawer() {
@@ -2015,7 +2048,7 @@ function openCreateKnowledgeBookDrawer() {
       },
     }),
   });
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function openImportKnowledgeBookDrawer() {
@@ -2050,7 +2083,7 @@ function openImportKnowledgeBookDrawer() {
       },
     }),
   });
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function openExportKnowledgeBookDrawer() {
@@ -2094,7 +2127,7 @@ function openExportKnowledgeBookDrawer() {
       },
     }),
   });
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function knowledgeActionDrawer({ title, subtitle, fields, actionLabel, commandType, recordId, commandTitle, buildPayload }) {
@@ -2125,7 +2158,7 @@ function knowledgeActionDrawer({ title, subtitle, fields, actionLabel, commandTy
     submitButton.disabled = !valid;
     submitButton.setAttribute('aria-disabled', String(!valid));
   };
-  body.querySelector('[data-close-drawer]').addEventListener('click', state.ctx.closeDrawers);
+  body.querySelector('[data-close-drawer]').addEventListener('click', closeKnowledgeOverlay);
   form.addEventListener('input', updateSubmitState);
   form.addEventListener('change', updateSubmitState);
   form.addEventListener('submit', async (event) => {
@@ -2186,7 +2219,7 @@ async function openKnowledgeConfig() {
       <button class="ctox-button is-primary" type="button" data-drawer-save disabled aria-disabled="true">An CTOX geben</button>
     </footer>
   `;
-  body.querySelector('[data-close-drawer]').addEventListener('click', state.ctx.closeDrawers);
+  body.querySelector('[data-close-drawer]').addEventListener('click', closeKnowledgeOverlay);
   const configTextarea = body.querySelector('[data-drawer-markdown]');
   const configSave = body.querySelector('[data-drawer-save]');
   const updateConfigSubmit = () => {
@@ -2203,17 +2236,17 @@ async function openKnowledgeConfig() {
     await queueMarkdownSave();
   });
   updateConfigSubmit();
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function openRunbookConfig() {
   const runbook = state.runbooks.find((entry) => runbookIdMatches(entry.id || entry.runbook_id, state.selectedRunbookId));
-  state.ctx.openRightDrawer(drawerContent('Runbook Runtime', [
+  openKnowledgeOverlay(drawerContent('Runbook Runtime', [
     ['Ausführung', 'CTOX Task Queue'],
     ['Command history', 'Local command data'],
     ['Ausgewählt', runbook?.title || state.selectedRunbookId || 'kein Runbook'],
     ['Status', runbook?.status || 'unbekannt'],
-  ]));
+  ]), { placement: 'right' });
 }
 
 function drawerContent(title, rows) {
@@ -2223,7 +2256,7 @@ function drawerContent(title, rows) {
     ? `<dl class="ctox-fields knowledge-config-list">${rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`
     : `<p>${escapeHtml(rows)}</p>`;
   body.innerHTML = `<header class="drawer-header-row"><div><h2>${escapeHtml(title)}</h2></div><button class="ctox-pane-icon" type="button" data-close-drawer aria-label="Schließen">${actionIcon('close')}</button></header>${content}`;
-  body.querySelector('[data-close-drawer]').addEventListener('click', state.ctx.closeDrawers);
+  body.querySelector('[data-close-drawer]').addEventListener('click', closeKnowledgeOverlay);
   return body;
 }
 

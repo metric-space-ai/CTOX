@@ -31,12 +31,12 @@
     "summary": "Local-first markdown notes workspace with folder navigation and live preview.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/notes",
-    "installable": true,
-    "editable_after_install": true,
-    "distribution": "catalog-module"
+    "installable": false,
+    "editable_after_install": false,
+    "distribution": "system-module"
   },
-  "install_scope": "store",
-  "default_installed": false,
+  "install_scope": "core",
+  "default_installed": true,
   "launch_kind": "desktop-app",
   "presentation": {
     "default_mode": "window",
@@ -56,8 +56,8 @@
     "multi_instance": false,
     "auto_restore": false
   },
-  "source": "catalog",
-  "core": false,
+  "source": "core",
+  "core": true,
   "editable": true,
-  "deletable": true
+  "deletable": false
 }

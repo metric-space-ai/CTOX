@@ -21,9 +21,9 @@ modules/<id>/
 
 `module.json` uses `install_scope` to decide how the app is shipped:
 
-- `core`: a system app, always installed and not removable. The canonical list
-  is `system-apps.json`: `desktop`, `ctox`, `tickets`, `threads`, `knowledge`,
-  `browser`, `credentials`, `app-store`, `creator`, `reports`.
+- `core`: a system app, always installed and not removable. The canonical
+  installation order comes from `standard-app-bundle.json`; `system-apps.json`
+  adds the shell-owned `desktop` surface in front of that exact selection.
 - `store`: discoverable in the App Store and installed into `installed-modules/` on demand.
 - `internal`: shipped for shell-owned workflows but hidden from normal launchers.
 - `installed`: runtime-installed via the App Creator/App Store into
@@ -39,7 +39,7 @@ system apps come from the source package, App Store apps exist under
 ### Instance assignment
 
 The hostname does not select apps in browser code. Each CTOX instance gets the
-same ten system apps; its additional apps are determined only by its own
+same 18 system apps (Desktop plus 17 selected standard apps); its additional apps are determined only by its own
 runtime directories:
 
 | Instance | App Store installations | Private `local-modules/` |

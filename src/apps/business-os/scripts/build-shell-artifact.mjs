@@ -24,6 +24,7 @@ export const ROOT_RUNTIME_FILES = Object.freeze([
   'mobile-host.css',
   'mobile-host.js',
   'system-apps.json',
+  'standard-app-bundle.json',
 ]);
 export const RUNTIME_TREES = Object.freeze([
   'app-starter',

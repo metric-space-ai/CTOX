@@ -302,3 +302,13 @@ test('calendar does not advertise an unavailable public booking route', async ()
   assert.doesNotMatch(js, /href="\$\{publicUrl\}"/);
   assert.match(js, /Nicht veröffentlicht/);
 });
+
+test('v2 inspector drawer is contained by the calendar app and icons have a fallback', async () => {
+  const [css, js] = await Promise.all([
+    readFile(new URL('./index.css', import.meta.url), 'utf8'),
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.calendar-app \{ position: relative;[\s\S]*overflow: hidden;/);
+  assert.match(js, /function actionIcon\(name\) \{[\s\S]*const paths = \{/);
+  assert.doesNotMatch(js, /return state\.ctx\?\.getActionIcon\?\.\(name\) \|\| ''/);
+});

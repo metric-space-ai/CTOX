@@ -22,10 +22,25 @@ async function importBrowserBundle(relativePath) {
 const { __researchTestHooks: hooks } = await importBrowserBundle('./index.js');
 const researchSource = await readFile(new URL('./index.js', import.meta.url), 'utf8');
 const researchGraphSource = await readFile(new URL('./research-graph.mjs', import.meta.url), 'utf8');
+const researchMarkup = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+const researchCss = await readFile(new URL('./index.css', import.meta.url), 'utf8');
+const researchManifest = JSON.parse(await readFile(new URL('./module.json', import.meta.url), 'utf8'));
 
 const bases = [
   { domain: 'research/vendor-ai-agents', title: 'Vendor AI Agents' },
 ];
+
+test('shell-v2 research keeps headers, icons, and overlays module-scoped', () => {
+  assert.equal(researchManifest.layout.shell_contract, 'v2');
+  assert.equal((researchMarkup.match(/data-shell-v2-header-row="1"/g) || []).length, 3);
+  assert.match(researchSource, /research-task-dialog research-module-overlay/);
+  assert.match(researchSource, /research-prompt-viewer research-module-overlay/);
+  assert.match(researchSource, /const mountTarget = state\.ctx\?\.host\?\.querySelector\('\[data-research-root\]'\)/);
+  assert.match(researchSource, /if \(mountTarget\) mountTarget\.appendChild\(backdrop\)/);
+  assert.match(researchSource, /const RESEARCH_ICON_FALLBACK_PATHS = Object\.freeze/);
+  assert.doesNotMatch(researchSource, /onclick="this\.closest\('\.ctox-modal'\)\.remove\(\)"/);
+  assert.match(researchCss, /\.shell-window\[data-shell-contract="v2"\] \.research-module-overlay\s*\{[\s\S]*position:\s*absolute[\s\S]*inset:\s*0/);
+});
 
 test('create dialog validation requires title, local domain, and task prompt', () => {
   assert.equal(hooks.validateResearchTaskInput({ title: '', domain: bases[0].domain, prompt: 'Analyse' }, bases).valid, false);
@@ -680,13 +695,13 @@ test('research reports contain only live documents with explicit task or domain 
 
 test('diagnostic rows distinguish sync failures from local no-data', () => {
   const rows = hooks.collectionDiagnosticRows(['research_runs', 'research_notes', 'knowledge_tables'], {
-    research_runs: { sync: { kind: 'failed', message: 'WebRTC replication failed' } },
+    research_runs: { sync: { kind: 'failed', message: 'Synchronisierung fehlgeschlagen' } },
     research_notes: { sync: { kind: 'local', message: 'Lokaler Modus' } },
     knowledge_tables: { read: { kind: 'ok', message: '0 rows' } },
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['failed', 'local', 'ok']);
-  assert.match(rows[0].label, /WebRTC/);
+  assert.match(rows[0].label, /Synchronisierung/);
 });
 
 test('knowledge base grouping ignores legacy parquet docs without domain and table key', () => {

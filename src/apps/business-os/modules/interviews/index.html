@@ -3,7 +3,7 @@
        Canonical column grammar; the shell auto-wires the data-pg-* chrome. -->
   <aside class="ctox-pane ats-list-pane" aria-label="Interviews" data-left-content>
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-i18n="listKicker">Recruiting</span>
           <h2 class="ctox-pane-title" data-ats-title>Interviews</h2>
@@ -21,7 +21,7 @@
         </div>
       </div>
       <!-- Row 2: filter section — search + shard/list toggle + collapsed tray. -->
-      <div class="ctox-filterbar">
+      <div class="ctox-filterbar" data-shell-v2-header-row="2">
         <input class="ctox-pane-search" type="search" data-pg-search data-i18n-placeholder="searchPlaceholder" placeholder="Suchen..." aria-label="Interviews suchen" />
         <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
           <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" data-i18n-title="viewCards" title="Kachelansicht" aria-label="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
@@ -45,7 +45,7 @@
       </div>
     </header>
     <!-- Row 3: counted view band — >= 2 real views derived from meeting state. -->
-    <nav class="ctox-view-switch" aria-label="Ansichten">
+    <nav class="ctox-view-switch" aria-label="Ansichten" data-shell-v2-header-row="3">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-i18n="viewAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="open" aria-selected="false"><span data-i18n="viewOpen">Offen</span><span class="view-count" data-pg-count="open"></span></button>
@@ -66,15 +66,12 @@
        or Neu (visible = (hasSelection || creating) && !userCollapsed). -->
   <section class="ctox-pane ats-workbench-pane" aria-label="Interview" data-ats-workbench>
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-ats-wb-kicker></span>
           <h2 class="ctox-pane-title" data-ats-wb-title></h2>
         </div>
         <div class="ctox-pane-actions">
-          <button type="button" class="ctox-pane-icon is-primary" data-action="new" data-i18n-title="newMeeting" title="Neuer Termin" aria-label="Neuer Termin">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
-          </button>
           <button type="button" class="ctox-pane-icon" data-toggle-workbench data-i18n-title="collapseLabel" title="Einklappen" aria-label="Einklappen" aria-pressed="false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l6 6-6 6M13 6l6 6-6 6"/></svg>
           </button>

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { build } from 'esbuild';
@@ -14,6 +15,7 @@ const bundledModule = await build({
 });
 
 const [{ text: bundledSource }] = bundledModule.outputFiles;
+const appSource = await readFile(new URL('./app.js', import.meta.url), 'utf8');
 const {
   filterSourceFiles,
   formatSourceContent,
@@ -165,4 +167,31 @@ test('monaco model paths never create an authority-less double-slash URI', () =>
 test('formatter handles json and low-risk whitespace cleanup', () => {
   assert.equal(formatSourceContent('{"b":1,"a":2}', 'json'), '{\n  "b": 1,\n  "a": 2\n}\n');
   assert.equal(formatSourceContent('const value = 1;  \n\n', 'javascript'), 'const value = 1;\n');
+});
+
+test('embedded editor uses the shell v2 frame and never creates window chrome', () => {
+  assert.match(appSource, /data-shell-v2="true"/);
+  assert.match(appSource, /data-shell-v2-header-row="1"/);
+  assert.doesNotMatch(appSource, /window-(?:titlebar|controls|close|minimize|maximize)/);
+  assert.doesNotMatch(appSource, /window\.prompt/);
+});
+
+test('embedded editor keeps narrow toolbars single-row and scrollable', () => {
+  assert.match(appSource, /source-editor-toolbar[\s\S]*flex-wrap: nowrap/);
+  assert.match(appSource, /source-editor-actions[\s\S]*overflow-x: auto/);
+  assert.match(appSource, /source-editor-workbench[\s\S]*minmax\(220px, 34%\)/);
+  assert.match(appSource, /source-editor-action-icon/);
+});
+
+test('commit entry is bounded to the embedded editor overlay', () => {
+  assert.match(appSource, /data-source-commit-dialog/);
+  assert.match(appSource, /className = 'source-editor-dialog'/);
+  assert.match(appSource, /\.source-editor-dialog\s*\{[\s\S]*position: absolute;[\s\S]*inset: 0;/);
+  assert.match(appSource, /data-source-commit-message/);
+});
+
+test('toolbar icons prefer shell actions and retain local SVG fallbacks', () => {
+  assert.match(appSource, /ctx\?\.getActionIcon\?\.\(name, size, strokeWidth\)/);
+  assert.match(appSource, /ACTION_ICON_FALLBACKS/);
+  assert.match(appSource, /data-source-history[\s\S]*actionIcon\(ctx, 'history'\)/);
 });

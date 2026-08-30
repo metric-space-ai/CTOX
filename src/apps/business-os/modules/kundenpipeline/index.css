@@ -1,0 +1,266 @@
+.kundenpipeline-module {
+  --ctox-left-width: 340px;
+  --ctox-right-width: 360px;
+  min-width: 0;
+  min-height: 0;
+  color: var(--text);
+}
+
+.kundenpipeline-module .kundenpipeline-rail,
+.kundenpipeline-module .kundenpipeline-detail,
+.kundenpipeline-module .kundenpipeline-actions {
+  min-width: 0;
+  min-height: 0;
+}
+
+.kundenpipeline-module .ctox-pane-body,
+.kundenpipeline-module .kundenpipeline-detail-scroll,
+.kundenpipeline-module .kundenpipeline-actions-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.kundenpipeline-module .ctox-pane-search {
+  min-width: 0;
+  width: 100%;
+}
+
+.kundenpipeline-module .ctox-pane-tab {
+  gap: 6px;
+}
+
+.kundenpipeline-module .view-count {
+  min-width: 18px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.kundenpipeline-module .kundenpipeline-decision-card {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kundenpipeline-module .kundenpipeline-decision-card:hover,
+.kundenpipeline-module .kundenpipeline-decision-card.is-selected {
+  background: var(--surface-2);
+}
+
+.kundenpipeline-module .kundenpipeline-decision-card.is-selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.kundenpipeline-module .kundenpipeline-card-meta,
+.kundenpipeline-module .kundenpipeline-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.kundenpipeline-module .kundenpipeline-card-meta > span,
+.kundenpipeline-module .kundenpipeline-card-foot > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kundenpipeline-module .kundenpipeline-card-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kundenpipeline-module .kundenpipeline-type,
+.kundenpipeline-module .kundenpipeline-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.kundenpipeline-module .kundenpipeline-status.is-open {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  color: var(--accent);
+}
+
+.kundenpipeline-module .kundenpipeline-status.is-resolved {
+  color: var(--muted);
+}
+
+.kundenpipeline-module .kundenpipeline-detail-body {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.kundenpipeline-module .kundenpipeline-section {
+  display: grid;
+  gap: 8px;
+}
+
+.kundenpipeline-module .kundenpipeline-section h3,
+.kundenpipeline-module .kundenpipeline-section h4 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.kundenpipeline-module .kundenpipeline-question {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.kundenpipeline-module .kundenpipeline-copy,
+.kundenpipeline-module .kundenpipeline-mail,
+.kundenpipeline-module .kundenpipeline-audit-entry {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.kundenpipeline-module .kundenpipeline-mail {
+  padding: 12px;
+  border-left: 3px solid var(--line);
+  background: var(--surface-2);
+}
+
+.kundenpipeline-module .kundenpipeline-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kundenpipeline-module .kundenpipeline-fact {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius, 8px);
+  background: var(--surface-2);
+}
+
+.kundenpipeline-module .kundenpipeline-fact dt {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.kundenpipeline-module .kundenpipeline-fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.kundenpipeline-module .kundenpipeline-actions-scroll {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 16px;
+}
+
+.kundenpipeline-module .kundenpipeline-action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.kundenpipeline-module .kundenpipeline-action {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius, 8px);
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kundenpipeline-module .kundenpipeline-action:hover {
+  border-color: var(--accent);
+}
+
+.kundenpipeline-module .kundenpipeline-action strong {
+  font-size: 13px;
+}
+
+.kundenpipeline-module .kundenpipeline-action span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.kundenpipeline-module .kundenpipeline-command-status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.kundenpipeline-module .kundenpipeline-command-status.is-error {
+  color: var(--danger, #b42318);
+}
+
+.kundenpipeline-module .kundenpipeline-empty {
+  padding: 24px 16px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.kundenpipeline-module .kundenpipeline-error {
+  padding: 16px;
+  color: var(--danger, #b42318);
+  font-size: 13px;
+}
+
+@container business-app-window (max-width: 1180px) {
+  .kundenpipeline-module {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .kundenpipeline-module .kundenpipeline-rail,
+  .kundenpipeline-module .kundenpipeline-actions {
+    display: none;
+  }
+
+  .kundenpipeline-module:not(.is-actions-hidden) .kundenpipeline-actions {
+    display: block;
+  }
+}
+
+@container business-app-window (max-width: 767px) {
+  .kundenpipeline-module .kundenpipeline-detail-body {
+    padding: 14px;
+  }
+
+  .kundenpipeline-module .kundenpipeline-fact-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

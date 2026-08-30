@@ -94,6 +94,8 @@ weiterhin sofort und zeigen vorhandene Daten auch während des Catch-ups an.
 | `desktopApps` | array | Momentaufnahme der Desktop-Apps. |
 | `getDesktopApps()` | fn → array | Live-Liste. |
 | `openDesktopApp(id, options)` | fn | Desktop-App öffnen. |
+| `openModuleSource(id?)` | fn | Source-Editor als integrierte Ansicht der angegebenen oder aktuellen App öffnen. |
+| `openModuleVersions(id?)` | fn | Versionshistorie als integrierte Ansicht der angegebenen oder aktuellen App öffnen. |
 | `getSvgIcon(name)` | fn | Registrierte Shell-Icons (Modul-/Kachel-Icons, Gradient-Stil). |
 | `getActionIcon(name, size?, strokeWidth?)` | fn → string | Funktionale Aktions-Icons (monochrom, `currentColor`) für `.ctox-pane-icon`/`.ctox-icon-button`; Namen via `listActionIcons()` in `shared/icons.js`. |
 | `isTaskbarPinned(target)` / `pinToTaskbar` / `unpinFromTaskbar` / `toggleTaskbarPin` | fn | Taskbar-Pinning. |

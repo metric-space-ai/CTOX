@@ -1698,9 +1698,9 @@ export async function mount(ctx) {
   function spawnMessageCtoxForm(x, y, msg) {
     const menu = document.createElement('div');
     menu.className = 'ctox-context-menu';
-    menu.style.position = 'fixed';
+    menu.style.position = 'absolute';
     menu.hidden = true;
-    document.body.append(menu);
+    root.append(menu);
 
     const escapeHtml = (val) => String(val || '')
       .replace(/&/g, '&amp;')
@@ -1734,8 +1734,9 @@ export async function mount(ctx) {
 
     menu.hidden = false;
     const rect = menu.getBoundingClientRect();
-    const left = Math.min(x, window.innerWidth - rect.width - 8);
-    const top = Math.min(y, window.innerHeight - rect.height - 8);
+    const rootRect = root.getBoundingClientRect();
+    const left = Math.min(x - rootRect.left, rootRect.width - rect.width - 8);
+    const top = Math.min(y - rootRect.top, rootRect.height - rect.height - 8);
     menu.style.left = `${Math.max(8, left)}px`;
     menu.style.top = `${Math.max(8, top)}px`;
 

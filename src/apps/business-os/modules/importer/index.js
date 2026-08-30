@@ -219,7 +219,9 @@ export async function mount(ctx) {
     openLabel: root.querySelector('[data-imp-open-label]'),
   };
 
-  refs.title.textContent = t('title', FALLBACK_LABELS.title);
+  // The shared v2 window header owns the app title. Keep this optional for
+  // older standalone fixtures without introducing a second local titlebar.
+  if (refs.title) refs.title.textContent = t('title', FALLBACK_LABELS.title);
   refs.subtitle.textContent = t('subtitle', FALLBACK_LABELS.subtitle);
   refs.sourceStep.textContent = t('sourceStep', 'Source');
   refs.sourceStepNote.textContent = t('sourceStepNote', 'Choose an app');

@@ -133,6 +133,15 @@ test('matching UI uses canonical readiness subscriptions and list states', async
   assert.match(source, /renderListOrState/);
 });
 
+test('matching transient dialogs and menus stay inside the module host', async () => {
+  const source = await readFile(new URL('./ui/index.js', import.meta.url), 'utf8');
+  assert.match(source, /function getScopedMatchingHost\(\)/);
+  assert.match(source, /syncFeedback\.setHostRoot\?\.\(matchingHost\)/);
+  assert.match(source, /root\.appendChild\(menu\)/);
+  assert.match(source, /root\.append\(layer\)/);
+  assert.doesNotMatch(source, /document\.body\.append(?:Child)?\((?:menu|layer)\)/);
+});
+
 test('denies writes when the Business OS permission facade denies collection writes', async () => {
   setBusinessOsDatabaseContext(businessOsContext({}, {
     canWriteCollection: () => false

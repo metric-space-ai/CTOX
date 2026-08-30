@@ -51,6 +51,10 @@ test('presentation layer stays compact and shell-native', () => {
   assert.match(js, /coding-agents-app-icon/);
   assert.match(js, /coding-agents-app-monogram/);
   assert.match(js, /coding-agents-rail-chip/);
+  assert.match(js, /operatorIconFor\(\{ id: moduleId \}\)/, 'app rail uses the frozen operator raster selection');
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.coding-agents-module \{ position: relative;[\s\S]*overflow: hidden;/);
+  assert.match(js, /\(els\.root \|\| state\.ctx\?\.host\)\?\.appendChild\(railChip\)/);
+  assert.match(css, /\.coding-agents-rail-chip \{\s*position: absolute;/);
   // Canonical column grammar (design-guide): every column carries header row →
   // filter section (search + collapsed tray with reset + active-dot) →
   // counted view band → recessed well → one-line footer; the main view offers
@@ -288,6 +292,12 @@ test('model capability discovery waits on the command bus terminal contract', ()
   assert.match(source, /CODING_MODELS_WAIT_TIMEOUT_MS = 120_000/);
   assert.match(source, /until: 'terminal', timeoutMs: CODING_MODELS_WAIT_TIMEOUT_MS/);
   assert.doesNotMatch(source, /until: 'completed'/);
+});
+
+test('source action opens the selected app-integrated editor, never a standalone launcher', () => {
+  const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  assert.match(source, /openModuleSource\?\.\(mod\.id\)/);
+  assert.doesNotMatch(source, /openDesktopApp\?\.\('code-editor'/);
 });
 
 test('data-driven empty center views become sync states until collections are live', () => {

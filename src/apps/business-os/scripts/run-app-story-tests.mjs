@@ -44,7 +44,7 @@ const report = {
   schema: 'ctox.business_os.app_story_tests.v1',
   started_at: startedAt,
   ended_at: endedAt,
-  ok: run.status === 0 && apps.length === 35 && missing.length === 0,
+  ok: run.status === 0 && apps.length === inventory.sourceApps.length && missing.length === 0,
   source_app_count: apps.length,
   system_app_count: inventory.coreApps.length,
   test_file_count: testFiles.length,
@@ -60,7 +60,7 @@ mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
 process.stdout.write(stdout);
 process.stderr.write(stderr);
-console.log(`Business OS app story tests: ${apps.length}/35 apps, ${testFiles.length} test files, ${summary.pass ?? '?'} passed.`);
+console.log(`Business OS app story tests: ${apps.length}/${inventory.sourceApps.length} apps, ${testFiles.length} test files, ${summary.pass ?? '?'} passed.`);
 console.log(`Report: ${outputPath}`);
 if (!report.ok) process.exit(run.status || 1);
 

@@ -631,7 +631,7 @@ export async function mount(ctx) {
     const route = routeCommandForRecord(record, view.commands);
     const displayStatus = route ? routeTargetLabel(route) : status;
     const progress = messageProgressModel(record);
-    const progressIcons = progress.steps.map((step) => `<span class="mail-progress-step is-${escapeAttribute(step.state)}" title="${escapeAttribute(step.label)}" aria-label="${escapeAttribute(step.label)}">${ctx.getActionIcon?.(step.icon, 11, 1.9) || ''}</span>`).join('');
+    const progressIcons = progress.steps.map((step) => `<span class="mail-progress-step is-${escapeAttribute(step.state)}" title="${escapeAttribute(step.label)}" aria-label="${escapeAttribute(step.label)}">${mailActionIcon(ctx, step.icon, 11, 1.9)}</span>`).join('');
     return `<div class="mail-record-row" role="option" tabindex="0" data-mail-record-kind="outbound" data-mail-record-id="${escapeAttribute(record.id)}" data-context-record-id="${escapeAttribute(record.id)}" data-context-record-type="outbound_message" data-context-record-label="${escapeAttribute(record.subject || recipient)}" data-context-label="${escapeAttribute(record.subject || recipient)}">
       <input class="mail-record-select" type="checkbox" data-mail-select-record="${escapeAttribute(selectionKey)}" aria-label="${escapeAttribute(record.subject || recipient)} auswählen" ${view.selectedRecords.has(selectionKey) ? 'checked' : ''} />
       <span class="mail-record-sender">${escapeHtml(recipient)}</span>
@@ -1967,7 +1967,7 @@ function collectRefs(root) {
 }
 
 function renderActionIcons(ctx, refs) {
-  const icon = (name) => ctx.getActionIcon?.(name) || '';
+  const icon = (name, size = 16, strokeWidth = 1.8) => mailActionIcon(ctx, name, size, strokeWidth);
   const assignments = [
     [refs.compose, 'edit'], [refs.newGroup, 'add'], [refs.settings, 'settings'], [refs.openNav, 'columns'],
     [refs.closeNav, 'close'], [refs.closeDetail, 'chevronLeft'],
@@ -1987,6 +1987,33 @@ function renderActionIcons(ctx, refs) {
   refs.leftPane?.querySelectorAll('[data-pg-reset]').forEach((button) => assignments.push([button, 'refresh']));
   refs.listPane?.querySelectorAll('[data-pg-reset]').forEach((button) => assignments.push([button, 'refresh']));
   assignments.forEach(([button, name]) => { if (button) button.innerHTML = icon(name); });
+}
+
+// The shell normally supplies these glyphs. Keep a local stroke fallback so
+// standalone fixtures and a briefly unavailable shell never render blank
+// controls (especially the close/navigation actions).
+const MAIL_ICON_FALLBACK_PATHS = Object.freeze({
+  add: 'M12 5v14M5 12h14',
+  check: 'm5 12 4 4L19 6',
+  chevronLeft: 'm15 6-6 6 6 6',
+  chevronRight: 'm9 6 6 6-6 6',
+  close: 'M6 6l12 12M18 6 6 18',
+  columns: 'M4 4h16v16H4zM10 4v16M16 4v16',
+  download: 'M12 3v12m0 0-4-4m4 4 4-4M5 21h14',
+  edit: 'm4 16-1 5 5-1L19 9l-4-4L4 16Zm10-9 4 4',
+  export: 'M12 21V9m0 0-4 4m4-4 4 4M5 3h14',
+  filter: 'M4 6h16M7 12h10M10 18h4',
+  grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
+  list: 'M5 6h14M5 12h14M5 18h14',
+  refresh: 'M20 11a8 8 0 1 0 2 5M20 4v7h-7',
+  settings: 'M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7ZM12 3v2.2M12 18.8V21M21 12h-2.2M5.2 12H3',
+});
+
+function mailActionIcon(ctx, name, size = 16, strokeWidth = 1.8) {
+  const fromShell = ctx?.getActionIcon?.(name, size, strokeWidth);
+  if (typeof fromShell === 'string' && fromShell.trim()) return fromShell;
+  const path = MAIL_ICON_FALLBACK_PATHS[name] || MAIL_ICON_FALLBACK_PATHS.close;
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"></path></svg>`;
 }
 
 function normalizePaneGrammar(detail, fallback) {

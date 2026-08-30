@@ -265,10 +265,11 @@ test('outbound message progress is a six-step status model rendered in the row',
 });
 
 test('mail surface provides a progressive inspector workbench and responsive composer', async () => {
-  const [html, css, manifest] = await Promise.all([
+  const [html, css, manifest, source] = await Promise.all([
     readFile(new URL('index.html', moduleRoot), 'utf8'),
     readFile(new URL('index.css', moduleRoot), 'utf8'),
     readFile(new URL('module.json', moduleRoot), 'utf8').then(JSON.parse),
+    readFile(new URL('index.js', moduleRoot), 'utf8'),
   ]);
   assert.match(html, /data-mail-account/);
   assert.match(html, /data-mail-group-list/);
@@ -287,8 +288,12 @@ test('mail surface provides a progressive inspector workbench and responsive com
   assert.match(html, /data-mail-mailbox-password[^>]+type="password"|type="password"[^>]+data-mail-mailbox-password/);
   assert.match(css, /@media \(max-width: 767px\)/);
   assert.match(css, /\.mail-module\.is-inspector-open/);
-  assert.equal(manifest.default_installed, true);
-  assert.equal(manifest.core, true);
+  assert.match(source, /function mailActionIcon\(/);
+  assert.match(source, /const MAIL_ICON_FALLBACK_PATHS = Object\.freeze/);
+  assert.equal(manifest.layout.shell_contract, 'v2');
+  assert.equal(manifest.install_scope, 'store');
+  assert.equal(manifest.default_installed, false);
+  assert.equal(manifest.core, false);
 });
 
 test('Sellify handoff opens the canonical Mail series-email contract', () => {

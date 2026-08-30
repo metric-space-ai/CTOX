@@ -15,6 +15,17 @@
    Adresszeile, Status-/Download-Leiste) und die Sitzungs-Shards.
    ========================================================================== */
 
+/* Shell V2 keeps the session pane title/filter chrome aligned with the shell
+   glyph and prevents the compact toolbar from wrapping. */
+.shell-window[data-shell-contract="v2"] .browser-module { padding: 0; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .browser-module .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+
 /* custom: Spalten-Pins — LEFT (Sitzungen) = Spalte 1, Resizer = Spalte 2,
    MAIN (Canvas) = Spalte 3. Der Workspace-Grid (2-Spalten-Template) kommt aus
    .ctox-workspace--two-pane; MAIN ist die einzige flexible Spur und behält so
