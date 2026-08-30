@@ -124,11 +124,11 @@ try {
     expect(m.navCount === 0, 'one chat must not show prev/next controls');
     expect(m.stripCount === 1, 'one chat renders one strip');
     expect(m.headerNewCount === 0, 'window header must not contain new-chat plus button');
-    expect(m.dateScopeText === 'Verlauf', `date control must explain chat history scope, got ${m.dateScopeText}`);
-    expect(m.dateTriggerLabel.includes('Chat-Verlauf'), `date trigger needs an accessible history label, got ${m.dateTriggerLabel}`);
+    expect(m.dateScopeText === 'Einsätze', `date control must explain crew mission scope, got ${m.dateScopeText}`);
+    expect(m.dateTriggerLabel.includes('Crew-Einsätze'), `date trigger needs an accessible mission label, got ${m.dateTriggerLabel}`);
     expect(m.dockWidth < 520, `one-chat dock should stay compact, got ${m.dockWidth}`);
     expect(m.activeChipCenterWithinWindow === true, 'one-chat active chip center must sit under the active window');
-    expect(m.activeWindowDockOverflow <= 1, `one-chat window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
+    expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'one-crew window must stay inside the viewport');
   });
 
   await scenario(page, 'date-workload-popover-heatmap', { count: 100, activeIndex: 50 }, async () => {
@@ -150,7 +150,7 @@ try {
     expect(m.dockWidth > 900, `six-chat dock should keep visible chips, got ${m.dockWidth}`);
     expect(m.dockWidth < m.viewportWidth * 0.75, `six-chat dock should not be full width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'six-chat active chip center must sit under the active window');
-    expect(m.activeWindowDockOverflow <= 1, `six-chat active window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
+    expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'six-member gallery must keep its active window inside the viewport');
   });
 
   await scenario(page, 'eight-chats-scrolls-but-not-full-width', { count: 8, activeIndex: 4 }, (m) => {
@@ -160,16 +160,16 @@ try {
     expect(m.stripClasses.includes('is-scrollable'), `overflowing strip must expose scroll affordance class, got ${m.stripClasses}`);
     expect(m.dockWidth < m.viewportWidth * 0.75, `eight-chat dock should avoid premature full width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'eight-chat active chip center must sit under the active window');
-    expect(m.activeWindowDockOverflow <= 1, `eight-chat active window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
+    expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'eight-member gallery must keep its active window inside the viewport');
   });
 
   await scenario(page, 'twelve-chats-full-width-scroll', { count: 12, activeIndex: 5 }, async (m) => {
     expect(m.chipCount === 12, 'twelve chats render twelve chips');
     expect(m.navCount === 2, 'twelve chats show strip nav');
     expect(m.stripHasOverflow === true, 'twelve-chat strip must be horizontally scrollable');
-    expect(m.dockWidth > m.viewportWidth * 0.85, `twelve-chat dock can span shell width, ratio ${m.dockRatio}`);
+    expect(m.dockWidth < m.viewportWidth * 0.75, `twelve-member crew dock must stay bounded, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'twelve-chat active chip center must sit under the active window');
-    expect(m.activeWindowDockOverflow <= 1, `twelve-chat active window must stay inside the dock frame, got overflow ${m.activeWindowDockOverflow}`);
+    expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'twelve-member gallery must keep its active window inside the viewport');
     await page.screenshot({ path: screenshotPath, fullPage: true });
   });
 
@@ -222,11 +222,22 @@ try {
     await page.screenshot({ path: groupedScreenshotPath, fullPage: true });
   });
 
-  await scenario(page, 'only-active-window-renders', { count: 4, activeIndex: 2 }, async (m) => {
+  await scenario(page, 'expanded-crew-windows-render-side-by-side', { count: 3, activeIndex: 1 }, async (m) => {
     expect(m.inactiveFocusable === 0, `inactive controls must not be tabbable, got ${m.inactiveFocusable}`);
     expect(m.inactiveVisibleActions === 0, `inactive header actions must be hidden, got ${m.inactiveVisibleActions}`);
-    expect(m.windowCount === 1, `the stage must render only the active chat window, got ${m.windowCount}`);
-    expect(m.renderedWindowIds.join(',') === 'chat_2', `the rendered window should be chat_2, got ${m.renderedWindowIds.join(',')}`);
+    expect(m.windowCount === 3, `the stage must render all three expanded crew windows, got ${m.windowCount}`);
+    expect(m.renderedWindowIds.join(',') === 'chat_0,chat_1,chat_2', `the rendered crew should preserve its order, got ${m.renderedWindowIds.join(',')}`);
+    expect(m.stageClasses.includes('is-side-by-side'), `three crew windows should arrange side by side, got ${m.stageClasses}`);
+    expect(m.windowCreatureCount === 3, `each work window needs its own creature, got ${m.windowCreatureCount}`);
+    expect(m.dockCreatureCount === 3, `the dock must show the same three crew members, got ${m.dockCreatureCount}`);
+    expect(m.dockLabel === 'Crew', `the surface must be named Crew, got ${m.dockLabel}`);
+  });
+
+  await scenario(page, 'overflowing-crew-folds-into-3d-gallery', { count: 7, activeIndex: 3 }, async (m) => {
+    expect(m.windowCount === 7, `the 3D stage must retain all seven crew windows, got ${m.windowCount}`);
+    expect(!m.stageClasses.includes('is-side-by-side'), `seven windows should overflow into the gallery, got ${m.stageClasses}`);
+    expect(m.inactiveVisible === true, 'inactive gallery windows must remain visibly folded behind the active window');
+    expect(m.inactiveTransform !== 'none', `inactive gallery windows need a 3D transform, got ${m.inactiveTransform}`);
   });
 
   await scenario(page, 'minimized-active-window-leaves-chip-only', { count: 2, activeIndex: 0 }, async () => {
@@ -245,9 +256,17 @@ try {
     expect(after.renderedWindowIds.join(',') === 'chat_1', `remaining rendered window should be chat_1, got ${after.renderedWindowIds.join(',')}`);
   });
 
-  await scenario(page, 'minimized-running-chip-keeps-status', { count: 6, activeIndex: 0, groupedResearch: true }, async () => {
+  await scenario(page, 'minimized-running-chip-keeps-status', {
+    count: 6,
+    activeIndex: 0,
+    groupedResearch: true,
+    staticTracking: true,
+  }, async () => {
     const after = await page.evaluate(async () => {
-      document.querySelector('.ctox-chat-window.is-active [data-chat-minimize]').click();
+      const runningWindow = document.querySelector('.ctox-chat-window[data-chat-id="chat_0"]');
+      const minimizeButton = runningWindow?.querySelector('[data-chat-minimize]');
+      if (!minimizeButton) throw new Error('running chat_0 window is not available to minimize');
+      minimizeButton.click();
       await window.chatHarness.waitFor(() => document.querySelector('[data-chat-focus="chat_0"]')?.classList.contains('is-minimized'));
       return window.chatHarness.collect();
     });
@@ -309,7 +328,7 @@ try {
       await window.chatHarness.waitForPaint();
       return {
         latency: performance.now() - start,
-        composerVisible: Boolean(document.querySelector('.ctox-chat-window.is-active textarea[placeholder="Folgeaufgabe eingeben..."]')),
+        composerVisible: Boolean(document.querySelector('.ctox-chat-window.is-active textarea[name="message"]')),
         triggerVisible: Boolean(document.querySelector('.ctox-chat-window.is-active [data-chat-followup-trigger]')),
       };
     });
@@ -317,7 +336,7 @@ try {
     expect(followUpResult.composerVisible, 'follow-up click must render the follow-up composer');
     expect(followUpResult.latency < 150, `follow-up composer must render before persistence delay, got ${followUpResult.latency.toFixed(1)}ms`);
     const followUpCommand = await page.evaluate(async () => {
-      const textarea = document.querySelector('.ctox-chat-window.is-active textarea[placeholder="Folgeaufgabe eingeben..."]');
+      const textarea = document.querySelector('.ctox-chat-window.is-active textarea[name="message"]');
       textarea.value = 'Korrigierte Folgeaufgabe';
       textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
       document.querySelector('.ctox-chat-window.is-active [data-chat-send]').click();
@@ -703,6 +722,7 @@ function harnessHtml() {
           taskId: trackingId,
           commandId: trackingId,
           status: statuses[index % statuses.length],
+          trackable: options.staticTracking ? false : undefined,
           createdAt: createdAt + 500,
         });
       } else if (failedChat) {
@@ -821,6 +841,8 @@ function harnessHtml() {
         ? stored.deletedChatIds
         : {};
       const activeMessages = document.querySelector('.ctox-chat-window.is-active .ctox-chat-messages');
+      const stageInner = document.querySelector('.ctox-chat-stage-inner');
+      const firstInactiveWindow = document.querySelector('.ctox-chat-window:not(.is-active)');
       const inactiveActions = Array.from(document.querySelectorAll('.ctox-chat-window:not(.is-active) .ctox-chat-header-actions'));
       const inactiveControls = Array.from(document.querySelectorAll('.ctox-chat-window:not(.is-active) button, .ctox-chat-window:not(.is-active) input, .ctox-chat-window:not(.is-active) textarea, .ctox-chat-window:not(.is-active) select, .ctox-chat-window:not(.is-active) a'));
       const dockRect = box(dock);
@@ -851,6 +873,7 @@ function harnessHtml() {
           ? Math.max(0, dockRect.x - activeWindowRect.x, activeWindowRect.x + activeWindowRect.width - (dockRect.x + dockRect.width))
           : 0,
         dateScopeText: document.querySelector('.ctox-date-scope')?.textContent || '',
+        dockLabel: document.querySelector('.ctox-chat-fab span')?.textContent || '',
         dateTriggerLabel: document.querySelector('.ctox-date-picker-trigger')?.getAttribute('aria-label') || '',
         stripCount: document.querySelectorAll('[data-chat-strip]').length,
         navCount: document.querySelectorAll('[data-chat-prev], [data-chat-next]').length,
@@ -872,12 +895,18 @@ function harnessHtml() {
         datePanelTaskText: document.querySelector('[data-chat-date-workload-panel] header span')?.textContent || '',
         chipCount: document.querySelectorAll('[data-chat-focus]').length,
         windowCount: document.querySelectorAll('.ctox-chat-window').length,
+        windowCreatureCount: document.querySelectorAll('.ctox-chat-window .ctox-crew-creature').length,
+        dockCreatureCount: document.querySelectorAll('.ctox-chat-chip .ctox-crew-creature').length,
+        stageClasses: stageInner?.className || '',
+        inactiveVisible: firstInactiveWindow ? isVisible(firstInactiveWindow) : false,
+        inactiveTransform: firstInactiveWindow ? getComputedStyle(firstInactiveWindow).transform : 'none',
         activeId: activeWindow?.dataset.chatId || '',
         renderedWindowIds: Array.from(document.querySelectorAll('.ctox-chat-window')).map((node) => node.dataset.chatId || ''),
         stripClientWidth: strip?.clientWidth || 0,
         stripScrollWidth: strip?.scrollWidth || 0,
         stripHasOverflow: strip ? strip.scrollWidth > strip.clientWidth + 1 : false,
         minimizedChipCount: document.querySelectorAll('.ctox-chat-chip.is-minimized').length,
+        minimizedChipIds: Array.from(document.querySelectorAll('.ctox-chat-chip.is-minimized')).map((node) => node.dataset.chatFocus || ''),
         minimizedRunningChipCount: document.querySelectorAll('.ctox-chat-chip.is-minimized.is-task-running').length,
         minimizedRunningStatusText: document.querySelector('.ctox-chat-chip.is-minimized.is-task-running .ctox-chat-chip-copy small')?.textContent || '',
         minimizedWindowCount: document.querySelectorAll('.ctox-chat-window.is-minimized').length,

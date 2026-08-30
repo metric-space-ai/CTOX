@@ -5,6 +5,7 @@ use anyhow::Context;
 use base64::Engine;
 use ctox_app_server_protocol::AuthMode as ApiAuthMode;
 use polars::prelude::*;
+use polars_utils::pl_path::PlRefPath;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
@@ -3655,7 +3656,7 @@ fn dataframe_to_json_rows(df: &DataFrame) -> anyhow::Result<Vec<Value>> {
 }
 
 fn scan_parquet(path: &Path) -> PolarsResult<LazyFrame> {
-    let pl_path = PlPath::new(&path.to_string_lossy());
+    let pl_path = PlRefPath::new(path.to_string_lossy().into_owned());
     LazyFrame::scan_parquet(pl_path, ScanArgsParquet::default())
 }
 

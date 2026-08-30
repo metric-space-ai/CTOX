@@ -46,13 +46,13 @@ expectIncludes(source, "openChats.length > 1 && openChats.length < MANY_CHAT_THR
 expectIncludes(source, "openChats.length >= MANY_CHAT_THRESHOLD ? 'has-many-chats' : ''", 'Many-chat mode must not activate before high tab counts');
 expectIncludes(source, 'function selectVisibleChats(openChats, activeChat)', 'Busy days must not render every chat tab/window');
 expectIncludes(source, 'const expandedChats = openChats.filter((chat) => !chat.minimized);', 'Minimized chats must be removed from the rendered window set');
-expectIncludes(source, 'const visibleWindowChats = stageWindowChats(activeExpandedChat);', 'Only the active expanded chat may own the stage');
+expectIncludes(source, 'const visibleWindowChats = stageWindowChats(expandedChats, activeExpandedChat);', 'All expanded crew windows must reach the shared stage');
 expectIncludes(
   source,
   'const windowShapeUnchanged = existingWindows.length === visibleWindowChats.length',
   'In-place updates must compare against expanded rendered windows only'
 );
-expectIncludes(source, 'visibleWindowChats.map((chat, idx)', 'Chat stage must render expanded chats, not every open tab');
+expectIncludes(source, 'visibleWindowChats.map((chat, idx)', 'Crew stage must render the bounded expanded window set');
 expectIncludes(
   source,
   '.ctox-chat-stage-inner.is-side-by-side .ctox-chat-window.is-minimized',
@@ -67,7 +67,7 @@ expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskSta
 expectIncludes(source, '`is-task-${taskState}`', 'Chat chips must include task-state classes');
 expectIncludes(source, '.ctox-chat-chip.is-minimized:not(.is-task-idle)', 'Minimized non-idle chats must keep visible status styling');
 expectIncludes(source, 'function chatDateAriaLabel(dateStr, total = 0)', 'Date history control needs a clear accessible label');
-expectIncludes(source, "<span class=\"ctox-date-scope\">${chatUiIsGerman() ? 'Verlauf' : 'History'}</span>", 'Date control must visibly explain it is chat history');
+expectIncludes(source, "<span class=\"ctox-date-scope\">${chatUiIsGerman() ? 'Einsätze' : 'Missions'}</span>", 'Date control must visibly explain it contains crew missions');
 expectIncludes(source, 'chatBusyPanel({ chats: openChats, selectedDate, state })', 'Busy days need a filterable list panel');
 expectIncludes(source, 'data-chat-list-filter="source"', 'Busy-day list must include source filtering');
 expectIncludes(source, 'data-chat-list-filter="group"', 'Busy-day list must include grouping control');
@@ -85,12 +85,12 @@ expectIncludes(
 expectIncludes(
   source,
   'const layoutFrame = chatWindowStageFrame(root, stageInner, widestWindow);',
-  'Chat windows must be aligned against the visible dock frame'
+  'Crew windows must be aligned against the shared stage frame'
 );
 expectIncludes(
   source,
   'function chatWindowStageFrame(root, stageInner, minContentWidth = 0)',
-  'Chat window layout needs a dock-relative frame helper'
+  'Crew window layout needs a viewport-safe stage frame helper'
 );
 expectIncludes(
   source,
@@ -119,6 +119,13 @@ expectIncludes(
   '.ctox-chat-window:not(.is-active) .ctox-chat-header-actions',
   'Inactive window controls must be hidden instead of visibly dead'
 );
+expectIncludes(
+  source,
+  '.ctox-chat-window:not(.is-active) {\n      opacity: 0.6;\n      visibility: visible;\n      pointer-events: auto;',
+  'Inactive desktop windows must remain visible and focusable as a 3D gallery'
+);
+expectIncludes(source, 'function crewCreatureHtml(chat, taskState = getTaskState(chat), placement = \'dock\')', 'Crew members need deterministic SVG identities');
+expectIncludes(source, '@keyframes ctoxCrewWork', 'Crew status must have a working animation');
 expectIncludes(
   source,
   'setWindowInteractiveState(node, chat.id === activeChat?.id && !chat.minimized);',

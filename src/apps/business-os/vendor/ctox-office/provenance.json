@@ -91,7 +91,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/frame.html",
-      "sha256": "eb5485117c19c71c3fd5550c8c972d5f52fec670d9f0b1adc5410d107c705355"
+      "sha256": "b6b1f7c9ee5313a2d261a573087524d808f8d35e56356d518c9b45468309286e"
     },
     {
       "path": "src/apps/business-os/office-engine/src/legacy-runtime/document.mjs",
@@ -3988,7 +3988,7 @@
     {
       "path": "src/apps/business-os/vendor/ctox-office/frame.html",
       "bytes": 560,
-      "sha256": "eb5485117c19c71c3fd5550c8c972d5f52fec670d9f0b1adc5410d107c705355"
+      "sha256": "b6b1f7c9ee5313a2d261a573087524d808f8d35e56356d518c9b45468309286e"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/rpc.mjs",

@@ -187,7 +187,7 @@ function assertReleaseWorkflowMatrix() {
   const workflow = fs.readFileSync(releaseWorkflowPath, "utf8");
   assert.match(
     workflow,
-    /^\s{2}build-business-os-desktop:\n\s+# Legacy donor only\.[\s\S]*?\n\s+if: \$\{\{ false \}\}/m,
+    /^\s{2}build-business-os-desktop:\r?\n\s+# Legacy donor only\.[\s\S]*?\r?\n\s+if: \$\{\{ false \}\}/m,
     "legacy Business OS Desktop build must remain disabled",
   );
   const releaseNeeds = workflow.match(/^\s{4}needs: \[business-os-production-gate[^\n]+\]/m)?.[0] || "";

@@ -52,10 +52,21 @@ test('background control commands cannot steal focus when their result arrives',
   assert.equal(__businessChatTestInternals.chatAllowsAutoFocus({}), true);
 });
 
-test('business chat stage renders only the active chat window', () => {
-  const active = { id: 'chat-active' };
-  assert.deepEqual(__businessChatTestInternals.stageWindowChats(active), [active]);
-  assert.deepEqual(__businessChatTestInternals.stageWindowChats(null), []);
+test('business crew stage keeps expanded windows together and caps the gallery', () => {
+  const expanded = Array.from({ length: 16 }, (_, index) => ({ id: `chat-${index}` }));
+  assert.deepEqual(__businessChatTestInternals.stageWindowChats(expanded.slice(0, 3), expanded[1]), expanded.slice(0, 3));
+  assert.equal(__businessChatTestInternals.stageWindowChats(expanded, expanded[8]).length, 12);
+  assert.ok(__businessChatTestInternals.stageWindowChats(expanded, expanded[8]).includes(expanded[8]));
+  assert.deepEqual(__businessChatTestInternals.stageWindowChats([], null), []);
+});
+
+test('crew identities and SVG bodies are stable per work stream', () => {
+  const chat = { id: 'chat-stable', title: 'Rechnungen prüfen', messages: [] };
+  const identity = __businessChatTestInternals.crewIdentity(chat);
+  assert.deepEqual(__businessChatTestInternals.crewIdentity(chat), identity);
+  assert.ok(['round', 'blob', 'square', 'triangle'].includes(identity.shape));
+  assert.match(__businessChatTestInternals.crewCreatureHtml(chat, 'running', 'window'), /ctox-crew-creature is-running/);
+  assert.match(__businessChatTestInternals.crewCreatureHtml(chat, 'running', 'window'), /<svg viewBox="0 0 64 64"/);
 });
 
 test('business chat does not restore terminal task windows over app content', () => {
@@ -1304,6 +1315,24 @@ test('business chat treats only disposable empty chats as deletion-empty', () =>
   }), false);
 });
 
+test('business chat does not resync messages explicitly marked untrackable', () => {
+  const state = {
+    chats: [{
+      id: 'chat-static-status',
+      messages: [{
+        id: 'message-static',
+        commandId: 'cmd-static',
+        taskId: 'task-static',
+        status: 'running',
+        trackable: false,
+      }],
+    }],
+  };
+
+  assert.deepEqual(__businessChatTestInternals.collectTrackedMessages(state), []);
+  assert.equal(__businessChatTestInternals.hasActiveTrackedMessages(state), false);
+});
+
 test('business chat tracking watch pins command and queue collections until terminal replies exist', () => {
   const timers = [];
   const commands = makeSubscriptionCollection();
@@ -2041,7 +2070,7 @@ function makeChatRootFixture({ chat, mutations }) {
   });
 
   const titleStrong = makeTextNode(chat.title || 'CTOX', 'titleStrong');
-  const maxBtn = makeAttrNode({ 'aria-label': 'Chat maximieren' }, 'maxBtn');
+  const maxBtn = makeAttrNode({ 'aria-label': 'Arbeitsfenster maximieren' }, 'maxBtn');
   maxBtn.querySelectorAll = () => [];
   const markEl = {
     className: 'ctox-chat-chip-mark is-queued',

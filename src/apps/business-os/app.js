@@ -80,7 +80,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-knowledge-shell-v2-dialogs-v292';
+const APP_BUILD = '20260830-business-os-crew-v293';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -763,12 +763,12 @@ const shellMessages = {
     pinned: 'Gepinnt',
     running: 'Läuft',
     openApp: 'Öffnen',
-    chatToCtox: 'Mit CTOX chatten',
+    chatToCtox: 'An die Crew übergeben',
     chatWorkDataLabel: 'Daten ändern',
     chatAnswerLabel: 'Frage stellen',
     chatModifyAppLabel: 'App ändern',
-    chatPlaceholder: 'Was soll CTOX hier tun oder prüfen?',
-    chatOpening: 'Öffne Chat...',
+    chatPlaceholder: 'Was soll die Crew hier tun oder prüfen?',
+    chatOpening: 'Öffne Crew...',
     send: 'Senden',
     startMenuOpen: 'Startmenü öffnen',
     ctoxCoreOpen: 'CTOX AI Core öffnen',
@@ -882,12 +882,12 @@ const shellMessages = {
     pinned: 'Pinned',
     running: 'Running',
     openApp: 'Open',
-    chatToCtox: 'Chat to CTOX',
+    chatToCtox: 'Hand off to crew',
     chatWorkDataLabel: 'Change data',
     chatAnswerLabel: 'Ask question',
     chatModifyAppLabel: 'Change app',
-    chatPlaceholder: 'What should CTOX do or check here?',
-    chatOpening: 'Opening Chat...',
+    chatPlaceholder: 'What should the crew do or check here?',
+    chatOpening: 'Opening crew...',
     send: 'Send',
     startMenuOpen: 'Open start menu',
     ctoxCoreOpen: 'Open CTOX AI Core',
@@ -7314,7 +7314,7 @@ async function submitBusinessChatTask(moduleLike, options = {}) {
         callback(value);
       };
       const timeoutId = window.setTimeout(() => {
-        finish(reject, new Error('Der CTOX-Chat hat den Auftrag nicht rechtzeitig an die Queue übergeben.'));
+        finish(reject, new Error('Die CTOX-Crew hat den Auftrag nicht rechtzeitig an die Queue übergeben.'));
       }, 30_000);
       window.dispatchEvent(new CustomEvent('ctox-business-os-chat-submit', {
         detail: {
@@ -12994,12 +12994,12 @@ function showGlobalCtoxContextMenu(context, x, y) {
   });
   const lang = shellLang();
 
-  const titleText = shellText('chatToCtox') || (lang === 'de' ? 'Mit CTOX chatten' : 'Chat to CTOX');
+  const titleText = shellText('chatToCtox') || (lang === 'de' ? 'An die Crew übergeben' : 'Hand off to crew');
   const workDataLabel = shellText('chatWorkDataLabel') || (lang === 'de' ? 'Daten ändern' : 'Change data');
   const answerLabel = shellText('chatAnswerLabel') || (lang === 'de' ? 'Frage stellen' : 'Ask question');
   const modifyAppLabel = shellText('chatModifyAppLabel') || (lang === 'de' ? 'App ändern' : 'Change app');
   const approvalLabel = lang === 'de' ? 'Freigabe einholen' : 'Request approval';
-  const placeholderText = shellText('chatPlaceholder') || (lang === 'de' ? 'Was soll CTOX hier tun oder prüfen?' : 'What should CTOX do or check here?');
+  const placeholderText = shellText('chatPlaceholder') || (lang === 'de' ? 'Was soll die Crew hier tun oder prüfen?' : 'What should the crew do or check here?');
   const dataPlaceholderText = lang === 'de' ? 'Welche Daten sollen geändert werden?' : 'What data should change?';
   const askPlaceholderText = lang === 'de' ? 'Welche Frage soll beantwortet werden?' : 'What question should be answered?';
   const appPlaceholderText = lang === 'de' ? 'Was soll an der App geändert werden?' : 'What should change in the app?';
@@ -13008,8 +13008,8 @@ function showGlobalCtoxContextMenu(context, x, y) {
   const closeLabel = lang === 'de' ? 'Schließen' : 'Close';
   const missingMsgLabel = lang === 'de' ? 'Nachricht fehlt.' : 'Message is missing.';
   const missingReviewerLabel = lang === 'de' ? 'Reviewer fehlt.' : 'Reviewer is missing.';
-  const chatNotReadyLabel = lang === 'de' ? 'Chat ist noch nicht bereit.' : 'Chat is not ready.';
-  const chatOpeningLabel = shellText('chatOpening') || (lang === 'de' ? 'Öffne Chat...' : 'Opening Chat...');
+  const chatNotReadyLabel = lang === 'de' ? 'Die Crew ist noch nicht bereit.' : 'The crew is not ready.';
+  const chatOpeningLabel = shellText('chatOpening') || (lang === 'de' ? 'Öffne Crew...' : 'Opening crew...');
   const commandOpeningLabel = lang === 'de' ? 'Sende an Threads...' : 'Sending to Threads...';
   const reviewerLabel = lang === 'de' ? 'Reviewer' : 'Reviewer';
   const reviewerPlaceholder = lang === 'de' ? 'reviewer-user-id' : 'reviewer-user-id';
