@@ -80,7 +80,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-business-os-crew-v293';
+const APP_BUILD = '20260830-business-os-crew-v294';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -294,6 +294,9 @@ const state = {
   eventBus: null,
   contextMenu: null,
   notifications: null,
+  compactWarningToasts: { ctox: null, recovery: null },
+  compactWarningFingerprints: { ctox: '', recovery: '' },
+  compactWarningMediaBound: false,
   windowManager: null,
   windowSwitcher: null,
   windowGeometryCache: new Map(),
@@ -1083,6 +1086,9 @@ async function bootstrap() {
     container: els.shellNotifications,
     t: (key, fallback) => shellText(key) || fallback || key,
   });
+  bindCompactShellWarningNotifications();
+  renderShellCtoxWarning(state.ctoxHealth);
+  renderBrowserRecoveryWarning();
   const snapPreviewEl = document.createElement('div');
   snapPreviewEl.className = 'shell-snap-preview';
   snapPreviewEl.hidden = true;
@@ -8980,10 +8986,21 @@ async function registerCustomModuleIcons() {
   const { registerSvgIcon } = await loadShellIconsModule();
   if (!Array.isArray(state.modules)) return;
   for (const mod of state.modules) {
-    const svgIcon = await resolveModuleIconSvg(mod);
-    if (svgIcon) {
-      registerSvgIcon(mod.id, svgIcon);
+    const inlineSvg = inlineModuleIconSvg(mod);
+    if (inlineSvg) {
+      registerSvgIcon(mod.id, inlineSvg);
+      continue;
     }
+    // Optional external icon assets must not hold the whole workspace boot.
+    // resolveModuleIconSvg() caches the in-flight promise, so overlapping
+    // catalog refreshes still issue at most one request per module.
+    void resolveModuleIconSvg(mod)
+      .then((svgIcon) => {
+        if (svgIcon) registerSvgIcon(mod.id, svgIcon);
+      })
+      .catch((error) => {
+        console.warn(`[business-os] optional module icon unavailable: ${mod.id}`, error);
+      });
   }
 }
 
@@ -9543,12 +9560,18 @@ function renderShellCtoxWarning(status) {
     els.ctoxWarning.hidden = true;
     els.ctoxWarning.removeAttribute('title');
     document.body.dataset.ctoxOperational = 'ok';
+    syncCompactShellWarningNotification('ctox', null);
     return;
   }
   els.ctoxWarning.hidden = false;
   els.ctoxWarning.textContent = shellText('ctoxNotWorking');
   els.ctoxWarning.title = problem;
   document.body.dataset.ctoxOperational = 'blocked';
+  syncCompactShellWarningNotification('ctox', {
+    title: shellText('ctoxNotWorking'),
+    message: problem,
+    action: () => openSettingsDrawer({ initialTab: 'runtime' }),
+  });
 }
 
 function updateRecoveryWarningFromEvent(event) {
@@ -9594,10 +9617,61 @@ function renderBrowserRecoveryWarning() {
   els.recoveryWarning.hidden = !warning;
   if (!warning) {
     els.recoveryWarning.removeAttribute('title');
+    syncCompactShellWarningNotification('recovery', null);
     return;
   }
   els.recoveryWarning.textContent = shellText('recoveryExport');
-  els.recoveryWarning.title = `${warning.pendingWrites} pending write(s); storage pressure ${Math.round(warning.pressureRatio * 100)}%`;
+  const message = `${warning.pendingWrites} pending write(s); storage pressure ${Math.round(warning.pressureRatio * 100)}%`;
+  els.recoveryWarning.title = message;
+  syncCompactShellWarningNotification('recovery', {
+    title: shellText('recoveryExport'),
+    message,
+    action: () => exportBrowserRecoveryFromWarning(),
+  });
+}
+
+function compactShellMediaMatches() {
+  try {
+    const media = globalThis.matchMedia?.('(max-width: 900px)');
+    return media ? media.matches === true : globalThis.innerWidth <= 900;
+  } catch {
+    return globalThis.innerWidth <= 900;
+  }
+}
+
+function syncCompactShellWarningNotification(kind, warning) {
+  const notifications = state.notifications;
+  if (!notifications || !(kind in state.compactWarningToasts)) return;
+  const visibleWarning = compactShellMediaMatches() ? warning : null;
+  const fingerprint = visibleWarning
+    ? `${visibleWarning.title}\n${visibleWarning.message}`
+    : '';
+  if (state.compactWarningFingerprints[kind] === fingerprint) return;
+  const existingId = state.compactWarningToasts[kind];
+  if (existingId) notifications.close(existingId);
+  state.compactWarningToasts[kind] = null;
+  state.compactWarningFingerprints[kind] = fingerprint;
+  if (!visibleWarning) return;
+  state.compactWarningToasts[kind] = notifications.show({
+    type: 'warning',
+    time: 0,
+    title: visibleWarning.title,
+    message: visibleWarning.message,
+    action: {
+      label: visibleWarning.title,
+      callback: visibleWarning.action,
+    },
+  });
+}
+
+function bindCompactShellWarningNotifications() {
+  if (state.compactWarningMediaBound || typeof globalThis.matchMedia !== 'function') return;
+  const media = globalThis.matchMedia('(max-width: 900px)');
+  media.addEventListener?.('change', () => {
+    renderShellCtoxWarning(state.ctoxHealth);
+    renderBrowserRecoveryWarning();
+  });
+  state.compactWarningMediaBound = true;
 }
 
 function renderBrowserConflictsWarning() {
