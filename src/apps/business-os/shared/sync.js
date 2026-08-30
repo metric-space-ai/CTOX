@@ -140,7 +140,12 @@ const RETRYABLE_CONTROL_PLANE_CODES = new Set([
 const signalingErrorHandlers = new Set();
 let signalingErrorObserverInstalled = false;
 
-export function createSyncRuntime({ db, config, onDiagnostic }) {
+export function createSyncRuntime({
+  db,
+  config,
+  onDiagnostic,
+  capabilityTokenProvider = getBusinessOsCapabilityToken,
+}) {
   const bridges = new Map();
   const activeCollections = new Set();
   // Direct shell/service consumers pin a bridge until they explicitly stop
@@ -835,6 +840,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
           config,
           collection,
           recordCollection,
+          capabilityTokenProvider,
           onFatalPeerError: (error) => scheduleGlobalRestart(collection, error),
           // Passed down explicitly: startWebRtcReplication is a module-level
           // function, so it cannot see this closure. The previous direct call
@@ -1492,7 +1498,15 @@ function signalingUrlMatchKey(value) {
   }
 }
 
-async function startWebRtcReplication({ db, config, collection, recordCollection, onFatalPeerError, scheduleRestart }) {
+async function startWebRtcReplication({
+  db,
+  config,
+  collection,
+  recordCollection,
+  capabilityTokenProvider,
+  onFatalPeerError,
+  scheduleRestart,
+}) {
   const rxCollection = db?.raw?.[collection] || db?.collection?.(collection);
   if (!rxCollection) {
     recordCollection?.(collection, { status: 'pending', reason: 'collection-not-registered' });
@@ -1590,7 +1604,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     retryTime: 5000,
     ctox: {
       expectedNativePeerId: String(config?.native_peer_id || config?.nativePeerId || '').trim(),
-      capabilityTokenProvider: getBusinessOsCapabilityToken,
+      capabilityTokenProvider,
       deviceProofProvider: getBusinessOsDeviceProof,
       onPeerProtocol(info) {
         const remoteCapabilities = Array.isArray(info?.capabilities) ? info.capabilities : [];

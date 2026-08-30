@@ -1323,6 +1323,7 @@ async function openBusinessDataPlane(syncConfig) {
       db: state.db,
       config: syncConfig,
       onDiagnostic: updateSyncDiagnostics,
+      capabilityTokenProvider: commandBusModule.getBusinessOsCapabilityToken,
     });
 
     setStartupProgress(69, shellText('bootServices'));
