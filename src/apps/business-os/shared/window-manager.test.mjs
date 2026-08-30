@@ -173,12 +173,17 @@ test('shell-v2 morph is endpoint-exact, spline-like and geometrically fuses brac
   assert.equal(frames.find((frame) => frame.amount >= 0.7).contentOpacity, 0);
   assert.equal(frames.at(-1).contentOpacity, 1);
   assert.equal(frames[0].cornerScale, 0);
+  assert.equal(frames[0].cornerOpacity, 0);
   assert.equal(frames[0].radius, anchor.radius);
   assert.equal(frames.find((frame) => frame.amount >= 0.17).cornerScale, 1);
+  assert.equal(frames.find((frame) => frame.amount >= 0.17).cornerOpacity, 1);
   assert.equal(frames.at(-1).cornerScale, 1);
+  assert.equal(frames.at(-1).cornerOpacity, 1);
   for (let index = 1; index < frames.length; index += 1) {
     assert.ok(frames[index].scaleX >= frames[index - 1].scaleX);
     assert.ok(frames[index].scaleY >= frames[index - 1].scaleY);
+    assert.ok(frames[index].cornerOpacity >= frames[index - 1].cornerOpacity);
+    assert.ok(frames[index].cornerOpacity >= 0 && frames[index].cornerOpacity <= 1);
   }
   // The quadratic control point bends the path: its midpoint must not land
   // on the straight-line midpoint between icon and final window.

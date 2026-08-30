@@ -221,6 +221,7 @@ export function shellV2MorphFrameData(finalRect, anchor, frameCount = SHELL_V2_M
       iconRadius: anchor.radius * (1 - fusionAmount),
       contentOpacity: contentAmount,
       cornerScale: cornerAmount,
+      cornerOpacity: cornerAmount * cornerAmount,
     };
   });
 }
@@ -1107,7 +1108,7 @@ export function createWindowManager({
     ));
     const corners = Array.from(el.querySelectorAll('[data-window-resize]'));
     const openCornerFrames = morphData.map((frame) => ({
-      opacity: 1,
+      opacity: frame.cornerOpacity,
       transform: `scale(${frame.cornerScale})`,
       offset: frame.amount,
     }));
