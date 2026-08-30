@@ -2452,8 +2452,7 @@ fn sync_runtime_settings_if_changed(
     )
 }
 
-#[cfg(test)]
-fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
+pub(crate) fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
     with_business_os_database(
         root,
         "failed to create Business OS module catalog sync runtime",

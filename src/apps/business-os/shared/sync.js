@@ -494,7 +494,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260830-main-merge-v197');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260830-main-merge-v198');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -786,6 +786,21 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
         // command. The background repair loop owns reconnect/restart policy.
         // Only a replication state that is actually cancelled is replaced.
         const currentBridge = await withTimeout(currentBridgePromise, 3000);
+        if (!currentBridge) {
+          // Keep repeated acquisitions bounded while the authoritative bridge
+          // is still opening. The ready promise remains available to callers,
+          // but the app/window launch itself does not hang on WebRTC startup.
+          const pendingBridge = createPendingCollectionBridge(collection, currentBridgePromise);
+          recordCollection(collection, {
+            status: 'pending',
+            connectionStatus: 'connecting',
+            reason: pendingBridge.reason,
+            lastError: null,
+            reconnectingSince: null,
+            connectedAt: null,
+          });
+          return pendingBridge;
+        }
         if (
           shouldReplaceCachedBridgeForStart(currentBridge, options)
           || currentBridge?.state?.cancelled === true
@@ -800,7 +815,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
             status: 'reused',
             connectionStatus: current.connectionStatus || current.status || 'connecting',
           });
-          return bridges.get(collection);
+          return currentBridge;
         }
       }
       recordCollection(collection, { status: 'starting' });
@@ -832,17 +847,7 @@ export function createSyncRuntime({ db, config, onDiagnostic }) {
       try {
         const bridge = await withTimeout(bridgePromise, 3000);
         if (!bridge) {
-          const pendingBridge = {
-            mode: 'pending',
-            collection,
-            reason: 'startup-in-progress',
-            state: null,
-            ready: bridgePromise,
-            stop: async () => {
-              const resolvedBridge = await bridgePromise.catch(() => null);
-              await resolvedBridge?.stop?.();
-            },
-          };
+          const pendingBridge = createPendingCollectionBridge(collection, bridgePromise);
           recordCollection(collection, {
             status: 'pending',
             connectionStatus: 'connecting',
@@ -1148,6 +1153,38 @@ function createFollowerBridge(collection, status, coordinator = null, directFall
       }
     },
     stop: async () => {},
+  };
+}
+
+function createPendingCollectionBridge(collection, bridgePromise) {
+  let stopRequested = false;
+  let stopTask = null;
+  const ready = Promise.resolve(bridgePromise);
+  const stopResolvedBridge = (bridge) => {
+    if (!bridge) return Promise.resolve(false);
+    if (!stopTask) {
+      stopTask = withTimeout(bridge.stop?.(), 3000)
+        .then(() => true)
+        .catch(() => false);
+    }
+    return stopTask;
+  };
+  ready.then(async (bridge) => {
+    if (!stopRequested) return;
+    await stopResolvedBridge(bridge);
+  }).catch(() => null);
+  return {
+    mode: 'pending',
+    collection,
+    reason: 'startup-in-progress',
+    state: null,
+    ready,
+    async stop() {
+      stopRequested = true;
+      const bridge = await withTimeout(ready.catch(() => null), 3000);
+      if (!bridge) return false;
+      return stopResolvedBridge(bridge);
+    },
   };
 }
 
@@ -1472,7 +1509,7 @@ async function startWebRtcReplication({ db, config, collection, recordCollection
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260830-main-merge-v197');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260830-main-merge-v198');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }
@@ -3030,6 +3067,7 @@ export const __ctoxSyncTestHooks = {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   shouldReplaceCachedBridgeForStart,
+  createPendingCollectionBridge,
   DEMAND_ONLY_COLLECTION_START_ERROR,
   createFollowerBridge,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,

@@ -26,6 +26,22 @@ const ALLOWED_HOST = "bundesanzeiger.de";
 const SEARCH_URL = "https://www.bundesanzeiger.de/pub/de/suche?0";
 const BROWSER_TIMEOUT_MS = 120_000;
 
+// The target is a source adapter, not a promise that Bundesanzeiger can
+// provide every field in the Outbound Lead Generation policy.  Keep the
+// vocabulary explicit so a run reports unavailable fields instead of
+// manufacturing values from a publication title or a third-party venue.
+const OUTBOUND_RESEARCH_FIELDS = Object.freeze([
+  "firma_name", "firma_fruehere_namen", "firma_aktivitaetsstatus",
+  "firma_anschrift", "firma_besucheranschrift", "firma_postanschrift",
+  "firma_postfach", "firma_plz", "firma_ort", "firma_land", "firma_email",
+  "firma_domain", "firma_telefon", "firma_fax", "firma_geschaeftstaetigkeit",
+  "firma_homepage_fact_sheet", "firma_geschaeftsfuehrung", "firma_prokura",
+  "wz_code", "umsatz", "mitarbeiter", "person_geschlecht", "person_titel",
+  "person_vorname", "person_nachname", "person_funktion", "person_position",
+  "person_email", "person_email_validation", "person_telefon", "person_linkedin",
+  "person_xing",
+]);
+
 function readInput() {
   const raw = process.env.CTOX_SCRAPE_INPUT_JSON;
   if (!raw) return { company: "", country: "" };
@@ -106,7 +122,22 @@ function selectMatchingEntry(company, entries) {
   ) || null;
 }
 
-function buildRecords(entry, sourceUrl) {
+function requestedFields(input) {
+  const fields = Array.isArray(input && input.requested_fields)
+    ? input.requested_fields
+    : Array.isArray(input && input.fields) ? input.fields : OUTBOUND_RESEARCH_FIELDS;
+  return [...new Set(fields.map(String).map((field) => field.trim()).filter(Boolean))]
+    .filter((field) => OUTBOUND_RESEARCH_FIELDS.includes(field));
+}
+
+function fieldFromPublicationInformation(information, label) {
+  const text = String(information || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const match = text.match(new RegExp(`(?:^|\\b)${label}\\s*:\\s*(.+)$`, "i"));
+  return match ? match[1].trim() : "";
+}
+
+function buildRecords(entry, sourceUrl, fields = OUTBOUND_RESEARCH_FIELDS) {
   const safeUrl = allowedSourceUrl(sourceUrl);
   if (!entry || !safeUrl || !entry.name) return [];
   const noteParts = ["Bundesanzeiger Suchergebnis"];
@@ -130,10 +161,22 @@ function buildRecords(entry, sourceUrl) {
       note,
     });
   }
-  return records;
+  // Only map an activity when the portal labels it explicitly.  Generic
+  // publication text such as "Jahresabschluss" is not a business activity.
+  const activity = fieldFromPublicationInformation(entry.information, "Gegenstand des Unternehmens");
+  if (activity && fields.includes("firma_geschaeftstaetigkeit")) {
+    records.push({
+      field: "firma_geschaeftstaetigkeit",
+      value: activity,
+      confidence: "medium",
+      source_url: safeUrl.href,
+      note,
+    });
+  }
+  return records.filter((record) => fields.includes(record.field));
 }
 
-function classifyBrowserResult(company, result) {
+function classifyBrowserResult(company, result, fields = OUTBOUND_RESEARCH_FIELDS) {
   if (!result) {
     return {
       records: [],
@@ -157,7 +200,19 @@ function classifyBrowserResult(company, result) {
     };
   }
   const entry = selectMatchingEntry(company, result.entries);
-  if (entry) return { records: buildRecords(entry, sourceUrl.href) };
+  if (entry) {
+    const records = buildRecords(entry, sourceUrl.href, fields);
+    const availableFields = [...new Set(records.map((record) => record.field))];
+    return {
+      records,
+      available_fields: availableFields,
+      missing_fields: fields.filter((field) => !availableFields.includes(field)),
+      evidence_urls: [...new Set(records.map((record) => record.source_url))],
+      detail: records.length > 0
+        ? "bundesanzeiger.de returned exact-match public search evidence"
+        : "bundesanzeiger.de exact match contained no requested extractable fields",
+    };
+  }
   if (result.no_results === true) {
     return {
       records: [],
@@ -310,7 +365,8 @@ async function main() {
     return;
   }
   const browserResult = browserSearch(company);
-  const output = classifyBrowserResult(company, browserResult);
+  const fields = requestedFields(input);
+  const output = classifyBrowserResult(company, browserResult, fields);
   if (output.failure_mode === "blocked") {
     recordUnlockSignal(browserResult?.url, ["access_challenge"]);
   }

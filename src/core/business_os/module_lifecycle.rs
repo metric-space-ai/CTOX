@@ -1654,14 +1654,8 @@ pub fn rollback_module_to_version(
     let module_parent = module_root
         .parent()
         .context("module source root has no parent")?;
-    let staging = module_parent.join(format!(
-        ".rollback-stage-{module_id}-{}",
-        Uuid::new_v4()
-    ));
-    let backup = module_parent.join(format!(
-        ".rollback-backup-{module_id}-{}",
-        Uuid::new_v4()
-    ));
+    let staging = module_parent.join(format!(".rollback-stage-{module_id}-{}", Uuid::new_v4()));
+    let backup = module_parent.join(format!(".rollback-backup-{module_id}-{}", Uuid::new_v4()));
 
     let current = compute_module_bundle(&source_app_root, &module_id)?;
     let mut target_paths = std::collections::BTreeSet::new();
@@ -2019,11 +2013,11 @@ mod tests {
         ModuleVersionListRequest, ModuleVersionRollbackRequest,
     };
     use super::{
-        compute_module_bundle, copy_dir_recursive, delete_installed_module, list_module_versions,
-        ensure_rollback_collection_schema_compatible, module_catalog_source_id,
-        module_policy_decision, normalize_catalog_installed_manifest, record_module_release,
-        record_module_version, release_managed_shadow_source, rollback_module_to_version,
-        sync_module_version_records, validate_staged_catalog_module,
+        compute_module_bundle, copy_dir_recursive, delete_installed_module,
+        ensure_rollback_collection_schema_compatible, list_module_versions,
+        module_catalog_source_id, module_policy_decision, normalize_catalog_installed_manifest,
+        record_module_release, record_module_version, release_managed_shadow_source,
+        rollback_module_to_version, sync_module_version_records, validate_staged_catalog_module,
     };
     use rusqlite::{params, Connection};
     use serde_json::Value;
@@ -2835,9 +2829,7 @@ mod tests {
 
         let error = ensure_rollback_collection_schema_compatible(&live, &staged)
             .expect_err("schema-changing rollback must fail closed");
-        assert!(error
-            .to_string()
-            .contains("incompatible collection schema"));
+        assert!(error.to_string().contains("incompatible collection schema"));
         Ok(())
     }
 

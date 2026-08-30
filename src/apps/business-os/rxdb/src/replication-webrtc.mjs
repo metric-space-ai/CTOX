@@ -193,6 +193,7 @@ export const replicationWebRtcTestInternals = Object.freeze({
   shouldAttachFileDemandLoaderBeforeCollectionHandshake,
   shouldPersistFetchedFileChunks,
   queryMetaBudgetBytesForCollection,
+  protocolHandshakeIsMultiplexed,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -202,6 +203,17 @@ export const replicationWebRtcTestInternals = Object.freeze({
   getSharedRoomPeerClass: () => SharedRoomPeer,
   getReplicationStateClass: () => CtoxWebRtcReplicationState,
 });
+
+function protocolHandshakeIsMultiplexed(collectionCount, localProtocol, remoteProtocol) {
+  const advertisedCollectionCount = (protocol) => (
+    protocol?.collectionSchemas && typeof protocol.collectionSchemas === 'object'
+      ? Object.keys(protocol.collectionSchemas).length
+      : 0
+  );
+  return collectionCount > 1
+    || advertisedCollectionCount(localProtocol) > 1
+    || advertisedCollectionCount(remoteProtocol) > 1;
+}
 
 function isTransientSharedPeerError(error) {
   const message = String(error?.message || error || '');
@@ -724,20 +736,24 @@ class SharedRoomPeer {
         capabilities: BROWSER_CAPABILITIES,
       });
     }
-    let collectionMapsBuild = null;
-    if (this.collections.size > 1) {
-      collectionMapsBuild = this.protocolCollectionMapsBuildPromise;
-      if (!collectionMapsBuild) {
-        collectionMapsBuild = Promise.all([
-          this.collectCollectionSchemas(),
-          this.collectCollectionCheckpoints(),
-        ]).then(([collectionSchemas, collectionCheckpoints]) => ({
+    const acquireCollectionMapsBuild = () => {
+      let build = this.protocolCollectionMapsBuildPromise;
+      if (!build) {
+        // The native CTOX peer is always master when the remote role is the
+        // Business OS browser. It validates the browser's collectionSchemas,
+        // but never consumes browser collectionCheckpoints. Reading every
+        // IndexedDB checkpoint here can exceed the handshake budget on large
+        // production rooms, so only advertise the schemas the native consumes.
+        build = this.collectCollectionSchemas().then((collectionSchemas) => ({
           collectionSchemas,
-          collectionCheckpoints,
         }));
-        this.protocolCollectionMapsBuildPromise = collectionMapsBuild;
+        this.protocolCollectionMapsBuildPromise = build;
       }
-    }
+      return build;
+    };
+    let collectionMapsBuild = this.collections.size > 1
+      ? acquireCollectionMapsBuild()
+      : null;
     const deviceProofNonce = Array.isArray(params)
       ? params[0]?.peerSession?.deviceProofNonce
       : null;
@@ -748,10 +764,13 @@ class SharedRoomPeer {
     // validates each entry individually instead of skipping schema validation.
     // Single-collection rooms omit the map (payload stays legacy-identical).
     if (this.collections.size > 1) {
+      // Runtime-installed collections can register while the representative
+      // payload above awaits IndexedDB. Acquire the expanded room map after
+      // that race instead of dereferencing the earlier null snapshot.
+      collectionMapsBuild ||= acquireCollectionMapsBuild();
       try {
         const maps = await collectionMapsBuild;
         payload.collectionSchemas = maps.collectionSchemas;
-        payload.collectionCheckpoints = maps.collectionCheckpoints;
       } finally {
         if (this.protocolCollectionMapsBuildPromise === collectionMapsBuild) {
           this.protocolCollectionMapsBuildPromise = null;
@@ -882,7 +901,13 @@ class SharedRoomPeer {
     );
     const normalizedRemoteProtocol = normalizeRemoteProtocol(remoteProtocol);
     if (!this.isPeerOpen(peerId)) return null;
-    const multiplexed = this.collections.size > 1;
+    // Startup is asymmetric: either side may have registered the complete
+    // multiplexed room while the other has only its representative collection.
+    const multiplexed = protocolHandshakeIsMultiplexed(
+      this.collections.size,
+      localProtocol,
+      normalizedRemoteProtocol,
+    );
     try {
       assertCompatibleProtocol(localProtocol, normalizedRemoteProtocol, {
         requiredCapabilities: CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
@@ -1977,6 +2002,10 @@ class CtoxWebRtcReplicationState {
   awaitInSync() {
     return Promise.resolve()
       .then(() => this.awaitInitialReplication())
+      // An explicit in-sync barrier must not certify a stale local projection
+      // while the native peer is offline. Background pulls remain non-blocking;
+      // this stronger API waits for a negotiated collection peer first.
+      .then(() => this.waitForOpenPeerId())
       .then(() => this.pullFromRemotePeers())
       .then(() => this.pushToRemotePeers());
   }
