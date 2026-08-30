@@ -219,36 +219,30 @@ test('provider account commands carry only typed non-secret selectors', () => {
   );
 });
 
-test('subscription login starts through the typed control plane without RxDB command dispatch', async () => {
+test('subscription login starts through the typed business command bus', async () => {
   const calls = [];
-  const payload = await hooks.startSubscriptionAuthControlPlane('codex', 'codex-primary', {
-    callbackUrl: 'https://welsch.ctox.dev/api/business-os/ctox/subscription-auth/callback',
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          ok: true,
+  const payload = await hooks.startSubscriptionAuth('codex', 'codex-primary', {
+    commandBus: {
+      dispatch: async (command, options) => {
+        calls.push({ command, options });
+        return { result: {
           status: 'device_code',
           user_code: 'ABCD-EFGH',
           verification_url: 'https://auth.example/device',
-        }),
-      };
+        } };
+      },
     },
+    db: { collection: (name) => (name === 'business_commands' ? {} : null) },
+    session: { user: { id: 'owner', role: 'chef', is_admin: true } },
+    sync: { startCollection: async () => {} },
   });
   assert.equal(payload.status, 'device_code');
+  assert.equal(payload.source, 'business_commands');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, '/api/business-os/ctox/subscription-auth/start');
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
-    provider: 'codex',
-    auth_mode: 'subscription',
-    flow: 'device_code',
-    account_id: 'codex-primary',
-    callback_url: 'https://welsch.ctox.dev/api/business-os/ctox/subscription-auth/callback',
-  });
-  assert.equal(calls[0].options.credentials, 'same-origin');
-  assert.doesNotMatch(calls[0].options.body, /token|secret|api[_-]?key/i);
+  assert.equal(calls[0].command.type, 'ctox.subscription_auth.start');
+  assert.deepEqual(calls[0].command.payload, { provider: 'codex', account_id: 'codex-primary' });
+  assert.equal(calls[0].options.until, 'terminal');
+  assert.doesNotMatch(JSON.stringify(calls[0].command), /token|secret|api[_-]?key/i);
 });
 
 test('runtime refresh preserves the selected subscription provider while device login is pending', () => {
@@ -322,32 +316,17 @@ test('pending OpenAI device login renders code and provider link in the runtime 
   assert.match(html, /Geräte-Code kopieren/);
 });
 
-test('subscription status endpoint is same-origin and its ready account is authoritative', async () => {
-  const calls = [];
-  const payload = await hooks.loadSubscriptionAuthStatusControlPlane({
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          ok: true,
-          provider_subscriptions: {
-            schema: 'ctox.provider-subscriptions.v1',
-            providers: [{ id: 'codex', label: 'ChatGPT / Codex' }],
-            accounts: [{ id: 'codex-primary', provider: 'codex', enabled: true, status: 'ready' }],
-          },
-        }),
-      };
-    },
-  });
-  assert.equal(calls[0].url, '/api/business-os/ctox/subscription-auth/status');
-  assert.equal(calls[0].options.credentials, 'same-origin');
-  assert.equal(hooks.subscriptionProviderConnected(payload.provider_subscriptions, 'codex'), true);
-  assert.equal(hooks.subscriptionProviderConnected(payload.provider_subscriptions, 'claude'), false);
+test('projected subscription status is authoritative', () => {
+  const projection = {
+    schema: 'ctox.provider-subscriptions.v1',
+    providers: [{ id: 'codex', label: 'ChatGPT / Codex' }],
+    accounts: [{ id: 'codex-primary', provider: 'codex', enabled: true, status: 'ready' }],
+  };
+  assert.equal(hooks.subscriptionProviderConnected(projection, 'codex'), true);
+  assert.equal(hooks.subscriptionProviderConnected(projection, 'claude'), false);
 });
 
-test('runtime settings save uses the typed control plane and returns the authoritative projection', async () => {
+test('runtime settings save uses the typed business command bus', async () => {
   const calls = [];
   const request = {
     provider: 'openai',
@@ -359,50 +338,36 @@ test('runtime settings save uses the typed control plane and returns the authori
     max_run_secs: 1800,
     api_key: '',
   };
-  const result = await hooks.saveRuntimeSettingsControlPlane(request, {
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          ok: true,
-          runtime_settings: {
-            runtime: { provider: 'openai', chat_model: 'gpt-5.5', reasoning_effort: 'high' },
-            auth: { mode: 'subscription' },
-          },
-        }),
-      };
+  const result = await hooks.saveRuntimeSettings(request, {
+    commandBus: {
+      dispatch: async (command, options) => {
+        calls.push({ command, options });
+        return { result: { ok: true } };
+      },
     },
+    db: { collection: (name) => (name === 'business_commands' ? {} : null) },
+    session: { user: { id: 'owner', role: 'chef', is_admin: true } },
+    sync: { startCollection: async () => {} },
+    waitForProjection: false,
   });
-  assert.equal(calls[0].url, '/api/business-os/ctox/runtime-settings');
-  assert.equal(calls[0].options.method, 'POST');
-  assert.equal(calls[0].options.credentials, 'same-origin');
-  assert.deepEqual(JSON.parse(calls[0].options.body), request);
-  assert.equal(result.runtime_settings.runtime.reasoning_effort, 'high');
+  assert.equal(calls[0].command.type, 'ctox.runtime_settings.save');
+  assert.deepEqual(calls[0].command.payload, request);
+  assert.equal(calls[0].options.until, 'accepted');
+  assert.deepEqual(result, { ok: true });
 });
 
-test('runtime settings reload reads the authoritative control plane projection', async () => {
-  const calls = [];
-  const runtimeSettings = await hooks.loadRuntimeSettingsControlPlane({
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          ok: true,
-          runtime_settings: {
-            runtime: { provider: 'openai', chat_model: 'gpt-5.5', reasoning_effort: 'high' },
-            auth: { mode: 'subscription', subscription_session_configured: true },
-          },
-        }),
-      };
+test('runtime settings reload reads the authoritative RxDB projection', async () => {
+  const projected = {
+    runtime: { provider: 'openai', chat_model: 'gpt-5.5', reasoning_effort: 'high' },
+    auth: { mode: 'subscription', subscription_session_configured: true },
+  };
+  const runtimeSettings = await hooks.loadRuntimeSettings({
+    db: {
+      collection: (name) => name === 'ctox_runtime_settings' ? {
+        findOne: () => ({ exec: async () => ({ toJSON: () => projected }) }),
+      } : null,
     },
   });
-  assert.equal(calls[0].url, '/api/business-os/ctox/runtime-settings');
-  assert.equal(calls[0].options.method, 'GET');
-  assert.equal(calls[0].options.credentials, 'same-origin');
   assert.equal(runtimeSettings.runtime.provider, 'openai');
   assert.equal(runtimeSettings.runtime.reasoning_effort, 'high');
 });

@@ -528,41 +528,6 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 )?;
             }
         }
-        (Method::Get, "/api/business-os/ctox/runtime-settings") => {
-            let session = request_session(root, &request);
-            if !session.authenticated {
-                respond_status(request, 401, "login required")?;
-            } else if !store::session_can_manage_all(&session) {
-                respond_status(request, 403, "chef or admin role required")?;
-            } else {
-                respond_json_value_no_store(
-                    request,
-                    serde_json::json!({
-                        "ok": true,
-                        "runtime_settings": store::runtime_settings_for_rxdb(root)?,
-                    }),
-                )?;
-            }
-        }
-        (Method::Post, "/api/business-os/ctox/runtime-settings") => {
-            let session = request_session(root, &request);
-            if !session.authenticated {
-                respond_status(request, 401, "login required")?;
-            } else if !store::session_can_manage_all(&session) {
-                respond_status(request, 403, "chef or admin role required")?;
-            } else {
-                let mutation: store::RuntimeSettingsRequest =
-                    serde_json::from_value(read_json(&mut request)?)?;
-                store::save_runtime_settings_command(root, &session, mutation)?;
-                respond_json_value_no_store(
-                    request,
-                    serde_json::json!({
-                        "ok": true,
-                        "runtime_settings": store::runtime_settings_for_rxdb(root)?,
-                    }),
-                )?;
-            }
-        }
         (Method::Get, "/api/business-os/ctox/subscription-auth/callback") => {
             let url_raw = request.url().to_owned();
             handle_subscription_auth_callback(request, root, &url_raw)?;
@@ -880,7 +845,9 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
         }
         (Method::Get, "/api/business-os/sync/config") => {
             let session = request_session(root, &request);
-            if let Some(turn_session) = authenticated_sync_config_session_id(&session) {
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if let Some(turn_session) = authenticated_sync_config_session_id(&session) {
                 respond_sensitive_json(
                     request,
                     &store::sync_config_for_browser(root, &turn_session)?,
@@ -1206,7 +1173,6 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
             | "/api/business-os/ctox/subscription-auth/start"
             | "/api/business-os/ctox/subscription-auth/status"
             | "/api/business-os/ctox/subscription-auth/callback"
-            | "/api/business-os/ctox/runtime-settings"
             // Admin-triggered release control-plane: release metadata check
             // and update subprocess launch. No Business OS records flow here.
             | "/api/business-os/ctox/update/check"
@@ -5065,7 +5031,6 @@ mod tests {
     #[test]
     fn shell_update_routes_are_control_plane_only() {
         for path in [
-            "/api/business-os/ctox/runtime-settings",
             "/api/business-os/shell/update/status",
             "/api/business-os/shell/update/check",
             "/api/business-os/shell/update/stage",

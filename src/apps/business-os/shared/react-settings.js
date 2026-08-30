@@ -222,21 +222,6 @@ export async function openReactSettings({
     try {
       await ensureRuntimeCollections();
       const loadedRuntimeSettings = await loadRuntimeSettings({ db });
-      const authStatus = await loadSubscriptionAuthStatusControlPlane().catch(() => null);
-      if (authStatus?.provider_subscriptions) {
-        loadedRuntimeSettings.provider_subscriptions = authStatus.provider_subscriptions;
-        const selectedSubscriptionProvider = runtimeSubscriptionProvider(
-          loadedRuntimeSettings?.runtime?.provider,
-        );
-        if (selectedSubscriptionProvider
-          && subscriptionProviderConnected(authStatus.provider_subscriptions, selectedSubscriptionProvider)) {
-          loadedRuntimeSettings.auth = {
-            ...(loadedRuntimeSettings.auth || {}),
-            configured: true,
-            subscription_session_configured: true,
-          };
-        }
-      }
       settingsState.runtimeSettings = runtimeSettingsPreservingPendingSubscription(
         loadedRuntimeSettings,
         settingsState.runtimeSettings,
@@ -675,11 +660,7 @@ export async function openReactSettings({
           settingsState.runtimeSettings,
           runtimePayload,
         );
-        settingsState.runtimeSettings = await saveRuntimeSettings(
-          runtimePayload,
-          { commandBus, db, session, sync },
-        );
-        const payload = await startSubscriptionAuth(providerId, accountId);
+        const payload = await startSubscriptionAuth(providerId, accountId, { commandBus, db, session, sync });
         const credentialRequirement = providerCredentialRequirement(payload, providerId);
         if (credentialRequirement) {
           if (authWindow && !authWindow.closed) authWindow.close();
@@ -731,7 +712,21 @@ export async function openReactSettings({
           : payload.user_code
           ? `${providerLabel} Geräte-Code: ${payload.user_code}. Danach Status neu laden.`
           : `${providerLabel} Login geöffnet. Danach Status neu laden.`;
+        saveRuntimeSettings(runtimePayload, {
+          commandBus,
+          db,
+          session,
+          sync,
+          waitForProjection: false,
+        }).catch((error) => {
+          const message = `Runtime konnte nach Start des Provider-Logins nicht gespeichert werden: ${String(error?.message || error)}`;
+          settingsState.commandStatus = settingsState.subscriptionAuth?.userCode
+            ? `${settingsState.commandStatus} ${message}`
+            : message;
+          render();
+        });
         waitForSubscriptionConnection(providerId, {
+          db,
           onProjection: (projection) => {
             settingsState.runtimeSettings = {
               ...(settingsState.runtimeSettings || {}),
@@ -3560,62 +3555,40 @@ function supportVisibilityText(lifecycle = {}, app = {}, mod = {}) {
 }
 
 async function loadRuntimeSettings({ db } = {}) {
-  try {
-    return await loadRuntimeSettingsControlPlane();
-  } catch (controlPlaneError) {
-    const coll = db?.collection?.('ctox_runtime_settings');
-    if (!coll) throw controlPlaneError;
-    const doc = await coll.findOne('runtime-settings').exec();
-    const data = doc?.toJSON?.();
-    if (!data) throw controlPlaneError;
-    return data;
-  }
-}
-
-async function loadRuntimeSettingsControlPlane(options = {}) {
-  const fetchImpl = options.fetchImpl || fetch;
-  const response = await fetchImpl('/api/business-os/ctox/runtime-settings', {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-    credentials: 'same-origin',
-    cache: 'no-store',
-  });
-  const text = await response.text();
-  let result = null;
-  try { result = text ? JSON.parse(text) : null; } catch {}
-  if (!response.ok || result?.ok === false || !result?.runtime_settings) {
-    throw new Error(result?.message || result?.error || text || `HTTP ${response.status}`);
-  }
-  return result.runtime_settings;
+  const coll = db?.collection?.('ctox_runtime_settings');
+  if (!coll) throw new Error('ctox_runtime_settings collection is required for runtime settings');
+  const doc = await coll.findOne('runtime-settings').exec();
+  const data = doc?.toJSON?.();
+  if (!data) throw new Error('Runtime-Status noch nicht synchronisiert.');
+  return data;
 }
 
 async function saveRuntimeSettings(payload, {
+  commandBus,
   db,
+  session,
+  sync,
+  waitForProjection = true,
 } = {}) {
-  const result = await saveRuntimeSettingsControlPlane(payload);
-  if (result?.runtime_settings) return result.runtime_settings;
-  return waitForRuntimeSettingsProjection(db, { payload });
-}
-
-async function saveRuntimeSettingsControlPlane(payload, options = {}) {
-  const fetchImpl = options.fetchImpl || fetch;
-  const response = await fetchImpl('/api/business-os/ctox/runtime-settings', {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload || {}),
-    credentials: 'same-origin',
-    cache: 'no-store',
+  const previousSettings = waitForProjection
+    ? await loadRuntimeSettings({ db }).catch(() => null)
+    : null;
+  const command = await dispatchModuleCommand({
+    commandBus,
+    db,
+    session,
+    sync,
+    commandType: 'ctox.runtime_settings.save',
+    moduleId: 'ctox',
+    recordId: 'runtime-settings',
+    payload,
+    source: 'business-os-settings',
   });
-  const text = await response.text();
-  let result = null;
-  try { result = text ? JSON.parse(text) : null; } catch {}
-  if (!response.ok || result?.ok === false) {
-    throw new Error(result?.message || result?.error || text || `HTTP ${response.status}`);
-  }
-  return result || { ok: true };
+  if (!waitForProjection) return command.result || command;
+  return waitForRuntimeSettingsProjection(db, {
+    payload,
+    previousUpdatedAtMs: Number(previousSettings?.updated_at_ms || 0),
+  });
 }
 
 async function waitForRuntimeSettingsProjection(db, options = {}) {
@@ -3719,22 +3692,32 @@ async function waitForWorkspaceBrandingProjection(db, options = {}) {
   throw lastError || new Error('Corporate Design wurde nicht synchronisiert.');
 }
 
-async function startSubscriptionAuth(provider = 'codex', accountId = '') {
+async function startSubscriptionAuth(provider = 'codex', accountId = '', { commandBus, db, session, sync } = {}) {
   const request = providerSubscriptionCommandRequest('connect', provider, accountId);
-  const payload = await startSubscriptionAuthControlPlane(
-    request.payload.provider,
-    request.payload.account_id,
-  );
+  const command = await dispatchModuleCommand({
+    commandBus,
+    db,
+    session,
+    sync,
+    commandType: request.commandType,
+    moduleId: 'ctox',
+    recordId: `provider-subscription:${request.payload.provider}:${request.payload.account_id}`,
+    payload: request.payload,
+    source: 'business-os-settings',
+    timeoutMs: 30000,
+    requireResult: true,
+  });
+  const payload = command.result || command;
   const credentialRequirement = providerCredentialRequirement(payload, provider);
   if (credentialRequirement) {
     return {
       status: 'credential_required',
       credential_name: credentialRequirement.credentialName,
-      source: 'ctox_control_plane',
+      source: 'business_commands',
     };
   }
   if (payload?.status === 'connected') {
-    return { status: 'connected', source: 'ctox_control_plane' };
+    return { status: 'connected', source: 'business_commands' };
   }
   if (payload?.user_code || payload?.auth_url || payload?.verification_url) {
     return {
@@ -3742,64 +3725,10 @@ async function startSubscriptionAuth(provider = 'codex', accountId = '') {
       user_code: String(payload.user_code || ''),
       auth_url: String(payload.auth_url || ''),
       verification_url: String(payload.verification_url || ''),
-      source: 'ctox_control_plane',
+      source: 'business_commands',
     };
   }
   throw new Error('CTOX lieferte weder eine Login-URL noch einen Geräte-Code.');
-}
-
-async function startSubscriptionAuthControlPlane(provider, accountId, options = {}) {
-  const fetchImpl = options.fetchImpl || fetch;
-  const normalizedProvider = String(provider || '').trim();
-  const normalizedAccountId = normalizeProviderAccountId(accountId);
-  const isOpenAi = ['codex', 'openai'].includes(normalizedProvider);
-  const callbackUrl = isOpenAi
-    ? String(options.callbackUrl || (typeof location !== 'undefined'
-      ? new URL('/api/business-os/ctox/subscription-auth/callback', location.origin).href
-      : ''))
-    : '';
-  const response = await fetchImpl('/api/business-os/ctox/subscription-auth/start', {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      provider: normalizedProvider,
-      auth_mode: 'subscription',
-      flow: isOpenAi ? 'device_code' : 'auth_url',
-      account_id: normalizedAccountId,
-      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
-    }),
-    credentials: 'same-origin',
-    cache: 'no-store',
-  });
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {}
-  if (!response.ok || payload?.ok === false) {
-    throw new Error(payload?.message || payload?.error || text || `HTTP ${response.status}`);
-  }
-  return payload || { ok: true };
-}
-
-async function loadSubscriptionAuthStatusControlPlane(options = {}) {
-  const fetchImpl = options.fetchImpl || fetch;
-  const response = await fetchImpl('/api/business-os/ctox/subscription-auth/status', {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-    credentials: 'same-origin',
-    cache: 'no-store',
-  });
-  const text = await response.text();
-  let payload = null;
-  try { payload = text ? JSON.parse(text) : null; } catch {}
-  if (!response.ok || payload?.ok === false) {
-    throw new Error(payload?.message || payload?.error || text || `HTTP ${response.status}`);
-  }
-  return payload || { ok: true };
 }
 
 function subscriptionProviderConnected(projection, provider) {
@@ -3816,8 +3745,8 @@ async function waitForSubscriptionConnection(provider, options = {}) {
   const pollMs = Number(options.pollMs || 1500);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const payload = await loadSubscriptionAuthStatusControlPlane(options);
-    const projection = payload?.provider_subscriptions || {};
+    const settings = await loadRuntimeSettings({ db: options.db });
+    const projection = settings?.provider_subscriptions || {};
     options.onProjection?.(projection);
     if (subscriptionProviderConnected(projection, provider)) return projection;
     await delay(pollMs);
@@ -5545,10 +5474,9 @@ export const __reactSettingsTestHooks = {
   normalizeProviderSubscriptions,
   providerCredentialRequirement,
   providerSubscriptionCommandRequest,
-  startSubscriptionAuthControlPlane,
-  saveRuntimeSettingsControlPlane,
-  loadRuntimeSettingsControlPlane,
-  loadSubscriptionAuthStatusControlPlane,
+  startSubscriptionAuth,
+  saveRuntimeSettings,
+  loadRuntimeSettings,
   subscriptionProviderConnected,
   waitForSubscriptionConnection,
   providerLogoHtml,

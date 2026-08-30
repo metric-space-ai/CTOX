@@ -9107,7 +9107,7 @@ async function refreshModules() {
   const activeModuleId = state.activeModule?.id || '';
   const activeModuleRevisionBefore = activeModuleId ? moduleRevisionQuery(state.activeModule) : '';
   const activeModuleSignatureBefore = activeModuleId ? moduleActivationSignature(state.activeModule) : '';
-  const modules = await loadModules();
+  const modules = await loadModules({ timeoutMs: 20000, allowShellSeed: false });
   const nextModules = modules.modules || [];
   const currentIds = state.modules.map(m => m.id).join(',');
   const nextIds = nextModules.map(m => m.id).join(',');
