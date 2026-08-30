@@ -25498,7 +25498,7 @@ mod tests {
             serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"action"}}}),
             serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","dependencies":[{"collection":"customers","record_id":"1"}]}}}),
             serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","attachments":[{"file_id":"1"}]}}}),
-            serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","writeback_contract":{"allowed_actions":[{"module_id":"thesen-outbound","action_id":"web_stack.person_research"}]}}}}),
+            serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","writeback_contract":{"allowed_actions":[{"module_id":"outbound-lead-generation","action_id":"web_stack.person_research"}]}}}}),
             serde_json::json!({"command":{"command_type":"business_os.data.modify","payload":{"mode":"data"}}}),
         ] {
             assert_eq!(completion_review_scope_from_command_context(&context), None);
@@ -29818,7 +29818,7 @@ Business OS command:
             serde_json::json!({
                 "id": command_id,
                 "command_id": command_id,
-                "module": "thesen-outbound",
+                "module": "outbound-lead-generation",
                 "command_type": "business_os.chat.task",
                 "record_id": "campaign:test",
                 "payload": {
@@ -29826,9 +29826,9 @@ Business OS command:
                     "instruction": "Run the bounded action.",
                     "mode": "data",
                     "writeback_contract": {
-                        "allowed_collections": ["thesen_outbound_leads"],
+                        "allowed_collections": ["outbound_lead_generation_leads"],
                         "allowed_actions": [{
-                            "module_id": "thesen-outbound",
+                            "module_id": "outbound-lead-generation",
                             "action_id": "web_stack.person_research",
                             "operation_ids": ["lead_1"]
                         }]
@@ -29851,7 +29851,7 @@ Business OS command:
             goal: "Research campaign".to_string(),
             preview: "Research campaign".to_string(),
             source_label: "queue".to_string(),
-            suggested_skill: Some("thesen-outbound-research".to_string()),
+            suggested_skill: Some("outbound-lead-generation-research".to_string()),
             leased_message_keys: accepted
                 .get("task_id")
                 .and_then(Value::as_str)
@@ -29859,7 +29859,7 @@ Business OS command:
                 .into_iter()
                 .collect(),
             leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("business-os/thesen-outbound/campaign/test".to_string()),
+            thread_key: Some("business-os/outbound-lead-generation/campaign/test".to_string()),
             workspace_root: Some(root.join("workspace").display().to_string()),
             ticket_self_work_id: None,
             outbound_email: None,
@@ -29900,7 +29900,7 @@ Business OS command:
             serde_json::json!({
                 "id": command_id,
                 "command_id": command_id,
-                "module": "thesen-outbound",
+                "module": "outbound-lead-generation",
                 "command_type": "business_os.chat.task",
                 "record_id": "campaign:test",
                 "payload": {
@@ -29909,7 +29909,7 @@ Business OS command:
                     "mode": "data",
                     "writeback_contract": {
                         "allowed_actions": [{
-                            "module_id": "thesen-outbound",
+                            "module_id": "outbound-lead-generation",
                             "action_id": "web_stack.person_research",
                             "operation_ids": ["lead_1", "lead_2"]
                         }]
@@ -29937,10 +29937,10 @@ Business OS command:
             goal: "Research campaign".to_string(),
             preview: "Research campaign".to_string(),
             source_label: "queue".to_string(),
-            suggested_skill: Some("thesen-outbound-research".to_string()),
+            suggested_skill: Some("outbound-lead-generation-research".to_string()),
             leased_message_keys: vec![task_id],
             leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("business-os/thesen-outbound/campaign/test".to_string()),
+            thread_key: Some("business-os/outbound-lead-generation/campaign/test".to_string()),
             workspace_root: Some(root.join("workspace").display().to_string()),
             ticket_self_work_id: None,
             outbound_email: None,
@@ -29966,7 +29966,7 @@ Business OS command:
                     command_type, record_id, execution_mode, execution_phase,
                     terminal_status, attempt, projection_version, intent_json,
                     retryable, created_at_ms, updated_at_ms
-                ) VALUES (?1, ?1, ?2, 'thesen-outbound',
+                ) VALUES (?1, ?1, ?2, 'outbound-lead-generation',
                     'web_stack.person_research', ?3, 'control', ?4,
                     ?5, 1, 1, ?6, 0, ?7, ?7)
                 "#,
@@ -29979,7 +29979,7 @@ Business OS command:
                     serde_json::json!({
                         "id": command_id,
                         "command_id": command_id,
-                        "module": "thesen-outbound",
+                        "module": "outbound-lead-generation",
                         "command_type": "web_stack.person_research",
                         "record_id": record_id,
                         "payload": { "operation_id": record_id }

@@ -1088,6 +1088,18 @@ function runSmokeMatrixSelfTest() {
   if (sha256File(__filename) !== expectedMatrixSourceSha256) {
     throw new Error('Smoke matrix chunked SHA-256 helper does not match the in-memory digest');
   }
+  const hashFixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ctox-smoke-hash-'));
+  const hashFixturePath = path.join(hashFixtureRoot, 'multi-chunk.bin');
+  try {
+    const hashFixture = Buffer.alloc((2 * 1024 * 1024) + 17, 0x5a);
+    fs.writeFileSync(hashFixturePath, hashFixture);
+    const expectedFixtureSha256 = crypto.createHash('sha256').update(hashFixture).digest('hex');
+    if (sha256File(hashFixturePath) !== expectedFixtureSha256) {
+      throw new Error('Smoke matrix chunked SHA-256 helper does not hash multi-chunk artifacts');
+    }
+  } finally {
+    fs.rmSync(hashFixtureRoot, { recursive: true, force: true });
+  }
   assertBusinessOsProductionSmokeRegistry({
     runnerModes: businessOsProductionSmokeModes,
     matrixModes: knownModes,
@@ -1269,10 +1281,21 @@ function readGitStatusPorcelain() {
 }
 
 function sha256File(filePath) {
+  let fileDescriptor;
   try {
-    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+    fileDescriptor = fs.openSync(filePath, 'r');
+    const hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let bytesRead;
+    do {
+      bytesRead = fs.readSync(fileDescriptor, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+    return hash.digest('hex');
   } catch {
     return null;
+  } finally {
+    if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
   }
 }
 
@@ -1319,7 +1342,11 @@ function validateSmokeMatrixSummaryArtifact(candidate, options = {}, validationO
     if (candidate.source.artifactHashes && typeof candidate.source.artifactHashes === 'object') {
       require(isSha256(candidate.source.artifactHashes.browserBundleSha256), 'source.artifactHashes.browserBundleSha256');
       require(typeof candidate.source.artifactHashes.smokeBinaryPath === 'string' && candidate.source.artifactHashes.smokeBinaryPath.length > 0, 'source.artifactHashes.smokeBinaryPath');
-      require(isSha256(candidate.source.artifactHashes.smokeBinarySha256), 'source.artifactHashes.smokeBinarySha256');
+      const smokeBinaryHash = candidate.source.artifactHashes.smokeBinarySha256;
+      require(
+        isSha256(smokeBinaryHash) || (configurationFailed && !options.final && smokeBinaryHash === null),
+        'source.artifactHashes.smokeBinarySha256',
+      );
     }
   }
   require(typeof candidate.ctoxBin === 'string' && candidate.ctoxBin.length > 0, 'ctoxBin');

@@ -34,7 +34,7 @@ const run = spawnSync(process.execPath, ['--test', ...testFiles], {
   cwd: repoRoot,
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'pipe'],
-  maxBuffer: 32 * 1024 * 1024,
+  maxBuffer: 128 * 1024 * 1024,
 });
 const endedAt = new Date().toISOString();
 const stdout = String(run.stdout || '');

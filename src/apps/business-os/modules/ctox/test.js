@@ -22,6 +22,8 @@ const { __ctoxTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   aggregateFlowMetrics,
+  authoritativeTaskNodeId,
+  authoritativeTaskStatus,
   applyTaskSelection,
   buildHarnessModel,
   canModifyCtoxApp,
@@ -51,6 +53,11 @@ const {
   webStackProjectionMissing,
   wireTaskSourceReadiness,
 } = hooks;
+
+test('Missing authoritative task telemetry remains a safe empty state', () => {
+  assert.equal(authoritativeTaskStatus(null), '');
+  assert.equal(authoritativeTaskNodeId(null), '');
+});
 
 // --- Minimal fake DOM ---------------------------------------------------------
 // Just enough of the element API for the focus-safe refresh + in-place selection
@@ -118,6 +125,16 @@ function test(name, fn) {
   } catch (error) {
     console.error(`not ok - ${name}`);
     throw error;
+  }
+}
+
+function withoutExpectedWarnings(fn) {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return fn();
+  } finally {
+    console.warn = warn;
   }
 }
 
@@ -302,10 +319,12 @@ test('Readiness wiring stays fail-soft when subscribeCollectionReadiness throws'
     },
   };
 
-  assert.doesNotThrow(() => {
-    const cleanup = wireTaskSourceReadiness(state);
-    assert.equal(typeof cleanup, 'function');
-    cleanup();
+  withoutExpectedWarnings(() => {
+    assert.doesNotThrow(() => {
+      const cleanup = wireTaskSourceReadiness(state);
+      assert.equal(typeof cleanup, 'function');
+      cleanup();
+    });
   });
 });
 
@@ -343,10 +362,12 @@ test('Readiness wiring ignores a listener re-render throw and still unsubscribes
     },
   };
 
-  const cleanup = wireTaskSourceReadiness(state);
-  assert.equal(typeof listener, 'function');
-  assert.doesNotThrow(() => listener({ collection: 'ctox_queue_tasks', state: 'live', ready: true }));
-  cleanup();
+  withoutExpectedWarnings(() => {
+    const cleanup = wireTaskSourceReadiness(state);
+    assert.equal(typeof listener, 'function');
+    assert.doesNotThrow(() => listener({ collection: 'ctox_queue_tasks', state: 'live', ready: true }));
+    cleanup();
+  });
   assert.ok(unsubscribed >= 1);
 });
 

@@ -15972,7 +15972,7 @@ pub(super) fn terminal_person_research_projection_candidates(
     let mut statement = conn.prepare(
         "SELECT command.command_id, command.module, command.record_id,
                 command.payload_json, command.client_context_json, command.status,
-                CASE WHEN command.module = 'thesen-outbound'
+                CASE WHEN command.module = 'outbound-lead-generation'
                        AND command.record_id <> ''
                        AND json_extract(command.client_context_json, '$.surface') = 'business_os_command_session'
                        AND json_type(command.payload_json, '$.writeback_contract') IS NULL
@@ -15994,7 +15994,7 @@ pub(super) fn terminal_person_research_projection_candidates(
          LEFT JOIN canonical_person_research.business_command_aggregates AS canonical
            ON canonical.command_id = command.command_id
          LEFT JOIN business_records AS lead
-           ON lead.collection = 'thesen_outbound_leads'
+           ON lead.collection = 'outbound_lead_generation_leads'
           AND lead.record_id = command.record_id
           AND lead.deleted = 0
          WHERE command.command_type = 'web_stack.person_research'
@@ -16005,7 +16005,7 @@ pub(super) fn terminal_person_research_projection_candidates(
              OR COALESCE(canonical.terminal_status, 'none')
                NOT IN ('completed', 'failed', 'cancelled')
              OR (
-               command.module = 'thesen-outbound'
+               command.module = 'outbound-lead-generation'
                AND command.record_id <> ''
                AND json_extract(command.client_context_json, '$.surface') = 'business_os_command_session'
                AND json_type(command.payload_json, '$.writeback_contract') IS NULL
@@ -16085,8 +16085,8 @@ pub(super) fn terminal_person_research_projection_candidates(
         let mut payload = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
         if needs_legacy_lead_writeback {
             payload["writeback_contract"] = serde_json::json!({
-                "collection": "thesen_outbound_leads",
-                "allowed_collections": ["thesen_outbound_leads"],
+                "collection": "outbound_lead_generation_leads",
+                "allowed_collections": ["outbound_lead_generation_leads"],
                 "record_ids": [record_id],
                 "command_type": "web_stack.person_research",
                 "min_independent_sources": 2,

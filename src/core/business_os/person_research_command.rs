@@ -65,7 +65,7 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
             if failed.is_ok() {
                 log_lead_projection_error(
                     command.id.as_deref().unwrap_or_default(),
-                    project_thesen_outbound_lead_state(
+                    project_outbound_lead_generation_lead_state(
                         root,
                         &command,
                         "failed",
@@ -79,7 +79,7 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
     }
     log_lead_projection_error(
         command.id.as_deref().unwrap_or_default(),
-        project_thesen_outbound_lead_state(root, &command, "running", None, None),
+        project_outbound_lead_generation_lead_state(root, &command, "running", None, None),
     );
     Ok(running)
 }
@@ -107,7 +107,7 @@ pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
         };
         log_lead_projection_error(
             command_id,
-            project_thesen_outbound_lead_state(
+            project_outbound_lead_generation_lead_state(
                 root,
                 &candidate.command,
                 lead_status,
@@ -222,7 +222,7 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
             } else {
                 log_lead_projection_error(
                     &worker_command_id,
-                    project_thesen_outbound_lead_state(
+                    project_outbound_lead_generation_lead_state(
                         &root,
                         &worker_command,
                         lead_status,
@@ -238,37 +238,42 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
     Ok(true)
 }
 
-fn project_thesen_outbound_lead_state(
+fn project_outbound_lead_generation_lead_state(
     root: &Path,
     command: &BusinessCommand,
     research_status: &str,
     error: Option<&str>,
     result: Option<&Value>,
 ) -> anyhow::Result<()> {
-    let Some(record_id) = thesen_outbound_writeback_record_id(command) else {
+    let Some(record_id) = outbound_lead_generation_writeback_record_id(command) else {
         return Ok(());
     };
     let now = now_ms();
     let command_id = command.id.as_deref().unwrap_or_default();
-    let mut lead_document =
-        thesen_outbound_lead_state_document(record_id, command_id, research_status, error, now);
+    let mut lead_document = outbound_lead_generation_lead_state_document(
+        record_id,
+        command_id,
+        research_status,
+        error,
+        now,
+    );
     if let Some(result) = result {
         let existing =
-            store::load_rxdb_collection_record(root, "thesen_outbound_leads", record_id)?
+            store::load_rxdb_collection_record(root, "outbound_lead_generation_leads", record_id)?
                 .unwrap_or_else(|| serde_json::json!({ "id": record_id }));
-        let outcome_patch = thesen_outbound_research_outcome_patch(&existing, result, now);
+        let outcome_patch = outbound_lead_generation_research_outcome_patch(&existing, result, now);
         merge_json_object_values(&mut lead_document, &outcome_patch);
     }
     store::upsert_rxdb_collection_record(
         root,
-        "thesen_outbound_leads",
+        "outbound_lead_generation_leads",
         record_id,
         now,
         lead_document,
     )
 }
 
-fn thesen_outbound_lead_state_document(
+fn outbound_lead_generation_lead_state_document(
     record_id: &str,
     command_id: &str,
     research_status: &str,
@@ -280,7 +285,7 @@ fn thesen_outbound_lead_state_document(
         "research_status": research_status,
         "command_id": command_id,
         "task_id": "",
-        "payload": thesen_outbound_lead_state_patch(command_id, research_status, error, now),
+        "payload": outbound_lead_generation_lead_state_patch(command_id, research_status, error, now),
     });
     if research_status != "running" {
         document["research_error"] = error
@@ -292,7 +297,7 @@ fn thesen_outbound_lead_state_document(
     document
 }
 
-fn thesen_outbound_research_outcome_patch(
+fn outbound_lead_generation_research_outcome_patch(
     existing: &Value,
     command_result: &Value,
     now: i64,
@@ -683,7 +688,7 @@ fn merge_json_object_values(target: &mut Value, patch: &Value) {
     }
 }
 
-fn thesen_outbound_lead_state_patch(
+fn outbound_lead_generation_lead_state_patch(
     command_id: &str,
     research_status: &str,
     error: Option<&str>,
@@ -709,8 +714,8 @@ fn thesen_outbound_lead_state_patch(
     lead_payload
 }
 
-fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str> {
-    if command.module.trim() != "thesen-outbound" {
+fn outbound_lead_generation_writeback_record_id(command: &BusinessCommand) -> Option<&str> {
+    if command.module.trim() != "outbound-lead-generation" {
         return None;
     }
     let record_id = command.record_id.as_deref()?.trim();
@@ -721,7 +726,7 @@ fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str
     let collection_allowed = contract
         .get("collection")
         .and_then(Value::as_str)
-        .is_some_and(|collection| collection == "thesen_outbound_leads")
+        .is_some_and(|collection| collection == "outbound_lead_generation_leads")
         || contract
             .get("allowed_collections")
             .and_then(Value::as_array)
@@ -729,7 +734,7 @@ fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str
                 collections
                     .iter()
                     .filter_map(Value::as_str)
-                    .any(|collection| collection == "thesen_outbound_leads")
+                    .any(|collection| collection == "outbound_lead_generation_leads")
             });
     if !collection_allowed {
         return None;
@@ -1066,16 +1071,16 @@ mod tests {
     }
 
     #[test]
-    fn thesen_outbound_lifecycle_projection_requires_bounded_writeback_contract() {
+    fn outbound_lead_generation_lifecycle_projection_requires_bounded_writeback_contract() {
         let command = BusinessCommand {
             id: Some("cmd-research".to_string()),
-            module: "thesen-outbound".to_string(),
+            module: "outbound-lead-generation".to_string(),
             command_type: "web_stack.person_research".to_string(),
             record_id: Some("lead-1".to_string()),
             payload: serde_json::json!({
                 "writeback_contract": {
-                    "collection": "thesen_outbound_leads",
-                    "allowed_collections": ["thesen_outbound_leads"],
+                    "collection": "outbound_lead_generation_leads",
+                    "allowed_collections": ["outbound_lead_generation_leads"],
                     "record_ids": ["lead-1"]
                 }
             }),
@@ -1083,29 +1088,38 @@ mod tests {
             origin: store::CommandOrigin::TrustedLocal,
         };
         assert_eq!(
-            thesen_outbound_writeback_record_id(&command),
+            outbound_lead_generation_writeback_record_id(&command),
             Some("lead-1")
         );
 
         let mut wrong_module = command.clone();
         wrong_module.module = "research".to_string();
-        assert_eq!(thesen_outbound_writeback_record_id(&wrong_module), None);
+        assert_eq!(
+            outbound_lead_generation_writeback_record_id(&wrong_module),
+            None
+        );
 
         let mut wrong_record = command.clone();
         wrong_record.record_id = Some("lead-2".to_string());
-        assert_eq!(thesen_outbound_writeback_record_id(&wrong_record), None);
+        assert_eq!(
+            outbound_lead_generation_writeback_record_id(&wrong_record),
+            None
+        );
 
         let mut wrong_collection = command;
         wrong_collection.payload["writeback_contract"]["collection"] =
             Value::String("sellify_companies".to_string());
         wrong_collection.payload["writeback_contract"]["allowed_collections"] =
             serde_json::json!(["sellify_companies"]);
-        assert_eq!(thesen_outbound_writeback_record_id(&wrong_collection), None);
+        assert_eq!(
+            outbound_lead_generation_writeback_record_id(&wrong_collection),
+            None
+        );
     }
 
     #[test]
-    fn successful_thesen_outbound_retry_clears_stale_research_error() {
-        let failed = thesen_outbound_lead_state_patch(
+    fn successful_outbound_lead_generation_retry_clears_stale_research_error() {
+        let failed = outbound_lead_generation_lead_state_patch(
             "cmd-failed",
             "failed",
             Some("prior attempt failed"),
@@ -1114,12 +1128,12 @@ mod tests {
         assert_eq!(failed["research_error"], "prior attempt failed");
 
         let completed =
-            thesen_outbound_lead_state_patch("cmd-completed", "needs_review", None, 2_000);
+            outbound_lead_generation_lead_state_patch("cmd-completed", "needs_review", None, 2_000);
         assert_eq!(completed["research_error"], Value::Null);
         assert_eq!(completed["native_research_terminal_status"], "needs_review");
         assert_eq!(completed["research_finished_at_ms"], 2_000);
 
-        let document = thesen_outbound_lead_state_document(
+        let document = outbound_lead_generation_lead_state_document(
             "lead-1",
             "cmd-completed",
             "needs_review",
@@ -1167,7 +1181,7 @@ mod tests {
             "browser_assist_tasks": []
         });
 
-        let patch = thesen_outbound_research_outcome_patch(&existing, &outcome, 2_000);
+        let patch = outbound_lead_generation_research_outcome_patch(&existing, &outcome, 2_000);
 
         assert_eq!(patch["data"]["legacy"], "kept");
         assert_eq!(patch["data"]["firma_domain"], "example.test");
@@ -1224,7 +1238,7 @@ mod tests {
             ]
         });
 
-        let patch = thesen_outbound_research_outcome_patch(&existing, &outcome, 3_000);
+        let patch = outbound_lead_generation_research_outcome_patch(&existing, &outcome, 3_000);
 
         assert_eq!(patch["contacts"].as_array().map(Vec::len), Some(3));
         assert_eq!(patch["contacts"][0]["id"], "manual-contact");

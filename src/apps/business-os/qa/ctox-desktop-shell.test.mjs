@@ -161,16 +161,19 @@ test('the primitive palette is host-tintable on :root', () => {
   assert.equal((appCss.match(/--control-radius:\s*4px/g) || []).length, 2);
 });
 
-// The flat chrome is the default, not an override: both 44px rows and the
+// The flat chrome is the default, not an override: the shared topbar token and
 // hairline separators must be declared by the shell itself.
 test('the flat chrome is declared by the shell, unscoped', () => {
-  assert.match(appCss, /\.app-shell \{[^}]*grid-template-rows: 44px minmax\(0, 1fr\)/);
-  assert.match(appCss, /\.topbar \{[^}]*min-height: 44px/);
-  assert.match(appCss, /\.topbar \{[^}]*border-bottom: 1px solid var\(--line\)/);
-  assert.match(chatJs, /\.ctox-chat-dock \{[^}]*min-height: 44px/);
-  assert.match(chatJs, /\.ctox-chat-dock \{[^}]*border-top: 1px solid var\(--line\)/);
-  assert.doesNotMatch(appCss, /:root\[data-shell-style="ctox"\] \.topbar \{/,
-    'the CTOX shell style must not re-lift the topbar into an island');
+  assert.match(appCss, /--shell-topbar-height:\s*48px/);
+  assert.match(appCss, /\.app-shell \{[^}]*grid-template-rows: var\(--shell-topbar-height\) minmax\(0, 1fr\)/);
+  assert.match(appCss, /\.topbar \{[^}]*min-height: var\(--shell-topbar-height\)/);
+  assert.match(appCss, /\.topbar \{[^}]*border-bottom: 1px solid var\(--hairline, var\(--line\)\)/);
+  assert.match(chatJs, /\.ctox-chat-dock \{[^}]*border: 1px solid var\(--line\)/);
+  assert.match(
+    appCss,
+    /:root\[data-shell-style="ctox"\] \.topbar \{\s*margin: 0;\s*border-radius: 0;[\s\S]*?backdrop-filter: none !important;/,
+    'the final Workjet contract layer must flatten the legacy CTOX island',
+  );
 });
 
 // Regression, twice over: an expanded dock holding no chat window reserved a

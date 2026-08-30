@@ -86,7 +86,7 @@ try {
       return Promise.resolve(capabilityResponse('capability-after-timeout'));
     };
     globalThis.setTimeout = (callback, delay, ...args) => (
-      nativeSetTimeout(callback, delay === 5_000 ? 20 : delay, ...args)
+      nativeSetTimeout(callback, delay === 120_000 ? 20 : delay, ...args)
     );
 
     const bus = createCommandBus({ db });

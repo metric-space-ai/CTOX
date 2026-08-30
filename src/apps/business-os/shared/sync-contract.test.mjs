@@ -114,4 +114,14 @@ test('slow collection startup remains pending instead of dereferencing an empty 
   assert.match(source, /if \(!bridge\) \{/);
   assert.match(source, /reason: 'startup-in-progress'/);
   assert.match(source, /return pendingBridge;/);
+  assert.match(
+    source,
+    /const currentBridge = await withTimeout\(currentBridgePromise, 3000\);[\s\S]*?if \(!currentBridge\) \{[\s\S]*?createPendingCollectionBridge\(collection, currentBridgePromise\)[\s\S]*?return pendingBridge;/,
+    'a repeated acquisition of the same slow bridge must return a bounded pending handle',
+  );
+  assert.doesNotMatch(
+    source,
+    /return bridges\.get\(collection\);/,
+    'an async start must never adopt an unresolved cached bridge promise as its return value',
+  );
 });

@@ -2,6 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createDefaultRegistry } = require("../src/main/registry.cjs");
@@ -27,6 +28,15 @@ const {
   runSshLocalArtifactInstallCommand,
   runSshProgram,
 } = require("../src/main/sources.cjs");
+
+function roleBoundPeerFields(browserToken) {
+  return {
+    signaling_auth_version: "ctox-role-bound-v1",
+    signaling_browser_token: browserToken,
+    signaling_browser_token_hash: createHash("sha256").update(browserToken).digest("hex"),
+    signaling_native_token_hash: createHash("sha256").update(`native:${browserToken}`).digest("hex"),
+  };
+}
 
 test("ssh profile validation requires host, user and valid port", () => {
   assert.throws(() => normalizeSshProfile({ user: "ubuntu" }), /host/);
@@ -535,7 +545,7 @@ test("ssh-managed attach stores metadata only and builds webrtc launch", async (
         return {
           instance_id: "vps-demo",
           sync_room: "ctox-business-os:vps-demo:abc",
-          signaling_room_password: "ssh-room-secret",
+          ...roleBoundPeerFields("ssh-browser-token"),
           signaling_urls: ["wss://signaling.ctox.dev"],
           native_rxdb_peer_available: true,
         };
@@ -556,7 +566,7 @@ test("ssh-managed attach stores metadata only and builds webrtc launch", async (
   assert.equal(instance.connection.user, "ubuntu");
   assert.equal(instance.connection.hostKeyFingerprint, "SHA256:testfingerprint");
   assert.equal(ensureCalled, true);
-  assert.equal(JSON.stringify(registry).includes("ssh-room-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("ssh-browser-token"), false);
   assert.equal(secrets.size, 1);
 
   const launch = await source.getLaunchConfig(instance.id);
@@ -660,7 +670,7 @@ test("ssh-managed install upgrades existing ctox and registers ensured peer", as
         return {
           instance_id: "upgraded",
           sync_room: "ctox-business-os:upgraded:abc",
-          signaling_room_password: "upgraded-room-secret",
+          ...roleBoundPeerFields("upgraded-browser-token"),
           signaling_urls: ["wss://signaling.ctox.dev"],
           native_rxdb_peer_available: true,
         };
@@ -680,7 +690,7 @@ test("ssh-managed install upgrades existing ctox and registers ensured peer", as
   assert.equal(installOptions.releaseChannel, "dev");
   assert.equal(installProfile.host, "example.com");
   assert.equal(ensureCalled, true);
-  assert.equal(JSON.stringify(registry).includes("upgraded-room-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("upgraded-browser-token"), false);
   assert.equal(secrets.size, 1);
 });
 
@@ -730,7 +740,7 @@ test("ssh-managed fresh install runs official installer contract and registers p
         return {
           instance_id: "fresh-vps",
           sync_room: "ctox-business-os:fresh-vps:abc",
-          signaling_room_password: "fresh-room-secret",
+          ...roleBoundPeerFields("fresh-browser-token"),
           signaling_urls: ["wss://signaling.ctox.dev"],
           native_rxdb_peer_available: true,
         };
@@ -756,7 +766,7 @@ test("ssh-managed fresh install runs official installer contract and registers p
   assert.equal(installOptions.backend, "cpu");
   assert.equal(installProfile.host, "fresh.example.com");
   assert.equal(ensureCalled, true);
-  assert.equal(JSON.stringify(registry).includes("fresh-room-secret"), false);
+  assert.equal(JSON.stringify(registry).includes("fresh-browser-token"), false);
   assert.equal(secrets.size, 1);
 });
 
@@ -802,7 +812,7 @@ test("installFresh refuses the unverified dev installer unless explicitly acknow
       runEnsureCommand: async () => ({
         instance_id: "fresh-vps",
         sync_room: "ctox-business-os:fresh-vps:abc",
-        signaling_room_password: "fresh-room-secret",
+        ...roleBoundPeerFields("fresh-browser-token"),
         signaling_urls: ["wss://signaling.ctox.dev"],
         native_rxdb_peer_available: true,
       }),

@@ -17,6 +17,8 @@ use std::env;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+static CTOX_API_KEY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn refresh_without_id_token() {
     let codex_home = tempdir().unwrap();
@@ -87,8 +89,8 @@ fn missing_auth_json_returns_none() {
 }
 
 #[tokio::test]
-#[serial(ctox_api_key)]
 async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
+    let _test_guard = CTOX_API_KEY_TEST_LOCK.lock().await;
     let codex_home = tempdir().unwrap();
     let fake_jwt = write_auth_file(
         AuthFileParams {
@@ -137,8 +139,8 @@ async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
 }
 
 #[tokio::test]
-#[serial(ctox_api_key)]
 async fn loads_api_key_from_auth_json() {
+    let _test_guard = CTOX_API_KEY_TEST_LOCK.lock().await;
     let dir = tempdir().unwrap();
     let auth_file = dir.path().join("auth.json");
     std::fs::write(
@@ -321,8 +323,8 @@ async fn enforce_login_restrictions_logs_out_for_method_mismatch() {
 }
 
 #[tokio::test]
-#[serial(ctox_api_key)]
 async fn enforce_login_restrictions_logs_out_for_workspace_mismatch() {
+    let _test_guard = CTOX_API_KEY_TEST_LOCK.lock().await;
     let codex_home = tempdir().unwrap();
     let _jwt = write_auth_file(
         AuthFileParams {
@@ -346,8 +348,8 @@ async fn enforce_login_restrictions_logs_out_for_workspace_mismatch() {
 }
 
 #[tokio::test]
-#[serial(ctox_api_key)]
 async fn enforce_login_restrictions_allows_matching_workspace() {
+    let _test_guard = CTOX_API_KEY_TEST_LOCK.lock().await;
     let codex_home = tempdir().unwrap();
     let _jwt = write_auth_file(
         AuthFileParams {
@@ -385,18 +387,20 @@ async fn enforce_login_restrictions_allows_api_key_if_login_method_not_set_but_f
 }
 
 #[tokio::test]
-#[serial(ctox_api_key)]
-async fn enforce_login_restrictions_blocks_env_api_key_when_chatgpt_required() {
+async fn enforce_login_restrictions_ignores_env_api_key_when_chatgpt_required() {
+    let _test_guard = CTOX_API_KEY_TEST_LOCK.lock().await;
     let _guard = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "sk-env");
     let codex_home = tempdir().unwrap();
 
     let config = build_config(codex_home.path(), Some(ForcedLoginMethod::Chatgpt), None).await;
 
-    let err = super::enforce_login_restrictions(&config)
-        .expect_err("environment API key should not satisfy forced ChatGPT login");
+    super::enforce_login_restrictions(&config)
+        .expect("ambient environment API keys must be ignored");
     assert!(
-        err.to_string()
-            .contains("ChatGPT login is required, but an API key is currently being used.")
+        super::load_auth(codex_home.path(), true, AuthCredentialsStoreMode::File,)
+            .expect("auth lookup should succeed")
+            .is_none(),
+        "ambient environment API keys must not become runtime authentication",
     );
 }
 

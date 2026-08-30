@@ -49,6 +49,7 @@ path = "examples/custom-provider/main.rs"
 
 [dependencies]
 base64 = "0.22"
+aws-lc-rs = "1.16.3"
 brotli = "8"
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 chrono-tz = "0.10"
@@ -66,7 +67,7 @@ mime = "0.3"
 percent-encoding = "2"
 png = "0.18"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rsa = { version = "0.9", features = ["pem"] }
+pkcs8 = "0.10"
 sha2 = "0.10"
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "test-util", "time"] }
@@ -87,6 +88,5 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-rand = "0.8"
 rcgen = "0.14"
 tempfile = "3"

@@ -5,14 +5,14 @@
 // as a silent participant via Playwright, captures audio for transcription, monitors
 // the meeting chat, and responds when @CTOX is mentioned.
 
-use anyhow::{Context, Result, bail};
-use base64::Engine as _;
+use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::{aead, hmac};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -29,7 +29,7 @@ use crate::channels::ensure_routing_rows_for_inbound;
 use crate::communication::adapters::{AdapterSyncCommandRequest, MeetingSendCommandRequest};
 use crate::communication::runtime as communication_runtime;
 use crate::communication_store::{
-    UpsertMessage, open_channel_db, refresh_thread, upsert_communication_message,
+    open_channel_db, refresh_thread, upsert_communication_message, UpsertMessage,
 };
 use crate::inference::{engine, native_stt, runtime_env, supervisor};
 
@@ -6320,13 +6320,11 @@ mod tests {
 
         let candidates = full_meeting_recording_candidates(&root, session_id);
         assert_eq!(candidates.len(), 2);
-        assert!(
-            candidates[0]
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap()
-                .ends_with("-recording.mp4")
-        );
+        assert!(candidates[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .ends_with("-recording.mp4"));
         assert!(candidates.iter().all(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -6459,11 +6457,9 @@ mod tests {
         let tasks = crate::schedule::list_tasks(&root).expect("scheduled tasks");
         assert_eq!(tasks.len(), 1);
         assert!(tasks[0].prompt.starts_with("CTOX_MEETING_JOIN:"));
-        assert!(
-            tasks[0]
-                .prompt
-                .contains("https://meet.google.com/abc-defg-hij")
-        );
+        assert!(tasks[0]
+            .prompt
+            .contains("https://meet.google.com/abc-defg-hij"));
         assert_eq!(tasks[0].cron_expr, "59 12 28 4 *");
         assert_eq!(
             result["results"][0]["join_time"],
@@ -6500,11 +6496,9 @@ mod tests {
         .expect("cancel result");
         assert_eq!(cancel["action"], "processed");
         assert_eq!(cancel["results"][0]["action"], "cancelled");
-        assert!(
-            crate::schedule::list_tasks(&root)
-                .expect("scheduled tasks")
-                .is_empty()
-        );
+        assert!(crate::schedule::list_tasks(&root)
+            .expect("scheduled tasks")
+            .is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6573,12 +6567,10 @@ mod tests {
         assert_eq!(mention_metadata["is_mention"], true);
         assert_eq!(mention_metadata["priority"], "urgent");
         assert_eq!(mention_metadata["transcript_chunk_count"], 2);
-        assert!(
-            mention_metadata["transcript_snapshot"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("rollout is blocked")
-        );
+        assert!(mention_metadata["transcript_snapshot"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rollout is blocked"));
 
         let mention_body: String = conn
             .query_row(
@@ -6739,14 +6731,12 @@ mod tests {
         assert_eq!(outbound, (1, "submitted".to_string()));
         drop(conn);
 
-        assert!(
-            confirm_meeting_outbound_message(
-                &root,
-                "session-send",
-                result["message_key"].as_str().unwrap()
-            )
-            .expect("runner confirmation")
-        );
+        assert!(confirm_meeting_outbound_message(
+            &root,
+            "session-send",
+            result["message_key"].as_str().unwrap()
+        )
+        .expect("runner confirmation"));
         let conn = open_channel_db(&db_path).expect("channel db");
         let confirmed_status: String = conn
             .query_row(
@@ -6786,10 +6776,9 @@ mod tests {
             body: "Diese Nachricht darf nicht als gesendet gelten.",
         };
         let err = send(&root, &BTreeMap::new(), &request).expect_err("write must fail");
-        assert!(
-            err.to_string()
-                .contains("failed to open meeting runner command file")
-        );
+        assert!(err
+            .to_string()
+            .contains("failed to open meeting runner command file"));
 
         let conn = open_channel_db(&db_path).expect("channel db");
         let sent_count: i64 = conn
@@ -6839,18 +6828,14 @@ mod tests {
         assert_eq!(result["finalization"]["action"], "ingested");
         let session_id = result["session_id"].as_str().expect("session id");
         let transcript = load_meeting_transcript(&root, session_id).expect("transcript");
-        assert!(
-            transcript["transcript"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("rollout ticket")
-        );
-        assert!(
-            transcript["chatlog"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("@CTOX")
-        );
+        assert!(transcript["transcript"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rollout ticket"));
+        assert!(transcript["chatlog"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("@CTOX"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6899,11 +6884,9 @@ mod tests {
             meeting_sessions_dir(&root).join(format!("{}-artifacts.json", session.session_id));
         assert!(transcript_path.exists());
         assert!(chatlog_path.exists());
-        assert!(
-            !std::fs::read_to_string(&transcript_path)
-                .unwrap()
-                .contains("deployment ticket")
-        );
+        assert!(!std::fs::read_to_string(&transcript_path)
+            .unwrap()
+            .contains("deployment ticket"));
         assert!(!artifact_dir.join("chunk-001.webm").exists());
         assert!(!artifact_dir.join("screen-001.mp4").exists());
         assert!(manifest_path.exists());

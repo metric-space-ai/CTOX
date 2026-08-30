@@ -4416,6 +4416,8 @@ function escapeAttr(value) {
 
 export const __ctoxTestHooks = {
   aggregateFlowMetrics,
+  authoritativeTaskNodeId,
+  authoritativeTaskStatus,
   buildHarnessModel,
   canModifyCtoxApp,
   clampMetric,

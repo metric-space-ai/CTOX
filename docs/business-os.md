@@ -203,6 +203,14 @@ initial status is not terminal.
 
 The main entrypoint is the Desktop shell (`modules/desktop/`), providing a lightweight operating environment:
 
+The shell and built-in `modules/` tree always come from the active immutable
+CTOX release. Durable extensions live only below
+`runtime/business-os/installed-modules/` or
+`runtime/business-os/local-modules/`. At native server start, legacy
+state-root copies of the release-owned `modules/` tree are moved into
+`runtime/business-os/.recovery/release-owned-system-module-overlays/`; they are
+kept for recovery but can no longer override the active release.
+
 - **Cross-Cutting Services**: Shared OS infrastructure lives under `src/apps/business-os/shared/`:
   - `shared/window-manager.js`: Coordinates overlapping workbench workspaces.
   - `shared/notifications.js`: Surfaces live events from the daemon's command streams.

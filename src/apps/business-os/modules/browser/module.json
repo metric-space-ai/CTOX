@@ -9,7 +9,8 @@
     "browser_tabs",
     "browser_frames",
     "browser_input_events",
-    "ctox_queue_tasks"
+    "ctox_queue_tasks",
+    "outbound_lead_generation_adapters"
   ],
   "launch_kind": "desktop-app",
   "presentation": {
@@ -41,7 +42,7 @@
     "center": "web page"
   },
   "category": "Workspace",
-  "version": "v0.2.1",
+  "version": "v0.2.4",
   "developer": "CTOX",
   "license": "AGPL-3.0-only",
   "tags": [

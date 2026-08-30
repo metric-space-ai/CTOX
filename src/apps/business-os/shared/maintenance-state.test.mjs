@@ -3,10 +3,21 @@ import test from 'node:test';
 
 import {
   CTOX_MAINTENANCE_SYNC_MESSAGE,
+  completedMaintenanceState,
   isDataEmptyStateText,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
 } from './maintenance-state.js';
+
+test('successful client readiness deterministically clears local maintenance', () => {
+  const state = completedMaintenanceState('upgrade-1');
+  assert.equal(state.active, false);
+  assert.equal(state.leaseId, 'upgrade-1');
+  assert.equal(state.status, 'completed');
+  assert.equal(state.percent, 100);
+  assert.equal(state.replicationUp, true);
+  assert.equal(state.initialReplicationComplete, true);
+});
 
 test('normalizes an instance-scoped active maintenance lease', () => {
   const state = normalizeMaintenancePayload({
@@ -27,6 +38,22 @@ test('normalizes an instance-scoped active maintenance lease', () => {
   assert.equal(state.leaseExpiresAtMs, 123456);
   assert.equal(state.percent, 96);
   assert.equal(state.replicationUp, true);
+});
+
+test('a remembered lease cannot revive a terminal failed upgrade', () => {
+  const state = normalizeMaintenancePayload({
+    active: false,
+    state: {
+      lease_id: 'upgrade-failed',
+      phase: 'failed',
+      status: 'failed',
+      retryable: true,
+      last_error: 'database is locked',
+    },
+  }, { rememberedLeaseId: 'upgrade-failed' });
+  assert.equal(state.active, false);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.retryable, true);
 });
 
 test('module readiness excludes demand-only blob collections', () => {

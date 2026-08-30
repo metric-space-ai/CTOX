@@ -80,7 +80,7 @@ const MAX_CONCURRENT_REQUEST_TASKS: usize = 32;
 const MAX_CONCURRENT_AUXILIARY_REQUESTS: usize = 8;
 const BROWSER_LIVE_METHOD: &str = "ctox.browser.live.v1";
 const OUTBOUND_SELLIFY_LOOKUP_METHOD: &str = "ctox.outbound.sellify_lookup.v1";
-const OUTBOUND_SELLIFY_RESPONSE_COLLECTION: &str = "thesen_outbound_leads";
+const OUTBOUND_SELLIFY_RESPONSE_COLLECTION: &str = "outbound_lead_generation_leads";
 
 fn auxiliary_response_collection(method: &str, operation: &str) -> Option<String> {
     if method == BROWSER_LIVE_METHOD {
@@ -93,7 +93,7 @@ fn auxiliary_response_collection(method: &str, operation: &str) -> Option<String
             .to_string(),
         );
     }
-    // Sellify lookups are read-only requests issued while the THESEN lead
+    // Sellify lookups are read-only requests issued while the customer tenant lead
     // collection is foreground. Tag only their response for the normal
     // active-collection priority lane so it cannot sit behind a cold full
     // replication backlog and exhaust the browser's bounded request budget.

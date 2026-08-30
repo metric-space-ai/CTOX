@@ -269,6 +269,9 @@ if (smokeMode === 'business-os-app-release-ui') {
 if (smokeMode === 'business-os-agent-scope-ui') {
   prepareBusinessOsAgentScopeModuleFixture(agentScopeModuleFixture);
 }
+if (smokeMode === 'business-os-fresh-profile-ui') {
+  prepareBusinessOsFreshProfileModuleAssets();
+}
 if (smokeMode === 'business-os-sellify-scale-ui') {
   prepareBusinessOsSellifyScaleModuleFixture();
 }
@@ -1060,6 +1063,33 @@ function prepareBusinessOsAgentScopeModuleFixture(fixture) {
 `);
 }
 
+function prepareBusinessOsFreshProfileModuleAssets() {
+  const moduleIds = [
+    'phase14-fresh-private-app',
+    'phase14-fresh-team-app',
+    'phase14-fresh-restricted-app',
+    ...Array.from({ length: 33 }, (_, index) =>
+      `phase14-scale-app-${String(index + 1).padStart(2, '0')}`),
+  ];
+  const installedModulesRoot = path.join(runtimeRoot, 'runtime/business-os/installed-modules');
+  fs.mkdirSync(installedModulesRoot, { recursive: true });
+  const targetRealPath = fs.realpathSync(installedModulesRoot);
+  const repoRealPath = fs.realpathSync(root);
+  if (targetRealPath === repoRealPath || targetRealPath.startsWith(`${repoRealPath}${path.sep}`)) {
+    throw new Error('fresh-profile fixture would write into the real Business OS source tree');
+  }
+  for (const moduleId of moduleIds) {
+    const moduleRoot = path.join(installedModulesRoot, moduleId);
+    fs.mkdirSync(moduleRoot, { recursive: true });
+    fs.writeFileSync(path.join(moduleRoot, 'schema.js'), 'export const collections = {};\n');
+    fs.writeFileSync(path.join(moduleRoot, 'icon.svg'), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="${moduleId}">
+  <rect width="24" height="24" rx="5" fill="#23665f"/>
+  <path d="M7 12h10M12 7v10" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+</svg>
+`);
+  }
+}
+
 function prepareBusinessOsReleaseModuleFixture(fixture) {
   const module = fixture?.module || {};
   const id = String(module.id || '').trim();
@@ -1592,8 +1622,8 @@ async function seedBusinessOsThreadsRightClickNativeUsers() {
       (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
        active, reason, created_by, created_at_ms, updated_at_ms)
     VALUES
-      ('threads_rightclick_notes_read', 'user', 'threads-requester', 'data.read',
-       'module', 'notes', 1, 'right-click smoke read-only source access',
+      ('threads_rightclick_tickets_read', 'user', 'threads-requester', 'data.read',
+       'module', 'tickets', 1, 'right-click smoke read-only source access',
        'browser-rust-smoke', ${now}, ${now})
     ON CONFLICT(grant_id) DO UPDATE SET
       subject_type = excluded.subject_type,
@@ -1639,6 +1669,24 @@ async function seedBusinessOsThreadsScaleNativeSetup() {
     messages: 'ctox_business_os__user_thread_messages__v1',
     notifications: 'ctox_business_os__user_notifications__v0',
   };
+  // Provision the canonical native tables before peer startup. Creating them
+  // after the peer has prepared catalog/change-feed statements invalidates
+  // those statements and can transiently tear down replication with
+  // "database schema has changed" while the scale fixture is being seeded.
+  sqlite(Object.values(tables).map((tableName) => {
+    const table = quoteSqlIdentifier(tableName);
+    const index = quoteSqlIdentifier(`idx_${tableName}_lwt`);
+    return `
+      CREATE TABLE IF NOT EXISTS ${table} (
+        id TEXT PRIMARY KEY,
+        revision TEXT NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        lastWriteTime REAL NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS ${index} ON ${table} (lastWriteTime DESC);
+    `;
+  }).join('\n'));
   await waitForSqliteTables(Object.values(tables), 60000);
 
   const fixtures = [
@@ -1670,11 +1718,12 @@ async function seedBusinessOsThreadsScaleNativeSetup() {
           thread_id: id,
           title: `Historical thread ${index}`,
           kind: 'history',
-          status: 'completed',
+          status: 'open',
           participant_ids: ['local-dev', 'threads-requester'],
           watcher_user_ids: [],
           owner_user_id: 'local-dev',
           created_by_id: 'local-dev',
+          assigned_user_id: 'local-dev',
           source_module: 'threads-scale-history',
           source_record_type: 'scale-fixture',
           source_record_id: `threads_scale_record_${index}`,
@@ -4252,6 +4301,11 @@ function ensureCtoxSmokeBinary() {
     sellifyScaleSeedMs = Date.now() - scaleSeedStartedAt;
     console.log(`business_os_sellify_scale_seed_ms=${sellifyScaleSeedMs}`);
   }
+  if (smokeMode === 'business-os-threads-scale-ui') {
+    const scaleSeedStartedAt = Date.now();
+    threadsScaleSeed = await seedBusinessOsThreadsScaleNativeSetup();
+    console.log(`business_os_threads_rightclick_scale_seed_ms=${Date.now() - scaleSeedStartedAt}`);
+  }
   let ctox = startCtoxServer();
   const browserDiagnostics = {
     warnings: 0,
@@ -4319,12 +4373,6 @@ function ensureCtoxSmokeBinary() {
     if (!config.native_rxdb_peer_available) {
       throw new Error(`native peer unavailable: ${JSON.stringify(config)}`);
     }
-    if (smokeMode === 'business-os-threads-scale-ui') {
-      const scaleSeedStartedAt = Date.now();
-      threadsScaleSeed = await seedBusinessOsThreadsScaleNativeSetup();
-      outerPhaseTimings.threadsScaleSeedMs = Date.now() - scaleSeedStartedAt;
-      console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
-    }
     if (smokeMode === 'business-os-sellify-scale-ui') {
       outerPhaseTimings.sellifyScaleSeedMs = sellifyScaleSeedMs;
     }
@@ -4389,6 +4437,19 @@ function ensureCtoxSmokeBinary() {
       });
     }
     const page = await browser.newPage();
+    if (
+      smokeMode === 'business-os-app-release-ui'
+      || smokeMode === 'business-os-agent-scope-ui'
+      || smokeMode === 'business-os-fresh-profile-ui'
+      || smokeMode === 'business-os-client-lifecycle-ui'
+    ) {
+      // These flows validate lifecycle/policy projections in the App Store's
+      // list representation, not its animated WebGL shelf. Exercise the real
+      // accessibility preference so the shelf is never initialized before the
+      // smoke selects the list toggle (which otherwise emits a Linux GPU
+      // driver warning under the production zero-warning budget).
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    }
     outerPhaseTimings.browserLaunchMs = Date.now() - browserLaunchStartedAt;
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) console.log(`[browser:navigation] ${frame.url()}`);
@@ -5146,9 +5207,9 @@ function ensureCtoxSmokeBinary() {
         }, waitError).catch((evalError) => ({ evaluateError: String(evalError?.message || evalError) }));
         throw new Error(`Business OS shell did not become ready: ${JSON.stringify(startupState, null, 2)}`);
       }
-      // The isolated scale smoke starts with an empty native store. Register
-      // the module collections only after the real shell database is ready,
-      // then seed the large native fixture into the canonical schema versions.
+      // Register the browser-side module collections once the real shell
+      // database is ready. The native tables and fixture were provisioned
+      // before peer startup so this step cannot invalidate native statements.
       if (smokeMode === 'business-os-threads-scale-ui') {
         await page.evaluate(async () => {
           const rawDb = globalThis.ctoxBusinessOsSmoke?.state?.db?.raw;
@@ -5160,10 +5221,6 @@ function ensureCtoxSmokeBinary() {
           }
           if (Object.keys(missing).length) await rawDb.addCollections(missing);
         });
-        const scaleSeedStartedAt = Date.now();
-        threadsScaleSeed = await seedBusinessOsThreadsScaleNativeSetup();
-        outerPhaseTimings.threadsScaleSeedMs = Date.now() - scaleSeedStartedAt;
-        console.log(`business_os_threads_rightclick_scale_seed_ms=${outerPhaseTimings.threadsScaleSeedMs}`);
       }
       if (smokeMode === 'business-os-sellify-scale-ui') {
         const setupDeadline = Date.now() + Number(process.env.SELLIFY_SCALE_SETUP_TIMEOUT_MS || 240000);
@@ -5626,7 +5683,7 @@ function ensureCtoxSmokeBinary() {
           };
           const moduleIds = [privateModule.id, teamModule.id, restrictedModule.id];
           const allPermissions = Object.values(BusinessOsPermissions);
-          const scaleModuleCount = 32;
+          const scaleModuleCount = 33;
           const scaleModules = Array.from({ length: scaleModuleCount }, (_, index) => {
             const seq = index + 1;
             const version = `1.${Math.floor(index / 8)}.${index % 8}`;
@@ -5840,6 +5897,41 @@ function ensureCtoxSmokeBinary() {
             smoke.renderTabs();
             return Math.round(performance.now() - renderStartedAt);
           };
+          const seedFreshProfileModuleCatalog = async () => {
+            const collection = state.db?.collection?.('business_module_catalog');
+            if (!collection) throw new Error('fresh-profile module catalog is unavailable');
+            const doc = await collection.findOne('module-catalog').exec().catch(() => null);
+            const existing = doc?.toJSON?.() || {
+              id: 'module-catalog',
+              ok: true,
+              modules: [],
+              templates: [],
+              governance: null,
+            };
+            const {
+              _rev,
+              _attachments,
+              ...catalog
+            } = existing;
+            void _rev;
+            void _attachments;
+            const insertedIds = new Set([...moduleIds, ...scaleModuleIds]);
+            const modules = Array.isArray(catalog.modules) ? catalog.modules : [];
+            await collection.upsert({
+              ...catalog,
+              id: 'module-catalog',
+              ok: catalog.ok !== false,
+              modules: [
+                ...modules.filter((mod) => !insertedIds.has(mod?.id)),
+                privateModule,
+                teamModule,
+                restrictedModule,
+                ...scaleModules,
+              ],
+              updated_at_ms: Date.now(),
+              source: catalog.source || 'business-os-fresh-profile-smoke',
+            });
+          };
           globalThis.__ctoxFreshProfileNarrowSetup = async () => {
             installModules(teamSession);
             await state.openModule('app-store', { force: true, asModule: true });
@@ -5847,11 +5939,12 @@ function ensureCtoxSmokeBinary() {
               ok: Boolean(document.querySelector('[data-app-store-root]')),
               text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
             }), 10000, 'fresh-profile narrow app store root');
+            await seedFreshProfileModuleCatalog();
             document.querySelector('[data-app-store-root] [data-scope="installed"]')?.click();
             return waitFor(() => {
               const card = document.querySelector(`[data-app-id="${css(teamModule.id)}"]`);
               const disabled = card?.querySelector('[data-disabled-reason]');
-              const lifecycle = card?.querySelector('.app-lifecycle-badge');
+              const lifecycle = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
               return {
                 ok: Boolean(card && disabled && lifecycle),
                 cardText: card?.innerText || '',
@@ -5932,11 +6025,12 @@ function ensureCtoxSmokeBinary() {
               ok: Boolean(document.querySelector('[data-app-store-root]')),
               text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
             }), 10000, 'fresh-profile app store root');
+            await seedFreshProfileModuleCatalog();
             document.querySelector('[data-app-store-root] [data-scope="installed"]')?.click();
             const appStore = await waitFor(() => {
               const card = document.querySelector(`[data-app-id="${css(teamModule.id)}"]`);
               const disabled = card?.querySelector('[data-disabled-reason]');
-              const lifecycle = card?.querySelector('.app-lifecycle-badge');
+              const lifecycle = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
               const cards = [...document.querySelectorAll('[data-app-id]')];
               const scaleCardCount = scaleModuleIds
                 .filter((id) => document.querySelector(`[data-app-id="${css(id)}"]`))
@@ -6093,7 +6187,7 @@ function ensureCtoxSmokeBinary() {
               const root = document.querySelector('[data-app-store-root]') || document.body;
               const targetCard = document.querySelector('[data-app-id="phase14-fresh-team-app"]');
               targetCard?.scrollIntoView?.({ block: 'center', inline: 'nearest' });
-              const visibleLifecycle = [...document.querySelectorAll('.module-tab-lifecycle, .app-lifecycle-badge')]
+              const visibleLifecycle = [...document.querySelectorAll('.module-tab-lifecycle, .app-card-version-row .ctox-badge[data-state]')]
                 .filter((el) => {
                   const rect = el.getBoundingClientRect();
                   return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.left < window.innerWidth;
@@ -7510,7 +7604,7 @@ function ensureCtoxSmokeBinary() {
       ? {
           kind: officeRestartKind,
           canonical: Array.from(fs.readFileSync(path.join(root, `tests/fixtures/office/${officeRestartKind}/edit-save.${officeRestartKind === 'document' ? 'docx' : 'xlsx'}`))),
-          editor: Array.from(fs.readFileSync(path.join(root, `output/playwright/ctox-office/rust/${officeRestartKind}.edit-save/ctox-rust.Editor.bin`))),
+          editor: Array.from(fs.readFileSync(path.join(root, `tests/fixtures/office/${officeRestartKind}/edit-save.editor.bin`))),
         }
       : null;
     // Backlog OS-C3/SYNC-02: the two-browser modes drive a second isolated
@@ -10119,7 +10213,6 @@ function ensureCtoxSmokeBinary() {
           }
         };
         const openAppStoreContextMenu = async () => {
-          await seedAgentScopeModuleCatalog({ force: true });
           applyAgentScopeState();
           await state.openModule('app-store', { force: true, asModule: true });
           await waitFor(() => ({
@@ -10127,6 +10220,11 @@ function ensureCtoxSmokeBinary() {
             activeModule: state.activeModule?.id || document.body?.dataset?.activeModule || '',
             text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
           }), 30000, 'agent scope App Store open');
+          // App Store startup performs an authoritative sync before subscribing
+          // to catalog updates. Seed the synthetic fixture only after that
+          // boundary so the test does not rely on stale offline state winning
+          // over a peer pull.
+          await seedAgentScopeModuleCatalog({ force: true });
           document.querySelector('[data-scope="installed"]')?.dispatchEvent(new MouseEvent('click', {
             bubbles: true,
             cancelable: true,
@@ -10140,10 +10238,8 @@ function ensureCtoxSmokeBinary() {
               activeModule: state.activeModule?.id || '',
             };
           }, 15000, 'agent scope App Store card');
-          let contextMenuDispatchCount = 0;
-          let lastContextMenuEventPrevented = false;
           return waitFor(async () => {
-            let menu = document.querySelector('.app-store-context-menu:not([hidden])');
+            let menu = document.querySelector('.ctox-global-context-menu:not([hidden])');
             let panel = menu?.querySelector('.ctox-agent-scope') || null;
             let rows = scopeRowsFromPanel(panel);
             if (!(menu && panel && rows.length >= 4 && /Phase 12 Agent Scope App/.test(panel.textContent || ''))) {
@@ -10158,61 +10254,56 @@ function ensureCtoxSmokeBinary() {
               }
               if (currentCard) {
                 const rect = currentCard.getBoundingClientRect();
-                lastContextMenuEventPrevented = !currentCard.dispatchEvent(new MouseEvent('contextmenu', {
-                  bubbles: true,
-                  cancelable: true,
-                  button: 2,
-                  buttons: 2,
-                  composed: true,
-                  clientX: Math.max(24, Math.round(rect.left + 18)),
-                  clientY: Math.max(24, Math.round(rect.top + 18)),
-                }));
-                contextMenuDispatchCount += 1;
-                menu = document.querySelector('.app-store-context-menu:not([hidden])');
+                smoke.openGlobalCtoxContextMenuForTarget(
+                  currentCard,
+                  Math.max(24, Math.round(rect.left + 18)),
+                  Math.max(24, Math.round(rect.top + 18)),
+                );
+                menu = document.querySelector('.ctox-global-context-menu:not([hidden])');
                 panel = menu?.querySelector('.ctox-agent-scope') || null;
                 rows = scopeRowsFromPanel(panel);
               }
             }
-            const allMenus = [...document.querySelectorAll('.app-store-context-menu')];
             const currentCard = document.querySelector(`[data-app-id="${css(targetModule.id)}"]`);
             const host = document.querySelector('[data-module-content]') || document.querySelector('[data-module-root]');
             return {
               ok: Boolean(menu && panel && rows.length >= 4 && /Phase 12 Agent Scope App/.test(panel.textContent || '')),
               rows,
               text: panel?.textContent?.trim() || '',
-              eventPrevented: lastContextMenuEventPrevented,
-              dispatchCount: contextMenuDispatchCount,
               activeModule: state.activeModule?.id || document.body?.dataset?.activeModule || '',
-              menuCount: allMenus.length,
-              menuHidden: allMenus.map((entry) => entry.hidden),
-              menuText: allMenus.map((entry) => entry.textContent?.trim?.().slice(0, 500) || ''),
               cardConnected: Boolean(currentCard?.isConnected),
               hostHasCard: Boolean(host && currentCard && host.contains(currentCard)),
-              hostLocalContextMenu: host?.getAttribute?.('data-ctox-local-context-menu') || '',
+              contextModuleId: currentCard?.getAttribute?.('data-context-module-id') || '',
               catalogSeedCount: agentScopeCatalogSeedCount,
             };
           }, 5000, 'agent scope App Store context menu');
         };
         const submitAppStoreContextMenu = async () => {
-          let submittedDetail = null;
-          const listener = (event) => {
-            submittedDetail = JSON.parse(JSON.stringify(event.detail || {}));
+          let submittedCommand = null;
+          const originalDispatch = state.commandBus?.dispatch;
+          if (typeof originalDispatch !== 'function') throw new Error('agent scope command bus is unavailable');
+          state.commandBus.dispatch = async (...args) => {
+            submittedCommand = JSON.parse(JSON.stringify(args[0] || {}));
+            return originalDispatch.apply(state.commandBus, args);
           };
-          window.addEventListener('ctox-business-os-chat-submit', listener, { capture: true, once: true });
-          const menu = document.querySelector('.app-store-context-menu:not([hidden])');
-          const form = menu?.querySelector('[data-app-store-context-chat-form]');
-          const textarea = menu?.querySelector('[data-app-store-context-message]');
+          const menu = document.querySelector('.ctox-global-context-menu:not([hidden])');
+          const form = menu?.querySelector('form');
+          const textarea = menu?.querySelector('textarea');
           if (!form || !textarea) throw new Error('agent scope App Store context form is missing');
+          const askInput = menu.querySelector('input[name="contextMode"][value="ask"]');
+          if (!askInput) throw new Error('agent scope App Store ask mode is missing');
+          askInput.checked = true;
+          askInput.dispatchEvent(new Event('change', { bubbles: true }));
           textarea.value = 'Bitte prüfe den App-Store-Scope im Chat.';
           textarea.dispatchEvent(new Event('input', { bubbles: true }));
           form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
           try {
             return await waitFor(() => ({
-              ok: Boolean(submittedDetail),
-              detail: submittedDetail,
+              ok: Boolean(submittedCommand),
+              detail: submittedCommand,
             }), 5000, 'agent scope App Store context submit detail');
           } finally {
-            window.removeEventListener('ctox-business-os-chat-submit', listener, { capture: true });
+            state.commandBus.dispatch = originalDispatch;
           }
         };
         const waitForBusinessChatScope = async (submittedDetail) => {
@@ -10308,8 +10399,8 @@ function ensureCtoxSmokeBinary() {
               && appStoreDetail.client_context?.module_id === targetModule.id
               && appStoreDetail.client_context?.app_id === targetModule.id
               && appStoreDetail.client_context?.actor?.id === actorSession.user.id
-              && appStoreDetail.payload?.mode === 'data'
-              && appStoreDetail.command_type === 'business_os.chat.task'
+              && appStoreDetail.payload?.mode === 'ask'
+              && appStoreDetail.command_type === 'business_os.context.ask'
               && scopeRowsMatchVisibleScope(appStoreMenu.rows, appStoreVisibleScope)
           );
           const businessChatScope = await waitForBusinessChatScope(appStoreDetail);
@@ -10809,9 +10900,9 @@ function ensureCtoxSmokeBinary() {
         appState = state;
 
         const targetModule = {
-          id: 'notes',
-          title: 'Notes',
-          glyph: 'N',
+          id: 'tickets',
+          title: 'Tickets',
+          glyph: 'T',
         };
         const requesterSession = {
           authenticated: true,
@@ -10832,8 +10923,8 @@ function ensureCtoxSmokeBinary() {
           },
         };
         const reviewerId = reviewerSession.user.id;
-        const targetRecordId = 'notes_seed_ops_review';
-        const appTargetRecordId = 'notes';
+        const targetRecordId = 'tickets_seed_ops_review';
+        const appTargetRecordId = 'tickets';
         const threadsCollections = [
           'user_threads',
           'user_thread_messages',
@@ -13488,17 +13579,29 @@ function ensureCtoxSmokeBinary() {
 
         await state.openModule('app-store', { force: true, asModule: true });
         await waitFor(() => ({
-          ok: visible('[data-app-store-root]') && visible('[data-apps-grid]'),
+          ok: visible('[data-app-store-root]')
+            && visible('[data-pg-view="list"]')
+            && document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired === 'true',
           activeModule: state.activeModule?.id || document.body?.dataset?.activeModule || '',
+          paneGrammarWired: document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired || '',
           text: document.querySelector('[data-app-store-root]')?.innerText?.slice(0, 500) || '',
         }), 30000, 'App Store opened for release smoke');
+        click('[data-pg-view="list"]', 'App Store list view');
+        await waitFor(() => ({
+          ok: visible('[data-apps-grid]'),
+          listViewPressed: document.querySelector('[data-pg-view="list"]')?.getAttribute('aria-pressed') || '',
+          gridHidden: document.querySelector('[data-apps-grid]')?.hidden ?? null,
+        }), 10000, 'App Store list view opened for release smoke');
         click('[data-scope="installed"]', 'installed scope');
         await waitFor(() => {
           const card = document.querySelector(`[data-apps-grid] [data-app-id="${css(moduleId)}"]`);
           const releaseButton = card?.querySelector('[data-card-action="release"]');
-          const lifecycleBadge = card?.querySelector('.app-lifecycle-badge');
+          const lifecycleBadge = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
           return {
-            ok: Boolean(card && releaseButton && !releaseButton.disabled && /Privat/.test(lifecycleBadge?.textContent || '')),
+            ok: Boolean(card
+              && releaseButton
+              && !releaseButton.disabled
+              && /Privat/.test(lifecycleBadge?.textContent || card?.innerText || '')),
             hasCard: Boolean(card),
             hasReleaseButton: Boolean(releaseButton),
             releaseDisabled: releaseButton?.disabled ?? null,
@@ -13566,7 +13669,7 @@ function ensureCtoxSmokeBinary() {
         }) === true;
         const versionBadgeVisible = await waitFor(() => {
           const card = document.querySelector(`[data-app-id="${css(moduleId)}"]`);
-          const lifecycleBadge = card?.querySelector('.app-lifecycle-badge');
+          const lifecycleBadge = card?.querySelector('.app-card-version-row .ctox-badge[data-state]');
           const releaseBadge = card?.querySelector('.app-release-state');
           const text = card?.innerText || '';
           return {
@@ -13600,6 +13703,18 @@ function ensureCtoxSmokeBinary() {
         localStorage.removeItem(storageKey);
 
         await state.openModule('app-store', { force: true, asModule: true });
+        if (!visible('[data-apps-grid]')) {
+          await waitFor(() => ({
+            ok: document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired === 'true',
+            paneGrammarWired: document.querySelector('[data-pg-view="list"]')?.closest('.ctox-pane')?.dataset?.pgWired || '',
+          }), 10000, 'App Store pane grammar before versions');
+          click('[data-pg-view="list"]', 'App Store list view before versions');
+          await waitFor(() => ({
+            ok: visible('[data-apps-grid]'),
+            listViewPressed: document.querySelector('[data-pg-view="list"]')?.getAttribute('aria-pressed') || '',
+            gridHidden: document.querySelector('[data-apps-grid]')?.hidden ?? null,
+          }), 10000, 'App Store list view before versions');
+        }
         const versionStateReady = await waitFor(async () => {
           await syncBusinessCollections(5000);
           const catalog = await catalogSnapshot();
@@ -15215,19 +15330,15 @@ function ensureCtoxSmokeBinary() {
         const baselineTimers = timers();
         const baselineHeap = heap();
         const initialSyncRuntime = state.sync;
-        // Canonical installed QA inventory. Do not derive this gate from the
-        // current user's visible/pinned launcher subset or hidden apps would
-        // silently escape lifecycle coverage.
-        const canonicalTargetIds = [
-          'app-store', 'appsec-pentest', 'browser', 'buchhaltung', 'calendar',
-          'code-editor', 'coding-agents', 'consent', 'conversations', 'creator',
-          'credentials', 'ctox', 'customers', 'cv-print-builder', 'documents',
-          'esign', 'explorer', 'intake', 'interviews', 'invoices', 'iot',
-          'knowledge', 'matching', 'nachweise', 'notes', 'outbound',
-          'placements', 'reports', 'research', 'shiftflow', 'spreadsheets',
-          'submissions', 'support', 'threads', 'tickets',
-        ];
-        const targets = canonicalTargetIds.map((id) => ({ id }));
+        // Exercise the shell-authoritative installed window-launch inventory,
+        // not a hand-maintained source/catalog list (which can contain apps
+        // that are available in the store but are not installed). This is not
+        // the user's pinned subset, and newly installed launchable apps enter
+        // lifecycle coverage automatically.
+        const targets = smoke.listLaunchTargets?.('app') || [];
+        if (!targets.length) {
+          throw new Error('lifecycle app inventory is empty');
+        }
         const results = [];
 
         for (const target of targets) {

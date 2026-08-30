@@ -4,8 +4,8 @@ import { __browserTestHooks } from './index.js';
 
 assert.deepEqual(
   __browserTestHooks.SCRAPING_ADAPTER_COLLECTIONS,
-  ['outbound_research_adapters', 'thesen_outbound_adapters'],
-  'the Browser scraping rail must include both core and THESEN tenant adapters',
+  ['outbound_research_adapters', 'outbound_lead_generation_adapters'],
+  'the Browser scraping rail must include both core and managed tenant adapters',
 );
 
 assert.equal(__browserTestHooks.normalizeUrl('example.com'), 'https://example.com');

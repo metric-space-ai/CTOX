@@ -404,9 +404,9 @@ try {
   await scenario(page, 'transient-command-timeout-keeps-chat-trackable', {
     count: 1,
     commandError: 'transient',
-    selectedOffset: -1,
   }, async () => {
     const after = await page.evaluate(async () => {
+      await window.chatHarness.waitFor(() => document.querySelector('.ctox-chat-window.is-active textarea'));
       const input = document.querySelector('.ctox-chat-window.is-active textarea');
       input.value = 'Bitte als CTOX Task verarbeiten';
       input.dispatchEvent(new InputEvent('input', { bubbles: true }));

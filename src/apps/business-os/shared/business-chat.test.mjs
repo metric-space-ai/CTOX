@@ -2366,7 +2366,7 @@ test('eine Antwort auf einen alten Chat holt sich die Ansicht nicht', () => {
 });
 
 test('die Chat-Leiste faengt nur dort Klicks, wo sie etwas anzeigt', () => {
-  // Am 11.08.2026 lag die Empfaengerauswahl von THESEN Outbound im
+  // Am 11.08.2026 lag die Empfaengerauswahl von Outbound Lead Generation im
   // durchsichtigen Zwischenraum des Docks. Der Detailbereich war bis zum
   // Anschlag gescrollt, das Haekchen sichtbar — und jeder Klick landete im
   // Dock. elementsFromPoint zeigte SECTION.ctox-chat-dock zuoberst. Ohne

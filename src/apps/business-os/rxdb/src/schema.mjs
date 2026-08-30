@@ -162,6 +162,7 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   outbound_campaigns: '194e3748c589a9cfc50ed63dccab525028e9bdbd006f20b73c10e29aa865e58d',
   outbound_companies: '1d79eb4b67d84826ed2016b0385224600d51c334d5b91d4adb77e62e916d0bbf',
   outbound_engagements: 'f310db7ac3c7abdc78b40b227866ce673f5871601d594b00853000f7c4e088c2',
+  outbound_lead_generation_adapters: '6f4b2144d3ebe5f25047ae1b51fef0429261753135e3889c3998900c4a914583',
   outbound_letter_templates: '9839d58ede05148b48b2a7e494fc29d4aa94611034a11bc4c73b32de866a7466',
   outbound_meeting_requests: 'f04c3249c3a3d8cf7ca6c2a4b51fbb15729035bca707668fbef3988242e69aa2',
   outbound_messages: '93b8e2cea0670112b6499a86a774dafef3cbd289d11725bf57d4e0941ad13006',

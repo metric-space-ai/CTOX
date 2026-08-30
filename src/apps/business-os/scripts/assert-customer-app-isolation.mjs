@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CUSTOMER_RUNTIME_PATH = /(?:^|\/)(?:installed-modules|local-modules)(?:\/|$)/;
-const CUSTOMER_WORK_PATH = /^runtime\/(?:rem|thesen)(?:-|\/)/i;
+const CUSTOMER_WORK_PATH = /^runtime\/(?:rem|customer)(?:-|\/)/i;
 const PUBLIC_SCOPE_VALUES = new Set(['public', 'global', 'system', 'store', 'internal', 'shared']);
 
 export function customerReleaseViolations(paths, readText) {
@@ -38,7 +38,7 @@ export function customerReleaseViolations(paths, readText) {
     const hasCustomerId = customerId !== undefined && customerId !== null;
     if (
       moduleId.startsWith('rem-')
-      || moduleId.startsWith('thesen-')
+      || moduleId.startsWith('customer-')
       || invalidOrPrivateScope
       || hasCustomerId
     ) {

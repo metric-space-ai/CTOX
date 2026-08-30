@@ -817,10 +817,12 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const activeExpandedChat = activeChat && !activeChat.minimized
     ? activeChat
     : expandedChats.find((chat) => chat.id === state.activeChatId) || expandedChats[0] || null;
+  const dockCollapsed = Boolean(state.dockCollapsed);
   // The dock already provides navigation between chats. Rendering historical
   // chats as translucent cards behind the active one made covered app controls
   // look clickable while an inactive chat surface intercepted the click.
   const visibleWindowChats = stageWindowChats(activeExpandedChat);
+  const stagedWindowCount = dockCollapsed ? 0 : visibleWindowChats.length;
   const hiddenChatCount = Math.max(0, openChats.length - visibleChats.length);
   const hasVisibleChats = openChats.length > 0;
   const showChatStrip = !Boolean(state.dockCollapsed) && hasVisibleChats;
@@ -835,7 +837,6 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     hiddenChatCount > 0 ? 'has-overflow-chats' : '',
     showChatNav ? 'has-nav' : 'has-no-nav',
   ].filter(Boolean).join(' ');
-  const dockCollapsed = Boolean(state.dockCollapsed);
   const wasCollapsed = root.classList.contains('is-collapsed');
   root.classList.toggle('is-collapsed', dockCollapsed);
 
@@ -1074,7 +1075,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     ${state.dateWorkloadOpen ? dateWorkloadPanel({ chats: state.chats, selectedDate }) : ''}
     ${state.chatListOpen && openChats.length > MAX_RENDERED_CHAT_TABS ? chatBusyPanel({ chats: openChats, selectedDate, state }) : ''}
     <div class="ctox-chat-stage" data-chat-stage>
-      <div class="ctox-chat-stage-inner ${hasMaximized ? 'has-maximized' : ''}">
+      <div class="ctox-chat-stage-inner ${stagedWindowCount === 0 ? 'is-empty' : ''} ${hasMaximized ? 'has-maximized' : ''}">
         ${dockCollapsed ? '' : (() => {
           const activeIndex = visibleWindowChats.findIndex((c) => c.id === activeExpandedChat?.id);
           return visibleWindowChats.map((chat, idx) => {
@@ -3994,7 +3995,7 @@ function installChatStyles() {
          darunter bedienbar bleibt — das Dock hob das fuer seine GESAMTE Flaeche
          wieder auf, einschliesslich der durchsichtigen Zwischenraeume zwischen
          Knopf, Datumspille und Streifen. Am 11.08.2026 lag die
-         Empfaengerauswahl von THESEN Outbound genau in diesem toten Streifen:
+         Empfaengerauswahl von Outbound Lead Generation genau in diesem toten Streifen:
          der Detailbereich war bis zum Anschlag gescrollt, das Haekchen sichtbar,
          und jeder Klick landete im Dock. Ohne Empfaenger keine Sellify-Uebergabe,
          kein Serienbrief, keine Serien-E-Mail — die gesamte Kette endete an
@@ -4848,6 +4849,11 @@ function installChatStyles() {
       perspective: 1200px;
       transform-style: preserve-3d;
     }
+    .ctox-chat-stage-inner.is-empty {
+      height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
     .ctox-chat-stage-inner.has-maximized {
       height: min(480px, calc(100dvh - 132px));
     }
@@ -5645,7 +5651,7 @@ function installChatStyles() {
     }
 
     @media (max-height: 680px) {
-      .ctox-chat-stage-inner {
+      .ctox-chat-stage-inner:not(.is-empty) {
         height: min(240px, calc(100vh - 132px));
       }
       .ctox-chat-stage-inner.has-maximized {

@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 csv = "1"
-quick-xml = "0.37"
+quick-xml = "0.41"
 regex = "1"
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }

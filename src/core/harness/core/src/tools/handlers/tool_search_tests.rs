@@ -6,6 +6,17 @@ use rmcp::model::Tool;
 use serde_json::json;
 use std::sync::Arc;
 
+fn test_tool(name: &str, description: &str) -> Tool {
+    Tool::new(
+        name.to_string(),
+        description.to_string(),
+        Arc::new(JsonObject::from_iter([(
+            "type".to_string(),
+            json!("object"),
+        )])),
+    )
+}
+
 #[test]
 fn serialize_tool_search_output_tools_groups_results_by_namespace() {
     let entries = [
@@ -15,20 +26,7 @@ fn serialize_tool_search_output_tools_groups_results_by_namespace() {
                 server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
                 tool_name: "_create_event".to_string(),
                 tool_namespace: "mcp__codex_apps__calendar".to_string(),
-                tool: Tool {
-                    name: "calendar-create-event".to_string().into(),
-                    title: None,
-                    description: Some("Create a calendar event.".into()),
-                    input_schema: Arc::new(JsonObject::from_iter([(
-                        "type".to_string(),
-                        json!("object"),
-                    )])),
-                    output_schema: None,
-                    annotations: None,
-                    execution: None,
-                    icons: None,
-                    meta: None,
-                },
+                tool: test_tool("calendar-create-event", "Create a calendar event."),
                 connector_id: Some("calendar".to_string()),
                 connector_name: Some("Calendar".to_string()),
                 plugin_display_names: Vec::new(),
@@ -41,20 +39,7 @@ fn serialize_tool_search_output_tools_groups_results_by_namespace() {
                 server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
                 tool_name: "_read_email".to_string(),
                 tool_namespace: "mcp__codex_apps__gmail".to_string(),
-                tool: Tool {
-                    name: "gmail-read-email".to_string().into(),
-                    title: None,
-                    description: Some("Read an email.".into()),
-                    input_schema: Arc::new(JsonObject::from_iter([(
-                        "type".to_string(),
-                        json!("object"),
-                    )])),
-                    output_schema: None,
-                    annotations: None,
-                    execution: None,
-                    icons: None,
-                    meta: None,
-                },
+                tool: test_tool("gmail-read-email", "Read an email."),
                 connector_id: Some("gmail".to_string()),
                 connector_name: Some("Gmail".to_string()),
                 plugin_display_names: Vec::new(),
@@ -67,20 +52,7 @@ fn serialize_tool_search_output_tools_groups_results_by_namespace() {
                 server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
                 tool_name: "_list_events".to_string(),
                 tool_namespace: "mcp__codex_apps__calendar".to_string(),
-                tool: Tool {
-                    name: "calendar-list-events".to_string().into(),
-                    title: None,
-                    description: Some("List calendar events.".into()),
-                    input_schema: Arc::new(JsonObject::from_iter([(
-                        "type".to_string(),
-                        json!("object"),
-                    )])),
-                    output_schema: None,
-                    annotations: None,
-                    execution: None,
-                    icons: None,
-                    meta: None,
-                },
+                tool: test_tool("calendar-list-events", "List calendar events."),
                 connector_id: Some("calendar".to_string()),
                 connector_name: Some("Calendar".to_string()),
                 plugin_display_names: Vec::new(),
@@ -153,20 +125,7 @@ fn serialize_tool_search_output_tools_falls_back_to_connector_name_description()
             server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
             tool_name: "_batch_read_email".to_string(),
             tool_namespace: "mcp__codex_apps__gmail".to_string(),
-            tool: Tool {
-                name: "gmail-batch-read-email".to_string().into(),
-                title: None,
-                description: Some("Read multiple emails.".into()),
-                input_schema: Arc::new(JsonObject::from_iter([(
-                    "type".to_string(),
-                    json!("object"),
-                )])),
-                output_schema: None,
-                annotations: None,
-                execution: None,
-                icons: None,
-                meta: None,
-            },
+            tool: test_tool("gmail-batch-read-email", "Read multiple emails."),
             connector_id: Some("connector_gmail_456".to_string()),
             connector_name: Some("Gmail".to_string()),
             plugin_display_names: Vec::new(),

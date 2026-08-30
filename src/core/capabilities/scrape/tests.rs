@@ -23,10 +23,10 @@ use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 static SCRAPE_EXEC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -58,11 +58,9 @@ fn scrape_record_provenance_binds_executor_run_and_evidence() {
     assert_eq!(evidence["verification_status"], json!("verified"));
     assert_eq!(evidence["checked_at"], json!("2026-07-21T19:00:00Z"));
     assert_eq!(evidence["receipt_kind"], json!("registered_scrape_output"));
-    assert!(
-        evidence["snapshot_hash"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71)
-    );
+    assert!(evidence["snapshot_hash"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71));
 }
 
 #[test]
@@ -300,41 +298,27 @@ fn upsert_target_creates_workspace_and_manifest() {
             .join("acme-jobs")
     );
     assert!(!Path::new(&target.workspace_dir).is_absolute());
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("manifest.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("api/api_contract.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("api/semantic_template.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("api/llm_enrichment_template.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/sources_manifest.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/primary/source.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/primary/extractor.js")
-            .is_file()
-    );
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("manifest.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("api/api_contract.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("api/semantic_template.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("api/llm_enrichment_template.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/sources_manifest.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/primary/source.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/primary/extractor.js")
+        .is_file());
     cleanup_test_root(&root);
 }
 
@@ -949,21 +933,15 @@ fn upsert_target_normalizes_multi_source_config() {
     assert_eq!(sources[0].source_kind, "rss");
     assert_eq!(sources[1].source_key, "board-b");
     assert_eq!(sources[1].source_kind, "html");
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/board-a/source.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/board-b/source.json")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/board-b/extractor.js")
-            .is_file()
-    );
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/board-a/source.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/board-b/source.json")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/board-b/extractor.js")
+        .is_file());
     cleanup_test_root(&root);
 }
 
@@ -1021,19 +999,15 @@ fn register_source_module_creates_revision_and_surfaces_in_target_view() {
             .and_then(Value::as_str),
         Some("board-a")
     );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/board-a/current.js")
-            .is_file()
-    );
-    assert!(
-        resolve_workspace_dir(&root, &target.workspace_dir)
-            .join("sources/board-a/revisions")
-            .read_dir()
-            .unwrap()
-            .next()
-            .is_some()
-    );
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/board-a/current.js")
+        .is_file());
+    assert!(resolve_workspace_dir(&root, &target.workspace_dir)
+        .join("sources/board-a/revisions")
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_some());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1328,16 +1302,12 @@ fn execute_with_reachable_failure_creates_repair_bundle_and_queue_task() {
 
     let tasks = crate::channels::list_queue_tasks(&root, &["pending".to_string()], 10).unwrap();
     assert_eq!(tasks.len(), 1);
-    assert!(
-        tasks[0]
-            .prompt
-            .contains("ctox scrape register-source-module")
-    );
-    assert!(
-        tasks[0]
-            .prompt
-            .contains("Do not modify the workspace parent")
-    );
+    assert!(tasks[0]
+        .prompt
+        .contains("ctox scrape register-source-module"));
+    assert!(tasks[0]
+        .prompt
+        .contains("Do not modify the workspace parent"));
     assert!(tasks[0].thread_key.contains("repair-fixture"));
     assert_eq!(
         tasks[0].suggested_skill.as_deref(),

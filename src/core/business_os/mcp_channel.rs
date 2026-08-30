@@ -2,13 +2,13 @@
 // License: AGPL-3.0-only
 
 use anyhow::Context;
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use ring::{digest, hmac};
-use rusqlite::OptionalExtension;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -24,13 +24,13 @@ use tiny_http::Request;
 use tiny_http::Response;
 use tiny_http::Server;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::Message;
 
 use super::policy::{
-    BusinessOsPermission, BusinessOsScope, BusinessOsScopeType, PolicyDecision, allow_decision,
-    normalize_role,
+    allow_decision, normalize_role, BusinessOsPermission, BusinessOsScope, BusinessOsScopeType,
+    PolicyDecision,
 };
 use super::store;
 
@@ -4460,7 +4460,7 @@ pub fn list_module_actions(
                 false,
             ),
         ],
-        "thesen-outbound" => vec![person_research_action_descriptor(&module.id)],
+        "outbound-lead-generation" => vec![person_research_action_descriptor(&module.id)],
         _ => Vec::new(),
     });
     let has_external_sql = store::local_external_data_source_declarations(root)?
@@ -4532,8 +4532,8 @@ pub fn propose_action(
             .as_deref()
             .context("person research action requires record_id")?;
         payload["writeback_contract"] = serde_json::json!({
-            "collection": "thesen_outbound_leads",
-            "allowed_collections": ["thesen_outbound_leads"],
+            "collection": "outbound_lead_generation_leads",
+            "allowed_collections": ["outbound_lead_generation_leads"],
             "record_ids": [scoped_record_id],
             "command_type": "web_stack.person_research",
             "min_independent_sources": 2
@@ -7139,7 +7139,7 @@ fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescrip
         "web_stack.person_research",
         module_id,
         "Research one campaign lead",
-        "Run the native Web Stack person-research workflow for one explicitly scoped THESEN Outbound lead.",
+        "Run the native Web Stack person-research workflow for one explicitly scoped Outbound Lead Generation lead.",
         "long_running",
         false,
         false,
@@ -7527,34 +7527,30 @@ mod tests {
             "action_id": "external_sql.write",
             "payload": { "operation_id": "person_delete" }
         });
-        assert!(
-            enforce_internal_command_session_scope(
-                "business_os.execute_action",
-                &wrong_operation,
-                Some(&trusted),
-            )
-            .is_err()
-        );
+        assert!(enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &wrong_operation,
+            Some(&trusted),
+        )
+        .is_err());
         let wrong_collection = serde_json::json!({ "collection": "other_records" });
-        assert!(
-            enforce_internal_command_session_scope(
-                "business_os.query_records",
-                &wrong_collection,
-                Some(&trusted),
-            )
-            .is_err()
-        );
+        assert!(enforce_internal_command_session_scope(
+            "business_os.query_records",
+            &wrong_collection,
+            Some(&trusted),
+        )
+        .is_err());
 
         let research_trusted = serde_json::json!({
             "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
             "allowed_actions": [{
-                "module_id": "thesen-outbound",
+                "module_id": "outbound-lead-generation",
                 "action_id": "web_stack.person_research",
                 "operation_ids": ["lead_1"]
             }]
         });
         let scoped_research = serde_json::json!({
-            "module_id": "thesen-outbound",
+            "module_id": "outbound-lead-generation",
             "action_id": "web_stack.person_research",
             "record_id": "lead_1",
             "payload": { "operation_id": "lead_1", "company": "Acme GmbH" }
@@ -7565,19 +7561,17 @@ mod tests {
             Some(&research_trusted),
         )?;
         let wrong_research_record = serde_json::json!({
-            "module_id": "thesen-outbound",
+            "module_id": "outbound-lead-generation",
             "action_id": "web_stack.person_research",
             "record_id": "lead_2",
             "payload": { "operation_id": "lead_1", "company": "Acme GmbH" }
         });
-        assert!(
-            enforce_internal_command_session_scope(
-                "business_os.execute_action",
-                &wrong_research_record,
-                Some(&research_trusted),
-            )
-            .is_err()
-        );
+        assert!(enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &wrong_research_record,
+            Some(&research_trusted),
+        )
+        .is_err());
         Ok(())
     }
 
@@ -7591,13 +7585,13 @@ mod tests {
         let payload = serde_json::json!({ "operation_id": "lead_1" });
         let first = native_mcp_control_command_id(
             &context,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &payload,
         );
         let replay = native_mcp_control_command_id(
             &context,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &payload,
         );
@@ -7605,7 +7599,7 @@ mod tests {
 
         let next_operation = native_mcp_control_command_id(
             &context,
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({ "operation_id": "lead_2" }),
         );
@@ -7616,7 +7610,7 @@ mod tests {
                 request_id: "parent-command-2".to_string(),
                 ..context
             },
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &payload,
         );
@@ -7624,8 +7618,8 @@ mod tests {
     }
 
     #[test]
-    fn internal_command_session_executes_bounded_action_without_weakening_external_confirmation()
-    -> anyhow::Result<()> {
+    fn internal_command_session_executes_bounded_action_without_weakening_external_confirmation(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -8713,12 +8707,10 @@ mod tests {
             assert!(!persisted.contains("browser-value"));
             assert!(event.metadata.get("argument_keys").is_some());
             assert!(event.metadata.pointer("/business_scope/tool").is_some());
-            assert!(
-                event
-                    .metadata
-                    .pointer("/business_scope/capability")
-                    .is_some()
-            );
+            assert!(event
+                .metadata
+                .pointer("/business_scope/capability")
+                .is_some());
             assert!(event.metadata.pointer("/business_scope/contract").is_some());
         }
         Ok(())
@@ -8748,150 +8740,96 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.query_records")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.execute_action")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.upsert_record")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.upsert_user")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.create_app")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.modify_app")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.prepare_app_source")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.list_app_files")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.read_app_file")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.read_app_skill_resource")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.search_app_source")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.write_app_file")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.validate_app")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.smoke_app")
-        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.query_records"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.execute_action"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.upsert_record"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.upsert_user"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.create_app"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.modify_app"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.prepare_app_source"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.list_app_files"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.read_app_file"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.read_app_skill_resource"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.search_app_source"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.write_app_file"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.validate_app"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.smoke_app"));
         assert!(tools.iter().any(|tool| tool.name == "business_os.e2e_app"));
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.get_command_status")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.get_record_context")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.list_runs")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.list_approvals")
-        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.get_command_status"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.get_record_context"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.list_runs"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.list_approvals"));
         assert!(tools.iter().any(|tool| tool.name == "business_os.approve"));
         assert!(tools.iter().any(|tool| tool.name == "business_os.reject"));
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "business_os.request_changes")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_assessment_create")
-        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "business_os.request_changes"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_assessment_create"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_lab_create"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_lab_run"));
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_assessment_status")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_completion_review")
-        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_assessment_status"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_completion_review"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_tools_doctor"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_authz_plan"));
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_authz_credential_proof_template")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_authz_credential_proof_from_evidence")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_authz_preflight")
-        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_authz_credential_proof_template"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_authz_credential_proof_from_evidence"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_authz_preflight"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_authz_run"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_authz_status"));
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_authz_build_matrix")
-        );
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name == "appsec_pipeline_rework")
-        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_authz_build_matrix"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == "appsec_pipeline_rework"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_report_get"));
         assert!(tools.iter().any(|tool| tool.name == "appsec_finding_get"));
         for forbidden in [
@@ -8951,12 +8889,10 @@ mod tests {
             "business_os.get_design_template",
             serde_json::json!({ "id": "hypo-rem", "_context": context.clone() }),
         )?;
-        assert!(
-            fetched
-                .pointer("/template/css")
-                .and_then(Value::as_str)
-                .is_some_and(|css| css.contains("--accent"))
-        );
+        assert!(fetched
+            .pointer("/template/css")
+            .and_then(Value::as_str)
+            .is_some_and(|css| css.contains("--accent")));
 
         let deleted = call_tool(
             root,
@@ -9019,12 +8955,10 @@ mod tests {
                 "business-os-skill://business-os-app-module-development/references/design-guide.md"
             )
         );
-        assert!(
-            result
-                .get("content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| content.contains("Design Guide"))
-        );
+        assert!(result
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains("Design Guide")));
         let traversal = read_app_skill_resource(temp.path(), &context, "../../AGENTS.md");
         assert!(
             traversal.is_err(),
@@ -9075,10 +9009,9 @@ mod tests {
             lab.get("module_id").and_then(Value::as_str),
             Some(APPSEC_MCP_MODULE_ID)
         );
-        assert!(
-            root.join("runtime/appsec/default/lab/vulnerable-webapp/ctox-vulnerable-webapp.py")
-                .is_file()
-        );
+        assert!(root
+            .join("runtime/appsec/default/lab/vulnerable-webapp/ctox-vulnerable-webapp.py")
+            .is_file());
 
         let status = call_tool(
             root,
@@ -9113,10 +9046,9 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
-        assert!(
-            root.join("runtime/appsec/default/completion-review.json")
-                .is_file()
-        );
+        assert!(root
+            .join("runtime/appsec/default/completion-review.json")
+            .is_file());
 
         let doctor = call_tool(
             root,
@@ -9295,12 +9227,10 @@ mod tests {
         );
         let authz_run_artifact = authz_run.get("artifact").and_then(Value::as_str).unwrap();
         assert!(Path::new(authz_run_artifact).is_file());
-        assert!(
-            authz_run
-                .pointer("/run/web_stack_tasks")
-                .and_then(Value::as_array)
-                .is_some_and(|tasks| !tasks.is_empty())
-        );
+        assert!(authz_run
+            .pointer("/run/web_stack_tasks")
+            .and_then(Value::as_array)
+            .is_some_and(|tasks| !tasks.is_empty()));
         let authz_status = call_tool(
             root,
             "appsec_authz_status",
@@ -9317,18 +9247,14 @@ mod tests {
             Some("appsec_authz_status")
         );
         assert_eq!(authz_status.get("ok").and_then(Value::as_bool), Some(true));
-        assert!(
-            authz_status
-                .get("runs")
-                .and_then(Value::as_array)
-                .is_some_and(|runs| !runs.is_empty())
-        );
-        assert!(
-            authz_status
-                .get("preflights")
-                .and_then(Value::as_array)
-                .is_some_and(|preflights| !preflights.is_empty())
-        );
+        assert!(authz_status
+            .get("runs")
+            .and_then(Value::as_array)
+            .is_some_and(|runs| !runs.is_empty()));
+        assert!(authz_status
+            .get("preflights")
+            .and_then(Value::as_array)
+            .is_some_and(|preflights| !preflights.is_empty()));
 
         let authz_evidence_dir = root.join("runtime/appsec/default/authz/mcp-evidence");
         fs::create_dir_all(&authz_evidence_dir)?;
@@ -9690,15 +9616,13 @@ mod tests {
                 .and_then(Value::as_str),
             Some("ctox business-os app validate mcp-inventory --installed")
         );
-        assert!(
-            result
-                .pointer("/development_contract/source_files")
-                .and_then(Value::as_array)
-                .context("expected development_contract.source_files")?
-                .iter()
-                .any(|path| path.as_str()
-                    == Some("runtime/business-os/installed-modules/mcp-inventory/module.json"))
-        );
+        assert!(result
+            .pointer("/development_contract/source_files")
+            .and_then(Value::as_array)
+            .context("expected development_contract.source_files")?
+            .iter()
+            .any(|path| path.as_str()
+                == Some("runtime/business-os/installed-modules/mcp-inventory/module.json")));
         let skill_resources = result
             .pointer("/development_contract/skill_resources")
             .and_then(Value::as_array)
@@ -9762,18 +9686,15 @@ mod tests {
             result.get("app_directory").and_then(Value::as_str),
             Some("runtime/business-os/installed-modules/mcp-direct-app")
         );
-        assert!(
-            root.join("runtime/business-os/installed-modules/mcp-direct-app/module.json")
-                .is_file()
-        );
-        assert!(
-            result
-                .pointer("/development_contract/source_tools")
-                .and_then(Value::as_array)
-                .context("expected source tools")?
-                .iter()
-                .any(|tool| tool.as_str() == Some("business_os.write_app_file"))
-        );
+        assert!(root
+            .join("runtime/business-os/installed-modules/mcp-direct-app/module.json")
+            .is_file());
+        assert!(result
+            .pointer("/development_contract/source_tools")
+            .and_then(Value::as_array)
+            .context("expected source tools")?
+            .iter()
+            .any(|tool| tool.as_str() == Some("business_os.write_app_file")));
         Ok(())
     }
 
@@ -9932,20 +9853,16 @@ mod tests {
         )?;
 
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
-        assert!(
-            result
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .contains("validate-app-module.mjs")
-        );
-        assert!(
-            result
-                .get("stdout")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .contains("\"module_id\":\"mcp-source\"")
-        );
+        assert!(result
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("validate-app-module.mjs"));
+        assert!(result
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("\"module_id\":\"mcp-source\""));
         Ok(())
     }
 
@@ -9997,10 +9914,9 @@ mod tests {
             Some("business-os-app-module-development")
         );
         assert!(task.prompt.contains("ctox.business_os.app.modify"));
-        assert!(
-            task.prompt
-                .contains("runtime/business-os/installed-modules/mcp-inventory")
-        );
+        assert!(task
+            .prompt
+            .contains("runtime/business-os/installed-modules/mcp-inventory"));
         Ok(())
     }
 
@@ -10644,8 +10560,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_unpersisted_service_actor_grant_and_audits_identity()
-    -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_unpersisted_service_actor_grant_and_audits_identity(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_module(root, "customers", "Customers", &["customer_accounts"])?;
@@ -10727,8 +10643,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_exact_approval_grant_without_outbound_module_grant()
-    -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_exact_approval_grant_without_outbound_module_grant(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         store::push_collection_records(
@@ -11051,8 +10967,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_exact_record_grant_without_collection_read()
-    -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_exact_record_grant_without_collection_read(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         store::push_collection_records(
@@ -11231,8 +11147,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_filters_module_list_by_app_visibility_not_data_read()
-    -> anyhow::Result<()> {
+    fn mcp_business_os_policy_filters_module_list_by_app_visibility_not_data_read(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -11429,8 +11345,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_denies_hidden_action_execution_even_with_data_write()
-    -> anyhow::Result<()> {
+    fn mcp_business_os_policy_denies_hidden_action_execution_even_with_data_write(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -11616,8 +11532,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_business_os_policy_allows_module_link_with_app_view_without_data_read()
-    -> anyhow::Result<()> {
+    fn mcp_business_os_policy_allows_module_link_with_app_view_without_data_read(
+    ) -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
@@ -11889,15 +11805,15 @@ mod tests {
     }
 
     #[test]
-    fn thesen_outbound_exposes_native_scoped_person_research() -> anyhow::Result<()> {
+    fn outbound_lead_generation_exposes_native_scoped_person_research() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         write_installed_module(
             root,
-            "thesen-outbound",
-            "THESEN Outbound",
+            "outbound-lead-generation",
+            "Outbound Lead Generation",
             "1.0.5",
-            &["thesen_outbound_leads"],
+            &["outbound_lead_generation_leads"],
             Some(serde_json::json!({ "public": true })),
         )?;
         seed_default_mcp_admin(root)?;
@@ -11905,14 +11821,12 @@ mod tests {
         let actions = list_module_actions(
             root,
             &test_context("business_os.list_module_actions"),
-            "thesen-outbound",
+            "outbound-lead-generation",
         )?;
-        assert!(
-            actions
-                .items
-                .iter()
-                .any(|action| action.action_id == "web_stack.person_research")
-        );
+        assert!(actions
+            .items
+            .iter()
+            .any(|action| action.action_id == "web_stack.person_research"));
         let research_action = actions
             .items
             .iter()
@@ -11946,7 +11860,7 @@ mod tests {
         let proposal = propose_action(
             root,
             &test_context("business_os.propose_action"),
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
@@ -11962,22 +11876,22 @@ mod tests {
         assert_eq!(
             proposal.payload["writeback_contract"],
             serde_json::json!({
-                "collection": "thesen_outbound_leads",
-                "allowed_collections": ["thesen_outbound_leads"],
+                "collection": "outbound_lead_generation_leads",
+                "allowed_collections": ["outbound_lead_generation_leads"],
                 "record_ids": ["lead_1"],
                 "command_type": "web_stack.person_research",
                 "min_independent_sources": 2
             })
         );
         assert!(is_native_mcp_control_action(
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research"
         ));
 
         let malformed = propose_action(
             root,
             &test_context("business_os.propose_action"),
-            "thesen-outbound",
+            "outbound-lead-generation",
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
@@ -12577,11 +12491,9 @@ mod tests {
 
         assert_eq!(envelope.get("status").and_then(Value::as_u64), Some(200));
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
-        assert!(
-            users
-                .iter()
-                .any(|user| user.get("id").and_then(Value::as_str) == Some("claude:user_3"))
-        );
+        assert!(users
+            .iter()
+            .any(|user| user.get("id").and_then(Value::as_str) == Some("claude:user_3")));
         Ok(())
     }
 
@@ -12635,14 +12547,12 @@ mod tests {
             hello.get("mcp_protocol_version").and_then(Value::as_str),
             Some(MCP_PROTOCOL_VERSION)
         );
-        assert!(
-            hello
-                .get("capabilities")
-                .and_then(Value::as_array)
-                .unwrap()
-                .iter()
-                .any(|value| value.as_str() == Some("business_os_mcp_channel_v1"))
-        );
+        assert!(hello
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("business_os_mcp_channel_v1")));
         assert!(
             hello
                 .get("connected_at_ms")

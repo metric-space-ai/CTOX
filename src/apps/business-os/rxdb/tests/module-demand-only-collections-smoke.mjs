@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createSyncRuntime, __ctoxSyncTestHooks } from '../../shared/sync.js';
 
 const {
@@ -7,11 +8,27 @@ const {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   createFollowerBridge,
+  createPendingCollectionBridge,
   shouldReplaceCachedBridgeForStart,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
   COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
   COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
 } = __ctoxSyncTestHooks;
+
+{
+  let resolveBridge;
+  let stopCalls = 0;
+  const ready = new Promise((resolve) => { resolveBridge = resolve; });
+  const pending = createPendingCollectionBridge('outbound_lead_generation_adapters', ready);
+  assert.equal(pending.mode, 'pending');
+  assert.equal(pending.reason, 'startup-in-progress');
+  assert.equal(pending.collection, 'outbound_lead_generation_adapters');
+  assert.equal(pending.ready, ready, 'the bounded handle retains the authoritative bridge promise');
+  const stop = pending.stop();
+  resolveBridge({ stop: async () => { stopCalls += 1; } });
+  assert.equal(await stop, true);
+  assert.equal(stopCalls, 1, 'closing a pending module stops the bridge once it materializes');
+}
 
 assert(
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS < COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
@@ -153,6 +170,7 @@ function createMockReplicationState(collection = 'desktop_file_chunks') {
 }
 
 function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
+  const browserToken = 'browser-role-token';
   const starts = [];
   const cancels = [];
   const db = {
@@ -194,6 +212,10 @@ function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
       transport: 'webrtc',
       sync_room: 'ctox-business-os:test',
       signaling_urls: ['ws://127.0.0.1/signaling'],
+      signaling_auth_version: 'ctox-role-bound-v1',
+      signaling_browser_token: browserToken,
+      signaling_browser_token_hash: createHash('sha256').update(browserToken).digest('hex'),
+      signaling_native_token_hash: createHash('sha256').update('distinct-native-token').digest('hex'),
     },
   });
   return { runtime, starts, cancels };

@@ -1451,6 +1451,19 @@ fn outbound_handle_research_source_adapter(
         now,
         record.clone(),
     )?;
+    // Ohne diese Projektion bleibt der Adapter im nativen `business_records`
+    // stehen und erreicht den Browser nie: der Befehl meldet dann `completed`
+    // mit `ok: true`, waehrend die Oberflaeche keinen Adapter kennt. Auf der
+    // Produktivinstanz war der neu erzeugte Adapter der einzige von 19
+    // nativen Datensaetzen, der in der Replikationsdatenbank fehlte. Der
+    // writeback-Pfad weiter unten schreibt aus demselben Grund bereits durch.
+    upsert_rxdb_collection_record(
+        root,
+        "outbound_research_adapters",
+        &adapter_id,
+        now,
+        record.clone(),
+    )?;
     let auth_assist = if next_status == "auth_requested" {
         let secret_name = outbound_string(&record, &["credential_secret_name"]).unwrap_or_default();
         let credential_ref = (!secret_name.is_empty()).then(|| {
@@ -1498,11 +1511,18 @@ fn outbound_handle_research_source_adapter(
             now,
             record.clone(),
         )?;
+        upsert_rxdb_collection_record(
+            root,
+            "outbound_research_adapters",
+            &adapter_id,
+            now,
+            record.clone(),
+        )?;
         Some(effect)
     } else {
         None
     };
-    outbound_apply_research_adapter_writeback(conn, command, &adapter_id, &record, now)?;
+    outbound_apply_research_adapter_writeback(root, conn, command, &adapter_id, &record, now)?;
     Ok(serde_json::json!({
         "ok": true,
         "collection": "outbound_research_adapters",
@@ -1515,6 +1535,7 @@ fn outbound_handle_research_source_adapter(
 }
 
 fn outbound_apply_research_adapter_writeback(
+    root: &Path,
     conn: &Connection,
     command: &BusinessCommand,
     adapter_id: &str,
@@ -1565,7 +1586,15 @@ fn outbound_apply_research_adapter_writeback(
         command.id.clone().unwrap_or_default(),
     );
     outbound_put_i64(&mut projection, "updated_at_ms", now);
-    upsert_business_record(conn, collection, record_id, now, projection)?;
+    upsert_business_record(conn, collection, record_id, now, projection.clone())?;
+    // Tenant modules read their adapter state from RxDB/WebRTC. Persisting the
+    // writeback only in `business_records` leaves the browser collection empty
+    // (and the Browser app's Scraping view therefore blank), especially for
+    // on-demand local-module collections that the generic projector does not
+    // eagerly scan. Write through the canonical native RxDB writer as part of
+    // the same command outcome; this is the same server-authoritative data
+    // path used by MCP projection upserts.
+    upsert_rxdb_collection_record(root, collection, record_id, now, projection)?;
     Ok(())
 }
 
@@ -5709,6 +5738,81 @@ mod tests {
         assert!(
             !serialized.contains("DO_NOT_LEAK_BROWSER_PASSWORD"),
             "browser auth assist leaked a credential value"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn outbound_research_adapter_writeback_reaches_tenant_rxdb_collection() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let adapter_id = "adapter_outbound_example-com";
+        let rxdb_path = super::super::store::rxdb_store_path(root);
+        std::fs::create_dir_all(rxdb_path.parent().context("RxDB parent")?)?;
+        let rxdb = Connection::open(rxdb_path)?;
+        rxdb.execute_batch(
+            "CREATE TABLE ctox_business_os__outbound_lead_generation_adapters__v1 (
+                id TEXT PRIMARY KEY NOT NULL,
+                revision TEXT,
+                deleted INTEGER NOT NULL,
+                lastWriteTime REAL NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )?;
+        drop(rxdb);
+        let outcome = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_outbound_adapter_writeback",
+                "command_id": "cmd_outbound_adapter_writeback",
+                "module": "outbound",
+                "command_type": "outbound.research_source.upsert",
+                "record_id": adapter_id,
+                "status": "pending_sync",
+                "payload": {
+                    "adapter_id": adapter_id,
+                    "source_id": "example.com",
+                    "adapter": {
+                        "id": adapter_id,
+                        "source_id": "example.com",
+                        "label": "Example",
+                        "url": "https://example.com/",
+                        "adapter_kind": "scrape_target",
+                        "target_key": "example-com",
+                        "countries": ["DE"],
+                        "field_keys": ["firma_name"],
+                        "enabled": true,
+                        "requires_credential": false,
+                        "auth_mode": "none",
+                        "auth_status": "not_required"
+                    },
+                    "writeback": {
+                        "collection": "outbound_lead_generation_adapters",
+                        "record_id": adapter_id
+                    },
+                    "secret_value_in_payload": false
+                },
+                "client_context": {
+                    "actor": { "id": "tester", "role": "admin", "display_name": "Tester" },
+                    "source_module": "outbound-lead-generation"
+                }
+            }),
+        )?;
+
+        assert_eq!(
+            outcome.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+        let projected =
+            load_rxdb_collection_record(root, "outbound_lead_generation_adapters", adapter_id)?
+                .context("tenant adapter writeback must be projected into RxDB")?;
+        assert_eq!(
+            projected.get("source_id").and_then(Value::as_str),
+            Some("example.com")
+        );
+        assert_eq!(
+            projected.get("status").and_then(Value::as_str),
+            Some("active")
         );
         Ok(())
     }
@@ -10648,4 +10752,67 @@ mod tests {
 
         Ok(())
     }
+}
+
+/// Markiert alle Quellen-/Adapter-Records dieser Quelle als angemeldet.
+///
+/// Der Login-Rueckweg: nach "Ich bin angemeldet" bekommt jeder business_record,
+/// der diese `source_id` beschreibt, `auth_status = session_authenticated` --
+/// in der generischen Sammlung `outbound_research_adapters` UND im Modul-
+/// Zwilling `outbound_lead_generation_adapters`, den die Oberflaeche wirklich liest.
+/// Damit schliesst sich zugleich die Zwei-Wahrheiten-Luecke: der Server, der
+/// bisher nur die generische Sammlung schrieb, spiegelt die Wahrheit hier in
+/// beide. Gibt die Zahl der geaenderten Records zurueck.
+pub(super) fn outbound_mark_source_authenticated(
+    root: &Path,
+    source_id: &str,
+) -> anyhow::Result<usize> {
+    let source = source_id.trim();
+    anyhow::ensure!(!source.is_empty(), "source_id is required");
+    let conn = open_store(root)?;
+    let now = now_ms() as i64;
+    let mut touched = 0usize;
+    for collection in [
+        "outbound_research_adapters",
+        "outbound_lead_generation_adapters",
+    ] {
+        let mut rows = conn.prepare(
+            "SELECT record_id, payload_json FROM business_records
+             WHERE collection = ?1 AND deleted = 0",
+        )?;
+        let matches: Vec<(String, Value)> = rows
+            .query_map([collection], |row| {
+                let id: String = row.get(0)?;
+                let raw: String = row.get(1)?;
+                Ok((id, raw))
+            })?
+            .filter_map(Result::ok)
+            .filter_map(|(id, raw)| {
+                serde_json::from_str::<Value>(&raw)
+                    .ok()
+                    .map(|doc| (id, doc))
+            })
+            .filter(|(_, doc)| {
+                let sid = doc
+                    .get("source_id")
+                    .or_else(|| doc.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                sid == source
+            })
+            .collect();
+        drop(rows);
+        for (record_id, mut doc) in matches {
+            if let Some(object) = doc.as_object_mut() {
+                object.insert(
+                    "auth_status".to_string(),
+                    Value::String("session_authenticated".to_string()),
+                );
+                object.insert("auth_authenticated_at_ms".to_string(), Value::from(now));
+            }
+            upsert_business_record(&conn, collection, &record_id, now, doc)?;
+            touched += 1;
+        }
+    }
+    Ok(touched)
 }

@@ -11,12 +11,12 @@ test('customer runtime paths and private global manifests are rejected', () => {
   ]);
   const violations = customerReleaseViolations([
     'src/apps/business-os/installed-modules/rem-private/index.js',
-    'runtime/thesen-work/thesen-outbound/index.js',
+    'runtime/customer-work/outbound-lead-generation/index.js',
     ...manifests.keys(),
   ], (path) => manifests.get(path));
   assert.equal(violations.length, 3);
   assert.match(violations.join('\n'), /installed-modules/);
-  assert.match(violations.join('\n'), /runtime\/thesen-work/);
+  assert.match(violations.join('\n'), /runtime\/customer-work/);
   assert.match(violations.join('\n'), /private\/module\.json/);
 });
 

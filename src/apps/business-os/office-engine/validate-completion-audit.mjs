@@ -22,7 +22,7 @@ const spreadsheets = await readText('../modules/spreadsheets/index.js');
 const documentsBundle = await readText('../vendor/ctox-office/ctox-office-document.mjs');
 const spreadsheetsBundle = await readText('../vendor/ctox-office/ctox-office-spreadsheet.mjs');
 const rustEngine = await readText('../../../core/business_os/office_engine.rs');
-const rustStore = await readText('../../../core/business_os/store.rs');
+const rustStore = await readText('../../../core/business_os/store_office_commands.rs');
 const plan = await readText('../../../../docs/ctox-office-port-plan.md', root);
 
 assert.equal(audit.schema_version, 'ctox-office-completion-audit-v1');
@@ -103,14 +103,14 @@ assert.match(spreadsheets, /vendor\/ctox-office\/ctox-office-spreadsheet\.mjs/);
 assert.match(spreadsheets, /createCtoxSpreadsheetsEditor/);
 assert.match(spreadsheets, /kind:\s*'ctox-spreadsheets'/);
 assert.match(spreadsheets, /officeEngine:\s*'ctox_spreadsheets'/);
-assert.equal(documentsManifest.title, 'CTOX Documents');
+assert.equal(documentsManifest.title, 'Dokumente');
 assert.equal(spreadsheetsManifest.title, 'CTOX Spreadsheets');
 assert.match(documentsBundle, /createCtoxDocumentsEditor/);
 assert.match(documentsBundle, /CTOX_DOCUMENTS_PRODUCT_ID/);
 assert.match(spreadsheetsBundle, /createCtoxSpreadsheetsEditor/);
 assert.match(spreadsheetsBundle, /CTOX_SPREADSHEETS_PRODUCT_ID/);
 for (const source of [documents, spreadsheets]) {
-  assert.match(source, /ctx\.db/);
+  assert.match(source, /ctx(?:\?\.|\.)db/);
   assert.match(source, /ctx\.commandBus/);
 }
 
@@ -131,6 +131,10 @@ assert.equal(sheetCorpus.fixture.package_parts, 147);
 assert.equal(sheetCorpus.ctox.native_identity_roundtrip.all_original_parts_byte_identical, true);
 
 assert.deepEqual(rollout.default_engines, { document: 'ctox_documents', spreadsheet: 'ctox_spreadsheets' });
+assert.deepEqual(rollout.legacy_runtime_policy, {
+  document: 'retained_until_release_observation',
+  spreadsheet: 'removed_no_safe_fallback',
+});
 assert.equal(rollout.default_switch_release, null);
 assert.deepEqual(rollout.qualifying_releases, []);
 assert.equal(rollout.legacy_removal_authorized, false);

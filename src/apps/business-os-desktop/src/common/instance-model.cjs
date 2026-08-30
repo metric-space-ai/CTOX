@@ -125,10 +125,16 @@ function normalizePairingMetadata(pairing) {
   if (signalingUrls.length === 0) {
     throw new Error("pairing needs at least one signaling URL");
   }
+  const authVersion = String(pairing.authVersion || pairing.signaling_auth_version || "").trim();
+  const browserCommitmentSha256 = String(pairing.browserCommitmentSha256 || pairing.signaling_browser_token_hash || "").trim();
+  const nativeCommitmentSha256 = String(pairing.nativeCommitmentSha256 || pairing.signaling_native_token_hash || "").trim();
   return {
     syncRoom,
     signalingUrls,
     transport: "webrtc",
+    authVersion,
+    browserCommitmentSha256,
+    nativeCommitmentSha256,
     secretRef: typeof pairing.secretRef === "string" ? pairing.secretRef : "",
     authorizationRef: typeof pairing.authorizationRef === "string" ? pairing.authorizationRef : "",
     capabilityExpiresAtMs: Number.isFinite(Number(pairing.capabilityExpiresAtMs))

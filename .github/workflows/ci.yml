@@ -46,7 +46,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: src/apps/business-os-desktop
-        run: npm ci
+        run: |
+          npm ci
+          npm audit --audit-level=low
 
       - name: Unit tests
         working-directory: src/apps/business-os-desktop
@@ -144,6 +146,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
+      - uses: ./.github/actions/build-pi-sidecar
+
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
           toolchain: "1.93.0"
@@ -164,13 +168,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
+            bubblewrap libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
 
       - name: Business OS JS dependency bootstrap
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           npm ci --ignore-scripts --prefix src/apps/business-os
           npm audit --audit-level=low --prefix src/apps/business-os
+
+      - name: Install Business OS browser test runtime
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+
+      - name: Business OS JS tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
           npm --prefix src/apps/business-os test
           npm --prefix src/apps/business-os run test:module-bundles
 
@@ -178,9 +190,13 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo fmt --check
 
-      - name: Install Business OS browser test runtime
+      - name: Install Rust dependency auditor
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit Rust dependencies
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: src/scripts/audit-rust-dependencies.sh
 
       - name: Installer script checks
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -191,11 +207,27 @@ jobs:
       - name: AppSec non-network fixture gates
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
+          bwrap --version
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml scanner_schema_covers_all_allowlisted_tools --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_realistic_web_scanner_outputs_validate_contracts --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_remaining_allowlisted_tools_have_structured_output --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml analyze_high_impact_pinned_outputs_extract_actionable_evidence --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml failed_scanner_run_is_classified_as_blocked_tool_failed --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml oci_layout_signature_smoke_verifies_signed_unsigned_config_and_layer_contracts --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml logic_contract_native_bearer_reference_authenticates_without_retaining_secret --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml identity_session_fixture_proves_saml_signature_replay_fixation_and_recovery --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml native_grpc_fixture_executes_authenticated_reflection_unary_and_streaming --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml authenticated_transport_fixture_injects_session_without_retaining_it --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml cloud_kubernetes_live_fixture_proves_auth_and_positive_negative_posture --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml mobile_artifact_inspector_decodes_android_and_ios_positive_negative_controls --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml android_binary_axml_manifest_decoder_proves_secure_controls --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml artifact_signature_verification_distinguishes_valid_invalid_and_partial --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml desktop_artifact_inspector_proves_appx_and_tauri_positive_negative_controls --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml electron_artifact_inspector_proves_secure_insecure_and_opaque_packages --quiet
+          cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml native_hardening_parser_reports_elf_pe_and_macho_controls --quiet
+          CTOX_BROWSER_RUNTIME_LIVE_FIXTURE=1 \
+            CTOX_PLAYWRIGHT_MODULE="$PWD/src/apps/business-os/node_modules/playwright/index.mjs" \
+            cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml browser_runtime_live_chromium_fixture_proves_authenticated_positive_and_negative_cases --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml finding_bundle_exports_authz_replay_issue_and_fix_check_script --quiet
           cargo test --locked --manifest-path src/tools/appsec-pentest/Cargo.toml finding_verify_bundle_executes_proof_script_and_records_fix_status --quiet
 

@@ -4105,7 +4105,7 @@ Der Regressionstest rendert alle acht Admin-Tabs und prüft beide Attribute.
 Der echte Chromium-Lauf hovert jeden Tab bei 900 × 1000 und 390 × 844, prüft
 die vollständigen Namen und stellt sicher, dass die Tab-Leiste innerhalb des
 Viewports bleibt. Die lokale laufende Installation sowie Infyoda, SKF, GPU3
-und THESEN liefern den Fix mit einer neuen Asset-Version aus; die jeweiligen
+und private Kundenmodule liefern den Fix mit einer neuen Asset-Version aus; die jeweiligen
 Installed-/Local-App-Mengen blieben unverändert.
 
 Evidence:

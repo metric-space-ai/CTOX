@@ -20,7 +20,8 @@ const matrix = await readJson('features.json');
 const restartEvidence = await readJson('oracle/evidence/office.native-peer-restart.json');
 const documents = await readText('../modules/documents/index.js');
 const spreadsheets = await readText('../modules/spreadsheets/index.js');
-const store = await readText('../../../core/business_os/store.rs');
+const officeReadme = await readText('README.md');
+const store = await readText('../../../core/business_os/store_runtime_sync_settings.rs');
 const soakWorkflow = await readText('../../../../.github/workflows/rxdb-soak.yml');
 const releaseWorkflow = await readText('../../../../.github/workflows/release.yml');
 
@@ -54,12 +55,23 @@ for (const feature of features) assert.equal(feature.status, expectedStatus, `${
 
 assert.match(documents, /officeEngine:\s*'ctox_documents'/);
 assert.match(spreadsheets, /officeEngine:\s*'ctox_spreadsheets'/);
-for (const source of [documents, spreadsheets]) {
-  if (!rollout.legacy_removal_authorized) assert.match(source, /===\s*'legacy'/, 'typed Legacy rollback must remain before authorization');
+assert.deepEqual(rollout.legacy_runtime_policy, {
+  document: 'retained_until_release_observation',
+  spreadsheet: 'removed_no_safe_fallback',
+});
+if (!rollout.legacy_removal_authorized) {
+  assert.match(documents, /===\s*'legacy'/, 'typed document Legacy rollback must remain before authorization');
 }
+assert.doesNotMatch(spreadsheets, /vendor\/jspreadsheet\.mjs|===\s*'legacy'/,
+  'the removed spreadsheet viewer must not return as an unaudited fallback');
+assert.match(officeReadme, /CTOX Spreadsheets is the only spreadsheet\s+viewer; there is no legacy runtime fallback\./);
 assert.match(store, /"documents_engine":\s*"ctox_documents"/);
 assert.match(store, /"spreadsheets_engine":\s*"ctox_spreadsheets"/);
-if (!rollout.legacy_removal_authorized) assert.match(store, /\(_,\s*"legacy"\)\s*=>\s*Ok\("legacy"\)/);
+if (!rollout.legacy_removal_authorized) {
+  assert.match(store, /\("document",\s*"legacy"\)\s*=>\s*Ok\("legacy"\)/);
+}
+assert.match(store, /\("spreadsheet",\s*"legacy"\)\s*=>\s*Ok\("ctox_spreadsheets"\)/,
+  'persisted spreadsheet legacy settings must migrate to the only supported engine');
 
 assert.equal(restartEvidence.status, 'passed');
 assert.deepEqual(restartEvidence.cases.map(({ kind, status }) => ({ kind, status })), [

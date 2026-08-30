@@ -32,6 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
+      - uses: ./.github/actions/build-pi-sidecar
+
       - name: Download RxDB release soak evidence
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
@@ -67,10 +69,22 @@ jobs:
           sudo apt-get install -y \
             libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev libcap-dev sqlite3
 
+      - name: Install Rust dependency auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit Rust dependencies
+        run: src/scripts/audit-rust-dependencies.sh
+
       - name: Business OS JS dependency bootstrap
         run: |
           npm ci --ignore-scripts --prefix src/apps/business-os
           npm audit --audit-level=low --prefix src/apps/business-os
+
+      - name: Install Business OS browser test runtime
+        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+
+      - name: Business OS JS tests
+        run: |
           npm --prefix src/apps/business-os test
           npm --prefix src/apps/business-os run test:module-bundles
 
@@ -86,9 +100,6 @@ jobs:
             --docx-corpus-evidence src/apps/business-os/office-engine/oracle/evidence/document.docx-roundtrip-corpus.json \
             --xlsx-corpus-evidence src/apps/business-os/office-engine/oracle/evidence/spreadsheet.xlsx-roundtrip-corpus.json \
             --output runtime/build/ctox-office-release-candidate-evidence.json
-
-      - name: Install Business OS browser test runtime
-        run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
 
       - name: Build rxdb wire daemon (cross-process smokes)
         # Required so run-all.mjs --require-wire-daemon below actually runs
@@ -477,6 +488,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
+      - uses: ./.github/actions/build-pi-sidecar
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
@@ -505,7 +518,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: src/apps/business-os-desktop
-        run: npm ci
+        run: |
+          npm ci
+          npm audit --audit-level=low
 
       - name: Unit and syntax checks
         working-directory: src/apps/business-os-desktop
@@ -650,6 +665,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - uses: ./.github/actions/build-pi-sidecar
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88

@@ -22,9 +22,9 @@ the tenant's legacy HTTP-login shell.
 
 The launcher exposes all implemented connection paths directly: local daemon,
 SSH host with pinned host-key confirmation, pasted Desktop invite/deep link,
-manual signaling URL + sync room + room password, and ctox.dev account login.
-Room and SSH passwords are stored in the platform keychain and are never
-written to the instance registry.
+manual signaling URL + sync room + browser-role signaling credential, and
+ctox.dev account login. Browser-role and SSH credentials are stored in the
+platform keychain and are never written to the instance registry.
 
 After CTOX is installed on a host, create the preferred import payload with:
 
@@ -33,8 +33,9 @@ ctox business-os desktop invite --format json --display-name "My CTOX"
 ```
 
 Use `--format link` for a `ctox-business-os-desktop://pair?...` deep link. Both
-formats contain the room secret and must be transferred like credentials; the
-Desktop app moves the secret into the platform keychain during import.
+formats contain a browser-role signaling credential and must be transferred
+like credentials; the Desktop app moves it into the platform keychain during
+import. They never contain the native room password or native-role credential.
 
 Local user testing:
 
@@ -137,7 +138,7 @@ Release-related checks:
   from stdin, imports a real remote Desktop invite into a fresh local desktop
   registry, verifies the WebRTC-only launch config, optionally runs remote
   `ctox business-os peer rotate`, rotates the local pairing, and optionally
-  revokes it locally without leaking the room secret into registry or evidence.
+  revokes it locally without leaking the browser credential into registry or evidence.
   Add `--allow-peer-status-invite` only for older remote CTOX versions that do
   not yet expose `ctox business-os desktop invite`; that fallback derives the
   same invite shape from `peer status` and should be treated as weaker evidence

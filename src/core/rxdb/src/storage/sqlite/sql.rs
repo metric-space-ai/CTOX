@@ -366,6 +366,40 @@ fn decode_document_json(data: &str) -> RxResult<Value> {
     })
 }
 
+fn decode_document_row(
+    revision: Option<String>,
+    deleted: bool,
+    last_write_time: f64,
+    data: &str,
+) -> RxResult<Value> {
+    let mut document = decode_document_json(data)?;
+    let object = document.as_object_mut().ok_or_else(|| {
+        new_rx_error(
+            "SQLITE_JSON",
+            Some(serde_json::json!({ "message": "stored document is not an object" })),
+        )
+    })?;
+
+    if let Some(revision) = revision.filter(|revision| !revision.is_empty()) {
+        object.insert("_rev".to_string(), Value::String(revision));
+    }
+    object.insert("_deleted".to_string(), Value::Bool(deleted));
+    object
+        .entry("_attachments".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let meta = object
+        .entry("_meta".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let meta = meta.as_object_mut().ok_or_else(|| {
+        new_rx_error(
+            "SQLITE_JSON",
+            Some(serde_json::json!({ "message": "stored document _meta is not an object" })),
+        )
+    })?;
+    meta.insert("lwt".to_string(), Value::from(last_write_time));
+    Ok(document)
+}
+
 pub fn query_documents_with_compiled_sql(
     conn: &Connection,
     compiled: &CompiledSqliteQuery,
@@ -658,15 +692,21 @@ pub fn document_by_id(conn: &Connection, table: &str, id: &str) -> RxResult<Opti
     #[cfg(test)]
     SQLITE_DOCUMENT_BY_ID_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     let _statement_timer = timed_sqlite_statement();
-    let data: Option<String> = conn
+    let row: Option<(Option<String>, i64, f64, String)> = conn
         .query_row(
-            &format!("SELECT data FROM {} WHERE id = ?", quote_identifier(table)),
+            &format!(
+                "SELECT revision, deleted, lastWriteTime, data FROM {} WHERE id = ?",
+                quote_identifier(table)
+            ),
             params![id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(sqlite_error)?;
-    data.map(|text| decode_document_json(&text)).transpose()
+    row.map(|(revision, deleted, last_write_time, data)| {
+        decode_document_row(revision, deleted != 0, last_write_time, &data)
+    })
+    .transpose()
 }
 
 pub fn documents_by_ids(
@@ -688,22 +728,30 @@ pub fn documents_by_ids(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = if with_deleted {
-            format!("SELECT id, data FROM {quoted_table} WHERE id IN ({placeholders})")
+            format!(
+                "SELECT id, revision, deleted, lastWriteTime, data FROM {quoted_table} WHERE id IN ({placeholders})"
+            )
         } else {
             format!(
-                "SELECT id, data FROM {quoted_table} WHERE id IN ({placeholders}) AND deleted = 0"
+                "SELECT id, revision, deleted, lastWriteTime, data FROM {quoted_table} WHERE id IN ({placeholders}) AND deleted = 0"
             )
         };
         let _statement_timer = timed_sqlite_statement();
         let mut statement = conn.prepare(&sql).map_err(sqlite_error)?;
         let rows = statement
             .query_map(params_from_iter(chunk.iter().map(String::as_str)), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             })
             .map_err(sqlite_error)?;
         for row in rows {
-            let (id, data) = row.map_err(sqlite_error)?;
-            let doc = decode_document_json(&data)?;
+            let (id, revision, deleted, last_write_time, data) = row.map_err(sqlite_error)?;
+            let doc = decode_document_row(revision, deleted != 0, last_write_time, &data)?;
             by_id.insert(id, doc);
         }
     }
@@ -736,4 +784,39 @@ pub fn last_write_time(document: &Value) -> f64 {
         .and_then(|meta| meta.get("lwt"))
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_document_row;
+    use serde_json::json;
+
+    #[test]
+    fn native_sqlite_row_columns_restore_rxdb_envelope() {
+        let document = decode_document_row(
+            Some("3-native".to_string()),
+            false,
+            42.5,
+            &json!({ "id": "cmd-native", "status": "pending_sync" }).to_string(),
+        )
+        .expect("decode native SQLite row");
+
+        assert_eq!(
+            document.get("_rev").and_then(|value| value.as_str()),
+            Some("3-native")
+        );
+        assert_eq!(
+            document
+                .pointer("/_meta/lwt")
+                .and_then(|value| value.as_f64()),
+            Some(42.5)
+        );
+        assert_eq!(
+            document.get("_deleted").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(document
+            .get("_attachments")
+            .is_some_and(|value| value.is_object()));
+    }
 }

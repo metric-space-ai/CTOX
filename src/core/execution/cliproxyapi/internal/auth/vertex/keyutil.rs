@@ -4,11 +4,11 @@
 
 use std::fmt;
 
+use aws_lc_rs::rsa::KeyPair as RsaKeyPair;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::{pkcs1::LineEnding, RsaPrivateKey};
+use pkcs8::der::Decode;
+use pkcs8::PrivateKeyInfo;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
@@ -133,18 +133,33 @@ pub fn sanitize_private_key(raw: &str) -> Result<String, ServiceAccountNormalize
     };
 
     let (label, der) = pem_parts(pem).ok_or(ServiceAccountNormalizeError::MissingPemMarkers)?;
-    let key = match label {
-        "RSA PRIVATE KEY" => RsaPrivateKey::from_pkcs1_der(&der)
-            .map_err(|_| ServiceAccountNormalizeError::InvalidRsa)?,
-        "PRIVATE KEY" => RsaPrivateKey::from_pkcs8_der(&der)
-            .map_err(|_| ServiceAccountNormalizeError::UnsupportedKeyFormat)?,
-        _ => RsaPrivateKey::from_pkcs1_der(&der)
-            .or_else(|_| RsaPrivateKey::from_pkcs8_der(&der))
-            .map_err(|_| ServiceAccountNormalizeError::UnsupportedKeyFormat)?,
+    let pkcs1_der = match label {
+        "RSA PRIVATE KEY" => {
+            RsaKeyPair::from_der(&der).map_err(|_| ServiceAccountNormalizeError::InvalidRsa)?;
+            der.to_vec()
+        }
+        "PRIVATE KEY" => {
+            RsaKeyPair::from_pkcs8(&der)
+                .map_err(|_| ServiceAccountNormalizeError::UnsupportedKeyFormat)?;
+            PrivateKeyInfo::from_der(&der)
+                .map_err(|_| ServiceAccountNormalizeError::UnsupportedKeyFormat)?
+                .private_key
+                .to_vec()
+        }
+        _ => {
+            if RsaKeyPair::from_der(&der).is_ok() {
+                der.to_vec()
+            } else {
+                RsaKeyPair::from_pkcs8(&der)
+                    .map_err(|_| ServiceAccountNormalizeError::UnsupportedKeyFormat)?;
+                PrivateKeyInfo::from_der(&der)
+                    .map_err(|_| ServiceAccountNormalizeError::UnsupportedKeyFormat)?
+                    .private_key
+                    .to_vec()
+            }
+        }
     };
-    key.to_pkcs1_pem(LineEnding::LF)
-        .map(|pem| pem.to_string())
-        .map_err(|_| ServiceAccountNormalizeError::Encode)
+    Ok(encode_pem("RSA PRIVATE KEY", &pkcs1_der))
 }
 
 fn rebuild_pem(raw: &str) -> Result<String, ServiceAccountNormalizeError> {
@@ -259,14 +274,30 @@ fn strip_ansi_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
-    use rsa::pkcs8::{EncodePrivateKey, LineEnding as Pkcs8LineEnding};
+    use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+    use aws_lc_rs::rsa::KeySize;
 
     use super::*;
 
-    fn key() -> RsaPrivateKey {
-        RsaPrivateKey::new(&mut StdRng::seed_from_u64(42), 1024).unwrap()
+    fn key() -> RsaKeyPair {
+        RsaKeyPair::generate(KeySize::Rsa2048).unwrap()
+    }
+
+    fn pkcs8_pem(key: &RsaKeyPair) -> String {
+        let der = AsDer::<Pkcs8V1Der>::as_der(key).unwrap();
+        encode_pem("PRIVATE KEY", der.as_ref())
+    }
+
+    fn pkcs1_pem(key: &RsaKeyPair) -> String {
+        let der = AsDer::<Pkcs8V1Der>::as_der(key).unwrap();
+        let info = PrivateKeyInfo::from_der(der.as_ref()).unwrap();
+        encode_pem("RSA PRIVATE KEY", info.private_key)
+    }
+
+    fn assert_valid_pkcs1(value: &str) {
+        let (label, der) = pem_parts(value).unwrap();
+        assert_eq!(label, "RSA PRIVATE KEY");
+        RsaKeyPair::from_der(&der).unwrap();
     }
 
     #[test]
@@ -283,16 +314,16 @@ mod tests {
 
     #[test]
     fn pkcs8_is_converted_to_rsa_private_key_pem() {
-        let input = key().to_pkcs8_pem(Pkcs8LineEnding::CRLF).unwrap();
-        let output = sanitize_private_key(input.as_str()).unwrap();
+        let input = pkcs8_pem(&key()).replace('\n', "\r\n");
+        let output = sanitize_private_key(&input).unwrap();
         assert!(output.starts_with("-----BEGIN RSA PRIVATE KEY-----\n"));
         assert!(output.ends_with("-----END RSA PRIVATE KEY-----\n"));
-        RsaPrivateKey::from_pkcs1_pem(&output).unwrap();
+        assert_valid_pkcs1(&output);
     }
 
     #[test]
     fn noisy_pem_is_rebuilt_and_unknown_fields_survive_map_copy() {
-        let canonical = key().to_pkcs1_pem(LineEnding::LF).unwrap();
+        let canonical = pkcs1_pem(&key());
         let noisy = format!("\u{1b}[31m{}\u{1b}[0m", canonical.replace('\n', " !!\r\n"));
         let mut input = Map::new();
         input.insert("private_key".to_owned(), Value::String(noisy));
@@ -305,7 +336,7 @@ mod tests {
         let normalized = normalize_service_account_map(&input).unwrap();
         assert_eq!(normalized.get("custom"), Some(&Value::from(7)));
         let output = normalized["private_key"].as_str().unwrap();
-        RsaPrivateKey::from_pkcs1_pem(output).unwrap();
+        assert_valid_pkcs1(output);
     }
 
     #[test]

@@ -49,6 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
+      - uses: ./.github/actions/build-pi-sidecar
+
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
           toolchain: "1.93.0"
@@ -77,26 +79,6 @@ jobs:
 
       - name: Build CTOX smoke binary
         run: cargo build --locked --bin ctox --no-default-features --target-dir runtime/build/core-rxdb-integration-target
-
-      - name: Run CTOX Documents restart gate
-        env:
-          SMOKE_MODES: office-document-midflight-restart-browser-to-rust
-          SMOKE_MATRIX_ATTEMPTS: "1"
-          SMOKE_PAGE_PATH: /index.html
-          BUSINESS_PORT: "8980"
-          SIGNALING_PORT: "18980"
-          SMOKE_MATRIX_RESULT_PATH: runtime/build/office-document-restart-matrix.json
-        run: node src/core/rxdb/tools/browser_rust_smoke_matrix.js
-
-      - name: Run CTOX Spreadsheets restart gate
-        env:
-          SMOKE_MODES: office-spreadsheet-midflight-restart-browser-to-rust
-          SMOKE_MATRIX_ATTEMPTS: "1"
-          SMOKE_PAGE_PATH: /index.html
-          BUSINESS_PORT: "8981"
-          SIGNALING_PORT: "18981"
-          SMOKE_MATRIX_RESULT_PATH: runtime/build/office-spreadsheet-restart-matrix.json
-        run: node src/core/rxdb/tools/browser_rust_smoke_matrix.js
 
       - name: Run CTOX Documents restart gate
         env:

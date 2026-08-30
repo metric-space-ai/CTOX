@@ -159,9 +159,10 @@ impl SignalingClient {
                     break;
                 }
                 Err(error) => {
+                    let safe_url = redacted_signaling_url(candidate);
                     tracing::warn!(
                         target: "ctox_rxdb::signaling_client",
-                        url = %candidate,
+                        url = %safe_url,
                         "initial signaling connect failed: {error}; trying next candidate",
                     );
                     last_error = Some(error);
@@ -172,7 +173,7 @@ impl SignalingClient {
             return Err(last_error.expect("candidates is non-empty, so at least one error"));
         };
         let client = Arc::new(Self {
-            url: url_string,
+            url: redacted_signaling_url(&url_string),
             url_provider,
             url_rotation: AtomicUsize::new(initial_index),
             server_messages: RxSubject::new(),
@@ -262,9 +263,10 @@ impl SignalingClient {
                                     );
                                 }
                             }
+                            let safe_url = redacted_signaling_url(&fresh_url);
                             tracing::info!(
                                 target: "ctox_rxdb::signaling_client",
-                                url = %fresh_url,
+                                url = %safe_url,
                                 "signaling socket reconnected",
                             );
                             // A socket open is not a successful reconnect. Keep
@@ -279,9 +281,10 @@ impl SignalingClient {
                             supervisor_client
                                 .url_rotation
                                 .fetch_add(1, Ordering::AcqRel);
+                            let safe_url = redacted_signaling_url(&fresh_url);
                             tracing::warn!(
                                 target: "ctox_rxdb::signaling_client",
-                                url = %fresh_url,
+                                url = %safe_url,
                                 delay_secs = delay.as_secs(),
                                 "signaling reconnect failed: {e}; rotating to next candidate and backing off",
                             );
@@ -435,7 +438,7 @@ impl SignalingClient {
                 Some(serde_json::json!({ "message": "signaling client is closed" })),
             )
         })?;
-        w.send(Message::Text(text)).await.map_err(|e| {
+        w.send(Message::Text(text.into())).await.map_err(|e| {
             new_rx_error(
                 "RC_WEBRTC_SIGNAL",
                 Some(serde_json::json!({
@@ -458,15 +461,17 @@ fn install_rustls_crypto_provider() {
 /// reconnect supervisor.
 async fn establish_ws(url: &str) -> Result<(WsWrite, WsRead), RxError> {
     install_rustls_crypto_provider();
+    let safe_url = redacted_signaling_url(url);
     let parsed = Url::parse(url).map_err(|e| {
         new_rx_error(
             "RC_WEBRTC_SIGNAL",
             Some(serde_json::json!({
                 "message": format!("invalid signaling URL: {e}"),
-                "url": url,
+                "url": safe_url.clone(),
             })),
         )
     })?;
+    validate_signaling_url(&parsed)?;
     let ws_stream =
         match tokio::time::timeout(SIGNALING_CONNECT_TIMEOUT, connect_resolved_ws(&parsed)).await {
             Ok(result) => result.map_err(|message| {
@@ -474,7 +479,7 @@ async fn establish_ws(url: &str) -> Result<(WsWrite, WsRead), RxError> {
                     "RC_WEBRTC_SIGNAL",
                     Some(serde_json::json!({
                         "message": format!("WebSocket connect failed: {message}"),
-                        "url": url,
+                        "url": safe_url.clone(),
                     })),
                 )
             })?,
@@ -486,12 +491,39 @@ async fn establish_ws(url: &str) -> Result<(WsWrite, WsRead), RxError> {
                             "WebSocket connect timed out after {}s",
                             SIGNALING_CONNECT_TIMEOUT.as_secs()
                         ),
-                        "url": url,
+                        "url": safe_url.clone(),
                     })),
                 ));
             }
         };
     Ok(ws_stream.split())
+}
+
+fn validate_signaling_url(url: &Url) -> Result<(), RxError> {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let loopback = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let secure_transport = url.scheme() == "wss" || (url.scheme() == "ws" && loopback);
+    if !secure_transport || !url.username().is_empty() || url.password().is_some() {
+        return Err(new_rx_error(
+            "RC_WEBRTC_SIGNAL",
+            Some(serde_json::json!({
+                "message": "signaling URL must use wss outside loopback and must not contain userinfo credentials",
+                "url": redacted_signaling_url(url.as_str()),
+            })),
+        ));
+    }
+    Ok(())
+}
+
+fn redacted_signaling_url(raw: &str) -> String {
+    let Ok(mut url) = Url::parse(raw) else {
+        return "[invalid signaling URL]".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 /// Resolve signaling endpoints explicitly and try IPv4 before IPv6. Some
@@ -705,6 +737,31 @@ mod tests {
         assert!(addresses[3].is_ipv6());
     }
 
+    #[test]
+    fn signaling_transport_requires_tls_outside_loopback_and_rejects_userinfo() {
+        assert!(
+            validate_signaling_url(&Url::parse("wss://signaling.ctox.dev/v2").unwrap()).is_ok()
+        );
+        assert!(validate_signaling_url(&Url::parse("ws://127.0.0.1:8787/v2").unwrap()).is_ok());
+        assert!(
+            validate_signaling_url(&Url::parse("ws://signaling.ctox.dev/v2").unwrap()).is_err()
+        );
+        assert!(validate_signaling_url(
+            &Url::parse("wss://user:password@signaling.ctox.dev/v2").unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn signaling_url_diagnostics_remove_credentials_and_query_tokens() {
+        let redacted = redacted_signaling_url(
+            "wss://user:password@signaling.ctox.dev/v2?token=native-secret&cap=ctox-control-plane-v1#secret",
+        );
+        assert_eq!(redacted, "wss://signaling.ctox.dev/v2");
+        assert!(!redacted.contains("native-secret"));
+        assert!(!redacted.contains("password"));
+    }
+
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
 
@@ -731,7 +788,7 @@ mod tests {
                 conns_s.fetch_add(1, Ordering::SeqCst);
                 let mut ws = accept_async(stream).await.unwrap();
                 ws.send(Message::Text(
-                    r#"{"type":"init","yourPeerId":"p1"}"#.to_string(),
+                    r#"{"type":"init","yourPeerId":"p1"}"#.to_string().into(),
                 ))
                 .await
                 .unwrap();
@@ -744,7 +801,7 @@ mod tests {
                     }
                 }
                 ws.send(Message::Text(
-                    r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string(),
+                    r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string().into(),
                 ))
                 .await
                 .unwrap();
@@ -799,7 +856,7 @@ mod tests {
             let mut first_ws = accept_async(first_stream).await.unwrap();
             first_ws
                 .send(Message::Text(
-                    r#"{"type":"init","yourPeerId":"old-peer"}"#.to_string(),
+                    r#"{"type":"init","yourPeerId":"old-peer"}"#.to_string().into(),
                 ))
                 .await
                 .unwrap();
@@ -813,7 +870,8 @@ mod tests {
             first_ws
                 .send(Message::Text(
                     r#"{"type":"joined","otherPeerIds":["old-browser"],"peers":[{"peerId":"old-browser","role":"browser"}]}"#
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 ))
                 .await
                 .unwrap();
@@ -875,7 +933,7 @@ mod tests {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = accept_async(stream).await.unwrap();
         ws.send(Message::Text(
-            r#"{"type":"init","yourPeerId":"p1"}"#.to_string(),
+            r#"{"type":"init","yourPeerId":"p1"}"#.to_string().into(),
         ))
         .await
         .unwrap();
@@ -888,7 +946,7 @@ mod tests {
             }
         }
         ws.send(Message::Text(
-            r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string(),
+            r#"{"type":"joined","otherPeerIds":[],"peers":[]}"#.to_string().into(),
         ))
         .await
         .unwrap();

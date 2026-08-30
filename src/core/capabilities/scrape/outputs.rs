@@ -5,16 +5,16 @@ use super::classify::ScrapeRunStatus;
 use super::execute::{CommandExecution, ProbeResult};
 use super::registry::open_db;
 use super::{
-    DEFAULT_REPAIR_SKILL, MIN_TEMPLATE_CODE_LEN, MIN_TEMPLATE_RESULTS, MIN_TEMPLATE_TARGETS,
-    MaterializationOutcome, RegisteredTarget, artifact_record, canonical_json, compute_sha256,
-    latest_source_revision_map, latest_state_paths_for_target, load_active_record_index,
-    load_latest_active_records_sample, load_target_view, now_iso_string, probe_to_json,
-    record_identity_fields, record_identity_key, resolve_input_path, resolve_workspace_dir,
-    slugify, stable_digest, tail_excerpt, target_sources,
+    artifact_record, canonical_json, compute_sha256, latest_source_revision_map,
+    latest_state_paths_for_target, load_active_record_index, load_latest_active_records_sample,
+    load_target_view, now_iso_string, probe_to_json, record_identity_fields, record_identity_key,
+    resolve_input_path, resolve_workspace_dir, slugify, stable_digest, tail_excerpt,
+    target_sources, MaterializationOutcome, RegisteredTarget, DEFAULT_REPAIR_SKILL,
+    MIN_TEMPLATE_CODE_LEN, MIN_TEMPLATE_RESULTS, MIN_TEMPLATE_TARGETS,
 };
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

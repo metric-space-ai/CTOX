@@ -152,3 +152,8 @@ und enthält `app_id`, `window_instance_id`, `surface_id`, `pane_id`,
 v1-Felder sowie `surface`, `location`, `client_x/client_y` bleiben während der
 Migration als Dual-Read-Aliase erhalten. ContextMenu-Taste und Shift+F10 öffnen
 denselben zentralen Ablauf wie ein Rechtsklick.
+
+Verschachtelte Shell-Flächen dürfen mit `data-context-module-id` auf ein
+anderes installiertes Modul zeigen, etwa eine App-Karte im App Store. Die Shell
+akzeptiert diese Zuordnung nur, wenn die ID im server-projizierten Modulkatalog
+vorhanden ist; frei gesetzte DOM-Attribute erzeugen keinen Aktions-Scope.

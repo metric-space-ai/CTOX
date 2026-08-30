@@ -186,7 +186,7 @@ const CANDIDATE_POLITENESS_MS = 1_500;
 // Filler words a German company name carries but its domain drops: industry
 // words and honorifics, never the distinguishing words. "Chemische Fabrik
 // Berg" runs cfb.de, "Carbosulf Chemische Werke" runs carbosulf.de.
-// Measured 2026-07-31 against the live THESEN leads.
+// Measured 2026-07-31 against the live managed tenant leads.
 const DOMAIN_FILLER_TOKENS = new Set([
   "chemische", "chemisches", "chemischer", "chemisch", "chem",
   "werke", "werk", "fabrik", "fabriken",

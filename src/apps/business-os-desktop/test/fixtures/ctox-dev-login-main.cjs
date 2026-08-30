@@ -222,6 +222,10 @@ function startCtoxDevMockServer() {
           transport: "webrtc",
           http_bridge_available: false,
           launchEpoch,
+          signaling_auth_version: "ctox-role-bound-v1",
+          signaling_browser_token: "desktop-browser-token",
+          signaling_browser_token_hash: "0a7fa43b18972eced883f4523c24098a0a2646368b348a8d7b7abf7135ee995d",
+          signaling_native_token_hash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         },
       });
       return;

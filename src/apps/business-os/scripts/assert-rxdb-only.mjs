@@ -311,6 +311,10 @@ function assertBusinessOsServerHttpDataApisAreGated() {
   if (!/Business OS HTTP data APIs are disabled; use RxDB\/WebRTC\./.test(server)) {
     offenders.push('src/core/business_os/server.rs: HTTP data API gate must return the RxDB/WebRTC-only contract message');
   }
+  const syncConfigRoute = server.match(/\(Method::Get, "\/api\/business-os\/sync\/config"\)[\s\S]{0,900}?\n        \}/)?.[0] || '';
+  if (!/if !session\.authenticated[\s\S]*respond_status\(request, 401, "login required"\)/.test(syncConfigRoute)) {
+    offenders.push('src/core/business_os/server.rs: sync config must require an authenticated Business OS session');
+  }
   const runtimeSettingsRoute = /"\/api\/business-os\/ctox\/runtime-settings"/;
   if (runtimeSettingsRoute.test(server)) {
     offenders.push('src/core/business_os/server.rs: runtime settings must not be exposed as an HTTP route');

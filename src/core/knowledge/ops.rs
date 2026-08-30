@@ -16,6 +16,8 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use polars::prelude::*;
+use polars_lazy::prelude::{LazyCsvReader, LazyJsonLineReader};
+use polars_utils::pl_path::PlRefPath;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -229,7 +231,7 @@ pub fn stats(root: &Path, args: &[String]) -> Result<()> {
     let df = lf.collect().context("collect DataFrame for stats")?;
 
     let mut out = Map::new();
-    for col_ref in df.get_columns() {
+    for col_ref in df.columns() {
         let name = col_ref.name().to_string();
         let null_count = col_ref.null_count();
         let n_unique = col_ref.n_unique().ok();
@@ -400,6 +402,7 @@ pub fn append(root: &Path, args: &[String]) -> Result<()> {
                 rechunk: true,
                 to_supertypes: true,
                 diagonal: true,
+                strict: false,
                 from_partitioned_ds: false,
                 maintain_order: true,
             },
@@ -604,7 +607,7 @@ pub fn drop_column(root: &Path, args: &[String]) -> Result<()> {
         bail!("column `{column}` does not exist on domain={domain} key={table_key}");
     }
 
-    let selector = by_name([PlSmallStr::from_str(column.as_str())], true);
+    let selector = by_name([PlSmallStr::from_str(column.as_str())], true, false);
     let df = scan_table(&path)?
         .drop(selector)
         .collect()
@@ -648,13 +651,13 @@ pub fn import(root: &Path, args: &[String]) -> Result<()> {
 
     let df_new = match ext.as_str() {
         "parquet" => {
-            let pl = PlPath::new(&from_file.to_string_lossy());
+            let pl = PlRefPath::new(from_file.to_string_lossy().into_owned());
             LazyFrame::scan_parquet(pl, ScanArgsParquet::default())?
                 .collect()
                 .context("read source parquet")?
         }
         "csv" => {
-            let pl = PlPath::new(&from_file.to_string_lossy());
+            let pl = PlRefPath::new(from_file.to_string_lossy().into_owned());
             LazyCsvReader::new(pl)
                 .with_has_header(true)
                 .finish()
@@ -663,7 +666,7 @@ pub fn import(root: &Path, args: &[String]) -> Result<()> {
                 .context("read source CSV")?
         }
         "jsonl" | "ndjson" => {
-            let pl = PlPath::new(&from_file.to_string_lossy());
+            let pl = PlRefPath::new(from_file.to_string_lossy().into_owned());
             LazyJsonLineReader::new(pl)
                 .finish()
                 .context("open source NDJSON")?
@@ -693,6 +696,7 @@ pub fn import(root: &Path, args: &[String]) -> Result<()> {
                 rechunk: true,
                 to_supertypes: true,
                 diagonal: true,
+                strict: false,
                 from_partitioned_ds: false,
                 maintain_order: true,
             },

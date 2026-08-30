@@ -1,23 +1,22 @@
 // Run execution: the outcome orchestrator, the sandboxed runner spawn
 // (env-clear + allowlist, process-group kill), the per-target run lock
 // with holder-liveness reclaim, and the portal health probe.
-use super::classify::{Classification, ScrapeRunStatus, classify_outcome};
+use super::classify::{classify_outcome, Classification, ScrapeRunStatus};
 use super::registry::{load_registered_target, open_db};
 use super::{
-    DEFAULT_QUEUE_PRIORITY, RecordRunRequest, RegisteredTarget, SCRAPE_RUNNER_ENV_ALLOWLIST,
-    ScrapeExecutionOutcome, bind_scrape_record_provenance, build_repair_prompt,
-    build_run_artifacts, contains_human_verification, default_entry_command,
-    emit_reauthorization_handoff, extracted_record_fields, find_flag_value,
-    latest_source_revision_map, load_last_successful_run, materialize_latest_records,
-    maybe_record_template_from_target, maybe_run_llm_enrichment, normalize_records, now_iso_string,
-    parse_execution_payload, print_json, probe_to_json, read_response_excerpt, record_run,
-    repair_skill_for_status, required_flag_value, resolve_workspace_dir, scrape_error_diagnostic,
-    session_expiry_reauthorization, stable_digest, tail_excerpt, target_sources, url_host_lower,
-    write_repair_request,
+    bind_scrape_record_provenance, build_repair_prompt, build_run_artifacts,
+    contains_human_verification, default_entry_command, emit_reauthorization_handoff,
+    extracted_record_fields, find_flag_value, latest_source_revision_map, load_last_successful_run,
+    materialize_latest_records, maybe_record_template_from_target, maybe_run_llm_enrichment,
+    normalize_records, now_iso_string, parse_execution_payload, print_json, probe_to_json,
+    read_response_excerpt, record_run, repair_skill_for_status, required_flag_value,
+    resolve_workspace_dir, scrape_error_diagnostic, session_expiry_reauthorization, stable_digest,
+    tail_excerpt, target_sources, url_host_lower, write_repair_request, RecordRunRequest,
+    RegisteredTarget, ScrapeExecutionOutcome, DEFAULT_QUEUE_PRIORITY, SCRAPE_RUNNER_ENV_ALLOWLIST,
 };
 use crate::channels;
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Read as _;
@@ -630,11 +629,47 @@ pub(super) fn run_lock_holder_is_alive(path: &Path) -> bool {
     if pid <= 0 {
         return false;
     }
+    process_is_alive(pid)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: i64) -> bool {
     if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
         return true;
     }
     // EPERM: the process exists but belongs to someone else — still alive.
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: i64) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // Match the Unix EPERM behavior: an inaccessible process still exists
+        // and must retain its lock.
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let mut exit_code = 0u32;
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    unsafe {
+        CloseHandle(process);
+    }
+    queried && i32::try_from(exit_code).ok() == Some(STILL_ACTIVE)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_alive(_pid: i64) -> bool {
+    false
 }
 
 pub(super) fn probe_portal_health(url: &str, skip_probe: bool) -> ProbeResult {

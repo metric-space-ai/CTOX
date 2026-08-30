@@ -113,7 +113,7 @@
           <form id="connection-invite" class="connection-form" data-connection-pane="invite" hidden>
             <div class="form-copy">
               <h2 id="invite-form-title">Peer2Peer verbinden</h2>
-              <p>Füge vorzugsweise den vollständigen Desktop-Link oder das JSON-Invite ein. Room-Passwort und Zugangs-Token werden nur im System-Schlüsselbund gespeichert.</p>
+              <p>Füge vorzugsweise den vollständigen Desktop-Link oder das JSON-Invite ein. Browser-Signaling- und Zugangs-Token werden nur im System-Schlüsselbund gespeichert.</p>
             </div>
             <label>Desktop-Einladung<textarea id="invite-payload" name="invite" rows="6" placeholder="ctox-business-os-desktop://pair?payload=…"></textarea></label>
             <details id="manual-pairing-fields" class="manual-pairing-fields">
@@ -122,7 +122,8 @@
                 <label>Anzeigename<input id="pairing-display-name" autocomplete="off" placeholder="Meine CTOX-Instanz"></label>
                 <label>Signaling-URL<input id="pairing-signaling-url" type="url" autocomplete="url" value="wss://signaling.ctox.dev"></label>
                 <label class="span-two">Sync Room<input id="pairing-sync-room" autocomplete="off" placeholder="ctox-business-os:instance:room"></label>
-                <label class="span-two">Room-Passwort<input id="pairing-room-secret" type="password" autocomplete="new-password"></label>
+                <label class="span-two">Browser-Signaling-Token<input id="pairing-browser-token" type="password" autocomplete="new-password"></label>
+                <label class="span-two">Native Token-Commitment (SHA-256)<input id="pairing-native-token-hash" autocomplete="off" pattern="[a-f0-9]{64}"></label>
                 <label class="span-two">Zugangs-Token<input id="pairing-capability-token" type="password" autocomplete="new-password" placeholder="Aus ctox business-os desktop invite"></label>
               </div>
             </details>

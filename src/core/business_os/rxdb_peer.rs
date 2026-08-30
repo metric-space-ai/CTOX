@@ -2880,11 +2880,11 @@ async fn run_native_peer(
                             if !store::capability_allows_collection_permission(
                                 &root,
                                 &capability_token,
-                                "thesen_outbound_leads",
+                                "outbound_lead_generation_leads",
                                 crate::business_os::policy::BusinessOsPermission::DataRead,
                             ) {
                                 return Err(
-                                    "outbound Sellify lookup capability may not read THESEN leads"
+                                    "outbound Sellify lookup capability may not read managed tenant leads"
                                         .to_string(),
                                 );
                             }

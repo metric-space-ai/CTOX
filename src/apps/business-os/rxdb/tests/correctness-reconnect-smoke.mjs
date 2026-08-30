@@ -95,6 +95,38 @@ function makeStorageCollection() {
   assert(completed.length === 0, 'no completed window after abort');
 }
 
+// === Reconnect-abort during async fingerprint/cache preflight ===
+// The invocation is visible before its remote request is registered. A
+// reconnect in that window must cancel the stable request id and prevent the
+// fetch from starting later.
+{
+  const sidecar = createSidecarWithMemoryBackend({ databaseName: 'reset-preflight' });
+  const storage = makeStorageCollection();
+  const cancelled = [];
+  let fetchStarted = 0;
+  const loader = createQueryDemandLoader({
+    storageCollection: storage,
+    sidecar,
+    collectionName: 'business_records',
+    schemaVersion: 1,
+    requestQueryFetch: async () => {
+      fetchStarted += 1;
+      return { documents: [] };
+    },
+    requestCancel: async ({ requestId, reason }) => { cancelled.push({ requestId, reason }); },
+  });
+
+  loader.resolveQuery({ selector: { status: 'preflight' } }).catch(() => {});
+  assert(loader.inflightSize() === 1, 'preflight invocation must be observable as in-flight');
+  await loader.abortAllInFlight('reconnect-preflight');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert(cancelled.length === 1, 'preflight abort must send exactly one cancel');
+  assert(cancelled[0].reason === 'reconnect-preflight', 'preflight abort reason propagated');
+  assert(fetchStarted === 0, 'aborted preflight must never start a remote fetch');
+  assert(loader.inflightSize() === 0, 'aborted preflight must release all local state');
+}
+
 // === Multi-tab leader test ===
 {
   const sidecar = createSidecarWithMemoryBackend({ databaseName: 'reset-mt' });

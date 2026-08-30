@@ -1209,6 +1209,7 @@
     padding: 6px;
   }
 
+  .ctox-workspace > [data-resizer],
   .ctox-column-resizer {
     display: none;
   }

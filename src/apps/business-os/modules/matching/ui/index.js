@@ -5838,7 +5838,10 @@ function renderSources(){
     const locs = c.locations || [];
     (showAll?locs:locs.slice(0,MAX)).forEach(l=>{
       const sp=el('span','loc');
-      sp.innerHTML=`${l.city} <b>${l.open}</b>`;
+      sp.append(document.createTextNode(`${String(l.city || '')} `));
+      const open = document.createElement('b');
+      open.textContent = String(l.open || '');
+      sp.appendChild(open);
       locWrap.appendChild(sp);
     });
     if(locs.length>MAX){

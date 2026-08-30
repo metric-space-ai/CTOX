@@ -318,7 +318,6 @@
     "ctox.module.save",
     "ctox.module.update",
     "ctox.runtime.switch",
-    "ctox.runtime_settings.save",
     "ctox.source.rollback_snapshot",
     "ctox.subscription_auth.start",
     "ctox.task.delete",

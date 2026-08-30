@@ -576,17 +576,30 @@ export function createWindowManager({
 
   function minimize(id) {
     const win = windows.find((w) => w.id === id);
-    if (!win) return;
+    if (!win || win._minimizing || win.state === 'minimized') return;
+    win._minimizing = true;
     const reduced = prefersReducedMotion();
     if (!reduced) win.element.classList.add('is-minimizing');
     setTimeout(() => {
       win.element.classList.remove('is-minimizing');
       win.element.style.display = 'none';
       win.state = 'minimized';
+      win._minimizing = false;
       focusNextAfter(id);
       bus.emit('window:minimized', { id, ownerId: win.ownerId });
       persistFor(win);
     }, reduced ? 0 : motionBaseMs());
+  }
+
+  function minimizeAll() {
+    const visible = windows.filter((win) => (
+      win.state !== 'minimized'
+      && win.element.style.display !== 'none'
+      && !win._destroying
+      && !win._minimizing
+    ));
+    for (const win of visible) minimize(win.id);
+    return visible.length;
   }
 
   function toggleMaximize(id, { skipStore = false } = {}) {
@@ -1122,6 +1135,7 @@ export function createWindowManager({
     create,
     focus,
     minimize,
+    minimizeAll,
     toggleMaximize,
     restore: (id) => {
       const win = windows.find((w) => w.id === id);

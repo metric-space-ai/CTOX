@@ -5,7 +5,7 @@ fn eventus_config() -> PostgresConfig {
     PostgresConfig {
         server: "127.0.0.1".into(),
         port: 55_432,
-        database: "thesen_rfq_test".into(),
+        database: "outbound_rfq_test".into(),
         user: "rfqdev".into(),
         password: None,
         sslmode: PostgresSslMode::Disable,

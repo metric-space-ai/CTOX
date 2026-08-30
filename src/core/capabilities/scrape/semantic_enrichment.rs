@@ -3,12 +3,13 @@
 
 use super::registry::open_db;
 use super::{
-    DEFAULT_ENRICHMENT_MAX_RECORDS, EnrichmentOutcome, EnrichmentTaskConfig, EnrichmentUpdate,
-    LatestRecordView, LocalEmbeddingSocketRequest, LocalEmbeddingSocketResponse, RegisteredTarget,
-    ScrapeTargetView, SemanticMatch, artifact_record, build_target_api_contract, canonical_json,
-    compute_sha256, extract_first_json_object, invoke_responses_text, json_lookup_path,
+    artifact_record, build_target_api_contract, canonical_json, compute_sha256,
+    extract_first_json_object, invoke_responses_text, json_lookup_path,
     load_all_latest_active_records, load_target_view, now_iso_string, scalarish_string,
-    set_json_path, tail_excerpt, target_api_dir, truncate_chars,
+    set_json_path, tail_excerpt, target_api_dir, truncate_chars, EnrichmentOutcome,
+    EnrichmentTaskConfig, EnrichmentUpdate, LatestRecordView, LocalEmbeddingSocketRequest,
+    LocalEmbeddingSocketResponse, RegisteredTarget, ScrapeTargetView, SemanticMatch,
+    DEFAULT_ENRICHMENT_MAX_RECORDS,
 };
 use crate::inference::engine;
 use crate::inference::local_transport::LocalTransport;
@@ -17,9 +18,9 @@ use crate::inference::runtime_kernel;
 use crate::inference::runtime_state;
 use crate::inference::supervisor;
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;

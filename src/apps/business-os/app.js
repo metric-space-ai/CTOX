@@ -5414,7 +5414,7 @@ function withMigrationStrategies(collections, migrationStrategies = {}) {
 // Eine App, die eine fremde Collection deklariert, muss sie auch lesen koennen —
 // ohne dass der Nutzer vorher die besitzende App geoeffnet hat.
 //
-// THESEN Outbound deklariert sellify_companies und sellify_people, um vor jeder
+// Outbound Lead Generation deklariert sellify_companies und sellify_people, um vor jeder
 // Recherche im CRM nachzuschlagen: existiert die Firma schon, ist es eine
 // Nachrecherche, und die dort gefuehrten Ansprechpartner (im Schnitt 3,5 je
 // Firma) sind bereits bekannt. Registriert wurden diese Collections aber nur
@@ -6522,7 +6522,7 @@ function createLiveSyncFacade({ host = null } = {}) {
       assertActive();
       // Fehlte die native Bruecke, lieferte das optionale Aufrufzeichen still
       // `undefined` statt zu werfen. Aufrufer behandeln das als Erfolg: der
-      // Browser meldete am 20.08.2026 auf thesen.ctox.dev "Bereit", waehrend
+      // Browser meldete am 20.08.2026 auf managed production tenant "Bereit", waehrend
       // serverseitig weder Sitzung noch Tab noch Chromium existierten — der
       // Los-Knopf war tot, ohne dass irgendwo ein Fehler entstand.
       if (typeof state.sync?.requestNative !== 'function') {
@@ -9385,7 +9385,7 @@ function renderShellCtoxVersion(status = state.ctoxHealth) {
   // Die Versionsnummer stammt aus Cargo.toml und wird auf main nie
   // hochgezaehlt: sie zeigt seit Monaten 0.3.22, egal wie oft aktualisiert
   // wurde. Ein Betreiber konnte am Bildschirm nicht erkennen, ob ein Upgrade
-  // angekommen ist — auf thesen.ctox.dev lief drei Wochen ein alter Build
+  // angekommen ist — auf managed production tenant lief drei Wochen ein alter Build
   // hinter einer Zahl, die aktuell aussah. Der Build-Stand des laufenden
   // Release ist die Angabe, die sich tatsaechlich aendert.
   const buildStand = platformBuildStamp(platform?.current_release);
@@ -11364,11 +11364,7 @@ function readUrlPairingConfig() {
   const syncRoom = params.get('sync_room') || params.get('syncRoom');
   const signaling = params.get('signaling_url') || params.get('signalingUrl');
   const instanceId = params.get('instance_id') || params.get('instanceId');
-  const roomPassword = params.get('room_password')
-    || params.get('roomPassword')
-    || params.get('signaling_room_password')
-    || params.get('signalingRoomPassword');
-  if ((!syncRoom && (!instanceId || !roomPassword)) || !signaling) return null;
+  if (!syncRoom || !signaling) return null;
   return {
     ok: true,
     source: 'url',
@@ -11379,7 +11375,10 @@ function readUrlPairingConfig() {
     native_peer_id: params.get('native_peer_id') || params.get('nativePeerId') || '',
     peer_role: 'browser',
     sync_room: syncRoom,
-    signaling_room_password: roomPassword || '',
+    signaling_auth_version: params.get('signaling_auth_version') || params.get('signalingAuthVersion') || '',
+    signaling_browser_token: params.get('signaling_browser_token') || params.get('signalingBrowserToken') || '',
+    signaling_browser_token_hash: params.get('signaling_browser_token_hash') || params.get('signalingBrowserTokenHash') || '',
+    signaling_native_token_hash: params.get('signaling_native_token_hash') || params.get('signalingNativeTokenHash') || '',
     signaling_urls: signaling.split(',').map((item) => item.trim()).filter(Boolean),
     transport: 'webrtc',
     http_bridge_available: false,
@@ -11408,10 +11407,13 @@ function assertManagedDesktopCapability(config) {
 
 function readStoredPairingConfig() {
   try {
-    const raw = readScopedLocalStorage(PAIRING_CONFIG_KEY, {
-      actor: false,
-      legacyFallback: true,
-    });
+    // Pairing state contains the browser-role signaling credential. Keep it
+    // only for this page session so a later browser process/profile cannot
+    // recover it from persistent localStorage. Legacy persistent copies may
+    // contain the former native room password and are removed fail-closed.
+    removeScopedLocalStorage(PAIRING_CONFIG_KEY, { actor: false });
+    localStorage.removeItem(PAIRING_CONFIG_KEY);
+    const raw = sessionStorage.getItem(scopedStorageKey(PAIRING_CONFIG_KEY, { actor: false }));
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -11422,14 +11424,14 @@ function writeStoredPairingConfig(config) {
   try {
     const instanceId = storageScopeSegment(config?.instance_id || config?.instanceId, '');
     if (instanceId) sessionStorage.setItem(CTOX_WORKSPACE_SCOPE_HINT_KEY, instanceId);
-    writeScopedLocalStorage(PAIRING_CONFIG_KEY, JSON.stringify({ ...config, source: 'stored' }), {
-      actor: false,
-    });
+    const key = scopedStorageKey(PAIRING_CONFIG_KEY, { actor: false });
+    sessionStorage.setItem(key, JSON.stringify({ ...config, source: 'stored' }));
   } catch {}
 }
 
 function clearStoredPairingConfig() {
   try {
+    sessionStorage.removeItem(scopedStorageKey(PAIRING_CONFIG_KEY, { actor: false }));
     removeScopedLocalStorage(PAIRING_CONFIG_KEY, { actor: false });
     localStorage.removeItem(PAIRING_CONFIG_KEY);
     sessionStorage.removeItem(CTOX_WORKSPACE_SCOPE_HINT_KEY);
@@ -11452,6 +11454,14 @@ function scrubPairingConfigFromUrl() {
       'roomPassword',
       'signaling_room_password',
       'signalingRoomPassword',
+      'signaling_auth_version',
+      'signalingAuthVersion',
+      'signaling_browser_token',
+      'signalingBrowserToken',
+      'signaling_browser_token_hash',
+      'signalingBrowserTokenHash',
+      'signaling_native_token_hash',
+      'signalingNativeTokenHash',
       'peer_id',
       'peerId',
       'native_peer_id',
@@ -11570,15 +11580,7 @@ async function normalizeBusinessOsLaunchConfig(config) {
     ? config.signaling_urls
     : (Array.isArray(config.signalingUrls) ? config.signalingUrls : []);
   const instanceId = String(config.instance_id || config.instanceId || '').trim();
-  const roomPassword = String(
-    config.signaling_room_password
-      || config.signalingRoomPassword
-      || config.room_password
-      || config.roomPassword
-      || ''
-  ).trim();
-  const explicitSyncRoom = String(config.sync_room || config.syncRoom || '').trim();
-  const syncRoom = explicitSyncRoom || await deriveSyncRoomFromPassword(instanceId, roomPassword);
+  const syncRoom = String(config.sync_room || config.syncRoom || '').trim();
   const urls = signalingUrls.map((url) => String(url || '').trim()).filter(Boolean);
   if (!syncRoom || !urls.length) return null;
   // A pairing payload (`?ctox_config=`, `desktop invite`) carries the room and
@@ -11611,7 +11613,6 @@ async function normalizeBusinessOsLaunchConfig(config) {
     native_peer_id: config.native_peer_id || config.nativePeerId || '',
     peer_role: config.peer_role || config.peerRole || 'browser',
     sync_room: syncRoom,
-    signaling_room_password: roomPassword,
     signaling_auth_version: String(config.signaling_auth_version || config.signalingAuthVersion || '').trim(),
     signaling_browser_token: String(config.signaling_browser_token || config.signalingBrowserToken || '').trim(),
     signaling_browser_token_hash: String(config.signaling_browser_token_hash || config.signalingBrowserTokenHash || '').trim(),
@@ -11641,23 +11642,6 @@ async function normalizeBusinessOsLaunchConfig(config) {
       : null,
     source: config.source || 'injected',
   };
-}
-
-async function deriveSyncRoomFromPassword(instanceId, roomPassword) {
-  if (!instanceId || !roomPassword) return '';
-  if (!globalThis.crypto?.subtle || typeof TextEncoder === 'undefined') {
-    throw new Error('Business OS pairing requires secure browser cryptography to set up the connection.');
-  }
-  const bytes = new TextEncoder().encode(roomPassword);
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-  const secretId = base64UrlEncode(new Uint8Array(digest)).slice(0, 22);
-  return `ctox-business-os:${instanceId}:${secretId}`;
-}
-
-function base64UrlEncode(bytes) {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 function firstObject(...items) {

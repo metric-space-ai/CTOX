@@ -239,6 +239,7 @@ function bindElements(root) {
   els.appSortDir = els.leftPane?.querySelector('[data-app-sort-dir]');
   els.centerFooter = root.querySelector('#ca-center-footer');
   els.artifactFooter = root.querySelector('#ca-artifact-footer');
+  els.artifactHost = root.querySelector('#ca-artifact-host');
   if (els.root) els.root.className = ROOT_CLASSES;
 }
 
@@ -1208,29 +1209,52 @@ function renderTranscriptInline(box, events, emptyText) {
 // Column 3: the agent's free HTML artifact — a live page the agent maintains
 // about its task (contract: session.metadata.artifact_html). Sandboxed.
 function renderArtifact() {
-  const frame = els.root?.querySelector('#ca-artifact');
+  const host = els.artifactHost || els.root?.querySelector('#ca-artifact-host');
   const empty = els.root?.querySelector('#ca-artifact-empty');
-  if (!frame || !empty) return;
+  if (!host || !empty) return;
   let metadata = state.activeSession?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = null; } }
   const html = metadata && typeof metadata === 'object' ? String(metadata.artifact_html || '') : '';
   if (html.trim()) {
+    let frame = host.querySelector('#ca-artifact');
+    if (!frame) {
+      frame = document.createElement('iframe');
+      frame.id = 'ca-artifact';
+      frame.className = 'coding-agents-artifact';
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('title', 'Task-Artefakt');
+      host.replaceChildren(frame);
+    }
     if (state.artifactHtml !== html) {
       state.artifactHtml = html;
-      applyArtifactSrcdoc(frame, html);
+      applyArtifactSrcdoc(frame, sanitizeArtifactHtml(html));
     }
     frame.hidden = false;
     empty.hidden = true;
   } else {
     state.artifactHtml = '';
-    frame.removeAttribute('srcdoc');
-    frame.hidden = true;
+    host.replaceChildren();
     empty.hidden = false;
   }
   if (els.artifactFooter) {
     const updatedMs = Number(state.activeSession?.updated_at_ms || 0);
     els.artifactFooter.textContent = html.trim() && updatedMs ? `Aktualisiert ${relativeTime(updatedMs)}` : '';
   }
+}
+
+function sanitizeArtifactHtml(html) {
+  const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+  doc.querySelectorAll('script, iframe, object, embed, base, meta[http-equiv]').forEach((node) => node.remove());
+  for (const element of doc.querySelectorAll('*')) {
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim();
+      if (name.startsWith('on') || ((name === 'href' || name === 'src') && /^javascript:/i.test(value))) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+  return `<!doctype html><html><head>${doc.head.innerHTML}</head><body>${doc.body.innerHTML}</body></html>`;
 }
 
 // Chromium can swallow the very first srcdoc assignment while the module

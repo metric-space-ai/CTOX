@@ -176,11 +176,60 @@ const browserInputEventSchema = {
   additionalProperties: true,
 };
 
+// Legacy customer deployments still expose the research-adapter projection
+// under this German collection name. The Browser module reads it only after a
+// declared database-handle grant, so the manifest and schema must agree or the
+// shell cannot enforce the module's collection boundary.
+const outboundLeadGenerationAdapterSchema = {
+  version: 2,
+  primaryKey: 'id',
+  type: 'object',
+  properties: {
+    id: { type: 'string', maxLength: 180 },
+    campaign_id: { type: 'string' },
+    source_id: { type: 'string' },
+    label: { type: 'string' },
+    url: { type: 'string' },
+    adapter_kind: { type: 'string' },
+    target_key: { type: 'string' },
+    status: { type: 'string' },
+    enabled: { type: 'boolean' },
+    tier: { type: 'string' },
+    countries: { type: 'array', items: { type: 'string' } },
+    field_keys: { type: 'array', items: { type: 'string' } },
+    requires_credential: { type: 'boolean' },
+    credential_secret_name: { type: 'string' },
+    auth_mode: { type: 'string' },
+    auth_status: { type: 'string' },
+    scrape_status: { type: 'string' },
+    last_run_id: { type: 'string' },
+    last_success_at_ms: { type: 'number' },
+    last_error: { type: 'string' },
+    payload: { type: 'object', additionalProperties: true },
+    created_at_ms: { type: 'number' },
+    updated_at_ms: { type: 'number' },
+  },
+  required: ['id', 'source_id', 'url', 'adapter_kind', 'status', 'enabled', 'payload', 'created_at_ms', 'updated_at_ms'],
+  additionalProperties: true,
+};
+
+// Die Kern-Adaptersammlung traegt dieselben Felder wie die tenant-lokale, liegt
+// aber auf Version 0. Ohne diesen Eintrag laesst sich die Sammlung im Browser
+// nicht registrieren, und die Scraping-Leiste sieht ausschliesslich die
+// tenant-lokalen Adapter. Auf der Produktivinstanz betraf das 17 aktive
+// Adapter, darunter als einziger Traeger linkedin.com.
+const outboundResearchAdapterSchema = {
+  ...outboundLeadGenerationAdapterSchema,
+  version: 0,
+};
+
 export const collections = {
   browser_sessions: browserSessionSchema,
   browser_tabs: browserTabSchema,
   browser_frames: browserFrameSchema,
   browser_input_events: browserInputEventSchema,
+  outbound_research_adapters: outboundResearchAdapterSchema,
+  outbound_lead_generation_adapters: outboundLeadGenerationAdapterSchema,
 };
 
 const retainV0BrowserDocument = (oldDoc) => ({ ...oldDoc });
@@ -190,4 +239,8 @@ export const migrationStrategies = {
   browser_tabs: { 1: retainV0BrowserDocument },
   browser_frames: { 1: retainV0BrowserDocument },
   browser_input_events: { 1: retainV0BrowserDocument },
+  outbound_lead_generation_adapters: {
+    1: retainV0BrowserDocument,
+    2: retainV0BrowserDocument,
+  },
 };

@@ -114,7 +114,7 @@ async function exercisePackagedHelper(helperPath) {
     assert.equal(instance.healthSummary?.dataPlane, "rxdb-webrtc");
     assert.equal(instance.healthSummary?.httpDataProxy, false);
     assert.equal(secrets.size, 2);
-    assert.equal(JSON.stringify(registry).includes("packaged-room-secret"), false);
+    assert.equal(JSON.stringify(registry).includes("packaged-browser-token"), false);
 
     registry = loadRegistry(registryPath);
     const restartedList = await sourceManager().listInstances();
@@ -122,7 +122,8 @@ async function exercisePackagedHelper(helperPath) {
     const launch = await sourceManager().getLaunchConfig(restartedList[0]);
     assert.equal(launch.ctoxConfig.transport, "webrtc");
     assert.equal(launch.ctoxConfig.http_bridge_available, false);
-    assert.equal(launch.ctoxConfig.signaling_room_password, "packaged-room-secret");
+    assert.equal(launch.ctoxConfig.signaling_browser_token, "packaged-browser-token");
+    assert.equal("signaling_room_password" in launch.ctoxConfig, false);
     assert.equal(launch.ctoxConfig.session.capability_token, "packaged-native-capability");
     assert.ok(String(launch.ctoxConfig.sync_room || "").startsWith("ctox-business-os:"));
   } finally {
@@ -142,7 +143,10 @@ function writeBundledCtoxHelper(helperPath) {
     "  console.log(JSON.stringify({",
     "    instance_id: 'packaged-local',",
     "    sync_room: 'ctox-business-os:packaged-local:room',",
-    "    signaling_room_password: 'packaged-room-secret',",
+    "    signaling_auth_version: 'ctox-role-bound-v1',",
+    "    signaling_browser_token: 'packaged-browser-token',",
+    "    signaling_browser_token_hash: '7be8c9b3c1fa88bde053882241093dcf26885c446372a04eaa55e141601df69e',",
+    "    signaling_native_token_hash: '72366d33e02ef6dae886bc1520d050ba79b72df0c8a82547f126bcfa6513a292',",
     "    signaling_urls: ['wss://signaling.ctox.dev'],",
     "    native_rxdb_peer_available: true",
     "  }));",
@@ -152,7 +156,8 @@ function writeBundledCtoxHelper(helperPath) {
     "  console.log(JSON.stringify({",
     "    type: 'ctox-business-os-invite', version: 1, display_name: 'Packaged Local',",
     "    instance_id: 'packaged-local', sync_room: 'ctox-business-os:packaged-local:room',",
-    "    signaling_room_password: 'packaged-room-secret', signaling_urls: ['wss://signaling.ctox.dev'],",
+    "    signaling_auth_version: 'ctox-role-bound-v1', signaling_browser_token: 'packaged-browser-token',",
+    "    signaling_browser_token_hash: '7be8c9b3c1fa88bde053882241093dcf26885c446372a04eaa55e141601df69e', signaling_native_token_hash: '72366d33e02ef6dae886bc1520d050ba79b72df0c8a82547f126bcfa6513a292', signaling_urls: ['wss://signaling.ctox.dev'],",
     "    transport: 'webrtc', expires_at: '2099-01-01T00:00:00.000Z',",
     "    session: { authenticated: true, capability_token: 'packaged-native-capability', capability_expires_at_ms: 4070908800000, user: { id: 'desktop-owner', display_name: 'Desktop Owner', role: 'chef' } }",
     "  }));",

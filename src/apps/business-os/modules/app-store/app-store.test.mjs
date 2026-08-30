@@ -667,6 +667,7 @@ test('center column carries the canonical grammar and the shelf contract', () =>
   // scroll rides the pane well, never the window.
   assert.match(js, /import\('\.\.\/\.\.\/vendor\/store-shelf\/store-shelf\.mjs'\)/);
   assert.match(js, /shelfUnavailable/);
+  assert.match(js, /matchMedia\?\.\('\(prefers-reduced-motion: reduce\)'\)/);
   assert.match(html, /data-shelf-canvas/);
   assert.match(html, /data-shelf-track/);
   // Detail panel keeps real store actions (shared builder with the cards).

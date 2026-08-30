@@ -74,7 +74,7 @@ async function loadRuntime(config, peer) {
     assertRuntime(runtime);
     return runtime;
   } catch (error) {
-    root.innerHTML = `<div class="ctox-office-frame-error"><div><strong>${productName} nicht verfügbar</strong><p>${escapeHtml(error?.message || error)}</p></div></div>`;
+    root.innerHTML = `<div class="ctox-office-frame-error"><div><strong>${escapeHtml(productName)} nicht verfügbar</strong><p>${escapeHtml(error?.message || error)}</p></div></div>`;
     throw error;
   }
 }

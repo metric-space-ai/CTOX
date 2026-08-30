@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createSyncRuntime, __ctoxSyncTestHooks } from './sync.js';
 
-const { collectionForReplication, projectDesktopIconForReplication } = __ctoxSyncTestHooks;
+const {
+  collectionForReplication,
+  projectDesktopIconForReplication,
+  multiTabCoordinatorRoom,
+} = __ctoxSyncTestHooks;
 const unsafeIcon = () => ({
   id: `desk_icon_${'x'.repeat(180)}`,
   target_type: 'application-with-an-unbounded-type-name',
@@ -86,7 +91,16 @@ test('non-desktop collections retain their original collection', () => {
   assert.strictEqual(collectionForReplication('desktop_layout', collection), collection);
 });
 
+test('multi-tab leadership is isolated across Business OS releases', () => {
+  const nativeRoom = 'ctox-business-os:tenant-1';
+  const coordinatorRoom = multiTabCoordinatorRoom(nativeRoom);
+  assert.match(coordinatorRoom, /^ctox-business-os:tenant-1\|release=/);
+  assert.notEqual(coordinatorRoom, nativeRoom);
+  assert.equal(multiTabCoordinatorRoom(nativeRoom), coordinatorRoom);
+});
+
 test('desktop_icons startup gives WebRTC the projected collection', async () => {
+  const browserToken = 'desktop-icon-replication-browser-token';
   const previousWindow = globalThis.window;
   globalThis.window = {
     location: { href: 'https://business-os.test/' },
@@ -132,7 +146,15 @@ test('desktop_icons startup gives WebRTC the projected collection', async () => 
   };
   const runtime = createSyncRuntime({
     db,
-    config: { transport: 'webrtc', sync_room: 'ctox-business-os:i-009', signaling_urls: ['wss://signal.test/room'] },
+    config: {
+      transport: 'webrtc',
+      sync_room: 'ctox-business-os:i-009',
+      signaling_urls: ['wss://signal.test/room'],
+      signaling_auth_version: 'ctox-role-bound-v1',
+      signaling_browser_token: browserToken,
+      signaling_browser_token_hash: createHash('sha256').update(browserToken).digest('hex'),
+      signaling_native_token_hash: createHash('sha256').update('distinct-native-token').digest('hex'),
+    },
   });
   try {
     const bridge = await runtime.startCollection('desktop_icons', { forceDirect: true, pin: false });
