@@ -74,9 +74,15 @@ impl SourceModule for Zefix {
     fn authoritative_for(&self) -> &'static [FieldKey] {
         &[
             FieldKey::FirmaName,
+            FieldKey::FirmaFruehereNamen,
+            FieldKey::FirmaAktivitaetsstatus,
             FieldKey::FirmaAnschrift,
             FieldKey::FirmaPlz,
             FieldKey::FirmaOrt,
+            FieldKey::FirmaLand,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaGeschaeftsfuehrung,
+            FieldKey::FirmaProkura,
             FieldKey::PersonVorname,
             FieldKey::PersonNachname,
             FieldKey::PersonFunktion,

@@ -1072,6 +1072,157 @@ fn merge_authenticated_person_records(payload: &mut Value, incoming: Vec<Value>)
     Ok(())
 }
 
+pub fn merge_runtime_scrape_result(
+    payload: &mut Value,
+    source_id: &str,
+    source_url: &str,
+    target_fields: &[FieldKey],
+    result: &scrape_bridge::ScrapeBridgeResult,
+) -> Result<usize> {
+    let fields = payload
+        .get_mut("fields")
+        .and_then(Value::as_object_mut)
+        .context("person-research result has no fields object")?;
+    let mut added = 0_usize;
+    for (field, evidence) in &result.fields {
+        if !target_fields.contains(field) {
+            continue;
+        }
+        let Some(field_result) = fields
+            .get_mut(field.as_str())
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let candidate = json!({
+            "value": evidence.value,
+            "confidence": evidence.confidence.as_str(),
+            "source_id": source_id,
+            "source_url": evidence.source_url,
+            "tier": "runtime",
+            "via": "runtime_scrape_target",
+            "note": evidence.note,
+        });
+        let candidates = field_result
+            .entry("candidates")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("person-research field candidates must be an array")?;
+        if candidates.iter().any(|existing| {
+            existing.get("value") == candidate.get("value")
+                && existing.get("source_id") == candidate.get("source_id")
+                && existing.get("source_url") == candidate.get("source_url")
+        }) {
+            continue;
+        }
+        candidates.push(candidate);
+        candidates.sort_by(|left, right| {
+            confidence_rank(right.get("confidence").and_then(Value::as_str)).cmp(&confidence_rank(
+                left.get("confidence").and_then(Value::as_str),
+            ))
+        });
+        if let Some(best) = candidates.first().cloned() {
+            for key in [
+                "value",
+                "confidence",
+                "source_id",
+                "source_url",
+                "tier",
+                "note",
+            ] {
+                field_result.insert(
+                    key.to_string(),
+                    best.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        added += 1;
+    }
+
+    let plan = payload
+        .get_mut("plan")
+        .and_then(Value::as_array_mut)
+        .context("person-research result has no plan array")?;
+    if !plan.iter().any(|entry| {
+        entry
+            .get("source_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.eq_ignore_ascii_case(source_id))
+    }) {
+        plan.push(json!({
+            "source_id": source_id,
+            "tier": "runtime",
+            "api_path": false,
+            "target_key": result.target_key,
+            "target_fields": target_fields.iter().map(|field| field.as_str()).collect::<Vec<_>>(),
+        }));
+    }
+    payload
+        .get_mut("scrape_runs")
+        .and_then(Value::as_array_mut)
+        .context("person-research result has no scrape_runs array")?
+        .push(json!({
+            "source_id": source_id,
+            "target_key": result.target_key,
+            "classification": result.classification,
+            "reason": result.reason,
+            "repair_queued": result.repair_queued,
+            "run_id": result.run_id,
+            "record_count": result.fields.len(),
+            "evidence_rejections": result.evidence_rejections,
+            "attempts": result.attempts,
+            "runtime_policy_source": true,
+        }));
+
+    if matches!(
+        result.classification.as_str(),
+        "authorization_required" | "auth_required" | "blocked"
+    ) {
+        let host = url::Url::parse(source_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default();
+        let session_id = format!(
+            "browser_session_web_stack_auth_{}",
+            source_id
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '-'
+                })
+                .collect::<String>()
+                .trim_matches('-')
+        );
+        payload
+            .get_mut("browser_assist_tasks")
+            .and_then(Value::as_array_mut)
+            .context("person-research result has no browser_assist_tasks array")?
+            .push(json!({
+                "source_id": source_id,
+                "target_fields": target_fields.iter().map(|field| field.as_str()).collect::<Vec<_>>(),
+                "reason": result.classification,
+                "error": result.reason,
+                "status": "auth_assist_required",
+                "stream": "rxdb",
+                "browser_assist": {
+                    "source_id": source_id,
+                    "session_id": session_id,
+                    "target_url": source_url,
+                    "allowed_domains": if host.is_empty() { Vec::<String>::new() } else { vec![host] },
+                    "status": "requested",
+                    "secret_value_in_payload": false,
+                },
+                "next_command": format!(
+                    "ctox business-os web-stack auth-assist-request --source-id {source_id} --target-url {source_url}"
+                ),
+                "secret_value_in_payload": false,
+                "frame_data_in_payload": false,
+            }));
+    }
+    Ok(added)
+}
+
 fn confidence_rank(raw: Option<&str>) -> u8 {
     match raw {
         Some("high") | Some("user_provided") => 3,
@@ -1873,6 +2024,16 @@ fn find_terms_for_fields(fields: &[FieldKey]) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for field in fields {
         match field {
+            FieldKey::FirmaName | FieldKey::FirmaFruehereNamen => {
+                out.insert("Firma".into());
+                out.insert("Firmierung".into());
+                out.insert("frühere Namen".into());
+            }
+            FieldKey::FirmaAktivitaetsstatus => {
+                out.insert("Aktivitätsstatus".into());
+                out.insert("gelöscht".into());
+                out.insert("Liquidation".into());
+            }
             FieldKey::Umsatz => {
                 out.insert("Umsatz".into());
                 out.insert("Umsatzerlöse".into());
@@ -1885,13 +2046,57 @@ fn find_terms_for_fields(fields: &[FieldKey]) -> Vec<String> {
                 out.insert("E-Mail".into());
                 out.insert("Email".into());
             }
-            FieldKey::FirmaAnschrift | FieldKey::FirmaPlz | FieldKey::FirmaOrt => {
+            FieldKey::FirmaAnschrift
+            | FieldKey::FirmaBesucheranschrift
+            | FieldKey::FirmaPostanschrift
+            | FieldKey::FirmaPostfach
+            | FieldKey::FirmaPlz
+            | FieldKey::FirmaOrt
+            | FieldKey::FirmaLand => {
                 out.insert("Anschrift".into());
                 out.insert("Sitz".into());
+                out.insert("Besucheranschrift".into());
+                out.insert("Postanschrift".into());
+                out.insert("Postfach".into());
+            }
+            FieldKey::FirmaDomain | FieldKey::FirmaHomepageFactSheet => {
+                out.insert("Website".into());
+                out.insert("Homepage".into());
+                out.insert("Unternehmen".into());
+            }
+            FieldKey::FirmaTelefon | FieldKey::PersonTelefon => {
+                out.insert("Telefon".into());
+                out.insert("Tel.".into());
+            }
+            FieldKey::FirmaFax => {
+                out.insert("Fax".into());
+                out.insert("Telefax".into());
+            }
+            FieldKey::FirmaGeschaeftstaetigkeit => {
+                out.insert("Geschäftstätigkeit".into());
+                out.insert("Unternehmensgegenstand".into());
+            }
+            FieldKey::FirmaGeschaeftsfuehrung | FieldKey::FirmaProkura => {
+                out.insert("Geschäftsführung".into());
+                out.insert("Prokura".into());
+                out.insert("Vertretungsberechtigt".into());
             }
             FieldKey::PersonFunktion | FieldKey::PersonPosition => {
                 out.insert("Geschäftsführer".into());
                 out.insert("Vorstand".into());
+            }
+            FieldKey::PersonGeschlecht
+            | FieldKey::PersonTitel
+            | FieldKey::PersonVorname
+            | FieldKey::PersonNachname => {
+                out.insert("Ansprechpartner".into());
+                out.insert("Kontakt".into());
+            }
+            FieldKey::PersonLinkedin => {
+                out.insert("LinkedIn".into());
+            }
+            FieldKey::PersonXing => {
+                out.insert("XING".into());
             }
             FieldKey::WzCode => {
                 out.insert("WZ".into());
@@ -2406,7 +2611,7 @@ mod tests {
             api_path: false,
         };
         let result = scrape_bridge::ScrapeBridgeResult {
-            target_key: "companyhouse-de",
+            target_key: "companyhouse-de".to_string(),
             fields: Vec::new(),
             classification: "blocked".to_string(),
             reason: Some("explicit_failure_mode_blocked".to_string()),
@@ -2445,6 +2650,54 @@ mod tests {
         let serialized = serde_json::to_string(&task).unwrap();
         assert!(!serialized.contains("cookie"));
         assert!(!serialized.contains("password"));
+    }
+
+    #[test]
+    fn dynamic_adapter_authorization_becomes_visible_browser_handoff() {
+        let mut payload = json!({
+            "fields": {
+                "firma_name": {"value": null, "confidence": "missing", "candidates": []}
+            },
+            "plan": [],
+            "scrape_runs": [],
+            "browser_assist_tasks": []
+        });
+        let result = scrape_bridge::ScrapeBridgeResult {
+            target_key: "custom-portal".to_string(),
+            fields: Vec::new(),
+            classification: "authorization_required".to_string(),
+            reason: Some("login_required".to_string()),
+            repair_queued: true,
+            run_id: Some("scrape_run-auth".to_string()),
+            evidence_rejections: vec![
+                "classification_not_succeeded:authorization_required".to_string()
+            ],
+            attempts: 1,
+            initial_classification: None,
+            public_browser_fallback: None,
+        };
+
+        merge_runtime_scrape_result(
+            &mut payload,
+            "portal.example.test",
+            "https://portal.example.test/login",
+            &[FieldKey::FirmaName],
+            &result,
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload["browser_assist_tasks"][0]["status"],
+            "auth_assist_required"
+        );
+        assert_eq!(
+            payload["browser_assist_tasks"][0]["browser_assist"]["target_url"],
+            "https://portal.example.test/login"
+        );
+        assert_eq!(
+            payload["browser_assist_tasks"][0]["browser_assist"]["allowed_domains"],
+            json!(["portal.example.test"])
+        );
     }
 
     #[test]

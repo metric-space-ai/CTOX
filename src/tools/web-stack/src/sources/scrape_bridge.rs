@@ -48,7 +48,7 @@ const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
 /// What the bridge produced for one delegated scrape call.
 #[derive(Debug, Clone)]
 pub struct ScrapeBridgeResult {
-    pub target_key: &'static str,
+    pub target_key: String,
     /// Typed records the scrape script emitted, mapped onto our vocab.
     pub fields: Vec<(FieldKey, FieldEvidence)>,
     /// `ctox scrape execute` classification:
@@ -89,7 +89,7 @@ pub fn run_via_scrape_target(
     let Some(target_key) = module.scrape_target_key() else {
         // Not opted in — caller should use the Rust path.
         return ScrapeBridgeResult {
-            target_key: "",
+            target_key: String::new(),
             fields: Vec::new(),
             classification: "no_scrape_target".to_string(),
             reason: Some("module.scrape_target_key() == None".to_string()),
@@ -118,6 +118,102 @@ pub fn run_via_scrape_target(
         return current;
     }
     recent_successful_result(root, target_key, module, company, &current).unwrap_or(current)
+}
+
+/// Execute a runtime-installed adapter supplied by the tenant's typed research
+/// policy rather than by the compile-time source registry.
+pub fn run_via_runtime_target(
+    root: &Path,
+    ctox_bin: &Path,
+    source_id: &str,
+    source_url: &str,
+    target_key: &str,
+    allowed_fields: &[FieldKey],
+    company: &str,
+    country: Country,
+) -> ScrapeBridgeResult {
+    let input = json!({
+        "company": company,
+        "country": country.as_iso(),
+        "source_id": source_id,
+    });
+    let output = Command::new(ctox_bin)
+        .arg("scrape")
+        .arg("execute")
+        .arg("--target-key")
+        .arg(target_key)
+        .arg("--trigger-kind")
+        .arg("person_research")
+        .arg("--allow-heal")
+        .arg("--input-json")
+        .arg(input.to_string())
+        .arg("--runtime-root")
+        .arg(root)
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return ScrapeBridgeResult {
+                target_key: target_key.to_string(),
+                fields: Vec::new(),
+                classification: "subprocess_failed".to_string(),
+                reason: Some(format!("failed to spawn ctox: {error}")),
+                repair_queued: false,
+                run_id: None,
+                evidence_rejections: Vec::new(),
+                attempts: 1,
+                initial_classification: None,
+                public_browser_fallback: None,
+            };
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let classification =
+            if stderr.contains("target_key not found") || stdout.contains("target_key not found") {
+                "target_not_registered"
+            } else {
+                "executor_error"
+            };
+        return ScrapeBridgeResult {
+            target_key: target_key.to_string(),
+            fields: Vec::new(),
+            classification: classification.to_string(),
+            reason: Some(stderr.into_owned()),
+            repair_queued: false,
+            run_id: None,
+            evidence_rejections: Vec::new(),
+            attempts: 1,
+            initial_classification: None,
+            public_browser_fallback: None,
+        };
+    }
+    let envelope = match serde_json::from_str::<Value>(&stdout) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return ScrapeBridgeResult {
+                target_key: target_key.to_string(),
+                fields: Vec::new(),
+                classification: "parse_error".to_string(),
+                reason: Some(format!("invalid JSON from scrape execute: {error}")),
+                repair_queued: false,
+                run_id: None,
+                evidence_rejections: Vec::new(),
+                attempts: 1,
+                initial_classification: None,
+                public_browser_fallback: None,
+            };
+        }
+    };
+    parse_runtime_scrape_envelope(
+        target_key,
+        source_id,
+        source_url,
+        allowed_fields,
+        company,
+        &envelope,
+    )
 }
 
 fn run_with_public_browser_fallback<Execute, Unlock>(
@@ -224,7 +320,7 @@ fn execute_scrape_target_once(
     company: &str,
     root: &Path,
     ctox_bin: &Path,
-    target_key: &'static str,
+    target_key: &str,
     input: &Value,
 ) -> ScrapeBridgeResult {
     let output = Command::new(ctox_bin)
@@ -245,7 +341,7 @@ fn execute_scrape_target_once(
         Ok(o) => o,
         Err(err) => {
             return ScrapeBridgeResult {
-                target_key,
+                target_key: target_key.to_string(),
                 fields: Vec::new(),
                 classification: "subprocess_failed".to_string(),
                 reason: Some(format!("failed to spawn ctox: {err}")),
@@ -272,7 +368,7 @@ fn execute_scrape_target_once(
                 "executor_error"
             };
         return ScrapeBridgeResult {
-            target_key,
+            target_key: target_key.to_string(),
             fields: Vec::new(),
             classification: classification.to_string(),
             reason: Some(stderr.into_owned()),
@@ -289,7 +385,7 @@ fn execute_scrape_target_once(
         Ok(v) => v,
         Err(err) => {
             return ScrapeBridgeResult {
-                target_key,
+                target_key: target_key.to_string(),
                 fields: Vec::new(),
                 classification: "parse_error".to_string(),
                 reason: Some(format!("invalid JSON from scrape execute: {err}")),
@@ -314,7 +410,7 @@ pub fn default_ctox_bin() -> PathBuf {
 }
 
 fn parse_scrape_envelope(
-    target_key: &'static str,
+    target_key: &str,
     module: &dyn SourceModule,
     company: &str,
     envelope: &Value,
@@ -396,7 +492,108 @@ fn parse_scrape_envelope(
     };
 
     ScrapeBridgeResult {
-        target_key,
+        target_key: target_key.to_string(),
+        fields,
+        classification,
+        reason,
+        repair_queued,
+        run_id,
+        evidence_rejections,
+        attempts: 1,
+        initial_classification: None,
+        public_browser_fallback: None,
+    }
+}
+
+fn parse_runtime_scrape_envelope(
+    target_key: &str,
+    source_id: &str,
+    source_url: &str,
+    allowed_fields: &[FieldKey],
+    company: &str,
+    envelope: &Value,
+) -> ScrapeBridgeResult {
+    let classification = envelope
+        .get("classification")
+        .and_then(|value| value.get("status"))
+        .or_else(|| envelope.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let reason = envelope
+        .get("classification")
+        .and_then(|value| value.get("reason"))
+        .and_then(Value::as_str)
+        .or_else(|| envelope.get("reason").and_then(Value::as_str))
+        .map(str::to_string);
+    let repair_queued = envelope
+        .get("repair_queue_task")
+        .is_some_and(|value| !value.is_null());
+    let run_id = envelope
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut evidence_rejections = Vec::new();
+    if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
+        evidence_rejections.push("executor_not_ok".to_string());
+    }
+    if classification != "succeeded" {
+        evidence_rejections.push(format!("classification_not_succeeded:{classification}"));
+    }
+    if run_id.is_none() {
+        evidence_rejections.push("missing_run_id".to_string());
+    }
+    if let Some(manifest_path) = envelope.get("run_manifest_path").and_then(Value::as_str) {
+        if !manifest_matches_run(Path::new(manifest_path), target_key, run_id.as_deref()) {
+            evidence_rejections.push("run_manifest_mismatch".to_string());
+        }
+    }
+    let records = if let Some(records_path) = locate_records_file(envelope) {
+        load_records_file(&records_path).unwrap_or_default()
+    } else {
+        envelope
+            .get("records")
+            .or_else(|| {
+                envelope
+                    .get("result")
+                    .and_then(|value| value.get("records"))
+            })
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let allowed_fields = allowed_fields
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let fields = if evidence_rejections.is_empty() {
+        records
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                match runtime_record_to_field_evidence(
+                    &record,
+                    source_id,
+                    source_url,
+                    &allowed_fields,
+                    company,
+                    run_id.as_deref(),
+                ) {
+                    Ok(field) => field,
+                    Err(reason) => {
+                        evidence_rejections.push(format!("record_{index}:{reason}"));
+                        None
+                    }
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ScrapeBridgeResult {
+        target_key: target_key.to_string(),
         fields,
         classification,
         reason,
@@ -449,7 +646,7 @@ fn load_records_file(path: &Path) -> Option<Vec<Value>> {
 
 fn recent_successful_result(
     root: &Path,
-    target_key: &'static str,
+    target_key: &str,
     module: &dyn SourceModule,
     company: &str,
     current: &ScrapeBridgeResult,
@@ -762,6 +959,112 @@ fn record_to_field_evidence(
     )))
 }
 
+fn runtime_record_to_field_evidence(
+    record: &Value,
+    source_id: &str,
+    source_url: &str,
+    allowed_fields: &std::collections::HashSet<FieldKey>,
+    company: &str,
+    run_id: Option<&str>,
+) -> Result<Option<(FieldKey, FieldEvidence)>, String> {
+    let field = record
+        .get("field")
+        .and_then(Value::as_str)
+        .and_then(FieldKey::from_str)
+        .ok_or_else(|| "unknown_field".to_string())?;
+    if !allowed_fields.contains(&field) {
+        return Err("field_outside_runtime_source_policy".to_string());
+    }
+    let value = record
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing_value".to_string())?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let expected_run_id = run_id.ok_or_else(|| "missing_run_id".to_string())?;
+    let record_run_id = first_string(record, &["run_id", "scrape_run_id"])
+        .or_else(|| {
+            record
+                .pointer("/provenance/run_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| "missing_record_run_id".to_string())?;
+    if record_run_id != expected_run_id {
+        return Err("record_run_id_mismatch".to_string());
+    }
+    let record_source_id = first_string(record, &["source_id", "source_key", "source"])
+        .or_else(|| {
+            record
+                .pointer("/provenance/source_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| "missing_record_source_id".to_string())?;
+    if !record_source_id.eq_ignore_ascii_case(source_id) {
+        return Err("record_source_id_mismatch".to_string());
+    }
+    let evidence_url = first_string(record, &["canonical_url", "source_url"])
+        .ok_or_else(|| "missing_source_url".to_string())?;
+    if !runtime_source_url_matches(&evidence_url, source_url) {
+        return Err("source_url_not_canonical_for_runtime_source".to_string());
+    }
+    validate_record_evidence_gate(record)?;
+    let identity = record_company_identity(record, field, &value)
+        .ok_or_else(|| "missing_company_identity".to_string())?;
+    if !company_identity_matches(company, &identity) {
+        return Err("company_identity_mismatch".to_string());
+    }
+    let confidence = match record.get("confidence").and_then(Value::as_str) {
+        Some("high") => Confidence::High,
+        Some("low") => Confidence::Low,
+        Some("user_provided") => Confidence::UserProvided,
+        _ => Confidence::Medium,
+    };
+    Ok(Some((
+        field,
+        FieldEvidence {
+            value,
+            confidence,
+            source_url: evidence_url,
+            note: record
+                .get("note")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        },
+    )))
+}
+
+fn runtime_source_url_matches(evidence_url: &str, configured_url: &str) -> bool {
+    let (Ok(evidence), Ok(configured)) = (
+        url::Url::parse(evidence_url),
+        url::Url::parse(configured_url),
+    ) else {
+        return false;
+    };
+    if !matches!(evidence.scheme(), "http" | "https")
+        || !matches!(configured.scheme(), "http" | "https")
+    {
+        return false;
+    }
+    let Some(expected_host) = configured
+        .host_str()
+        .map(|host| host.trim_start_matches("www."))
+    else {
+        return false;
+    };
+    evidence.host_str().is_some_and(|host| {
+        let host = host.trim_start_matches("www.");
+        host.eq_ignore_ascii_case(expected_host)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", expected_host.to_ascii_lowercase()))
+    })
+}
+
 fn validate_record_evidence_gate(record: &Value) -> Result<(), String> {
     let gate = record
         .get("evidence_gate")
@@ -1013,6 +1316,53 @@ mod tests {
                 "URL should be rejected: {invalid_url}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_source_enforces_field_and_host_policy() {
+        let accepted = json!({
+            "ok": true,
+            "status": "succeeded",
+            "run_id": "scrape_run-runtime",
+            "records": [{
+                "field": "firma_anschrift",
+                "value": "Lechstrasse 28",
+                "confidence": "high",
+                "source_url": "https://portal.example.test/company/akemi",
+                "run_id": "scrape_run-runtime",
+                "source_id": "example.test",
+                "company_name": "AKEMI GmbH",
+                "evidence_eligible": true,
+                "verification_status": "verified",
+                "http_status": 200,
+                "checked_at": now_ms(),
+                "snapshot_hash": "sha256:runtime"
+            }]
+        });
+        let result = parse_runtime_scrape_envelope(
+            "example-test",
+            "example.test",
+            "https://example.test/",
+            &[FieldKey::FirmaAnschrift],
+            "AKEMI GmbH",
+            &accepted,
+        );
+        assert_eq!(result.fields.len(), 1);
+        assert!(result.evidence_rejections.is_empty());
+
+        let rejected = parse_runtime_scrape_envelope(
+            "example-test",
+            "example.test",
+            "https://different.test/",
+            &[FieldKey::FirmaAnschrift],
+            "AKEMI GmbH",
+            &accepted,
+        );
+        assert!(rejected.fields.is_empty());
+        assert!(rejected
+            .evidence_rejections
+            .iter()
+            .any(|reason| reason.contains("source_url_not_canonical_for_runtime_source")));
     }
 
     fn write_cached_run(root: &Path, checked_at: u64, finished_at: u64) {
@@ -1280,7 +1630,7 @@ mod tests {
 
     fn stub_result(classification: &str) -> ScrapeBridgeResult {
         ScrapeBridgeResult {
-            target_key: "northdata.de",
+            target_key: "northdata.de".to_string(),
             fields: Vec::new(),
             classification: classification.to_string(),
             reason: None,

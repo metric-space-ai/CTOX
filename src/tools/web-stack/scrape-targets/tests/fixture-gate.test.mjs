@@ -21,7 +21,7 @@ const PUBLIC_UNLOCK_TARGETS = [
 
 const FIELD_KEYS = new Set([
   "firma_name", "firma_anschrift", "firma_plz", "firma_ort", "firma_email",
-  "firma_domain", "firma_telefon", "wz_code", "umsatz", "mitarbeiter",
+  "firma_domain", "firma_telefon", "firma_fax", "wz_code", "umsatz", "mitarbeiter",
   "crm_record_number", "person_geschlecht", "person_titel", "person_vorname",
   "person_nachname", "person_funktion", "person_position", "person_email",
   "person_email_validation", "person_telefon", "person_linkedin", "person_xing",

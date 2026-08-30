@@ -39,6 +39,13 @@
     },
     {
       "file": "src/core/business_os/store_outbound_commands.rs",
+      "function": "apply_outbound_adapter_reconciliation_reply",
+      "occurrence": 1,
+      "semantics": "compatibility_mixed",
+      "target_field": "execution_task_id"
+    },
+    {
+      "file": "src/core/business_os/store_outbound_commands.rs",
       "function": "outbound_queue_research_scraper_generation",
       "occurrence": 1,
       "semantics": "domain_queue_reference",

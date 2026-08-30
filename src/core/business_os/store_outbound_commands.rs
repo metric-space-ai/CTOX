@@ -1273,6 +1273,668 @@ pub(super) fn outbound_sellify_lookup(root: &Path, payload: &Value) -> anyhow::R
     }))
 }
 
+pub(super) fn is_outbound_adapter_reconciliation_command(command: &BusinessCommand) -> bool {
+    command.command_type == "outbound.research.adapters.reconcile"
+}
+
+/// Apply the typed result of the single campaign-wide adapter reconciliation
+/// task.  The queue worker may create or repair multiple Playwright targets in
+/// one bounded turn; only this native writeback path is allowed to project the
+/// result into the tenant module's RxDB collections.
+pub(super) fn apply_outbound_adapter_reconciliation_reply(
+    root: &Path,
+    conn: &Connection,
+    command_id: &str,
+    command: &BusinessCommand,
+    task_id: &str,
+    reply_text: &str,
+) -> anyhow::Result<Value> {
+    anyhow::ensure!(
+        is_outbound_adapter_reconciliation_command(command),
+        "not an outbound adapter reconciliation command"
+    );
+    let reply_text = reply_text.trim();
+    anyhow::ensure!(
+        !reply_text.is_empty(),
+        "adapter reconciliation reply was empty"
+    );
+    let result: Value = serde_json::from_str(reply_text)
+        .context("adapter reconciliation reply must be one strict JSON object")?;
+    anyhow::ensure!(
+        result.get("schema").and_then(Value::as_str)
+            == Some("ctox.outbound.adapter_reconciliation.v1"),
+        "adapter reconciliation reply has the wrong schema"
+    );
+    anyhow::ensure!(
+        !outbound_reconciliation_contains_secret_key(&result),
+        "adapter reconciliation reply must not contain credential values"
+    );
+
+    let expected_digest = outbound_required_string(&command.payload, &["configuration_digest"])?;
+    anyhow::ensure!(
+        result
+            .get("configuration_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == expected_digest),
+        "adapter reconciliation result does not match the requested configuration"
+    );
+    let writeback = command
+        .payload
+        .get("writeback_contract")
+        .context("adapter reconciliation writeback contract is required")?;
+    let source_collection = outbound_required_string(writeback, &["source_collection"])?;
+    let adapter_collection = outbound_required_string(writeback, &["adapter_collection"])?;
+    anyhow::ensure!(
+        is_safe_rxdb_collection_name(&source_collection)
+            && is_safe_rxdb_collection_name(&adapter_collection),
+        "invalid adapter reconciliation writeback collection"
+    );
+    let source_module = outbound_first_string(&[
+        outbound_string(&command.client_context, &["source_module"]),
+        Some(command.module.clone()),
+    ])
+    .context("adapter reconciliation source module is required")?;
+    let module_prefix = runtime_app_starter_collection_name(&source_module)
+        .trim_end_matches("_records")
+        .to_string();
+    anyhow::ensure!(
+        !module_prefix.is_empty()
+            && source_collection.starts_with(&format!("{module_prefix}_"))
+            && adapter_collection.starts_with(&format!("{module_prefix}_")),
+        "adapter reconciliation writeback must stay inside the source module"
+    );
+
+    let requested_sources = command
+        .payload
+        .get("sources")
+        .and_then(Value::as_array)
+        .context("adapter reconciliation sources are required")?;
+    let mut source_ids = BTreeSet::new();
+    let mut requested_by_id = std::collections::BTreeMap::new();
+    for source in requested_sources {
+        let source_id = outbound_required_string(source, &["id"])?;
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&source_id, 160),
+            "invalid source id in adapter reconciliation request"
+        );
+        source_ids.insert(source_id.clone());
+        requested_by_id.insert(source_id, source.clone());
+    }
+
+    let result_status = outbound_required_string(&result, &["status"])?;
+    anyhow::ensure!(
+        matches!(result_status.as_str(), "completed" | "needs_attention"),
+        "adapter reconciliation result has an unsupported status"
+    );
+
+    // Validate the complete agent result before the first projection. The
+    // RxDB mirror and the native store cannot be rolled back as one database,
+    // so content validation must be all-or-nothing ahead of any write.
+    let discovered_sources = result
+        .get("discovered_sources")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut validated_source_ids = source_ids.clone();
+    for discovered in &discovered_sources {
+        let source_id = outbound_required_string(discovered, &["id"])?;
+        let url = outbound_required_string(discovered, &["url"])?;
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&source_id, 160),
+            "invalid discovered source id"
+        );
+        anyhow::ensure!(
+            validated_source_ids.insert(source_id.clone()),
+            "adapter reconciliation returned a source more than once"
+        );
+        let parsed = Url::parse(&url).context("discovered source URL is invalid")?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+            "discovered source URL must be HTTP(S)"
+        );
+        if let Some(target_key) = outbound_string(discovered, &["target_key"]) {
+            anyhow::ensure!(
+                outbound_safe_reconciliation_identifier(&target_key, 128),
+                "invalid discovered target key"
+            );
+        }
+    }
+
+    let adapter_results = result
+        .get("adapters")
+        .and_then(Value::as_array)
+        .context("adapter reconciliation result requires adapters")?;
+    let mut validated_adapter_sources = BTreeSet::new();
+    let mut has_attention = false;
+    for adapter in adapter_results {
+        let source_id = outbound_required_string(adapter, &["source_id"])?;
+        anyhow::ensure!(
+            validated_source_ids.contains(&source_id),
+            "adapter result references an undeclared source"
+        );
+        anyhow::ensure!(
+            validated_adapter_sources.insert(source_id),
+            "adapter reconciliation returned a source more than once"
+        );
+        let status = outbound_required_string(adapter, &["status"])?;
+        anyhow::ensure!(
+            matches!(
+                status.as_str(),
+                "ready" | "auth_required" | "failed" | "disabled" | "needs_attention"
+            ),
+            "unsupported adapter reconciliation status"
+        );
+        has_attention |= matches!(
+            status.as_str(),
+            "auth_required" | "failed" | "needs_attention"
+        );
+        let scrape_status = outbound_required_string(adapter, &["scrape_status"])?;
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&scrape_status, 80),
+            "invalid adapter scrape status"
+        );
+        if let Some(revision) = outbound_string(adapter, &["adapter_revision"]) {
+            anyhow::ensure!(
+                outbound_safe_reconciliation_revision(&revision),
+                "invalid adapter revision"
+            );
+        }
+        if let Some(script_path) = outbound_string(adapter, &["script_path"]) {
+            anyhow::ensure!(
+                outbound_safe_relative_script_path(&script_path),
+                "invalid adapter script path"
+            );
+        }
+        if let Some(test) = adapter.get("test") {
+            anyhow::ensure!(test.is_object(), "adapter test result must be an object");
+        }
+        if status == "ready" {
+            anyhow::ensure!(
+                outbound_string(adapter, &["adapter_revision"]).is_some(),
+                "ready adapter requires adapter_revision"
+            );
+            anyhow::ensure!(
+                outbound_string(adapter, &["script_path"]).is_some(),
+                "ready adapter requires script_path"
+            );
+            anyhow::ensure!(
+                adapter.pointer("/test/ok").and_then(Value::as_bool) == Some(true),
+                "ready adapter requires a passing test result"
+            );
+        }
+    }
+    let missing_sources = validated_source_ids
+        .difference(&validated_adapter_sources)
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing_sources.is_empty(),
+        "adapter reconciliation omitted sources: {}",
+        missing_sources.join(", ")
+    );
+    anyhow::ensure!(
+        (result_status == "needs_attention") == has_attention,
+        "adapter reconciliation status is inconsistent with adapter results"
+    );
+
+    let policy_collection = if outbound_string(&command.payload, &["policy_id"]).is_some() {
+        let collection = outbound_required_string(writeback, &["policy_collection"])?;
+        anyhow::ensure!(
+            is_safe_rxdb_collection_name(&collection)
+                && collection.starts_with(&format!("{module_prefix}_")),
+            "adapter reconciliation policy writeback must stay inside the source module"
+        );
+        Some(collection)
+    } else {
+        None
+    };
+
+    let now = now_ms() as i64;
+    let mut projected_sources = Vec::new();
+    for discovered in discovered_sources {
+        let source_id = outbound_required_string(&discovered, &["id"])?;
+        let url = outbound_required_string(&discovered, &["url"])?;
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&source_id, 160),
+            "invalid discovered source id"
+        );
+        let parsed = Url::parse(&url).context("discovered source URL is invalid")?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+            "discovered source URL must be HTTP(S)"
+        );
+        source_ids.insert(source_id.clone());
+        let existing =
+            load_rxdb_collection_record(root, &source_collection, &source_id)?.or_else(|| {
+                outbound_load_record(conn, &source_collection, &source_id)
+                    .ok()
+                    .flatten()
+            });
+        let created_at = existing
+            .as_ref()
+            .and_then(|value| value.get("created_at_ms"))
+            .and_then(Value::as_i64)
+            .unwrap_or(now);
+        let target_key = outbound_string(&discovered, &["target_key"])
+            .unwrap_or_else(|| outbound_reconciliation_target_key(&source_id));
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&target_key, 128),
+            "invalid discovered target key"
+        );
+        let record = serde_json::json!({
+            "id": source_id.clone(),
+            "label": outbound_string(&discovered, &["label"]).unwrap_or_else(|| source_id.clone()),
+            "url": url,
+            "countries": discovered.get("countries").cloned().unwrap_or_else(|| serde_json::json!(["DE", "AT", "CH"])),
+            "field_keys": discovered.get("field_keys").cloned().unwrap_or_else(|| command.payload.get("field_keys").cloned().unwrap_or_else(|| serde_json::json!([]))),
+            "enabled": discovered.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+            "requires_credential": discovered.get("requires_credential").and_then(Value::as_bool).unwrap_or(false),
+            "credential_secret_name": "",
+            "target_key": target_key,
+            "adapter_status": "reconciliation_completed",
+            "scrape_status": "target_available",
+            "auth_status": if discovered.get("requires_credential").and_then(Value::as_bool).unwrap_or(false) { "required" } else { "not_required" },
+            "payload": {
+                "builtin": false,
+                "discovered_by_command_id": command_id,
+                "discovery_reason": outbound_string(&discovered, &["reason"]).unwrap_or_default(),
+                "secret_value_in_payload": false
+            },
+            "created_at_ms": created_at,
+            "updated_at_ms": now
+        });
+        upsert_business_record(conn, &source_collection, &source_id, now, record.clone())?;
+        upsert_rxdb_collection_record(root, &source_collection, &source_id, now, record.clone())?;
+        requested_by_id.insert(source_id.clone(), record.clone());
+        projected_sources.push(record);
+    }
+
+    let mut completed_source_ids = BTreeSet::new();
+    let mut projected_adapters = Vec::new();
+    for adapter_result in adapter_results {
+        let source_id = outbound_required_string(adapter_result, &["source_id"])?;
+        anyhow::ensure!(
+            source_ids.contains(&source_id),
+            "adapter result references an undeclared source"
+        );
+        anyhow::ensure!(
+            completed_source_ids.insert(source_id.clone()),
+            "adapter reconciliation returned a source more than once"
+        );
+        let requested = requested_by_id
+            .get(&source_id)
+            .context("adapter source definition is unavailable")?;
+        let target_key = outbound_first_string(&[
+            outbound_string(adapter_result, &["target_key"]),
+            outbound_string(requested, &["target_key"]),
+        ])
+        .unwrap_or_else(|| outbound_reconciliation_target_key(&source_id));
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&target_key, 128),
+            "invalid adapter target key"
+        );
+        let adapter_id = outbound_first_string(&[
+            outbound_string(requested, &["adapter_id"]),
+            outbound_string(adapter_result, &["id"]),
+        ])
+        .unwrap_or_else(|| format!("adapter_leadgen_{target_key}"));
+        anyhow::ensure!(
+            outbound_safe_reconciliation_identifier(&adapter_id, 180),
+            "invalid adapter id"
+        );
+        let existing = load_rxdb_collection_record(root, &adapter_collection, &adapter_id)?
+            .or_else(|| {
+                outbound_load_record(conn, &adapter_collection, &adapter_id)
+                    .ok()
+                    .flatten()
+            });
+        let created_at = existing
+            .as_ref()
+            .and_then(|value| value.get("created_at_ms"))
+            .and_then(Value::as_i64)
+            .unwrap_or(now);
+        let status = outbound_required_string(adapter_result, &["status"])?;
+        anyhow::ensure!(
+            matches!(
+                status.as_str(),
+                "ready" | "auth_required" | "failed" | "disabled" | "needs_attention"
+            ),
+            "unsupported adapter reconciliation status"
+        );
+        let scrape_status = outbound_required_string(adapter_result, &["scrape_status"])?;
+        let auth_status = outbound_string(adapter_result, &["auth_status"]).unwrap_or_else(|| {
+            if status == "auth_required" {
+                "auth_required".to_string()
+            } else {
+                "not_required".to_string()
+            }
+        });
+        let last_error = outbound_string(adapter_result, &["last_error"]).unwrap_or_default();
+        let mut payload = existing
+            .as_ref()
+            .and_then(|value| value.get("payload"))
+            .filter(|value| value.is_object())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        outbound_payload_insert(
+            &mut payload,
+            "configuration_digest",
+            Value::String(expected_digest.clone()),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "reconciliation_command_id",
+            Value::String(command_id.to_string()),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "reconciliation_task_id",
+            Value::String(task_id.to_string()),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "reconciled_command_id",
+            Value::String(command_id.to_string()),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "reconciled_command_status",
+            Value::String(result_status.clone()),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "adapter_revision",
+            adapter_result
+                .get("adapter_revision")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "script_path",
+            adapter_result
+                .get("script_path")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        outbound_payload_insert(
+            &mut payload,
+            "test",
+            adapter_result.get("test").cloned().unwrap_or(Value::Null),
+        );
+        outbound_payload_insert(&mut payload, "secret_value_in_payload", Value::Bool(false));
+        let record = serde_json::json!({
+            "id": adapter_id.clone(),
+            "source_id": source_id.clone(),
+            "status": status.clone(),
+            "scrape_status": scrape_status.clone(),
+            "auth_status": auth_status.clone(),
+            "last_command_id": command_id,
+            "last_task_id": task_id,
+            "last_error": last_error,
+            "payload": payload,
+            "created_at_ms": created_at,
+            "updated_at_ms": now
+        });
+        upsert_business_record(conn, &adapter_collection, &adapter_id, now, record.clone())?;
+        upsert_rxdb_collection_record(root, &adapter_collection, &adapter_id, now, record.clone())?;
+
+        if let Some(mut source_record) =
+            load_rxdb_collection_record(root, &source_collection, &source_id)?.or_else(|| {
+                outbound_load_record(conn, &source_collection, &source_id)
+                    .ok()
+                    .flatten()
+            })
+        {
+            outbound_put_string(&mut source_record, "adapter_status", status);
+            outbound_put_string(&mut source_record, "scrape_status", scrape_status);
+            outbound_put_string(&mut source_record, "auth_status", auth_status);
+            outbound_put_i64(&mut source_record, "updated_at_ms", now);
+            upsert_business_record(
+                conn,
+                &source_collection,
+                &source_id,
+                now,
+                source_record.clone(),
+            )?;
+            upsert_rxdb_collection_record(
+                root,
+                &source_collection,
+                &source_id,
+                now,
+                source_record,
+            )?;
+        }
+        projected_adapters.push(record);
+    }
+
+    let missing_sources = source_ids
+        .difference(&completed_source_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing_sources.is_empty(),
+        "adapter reconciliation omitted sources: {}",
+        missing_sources.join(", ")
+    );
+
+    if let (Some(policy_id), Some(policy_collection)) = (
+        outbound_string(&command.payload, &["policy_id"]),
+        policy_collection,
+    ) {
+        if let Some(mut policy) = load_rxdb_collection_record(root, &policy_collection, &policy_id)?
+        {
+            outbound_put_string(&mut policy, "reconciliation_status", result_status.clone());
+            outbound_put_string(&mut policy, "reconciliation_command_id", command_id);
+            outbound_put_string(&mut policy, "reconciliation_task_id", task_id);
+            outbound_put_string(&mut policy, "configuration_digest", expected_digest.clone());
+            outbound_put_string(
+                &mut policy,
+                "reconciliation_error",
+                if result_status == "needs_attention" {
+                    "one or more adapters require operator attention"
+                } else {
+                    ""
+                },
+            );
+            outbound_put_i64(&mut policy, "updated_at_ms", now);
+            upsert_business_record(conn, &policy_collection, &policy_id, now, policy.clone())?;
+            upsert_rxdb_collection_record(root, &policy_collection, &policy_id, now, policy)?;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "schema": "ctox.outbound.adapter_reconciliation.v1",
+        "configuration_digest": expected_digest,
+        "status": result.get("status").cloned().unwrap_or_else(|| Value::String("completed".to_string())),
+        "command_id": command_id,
+        "execution_task_id": task_id,
+        "task_id": task_id,
+        "sources": projected_sources,
+        "adapters": projected_adapters,
+        "secret_value_in_payload": false
+    }))
+}
+
+/// Project a reconciliation failure onto the same source/adapter/policy
+/// records the app already renders. This keeps harness, schema-validation and
+/// timeout failures visible and retryable instead of leaving an eternal
+/// `reconciliation_queued` spinner.
+pub(super) fn mark_outbound_adapter_reconciliation_failed(
+    root: &Path,
+    conn: &Connection,
+    command: &BusinessCommand,
+    command_id: &str,
+    task_id: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    if !is_outbound_adapter_reconciliation_command(command) {
+        return Ok(());
+    }
+    let writeback = command
+        .payload
+        .get("writeback_contract")
+        .context("adapter reconciliation writeback contract is required")?;
+    let source_collection = outbound_required_string(writeback, &["source_collection"])?;
+    let adapter_collection = outbound_required_string(writeback, &["adapter_collection"])?;
+    anyhow::ensure!(
+        is_safe_rxdb_collection_name(&source_collection)
+            && is_safe_rxdb_collection_name(&adapter_collection),
+        "invalid adapter reconciliation writeback collection"
+    );
+    let source_module = outbound_first_string(&[
+        outbound_string(&command.client_context, &["source_module"]),
+        Some(command.module.clone()),
+    ])
+    .context("adapter reconciliation source module is required")?;
+    let module_prefix = runtime_app_starter_collection_name(&source_module)
+        .trim_end_matches("_records")
+        .to_string();
+    anyhow::ensure!(
+        !module_prefix.is_empty()
+            && source_collection.starts_with(&format!("{module_prefix}_"))
+            && adapter_collection.starts_with(&format!("{module_prefix}_")),
+        "adapter reconciliation failure writeback must stay inside the source module"
+    );
+    let now = now_ms() as i64;
+    for requested in command
+        .payload
+        .get("sources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let source_id = outbound_required_string(requested, &["id"])?;
+        if let Some(mut source) = load_rxdb_collection_record(root, &source_collection, &source_id)?
+            .or_else(|| {
+                outbound_load_record(conn, &source_collection, &source_id)
+                    .ok()
+                    .flatten()
+            })
+        {
+            outbound_put_string(&mut source, "adapter_status", "needs_attention");
+            outbound_put_string(&mut source, "scrape_status", "failed");
+            outbound_put_string(&mut source, "last_error", error);
+            outbound_put_i64(&mut source, "updated_at_ms", now);
+            upsert_business_record(conn, &source_collection, &source_id, now, source.clone())?;
+            upsert_rxdb_collection_record(root, &source_collection, &source_id, now, source)?;
+        }
+        let target_key = outbound_string(requested, &["target_key"])
+            .unwrap_or_else(|| outbound_reconciliation_target_key(&source_id));
+        let adapter_id = outbound_string(requested, &["adapter_id"])
+            .unwrap_or_else(|| format!("adapter_leadgen_{target_key}"));
+        if let Some(mut adapter) =
+            load_rxdb_collection_record(root, &adapter_collection, &adapter_id)?.or_else(|| {
+                outbound_load_record(conn, &adapter_collection, &adapter_id)
+                    .ok()
+                    .flatten()
+            })
+        {
+            outbound_put_string(&mut adapter, "status", "failed");
+            outbound_put_string(&mut adapter, "scrape_status", "failed");
+            outbound_put_string(&mut adapter, "last_command_id", command_id);
+            outbound_put_string(&mut adapter, "last_task_id", task_id);
+            outbound_put_string(&mut adapter, "last_error", error);
+            outbound_put_i64(&mut adapter, "updated_at_ms", now);
+            upsert_business_record(conn, &adapter_collection, &adapter_id, now, adapter.clone())?;
+            upsert_rxdb_collection_record(root, &adapter_collection, &adapter_id, now, adapter)?;
+        }
+    }
+    if let (Some(policy_id), Ok(policy_collection)) = (
+        outbound_string(&command.payload, &["policy_id"]),
+        outbound_required_string(writeback, &["policy_collection"]),
+    ) {
+        if is_safe_rxdb_collection_name(&policy_collection)
+            && policy_collection.starts_with(&format!("{module_prefix}_"))
+        {
+            if let Some(mut policy) =
+                load_rxdb_collection_record(root, &policy_collection, &policy_id)?
+            {
+                outbound_put_string(&mut policy, "reconciliation_status", "failed");
+                outbound_put_string(&mut policy, "reconciliation_command_id", command_id);
+                outbound_put_string(&mut policy, "reconciliation_task_id", task_id);
+                outbound_put_string(&mut policy, "reconciliation_error", error);
+                outbound_put_i64(&mut policy, "updated_at_ms", now);
+                upsert_business_record(conn, &policy_collection, &policy_id, now, policy.clone())?;
+                upsert_rxdb_collection_record(root, &policy_collection, &policy_id, now, policy)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn outbound_safe_reconciliation_identifier(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn outbound_safe_relative_script_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && value.len() <= 512
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("js" | "mjs")
+        )
+}
+
+fn outbound_safe_reconciliation_revision(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 180
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+}
+
+fn outbound_reconciliation_target_key(source_id: &str) -> String {
+    source_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() {
+                (byte as char).to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn outbound_reconciliation_contains_secret_key(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, child)| {
+            let key = key.trim().to_ascii_lowercase().replace('-', "_");
+            matches!(
+                key.as_str(),
+                "password"
+                    | "passphrase"
+                    | "secret"
+                    | "credential_value"
+                    | "api_key"
+                    | "access_token"
+                    | "refresh_token"
+                    | "private_key"
+            ) || key.ends_with("_password")
+                || key.ends_with("_secret")
+                || key.ends_with("_token")
+                || outbound_reconciliation_contains_secret_key(child)
+        }),
+        Value::Array(items) => items
+            .iter()
+            .any(outbound_reconciliation_contains_secret_key),
+        _ => false,
+    }
+}
+
 fn outbound_handle_research_source_adapter(
     root: &Path,
     conn: &Connection,
@@ -5243,6 +5905,251 @@ mod tests {
     };
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn outbound_adapter_reconciliation_projects_typed_result_without_secrets() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let conn = open_store(root)?;
+        let now = 1_000;
+        let source = serde_json::json!({
+            "id": "example.com",
+            "label": "Example",
+            "url": "https://example.com/",
+            "countries": ["DE"],
+            "field_keys": ["firma_name"],
+            "enabled": true,
+            "requires_credential": false,
+            "credential_secret_name": "",
+            "target_key": "example-com",
+            "adapter_id": "adapter_leadgen_example-com",
+            "adapter_status": "reconciliation_queued",
+            "scrape_status": "generation_queued",
+            "auth_status": "not_required",
+            "payload": { "builtin": false, "secret_value_in_payload": false },
+            "created_at_ms": now,
+            "updated_at_ms": now
+        });
+        upsert_business_record(
+            &conn,
+            "outbound_lead_generation_sources",
+            "example.com",
+            now,
+            source.clone(),
+        )?;
+        upsert_rxdb_collection_record(
+            root,
+            "outbound_lead_generation_sources",
+            "example.com",
+            now,
+            source.clone(),
+        )?;
+        let policy = serde_json::json!({
+            "id": "research_policy",
+            "title": "Research",
+            "version_number": 2,
+            "status": "active",
+            "skill_name": "outbound-lead-generation-research",
+            "skill_version": "1.0.0",
+            "min_independent_sources": 2,
+            "rules": [],
+            "instructions": "Find legal name",
+            "created_at_ms": now,
+            "updated_at_ms": now
+        });
+        upsert_rxdb_collection_record(
+            root,
+            "outbound_lead_generation_research_policies",
+            "research_policy",
+            now,
+            policy,
+        )?;
+        let command = BusinessCommand {
+            id: Some("cmd_reconcile".to_string()),
+            module: "outbound-lead-generation".to_string(),
+            command_type: "outbound.research.adapters.reconcile".to_string(),
+            record_id: Some("research_policy".to_string()),
+            payload: serde_json::json!({
+                "configuration_digest": "sha256:test",
+                "policy_id": "research_policy",
+                "field_keys": ["firma_name"],
+                "sources": [source],
+                "writeback_contract": {
+                    "source_collection": "outbound_lead_generation_sources",
+                    "adapter_collection": "outbound_lead_generation_adapters",
+                    "policy_collection": "outbound_lead_generation_research_policies"
+                }
+            }),
+            client_context: serde_json::json!({
+                "source_module": "outbound-lead-generation"
+            }),
+            origin: CommandOrigin::TrustedLocal,
+        };
+        let reply = serde_json::json!({
+            "schema": "ctox.outbound.adapter_reconciliation.v1",
+            "configuration_digest": "sha256:test",
+            "status": "completed",
+            "discovered_sources": [],
+            "adapters": [{
+                "source_id": "example.com",
+                "target_key": "example-com",
+                "status": "ready",
+                "scrape_status": "test_passed",
+                "auth_status": "not_required",
+                "adapter_revision": "sha256:adapter",
+                "script_path": "runtime/scraping/targets/example-com/scripts/capture.js",
+                "last_error": "",
+                "test": { "ok": true, "records_found": 1 }
+            }]
+        })
+        .to_string();
+        let outcome = apply_outbound_adapter_reconciliation_reply(
+            root,
+            &conn,
+            "cmd_reconcile",
+            &command,
+            "task_reconcile",
+            &reply,
+        )?;
+        assert_eq!(outcome.get("ok").and_then(Value::as_bool), Some(true));
+        let adapter = load_rxdb_collection_record(
+            root,
+            "outbound_lead_generation_adapters",
+            "adapter_leadgen_example-com",
+        )?
+        .context("adapter writeback")?;
+        assert_eq!(adapter.get("status").and_then(Value::as_str), Some("ready"));
+        assert_eq!(
+            adapter
+                .pointer("/payload/test/records_found")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+        let policy = load_rxdb_collection_record(
+            root,
+            "outbound_lead_generation_research_policies",
+            "research_policy",
+        )?
+        .context("policy writeback")?;
+        assert_eq!(
+            policy.get("reconciliation_status").and_then(Value::as_str),
+            Some("completed")
+        );
+        assert!(!serde_json::to_string(&outcome)?.contains("password"));
+        Ok(())
+    }
+
+    #[test]
+    fn outbound_adapter_reconciliation_rejects_invalid_batch_before_any_write() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let conn = open_store(root)?;
+        let now = 1_000;
+        let source = |id: &str| {
+            let target_key = id.replace('.', "-");
+            serde_json::json!({
+                "id": id,
+                "label": id,
+                "url": format!("https://{id}/"),
+                "countries": ["DE"],
+                "field_keys": ["firma_name"],
+                "enabled": true,
+                "requires_credential": false,
+                "credential_secret_name": "",
+                "target_key": target_key,
+                "adapter_id": format!("adapter_leadgen_{target_key}"),
+                "adapter_status": "reconciliation_queued",
+                "scrape_status": "generation_queued",
+                "auth_status": "not_required",
+                "payload": { "builtin": false, "secret_value_in_payload": false },
+                "created_at_ms": now,
+                "updated_at_ms": now
+            })
+        };
+        let first = source("first.example");
+        let second = source("second.example");
+        for record in [&first, &second] {
+            let id = record["id"].as_str().unwrap();
+            upsert_rxdb_collection_record(
+                root,
+                "outbound_lead_generation_sources",
+                id,
+                now,
+                record.clone(),
+            )?;
+        }
+        let command = BusinessCommand {
+            id: Some("cmd_atomic".to_string()),
+            module: "outbound-lead-generation".to_string(),
+            command_type: "outbound.research.adapters.reconcile".to_string(),
+            record_id: None,
+            payload: serde_json::json!({
+                "configuration_digest": "sha256:atomic",
+                "field_keys": ["firma_name"],
+                "sources": [first, second],
+                "writeback_contract": {
+                    "source_collection": "outbound_lead_generation_sources",
+                    "adapter_collection": "outbound_lead_generation_adapters",
+                    "policy_collection": "outbound_lead_generation_research_policies"
+                }
+            }),
+            client_context: serde_json::json!({"source_module": "outbound-lead-generation"}),
+            origin: CommandOrigin::TrustedLocal,
+        };
+        let reply = serde_json::json!({
+            "schema": "ctox.outbound.adapter_reconciliation.v1",
+            "configuration_digest": "sha256:atomic",
+            "status": "completed",
+            "discovered_sources": [],
+            "adapters": [
+                {
+                    "source_id": "first.example",
+                    "target_key": "first-example",
+                    "status": "ready",
+                    "scrape_status": "test_passed",
+                    "adapter_revision": "sha256:first",
+                    "script_path": "runtime/scraping/targets/first-example/scripts/capture.js",
+                    "test": {"ok": true, "records_found": 1}
+                },
+                {
+                    "source_id": "second.example",
+                    "target_key": "second-example",
+                    "status": "ready",
+                    "scrape_status": "test_passed",
+                    "adapter_revision": "sha256:second",
+                    "script_path": "../outside.js",
+                    "test": {"ok": true, "records_found": 1}
+                }
+            ]
+        })
+        .to_string();
+
+        assert!(apply_outbound_adapter_reconciliation_reply(
+            root,
+            &conn,
+            "cmd_atomic",
+            &command,
+            "task_atomic",
+            &reply,
+        )
+        .is_err());
+        assert!(load_rxdb_collection_record(
+            root,
+            "outbound_lead_generation_adapters",
+            "adapter_leadgen_first-example",
+        )?
+        .is_none());
+        let unchanged =
+            load_rxdb_collection_record(root, "outbound_lead_generation_sources", "first.example")?
+                .context("first source")?;
+        assert_eq!(
+            unchanged.get("adapter_status").and_then(Value::as_str),
+            Some("reconciliation_queued")
+        );
+        Ok(())
+    }
 
     #[test]
     fn outbound_approval_decisions_write_business_event_audit() -> anyhow::Result<()> {

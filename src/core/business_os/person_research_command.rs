@@ -31,6 +31,23 @@ struct PersonResearchCommandRequest {
     include_private: Vec<String>,
     #[serde(default)]
     auto_browser_capture: bool,
+    #[serde(default)]
+    source_policy: RuntimeResearchSourcePolicy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeResearchSourcePolicy {
+    #[serde(default)]
+    sources: Vec<RuntimeResearchSource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeResearchSource {
+    id: String,
+    url: String,
+    target_key: String,
+    #[serde(default)]
+    field_keys: Vec<String>,
 }
 
 pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Value> {
@@ -798,6 +815,24 @@ fn active_commands() -> std::sync::MutexGuard<'static, HashSet<ActiveResearchCom
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn parse_requested_fields(fields: &[String]) -> anyhow::Result<Vec<FieldKey>> {
+    fields
+        .iter()
+        .map(|field| {
+            FieldKey::from_str(field)
+                .with_context(|| format!("unsupported person-research field `{field}`"))
+        })
+        .collect()
+}
+
+fn safe_runtime_source_identifier(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
     let request: PersonResearchCommandRequest = serde_json::from_value(payload.clone())
         .context("invalid web_stack.person_research payload")?;
@@ -815,33 +850,10 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
             request.mode
         )
     })?;
-    // Ein einzelnes unbekanntes Feld brach bisher die gesamte Recherche ab.
-    // Auf der Produktivinstanz forderte das Tenant-Modul rund zwanzig Felder an,
-    // von denen `FieldKey` sieben kennt; jeder Lauf scheiterte deshalb an
-    // `firma_fruehere_namen`, obwohl Name, Anschrift, Ort, PLZ, Domain, E-Mail
-    // und Telefon lieferbar gewesen waeren. Unbekannte Feldschluessel werden
-    // jetzt uebersprungen und im Ergebnis benannt; nur wenn KEIN einziges Feld
-    // erkannt wird, bleibt es beim harten Fehler.
-    let mut fields = Vec::new();
-    let mut unsupported_fields = Vec::new();
-    for field in &request.fields {
-        match FieldKey::from_str(field) {
-            Some(key) => fields.push(key),
-            None => unsupported_fields.push(field.clone()),
-        }
-    }
-    anyhow::ensure!(
-        !(fields.is_empty() && !unsupported_fields.is_empty()),
-        "no supported person-research field requested; unsupported: {}",
-        unsupported_fields.join(", ")
-    );
-    if !unsupported_fields.is_empty() {
-        eprintln!(
-            "[business-os] person-research skipping {} unsupported field(s): {}",
-            unsupported_fields.len(),
-            unsupported_fields.join(", ")
-        );
-    }
+    // The app and the native planner share one strict field vocabulary. A
+    // misspelled or not-yet-implemented field must fail visibly instead of
+    // making a partial result look like a complete research run.
+    let fields = parse_requested_fields(&request.fields)?;
     let workspace =
         root.join("runtime")
             .join("research")
@@ -863,20 +875,51 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
         persist_workspace: true,
     };
     let mut result = ctox_web_stack::run_ctox_person_research_tool(root, &research_request)?;
-    if !unsupported_fields.is_empty() {
-        // Uebersprungene Feldschluessel gehoeren ins Ergebnis, sonst wirkt eine
-        // Teilrecherche wie eine vollstaendige.
-        if let Some(object) = result.as_object_mut() {
-            object.insert(
-                "unsupported_fields".to_string(),
-                Value::Array(
-                    unsupported_fields
-                        .iter()
-                        .map(|field| Value::String(field.clone()))
-                        .collect(),
-                ),
-            );
+    let ctox_bin = ctox_web_stack::sources::scrape_bridge::default_ctox_bin();
+    for runtime_source in request.source_policy.sources {
+        let source_id = runtime_source.id.trim();
+        let target_key = runtime_source.target_key.trim();
+        let source_url = runtime_source.url.trim();
+        anyhow::ensure!(
+            safe_runtime_source_identifier(source_id, 160)
+                && safe_runtime_source_identifier(target_key, 128),
+            "invalid runtime research source identifier"
+        );
+        let parsed_url = url::Url::parse(source_url)
+            .with_context(|| format!("invalid runtime source URL for `{source_id}`"))?;
+        anyhow::ensure!(
+            matches!(parsed_url.scheme(), "http" | "https") && parsed_url.host_str().is_some(),
+            "runtime source URL for `{source_id}` must be HTTP(S)"
+        );
+        // Compile-time modules already ran through the normal research plan.
+        // This path exists for truly dynamic/manual/discovered adapters.
+        if ctox_web_stack::sources::find(source_id).is_some() {
+            continue;
         }
+        let mut target_fields = parse_requested_fields(&runtime_source.field_keys)?;
+        target_fields.retain(|field| {
+            research_request.fields.is_empty() || research_request.fields.contains(field)
+        });
+        if target_fields.is_empty() {
+            continue;
+        }
+        let runtime_result = ctox_web_stack::sources::scrape_bridge::run_via_runtime_target(
+            root,
+            &ctox_bin,
+            source_id,
+            source_url,
+            target_key,
+            &target_fields,
+            company,
+            country,
+        );
+        ctox_web_stack::person_research::merge_runtime_scrape_result(
+            &mut result,
+            source_id,
+            source_url,
+            &target_fields,
+            &runtime_result,
+        )?;
     }
     if auto_browser_capture {
         let capture_tasks =
@@ -1093,6 +1136,21 @@ mod tests {
         }))
         .unwrap();
         assert!(enabled.auto_browser_capture);
+    }
+
+    #[test]
+    fn outbound_research_contract_accepts_all_32_canonical_fields() -> anyhow::Result<()> {
+        let requested = ctox_web_stack::sources::OUTBOUND_RESEARCH_FIELDS
+            .iter()
+            .map(|field| field.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        let parsed = parse_requested_fields(&requested)?;
+
+        assert_eq!(parsed, ctox_web_stack::sources::OUTBOUND_RESEARCH_FIELDS);
+        assert_eq!(parsed.len(), 32);
+        assert!(parse_requested_fields(&["firma_unbekannt".to_string()]).is_err());
+        Ok(())
     }
 
     #[test]

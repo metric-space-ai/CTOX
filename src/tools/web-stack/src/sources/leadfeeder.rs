@@ -93,8 +93,11 @@ impl SourceModule for Leadfeeder {
 
     fn authoritative_for(&self) -> &'static [FieldKey] {
         &[
+            FieldKey::FirmaName,
             FieldKey::FirmaEmail,
             FieldKey::FirmaDomain,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaHomepageFactSheet,
             FieldKey::Mitarbeiter,
             FieldKey::PersonEmail,
         ]
