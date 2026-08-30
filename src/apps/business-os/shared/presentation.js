@@ -7,6 +7,8 @@ const MODES = new Set(['window', 'maximized', 'focus']);
 // must be hosted by the shared shell-window manager, even when its manifest is
 // legacy, runtime-installed, or imported from an older catalog.
 export const SHELL_SURFACE_MODULE_ID = 'desktop';
+export const SHELL_WINDOW_CONTRACT = 'v2';
+export const SHELL_WINDOW_GEOMETRY_CONTRACT = 'business-os-v2-global-1';
 
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -68,6 +70,20 @@ export function resolvePresentation(moduleDef = {}) {
 
 export function launchesInWindow(moduleDef) {
   return !isShellSurfaceModule(moduleDef);
+}
+
+// Window chrome is owned by the tenant-delivered Business OS shell, not by a
+// module catalog snapshot.  Runtime-installed and legacy module records may
+// therefore describe content layout, but they cannot downgrade the active
+// shell contract.  Keeping this resolution central also makes the remaining
+// v1 renderer unreachable before its follow-up removal.
+export function resolveShellWindowContract(moduleDef = {}) {
+  if (isShellSurfaceModule(moduleDef)) return null;
+  return Object.freeze({
+    contract: SHELL_WINDOW_CONTRACT,
+    geometryContract: String(moduleDef?.layout?.shell_geometry_contract || '').trim()
+      || SHELL_WINDOW_GEOMETRY_CONTRACT,
+  });
 }
 
 export function usesLegacyWorkspace(moduleDef) {

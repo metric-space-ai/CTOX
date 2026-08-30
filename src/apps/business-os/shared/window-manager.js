@@ -487,7 +487,10 @@ export function createWindowManager({
     const minHeight = Math.max(CONST.MIN_HEIGHT, parseInt(options.minHeight ?? options.min_height, 10) || CONST.MIN_HEIGHT);
 
     const winEl = document.createElement('section');
-    const shellContract = options.shellContract === 'v2' ? 'v2' : 'v1';
+    // The shared tenant shell is v2 by default. A remaining explicit v1 value
+    // is accepted only until the unreachable legacy renderer is deleted after
+    // the fleet migration gate.
+    const shellContract = options.shellContract === 'v1' ? 'v1' : 'v2';
     const resizeHandles = shellContract === 'v2' ? V2_RESIZE_HANDLES : RESIZE_HANDLES;
     winEl.className = 'shell-window';
     winEl.id = id;
@@ -537,7 +540,7 @@ export function createWindowManager({
         <img data-window-app-icon alt="" draggable="false" />
         <span data-window-app-label></span>
       </div>
-      <header class="shell-window-header" data-window-header>
+      <header class="shell-window-header" data-window-header data-window-drag-region data-shell-v2-header-row="1">
         <div class="shell-window-title" data-window-title></div>
         <div class="shell-window-meta" data-window-meta></div>
         <div class="shell-window-actions" data-window-actions></div>
@@ -563,12 +566,20 @@ export function createWindowManager({
     titleEl.innerHTML = `${svgHtml ? `<span class="shell-window-title-icon" aria-hidden="true">${svgHtml}</span>` : ''}<span class="shell-window-title-text">${escapeHtml(options.title || composeTitle(options, translate))}</span>`;
     if (shellContract === 'v2') {
       const iconEl = winEl.querySelector('[data-window-app-icon]');
+      const iconHost = iconEl?.closest('.shell-window-v2-icon');
       if (iconEl && options.iconAsset) {
         iconEl.src = String(options.iconAsset);
         if (options.iconSrcSet) iconEl.srcset = String(options.iconSrcSet);
+      } else {
+        iconEl?.remove();
+        iconHost?.classList.add('is-fallback');
       }
       const labelEl = winEl.querySelector('[data-window-app-label]');
-      if (labelEl) labelEl.textContent = options.title || composeTitle(options, translate);
+      if (labelEl) {
+        const label = options.title || composeTitle(options, translate);
+        labelEl.textContent = String(label).trim().slice(0, 1).toUpperCase() || '•';
+        labelEl.setAttribute('aria-label', String(label));
+      }
       applyFramePalette(winEl, options.framePalette);
     }
     renderHeaderItems(winEl.querySelector('[data-window-meta]'), options.headerBadges, 'meta');
@@ -1455,11 +1466,14 @@ export function createWindowManager({
   }
 
   function makePointerDraggable(win) {
-    const iconHandle = win.element.querySelector('[data-window-drag-region]');
-    if (!iconHandle) return;
+    const dragHandles = Array.from(win.element.querySelectorAll('[data-window-drag-region]'));
+    if (!dragHandles.length) return;
     const beginDrag = (event, handle, borderOnly = false) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
       if (win.element.classList.contains('is-mobile-sheet')) return;
+      if (handle.matches?.('[data-window-header]') && event.target.closest?.(
+        'button, a, input, select, textarea, [role="button"], [data-window-controls], [data-window-actions]',
+      )) return;
       if (borderOnly) {
         if (event.target !== win.element) return;
         const rect = win.element.getBoundingClientRect();
@@ -1550,7 +1564,9 @@ export function createWindowManager({
       handle.addEventListener('pointercancel', cancel);
       handle.addEventListener('lostpointercapture', lost);
     };
-    iconHandle.addEventListener('pointerdown', (event) => beginDrag(event, iconHandle));
+    for (const handle of dragHandles) {
+      handle.addEventListener('pointerdown', (event) => beginDrag(event, handle));
+    }
     win.element.addEventListener('pointerdown', (event) => beginDrag(event, win.element, true));
   }
 

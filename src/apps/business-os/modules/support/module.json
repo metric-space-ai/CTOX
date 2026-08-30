@@ -38,6 +38,8 @@
   ],
   "layout": {
     "shell": "windowed",
+    "shell_contract": "v2",
+    "shell_geometry_contract": "business-os-v2-global-1",
     "left": "Support queue, saved views, and channel filters",
     "center": "Selected support conversation timeline and composer",
     "right": "Customer context, ticket links, SLA, macros, and CTOX Agent suggestions",
