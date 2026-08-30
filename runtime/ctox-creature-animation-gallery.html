@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CTOX · Creature motion lab</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f2f5f7;
+      --muted: #8c99a3;
+      --faint: #56636d;
+      --canvas: #081015;
+      --surface: #101a20;
+      --surface-2: #14232b;
+      --line: rgba(210, 231, 240, .12);
+      --blue: #4e8cff;
+      --teal: #2dd5b3;
+      --amber: #f5bb62;
+      --red: #f17579;
+      --green: #62ddb1;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      background-image:
+        linear-gradient(rgba(117, 149, 164, .055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(117, 149, 164, .055) 1px, transparent 1px),
+        radial-gradient(circle at 50% 0%, rgba(50, 129, 172, .14), transparent 42rem);
+      background-size: 48px 48px, 48px 48px, auto;
+    }
+
+    .lab {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 42px 0 74px;
+    }
+
+    .masthead {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      padding-bottom: 30px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 9px;
+      color: var(--teal);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .2em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 5vw, 54px);
+      line-height: .98;
+      letter-spacing: -.055em;
+      font-weight: 720;
+    }
+
+    .intro {
+      max-width: 460px;
+      margin: 13px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .controls { display: flex; gap: 8px; flex: 0 0 auto; }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 10px 13px;
+      color: var(--ink);
+      background: rgba(255,255,255,.04);
+      font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+    }
+    button:hover, button:focus-visible { border-color: var(--blue); background: rgba(78,140,255,.13); outline: none; }
+    button[aria-pressed="true"] { border-color: var(--teal); color: var(--teal); background: rgba(45,213,179,.1); }
+
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin: 25px 0 18px;
+      color: var(--faint);
+      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .legend-item { display: inline-flex; align-items: center; gap: 7px; }
+    .legend-mark { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 12px currentColor; }
+    .legend-mark.is-static { background: #a4adb4; color: #a4adb4; }
+    .legend-mark.is-attention { background: var(--red); color: var(--red); }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 13px;
+    }
+
+    .state {
+      min-height: 232px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(160deg, rgba(22, 37, 45, .92), rgba(10, 18, 23, .98));
+    }
+    .state[data-family="active"] { border-color: rgba(78,140,255,.28); }
+    .state[data-family="review"] { border-color: rgba(245,187,98,.3); }
+    .state[data-family="error"] { border-color: rgba(241,117,121,.32); }
+
+    .state-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 16px 17px 0;
+    }
+    .state-name { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
+    .state-note { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .state-code { color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .specimens {
+      display: flex;
+      align-items: end;
+      justify-content: space-around;
+      min-height: 166px;
+      padding: 20px 12px 20px;
+    }
+
+    .specimen {
+      --creature-color: #57a9ff;
+      --creature-shadow: rgba(87,169,255,.36);
+      --size: 64px;
+      --duration: 4s;
+      --delay: 0s;
+      --lean: 0deg;
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 90px;
+      height: 118px;
+    }
+    .specimen::after {
+      content: "";
+      position: absolute;
+      bottom: 9px;
+      width: 42px;
+      height: 7px;
+      border-radius: 50%;
+      background: rgba(0,0,0,.28);
+      filter: blur(4px);
+      transform: scaleX(.75);
+    }
+    .creature {
+      position: relative;
+      z-index: 1;
+      width: var(--size);
+      height: var(--size);
+      border-radius: var(--rounding, 46% 54% 50% 50% / 54% 48% 52% 46%);
+      background: var(--creature-color);
+      box-shadow: 0 11px 25px var(--creature-shadow), inset 0 -3px 0 rgba(0,0,0,.1);
+      transform-origin: 50% 85%;
+    }
+    .face { position: absolute; inset: 0; }
+    .eye {
+      position: absolute;
+      top: 35%;
+      width: 6px;
+      height: 13px;
+      border-radius: 80% 80% 70% 70%;
+      background: #071014;
+      transform: rotate(var(--eye-tilt, -16deg));
+    }
+    .eye.left { left: 33%; }
+    .eye.right { right: 24%; --eye-tilt: -16deg; }
+    .mouth {
+      position: absolute;
+      left: 50%;
+      top: 57%;
+      width: 12px;
+      height: 5px;
+      border-bottom: 2px solid rgba(7,16,20,.7);
+      border-radius: 0 0 12px 12px;
+      transform: translateX(-50%);
+      opacity: .72;
+    }
+    .sleeping .eye { top: 40%; height: 5px; border-radius: 100% 100% 0 0; background: transparent; border-top: 2px solid #071014; transform: rotate(4deg); }
+    .sleeping .eye.right { transform: rotate(-4deg); }
+    .sleeping .mouth { top: 57%; width: 8px; height: 4px; opacity: .55; }
+    .blocked .eye { height: 7px; top: 39%; border-radius: 10px 10px 2px 2px; transform: rotate(8deg); }
+    .blocked .eye.right { transform: rotate(-8deg); }
+    .failed .eye { top: 34%; width: 16px; height: 5px; border-radius: 2px; background: #071014; transform: rotate(45deg); }
+    .failed .eye::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: #071014; transform: rotate(90deg); }
+    .failed .eye.right { transform: rotate(45deg); }
+    .failed .mouth { display: none; }
+
+    .queued .creature { animation: queue-breathe var(--duration) ease-in-out var(--delay) infinite; }
+    .working .creature { animation: work-roam var(--duration) ease-in-out var(--delay) infinite; }
+    .thinking .creature { animation: think-lean var(--duration) ease-in-out var(--delay) infinite; }
+    .thinking .eye { animation: think-blink calc(var(--duration) * .83) ease-in-out var(--delay) infinite; }
+    .tool .creature { animation: tool-nudge var(--duration) cubic-bezier(.4,0,.2,1) var(--delay) infinite; }
+    .tool .mouth { animation: tool-mouth var(--duration) ease-in-out var(--delay) infinite; }
+    .review .creature { animation: review-loop var(--duration) cubic-bezier(.45,.05,.45,.95) var(--delay) infinite; }
+    .review::before { content: ""; position: absolute; width: 82px; height: 82px; border: 1px solid rgba(245,187,98,.18); border-radius: 50%; transform: rotateX(64deg); }
+    .failed .creature { animation: error-stumble .74s cubic-bezier(.2,.85,.35,1) var(--delay) 1 both; }
+
+    @keyframes queue-breathe { 0%,100% { transform: translateY(0) scale(1); } 47% { transform: translateY(-2px) scale(1.02,.98); } }
+    @keyframes work-roam { 0%,100% { transform: translateY(1px) rotate(calc(var(--lean) * -1)); } 33% { transform: translateY(-7px) rotate(var(--lean)); } 67% { transform: translateY(-2px) rotate(calc(var(--lean) * -.6)); } }
+    @keyframes think-lean { 0%,100% { transform: rotate(calc(var(--lean) * -.5)) translateY(0); } 43% { transform: rotate(var(--lean)) translateY(-3px); } 68% { transform: rotate(calc(var(--lean) * -.8)) translateY(1px); } }
+    @keyframes think-blink { 0%, 39%, 47%, 100% { transform: scaleY(1); } 43% { transform: scaleY(.12); } }
+    @keyframes tool-nudge { 0%,100% { transform: translate(0,0) rotate(0); } 22% { transform: translate(1px,-2px) rotate(2deg); } 31% { transform: translate(-2px,1px) rotate(-2deg); } 50% { transform: translate(2px,0) rotate(1deg); } 71% { transform: translate(-1px,-1px) rotate(-1deg); } }
+    @keyframes tool-mouth { 0%,100% { transform: translateX(-50%) scaleX(1); } 50% { transform: translateX(-50%) scaleX(.55); } }
+    @keyframes review-loop { 0%,100% { transform: translateY(0) rotate(0deg); } 25% { transform: translate(5px,-4px) rotate(8deg); } 51% { transform: translate(-1px,-8px) rotate(-4deg); } 76% { transform: translate(-5px,-3px) rotate(-9deg); } }
+    @keyframes error-stumble { 0% { transform: translateX(0) rotate(0); } 18% { transform: translateX(-6px) rotate(-7deg); } 37% { transform: translateX(7px) rotate(8deg); } 58% { transform: translateX(-3px) rotate(-4deg); } 100% { transform: translateX(0) rotate(0); } }
+
+    .footer-note { margin-top: 20px; color: var(--faint); font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .reduced-motion *, .reduced-motion *::before, .reduced-motion *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+    @media (max-width: 880px) { .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 570px) {
+      .lab { width: min(100% - 28px, 440px); padding-top: 25px; }
+      .masthead { display: block; }
+      .controls { margin-top: 20px; }
+      .gallery { grid-template-columns: 1fr; }
+      .legend { flex-wrap: wrap; gap: 9px 14px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="lab">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">CTOX / creature motion lab</p>
+        <h1>Jeder Status<br>hat eine Haltung.</h1>
+        <p class="intro">Prozedurale Wesen-Varianten für den Crew-Header. Form, Rhythmus und Phase werden pro Wesen aus seiner Identität abgeleitet.</p>
+      </div>
+      <div class="controls" aria-label="Galerie-Steuerung">
+        <button id="shuffle" type="button">↻ Neu variieren</button>
+        <button id="motion" type="button" aria-pressed="false">Bewegung</button>
+      </div>
+    </header>
+
+    <div class="legend" aria-label="Legende">
+      <span class="legend-item"><i class="legend-mark"></i>aktiv</span>
+      <span class="legend-item"><i class="legend-mark is-static"></i>ruhig</span>
+      <span class="legend-item"><i class="legend-mark is-attention"></i>aufmerksamkeit</span>
+      <span id="seed-readout"></span>
+    </div>
+    <section id="gallery" class="gallery" aria-label="Status-Animationen"></section>
+    <p class="footer-note">Jede Instanz besitzt eine eigene Form, Dauer und Startphase. Fehleranimationen laufen einmal aus und bleiben danach in der X-X-Pose.</p>
+  </main>
+
+  <script>
+    (() => {
+      const statuses = [
+        { id: 'idle', label: 'Idle', note: 'schläft', mode: 'sleeping', family: 'quiet' },
+        { id: 'queued', label: 'Queued', note: 'wartet auf Start', mode: 'queued', family: 'active' },
+        { id: 'scheduled', label: 'Scheduled', note: 'wartet auf Zeitpunkt', mode: 'sleeping', family: 'quiet' },
+        { id: 'working', label: 'Working', note: 'arbeitet', mode: 'working', family: 'active' },
+        { id: 'thinking', label: 'Thinking', note: 'denkt nach', mode: 'thinking', family: 'active' },
+        { id: 'tool', label: 'Tool activity', note: 'führt Tool aus', mode: 'tool', family: 'active' },
+        { id: 'review', label: 'Review loop', note: 'prüft Ergebnis', mode: 'review', family: 'review' },
+        { id: 'blocked', label: 'Blocked', note: 'braucht Aufmerksamkeit', mode: 'blocked', family: 'error' },
+        { id: 'completed', label: 'Completed', note: 'fertig · schläft', mode: 'sleeping', family: 'quiet' },
+        { id: 'failed', label: 'Failed / Error', note: 'Fehler · bleibt stehen', mode: 'failed', family: 'error' }
+      ];
+      const colors = [
+        ['#4e96ee', 'rgba(78,150,238,.34)'], ['#27c6ae', 'rgba(39,198,174,.34)'],
+        ['#f3b565', 'rgba(243,181,101,.31)'], ['#9b9aa5', 'rgba(155,154,165,.28)'],
+        ['#e8797b', 'rgba(232,121,123,.32)'], ['#9685dd', 'rgba(150,133,221,.3)']
+      ];
+      const gallery = document.querySelector('#gallery');
+      const seedReadout = document.querySelector('#seed-readout');
+      let seed = Math.floor(Math.random() * 100000);
+
+      function hash(input) {
+        let value = 2166136261;
+        for (let i = 0; i < input.length; i += 1) {
+          value ^= input.charCodeAt(i);
+          value = Math.imul(value, 16777619);
+        }
+        return (value >>> 0) / 4294967296;
+      }
+      function pick(value, min, max) { return min + (max - min) * value; }
+      function specimen(status, index) {
+        const n = hash(`${seed}:${status.id}:${index}`);
+        const n2 = hash(`${seed}:shape:${status.id}:${index}`);
+        const n3 = hash(`${seed}:color:${status.id}:${index}`);
+        const color = colors[Math.floor(n3 * colors.length)];
+        const duration = pick(n, 2.7, 5.8).toFixed(2);
+        const delay = (-pick(n2, 0, 5.5)).toFixed(2);
+        const size = pick(n3, 54, 72).toFixed(0);
+        const lean = pick(n2, -7, 7).toFixed(1);
+        const radii = `${pick(n, 38, 52).toFixed(0)}% ${pick(n2, 46, 62).toFixed(0)}% ${pick(n3, 42, 57).toFixed(0)}% ${pick(n, 43, 59).toFixed(0)}% / ${pick(n2, 47, 60).toFixed(0)}% ${pick(n3, 40, 56).toFixed(0)}% ${pick(n, 46, 59).toFixed(0)}% ${pick(n2, 43, 58).toFixed(0)}%`;
+        return `<div class="specimen ${status.mode}" style="--creature-color:${color[0]};--creature-shadow:${color[1]};--size:${size}px;--duration:${duration}s;--delay:${delay}s;--lean:${lean}deg;--rounding:${radii}" aria-label="${status.label} Variante ${index + 1}"><div class="creature"><span class="face"><i class="eye left"></i><i class="eye right"></i><i class="mouth"></i></span></div></div>`;
+      }
+      function render() {
+        gallery.innerHTML = statuses.map((status) => `<article class="state" data-family="${status.family}"><header class="state-head"><div><h2 class="state-name">${status.label}</h2><p class="state-note">${status.note}</p></div><span class="state-code">${status.id}</span></header><div class="specimens">${[0, 1, 2].map((index) => specimen(status, index)).join('')}</div></article>`).join('');
+        seedReadout.textContent = `seed ${seed}`;
+      }
+      document.querySelector('#shuffle').addEventListener('click', () => { seed = Math.floor(Math.random() * 100000); render(); });
+      document.querySelector('#motion').addEventListener('click', (event) => {
+        const reduced = document.body.classList.toggle('reduced-motion');
+        event.currentTarget.setAttribute('aria-pressed', String(reduced));
+        event.currentTarget.textContent = reduced ? 'Bewegung aus' : 'Bewegung';
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>
