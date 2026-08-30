@@ -93,7 +93,7 @@ const BUSINESS_DB_NAME = 'ctox_business_os_v11';
 // Browser-local persistence generation. Advancing this creates a fresh local
 // replica without deleting the previous cache; authoritative Business OS data
 // is repopulated through the existing WebRTC/RxDB replication path.
-const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v4-demand-sync';
+const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v5-live-catalog-recovery';
 const RXDB_BOOTSTRAP_VERSION = `${BUSINESS_DB_NAME}:storage-v1`;
 const CTOX_HEALTH_POLL_MS = 10000;
 const CTOX_MAINTENANCE_POLL_MS = 2000;
