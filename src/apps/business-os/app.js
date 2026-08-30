@@ -28,7 +28,7 @@ import {
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v294';
+} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v295';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -81,7 +81,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-global-shell-v2-raster-v294';
+const APP_BUILD = '20260830-global-shell-v2-raster-v295';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -9018,10 +9018,21 @@ async function registerCustomModuleIcons() {
   const { registerSvgIcon } = await loadShellIconsModule();
   if (!Array.isArray(state.modules)) return;
   for (const mod of state.modules) {
-    const svgIcon = await resolveModuleIconSvg(mod);
-    if (svgIcon) {
-      registerSvgIcon(mod.id, svgIcon);
+    const inlineSvg = inlineModuleIconSvg(mod);
+    if (inlineSvg) {
+      registerSvgIcon(mod.id, inlineSvg);
+      continue;
     }
+    // External icons are optional decoration. A slow or wedged asset request
+    // must never hold the workspace bootstrap before the desktop is usable.
+    // resolveModuleIconSvg() caches its in-flight request per module.
+    void resolveModuleIconSvg(mod)
+      .then((svgIcon) => {
+        if (svgIcon) registerSvgIcon(mod.id, svgIcon);
+      })
+      .catch((error) => {
+        console.warn(`[business-os] optional module icon unavailable: ${mod.id}`, error);
+      });
   }
 }
 
