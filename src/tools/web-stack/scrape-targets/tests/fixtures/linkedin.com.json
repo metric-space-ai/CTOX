@@ -1,0 +1,8 @@
+{
+  "input": { "source_id": "linkedin.com", "company": "Example Manufacturing AG", "country": "DE", "task_id": "fixture-linkedin", "credential_ref": "ctox-secret://credentials/LINKEDIN_BROWSER_LOGIN" },
+  "expected": { "firma_name": "Example Manufacturing AG", "person_funktion": "Leiterin Einkauf", "person_linkedin": "https://www.linkedin.com/in/erika-beispiel" },
+  "browser_allowed_domains": ["linkedin.com", "www.linkedin.com", "login.linkedin.com", "api.linkedin.com"],
+  "login_url": "https://www.linkedin.com/login",
+  "capture": { "ok": true, "company": "Example Manufacturing AG", "source_status": "succeeded", "records": [{ "field": "firma_name", "value": "Example Manufacturing AG", "confidence": "high", "source_url": "https://www.linkedin.com/company/example-manufacturing-ag/about/", "note": "LinkedIn company page result" }, { "field": "person_funktion", "value": "Leiterin Einkauf", "confidence": "medium", "source_url": "https://www.linkedin.com/in/erika-beispiel", "note": "LinkedIn member result employment context" }, { "field": "person_linkedin", "value": "https://www.linkedin.com/in/erika-beispiel", "confidence": "high", "source_url": "https://www.linkedin.com/in/erika-beispiel", "note": "LinkedIn canonical profile URL" }] },
+  "search": { "results": [] }
+}
