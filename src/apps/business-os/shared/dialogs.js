@@ -1,5 +1,20 @@
 const DIALOG_STYLE_ID = 'ctox-business-dialog-style';
 let fallbacksInstalled = false;
+// Dialoge gehoeren in das Modulfenster. Ohne diesen Wirt legten sie sich auf
+// `document.body` und damit ueber Titelleiste und Fensterrahmen der Shell.
+// Der Wirt haengt am Fenster, nicht am Modul: Shell und Module importieren
+// diese Datei mit unterschiedlichen Cache-Bustern und erhalten sonst je eine
+// eigene Instanz mit eigener Variablen.
+export function setBusinessDialogHost(element) {
+  window.__ctoxBusinessDialogHost = element && typeof element.append === 'function' ? element : null;
+}
+
+function resolveDialogHost(explicitHost) {
+  const candidate = explicitHost || window.__ctoxBusinessDialogHost;
+  return candidate && typeof candidate.append === 'function' && candidate.isConnected
+    ? candidate
+    : document.body;
+}
 
 export function installBusinessDialogFallbacks() {
   if (fallbacksInstalled) return;
@@ -52,6 +67,7 @@ function openBusinessDialog({
   requireText = '',
   prompt = false,
   kind = 'info',
+  host = null,
 } = {}) {
   installDialogStyles();
   const confirmationText = String(requireText || '').trim();
@@ -77,7 +93,12 @@ function openBusinessDialog({
       </div>
     </section>
   `;
-  document.body.append(layer);
+  const layerHost = resolveDialogHost(host);
+  if (layerHost !== document.body && window.getComputedStyle(layerHost).position === 'static') {
+    layerHost.style.position = 'relative';
+  }
+  layer.dataset.scope = layerHost === document.body ? 'shell' : 'module';
+  layerHost.append(layer);
 
   const panel = layer.querySelector('.business-dialog');
   const input = layer.querySelector('[data-dialog-input]');
@@ -153,7 +174,7 @@ function installDialogStyles() {
   style.id = DIALOG_STYLE_ID;
   style.textContent = `
     .business-dialog-layer {
-      position: fixed;
+      position: absolute;
       inset: 0;
       z-index: 240;
       display: grid;
@@ -163,6 +184,9 @@ function installDialogStyles() {
       opacity: 0;
       pointer-events: none;
       transition: opacity 120ms ease-out;
+    }
+    .business-dialog-layer[data-scope="shell"] {
+      position: fixed;
     }
     .business-dialog-layer.is-open {
       opacity: 1;

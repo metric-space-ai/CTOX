@@ -73,7 +73,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260829-instance-shell-projects-v290';
+const APP_BUILD = '20260830-dialoge-im-modulfenster-v291';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -5671,6 +5671,12 @@ function createModuleContext(mod, overrides = {}) {
     || els.host.querySelector('[data-module-root]');
   const ownerKey = overrides.ownerKey || `module:${mod.id}`;
   const moduleSync = createLiveSyncFacade({ host: hostEl });
+  // Dialoge des Moduls sollen im Modulfenster erscheinen, nicht auf Shell-Ebene.
+  if (hostEl) {
+    loadShellDialogsModule()
+      .then((dialogs) => dialogs?.setBusinessDialogHost?.(hostEl))
+      .catch(() => {});
+  }
   // CTX-CONTRACT-BEGIN business-os-module-context-v1
   return {
     module: mod,

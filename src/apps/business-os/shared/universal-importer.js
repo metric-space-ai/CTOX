@@ -1,4 +1,5 @@
 import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessAlert } from './dialogs.js';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';
 
@@ -11,7 +12,16 @@ export async function openUniversalImporter(ctx, config = {}) {
   drawer.setAttribute('role', 'dialog');
   drawer.setAttribute('aria-modal', 'true');
   drawer.innerHTML = importerTemplate(config);
-  document.body.append(drawer);
+  // Der Importer gehoert in das Modulfenster, nicht auf die Shell-Ebene:
+  // auf `document.body` legt er sich ueber Titelleiste und Fensterrahmen.
+  const host = resolveImporterHost(ctx, config);
+  // Ein zweiter Aufruf hinterliess bisher eine zweite Schublade im DOM.
+  host.querySelectorAll(':scope > .universal-importer-drawer').forEach((old) => old.remove());
+  if (host !== document.body && window.getComputedStyle(host).position === 'static') {
+    host.style.position = 'relative';
+  }
+  drawer.dataset.scope = host === document.body ? 'shell' : 'module';
+  host.append(drawer);
 
   const close = () => drawer.remove();
   drawer.querySelector('[data-action="close-importer"]')?.addEventListener('click', close);
@@ -329,7 +339,22 @@ export async function openUniversalImporter(ctx, config = {}) {
       };
       if (config.closeOnSubmit) {
         close();
-        runImport().catch((error) => console.warn('[business-os importer] background import failed', error));
+        // Mit geschlossener Schublade gibt es kein Statusfeld mehr. Ohne diesen
+        // Zweig verschwand jede Validierungsmeldung in der Konsole.
+        runImport().catch((error) => {
+          const detail = error?.message || String(error);
+          console.warn('[business-os importer] background import failed', error);
+          recordImportStatus({
+            id: payload.record_id,
+            module_id: config.moduleId || '',
+            title: payload.title,
+            source_type: payload.source_type,
+            status: 'failed',
+            detail,
+            updated_at_ms: Date.now(),
+          });
+          showBusinessAlert(detail, { title: config.failureTitle || 'Import fehlgeschlagen', kind: 'danger' });
+        });
         return;
       }
       await runImport();
@@ -870,6 +895,13 @@ function updateImporterFields(drawer) {
     const values = String(panel.dataset.sourcePanel || '').split(/\s+/);
     panel.hidden = !values.includes(selected);
   }
+}
+
+function resolveImporterHost(ctx, config = {}) {
+  const candidate = config.host || ctx?.host || null;
+  return candidate && typeof candidate.append === 'function' && candidate.isConnected
+    ? candidate
+    : document.body;
 }
 
 async function ensureImporterStyles() {
