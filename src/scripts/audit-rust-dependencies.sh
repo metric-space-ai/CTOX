@@ -17,6 +17,18 @@ if [ -n "$(cargo tree --locked --manifest-path src/core/harness/Cargo.toml --tar
   exit 1
 fi
 
+# The vendored rtc-ice manifest retains an upstream ping_pong example on
+# hyper 0.14. Production and build dependency edges do not include that
+# example-only HTTP stack. Fail closed if h2 ever enters the patch crate's
+# normal/build graph; until then, scope the advisory exception to this one
+# standalone lockfile instead of weakening the root audit.
+rtc_ice_manifest="src/core/rxdb/patches/rtc-ice/Cargo.toml"
+rtc_ice_lockfile="src/core/rxdb/patches/rtc-ice/Cargo.lock"
+if [ -n "$(cargo tree --locked --manifest-path "$rtc_ice_manifest" --target all --edges normal,build -i h2@0.3.27 2>/dev/null)" ]; then
+  echo "security exception became reachable in rtc-ice production edges: h2@0.3.27" >&2
+  exit 1
+fi
+
 audit_args=(
   --deny unsound
   --ignore RUSTSEC-2026-0002
@@ -46,6 +58,12 @@ while IFS= read -r lockfile; do
       --file "$lockfile" \
       "${audit_args[@]}" \
       --ignore RUSTSEC-2023-0071
+  elif [ "$lockfile" = "$rtc_ice_lockfile" ]; then
+    cargo audit \
+      --no-fetch \
+      --file "$lockfile" \
+      "${audit_args[@]}" \
+      --ignore RUSTSEC-2026-0258
   else
     cargo audit --no-fetch --file "$lockfile" "${audit_args[@]}"
   fi
