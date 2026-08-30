@@ -13,6 +13,8 @@
   "deletable": true,
   "layout": {
     "shell": "windowed",
+    "shell_contract": "v2",
+    "shell_geometry_contract": "business-os-v2-global-1",
     "left": "Filter",
     "center": "Vorstellungen"
   },

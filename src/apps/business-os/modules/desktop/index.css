@@ -13,8 +13,8 @@
   overflow: hidden;
   isolation: isolate;
   container-type: inline-size;
-  --desktop-icon-cell-w: 104px;
-  --desktop-icon-cell-h: 120px;
+  --desktop-icon-cell-w: 120px;
+  --desktop-icon-cell-h: 140px;
   --desktop-icon-padding: 24px;
 }
 
@@ -57,14 +57,13 @@
   scrollbar-width: thin;
 }
 
-/* Premium draggable desktop icons - expanded to 96px for robust label support */
+/* The shell-v2 launcher uses the same 80px artwork as its window corner. */
 .desktop-icon {
   position: absolute;
-  width: 96px;
-  /* 2-line labels need headroom for descenders (g, p, y) — 112px clipped
-     the second line's baseline box. Grid cell is 120px, so 116px still
-     leaves row spacing. */
-  height: 116px;
+  width: 112px;
+  /* Two-line labels need headroom for descenders. The 140px grid cell leaves
+     a four-pixel row gutter around the 136px launcher. */
+  height: 136px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -104,8 +103,8 @@
 
 /* App artwork is the icon. Do not wrap it in a second glass/card surface. */
 .desktop-icon .desktop-icon-glyph {
-  width: 64px;
-  height: 64px;
+  width: 80px;
+  height: 80px;
   display: grid;
   place-items: center;
   border-radius: 16px;
@@ -134,8 +133,8 @@
 }
 
 .desktop-icon .desktop-icon-glyph > svg {
-  width: 56px;
-  height: 56px;
+  width: 72px;
+  height: 72px;
   max-width: 100%;
   max-height: 100%;
 }

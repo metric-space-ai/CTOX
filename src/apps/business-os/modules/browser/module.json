@@ -33,6 +33,8 @@
   },
   "layout": {
     "shell": "windowed",
+    "shell_contract": "v2",
+    "shell_geometry_contract": "business-os-v2-global-1",
     "default_width": 1120,
     "default_height": 760,
     "min_width": 640,

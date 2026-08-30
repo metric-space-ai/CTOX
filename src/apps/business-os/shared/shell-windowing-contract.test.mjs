@@ -10,6 +10,9 @@ import {
   isShellSurfaceModule,
   launchesInWindow,
   resolvePresentation,
+  resolveShellWindowContract,
+  SHELL_WINDOW_CONTRACT,
+  SHELL_WINDOW_GEOMETRY_CONTRACT,
   SHELL_SURFACE_MODULE_ID,
   usesLegacyWorkspace,
 } from './presentation.js';
@@ -60,25 +63,57 @@ test('every registry app is classified as a shared-window app or the one shell s
   }
 });
 
-test('Knowledge is the only explicit shell-v2 pilot', () => {
+test('the tenant shell resolves every windowed app to shell v2', () => {
   const v2Modules = registry.modules.filter((moduleDef) => moduleDef.layout?.shell_contract === 'v2');
-  assert.deepEqual(v2Modules.map((moduleDef) => moduleDef.id), ['knowledge']);
-  assert.equal(v2Modules[0].layout.icon_asset, 'modules/knowledge/assets/icon/knowledge-256.png');
+  const visibleWindowModules = registry.modules.filter((moduleDef) => (
+    moduleDef.id !== SHELL_SURFACE_MODULE_ID && moduleDef.install_scope !== 'internal'
+  ));
+  assert.equal(visibleWindowModules.length, 33, 'the release gate must cover every visible app');
+  assert.deepEqual(
+    v2Modules.map((moduleDef) => moduleDef.id).sort(),
+    visibleWindowModules.map((moduleDef) => moduleDef.id).sort(),
+  );
+  for (const moduleDef of visibleWindowModules) {
+    const sourceManifest = JSON.parse(readFileSync(
+      resolve(businessOsRoot, 'modules', moduleDef.id, 'module.json'),
+      'utf8',
+    ));
+    assert.equal(sourceManifest.layout?.shell_contract, 'v2', `${moduleDef.id} source manifest must declare v2`);
+    assert.ok(sourceManifest.layout?.shell_geometry_contract, `${moduleDef.id} source manifest needs v2 geometry`);
+  }
+  const knowledge = v2Modules.find((moduleDef) => moduleDef.id === 'knowledge');
+  assert.equal(SHELL_WINDOW_CONTRACT, 'v2');
+  assert.equal(SHELL_WINDOW_GEOMETRY_CONTRACT, 'business-os-v2-global-1');
+  for (const moduleDef of registry.modules) {
+    if (moduleDef.id === SHELL_SURFACE_MODULE_ID) {
+      assert.equal(resolveShellWindowContract(moduleDef), null);
+      continue;
+    }
+    const shell = resolveShellWindowContract(moduleDef);
+    assert.equal(shell.contract, 'v2', `${moduleDef.id} must resolve to shell v2`);
+    assert.ok(shell.geometryContract, `${moduleDef.id} needs a v2 geometry contract`);
+  }
   assert.equal(
-    v2Modules[0].layout.icon_asset_srcset,
+    resolveShellWindowContract({ id: 'runtime-old', layout: { shell_contract: 'v1' } }).contract,
+    'v2',
+    'a stale runtime record must not downgrade tenant shell chrome',
+  );
+  assert.equal(knowledge.layout.icon_asset, 'modules/knowledge/assets/icon/knowledge-256.png');
+  assert.equal(
+    knowledge.layout.icon_asset_srcset,
     'modules/knowledge/assets/icon/knowledge-256.png 1x, modules/knowledge/assets/icon/knowledge-512.png 2x, modules/knowledge/assets/icon/knowledge-1024.png 4x',
   );
-  assert.notEqual(v2Modules[0].layout.icon_asset, v2Modules[0].layout.icon_asset_60);
-  assert.equal(v2Modules[0].layout.shell_header_rows, 2);
-  assert.equal(v2Modules[0].layout.shell_icon_rows, 2);
-  assert.deepEqual(v2Modules[0].presentation.initial_size, { width: 1200, height: 720 });
-  assert.equal(v2Modules[0].layout.icon_svg, undefined);
-  assert.match(v2Modules[0].layout.frame_palette.start, /^#[0-9a-f]{6}$/i);
-  assert.match(v2Modules[0].layout.frame_palette.top_joint, /^#[0-9a-f]{6}$/i);
-  assert.match(v2Modules[0].layout.frame_palette.left_joint, /^#[0-9a-f]{6}$/i);
-  assert.match(appCss, /--shell-v2-icon-size:\s*64px/);
+  assert.notEqual(knowledge.layout.icon_asset, knowledge.layout.icon_asset_60);
+  assert.equal(knowledge.layout.shell_header_rows, 2);
+  assert.equal(knowledge.layout.shell_icon_rows, 2);
+  assert.deepEqual(knowledge.presentation.initial_size, { width: 1200, height: 720 });
+  assert.equal(knowledge.layout.icon_svg, undefined);
+  assert.match(knowledge.layout.frame_palette.start, /^#[0-9a-f]{6}$/i);
+  assert.match(knowledge.layout.frame_palette.top_joint, /^#[0-9a-f]{6}$/i);
+  assert.match(knowledge.layout.frame_palette.left_joint, /^#[0-9a-f]{6}$/i);
+  assert.match(appCss, /--shell-v2-icon-size:\s*80px/);
   assert.match(appCss, /\.shell-window\[data-shell-contract="v2"\] \.shell-window-control--close::before/);
-  assert.match(appCss, /width:\s*28px;[\s\S]*?height:\s*4px;[\s\S]*?background:\s*currentColor/);
+  assert.match(appCss, /width:\s*22px;[\s\S]*?height:\s*3px;[\s\S]*?background:\s*currentColor/);
   assert.match(appCss, /:root\[data-shell-style\] \.shell-window\[data-shell-contract="v2"\] \.shell-window-control--close:hover/);
   assert.match(appCss, /width:\s*calc\(var\(--shell-v2-header-row-size\) \* 2\)/);
   assert.match(appCss, /@media \(forced-colors: active\)[\s\S]*?shell-window-control--close[\s\S]*?background:\s*Canvas;[\s\S]*?color:\s*CanvasText/);
@@ -89,12 +124,36 @@ test('Knowledge is the only explicit shell-v2 pilot', () => {
   assert.match(windowManagerSource, /function finalizeDockRestore\(\)/);
   assert.match(windowManagerSource, /bus\.emit\('window:closing', \{ id, ownerId: win\.ownerId \}\)/);
   assert.match(windowManagerSource, /addEventListener\('lostpointercapture', lost\)/);
+  assert.match(windowManagerSource, /querySelectorAll\('\[data-window-drag-region\]'\)/);
+  assert.match(windowManagerSource, /handle\.matches\?\.\('\[data-window-header\]'\)[\s\S]*?button, a, input, select, textarea/);
   assert.match(windowManagerSource, /addEventListener\('lostpointercapture', finish\)/);
   assert.match(appSource, /state\.windowManager\?\.finalizeDockRestore\?\.\(\)/);
   assert.match(appSource, /loadModules\(\{ timeoutMs: 20000, allowShellSeed: true \}\)/);
   assert.match(appSource, /const width = Number\(glyph\.offsetWidth\) \|\| visualRect\.width/);
   assert.match(appSource, /visualRect\.left \+ \(visualRect\.width - width\) \/ 2/);
   assert.match(appCss, /\.desktop-icon\.is-app-open:hover \.desktop-icon-glyph[\s\S]*?transform:\s*none !important/);
+  assert.match(appSource, /shellContract:\s*shell\?\.contract \|\| 'v2'/);
+  assert.match(appSource, /iconAsset:\s*String\(operatorIcon\?\.asset \|\| mod\?\.layout\?\.icon_asset/);
+  assert.match(appSource, /shellContract:\s*'v2',[\s\S]*?iconAnchorRect:\s*\(\) => desktopIconAnchorRect\(entry\.id\)/);
+  assert.match(appSource, /trigger\.className = 'shell-v2-window-title-fallback'/);
+  assert.match(windowManagerSource, /options\.shellContract === 'v1' \? 'v1' : 'v2'/);
+  assert.match(windowManagerSource, /iconHost\?\.classList\.add\('is-fallback'\)/);
+  assert.match(windowManagerSource, /if \(iconEl && options\.iconAsset\)[\s\S]*?else \{[\s\S]*?iconEl\?\.remove\(\)/);
+  assert.doesNotMatch(windowManagerSource, /<img[^>]+src=["']\s*["']/);
+  assert.match(appSource, /load\(ownerId, \{ shellContract = 'v2', shellGeometryContract = '' \} = \{\}\)/);
+  assert.match(appSource, /if \(shellContract === 'v2' && cached\.shell_contract !== 'v2'\) return null/);
+  assert.match(appSource, /shell_contract:\s*snapshot\.shellContract \|\| 'v2'/);
+  for (const moduleId of ['importer', 'spreadsheets']) {
+    assert.ok(visibleWindowModules.some((moduleDef) => moduleDef.id === moduleId));
+  }
+  assert.match(appSource, /root\.dataset\.resizeFrame = ''/);
+  assert.match(appSource, /leftResizer\.dataset\.resizerVar = '--shell-module-left-width'/);
+  assert.match(appSource, /rightResizer\.dataset\.resizerVar = '--shell-module-right-width'/);
+  assert.match(appSource, /scope:\s*root,[\s\S]*?resizers:\s*windowResizers/);
+  assert.match(appCss, /grid-template-columns:[\s\S]*?var\(--shell-module-left-width\)[\s\S]*?var\(--shell-module-right-width\)/);
+  assert.match(appCss, /shell-window-module-pane--left:empty[\s\S]*?shell-window-module-column-resizer--left/);
+  assert.match(windowManagerSource, /const resizeHandles = shellContract === 'v2' \? V2_RESIZE_HANDLES : RESIZE_HANDLES/);
+  assert.match(windowManagerSource, /V2_RESIZE_HANDLES = \['nw', 'ne', 'sw', 'se'\]/);
 });
 
 test('Knowledge raster provenance binds the exact 1024 master and every responsive derivative', () => {
@@ -134,6 +193,7 @@ test('the shared shell keeps v1 chrome while v2 exposes icon drag, four corners 
   assert.match(windowManagerSource, /winEl\.dataset\.shellWindow = 'true'/);
   assert.match(windowManagerSource, /winEl\.dataset\.shellWindowChrome = shellContract === 'v2'/);
   assert.match(windowManagerSource, /data-window-header data-window-drag-region/);
+  assert.match(windowManagerSource, /data-window-header data-window-drag-region data-shell-v2-header-row="1"/);
   assert.match(windowManagerSource, /class="shell-window-v2-icon" data-window-drag-region/);
   assert.match(windowManagerSource, /data-window-controls data-window-control-strip/);
   assert.match(windowManagerSource, /btn\.dataset\.windowControl = kind/);
@@ -178,6 +238,7 @@ test('all app launch routes converge on the shared window manager', () => {
   for (const staticAppId of ['explorer', 'code-editor', 'file-viewer']) {
     assert.match(appSource, new RegExp(`id: '${staticAppId}'`));
   }
+  assert.match(appSource, /async function openDesktopApp[\s\S]*?shellContract:\s*'v2',[\s\S]*?state\.windowManager\.create/);
   assert.match(appSource, /if \(moduleLaunchesAsDesktopApp\(mod\)\) \{/);
   assert.doesNotMatch(appSource, /moduleLaunchesAsDesktopApp\(mod\) && !options\.asModule/);
   assert.match(appSource, /Every Business OS app is hosted by the shared window manager/);

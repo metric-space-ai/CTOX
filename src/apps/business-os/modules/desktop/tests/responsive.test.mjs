@@ -27,9 +27,14 @@ assert.doesNotMatch(
 
 const selectedLabelRule = css.match(/\.desktop-icon\.selected \.desktop-icon-label\s*\{([^}]*)\}/u)?.[1] ?? '';
 assert.match(selectedLabelRule, /background:\s*transparent/u);
-assert.match(css, /--desktop-icon-cell-h:\s*116px/u);
+assert.match(css, /--desktop-icon-cell-w:\s*120px/u);
+assert.match(css, /--desktop-icon-cell-h:\s*140px/u);
+assert.match(css, /@media \(max-width: 767px\)[\s\S]*--desktop-icon-cell-h:\s*132px/u);
 assert.match(css, /\.desktop-icon:focus-visible \.desktop-icon-glyph/u);
-assert.match(js, /height:\s*116,/u, 'drag bounds use the rendered desktop icon height');
+assert.match(js, /const DEFAULT_GRID = \{ cellW: 120, cellH: 140,/u);
+assert.match(js, /const COMPACT_GRID = \{ cellW: 88, cellH: 132,/u);
+assert.match(js, /width:\s*112,[\s\S]*height:\s*136,/u, 'drag bounds use the rendered desktop icon size');
+assert.match(js, /compactWidth:\s*88,[\s\S]*compactHeight:\s*128,/u);
 assert.match(js, /return 'CTOX Backend';/u);
 assert.match(js, /el\.setAttribute\('role', 'button'\)/u);
 assert.match(js, /el\.setAttribute\('aria-label', label\)/u);

@@ -55,6 +55,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-app-store\"><defs><linearGradient id=\"grad-app-store\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#f59e0b\" /><stop offset=\"100%\" stop-color=\"#ec4899\" /></linearGradient></defs><path d=\"M21 8H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2z\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.12\" stroke=\"url(#grad-app-store)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M16 8A4 4 0 0 0 8 8\" stroke=\"url(#grad-app-store)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><rect x=\"5\" y=\"12\" width=\"5\" height=\"5\" rx=\"1\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.25\" stroke=\"url(#grad-app-store)\" stroke-width=\"1.2\"></rect><rect x=\"14\" y=\"12\" width=\"5\" height=\"5\" rx=\"1\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.25\" stroke=\"url(#grad-app-store)\" stroke-width=\"1.2\"></rect></svg>",
         "left": "Categories and Search",
         "center": "Available Applications Catalog",
@@ -136,6 +138,8 @@
       "deletable": false,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-appsec\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-appsec\" x1=\"2\" y1=\"2\" x2=\"22\" y2=\"22\" gradientUnits=\"userSpaceOnUse\"><stop stop-color=\"#0f766e\"/><stop offset=\"1\" stop-color=\"#dc2626\"/></linearGradient></defs><path d=\"M12 2.75 20 6v5.9c0 4.65-3.25 7.9-8 9.35-4.75-1.45-8-4.7-8-9.35V6l8-3.25Z\" fill=\"url(#grad-appsec)\" fill-opacity=\".12\" stroke=\"url(#grad-appsec)\" stroke-width=\"1.8\" stroke-linejoin=\"round\"/><path d=\"M8 12h8M12 8v8\" stroke=\"url(#grad-appsec)\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"12\" cy=\"12\" r=\"2.4\" fill=\"#fff\" stroke=\"url(#grad-appsec)\" stroke-width=\"1.4\"/></svg>",
         "left": "assessment launch, scope, and navigation",
         "center": "selected penetration-test evidence workbench",
@@ -227,6 +231,8 @@
       },
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
@@ -282,6 +288,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-buchhaltung\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-buchhaltung\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#818cf8\" /><stop offset=\"100%\" stop-color=\"#db2777\" /></linearGradient></defs><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\" fill=\"url(#grad-buchhaltung)\" fill-opacity=\"0.12\" stroke=\"url(#grad-buchhaltung)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M8 11h8M8 15h5M9 7h6\" stroke=\"url(#grad-buchhaltung)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Fibu-Navigationsstruktur & Kontenrahmen-Wähler",
         "center": "Aktiver Arbeitsbereich & Journale",
@@ -355,6 +363,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-calendar\"><defs><linearGradient id=\"grad-calendar\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#3b82f6\" /><stop offset=\"100%\" stop-color=\"#8b5cf6\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" ry=\"3\" fill=\"url(#grad-calendar)\" fill-opacity=\"0.12\" stroke=\"url(#grad-calendar)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-calendar)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"9\" y1=\"9\" x2=\"9\" y2=\"20\" stroke=\"url(#grad-calendar)\" stroke-width=\"1.2\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><line x1=\"15\" y1=\"9\" x2=\"15\" y2=\"20\" stroke=\"url(#grad-calendar)\" stroke-width=\"1.2\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><path d=\"M8 2v3M16 2v3\" stroke=\"url(#grad-calendar)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><rect x=\"5\" y=\"12\" width=\"3\" height=\"3\" rx=\"0.5\" fill=\"url(#grad-calendar)\" fill-opacity=\"0.3\" stroke=\"url(#grad-calendar)\" stroke-width=\"1\"></rect><rect x=\"10\" y=\"12\" width=\"4\" height=\"5\" rx=\"1\" fill=\"url(#grad-calendar)\" fill-opacity=\"0.3\" stroke=\"url(#grad-calendar)\" stroke-width=\"1\"></rect></svg>",
         "left": "Mini-Calendar & Lists",
         "center": "Calendar Grid",
@@ -422,6 +432,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-coding-agents\"><defs><linearGradient id=\"grad-coding-agents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#3b82f6\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"url(#grad-coding-agents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M9 16l-3-3 3-3M15 10l3 3-3 3\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"13\" y1=\"8\" x2=\"11\" y2=\"16\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\"></line></svg>",
         "left": "Agent selector and remote connection status",
         "center": "Unified Agent Control, subscriptions, permission bypasses, and active terminal",
@@ -492,6 +504,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
         "center": "Einwilligungen",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/consent.jpg",
@@ -556,6 +570,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-conversations\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-conversations\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#4f46e5\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><path d=\"M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z\" fill=\"url(#grad-conversations)\" fill-opacity=\"0.12\" stroke=\"url(#grad-conversations)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"9\" cy=\"11\" r=\"1.5\" fill=\"url(#grad-conversations)\"></circle><circle cx=\"13\" cy=\"11\" r=\"1.5\" fill=\"url(#grad-conversations)\"></circle><circle cx=\"17\" cy=\"11\" r=\"1.5\" fill=\"url(#grad-conversations)\"></circle></svg>",
         "left": "Conversation list filtered by channel and search",
         "center": "Selected conversation timeline with channel-aware messages",
@@ -629,6 +645,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"3\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"1.8\"/><path d=\"m5 8 7 5 7-5\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
         "left": "Mailkonten, Ordner und Kampagnengruppen",
         "center": "Gefilterte Threads, Entwürfe oder Kampagnenmails",
@@ -692,6 +710,8 @@
       "collections": [],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-importer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-importer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"12\" rx=\"2.5\" fill=\"url(#grad-importer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></rect><path d=\"M12 3v9\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M8.5 8.5 12 12l3.5-3.5\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Source: folder or GitHub",
         "center": "Transcode report and module details",
@@ -757,6 +777,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-credentials\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-credentials\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#14b8a6\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><path d=\"M12 2l8 3v6c0 5-3.5 8-8 11-4.5-3-8-6-8-11V5l8-3z\" fill=\"url(#grad-credentials)\" fill-opacity=\"0.12\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"10\" r=\"2.4\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\"></circle><path d=\"M12 12.4V16\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
         "left": "Credential catalog and status",
         "center": "Set, rotate and remove credentials",
@@ -831,6 +853,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-ctox\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"12 2 22 8 22 16 12 22 2 16 2 8\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polygon><polyline points=\"12 22 12 12 22 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 12 2 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 2 12 12\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><circle cx=\"12\" cy=\"12\" r=\"3.5\" fill=\"currentColor\" fill-opacity=\"0.88\"></circle></svg>",
         "left": "runtime scopes",
         "center": "active workbench",
@@ -915,6 +939,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-customers\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-customers\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><path d=\"M4 20V7a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v13\" fill=\"url(#grad-customers)\" fill-opacity=\"0.12\" stroke=\"url(#grad-customers)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M8 20v-5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v5\" stroke=\"url(#grad-customers)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M8 8h2M14 8h2M8 11h8\" stroke=\"url(#grad-customers)\" stroke-width=\"1.8\" stroke-linecap=\"round\"></path><circle cx=\"18\" cy=\"6\" r=\"3\" fill=\"#ffffff\" stroke=\"url(#grad-customers)\" stroke-width=\"1.5\"></circle><path d=\"M16.9 6h2.2M18 4.9v2.2\" stroke=\"url(#grad-customers)\" stroke-width=\"1.3\" stroke-linecap=\"round\"></path></svg>",
         "left": "Customer segments, saved views and review inbox",
         "center": "Customer account list, opportunity pipeline and task workbench",
@@ -986,6 +1012,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-cv-print-builder\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-cv-print-builder\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\"/><stop offset=\"100%\" stop-color=\"#64748b\"/></linearGradient></defs><path d=\"M6 3h8l4 4v14H6z\" fill=\"url(#grad-cv-print-builder)\" fill-opacity=\"0.12\" stroke=\"url(#grad-cv-print-builder)\" stroke-width=\"2\" stroke-linejoin=\"round\"/><path d=\"M14 3v5h4\" stroke=\"url(#grad-cv-print-builder)\" stroke-width=\"2\" stroke-linejoin=\"round\"/><path d=\"M8.5 12h7M8.5 15h7M8.5 18h4\" stroke=\"url(#grad-cv-print-builder)\" stroke-width=\"1.8\" stroke-linecap=\"round\"/></svg>",
         "left": "Kandidaten-Shards und CV-Import",
         "center": "Original-PDF, Split-Ansicht und Druckansicht",
@@ -1052,6 +1080,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-documents\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-documents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#3b82f6\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z\" fill=\"url(#grad-documents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"8\" y1=\"12\" x2=\"16\" y2=\"12\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"8\" y1=\"16\" x2=\"16\" y2=\"16\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"8\" y1=\"8\" x2=\"10\" y2=\"8\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line></svg>",
         "left": "document navigation and explorer",
         "center": "DOCX viewer/editor workbench",
@@ -1126,6 +1156,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
         "center": "E-Signatur",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/esign.jpg",
@@ -1187,6 +1219,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
         "center": "Bewerbungseingang",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/intake.jpg",
@@ -1249,6 +1283,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
         "center": "Interviews",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/interviews.jpg",
@@ -1331,6 +1367,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-invoices\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#f97316\" /></linearGradient></defs><path d=\"M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z\" fill=\"url(#grad-invoices)\" fill-opacity=\"0.12\" stroke=\"url(#grad-invoices)\" stroke-width=\"2\" stroke-linejoin=\"round\" /><path d=\"M15 2v6h6\" stroke=\"url(#grad-invoices)\" stroke-width=\"2\" stroke-linejoin=\"round\" /><line x1=\"9\" y1=\"12\" x2=\"15\" y2=\"12\" stroke=\"url(#grad-invoices)\" stroke-width=\"1.8\" stroke-linecap=\"round\" /><line x1=\"9\" y1=\"15\" x2=\"15\" y2=\"15\" stroke=\"url(#grad-invoices)\" stroke-width=\"1.8\" stroke-linecap=\"round\" /><line x1=\"9\" y1=\"18\" x2=\"13\" y2=\"18\" stroke=\"url(#grad-invoices)\" stroke-width=\"1.8\" stroke-linecap=\"round\" /></svg>",
         "left": "Rechnungs-Scopes, Status-Chips, Schnellfilter (ueberfaellig, Mahnstufe 1, offene Posten)",
         "center": "Editor und Detail mit Tabs (Stammdaten, Positionen, Steuern, Zahlungen, PDF, Verlauf)",
@@ -1409,6 +1447,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-iot\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-iot\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"url(#grad-iot)\" fill-opacity=\"0.18\" stroke=\"url(#grad-iot)\" stroke-width=\"2\"></circle><path d=\"M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4\" stroke=\"url(#grad-iot)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14\" stroke=\"url(#grad-iot)\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-opacity=\"0.7\"></path></svg>",
         "left": "Realm scope, asset/signal tree; right-click a signal to create an order or a webhook source",
         "center": "Dashboards of automation widgets (the three CTOX-programmed parts: trigger logic, widget code, order prompt), Karten ⇄ Liste",
@@ -1564,6 +1604,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-matching\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-matching\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#f59e0b\" /><stop offset=\"100%\" stop-color=\"#ea580c\" /></linearGradient></defs><path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\" fill=\"url(#grad-matching)\" fill-opacity=\"0.12\" stroke=\"url(#grad-matching)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\" fill=\"url(#grad-matching)\" fill-opacity=\"0.12\" stroke=\"url(#grad-matching)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"12\" r=\"2.5\" fill=\"#ffffff\" stroke=\"url(#grad-matching)\" stroke-width=\"1\"></circle></svg>",
         "left": "Requirement/source records and import task prompts",
         "center": "Configured matching tasks, queue state, and match results",
@@ -1638,6 +1680,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Subjekt- und Statusfilter",
         "center": "Nachweise mit Ablauf und Verifikationsstatus",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/nachweise.jpg",
@@ -1697,6 +1741,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-notes\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-notes\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#eab308\" /><stop offset=\"100%\" stop-color=\"#d97706\" /></linearGradient></defs><path d=\"M16 2H4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z\" fill=\"url(#grad-notes)\" fill-opacity=\"0.12\" stroke=\"url(#grad-notes)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M2 6h2M2 10h2M2 14h2M2 18h2\" stroke=\"url(#grad-notes)\" stroke-width=\"1.5\" stroke-linecap=\"round\"></path><path d=\"M18.5 2.5a2.121 2.121 0 0 1 3 3L11 16l-4 1 1-4 10.5-10.5z\" fill=\"url(#grad-notes)\" fill-opacity=\"0.3\" stroke=\"url(#grad-notes)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Folders and note list",
         "center": "Markdown editor and rich text live preview",
@@ -1781,6 +1827,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-outbound\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-outbound\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#ec4899\" /><stop offset=\"100%\" stop-color=\"#f43f5e\" /></linearGradient></defs><line x1=\"22\" y1=\"2\" x2=\"11\" y2=\"13\" stroke=\"url(#grad-outbound)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><polygon points=\"22 2 15 22 11 13 2 9 22 2\" fill=\"url(#grad-outbound)\" fill-opacity=\"0.12\" stroke=\"url(#grad-outbound)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polygon><path d=\"M6 19c3-1 6-1 9-3\" stroke=\"url(#grad-outbound)\" stroke-width=\"1.5\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></path></svg>",
         "left": "campaign selection and source import",
         "center": "company qualification and pipeline workbench",
@@ -1846,6 +1894,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
         "center": "Vermittlungen",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/placements.jpg",
@@ -1908,6 +1958,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-reports\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-reports\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#ef4444\" /><stop offset=\"100%\" stop-color=\"#f97316\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-reports)\" fill-opacity=\"0.12\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M18 17V10M12 17V6M6 17v-4\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"6\" r=\"2\" fill=\"#ffffff\" stroke=\"url(#grad-reports)\" stroke-width=\"1.2\"></circle></svg>",
         "left": "Bug and feature filters and history",
         "center": "Selected report evidence, CTOX change log, and rollback",
@@ -2060,6 +2112,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-shiftflow\"><defs><linearGradient id=\"grad-shiftflow\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" fill=\"url(#grad-shiftflow)\" fill-opacity=\"0.12\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"2\" stroke-linecap=\"round\"></line><line x1=\"9\" y1=\"9\" x2=\"9\" y2=\"20\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><line x1=\"15\" y1=\"9\" x2=\"15\" y2=\"20\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><rect x=\"5\" y=\"12\" width=\"8\" height=\"4\" rx=\"1.5\" fill=\"url(#grad-shiftflow)\" fill-opacity=\"0.3\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\"></rect><circle cx=\"17\" cy=\"15\" r=\"2.5\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1.2\"></circle><polyline points=\"17 13.5 17 15 18 15\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\" stroke-linecap=\"round\"></polyline></svg>",
         "left": "team status, absence scopes and department selection",
         "center": "interactive scheduler timeline and timesheet grid",
@@ -2133,6 +2187,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-spreadsheets\"><defs><linearGradient id=\"grad-spreadsheets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#10b981\" /><stop offset=\"100%\" stop-color=\"#059669\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-spreadsheets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"9\" y1=\"3\" x2=\"9\" y2=\"21\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"15\" x2=\"21\" y2=\"15\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><path d=\"M5 17l3-3 4 2 4-4\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"16\" cy=\"12\" r=\"1.5\" fill=\"#ffffff\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1\"></circle></svg>",
         "left": "spreadsheet navigation and explorer",
         "center": "Spreadsheet viewer/editor workbench",
@@ -2207,6 +2263,8 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
         "center": "Vorstellungen",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/submissions.jpg",
@@ -2293,6 +2351,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Support queue, saved views, and channel filters",
         "center": "Selected support conversation timeline and composer",
         "right": "Customer context, ticket links, SLA, macros, and CTOX Agent suggestions",
@@ -2365,6 +2425,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-threads\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-threads\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><path d=\"M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H10l-5 4v-4.2A2.5 2.5 0 0 1 4 12.5z\" fill=\"url(#grad-threads)\" fill-opacity=\"0.12\" stroke=\"url(#grad-threads)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 8h8M8 11h5\" stroke=\"url(#grad-threads)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><circle cx=\"18\" cy=\"18\" r=\"3\" fill=\"#fff\" stroke=\"url(#grad-threads)\" stroke-width=\"1.5\"></circle><path d=\"M18 16.6v1.7l1.2.8\" stroke=\"url(#grad-threads)\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "personal inbox, approvals, and source filters",
         "center": "durable thread timeline tied to app records",
@@ -2445,6 +2507,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-tickets\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-tickets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><path d=\"M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z\" fill=\"url(#grad-tickets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M15 3v5h5\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 12h8M8 16h6\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
         "left": "ticket inbox, source and state filters",
         "center": "selected ticket timeline and case evidence",

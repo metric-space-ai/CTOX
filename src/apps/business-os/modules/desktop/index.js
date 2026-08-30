@@ -39,13 +39,13 @@ const DESKTOP_ICON_PERSISTED_FIELDS = new Set([
   'sort_index',
   'updated_at_ms',
 ]);
-const DEFAULT_GRID = { cellW: 104, cellH: 120, offset: 24 };
-const COMPACT_GRID = { cellW: 88, cellH: 116, offset: 12 };
+const DEFAULT_GRID = { cellW: 120, cellH: 140, offset: 24 };
+const COMPACT_GRID = { cellW: 88, cellH: 132, offset: 12 };
 const ICON_METRICS = {
-  width: 96,
-  height: 116,
-  compactWidth: 80,
-  compactHeight: 108,
+  width: 112,
+  height: 136,
+  compactWidth: 88,
+  compactHeight: 128,
 };
 
 const FALLBACK_LABELS = {
@@ -1119,8 +1119,8 @@ export async function mount(ctx) {
       return { ...COMPACT_GRID, compact: true };
     }
     return {
-      cellW: Math.max(104, layout?.grid_cell_w || DEFAULT_GRID.cellW),
-      cellH: Math.max(120, layout?.grid_cell_h || DEFAULT_GRID.cellH),
+      cellW: Math.max(DEFAULT_GRID.cellW, layout?.grid_cell_w || DEFAULT_GRID.cellW),
+      cellH: Math.max(DEFAULT_GRID.cellH, layout?.grid_cell_h || DEFAULT_GRID.cellH),
       offset: layout?.grid_offset || DEFAULT_GRID.offset,
       compact: false,
     };

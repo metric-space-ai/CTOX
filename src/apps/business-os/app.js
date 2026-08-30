@@ -26,8 +26,9 @@ import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from '
 import {
   launchesInWindow,
   resolvePresentation,
+  resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260816-browser-sync-guards-v141';
+} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v295';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -80,7 +81,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-business-os-crew-v294';
+const APP_BUILD = '20260830-global-shell-v2-raster-v296';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -1669,7 +1670,7 @@ function isLegacyWindowGeometryDocument(payload) {
 
 function createWindowGeometryPersistence() {
   return {
-    load(ownerId, { shellContract = 'v1', shellGeometryContract = '' } = {}) {
+    load(ownerId, { shellContract = 'v2', shellGeometryContract = '' } = {}) {
       if (!ownerId) return null;
       const cached = state.windowGeometryCache.get(ownerId);
       if (!cached) return null;
@@ -1707,7 +1708,7 @@ function createWindowGeometryPersistence() {
       const next = {
         id: windowGeometryRecordId(ownerId),
         owner_id: ownerId,
-        shell_contract: snapshot.shellContract || 'v1',
+        shell_contract: snapshot.shellContract || 'v2',
         shell_geometry_contract: snapshot.shellGeometryContract || '',
         workspace_scope: scope.workspace_scope,
         actor_scope: scope.actor_scope,
@@ -2413,9 +2414,17 @@ async function toggleShellV2VersionMenu(mod, context = {}) {
 }
 
 function wireShellV2ModuleTitle(mod, win, scope) {
-  if (mod?.layout?.shell_contract !== 'v2' || !win?.id || !scope) return;
-  const trigger = scope.querySelector('.knowledge-left > .ctox-pane-header .ctox-pane-title');
-  if (!trigger) return;
+  if (resolveShellWindowContract(mod)?.contract !== 'v2' || !win?.id || !scope) return;
+  let trigger = scope.querySelector('.ctox-pane-header .ctox-pane-title');
+  if (!trigger) {
+    const shellHeader = win.element?.querySelector?.('[data-window-header]');
+    if (!shellHeader) return;
+    trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'shell-v2-window-title-fallback';
+    trigger.textContent = moduleDisplayTitle(mod);
+    shellHeader.prepend(trigger);
+  }
   const lifecycle = appLifecycleState(mod, { session: state.session, governance: state.governance });
   const version = lifecycle.versionLabel || String(mod.version || mod.app_version || 'Version —');
   trigger.classList.add('shell-v2-module-title-trigger');
@@ -4194,6 +4203,7 @@ const DESKTOP_APPS = [
     id: 'explorer',
     title: 'Files',
     glyph: '📁',
+    iconAsset: 'shared/assets/workjet-icons/operator-selection-v1/documents.jpg',
     category: 'workspace',
     defaultWidth: 720,
     defaultHeight: 460,
@@ -4203,6 +4213,7 @@ const DESKTOP_APPS = [
     id: 'code-editor',
     title: 'Source Editor',
     glyph: '⌘',
+    iconAsset: 'shared/assets/workjet-icons/operator-selection-v1/coding-agents.jpg',
     category: 'development',
     defaultWidth: 980,
     defaultHeight: 640,
@@ -4212,6 +4223,7 @@ const DESKTOP_APPS = [
     id: 'file-viewer',
     title: 'File Viewer',
     glyph: '◫',
+    iconAsset: 'shared/assets/workjet-icons/operator-selection-v1/documents.jpg',
     category: 'workspace',
     defaultWidth: 760,
     defaultHeight: 560,
@@ -4269,6 +4281,8 @@ function moduleAppearsAsWindowTarget(mod) {
 
 function desktopAppDescriptorForModule(mod) {
   const presentation = resolvePresentation(mod);
+  const shell = resolveShellWindowContract(mod);
+  const operatorIcon = operatorIconFor(mod.id);
   return {
     id: mod.id,
     title: moduleDisplayTitle(mod),
@@ -4280,11 +4294,11 @@ function desktopAppDescriptorForModule(mod) {
     minHeight: presentation.minimumSize.height,
     defaultMode: presentation.defaultMode,
     multiInstance: presentation.multiInstance,
-    shellContract: mod?.layout?.shell_contract === 'v2' ? 'v2' : 'v1',
-    shellGeometryContract: String(mod?.layout?.shell_geometry_contract || '').trim(),
+    shellContract: shell?.contract || 'v2',
+    shellGeometryContract: shell?.geometryContract || '',
     shellHeaderRows: Math.max(2, Number.parseInt(mod?.layout?.shell_header_rows, 10) || 2),
     shellIconRows: Math.max(2, Number.parseInt(mod?.layout?.shell_icon_rows, 10) || 2),
-    iconAsset: String(mod?.layout?.icon_asset || '').trim(),
+    iconAsset: String(operatorIcon?.asset || mod?.layout?.icon_asset || '').trim(),
     iconSrcSet: String(mod?.layout?.icon_asset_srcset || '').trim(),
     framePalette: mod?.layout?.frame_palette || null,
   };
@@ -4302,7 +4316,7 @@ function windowHeaderOptionsForModule(mod) {
     module: mod,
     canOpenSource: canViewModuleSource(mod),
   });
-  if (mod?.layout?.shell_contract === 'v2') {
+  if (resolveShellWindowContract(mod)?.contract === 'v2') {
     return {
       headerBadges: [],
       headerActions: [],
@@ -4383,6 +4397,13 @@ async function openDesktopApp(appId, options = {}) {
     minWidth: options.minWidth || entry.minWidth,
     minHeight: options.minHeight || entry.minHeight,
     ownerId: `desktop-app:${entry.id}`,
+    shellContract: 'v2',
+    shellGeometryContract: 'business-os-v2-global-1',
+    shellHeaderRows: 2,
+    shellIconRows: 2,
+    iconAsset: entry.iconAsset,
+    iconSrcSet: entry.iconSrcSet,
+    iconAnchorRect: () => desktopIconAnchorRect(entry.id),
   });
   applyWorkjetCategory(win.element, entry.category || 'imported');
   let teardown = null;
@@ -4554,7 +4575,7 @@ async function openWindowedModule(mod, options = {}) {
     state.windowManager?.refreshV2Chrome?.(win.id);
     const windowResizers = [];
     cleanupWindowResizers = setupModuleResizers(mod, {
-      scope: content,
+      scope: root,
       resizers: windowResizers,
     });
   } catch (error) {
@@ -4620,9 +4641,18 @@ function createWindowedModuleHost(mod) {
   const root = document.createElement('div');
   root.className = 'module-root shell-window-module-root';
   root.dataset.moduleRoot = mod.id;
+  root.dataset.resizeFrame = '';
   const left = document.createElement('aside');
   left.className = 'module-context shell-window-module-pane shell-window-module-pane--left';
   left.dataset.moduleLeft = '';
+  const leftResizer = document.createElement('button');
+  leftResizer.type = 'button';
+  leftResizer.className = 'ctox-column-resizer shell-window-module-column-resizer shell-window-module-column-resizer--left';
+  leftResizer.dataset.resizer = 'left';
+  leftResizer.dataset.resizerVar = '--shell-module-left-width';
+  leftResizer.dataset.resizerMin = '180';
+  leftResizer.dataset.resizerMax = '520';
+  leftResizer.setAttribute('aria-label', `${moduleDisplayTitle(mod)}: linke Spalte skalieren`);
   const content = document.createElement('main');
   content.className = 'module-content';
   content.dataset.moduleContent = '';
@@ -4638,7 +4668,15 @@ function createWindowedModuleHost(mod) {
   const right = document.createElement('aside');
   right.className = 'module-context shell-window-module-pane shell-window-module-pane--right';
   right.dataset.moduleRight = '';
-  root.append(left, content, right);
+  const rightResizer = document.createElement('button');
+  rightResizer.type = 'button';
+  rightResizer.className = 'ctox-column-resizer shell-window-module-column-resizer shell-window-module-column-resizer--right';
+  rightResizer.dataset.resizer = 'right';
+  rightResizer.dataset.resizerVar = '--shell-module-right-width';
+  rightResizer.dataset.resizerMin = '220';
+  rightResizer.dataset.resizerMax = '600';
+  rightResizer.setAttribute('aria-label', `${moduleDisplayTitle(mod)}: rechte Spalte skalieren`);
+  root.append(left, leftResizer, content, rightResizer, right);
   return { root, content, left, right };
 }
 
@@ -8991,9 +9029,10 @@ async function registerCustomModuleIcons() {
       registerSvgIcon(mod.id, inlineSvg);
       continue;
     }
-    // Optional external icon assets must not hold the whole workspace boot.
-    // resolveModuleIconSvg() caches the in-flight promise, so overlapping
-    // catalog refreshes still issue at most one request per module.
+    // External icons are optional decoration. A slow or wedged asset request
+    // must never hold the workspace bootstrap before the desktop is usable.
+    // resolveModuleIconSvg() caches its in-flight request per module, so
+    // overlapping catalog refreshes still issue at most one request.
     void resolveModuleIconSvg(mod)
       .then((svgIcon) => {
         if (svgIcon) registerSvgIcon(mod.id, svgIcon);
