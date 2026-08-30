@@ -23,6 +23,7 @@ const {
   normalizeReportItems,
   resolveReportsContextRecord,
   resolveReportsDataState,
+  showReportNotification,
 } = await importBrowserBundle('./index.js');
 
 const t = (_key, fallback) => fallback;
@@ -143,6 +144,26 @@ test('gates data empties on canonical readiness: unready renders syncing, ready 
   assert.equal(resolveReportsDataState({ sourceCount: 0, readiness: { ready: true, syncing: false } }), 'empty');
   // No readiness facade (legacy ctx) => previous behaviour: plain empty.
   assert.equal(resolveReportsDataState({ sourceCount: 0, readiness: null }), 'empty');
+});
+
+test('delegation feedback uses the shell notification contract', () => {
+  const shown = [];
+  showReportNotification({
+    show(options) {
+      shown.push(options);
+      return 'toast-1';
+    },
+  }, {
+    type: 'error',
+    title: 'Delegation fehlgeschlagen',
+    message: 'Native write rejected.',
+  });
+
+  assert.deepEqual(shown, [{
+    type: 'error',
+    title: 'Delegation fehlgeschlagen',
+    message: 'Native write rejected.',
+  }]);
 });
 
 test('right-click context resolves the clicked report before selected fallback', () => {

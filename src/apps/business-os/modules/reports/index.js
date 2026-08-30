@@ -654,14 +654,24 @@ function openDelegateDialog(report) {
   promptInput.value = delegationPromptFor(report);
   wrap.querySelector('[data-delegate-cancel]').addEventListener('click', () => wrap.remove());
   wrap.addEventListener('click', (event) => { if (event.target === wrap) wrap.remove(); });
-  wrap.querySelector('[data-delegate-submit]').addEventListener('click', async () => {
+  const submitButton = wrap.querySelector('[data-delegate-submit]');
+  submitButton.addEventListener('click', async () => {
     const target = wrap.querySelector('#delegate-target').value;
     const reviewer = wrap.querySelector('#delegate-reviewer').value.trim();
     const prompt = promptInput.value.trim();
     if (!target || !reviewer || prompt.length < 20) {
-      state.ctx.notifications?.notify?.({ title: 'Delegation unvollständig', body: 'Ziel-App, Reviewer und ein aussagekräftiger Auftrag sind nötig.' });
+      showReportNotification(state.ctx.notifications, {
+        type: 'warning',
+        title: 'Delegation unvollständig',
+        message: 'Ziel-App, Reviewer und ein aussagekräftiger Auftrag sind nötig.',
+      });
       return;
     }
+    if (submitButton.disabled) return;
+    submitButton.disabled = true;
+    submitButton.setAttribute('aria-busy', 'true');
+    const originalSubmitLabel = submitButton.textContent;
+    submitButton.textContent = 'Wird eingereicht …';
     try {
       await dispatchModuleCommand({
         commandType: 'threads.ctox_approval.request',
@@ -687,12 +697,39 @@ function openDelegateDialog(report) {
         },
       });
       wrap.remove();
-      state.ctx.notifications?.notify?.({ title: 'Zur Freigabe eingereicht', body: `Der Auftrag wartet in Threads auf die Freigabe.` });
+      showReportNotification(state.ctx.notifications, {
+        type: 'success',
+        title: 'Zur Freigabe eingereicht',
+        message: 'Der Auftrag wartet in Threads auf die Freigabe.',
+      });
       await refreshReports({});
     } catch (error) {
-      state.ctx.notifications?.notify?.({ title: 'Delegation fehlgeschlagen', body: safeErrorMessage(error) });
+      showReportNotification(state.ctx.notifications, {
+        type: 'error',
+        title: 'Delegation fehlgeschlagen',
+        message: safeErrorMessage(error),
+      });
+    } finally {
+      if (submitButton.isConnected) {
+        submitButton.disabled = false;
+        submitButton.removeAttribute('aria-busy');
+        submitButton.textContent = originalSubmitLabel;
+      }
     }
   });
+}
+
+export function showReportNotification(notifications, options) {
+  if (typeof notifications?.show === 'function') {
+    return notifications.show(options);
+  }
+  if (typeof notifications?.notify === 'function') {
+    return notifications.notify({
+      ...options,
+      body: options?.message || '',
+    });
+  }
+  return null;
 }
 
 function syncGrammarSurfaces(allItems, searched) {

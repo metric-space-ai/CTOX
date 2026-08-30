@@ -410,7 +410,16 @@ pub(super) fn may_accept_peer_document_write(
             .as_ref()
             .and_then(|value| value.get("capability_token"))
             .and_then(Value::as_str);
-        if command_token != Some(token) {
+        // The command bus and the WebRTC runtime can import the shared token
+        // provider through different cache-busted module URLs during a rolling
+        // shell release. Both tokens are then native-signed and current, but
+        // not byte-identical. Authorize the command only when its token is
+        // independently valid and resolves to the exact same durable actor as
+        // the peer token. Role changes, grant changes, revocation, expiry, and
+        // device binding remain server-authoritative in the verifier.
+        let command_actor = command_token
+            .and_then(|command_token| store::verify_webrtc_capability_actor(root, command_token));
+        if command_actor.as_ref() != Some(&(user_id.clone(), role.clone())) {
             return false;
         }
     }
@@ -6166,6 +6175,74 @@ mod tests {
             &alice_session,
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn peer_command_write_accepts_refreshed_token_for_same_actor_only() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let now = now_ms();
+        let (peer_token, _) = store::issue_business_os_capability_token_for_managed_user(
+            temp.path(),
+            "alice",
+            "Alice",
+            "admin",
+            now,
+        )?;
+        let (refreshed_command_token, _) =
+            store::issue_business_os_capability_token_for_managed_user(
+                temp.path(),
+                "alice",
+                "Alice",
+                "admin",
+                now + 1,
+            )?;
+        let (foreign_command_token, _) =
+            store::issue_business_os_capability_token_for_managed_user(
+                temp.path(),
+                "bob",
+                "Bob",
+                "admin",
+                now + 1,
+            )?;
+
+        assert_ne!(peer_token, refreshed_command_token);
+        assert!(may_accept_peer_document_write(
+            temp.path(),
+            &peer_token,
+            "business_commands",
+            &json!({
+                "id": "cmd-refreshed",
+                "client_context": {
+                    "actor": { "id": "alice" },
+                    "capability_token": refreshed_command_token,
+                },
+            }),
+        ));
+        assert!(!may_accept_peer_document_write(
+            temp.path(),
+            &peer_token,
+            "business_commands",
+            &json!({
+                "id": "cmd-foreign",
+                "client_context": {
+                    "actor": { "id": "bob" },
+                    "capability_token": foreign_command_token,
+                },
+            }),
+        ));
+        assert!(!may_accept_peer_document_write(
+            temp.path(),
+            &peer_token,
+            "business_commands",
+            &json!({
+                "id": "cmd-invalid",
+                "client_context": {
+                    "actor": { "id": "alice" },
+                    "capability_token": "not-a-token",
+                },
+            }),
+        ));
         Ok(())
     }
 
