@@ -28,7 +28,7 @@ import {
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v295';
+} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v296';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
