@@ -167,20 +167,13 @@
       z-index: 1;
       width: var(--size);
       height: var(--size);
-      border-radius: var(--rounding, 46% 54% 50% 50% / 54% 48% 52% 46%);
+      border-radius: 0;
       background: var(--creature-color);
       box-shadow: 0 11px 25px var(--creature-shadow), inset 0 -3px 0 rgba(0,0,0,.1);
       transform-origin: 50% 85%;
     }
-    .creature.shape-round { border-radius: 50%; }
-    .creature.shape-blob { border-radius: var(--rounding, 46% 54% 50% 50% / 54% 48% 52% 46%); }
-    .creature.shape-square { border-radius: 23% 29% 22% 27% / 25% 21% 28% 24%; }
-    .creature.shape-triangle {
-      border-radius: 0;
-      clip-path: polygon(50% 2%, 98% 94%, 2% 94%);
-      transform-origin: 50% 78%;
-    }
-    .creature.shape-triangle .face { transform: translateY(12%) scale(.86); }
+    .creature.geometry-pointed { transform-origin: 50% 78%; }
+    .creature.geometry-pointed .face { transform: translateY(10%) scale(.88); }
     .face { position: absolute; inset: 0; }
     .eye {
       position: absolute;
@@ -210,7 +203,7 @@
     .blocked .eye { height: 7px; top: 39%; border-radius: 10px 10px 2px 2px; transform: rotate(8deg); }
     .blocked .eye.right { transform: rotate(-8deg); }
     .failed .creature {
-      clip-path: none;
+      clip-path: none !important;
       border-radius: 48% 52% 34% 31% / 50% 48% 29% 26%;
       transform-origin: 50% 100%;
     }
@@ -271,7 +264,7 @@
       <span id="seed-readout"></span>
     </div>
     <section id="gallery" class="gallery" aria-label="Status-Animationen"></section>
-    <p class="footer-note">Jede Instanz besitzt eine eigene Form. Aktive Bewegungen werden nach jedem Segment neu berechnet statt wiederholt. Fehler taumeln einmal, zerfließen und bleiben in der X-X-Pose.</p>
+    <p class="footer-note">Kontur und Bewegung werden deterministisch aus Seed und Zeitfeld berechnet. Überlagerte inkommensurable Frequenzen erzeugen keinen Wiederholungszyklus. Fehler taumeln einmal, zerfließen und bleiben in der X-X-Pose.</p>
   </main>
 
   <script>
@@ -295,11 +288,12 @@
       ];
       const gallery = document.querySelector('#gallery');
       const seedReadout = document.querySelector('#seed-readout');
-      let seed = Math.floor(Math.random() * 100000);
+      let seed = 27183;
       let motionEnabled = true;
-      let motionGeneration = 0;
-      const motionTimers = new Set();
-      const motionAnimations = new Set();
+      let motionFrame = 0;
+      let motionStartedAt = 0;
+      let motionProfiles = [];
+      const shapeRegistry = new Map();
 
       function hash(input) {
         let value = 2166136261;
@@ -310,136 +304,219 @@
         return (value >>> 0) / 4294967296;
       }
       function pick(value, min, max) { return min + (max - min) * value; }
-      function random(min, max) {
-        const sample = new Uint32Array(1);
-        crypto.getRandomValues(sample);
-        return min + (max - min) * (sample[0] / 4294967295);
+      function unit(key, channel) { return hash(`${key}:${channel}`); }
+      function signedPower(value, power) {
+        return Math.sign(value) * Math.pow(Math.abs(value), power);
+      }
+      function toPolygon(points) {
+        return `polygon(${points.map(([x, y]) => `${x.toFixed(2)}% ${y.toFixed(2)}%`).join(',')})`;
+      }
+      function proceduralShape(key) {
+        const familySelector = unit(key, 'family');
+        const points = [];
+        let family = 'fourier';
+        if (familySelector < .38) {
+          const count = 28;
+          const rx = pick(unit(key, 'rx'), 39, 47);
+          const ry = pick(unit(key, 'ry'), 38, 47);
+          const harmonic2 = pick(unit(key, 'h2'), .025, .085);
+          const harmonic3 = pick(unit(key, 'h3'), .018, .06);
+          const phase2 = unit(key, 'p2') * Math.PI * 2;
+          const phase3 = unit(key, 'p3') * Math.PI * 2;
+          for (let index = 0; index < count; index += 1) {
+            const angle = (index / count) * Math.PI * 2;
+            const radius = 1
+              + harmonic2 * Math.sin(angle * 2 + phase2)
+              + harmonic3 * Math.sin(angle * 3 + phase3);
+            points.push([50 + Math.cos(angle) * rx * radius, 50 + Math.sin(angle) * ry * radius]);
+          }
+        } else if (familySelector < .78) {
+          family = 'superellipse';
+          const count = 28;
+          const exponent = pick(unit(key, 'exponent'), 2.5, 6.8);
+          const rx = pick(unit(key, 'rx'), 38, 47);
+          const ry = pick(unit(key, 'ry'), 38, 46);
+          const asymmetry = pick(unit(key, 'asymmetry'), -.045, .045);
+          for (let index = 0; index < count; index += 1) {
+            const angle = (index / count) * Math.PI * 2;
+            const local = 1 + asymmetry * Math.sin(angle * 3 + unit(key, 'phase') * Math.PI * 2);
+            points.push([
+              50 + signedPower(Math.cos(angle), 2 / exponent) * rx * local,
+              50 + signedPower(Math.sin(angle), 2 / exponent) * ry / local,
+            ]);
+          }
+        } else {
+          family = 'pointed';
+          const vertices = [[50, 5], [95, 91], [5, 91]];
+          const stepsPerEdge = 9;
+          for (let edge = 0; edge < vertices.length; edge += 1) {
+            const from = vertices[edge];
+            const to = vertices[(edge + 1) % vertices.length];
+            for (let step = 0; step < stepsPerEdge; step += 1) {
+              const ratio = step / stepsPerEdge;
+              const index = edge * stepsPerEdge + step;
+              const ripple = Math.sin(index * 1.73 + unit(key, 'edge-phase') * Math.PI * 2)
+                * pick(unit(key, `edge-${edge}`), .35, 1.45);
+              points.push([
+                from[0] + (to[0] - from[0]) * ratio + ripple,
+                from[1] + (to[1] - from[1]) * ratio + ripple * .45,
+              ]);
+            }
+          }
+        }
+        return { family, points };
       }
       function specimen(status, index) {
-        const n = hash(`${seed}:${status.id}:${index}`);
-        const n2 = hash(`${seed}:shape:${status.id}:${index}`);
-        const n3 = hash(`${seed}:color:${status.id}:${index}`);
+        const key = `${seed}:${status.id}:${index}`;
+        const n3 = hash(`${key}:color`);
         const color = colors[Math.floor(n3 * colors.length)];
-        const duration = pick(n, 2.7, 5.8).toFixed(2);
-        const delay = (-pick(n2, 0, 5.5)).toFixed(2);
         const size = pick(n3, 54, 72).toFixed(0);
-        const lean = pick(n2, -7, 7).toFixed(1);
-        const shapes = ['round', 'blob', 'square', 'triangle'];
-        const shapeOffset = Math.floor(hash(`${seed}:shape-family:${status.id}`) * shapes.length);
-        const shape = shapes[(shapeOffset + index) % shapes.length];
-        const radii = `${pick(n, 38, 52).toFixed(0)}% ${pick(n2, 46, 62).toFixed(0)}% ${pick(n3, 42, 57).toFixed(0)}% ${pick(n, 43, 59).toFixed(0)}% / ${pick(n2, 47, 60).toFixed(0)}% ${pick(n3, 40, 56).toFixed(0)}% ${pick(n, 46, 59).toFixed(0)}% ${pick(n2, 43, 58).toFixed(0)}%`;
-        return `<div class="specimen ${status.mode}" data-motion="${status.id}" style="--creature-color:${color[0]};--creature-shadow:${color[1]};--size:${size}px;--duration:${duration}s;--delay:${delay}s;--index:${index};--lean:${lean}deg;--rounding:${radii}" aria-label="${status.label} Variante ${index + 1}"><div class="creature shape-${shape}" data-shape="${shape}"><span class="face"><i class="eye left"></i><i class="eye right"></i><i class="mouth"></i></span></div></div>`;
+        const geometry = proceduralShape(key);
+        shapeRegistry.set(key, geometry);
+        const geometryClass = geometry.family === 'pointed' ? ' geometry-pointed' : '';
+        return `<div class="specimen ${status.mode}" data-motion="${status.id}" data-creature-key="${key}" style="--creature-color:${color[0]};--creature-shadow:${color[1]};--size:${size}px;--index:${index}" aria-label="${status.label} Variante ${index + 1}"><div class="creature${geometryClass}" data-shape="procedural-${geometry.family}" style="clip-path:${toPolygon(geometry.points)}"><span class="face"><i class="eye left"></i><i class="eye right"></i><i class="mouth"></i></span></div></div>`;
       }
 
       function clearMotion({ reset = true } = {}) {
-        motionGeneration += 1;
-        motionTimers.forEach((timer) => clearTimeout(timer));
-        motionTimers.clear();
-        motionAnimations.forEach((animation) => animation.cancel());
-        motionAnimations.clear();
-        if (reset) gallery.querySelectorAll('.creature').forEach((node) => { node.style.transform = ''; });
+        if (motionFrame) cancelAnimationFrame(motionFrame);
+        motionFrame = 0;
+        motionProfiles = [];
+        if (reset) gallery.querySelectorAll('[data-creature-key]').forEach((specimenNode) => {
+          const node = specimenNode.querySelector('.creature');
+          const geometry = shapeRegistry.get(specimenNode.dataset.creatureKey);
+          node.style.transform = '';
+          if (geometry && specimenNode.dataset.motion !== 'failed') node.style.clipPath = toPolygon(geometry.points);
+        });
       }
 
-      function motionSegment(mode, start) {
-        if (mode === 'working') return {
-          frames: [
-            { transform: start, offset: 0 },
-            { transform: `translate(${random(-2, 2)}px, 3px) rotate(${random(-3, 3)}deg) scale(1.12,.82)`, offset: .18 },
-            { transform: `translate(${random(-3, 3)}px, ${random(-21, -15)}px) rotate(${random(-7, 7)}deg) scale(.88,1.18)`, offset: .48 },
-            { transform: `translate(${random(-2, 2)}px, -2px) rotate(${random(-4, 4)}deg) scale(1.05,.94)`, offset: .78 },
-            { transform: `translate(${random(-1, 1)}px, 0) rotate(${random(-2, 2)}deg) scale(1)`, offset: 1 },
-          ], duration: random(720, 1320), pause: random(120, 720), easing: 'cubic-bezier(.25,.9,.35,1)',
-        };
-        if (mode === 'thinking') return {
-          frames: [
-            { transform: start, offset: 0 },
-            { transform: `translate(-4px, 1px) rotate(${random(-18, -11)}deg) scale(.98,1.02)`, offset: .34 },
-            { transform: `translate(5px, -2px) rotate(${random(10, 17)}deg) scale(1.01,.99)`, offset: .7 },
-            { transform: `translate(${random(-1, 1)}px, 0) rotate(${random(-3, 3)}deg)`, offset: 1 },
-          ], duration: random(2600, 5200), pause: random(500, 1900), easing: 'cubic-bezier(.42,0,.35,1)',
-        };
-        if (mode === 'tool') return {
-          frames: [
-            { transform: start, offset: 0 },
-            { transform: `translate(${random(10, 16)}px, -3px) rotate(${random(7, 13)}deg) scale(1.08,.9)`, offset: .18 },
-            { transform: `translate(${random(-13, -8)}px, 2px) rotate(${random(-12, -6)}deg) scale(.94,1.08)`, offset: .36 },
-            { transform: `translate(${random(7, 11)}px, -1px) rotate(${random(4, 8)}deg)`, offset: .55 },
-            { transform: `translate(${random(-5, -2)}px, 1px) rotate(${random(-5, -2)}deg)`, offset: .74 },
-            { transform: 'translate(0,0) rotate(0deg) scale(1)', offset: 1 },
-          ], duration: random(300, 590), pause: random(900, 3000), easing: 'cubic-bezier(.15,.85,.25,1)',
-        };
-        const radiusX = random(12, 18);
-        const radiusY = random(8, 15);
-        const direction = random(0, 1) > .5 ? 1 : -1;
-        return {
-          frames: [
-            { transform: 'translate(0,0) rotate(0deg)', offset: 0 },
-            { transform: `translate(${radiusX * direction}px, ${-radiusY * .55}px) rotate(${13 * direction}deg)`, offset: .25 },
-            { transform: `translate(0, ${-radiusY}px) rotate(0deg)`, offset: .5 },
-            { transform: `translate(${-radiusX * direction}px, ${-radiusY * .55}px) rotate(${-13 * direction}deg)`, offset: .75 },
-            { transform: 'translate(0,0) rotate(0deg)', offset: 1 },
-          ], duration: random(1900, 3900), pause: random(180, 1050), easing: 'cubic-bezier(.45,.05,.45,.95)',
-        };
+      function smoothstep(edge0, edge1, value) {
+        const ratio = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+        return ratio * ratio * (3 - 2 * ratio);
       }
 
-      function scheduleMotion(node, mode, generation, wait = 0) {
-        const timer = setTimeout(() => {
-          motionTimers.delete(timer);
-          if (!motionEnabled || generation !== motionGeneration || !node.isConnected) return;
-          const start = node.style.transform || 'translate(0, 0) rotate(0deg)';
-          const segment = motionSegment(mode, start);
-          const animation = node.animate(segment.frames, {
-            duration: segment.duration,
-            easing: segment.easing,
-            fill: 'forwards',
-          });
-          motionAnimations.add(animation);
-          animation.finished.then(() => {
-            motionAnimations.delete(animation);
-            if (generation !== motionGeneration || !node.isConnected) return;
-            node.style.transform = segment.frames[segment.frames.length - 1].transform;
-            animation.cancel();
-            scheduleMotion(node, mode, generation, segment.pause);
-          }).catch(() => {});
-        }, wait);
-        motionTimers.add(timer);
+      function bodyPolygon(profile, time, pulse) {
+        const mode = profile.mode;
+        const phaseA = time * profile.frequencyA + profile.phaseA;
+        const phaseB = time * profile.frequencyB + profile.phaseB;
+        let stretchX = 1;
+        let stretchY = 1;
+        let localAmplitude = .006;
+        if (mode === 'working') {
+          const squash = Math.sin(phaseA) * .032 + Math.sin(phaseB) * .012;
+          stretchX += squash;
+          stretchY -= squash * 1.15;
+          localAmplitude = .014;
+        } else if (mode === 'thinking') {
+          stretchX += Math.sin(phaseA) * .012;
+          stretchY += Math.sin(phaseB) * .018;
+          localAmplitude = .019;
+        } else if (mode === 'tool') {
+          stretchX += pulse * .09;
+          stretchY -= pulse * .1;
+          localAmplitude = .008 + pulse * .025;
+        } else if (mode === 'review') {
+          localAmplitude = .026;
+        }
+        return toPolygon(profile.geometry.points.map(([x, y]) => {
+          const angle = Math.atan2(y - 50, x - 50);
+          const contourWave = Math.sin(angle * 2 + phaseA) * localAmplitude
+            + Math.sin(angle * 3 - phaseB) * localAmplitude * .45;
+          const asymmetry = mode === 'thinking' ? Math.sin(angle + phaseA * .45) * .018 : 0;
+          const radial = 1 + contourWave + asymmetry;
+          return [
+            50 + (x - 50) * stretchX * radial,
+            50 + (y - 50) * stretchY * (1 - contourWave * .5),
+          ];
+        }));
+      }
+
+      function tickMotion(now) {
+        if (!motionEnabled) return;
+        const time = (now - motionStartedAt) / 1000;
+        motionProfiles.forEach((profile) => {
+          if (!profile.node.isConnected) return;
+          const phaseA = time * profile.frequencyA + profile.phaseA;
+          const phaseB = time * profile.frequencyB + profile.phaseB;
+          if (profile.mode === 'failed') {
+            const elapsed = Math.max(0, time - profile.delay);
+            const progress = Math.min(1, elapsed / 1.55);
+            if (progress < .48) {
+              const decay = 1 - progress / .48;
+              const shake = Math.sin(progress * Math.PI * 8) * 7 * decay;
+              profile.node.style.transform = `translate(${shake}px, ${progress * 5}px) rotate(${shake * .72}deg)`;
+            } else {
+              const melt = smoothstep(.48, 1, progress);
+              profile.node.style.transform = `translateY(${melt * profile.meltY}px) scale(${1 + melt * profile.meltX}, ${1 - melt * profile.meltSquash}) rotate(${profile.meltTilt * melt}deg)`;
+            }
+            return;
+          }
+          let x = 0;
+          let y = 0;
+          let rotation = 0;
+          let pulse = 0;
+          if (profile.mode === 'working') {
+            y = -2.2 + Math.sin(phaseA) * 2.1 + Math.sin(phaseB) * .65;
+            x = Math.sin(phaseB) * .55;
+            rotation = Math.sin(phaseA * .72) * 1.25;
+          } else if (profile.mode === 'thinking') {
+            x = Math.sin(phaseB * .43) * 1.2;
+            y = Math.sin(phaseA * .37) * .65;
+            rotation = Math.sin(phaseA * .46) * 4.4 + Math.sin(phaseB * .27) * 1.1;
+          } else if (profile.mode === 'tool') {
+            const carrier = (Math.sin(phaseA) + Math.sin(phaseB) + 2) / 4;
+            pulse = smoothstep(.79, .96, carrier);
+            x = profile.direction * pulse * 5.5;
+            y = -pulse * 2.1;
+            rotation = profile.direction * pulse * 3.5;
+          } else if (profile.mode === 'review') {
+            x = Math.sin(phaseA * .52) * 4.2;
+            y = -1.7 + Math.cos(phaseB * .39) * 2.2;
+            rotation = Math.sin(phaseA * .31 + phaseB * .17) * 2.2;
+          }
+          profile.node.style.transform = `translate(${x.toFixed(3)}px, ${y.toFixed(3)}px) rotate(${rotation.toFixed(3)}deg)`;
+          profile.node.style.clipPath = bodyPolygon(profile, time, pulse);
+        });
+        motionFrame = requestAnimationFrame(tickMotion);
       }
 
       function startMotion() {
         clearMotion();
         if (!motionEnabled) return;
-        const generation = motionGeneration;
-        gallery.querySelectorAll('[data-motion]').forEach((specimenNode, index) => {
+        motionProfiles = Array.from(gallery.querySelectorAll('[data-creature-key]')).flatMap((specimenNode, index) => {
           const mode = specimenNode.dataset.motion;
-          const creature = specimenNode.querySelector('.creature');
-          if (['working', 'thinking', 'tool', 'review'].includes(mode)) {
-            scheduleMotion(creature, mode, generation, random(40, 900) + index * 23);
-          } else if (mode === 'failed') {
-            const finalMelt = `translateY(${random(16, 22)}px) scale(${random(1.38, 1.56)}, ${random(.5, .62)}) rotate(${random(-3, 3)}deg)`;
-            const animation = creature.animate([
-              { transform: 'translate(0,0) rotate(0)' },
-              { transform: 'translate(-8px,0) rotate(-9deg)' },
-              { transform: 'translate(9px,0) rotate(10deg)' },
-              { transform: 'translate(-4px,4px) rotate(-4deg) scale(1.05,.92)' },
-              { transform: finalMelt },
-            ], { duration: 1250, delay: index * 130, easing: 'cubic-bezier(.2,.85,.35,1)', fill: 'forwards' });
-            motionAnimations.add(animation);
-            animation.finished.then(() => {
-              creature.style.transform = finalMelt;
-              animation.cancel();
-              motionAnimations.delete(animation);
-            }).catch(() => motionAnimations.delete(animation));
-          }
+          if (!['working', 'thinking', 'tool', 'review', 'failed'].includes(mode)) return [];
+          const key = specimenNode.dataset.creatureKey;
+          return [{
+            node: specimenNode.querySelector('.creature'),
+            geometry: shapeRegistry.get(key),
+            mode,
+            phaseA: unit(key, 'motion-phase-a') * Math.PI * 2,
+            phaseB: unit(key, 'motion-phase-b') * Math.PI * 2,
+            frequencyA: pick(unit(key, 'motion-frequency-a'), .34, .68),
+            frequencyB: pick(unit(key, 'motion-frequency-b'), .34, .68) * Math.SQRT2,
+            direction: unit(key, 'motion-direction') > .5 ? 1 : -1,
+            delay: (index % 3) * .1,
+            meltY: pick(unit(key, 'melt-y'), 17, 22),
+            meltX: pick(unit(key, 'melt-x'), .38, .56),
+            meltSquash: pick(unit(key, 'melt-squash'), .39, .5),
+            meltTilt: pick(unit(key, 'melt-tilt'), -2.5, 2.5),
+          }];
         });
+        motionStartedAt = performance.now();
+        motionFrame = requestAnimationFrame(tickMotion);
       }
 
       function render() {
         clearMotion();
+        shapeRegistry.clear();
         gallery.innerHTML = statuses.map((status) => `<article class="state" data-family="${status.family}"><header class="state-head"><div><h2 class="state-name">${status.label}</h2><p class="state-note">${status.note}</p></div><span class="state-code">${status.id}</span></header><div class="specimens">${[0, 1, 2].map((index) => specimen(status, index)).join('')}</div></article>`).join('');
         seedReadout.textContent = `seed ${seed}`;
         startMotion();
       }
-      document.querySelector('#shuffle').addEventListener('click', () => { seed = Math.floor(Math.random() * 100000); render(); });
+      document.querySelector('#shuffle').addEventListener('click', () => {
+        seed = ((seed * 1664525 + 1013904223) >>> 0) % 100000;
+        render();
+      });
       document.querySelector('#motion').addEventListener('click', (event) => {
         motionEnabled = !motionEnabled;
         const off = !motionEnabled;
