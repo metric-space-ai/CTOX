@@ -150,6 +150,7 @@
       place-items: center;
       width: 90px;
       height: 118px;
+      contain: layout paint style;
     }
     .specimen::after {
       content: "";
@@ -171,6 +172,7 @@
       background: var(--creature-color);
       box-shadow: 0 11px 25px var(--creature-shadow), inset 0 -3px 0 rgba(0,0,0,.1);
       transform-origin: 50% 85%;
+      will-change: transform, clip-path;
     }
     .creature.geometry-pointed { transform-origin: 50% 78%; }
     .creature.geometry-pointed .face { transform: translateY(10%) scale(.88); }
@@ -320,6 +322,7 @@
       let seed = 27183;
       let motionEnabled = true;
       let motionFrame = 0;
+      let lastMotionFrameAt = 0;
       let motionStartedAt = 0;
       let motionProfiles = [];
       const shapeRegistry = new Map();
@@ -435,20 +438,20 @@
         let stretchY = 1;
         let localAmplitude = .006;
         if (mode === 'working') {
-          const squash = Math.sin(phaseA) * .055 + Math.sin(phaseB) * .018;
+          const squash = Math.sin(phaseA) * .08 + Math.sin(phaseB) * .026;
           stretchX += squash;
           stretchY -= squash * 1.15;
-          localAmplitude = .026;
+          localAmplitude = .04;
         } else if (mode === 'thinking') {
-          stretchX += Math.sin(phaseA) * .022;
-          stretchY += Math.sin(phaseB) * .031;
-          localAmplitude = .033;
+          stretchX += Math.sin(phaseA) * .038;
+          stretchY += Math.sin(phaseB) * .052;
+          localAmplitude = .052;
         } else if (mode === 'tool') {
-          stretchX += pulse * .15;
-          stretchY -= pulse * .17;
-          localAmplitude = .012 + pulse * .042;
+          stretchX += pulse * .22;
+          stretchY -= pulse * .25;
+          localAmplitude = .018 + pulse * .07;
         } else if (mode === 'review') {
-          localAmplitude = .042;
+          localAmplitude = .065;
         }
         return toPolygon(profile.geometry.points.map(([x, y]) => {
           const angle = Math.atan2(y - 50, x - 50);
@@ -465,6 +468,11 @@
 
       function tickMotion(now) {
         if (!motionEnabled) return;
+        if (now - lastMotionFrameAt < 33) {
+          motionFrame = requestAnimationFrame(tickMotion);
+          return;
+        }
+        lastMotionFrameAt = now;
         const time = (now - motionStartedAt) / 1000;
         motionProfiles.forEach((profile) => {
           if (!profile.node.isConnected) return;
@@ -492,23 +500,23 @@
           let rotation = 0;
           let pulse = 0;
           if (profile.mode === 'working') {
-            y = -4 + Math.sin(phaseA) * 4.6 + Math.sin(phaseB) * 1.35;
-            x = Math.sin(phaseB) * 1.2;
-            rotation = Math.sin(phaseA * .72) * 2.5;
+            y = -6 + Math.sin(phaseA) * 7.5 + Math.sin(phaseB) * 2.2;
+            x = Math.sin(phaseB) * 2.4;
+            rotation = Math.sin(phaseA * .82) * 4.2;
           } else if (profile.mode === 'thinking') {
-            x = Math.sin(phaseB * .43) * 2.5;
-            y = Math.sin(phaseA * .37) * 1.4;
-            rotation = Math.sin(phaseA * .46) * 7.2 + Math.sin(phaseB * .27) * 2;
+            x = Math.sin(phaseB * .66) * 4.2;
+            y = Math.sin(phaseA * .72) * 2.5;
+            rotation = Math.sin(phaseA * .74) * 10.5 + Math.sin(phaseB * .48) * 3;
           } else if (profile.mode === 'tool') {
             const carrier = (Math.sin(phaseA) + Math.sin(phaseB) + 2) / 4;
-            pulse = smoothstep(.66, .91, carrier);
-            x = profile.direction * pulse * 9;
-            y = -pulse * 3.8;
-            rotation = profile.direction * pulse * 6;
+            pulse = smoothstep(.58, .88, carrier);
+            x = profile.direction * pulse * 13;
+            y = -pulse * 6;
+            rotation = profile.direction * pulse * 9;
           } else if (profile.mode === 'review') {
-            x = Math.sin(phaseA * .52) * 8;
-            y = -3 + Math.cos(phaseB * .39) * 4.5;
-            rotation = Math.sin(phaseA * .31 + phaseB * .17) * 4;
+            x = Math.sin(phaseA * .9) * 12;
+            y = -5 + Math.cos(phaseB * .72) * 7;
+            rotation = Math.sin(phaseA * .58 + phaseB * .31) * 6.5;
           }
           profile.node.style.transform = `translate(${x.toFixed(3)}px, ${y.toFixed(3)}px) rotate(${rotation.toFixed(3)}deg)`;
           profile.node.style.clipPath = bodyPolygon(profile, time, pulse);
@@ -531,8 +539,8 @@
             mode,
             phaseA: unit(key, 'motion-phase-a') * Math.PI * 2,
             phaseB: unit(key, 'motion-phase-b') * Math.PI * 2,
-            frequencyA: pick(unit(key, 'motion-frequency-a'), .34, .68),
-            frequencyB: pick(unit(key, 'motion-frequency-b'), .34, .68) * Math.SQRT2,
+            frequencyA: pick(unit(key, 'motion-frequency-a'), .74, 1.16),
+            frequencyB: pick(unit(key, 'motion-frequency-b'), .74, 1.16) * Math.SQRT2,
             direction: unit(key, 'motion-direction') > .5 ? 1 : -1,
             delay: (index % 3) * .1,
             meltY: pick(unit(key, 'melt-y'), 17, 22),
@@ -542,6 +550,7 @@
           }];
         });
         motionStartedAt = performance.now();
+        lastMotionFrameAt = 0;
         motionFrame = requestAnimationFrame(tickMotion);
       }
 

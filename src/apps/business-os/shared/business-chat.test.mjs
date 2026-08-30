@@ -125,8 +125,13 @@ test('review progress selects a distinct creature mode with deterministic motion
 });
 
 test('crew motion CSS is work-only, review-specific, finite on failure, and reduced-motion safe', () => {
-  assert.match(businessChatSource, /\.ctox-crew-creature\.is-working[\s\S]*?animation: ctoxCrewWorkDrift/);
-  assert.match(businessChatSource, /\.ctox-crew-creature\.is-review[\s\S]*?animation: ctoxCrewReviewDrift/);
+  assert.match(businessChatSource, /function syncCrewProceduralMotion/);
+  assert.match(businessChatSource, /now - state\.lastFrameAt < 33/);
+  assert.match(businessChatSource, /\.slice\(0, 36\)/);
+  assert.match(businessChatSource, /document\.visibilityState === 'hidden'/);
+  assert.match(businessChatSource, /frequencyB: .*Math\.SQRT2/);
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-working[\s\S]*?animation: none/);
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-review[\s\S]*?animation: none/);
   assert.match(businessChatSource, /\.ctox-crew-creature\.is-failed[\s\S]*?animation: ctoxCrewOops 860ms[^;]* 1 both/);
   assert.match(businessChatSource, /\.ctox-crew-creature,\n\s+\.ctox-crew-creature \*/);
   assert.doesNotMatch(businessChatSource, /\.ctox-crew-creature\.is-(idle|queued|scheduled|success|blocked)[^}]*animation:/);
