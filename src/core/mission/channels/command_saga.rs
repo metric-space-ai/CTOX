@@ -1701,7 +1701,14 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
         "execution_task_id".to_string(),
         Value::String(task_id.clone()),
     );
-    object.insert("task_id".to_string(), Value::String(task_id));
+    object.insert("task_id".to_string(), Value::String(task_id.clone()));
+    if !task_id.is_empty() {
+        if let Some(progress) =
+            crate::lcm::run_task_execution_progress_for_task(&db_path, &task_id)?
+        {
+            object.insert("execution_progress".to_string(), progress);
+        }
+    }
     if let Some((saga_id, saga_phase, saga_step, saga_total_steps, compensation_status)) = saga {
         object.insert("saga_id".to_string(), Value::String(saga_id));
         object.insert("saga_phase".to_string(), Value::String(saga_phase));

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 // Re-export PersistentSession so callers (main.rs, service.rs) can hold one.
@@ -40,6 +41,7 @@ pub(crate) struct WorkerAttemptContext {
     pub(crate) attempt_id: String,
     pub(crate) work_key: String,
     pub(crate) source_label: String,
+    pub(crate) progress_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1344,6 +1346,19 @@ fn persist_successful_assistant_with_retry(
     for attempt in 1..=4 {
         let result = (|| {
             if let Some(worker_attempt) = worker_attempt {
+                if let Some(error) = worker_attempt
+                    .progress_error
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("task progress error latch poisoned"))?
+                    .clone()
+                {
+                    anyhow::bail!("durable task progress failed: {error}");
+                }
+                // A service-owned queue task may only enter native review
+                // after its durable, model-authored plan is fully complete.
+                // This is intentionally before the finalization marker so a
+                // planless completion remains retryable.
+                lcm::run_prepare_task_execution_review(db_path, &worker_attempt.work_key)?;
                 let durable = lcm::run_begin_worker_attempt_finalization(
                     db_path,
                     lcm::WorkerAttemptFinalizationInput {
@@ -2203,7 +2218,23 @@ mod tests {
             attempt_id: "turn-success-attempt".to_string(),
             work_key: "queue:turn-success".to_string(),
             source_label: "turn-loop-test".to_string(),
+            progress_error: Arc::new(Mutex::new(None)),
         };
+        let completed_steps = [lcm::TaskExecutionPlanStepInput {
+            label: "Persist the successful reply".to_string(),
+            status: "completed".to_string(),
+        }];
+        lcm::run_record_task_execution_plan(
+            &db_path,
+            lcm::TaskExecutionPlanUpdate {
+                work_key: &context.work_key,
+                task_id: "turn-success",
+                command_id: "cmd-turn-success",
+                attempt_id: &context.attempt_id,
+                explanation: None,
+                steps: &completed_steps,
+            },
+        )?;
         let mut events = Vec::new();
         let first = persist_successful_assistant_with_retry(
             &db_path,
@@ -2235,6 +2266,35 @@ mod tests {
         assert_eq!(attempts, 1);
         assert_eq!(replies, 1);
         assert!(events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn service_owned_turn_cannot_persist_success_without_a_completed_plan() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("ctox.sqlite3");
+        let context = WorkerAttemptContext {
+            attempt_id: "turn-planless-attempt".to_string(),
+            work_key: "queue:turn-planless".to_string(),
+            source_label: "turn-loop-test".to_string(),
+            progress_error: Arc::new(Mutex::new(None)),
+        };
+        let error = persist_successful_assistant_with_retry(
+            &db_path,
+            7102,
+            "must not persist",
+            Some(&context),
+            &mut |_| {},
+        )
+        .expect_err("planless service-owned completion must fail closed");
+        assert!(error.to_string().contains("has no durable execution plan"));
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let replies: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = 7102",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(replies, 0);
         Ok(())
     }
 

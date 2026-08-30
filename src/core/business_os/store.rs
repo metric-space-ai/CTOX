@@ -12402,9 +12402,9 @@ pub(super) fn handle_workspace_control_command(
                         .get("faux")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    // Delegate one bounded coding turn to the pi-sidecar owner. Errors
-                    // (e.g. sidecar not built, gateway unreachable) become an ok:false
-                    // outcome rather than a failed command.
+                    // Delegate one bounded coding turn to the pi-sidecar owner.
+                    // Transport, gateway, or agent failures are terminal command
+                    // failures; never present an ok:false result as completed.
                     let outcome = (|| -> anyhow::Result<Value> {
                         anyhow::ensure!(
                             command.payload.get("model").is_none(),
@@ -12428,18 +12428,23 @@ pub(super) fn handle_workspace_control_command(
                             faux,
                             model_override,
                         )
-                    })()
-                    .unwrap_or_else(
-                        |error| serde_json::json!({ "ok": false, "error": error.to_string() }),
-                    );
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    );
+                    })();
+                    return match outcome {
+                        Ok(outcome) => write_rxdb_control_command_outcome(
+                            root,
+                            &command,
+                            "completed",
+                            None,
+                            Some("completed"),
+                            outcome,
+                        ),
+                        Err(error) => write_rxdb_failed_control_command_outcome(
+                            root,
+                            &command,
+                            "coding_turn",
+                            error,
+                        ),
+                    };
                 },
             )?
             .into_outcome();
