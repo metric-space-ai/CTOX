@@ -6,9 +6,26 @@ import {
   defaultWindowPosition,
   detectSnapZone,
   shellV2RenderedIconSizeFromAnchor,
+  shellV2FramePaletteFromRgba,
   shellV2FrameSampleAt,
   shellV2MorphFrameData,
 } from './window-manager.js';
+
+test('derives the shell-v2 frame palette from raster pixels, not a category colour', () => {
+  const rgba = new Uint8ClampedArray([
+    ...Array(18).fill([240, 183, 116, 255]).flat(),
+    ...Array(22).fill([147, 107, 99, 255]).flat(),
+    ...Array(24).fill([113, 83, 101, 255]).flat(),
+    ...Array(20).fill([15, 42, 76, 255]).flat(),
+    ...Array(30).fill([240, 240, 240, 255]).flat(),
+  ]);
+  const palette = shellV2FramePaletteFromRgba(rgba);
+  assert.ok(palette);
+  for (const value of Object.values(palette)) assert.match(value, /^#[0-9a-f]{6}$/);
+  assert.notEqual(palette.accent, '#75d7c2');
+  assert.notEqual(palette.start, '#f0f0f0');
+  assert.notEqual(palette.start, palette.end);
+});
 
 const viewport = {
   w: 1200,

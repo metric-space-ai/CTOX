@@ -28,7 +28,7 @@ import {
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v296';
+} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v297';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -81,7 +81,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-global-shell-v2-raster-v296';
+const APP_BUILD = '20260830-global-shell-v2-raster-v297';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -10933,7 +10933,7 @@ function getOfflineFallbackCatalog() {
           "end": "#0f2a4c",
           "surface": "#10151c",
           "surface_alt": "#141b24",
-          "accent": "#75d7c2"
+          "accent": "#936b63"
         },
         "left": "Knowledge selection and source groups",
         "center": "Markdown reader/editor and dataframe table tabs",

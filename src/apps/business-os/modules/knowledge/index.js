@@ -1270,6 +1270,7 @@ function renderKnowledgeBundle(group) {
   const section = document.createElement('section');
   // Selection is applied after the write via applyKnowledgeSelection.
   section.className = 'knowledge-bundle';
+  section.dataset.shellV2Accent = '';
   section.dataset.bundleId = group.id;
   section.dataset.contextModule = 'knowledge';
   section.dataset.contextRecordType = 'knowledge-group';

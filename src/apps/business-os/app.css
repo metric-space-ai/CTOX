@@ -8215,7 +8215,7 @@ button.shell-window-header-meta:focus-visible,
   --shell-v2-frame-end: #17345c;
   --shell-v2-surface: #10151c;
   --shell-v2-surface-alt: #141b24;
-  --shell-v2-accent: #75d7c2;
+  --shell-v2-accent: var(--shell-v2-frame-top-joint);
   --shell-v2-icon-size: 80px;
   /* The window glyph is exactly the normal desktop glyph size. Because it
      replaces the outer top-left frame segment, the two module rows share the

@@ -111,6 +111,20 @@ test('the tenant shell resolves every windowed app to shell v2', () => {
   assert.match(knowledge.layout.frame_palette.start, /^#[0-9a-f]{6}$/i);
   assert.match(knowledge.layout.frame_palette.top_joint, /^#[0-9a-f]{6}$/i);
   assert.match(knowledge.layout.frame_palette.left_joint, /^#[0-9a-f]{6}$/i);
+  assert.ok(
+    [
+      knowledge.layout.frame_palette.start,
+      knowledge.layout.frame_palette.middle,
+      knowledge.layout.frame_palette.top_joint,
+      knowledge.layout.frame_palette.left_joint,
+      knowledge.layout.frame_palette.end,
+    ].includes(knowledge.layout.frame_palette.accent),
+    'manifest fallback accents must come from the icon-derived frame palette',
+  );
+  assert.doesNotMatch(appCss, /--shell-v2-accent:\s*#75d7c2/i);
+  assert.match(windowManagerSource, /shellV2FramePaletteFromRgba/);
+  assert.match(windowManagerSource, /dataset\.shellV2PaletteSource = 'icon'/);
+  assert.match(windowManagerSource, /\[data-shell-v2-accent\]/);
   assert.match(appCss, /--shell-v2-icon-size:\s*80px/);
   assert.match(appCss, /\.shell-window\[data-shell-contract="v2"\] \.shell-window-control--close::before/);
   assert.match(appCss, /width:\s*22px;[\s\S]*?height:\s*3px;[\s\S]*?background:\s*currentColor/);

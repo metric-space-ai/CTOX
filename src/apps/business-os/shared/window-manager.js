@@ -145,6 +145,78 @@ export function shellV2RenderedIconSizeFromAnchor(anchor) {
   return width;
 }
 
+function rgbToHex([r, g, b]) {
+  return `#${[r, g, b].map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function colorLuma([r, g, b]) {
+  return (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+}
+
+function colorSaturation([r, g, b]) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max === 0 ? 0 : (max - min) / max;
+}
+
+/**
+ * Derive the complete shell palette from the rendered app artwork. Pixels are
+ * quantised before ranking so anti-aliasing and JPEG noise cannot make the
+ * frame flicker between nearly-identical colours. The manifest palette is a
+ * loading/error fallback only; successful raster analysis is authoritative.
+ */
+export function shellV2FramePaletteFromRgba(rgba) {
+  const buckets = new Map();
+  for (let index = 0; index + 3 < rgba.length; index += 4) {
+    const alpha = rgba[index + 3];
+    if (alpha < 48) continue;
+    const rgb = [rgba[index], rgba[index + 1], rgba[index + 2]];
+    const luma = colorLuma(rgb);
+    const saturation = colorSaturation(rgb);
+    // Ignore white/black glyph ink and transparent padding. The frame should
+    // continue the icon's coloured body, not its foreground pictogram.
+    if (luma < 14 || luma > 244 || (luma > 214 && saturation < 0.18)) continue;
+    const quantised = rgb.map((value) => Math.min(255, Math.round(value / 24) * 24));
+    const key = quantised.join(',');
+    const entry = buckets.get(key) || { rgb: [0, 0, 0], weight: 0, count: 0 };
+    const weight = (alpha / 255) * (0.42 + saturation);
+    entry.rgb = entry.rgb.map((value, channel) => value + (rgb[channel] * weight));
+    entry.weight += weight;
+    entry.count += 1;
+    buckets.set(key, entry);
+  }
+  const ranked = [...buckets.values()]
+    .filter((entry) => entry.weight > 0)
+    .map((entry) => ({
+      rgb: entry.rgb.map((value) => value / entry.weight),
+      score: entry.weight * Math.sqrt(entry.count),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+  if (ranked.length < 2) return null;
+
+  // Retain dominant colours, then order them from luminous/energetic at the
+  // icon corner to calm/dark at the opposite frame corner.
+  const candidates = ranked.slice(0, Math.min(8, ranked.length));
+  const start = [...candidates].sort((a, b) => (
+    (colorLuma(b.rgb) + colorSaturation(b.rgb) * 48)
+    - (colorLuma(a.rgb) + colorSaturation(a.rgb) * 48)
+  ))[0];
+  const end = [...candidates].sort((a, b) => colorLuma(a.rgb) - colorLuma(b.rgb))[0];
+  const middle = candidates.find((entry) => entry !== start && entry !== end) || candidates[0];
+  const mix = (from, to, amount) => from.map((value, channel) => value + ((to[channel] - value) * amount));
+  const topJoint = mix(start.rgb, middle.rgb, 0.72);
+  const leftJoint = mix(middle.rgb, end.rgb, 0.42);
+  return {
+    start: rgbToHex(start.rgb),
+    middle: rgbToHex(middle.rgb),
+    top_joint: rgbToHex(topJoint),
+    left_joint: rgbToHex(leftJoint),
+    end: rgbToHex(end.rgb),
+    accent: rgbToHex(topJoint),
+  };
+}
+
 export function shellV2FrameSampleAt(x, y, iconWidthRatio, iconHeightRatio) {
   const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
   const px = clamp01(x);
@@ -569,6 +641,7 @@ export function createWindowManager({
       const iconEl = winEl.querySelector('[data-window-app-icon]');
       const iconHost = iconEl?.closest('.shell-window-v2-icon');
       if (iconEl && options.iconAsset) {
+        iconEl.crossOrigin = 'anonymous';
         iconEl.src = String(options.iconAsset);
         if (options.iconSrcSet) iconEl.srcset = String(options.iconSrcSet);
       } else {
@@ -582,6 +655,18 @@ export function createWindowManager({
         labelEl.setAttribute('aria-label', String(label));
       }
       applyFramePalette(winEl, options.framePalette);
+      if (iconEl) {
+        const applyIconPalette = () => {
+          const palette = framePaletteFromIcon(iconEl);
+          if (!palette) return;
+          applyFramePalette(winEl, palette);
+          winEl.dataset.shellV2PaletteSource = 'icon';
+          const record = windows.find((entry) => entry.element === winEl);
+          if (record) refreshV2Chrome(record);
+        };
+        iconEl.addEventListener('load', applyIconPalette, { once: true });
+        if (iconEl.complete && iconEl.naturalWidth > 0) queueMicrotask(applyIconPalette);
+      }
     }
     renderHeaderItems(winEl.querySelector('[data-window-meta]'), options.headerBadges, 'meta');
     renderHeaderItems(winEl.querySelector('[data-window-actions]'), options.headerActions, 'action');
@@ -947,6 +1032,7 @@ export function createWindowManager({
       '.ctox-pane-tab',
       '.ctox-column-resizer',
       '.shell-v2-module-title-trigger',
+      '[data-shell-v2-accent]',
     ].join(',');
     for (const element of win.element.querySelectorAll(selector)) {
       const rect = element.getBoundingClientRect();
@@ -2097,6 +2183,23 @@ function applyFramePalette(element, palette = {}) {
     if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) {
       element.style.setProperty(token, value);
     }
+  }
+}
+
+function framePaletteFromIcon(image) {
+  try {
+    if (!image?.naturalWidth || !image?.naturalHeight) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = 48;
+    canvas.height = 48;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return null;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return shellV2FramePaletteFromRgba(context.getImageData(0, 0, canvas.width, canvas.height).data);
+  } catch {
+    // Cross-origin/runtime-installed artwork may be unreadable. The manifest
+    // palette already applied above remains the explicit fail-closed fallback.
+    return null;
   }
 }
 

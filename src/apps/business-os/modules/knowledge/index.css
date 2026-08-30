@@ -49,7 +49,7 @@
   --knowledge-surface-muted: #19222d;
   --knowledge-text: #eef3f7;
   --knowledge-muted: #a8b2bc;
-  --knowledge-accent: var(--shell-v2-accent, #75d7c2);
+  --knowledge-accent: var(--shell-v2-accent, var(--shell-v2-frame-top-joint, #936b63));
   --knowledge-line: #2b3540;
   --knowledge-soft-line: #222c36;
   grid-template-columns: minmax(300px, var(--knowledge-left-width, 500px)) 12px minmax(0, 1fr);
@@ -1032,7 +1032,7 @@
 .knowledge-module .knowledge-left .ctox-pane-band,
 .knowledge-module .knowledge-left .knowledge-filterbar,
 .knowledge-module .knowledge-left .knowledge-scope-switch { background: transparent; }
-.knowledge-module .knowledge-left .ctox-pane-kicker { color: var(--knowledge-accent); }
+.knowledge-module .knowledge-left .ctox-pane-kicker { color: var(--shell-v2-local-accent, var(--knowledge-accent)); }
 
 /* Content element = an element too → its actions sit top-right of the content
    panel as icons (pencil; check/x while editing; play for runbooks). The status
@@ -1272,7 +1272,7 @@
   background: color-mix(in srgb, var(--knowledge-text) 6%, var(--knowledge-surface));
 }
 .knowledge-module .knowledge-bundle.is-selected {
-  background: color-mix(in srgb, var(--knowledge-accent) 12%, var(--knowledge-surface));
+  background: color-mix(in srgb, var(--shell-v2-local-accent, var(--knowledge-accent)) 12%, var(--knowledge-surface));
 }
 /* Selection accent bar: a flat 2px fill via pseudo-element (no shadow, no thick
    border) — keeps the Matching-style accent while staying inside kit discipline. */
@@ -1283,7 +1283,7 @@
   top: 0;
   bottom: 0;
   width: 2px;
-  background: var(--knowledge-accent);
+  background: var(--shell-v2-local-accent, var(--knowledge-accent));
   border-radius: var(--knowledge-control-radius) 0 0 var(--knowledge-control-radius);
 }
 /* nested items sit inside the card — no own fill, just an indent guide */
@@ -1348,7 +1348,7 @@
 /* View toggle (shard cards vs. compact list) in the filterbar. */
 .knowledge-module .knowledge-view-toggle { display: inline-flex; gap: 2px; }
 .knowledge-module .knowledge-view-toggle .ctox-pane-icon[aria-pressed="true"] {
-  color: var(--knowledge-accent);
+  color: var(--shell-v2-local-accent, var(--knowledge-accent));
   background: var(--kit-fill-strong);
 }
 /* Compact list mode: flat one-line rows, no card fills, hairline separators. */
