@@ -41,6 +41,167 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Shell-v2 pilot: the module surface reaches the single 6px outer frame.
+   Color stays in the frame/icon; all working surfaces are opaque and deep. */
+.shell-window[data-shell-contract="v2"] .knowledge-module {
+  --knowledge-bg: var(--shell-v2-surface, #10151c);
+  --knowledge-surface: var(--shell-v2-surface-alt, #141b24);
+  --knowledge-surface-muted: #19222d;
+  --knowledge-text: #eef3f7;
+  --knowledge-muted: #a8b2bc;
+  --knowledge-accent: var(--shell-v2-accent, #75d7c2);
+  --knowledge-line: #2b3540;
+  --knowledge-soft-line: #222c36;
+  grid-template-columns: minmax(300px, var(--knowledge-left-width, 500px)) 12px minmax(0, 1fr);
+  padding: 0;
+  background: var(--knowledge-bg);
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--knowledge-bg);
+  box-shadow: none;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-left,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center {
+  grid-template-rows: var(--shell-v2-header-row-size, 61px) var(--shell-v2-header-row-size, 61px) minmax(0, 1fr) auto;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-view-switch {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 61px);
+  height: var(--shell-v2-header-row-size, 61px);
+  border-bottom: 1px solid var(--knowledge-line);
+  background: var(--knowledge-surface);
+}
+
+/* A 64px window glyph leaves two 29px inner header rows next to the 6px
+   frame. Keep the semantic kicker and title, but place them on one baseline
+   so neither row clips or wastes vertical space. */
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-title-row {
+  height: 100%;
+  gap: 8px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-kicker {
+  flex: 0 0 auto;
+  line-height: 1;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-title {
+  margin-top: 0;
+  line-height: 1.1;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 29px));
+  height: min(26px, var(--shell-v2-header-row-size, 29px));
+  border-radius: 5px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-left > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 64px) + 14px);
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: 8px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-view-switch {
+  align-items: center;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 64px) + 14px);
+  padding-right: 8px;
+  gap: 5px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-search {
+  min-height: min(24px, var(--shell-v2-header-row-size, 29px));
+  height: min(24px, var(--shell-v2-header-row-size, 29px));
+  padding-block: 0;
+  border-radius: 5px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer {
+  width: 100%;
+  min-width: 8px;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  height: 48px;
+  border-radius: 999px;
+  background: var(--shell-v2-local-accent, var(--shell-v2-frame-left-joint));
+  opacity: 0.5;
+  transform: translate(-50%, -50%);
+  transition: opacity 150ms ease, background-color 150ms ease, filter 150ms ease;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer::after {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer:hover::before,
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer:focus-visible::before,
+.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer.is-active::before {
+  width: 4px;
+  background: var(--shell-v2-local-accent, var(--shell-v2-frame-left-joint));
+  opacity: 1;
+  filter: brightness(1.2);
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-group {
+  padding-inline: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-bundle,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-item,
+.shell-window[data-shell-contract="v2"] .knowledge-module .runbook-item {
+  border-radius: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-bundle {
+  padding-inline: 12px;
+}
+
+.shell-window[data-shell-contract="v2"] .knowledge-module :where(input, select, button):focus-visible {
+  outline: 2px solid var(--knowledge-accent);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+
+/* Narrow master/detail behavior is owned by the existing
+   `business-app-window` queries below. Do not replace the resizable track with
+   a fixed percentage here: that leaves the handle interactive while ignoring
+   the width it writes. */
+
 /* Re-assert [hidden] against module display rules (the module root is not a
    .ctox-workspace, which normally provides this in base.css). */
 .knowledge-module [hidden] {

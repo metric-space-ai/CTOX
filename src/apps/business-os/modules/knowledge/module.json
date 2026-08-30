@@ -11,7 +11,24 @@
   ],
   "layout": {
     "shell": "windowed",
-    "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-knowledge\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-knowledge\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#d946ef\" /></linearGradient></defs><path d=\"M4 19.5A2.5 2.5 0 0 1 6.5 17H20\" stroke=\"url(#grad-knowledge)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z\" fill=\"url(#grad-knowledge)\" fill-opacity=\"0.12\" stroke=\"url(#grad-knowledge)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M12 2v10l2.5-2 2.5 2V2z\" fill=\"url(#grad-knowledge)\" fill-opacity=\"0.25\" stroke=\"url(#grad-knowledge)\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"9\" cy=\"12\" r=\"1.5\" fill=\"url(#grad-knowledge)\"></circle><circle cx=\"14\" cy=\"15\" r=\"1\" fill=\"url(#grad-knowledge)\"></circle></svg>",
+    "shell_contract": "v2",
+    "shell_geometry_contract": "knowledge-v2-reference-3",
+    "shell_header_rows": 2,
+    "shell_icon_rows": 2,
+    "icon_asset": "modules/knowledge/assets/icon/knowledge-256.png",
+    "icon_asset_srcset": "modules/knowledge/assets/icon/knowledge-256.png 1x, modules/knowledge/assets/icon/knowledge-512.png 2x, modules/knowledge/assets/icon/knowledge-1024.png 4x",
+    "icon_asset_60": "modules/knowledge/assets/icon/knowledge-60.png",
+    "icon_provenance": "modules/knowledge/assets/icon/provenance.json",
+    "frame_palette": {
+      "start": "#f0b774",
+      "middle": "#936b63",
+      "top_joint": "#936b63",
+      "left_joint": "#715365",
+      "end": "#0f2a4c",
+      "surface": "#10151c",
+      "surface_alt": "#141b24",
+      "accent": "#75d7c2"
+    },
     "left": "Knowledge selection and source groups",
     "center": "Markdown reader/editor and dataframe table tabs",
     "right": "Runbooks as operational knowledge layer",
@@ -20,8 +37,8 @@
       "right": "Runbook configuration, modification, and execution",
       "bottom": "Selected rows, dataframe diagnostics, and CTOX task evidence"
     },
-    "default_width": 1180,
-    "default_height": 780,
+    "default_width": 1200,
+    "default_height": 720,
     "min_width": 640,
     "min_height": 480
   },
@@ -53,8 +70,8 @@
       "focus"
     ],
     "initial_size": {
-      "width": 1180,
-      "height": 780
+      "width": 1200,
+      "height": 720
     },
     "minimum_size": {
       "width": 640,

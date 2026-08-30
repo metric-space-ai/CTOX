@@ -852,6 +852,18 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   line-height: 1;
 }
 
+/* Raster artwork must remain an icon inside the quick-launch glyph. Without
+   explicit replaced-element dimensions its intrinsic 256px width expands the
+   complete tab into a coloured image strip. */
+.module-tab-icon > .workjet-app-raster-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  pointer-events: none;
+}
+
 .module-tab-label {
   min-width: 0;
   overflow: hidden;
@@ -7256,7 +7268,7 @@ body.is-resizing-horizontal * { cursor: row-resize !important; }
   transform: none !important;
 }
 
-.shell-window {
+.shell-window:not([data-shell-contract="v2"]) {
   border: 1px solid var(--hairline, var(--line)) !important;
   border-radius: var(--shell-window-radius) !important;
   background: var(--surface) !important;
@@ -8019,7 +8031,7 @@ button.shell-window-header-meta:focus-visible,
 
 /* --- Windows: soft 16px sheets with a top-lit header -------------------- */
 
-:root[data-shell-style="ctox"] .shell-window {
+:root[data-shell-style="ctox"] .shell-window:not([data-shell-contract="v2"]) {
   border: 1px solid var(--win-border) !important;
   border-radius: var(--win-radius) !important;
   background: var(--surface) !important;
@@ -8046,11 +8058,11 @@ button.shell-window-header-meta:focus-visible,
   box-shadow: var(--win-elev-dim) !important;
 }
 
-:root[data-shell-style="ctox"] .shell-window.is-maximized,
-:root[data-shell-style="ctox"] .shell-window.is-snapped,
-:root[data-shell-style="ctox"] .shell-window[data-snap-zone],
-:root[data-shell-style="ctox"] .shell-window.is-mobile-sheet {
-  border-radius: 0 !important;
+:root[data-shell-style="ctox"] .shell-window.is-maximized:not([data-shell-contract="v2"]),
+:root[data-shell-style="ctox"] .shell-window.is-snapped:not([data-shell-contract="v2"]),
+:root[data-shell-style="ctox"] .shell-window[data-snap-zone]:not([data-shell-contract="v2"]),
+:root[data-shell-style="ctox"] .shell-window.is-mobile-sheet:not([data-shell-contract="v2"]) {
+  border-radius: 0;
 }
 
 /* Unfocused windows step back one layer: a whisper of desktop tint washes
@@ -8165,6 +8177,403 @@ button.shell-window-header-meta:focus-visible,
 :root[data-shell-style="ctox"] .shell-window-header-meta[data-state="version"] {
   border-color: transparent;
   padding-inline: 2px;
+}
+
+/* Shell v2 is an explicit per-window production contract. Knowledge is the
+   only opt-in pilot; v1 windows keep every legacy selector above unchanged. */
+.shell-window[data-shell-contract="v2"],
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] {
+  --shell-v2-frame-start: #f0b56f;
+  --shell-v2-frame-middle: #9c7182;
+  --shell-v2-frame-top-joint: #936b63;
+  --shell-v2-frame-left-joint: #715365;
+  --shell-v2-frame-end: #17345c;
+  --shell-v2-surface: #10151c;
+  --shell-v2-surface-alt: #141b24;
+  --shell-v2-accent: #75d7c2;
+  --shell-v2-icon-size: 64px;
+  /* The window glyph is exactly the normal desktop glyph size. Because it
+     replaces the outer top-left frame segment, the two module rows share the
+     58px between the inner frame edge and the glyph's lower edge. */
+  --shell-v2-header-row-size: calc((var(--shell-v2-icon-size) - 6px) / 2);
+  --shell-v2-icon-radius: 0px;
+  box-sizing: border-box;
+  display: block;
+  overflow: visible;
+  border: 6px solid transparent !important;
+  border-radius: 0;
+  background:
+    linear-gradient(var(--shell-v2-surface), var(--shell-v2-surface)) padding-box,
+    linear-gradient(90deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-top-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
+    linear-gradient(180deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-left-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
+    linear-gradient(var(--shell-v2-frame-end), var(--shell-v2-frame-end)) top right / 6px 100% no-repeat border-box,
+    linear-gradient(90deg, var(--shell-v2-frame-left-joint), var(--shell-v2-frame-end)) bottom left / 100% 6px no-repeat border-box !important;
+  box-shadow: 0 24px 72px rgb(0 0 0 / 0.62) !important;
+  color: #eef3f7;
+}
+
+.shell-window[data-shell-contract="v2"]::before {
+  display: none !important;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-content {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--shell-v2-surface) !important;
+  color: #eef3f7;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-header,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] > .shell-window-header {
+  position: absolute;
+  inset: 0 0 auto var(--shell-v2-icon-size);
+  z-index: 30;
+  width: auto;
+  height: var(--shell-v2-header-row-size) !important;
+  min-height: var(--shell-v2-header-row-size);
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  pointer-events: none;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-title,
+.shell-window[data-shell-contract="v2"] .shell-window-actions {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-meta {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"] {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 6px;
+  background: #090c11;
+  color: #f4f7f8;
+  font-weight: 760;
+  letter-spacing: 0.01em;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"]:hover,
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"]:focus-visible,
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"][aria-expanded="true"] {
+  border-color: var(--shell-v2-accent);
+  background: #111820;
+  color: #ffffff;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close {
+  position: relative;
+  width: calc(var(--shell-v2-header-row-size) * 2);
+  height: calc(var(--shell-v2-header-row-size) * 2);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #030507;
+  color: #ffffff;
+  font-size: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::before,
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentColor;
+  transform-origin: center;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close:hover,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close:hover {
+  border-color: transparent;
+  background: #030507;
+  color: var(--shell-v2-local-accent, var(--shell-v2-frame-end));
+  transform: scale(1.06);
+  box-shadow: none;
+  text-shadow: 0 0 18px color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-frame-end)) 62%, transparent);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close:focus-visible,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close:focus-visible {
+  outline: 2px solid var(--shell-v2-local-accent, var(--shell-v2-frame-end));
+  outline-offset: 2px;
+  color: var(--shell-v2-local-accent, var(--shell-v2-frame-end));
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close {
+  transition: transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.shell-window-v2-icon {
+  position: absolute;
+  /* The icon replaces the frame's top-left segment. Negative one-frame
+     offsets align its visible bitmap with the window's outer border box, so
+     the morph can terminate on the desktop glyph without a six-pixel jump. */
+  top: -6px;
+  left: -6px;
+  z-index: 35;
+  width: var(--shell-v2-icon-size);
+  height: var(--shell-v2-icon-size);
+  overflow: hidden;
+  border-radius: var(--shell-v2-icon-radius) 0 var(--shell-v2-icon-radius) 0;
+  background: var(--shell-v2-surface-alt);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.shell-window-v2-icon:active { cursor: grabbing; }
+
+.shell-window-v2-icon:hover {
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-frame-start)) 46%, transparent));
+}
+
+.shell-window-v2-icon:focus-visible {
+  outline: 3px solid var(--shell-v2-local-accent, var(--shell-v2-frame-start));
+  outline-offset: -3px;
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-pane-icon:hover,
+.shell-window[data-shell-contract="v2"] .ctox-pane-icon:focus-visible,
+.shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):hover,
+.shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):focus-visible,
+.shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger:hover,
+.shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger:focus-visible {
+  color: var(--shell-v2-local-accent, var(--shell-v2-accent));
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-pane-icon:hover,
+.shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):hover {
+  background: color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-accent)) 12%, transparent);
+}
+
+.shell-v2-module-title-trigger {
+  cursor: pointer;
+  transition: color 150ms ease, text-shadow 150ms ease;
+}
+
+.shell-v2-module-title-trigger:hover {
+  text-shadow: 0 0 14px color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-accent)) 34%, transparent);
+}
+
+.shell-window-v2-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.shell-window[data-shell-contract="v2"].is-shell-v2-morphing {
+  pointer-events: none;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  will-change: left, top, width, height, border-radius;
+  contain: layout;
+}
+
+.shell-window[data-shell-contract="v2"][data-shell-v2-morph="close"] {
+  z-index: 10000 !important;
+}
+
+.desktop-icon .desktop-icon-glyph > .workjet-app-raster-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.desktop-icon.is-app-open .desktop-icon-glyph,
+.desktop-icon.is-app-open:hover .desktop-icon-glyph {
+  transform: none !important;
+  filter: grayscale(1) saturate(0) brightness(0.7) !important;
+  opacity: 0.62;
+  outline: 0 solid transparent !important;
+  box-shadow: none !important;
+}
+
+.desktop-icon.is-app-open .desktop-icon-label {
+  color: color-mix(in srgb, var(--text, #fff) 58%, transparent) !important;
+}
+
+/* Desktop and Workjet own the launcher grid. Shell v2 never overrides its
+   64px default / 56px compact rendering or the surrounding cell metrics. */
+
+.shell-window-v2-icon [data-window-app-label] { display: none; }
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize {
+  z-index: 45;
+  width: 32px;
+  height: 32px;
+  opacity: 1;
+  background: none;
+  touch-action: none;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::before,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::after {
+  content: '';
+  position: absolute;
+  background: var(--shell-v2-corner-color);
+  transition: transform var(--motion-fast) var(--ease-standard), filter var(--motion-fast) var(--ease-standard);
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::before { width: 24px; height: 6px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::after { width: 6px; height: 24px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:hover::before,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:hover::after,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:active::before,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:active::after { filter: brightness(1.35); }
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:focus-visible {
+  outline: 2px solid var(--shell-v2-accent);
+  outline-offset: 2px;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--nw {
+  top: -32px; left: -32px; --shell-v2-corner-color: var(--shell-v2-frame-start);
+  transform-origin: bottom right;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--nw::before { left: 0; bottom: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--nw::after { right: 8px; top: 0; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--ne {
+  top: -32px; right: -32px; --shell-v2-corner-color: var(--shell-v2-frame-end);
+  transform-origin: bottom left;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--ne::before { right: 0; bottom: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--ne::after { left: 8px; top: 0; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--sw {
+  bottom: -32px; left: -32px; --shell-v2-corner-color: var(--shell-v2-frame-left-joint);
+  transform-origin: top right;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--sw::before { left: 0; top: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--sw::after { right: 8px; bottom: 0; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--se {
+  bottom: -32px; right: -32px; --shell-v2-corner-color: var(--shell-v2-frame-end);
+  transform-origin: top left;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--se::before { right: 0; top: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--se::after { left: 8px; bottom: 0; }
+
+.shell-window[data-shell-contract="v2"].is-snapped > .shell-window-resize,
+.shell-window[data-shell-contract="v2"].is-docked-to-app > .shell-window-resize {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.shell-window-v2-version-menu {
+  position: absolute;
+  z-index: 80;
+  top: var(--shell-v2-header-row-size);
+  left: calc(var(--shell-v2-icon-size) + 14px);
+  width: min(360px, calc(100% - var(--shell-v2-icon-size) - 96px));
+  min-width: 280px;
+  max-height: min(560px, calc(100% - 82px));
+  overflow: auto;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 10px;
+  background: #0b1016;
+  color: #eef3f7;
+  box-shadow: 0 22px 56px rgb(0 0 0 / 0.68);
+}
+
+.shell-v2-version-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid #27313c;
+}
+
+.shell-v2-version-menu-head div { display: grid; gap: 3px; }
+.shell-v2-version-menu-head span,
+.shell-v2-version-menu-head small { color: #9eabb7; font-size: 11px; }
+.shell-v2-version-menu-head strong { font: 750 15px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.shell-v2-version-menu-actions { display: grid; padding: 8px; border-bottom: 1px solid #27313c; }
+.shell-v2-version-menu-actions button,
+.shell-v2-restore-actions button,
+.shell-v2-restore-confirm button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #e8eef2;
+  padding: 0 10px;
+  text-align: left;
+  font: 650 13px/1.2 var(--font-ui, system-ui, sans-serif);
+  cursor: pointer;
+}
+.shell-v2-version-menu-actions button:hover,
+.shell-v2-version-menu-actions button:focus-visible,
+.shell-v2-restore-actions button:hover,
+.shell-v2-restore-actions button:focus-visible,
+.shell-v2-restore-confirm button:hover,
+.shell-v2-restore-confirm button:focus-visible { background: #18232d; color: #ffffff; }
+
+.shell-v2-version-history { display: grid; gap: 10px; padding: 14px 16px 16px; }
+.shell-v2-version-history p { margin: 0; color: #a8b2bc; font-size: 12px; line-height: 1.45; }
+.shell-v2-version-history .is-error { color: #ff9a9f; }
+.shell-v2-version-select { display: grid; gap: 6px; color: #a8b2bc; font-size: 11px; }
+.shell-v2-version-select select {
+  width: 100%; min-height: 38px; border: 1px solid #33404d; border-radius: 6px;
+  background: #101820; color: #eef3f7; padding: 0 9px;
+}
+.shell-v2-restore-actions { display: flex; }
+.shell-v2-restore-actions > button { background: #17241f; color: var(--shell-v2-accent); }
+.shell-v2-restore-confirm { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.shell-v2-restore-confirm p { grid-column: 1 / -1; color: #eef3f7; }
+.shell-v2-restore-confirm [data-v2-restore-confirm] { background: #26311c; color: #dff3a8; }
+.shell-v2-restore-confirm [data-v2-restore-cancel] { background: #151b22; }
+
+@media (forced-colors: active) {
+  .shell-window[data-shell-contract="v2"] { border-color: CanvasText !important; background: Canvas !important; }
+  .shell-window[data-shell-contract="v2"] > .shell-window-resize::before,
+  .shell-window[data-shell-contract="v2"] > .shell-window-resize::after { background: Highlight; }
+  .shell-window[data-shell-contract="v2"] .shell-window-control--close {
+    forced-color-adjust: auto;
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .shell-window[data-shell-contract="v2"] .shell-window-control--close::before,
+  .shell-window[data-shell-contract="v2"] .shell-window-control--close::after {
+    background: CanvasText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-window[data-shell-contract="v2"],
+  .shell-window[data-shell-contract="v2"] * { transition-duration: 0s !important; animation-duration: 0s !important; }
 }
 
 /* --- Topbar: a floating glass island, not a full-width bar --------------
@@ -8385,6 +8794,63 @@ button.shell-window-header-meta:focus-visible,
 :root [data-workjet-category].shell-window.is-focused .shell-window-header {
   background: color-mix(in srgb, var(--shell-category-soft) 42%, var(--surface-2)) !important;
   border-bottom-color: var(--shell-category-border) !important;
+}
+
+/* Shell v2 carries its identity in the one outer frame and local corners.
+   The generic Workjet category focus wash must never color the v2 header or
+   replace its deterministic icon palette. */
+:root [data-workjet-category].shell-window[data-shell-contract="v2"],
+:root [data-workjet-category].shell-window[data-shell-contract="v2"].is-focused {
+  border-color: transparent !important;
+  border-radius: 0;
+  background:
+    linear-gradient(var(--shell-v2-surface), var(--shell-v2-surface)) padding-box,
+    linear-gradient(90deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-top-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
+    linear-gradient(180deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-left-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
+    linear-gradient(var(--shell-v2-frame-end), var(--shell-v2-frame-end)) top right / 6px 100% no-repeat border-box,
+    linear-gradient(90deg, var(--shell-v2-frame-left-joint), var(--shell-v2-frame-end)) bottom left / 100% 6px no-repeat border-box !important;
+  box-shadow: 0 24px 72px rgb(0 0 0 / 0.62) !important;
+}
+
+:root [data-workjet-category].shell-window[data-shell-contract="v2"] > .shell-window-header,
+:root [data-workjet-category].shell-window[data-shell-contract="v2"].is-focused > .shell-window-header {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* v2 keeps the established focus hierarchy without reintroducing the v1
+   overlay. Only the active app owns visible resize chrome. */
+:root .shell-window[data-shell-contract="v2"]:not(.is-focused) {
+  opacity: 0.86;
+  filter: saturate(0.36) brightness(0.78);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 0.42) !important;
+}
+
+:root .shell-window[data-shell-contract="v2"].is-focused {
+  opacity: 1;
+  filter: none;
+}
+
+:root .shell-window[data-shell-contract="v2"]:not(.is-focused) > .shell-window-resize {
+  opacity: 0;
+  pointer-events: none !important;
+  transform: scale(0.82);
+}
+
+:root .shell-window[data-shell-contract="v2"].is-focused > .shell-window-resize {
+  opacity: 1;
+  pointer-events: auto !important;
+  transform: scale(1);
+}
+
+:root .shell-window[data-shell-contract="v2"].is-shell-v2-morphing[data-shell-v2-morph="close"] {
+  opacity: 1;
+  filter: none;
+}
+
+:root .shell-window[data-shell-contract="v2"].is-shell-v2-morphing[data-shell-v2-morph="close"] > .shell-window-resize {
+  pointer-events: none !important;
 }
 
 :root [data-workjet-category].shell-window.is-focused .shell-window-title {

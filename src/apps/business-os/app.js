@@ -65,6 +65,7 @@ import {
   workjetCategoryForModule,
   workjetCategoryForTarget,
 } from './shared/workjet-theme.js?v=20260826-workjet-ui-contract-v1';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260830-operator-raster-v1';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -79,7 +80,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-reports-flow-v258';
+const APP_BUILD = '20260830-knowledge-shell-v2-icons-v259';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 ensureShellStylesheets();
@@ -188,11 +189,14 @@ function assertCriticalSyncCollectionsMatchBundle(rxdb) {
 let moduleLayoutSaveTimer = null;
 let taskbarPinSaveTimer = null;
 let workspaceSessionSaveTimer = null;
+let desktopOpenIconObserver = null;
+let desktopOpenIconObserverTarget = null;
 let shellColumnResizeSync = null;
 let syncToastRefresh = null;
 let syncToastWatchdog = 0;
 let moduleResizers = [];
 const integratedModuleToolSessions = new Map();
+const shellV2VersionMenus = new Map();
 let syncRecoveryRepairTimer = null;
 let syncRecoveryRepairRunning = false;
 let moduleScriptPreloadPending = false;
@@ -612,7 +616,17 @@ function getRegisteredSvgIcon(id, size, strokeWidth) {
   // its letter from the title (Contracts -> C) instead of the internal id,
   // which may carry tooling prefixes (bench_contracts_... -> B).
   const normalized = String(id || '').replace(/^module:|^desktop-app:/, '');
-  const label = state.modules?.find?.((mod) => mod.id === normalized)?.title || '';
+  const moduleDef = state.modules?.find?.((mod) => mod.id === normalized);
+  const operatorIcon = operatorIconFor(normalized);
+  const rasterAsset = String(operatorIcon?.asset || moduleDef?.layout?.icon_asset || '').trim();
+  const rasterSrcSet = String(moduleDef?.layout?.icon_asset_srcset || '').trim();
+  if (rasterAsset && !rasterAsset.includes('..') && !/^[a-z][a-z0-9+.-]*:/i.test(rasterAsset)) {
+    const srcset = rasterSrcSet && !rasterSrcSet.includes('..') && !/[<>]/.test(rasterSrcSet)
+      ? ` srcset="${escapeHtml(rasterSrcSet)}"`
+      : '';
+    return `<img class="workjet-app-raster-icon" src="${escapeHtml(rasterAsset)}"${srcset} alt="" draggable="false">`;
+  }
+  const label = moduleDef?.title || '';
   return shellIconsModule?.getSvgIcon?.(id, size, strokeWidth, { label }) || '';
 }
 
@@ -1546,6 +1560,9 @@ async function restoreWorkspaceSession(snapshot, options = {}) {
     if (focused) state.windowManager?.focus?.(focused.id);
     schedulePreferredDesktopAppFocus(options.preferredAppId);
   } finally {
+    // Only now is a missing dock target genuinely absent. During the loop it
+    // may simply not have been opened yet.
+    state.windowManager?.finalizeDockRestore?.();
     state.workspaceSessionRestoring = false;
     state.workspaceSessionRestored = true;
     persistWorkspaceSession();
@@ -1645,10 +1662,12 @@ function isLegacyWindowGeometryDocument(payload) {
 
 function createWindowGeometryPersistence() {
   return {
-    load(ownerId) {
+    load(ownerId, { shellContract = 'v1', shellGeometryContract = '' } = {}) {
       if (!ownerId) return null;
       const cached = state.windowGeometryCache.get(ownerId);
       if (!cached) return null;
+      if (shellContract === 'v2' && cached.shell_contract !== 'v2') return null;
+      if (shellContract === 'v2' && String(cached.shell_geometry_contract || '') !== String(shellGeometryContract || '')) return null;
       return {
         x: numberOrNull(cached.x),
         y: numberOrNull(cached.y),
@@ -1656,6 +1675,13 @@ function createWindowGeometryPersistence() {
         height: numberOrNull(cached.height),
         state: cached.state || 'normal',
         snapZone: cached.snap_zone || '',
+        dockRelation: cached.dock_target_owner_id
+          ? {
+              targetOwnerId: cached.dock_target_owner_id,
+              sourceEdge: cached.dock_source_edge || '',
+              targetEdge: cached.dock_target_edge || '',
+            }
+          : null,
         alwaysOnTop: !!cached.always_on_top,
         stored: cached.stored_x != null || cached.stored_y != null || cached.stored_width != null || cached.stored_height != null
           ? {
@@ -1674,6 +1700,8 @@ function createWindowGeometryPersistence() {
       const next = {
         id: windowGeometryRecordId(ownerId),
         owner_id: ownerId,
+        shell_contract: snapshot.shellContract || 'v1',
+        shell_geometry_contract: snapshot.shellGeometryContract || '',
         workspace_scope: scope.workspace_scope,
         actor_scope: scope.actor_scope,
         title: snapshot.title || cached.title || '',
@@ -1684,6 +1712,9 @@ function createWindowGeometryPersistence() {
         height: numberOrNull(snapshot.height),
         state: snapshot.state || 'normal',
         snap_zone: snapshot.snapZone || '',
+        dock_target_owner_id: snapshot.dockRelation?.targetOwnerId || '',
+        dock_source_edge: snapshot.dockRelation?.sourceEdge || '',
+        dock_target_edge: snapshot.dockRelation?.targetEdge || '',
         always_on_top: !!snapshot.alwaysOnTop,
         stored_x: parsePxOrNull(snapshot.stored?.left),
         stored_y: parsePxOrNull(snapshot.stored?.top),
@@ -1785,6 +1816,12 @@ function wireShellWindowGestures() {
     ].forEach((eventName) => state.eventBus.on(eventName, renderTabs));
     [
       'window:opened',
+      'window:closed',
+      'window:minimized',
+      'window:restored',
+    ].forEach((eventName) => state.eventBus.on(eventName, syncDesktopOpenIconStates));
+    [
+      'window:opened',
       'window:restored',
     ].forEach((eventName) => state.eventBus.on(eventName, () => {
       if (!state.preferredDesktopAppFocusId) return;
@@ -1801,6 +1838,58 @@ function wireShellWindowGestures() {
       'window:always_on_top_changed',
       'window:app_mode_changed',
     ].forEach((eventName) => state.eventBus.on(eventName, scheduleWorkspaceSessionPersist));
+  }
+}
+
+function desktopIconElementForApp(appId) {
+  const id = String(appId || '').trim();
+  if (!id) return null;
+  return document.querySelector(`.desktop-icon[data-target="${CSS.escape(id)}"]`);
+}
+
+function desktopIconAnchorRect(appId) {
+  const icon = desktopIconElementForApp(appId);
+  const glyph = icon?.querySelector('.desktop-icon-glyph');
+  if (!glyph) return null;
+  // The anchor callback is invoked only for an existing v2 window (opening or
+  // closing). Apply the open visual state before measuring so a pointer still
+  // hovering the launcher cannot leave one transformed frame underneath the
+  // morph. The event-driven synchronizer remains authoritative afterwards.
+  icon.classList.add('is-app-open');
+  icon.setAttribute('aria-current', 'true');
+  const visualRect = glyph.getBoundingClientRect();
+  const width = Number(glyph.offsetWidth) || visualRect.width;
+  const height = Number(glyph.offsetHeight) || visualRect.height;
+  if (width <= 0 || height <= 0) return null;
+  // CSS hover scales the glyph around its centre. The morph must target its
+  // stable layout box, otherwise moving the pointer away after launch changes
+  // the desktop size while the opened app logo keeps the temporary 106% size.
+  const left = visualRect.left + (visualRect.width - width) / 2;
+  const top = visualRect.top + (visualRect.height - height) / 2;
+  const radius = parseFloat(getComputedStyle(glyph).borderRadius) || Math.min(width, height) * 0.28;
+  return { left, top, width, height, radius };
+}
+
+function syncDesktopOpenIconStates() {
+  const openAppIds = new Set(
+    (state.windowManager?.listWindows?.() || [])
+      .filter((win) => win.state !== 'minimized' && win.ownerId?.startsWith('desktop-app:'))
+      .map((win) => win.ownerId.slice('desktop-app:'.length)),
+  );
+  const container = document.querySelector('[data-desktop-icons]');
+  for (const icon of container?.querySelectorAll?.('.desktop-icon[data-target]') || []) {
+    const open = openAppIds.has(icon.dataset.target || '');
+    icon.classList.toggle('is-app-open', open);
+    if (open) icon.setAttribute('aria-current', 'true');
+    else icon.removeAttribute('aria-current');
+  }
+  if (container && desktopOpenIconObserverTarget !== container && typeof MutationObserver === 'function') {
+    desktopOpenIconObserver?.disconnect?.();
+    desktopOpenIconObserverTarget = container;
+    desktopOpenIconObserver = new MutationObserver(() => {
+      queueMicrotask(syncDesktopOpenIconStates);
+    });
+    desktopOpenIconObserver.observe(container, { childList: true });
   }
 }
 
@@ -2195,6 +2284,222 @@ async function openIntegratedModuleLifecycle(moduleLike) {
   await session?.showVersions?.();
 }
 
+function closeShellV2VersionMenu(windowId, { returnFocus = true } = {}) {
+  const session = shellV2VersionMenus.get(windowId);
+  if (!session) return;
+  shellV2VersionMenus.delete(windowId);
+  session.cleanup?.();
+  session.menu?.remove();
+  session.trigger?.setAttribute('aria-expanded', 'false');
+  if (returnFocus && session.trigger?.isConnected) session.trigger.focus();
+}
+
+async function toggleShellV2VersionMenu(mod, context = {}) {
+  const windowId = String(context.id || '');
+  const winElement = windowId ? document.getElementById(windowId) : null;
+  const trigger = context.trigger || context.event?.target?.closest?.('[data-window-header-action]');
+  if (!windowId || !winElement || !trigger) return;
+  if (shellV2VersionMenus.has(windowId)) {
+    closeShellV2VersionMenu(windowId);
+    return;
+  }
+  for (const id of [...shellV2VersionMenus.keys()]) closeShellV2VersionMenu(id, { returnFocus: false });
+
+  const lifecycle = appLifecycleState(mod, { session: state.session, governance: state.governance });
+  const canSource = canViewModuleSource(mod);
+  const canCode = canUseModulePermission(mod, BusinessOsPermissions.AppsModify);
+  const canRollback = canUseModulePermission(mod, BusinessOsPermissions.AppsRollback);
+  const moduleTitle = moduleDisplayTitle(mod);
+  const menu = document.createElement('section');
+  menu.className = 'shell-window-v2-version-menu';
+  menu.setAttribute('role', 'dialog');
+  menu.setAttribute('aria-label', `${moduleDisplayTitle(mod)} Versionsmenü`);
+  menu.innerHTML = `
+    <header class="shell-v2-version-menu-head">
+      <div><span>${escapeHtml(moduleTitle)}</span><strong>${escapeHtml(lifecycle.versionLabel || mod.version || 'Version —')}</strong></div>
+      <small>${escapeHtml(lifecycle.label || lifecycle.state || 'Status unbekannt')}</small>
+    </header>
+    <div class="shell-v2-version-menu-actions">
+      <button type="button" data-v2-menu-action="history">Versionshistorie</button>
+      ${canSource ? '<button type="button" data-v2-menu-action="source">Im Source Code Editor öffnen</button>' : ''}
+      <button type="button" data-v2-menu-action="coding" ${canCode ? '' : 'disabled title="Keine Berechtigung: apps.modify"'}>Im Coding Agent öffnen</button>
+    </div>
+    <div class="shell-v2-version-history" data-v2-version-history aria-live="polite">
+      <p>Versionshistorie wird autorisiert geladen…</p>
+    </div>
+  `;
+  winElement.appendChild(menu);
+  trigger.setAttribute('aria-expanded', 'true');
+  trigger.setAttribute('aria-haspopup', 'dialog');
+
+  const outside = (event) => {
+    if (menu.contains(event.target) || trigger.contains(event.target)) return;
+    closeShellV2VersionMenu(windowId);
+  };
+  const keydown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeShellV2VersionMenu(windowId);
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    const focusable = [...menu.querySelectorAll('button:not(:disabled), select:not(:disabled)')];
+    if (!focusable.length) return;
+    event.preventDefault();
+    const current = focusable.indexOf(document.activeElement);
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    focusable[(current + delta + focusable.length) % focusable.length].focus();
+  };
+  const closeMenuForWindow = (detail) => {
+    if (detail?.id === windowId) closeShellV2VersionMenu(windowId, { returnFocus: false });
+  };
+  const closingToken = state.eventBus?.on?.('window:closing', closeMenuForWindow);
+  const closedToken = state.eventBus?.on?.('window:closed', closeMenuForWindow);
+  document.addEventListener('pointerdown', outside, true);
+  document.addEventListener('keydown', keydown, true);
+  shellV2VersionMenus.set(windowId, {
+    menu,
+    trigger,
+    cleanup() {
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', keydown, true);
+      state.eventBus?.off?.('window:closing', closingToken);
+      state.eventBus?.off?.('window:closed', closedToken);
+    },
+  });
+
+  menu.querySelector('[data-v2-menu-action="source"]')?.addEventListener('click', async () => {
+    closeShellV2VersionMenu(windowId, { returnFocus: false });
+    await openModuleSourceEditor(mod.id);
+  });
+  menu.querySelector('[data-v2-menu-action="coding"]')?.addEventListener('click', async () => {
+    if (!canCode) return;
+    closeShellV2VersionMenu(windowId, { returnFocus: false });
+    await openDesktopApp('coding-agents', {
+      args: {
+        moduleId: mod.id,
+        moduleTitle: moduleDisplayTitle(mod),
+        workspaceContext: { source: 'shell-v2-version-menu', ownerId: `desktop-app:${mod.id}` },
+      },
+    });
+  });
+
+  const history = menu.querySelector('[data-v2-version-history]');
+  try {
+    const terminal = await dispatchShellModuleCommand({
+      commandType: 'ctox.module.list_versions',
+      moduleId: mod.id,
+      recordId: `${mod.id}:versions`,
+      payload: { module_id: mod.id },
+      source: 'business-os-shell-v2-version-menu',
+      until: 'terminal',
+    });
+    if (!menu.isConnected) return;
+    const result = terminal?.result || terminal?.output || terminal?.payload?.result || {};
+    const versions = Array.isArray(result?.versions) ? result.versions : [];
+    renderShellV2VersionHistory({ mod, menu, history, versions, canRollback, windowId });
+  } catch (error) {
+    if (!menu.isConnected) return;
+    history.innerHTML = `<p class="is-error" role="alert">Versionshistorie nicht verfügbar: ${escapeHtml(error?.message || error)}</p>`;
+  }
+  menu.querySelector('button:not(:disabled)')?.focus();
+}
+
+function wireShellV2ModuleTitle(mod, win, scope) {
+  if (mod?.layout?.shell_contract !== 'v2' || !win?.id || !scope) return;
+  const trigger = scope.querySelector('.knowledge-left > .ctox-pane-header .ctox-pane-title');
+  if (!trigger) return;
+  const lifecycle = appLifecycleState(mod, { session: state.session, governance: state.governance });
+  const version = lifecycle.versionLabel || String(mod.version || mod.app_version || 'Version —');
+  trigger.classList.add('shell-v2-module-title-trigger');
+  trigger.tabIndex = 0;
+  trigger.setAttribute('role', 'button');
+  trigger.setAttribute('aria-haspopup', 'dialog');
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.setAttribute('aria-label', `${moduleDisplayTitle(mod)}; ${version}; Versionsmenü öffnen`);
+  trigger.title = `${version} · Versionsmenü öffnen`;
+  const open = (event) => toggleShellV2VersionMenu(mod, { id: win.id, trigger, event });
+  trigger.addEventListener('click', open);
+  trigger.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    open(event);
+  });
+}
+
+function renderShellV2VersionHistory({ mod, menu, history, versions, canRollback, windowId }) {
+  if (!versions.length) {
+    history.innerHTML = '<p>Noch keine gespeicherte Version vorhanden.</p>';
+    return;
+  }
+  history.innerHTML = `
+    <label class="shell-v2-version-select"><span>Frühere Version</span>
+      <select data-v2-version-select>
+        ${versions.map((version) => `<option value="${escapeHtml(version.version_id || '')}">#${escapeHtml(version.seq || '—')} · ${escapeHtml(version.label || moduleVersionOriginLabel(version.origin))} · ${escapeHtml(formatLifecycleTimestamp(version.created_at_ms))}</option>`).join('')}
+      </select>
+    </label>
+    <div class="shell-v2-restore-actions">
+      <button type="button" data-v2-restore-start ${canRollback ? '' : 'disabled title="Keine Berechtigung: apps.rollback"'}>Version wiederherstellen</button>
+    </div>
+    <p data-v2-version-status role="status"></p>
+  `;
+  const start = history.querySelector('[data-v2-restore-start]');
+  const select = history.querySelector('[data-v2-version-select]');
+  const status = history.querySelector('[data-v2-version-status]');
+  const moduleTitle = moduleDisplayTitle(mod);
+  let busy = false;
+  start?.addEventListener('click', () => {
+    if (busy || !canRollback) return;
+    const selected = versions.find((version) => version.version_id === select.value);
+    if (!selected) return;
+    start.hidden = true;
+    const confirm = document.createElement('div');
+    confirm.className = 'shell-v2-restore-confirm';
+    confirm.innerHTML = `
+      <p>${escapeHtml(moduleTitle)} wirklich auf Version #${escapeHtml(selected.seq || '—')} zurücksetzen?</p>
+      <button type="button" data-v2-restore-confirm>Wiederherstellen</button>
+      <button type="button" data-v2-restore-cancel>Abbrechen</button>
+    `;
+    start.parentElement.appendChild(confirm);
+    confirm.querySelector('[data-v2-restore-cancel]').addEventListener('click', () => {
+      confirm.remove();
+      start.hidden = false;
+      start.focus();
+    });
+    confirm.querySelector('[data-v2-restore-confirm]').addEventListener('click', async (event) => {
+      if (busy) return;
+      busy = true;
+      for (const button of confirm.querySelectorAll('button')) button.disabled = true;
+      event.currentTarget.textContent = 'Wiederherstellung läuft…';
+      status.textContent = 'Stage, Validierung und atomarer Austausch laufen…';
+      try {
+        await dispatchShellModuleCommand({
+          commandType: 'ctox.module.rollback_version',
+          moduleId: mod.id,
+          recordId: `${mod.id}:versions`,
+          payload: { module_id: mod.id, version_id: selected.version_id },
+          source: 'business-os-shell-v2-version-menu',
+          until: 'terminal',
+        });
+        status.textContent = `Version #${selected.seq || '—'} wurde vollständig wiederhergestellt.`;
+        state.moduleRevisions[mod.id] = Date.now();
+        state.schemaRegistrations.delete(mod.id);
+        closeShellV2VersionMenu(windowId, { returnFocus: false });
+        state.windowManager?.destroy?.(windowId);
+        await delay(240);
+        await openWindowedModule(state.modules.find((entry) => entry.id === mod.id) || mod);
+      } catch (error) {
+        busy = false;
+        for (const button of confirm.querySelectorAll('button')) button.disabled = false;
+        event.currentTarget.textContent = 'Wiederherstellen';
+        status.textContent = `Wiederherstellung fehlgeschlagen: ${error?.message || error}`;
+        status.classList.add('is-error');
+      }
+    });
+    confirm.querySelector('[data-v2-restore-confirm]')?.focus();
+  });
+}
+
 async function ensureIntegratedModuleToolSession(mod) {
   let windowInfo = findDesktopWindow(mod.id);
   if (!windowInfo) {
@@ -2436,6 +2741,7 @@ async function renderIntegratedModuleVersions({ mod, host, windowId }) {
         recordId: `${mod.id}:versions`,
         payload: { module_id: mod.id, version_id: selected.version_id },
         source: 'business-os-integrated-versions',
+        until: 'terminal',
       });
       state.moduleRevisions[mod.id] = Date.now();
       state.schemaRegistrations.delete(mod.id);
@@ -3967,6 +4273,13 @@ function desktopAppDescriptorForModule(mod) {
     minHeight: presentation.minimumSize.height,
     defaultMode: presentation.defaultMode,
     multiInstance: presentation.multiInstance,
+    shellContract: mod?.layout?.shell_contract === 'v2' ? 'v2' : 'v1',
+    shellGeometryContract: String(mod?.layout?.shell_geometry_contract || '').trim(),
+    shellHeaderRows: Math.max(2, Number.parseInt(mod?.layout?.shell_header_rows, 10) || 2),
+    shellIconRows: Math.max(2, Number.parseInt(mod?.layout?.shell_icon_rows, 10) || 2),
+    iconAsset: String(mod?.layout?.icon_asset || '').trim(),
+    iconSrcSet: String(mod?.layout?.icon_asset_srcset || '').trim(),
+    framePalette: mod?.layout?.frame_palette || null,
   };
 }
 
@@ -3982,6 +4295,13 @@ function windowHeaderOptionsForModule(mod) {
     module: mod,
     canOpenSource: canViewModuleSource(mod),
   });
+  if (mod?.layout?.shell_contract === 'v2') {
+    return {
+      headerBadges: [],
+      headerActions: [],
+      onHeaderAction: null,
+    };
+  }
   return {
     headerBadges: [
       { label: version, title: lifecycle.title || `${title}: ${version}`, state: 'version' },
@@ -4156,6 +4476,14 @@ async function openWindowedModule(mod, options = {}) {
     minWidth: options.minWidth || descriptor.minWidth,
     minHeight: options.minHeight || descriptor.minHeight,
     ownerId: `desktop-app:${mod.id}`,
+    shellContract: descriptor.shellContract,
+    shellGeometryContract: descriptor.shellGeometryContract,
+    shellHeaderRows: descriptor.shellHeaderRows,
+    shellIconRows: descriptor.shellIconRows,
+    iconAsset: descriptor.iconAsset,
+    iconSrcSet: descriptor.iconSrcSet,
+    framePalette: descriptor.framePalette,
+    iconAnchorRect: () => desktopIconAnchorRect(mod.id),
     ...windowHeaderOptionsForModule(mod),
   });
   applyWorkjetCategory(win.element, descriptor.category);
@@ -4215,6 +4543,8 @@ async function openWindowedModule(mod, options = {}) {
         args: options.args || {},
       }));
     }
+    wireShellV2ModuleTitle(mod, win, content);
+    state.windowManager?.refreshV2Chrome?.(win.id);
     const windowResizers = [];
     cleanupWindowResizers = setupModuleResizers(mod, {
       scope: content,
@@ -10467,7 +10797,24 @@ function getOfflineFallbackCatalog() {
       ],
       "layout": {
         "shell": "windowed",
-        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-knowledge\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-knowledge\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#d946ef\" /></linearGradient></defs><path d=\"M4 19.5A2.5 2.5 0 0 1 6.5 17H20\" stroke=\"url(#grad-knowledge)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z\" fill=\"url(#grad-knowledge)\" fill-opacity=\"0.12\" stroke=\"url(#grad-knowledge)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M12 2v10l2.5-2 2.5 2V2z\" fill=\"url(#grad-knowledge)\" fill-opacity=\"0.25\" stroke=\"url(#grad-knowledge)\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"9\" cy=\"12\" r=\"1.5\" fill=\"url(#grad-knowledge)\"></circle><circle cx=\"14\" cy=\"15\" r=\"1\" fill=\"url(#grad-knowledge)\"></circle></svg>",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "knowledge-v2-reference-3",
+        "shell_header_rows": 2,
+        "shell_icon_rows": 2,
+        "icon_asset": "modules/knowledge/assets/icon/knowledge-256.png",
+        "icon_asset_srcset": "modules/knowledge/assets/icon/knowledge-256.png 1x, modules/knowledge/assets/icon/knowledge-512.png 2x, modules/knowledge/assets/icon/knowledge-1024.png 4x",
+        "icon_asset_60": "modules/knowledge/assets/icon/knowledge-60.png",
+        "icon_provenance": "modules/knowledge/assets/icon/provenance.json",
+        "frame_palette": {
+          "start": "#f0b774",
+          "middle": "#936b63",
+          "top_joint": "#936b63",
+          "left_joint": "#715365",
+          "end": "#0f2a4c",
+          "surface": "#10151c",
+          "surface_alt": "#141b24",
+          "accent": "#75d7c2"
+        },
         "left": "Knowledge selection and source groups",
         "center": "Markdown reader/editor and dataframe table tabs",
         "right": "Runbooks as operational knowledge layer",
@@ -10476,13 +10823,13 @@ function getOfflineFallbackCatalog() {
           "right": "Runbook configuration, modification, and execution",
           "bottom": "Selected rows, dataframe diagnostics, and CTOX task evidence"
         },
-        "default_width": 1180,
-        "default_height": 780,
+        "default_width": 1200,
+        "default_height": 720,
         "min_width": 640,
         "min_height": 480
       },
       "category": "Knowledge",
-      "version": "v1",
+      "version": "1.1.6",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -10509,8 +10856,8 @@ function getOfflineFallbackCatalog() {
           "focus"
         ],
         "initial_size": {
-          "width": 1180,
-          "height": 780
+          "width": 1200,
+          "height": 720
         },
         "minimum_size": {
           "width": 640,
@@ -10873,6 +11220,7 @@ async function dispatchShellModuleCommand({
   recordId,
   payload,
   source,
+  until = 'accepted',
 }) {
   if (!state.commandBus?.dispatch || !state.db?.collection?.('business_commands')) {
     throw new Error('Aktionen sind gerade nicht verfügbar.');
@@ -10897,7 +11245,7 @@ async function dispatchShellModuleCommand({
       module_id: moduleId,
       actor: actorContext(state.session),
     },
-  }, { until: 'accepted' });
+  }, { until });
 }
 
 const WORKJET_PROJECT_CONTROL_MAX_RESULTS = 100;
@@ -11655,7 +12003,12 @@ function globalRoot() {
 function refreshRemoteShellStateInBackground() {
   if (!state.session?.authenticated) return;
   window.setTimeout(() => {
-    loadModules({ timeoutMs: 20000, allowShellSeed: false })
+    // Runtime lifecycle rows remain authoritative, but packaged presentation
+    // metadata (including the hash-bound operator icon selection and the
+    // Knowledge shell-v2 contract) must survive this delayed refresh. Loading
+    // without the shell merge replaced all of those icon assets with stale
+    // RxDB catalog rows roughly two seconds after boot.
+    loadModules({ timeoutMs: 20000, allowShellSeed: true })
       .then((modules) => {
         if (!Array.isArray(modules?.modules) || !modules.modules.length) return;
         const nextModules = preserveCurrentShellModules(modules.modules, state.modules);

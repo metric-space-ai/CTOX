@@ -8,7 +8,7 @@
            coding-agents. -->
       <section class="ctox-pane knowledge-pane knowledge-left" aria-label="Knowledge">
         <!-- Row 1: title + management-only icons (top-right). -->
-        <header class="ctox-pane-header ctox-pane-band">
+        <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
           <div class="ctox-pane-title-row">
             <div class="ctox-pane-titles">
               <span class="ctox-pane-kicker">Bibliothek</span>
@@ -24,7 +24,7 @@
         <!-- Row 2: filter section — search + view toggle + tray toggle.
              Everything else (scope, sort, content type) lives in the collapsed
              tray. data-pg-* attributes are wired by the shell grammar. -->
-        <div class="knowledge-filterbar">
+        <div class="knowledge-filterbar" data-shell-v2-header-row="2">
           <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen…" aria-label="Suchen" />
           <div class="knowledge-view-toggle" role="group" aria-label="Darstellung">
             <button class="ctox-pane-icon" type="button" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
@@ -32,7 +32,7 @@
           </div>
           <button class="ctox-pane-icon knowledge-filter-toggle" type="button" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--knowledge-surface-muted)"/><circle cx="15" cy="12" r="2.4" fill="var(--knowledge-surface-muted)"/><circle cx="8" cy="17" r="2.4" fill="var(--knowledge-surface-muted)"/></svg></button>
         </div>
-        <div class="knowledge-filter-advanced" data-pg-tray hidden>
+        <div class="knowledge-filter-advanced" data-pg-tray data-shell-v2-header-row="3" hidden>
           <div class="knowledge-filter-row">
             <select class="ctox-select knowledge-select" data-pg-filter data-pg-name="scope" data-pg-default="all" aria-label="Bereich">
               <option value="all">Alle Bereiche</option>
@@ -70,7 +70,7 @@
       <section class="ctox-pane knowledge-pane knowledge-center" aria-label="Knowledge Dokument">
         <!-- Row 1: title (the content element's own actions live top-right of
              each panel as icons — never as text buttons in the content flow). -->
-        <header class="ctox-pane-header ctox-pane-band knowledge-center-head">
+        <header class="ctox-pane-header ctox-pane-band knowledge-center-head" data-shell-v2-header-row="1">
           <div class="ctox-pane-title-row">
             <button class="ctox-pane-icon knowledge-mobile-back" type="button" data-action="mobile-back" aria-label="Zurück zur Liste" title="Zurück zur Liste"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
             <div class="ctox-pane-titles">
@@ -82,7 +82,7 @@
         </header>
         <!-- Row 3: counted view band (its own band below the header, never
              top-right). Zeros are rendered, never hidden. -->
-        <div class="knowledge-view-switch">
+        <div class="knowledge-view-switch" data-shell-v2-header-row="2">
           <div class="ctox-pane-tabs" role="tablist" aria-label="Knowledge Ansicht">
             <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="skill" aria-selected="true">Skill<span class="view-count" data-pg-count="skill"></span></button>
             <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="runbooks" aria-selected="false">Runbooks<span class="view-count" data-pg-count="runbooks"></span></button>
