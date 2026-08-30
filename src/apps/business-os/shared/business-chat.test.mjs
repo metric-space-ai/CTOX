@@ -74,7 +74,8 @@ test('crew creatures sleep when not working and use X eyes only for failures', (
   const idle = __businessChatTestInternals.crewCreatureHtml(chat, 'idle');
   const queued = __businessChatTestInternals.crewCreatureHtml(chat, 'queued');
   const scheduled = __businessChatTestInternals.crewCreatureHtml(chat, 'scheduled');
-  for (const markup of [idle, queued, scheduled]) {
+  const completed = __businessChatTestInternals.crewCreatureHtml(chat, 'success');
+  for (const markup of [idle, queued, scheduled, completed]) {
     assert.match(markup, /is-sleeping/);
     assert.match(markup, /ctox-crew-eyes-sleeping/);
     assert.doesNotMatch(markup, /ctox-crew-eyes-x/);
@@ -129,6 +130,21 @@ test('crew motion CSS is work-only, review-specific, finite on failure, and redu
   assert.match(businessChatSource, /\.ctox-crew-creature\.is-failed[\s\S]*?animation: ctoxCrewOops 860ms[^;]* 1 both/);
   assert.match(businessChatSource, /\.ctox-crew-creature,\n\s+\.ctox-crew-creature \*/);
   assert.doesNotMatch(businessChatSource, /\.ctox-crew-creature\.is-(idle|queued|scheduled|success|blocked)[^}]*animation:/);
+});
+
+test('routine status updates cannot restart dock or window entry animations', () => {
+  assert.doesNotMatch(
+    businessChatSource,
+    /\.ctox-chat-chip\s*\{[^}]*animation:/,
+    'dock chips must not replay an entry animation after a reactive render',
+  );
+  assert.doesNotMatch(
+    businessChatSource,
+    /\.ctox-chat-window\s*\{[^}]*animation:/,
+    'chat windows must not replay an entry animation after a reactive render',
+  );
+  assert.match(businessChatSource, /forceDock:\s*false,\s*forceMessages:\s*true/);
+  assert.match(businessChatSource, /previousStripScrollLeft/);
 });
 
 test('business chat does not restore terminal task windows over app content', () => {

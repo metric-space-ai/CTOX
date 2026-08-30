@@ -205,7 +205,8 @@
     .failed .eye.right { transform: rotate(45deg); }
     .failed .mouth { display: none; }
 
-    .queued .creature { animation: queue-breathe var(--duration) ease-in-out var(--delay) infinite; }
+    /* Queued is waiting, not working: the creature stays asleep and still. */
+    .queued .creature { animation: none; }
     .working .creature { animation: work-roam var(--duration) ease-in-out var(--delay) infinite; }
     .thinking .creature { animation: think-lean var(--duration) ease-in-out var(--delay) infinite; }
     .thinking .eye { animation: think-blink calc(var(--duration) * .83) ease-in-out var(--delay) infinite; }
@@ -215,7 +216,6 @@
     .review::before { content: ""; position: absolute; width: 82px; height: 82px; border: 1px solid rgba(245,187,98,.18); border-radius: 50%; transform: rotateX(64deg); }
     .failed .creature { animation: error-stumble .74s cubic-bezier(.2,.85,.35,1) var(--delay) 1 both; }
 
-    @keyframes queue-breathe { 0%,100% { transform: translateY(0) scale(1); } 47% { transform: translateY(-2px) scale(1.02,.98); } }
     @keyframes work-roam { 0%,100% { transform: translateY(1px) rotate(calc(var(--lean) * -1)); } 33% { transform: translateY(-7px) rotate(var(--lean)); } 67% { transform: translateY(-2px) rotate(calc(var(--lean) * -.6)); } }
     @keyframes think-lean { 0%,100% { transform: rotate(calc(var(--lean) * -.5)) translateY(0); } 43% { transform: rotate(var(--lean)) translateY(-3px); } 68% { transform: rotate(calc(var(--lean) * -.8)) translateY(1px); } }
     @keyframes think-blink { 0%, 39%, 47%, 100% { transform: scaleY(1); } 43% { transform: scaleY(.12); } }

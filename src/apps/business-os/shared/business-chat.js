@@ -852,11 +852,16 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
 
   if (canUpdateInPlace) {
     let inPlaceDomChanged = false;
+    let layoutDomChanged = false;
+    let activeChatChanged = false;
 
     // 1. Update dock state / collapse class
     const dockEl = root.querySelector('[data-chat-dock]');
     if (dockEl) {
-      if (setClassNameIfChanged(dockEl, `ctox-chat-dock ${dockStateClass}`)) inPlaceDomChanged = true;
+      if (setClassNameIfChanged(dockEl, `ctox-chat-dock ${dockStateClass}`)) {
+        inPlaceDomChanged = true;
+        layoutDomChanged = true;
+      }
     }
 
     // Update Chat count badge in FAB
@@ -930,6 +935,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
 
       const isActiveWindow = chat.id === activeExpandedChat?.id;
       const wasActiveWindow = win.classList.contains('is-active');
+      const wasMaximized = win.classList.contains('is-maximized');
       const nextWindowClass = [
         'ctox-chat-window',
         chat.maximized ? 'is-maximized' : '',
@@ -939,6 +945,11 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         activityClass,
       ].filter(Boolean).join(' ');
       if (setClassNameIfChanged(win, nextWindowClass)) inPlaceDomChanged = true;
+      if (wasActiveWindow !== isActiveWindow) {
+        activeChatChanged = true;
+        layoutDomChanged = true;
+      }
+      if (wasMaximized !== Boolean(chat.maximized)) layoutDomChanged = true;
       const activityChanged = setDatasetIfChanged(win, 'activityTurns', activityTurns);
       if (activityChanged && activityClass) {
         win.classList.remove(activityClass);
@@ -1052,20 +1063,33 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       }
     });
 
-    // 4. Align position and scroll — only when something actually moved.
-    // A no-op status tick must not call scrollIntoView or rewrite left styles;
-    // that is the visible "chat bar rebuilds every 2 seconds" twitch.
-    if (inPlaceDomChanged) {
+    if (root.dataset) root.dataset.activeChatId = activeExpandedChat?.id || '';
+    if (!inPlaceDomChanged) return;
+
+    // Geometry is independent from content/status. A new message, progress
+    // turn or creature-state change must never recompute window positions,
+    // smooth-scroll the dock, or republish the host layout. Those operations
+    // used to make the entire bar jump whenever an unrelated task ticked.
+    if (layoutDomChanged || activeChatChanged) {
       alignChatWindows(root);
-      scrollActiveChatIntoView(root, state, { forceMessages: messagesDomChanged });
+      scrollActiveChatIntoView(root, state, {
+        forceDock: activeChatChanged,
+        forceMessages: messagesDomChanged,
+      });
       updateChatStripOverflowState(root);
       publishChatLayout(root, state);
+    } else if (messagesDomChanged) {
+      scrollActiveChatIntoView(root, state, { forceDock: false, forceMessages: true });
     }
     return; // Exit early without recreating DOM nodes!
   }
   // --- END OF IN-PLACE DOM UPDATE FAST-PATH ---
 
   const maxDateVal = getLocalDateString(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000);
+  const previousStrip = root.querySelector('[data-chat-strip]');
+  const previousStripScrollLeft = previousStrip?.scrollLeft || 0;
+  const previousActiveChatId = root.dataset?.activeChatId || '';
+  const hadRenderedDock = Boolean(root.querySelector('[data-chat-dock]'));
 
   root.innerHTML = `
     <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
@@ -1434,8 +1458,14 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     });
   });
 
+  const nextStrip = root.querySelector('[data-chat-strip]');
+  if (nextStrip && hadRenderedDock) nextStrip.scrollLeft = previousStripScrollLeft;
+  if (root.dataset) root.dataset.activeChatId = activeExpandedChat?.id || '';
   alignChatWindows(root);
-  scrollActiveChatIntoView(root, state);
+  scrollActiveChatIntoView(root, state, {
+    forceDock: !hadRenderedDock || previousActiveChatId !== (activeExpandedChat?.id || ''),
+    forceMessages: true,
+  });
   updateChatStripOverflowState(root);
   publishChatLayout(root, state);
   window.requestAnimationFrame(() => {
@@ -1926,7 +1956,10 @@ function crewCreatureMode(chat, taskState = getTaskState(chat)) {
   if (taskState === 'running') {
     return executionProgressForChat(chat)?.phase === 'review' ? 'review' : 'working';
   }
-  if (taskState === 'idle' || taskState === 'queued' || taskState === 'scheduled') return 'sleeping';
+  if (taskState === 'idle'
+      || taskState === 'queued'
+      || taskState === 'scheduled'
+      || taskState === 'success') return 'sleeping';
   return taskState;
 }
 
@@ -2875,13 +2908,13 @@ function isScrolledToBottom(container) {
   return distanceFromBottom <= CHAT_BOTTOM_PIN_THRESHOLD_PX;
 }
 
-function scrollActiveChatIntoView(root, state, { forceMessages = true } = {}) {
+function scrollActiveChatIntoView(root, state, { forceDock = true, forceMessages = true } = {}) {
   const activeChip = Array.from(root.querySelectorAll('[data-chat-focus]'))
     .find((node) => node.dataset.chatFocus === state.activeChatId);
   // scrollIntoView on every no-op tick re-animates the dock strip and is the
   // visible "chat bar jumps by itself" symptom. Only call it when the active
   // chip is actually outside the strip's visible range.
-  if (activeChip && !isChipMostlyVisible(root, activeChip)) {
+  if (forceDock && activeChip && !isChipMostlyVisible(root, activeChip)) {
     activeChip.scrollIntoView?.({ inline: 'center', block: 'nearest', behavior: 'smooth' });
   }
   updateChatStripOverflowState(root);
@@ -4975,7 +5008,6 @@ function installChatStyles() {
       padding: 0 7px;
       text-align: left;
       cursor: pointer;
-      animation: ctoxChipSlideIn var(--motion-slow) var(--ease-spring) both;
       transition: transform var(--motion-slow) var(--ease-spring), background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-spring);
       --accent: var(--shell-category-accent, var(--workjet-accent, #1b4ed8));
       --accent-soft: var(--shell-category-soft, var(--workjet-accent-soft, #e0e6f7));
@@ -5043,7 +5075,6 @@ function installChatStyles() {
       box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 0 1px var(--accent) inset;
       opacity: 1 !important;
       transform: translateY(-1px) scale(1.02);
-      animation: ctoxChipActivePulse var(--motion-slow) var(--ease-standard) both;
     }
     .ctox-chat-chip-mark {
       position: relative;
@@ -5343,7 +5374,6 @@ function installChatStyles() {
       font-family: var(--font-sans, var(--workjet-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif));
       font-size: var(--fs-sm);
       line-height: 1.4;
-      animation: ctoxChatSlideIn var(--motion-slow) var(--ease-spring);
       flex-shrink: 0;
       transition: 
         left var(--motion-slow) var(--ease-standard),
@@ -5417,16 +5447,6 @@ function installChatStyles() {
       opacity: 1;
       filter: none;
       transform: scale(1) translateZ(0px) translateY(0);
-      animation: ctoxActiveFocusSpotlight var(--motion-slow) var(--ease-standard) both;
-    }
-    .ctox-chat-window.is-active.is-task-running {
-      animation: ctoxActiveFocusSpotlight var(--motion-slow) var(--ease-standard) both, ctoxPulseRunning 2s infinite ease-in-out var(--motion-slow);
-    }
-    .ctox-chat-window.is-active.is-task-queued {
-      animation: ctoxActiveFocusSpotlight var(--motion-slow) var(--ease-standard) both, ctoxPulseQueued 2s infinite ease-in-out var(--motion-slow);
-    }
-    .ctox-chat-window.is-active.is-task-failed {
-      animation: ctoxActiveFocusSpotlight var(--motion-slow) var(--ease-standard) both, ctoxPulseFailed 2.5s infinite ease-in-out var(--motion-slow);
     }
     .ctox-chat-window.is-maximized {
       width: min(440px, calc(100vw - 24px)) !important;
@@ -5496,17 +5516,18 @@ function installChatStyles() {
     }
 
     .ctox-chat-window.is-task-running {
-      animation: ctoxPulseRunning 2s infinite ease-in-out;
+      border-color: color-mix(in srgb, var(--accent) 68%, var(--line));
     }
     .ctox-chat-window.is-task-queued {
-      animation: ctoxPulseQueued 2s infinite ease-in-out;
+      border-color: color-mix(in srgb, #f59e0b 58%, var(--line));
     }
     .ctox-chat-window.is-task-success {
       border-color: var(--success, var(--accent)) !important;
       box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg)), 0 0 20px color-mix(in srgb, var(--success, var(--accent)) 35%, transparent) !important;
     }
     .ctox-chat-window.is-task-failed {
-      animation: ctoxPulseFailed 2.5s infinite ease-in-out;
+      border-color: color-mix(in srgb, #ef4444 78%, var(--line));
+      box-shadow: var(--workjet-shadow-overlay, var(--shadow-lg)), 0 0 14px rgba(239, 68, 68, 0.24);
     }
 
     .ctox-chat-window header {
