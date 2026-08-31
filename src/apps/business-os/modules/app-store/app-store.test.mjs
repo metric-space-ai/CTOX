@@ -55,7 +55,7 @@ test('marketplace sync labels explain loading and stale counts', () => {
       availableCount: 1,
       installedCount: 20,
     }),
-    '19 GitHub Module gefunden. 1 noch nicht lokal vorhanden. 20 installierte Apps lokal gezählt.'
+    '19 Katalog-Apps projiziert. 1 noch nicht lokal vorhanden. 20 installierte Apps lokal gezählt.'
   );
   assert.match(
     hooks.marketplaceStateLabel({
@@ -72,7 +72,10 @@ test('marketplace discovery is explicit and not an automatic mount side effect',
   assert.match(source, /data-refresh-marketplace/);
   assert.match(source, /refreshMarketplace\(\{ force: true \}\)/);
   assert.doesNotMatch(source, /render\(\);\s*refreshMarketplace\(\);/);
-  assert.match(source, /GitHub Discovery ist bereit und startet nur manuell/);
+  assert.match(source, /Aktualisierung startet nur manuell/);
+  // Eine Katalogquelle: keine Browser-seitige GitHub-Discovery mehr.
+  assert.doesNotMatch(source, /api\.github\.com/);
+  assert.doesNotMatch(source, /raw\.githubusercontent\.com/);
 });
 
 test('marketplace installs preserve GitHub provenance for first-party verification', () => {
@@ -133,11 +136,11 @@ test('canonical catalog item prefers installed local records over duplicate GitH
 });
 
 test('empty states distinguish sync loading from search misses', () => {
-  assert.equal(hooks.emptyCatalogTitle('marketplace', '', 'loading'), 'GitHub Discovery läuft');
+  assert.equal(hooks.emptyCatalogTitle('marketplace', '', 'loading'), 'Katalog wird aktualisiert');
   assert.equal(hooks.emptyCatalogTitle('all', 'zz-no-hit', 'ready'), 'Keine Apps gefunden');
   assert.match(
     hooks.emptyCatalogBody('marketplace', '', 'loading'),
-    /Katalog wird gerade mit GitHub synchronisiert/
+    /aus der Server-Projektion neu geladen/
   );
   assert.match(hooks.emptyCatalogBody('all', 'zz-no-hit', 'ready'), /zz-no-hit/);
 });

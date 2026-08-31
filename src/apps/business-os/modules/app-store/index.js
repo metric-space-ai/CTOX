@@ -25,10 +25,6 @@ import {
 
 const CTOX_REPO = 'metric-space-ai/ctox';
 const CTOX_BRANCH = 'main';
-const CTOX_APP_ROOT = 'src/apps/business-os';
-const CTOX_TREE_URL = `https://api.github.com/repos/${CTOX_REPO}/git/trees/${CTOX_BRANCH}?recursive=1`;
-const CTOX_RAW_ROOT = `https://raw.githubusercontent.com/${CTOX_REPO}/${CTOX_BRANCH}/${CTOX_APP_ROOT}`;
-const CTOX_DOWNLOAD_URL = `https://github.com/${CTOX_REPO}/archive/refs/heads/${CTOX_BRANCH}.zip`;
 const STORE_COMMAND_TIMEOUT_MS = 3 * 60 * 1000;
 const DEMAND_ONLY_SYNC_COLLECTIONS = new Set([
   'desktop_file_chunks',
@@ -380,7 +376,7 @@ function applyCatalogMarketplaceState() {
   state.marketplaceStatus = state.marketplace.length ? 'ready' : 'idle';
   state.marketplaceMessage = state.marketplace.length
     ? `${state.marketplace.length} projizierte Marketplace-Module geladen`
-    : 'GitHub Discovery ist bereit und startet nur manuell.';
+    : 'Katalog kommt aus der Server-Projektion; Aktualisierung startet nur manuell.';
 }
 
 function mergeShellModulesIntoCatalog(catalog) {
@@ -408,71 +404,19 @@ function mergeShellModulesIntoCatalog(catalog) {
 async function refreshMarketplace({ force = false } = {}) {
   if (state.marketplaceStatus === 'loading' && !force) return;
   state.marketplaceStatus = 'loading';
-  state.marketplaceMessage = `Lade Module aus ${CTOX_REPO}`;
+  state.marketplaceMessage = 'Katalogprojektion wird neu geladen';
   render();
   try {
-    const remote = await loadRemoteMarketplace();
-    state.marketplace = mergeMarketplace(remote, normalizeMarketplace(state.catalog?.marketplace || []));
+    await loadCatalog();
     state.marketplaceStatus = state.marketplace.length ? 'ready' : 'empty';
     state.marketplaceMessage = state.marketplace.length
-      ? `${state.marketplace.length} GitHub Module gefunden`
-      : `Keine Module in ${CTOX_REPO}/${CTOX_APP_ROOT}/modules gefunden.`;
+      ? `${state.marketplace.length} Apps im offiziellen Katalog`
+      : 'Keine Apps im offiziellen Katalog projiziert.';
   } catch (error) {
     state.marketplaceStatus = state.marketplace.length ? 'stale' : 'error';
     state.marketplaceMessage = error?.message || String(error);
   }
   render();
-}
-
-async function loadRemoteMarketplace() {
-  return discoverCtoxRepoModules();
-}
-
-async function discoverCtoxRepoModules() {
-  const response = await fetch(CTOX_TREE_URL, { cache: 'no-store' });
-  if (!response.ok) {
-    throw new Error(`CTOX GitHub discovery failed: ${response.status} ${response.statusText}`);
-  }
-  const data = await response.json();
-  const paths = Array.isArray(data.tree) ? data.tree : [];
-  const manifests = paths
-    .filter((entry) => entry.type === 'blob' && /^src\/apps\/business-os\/modules\/[^/]+\/module\.json$/.test(entry.path || ''))
-    .map((entry) => entry.path);
-  const settled = await Promise.allSettled(manifests.map(manifestPathToMarketplaceItem));
-  return settled
-    .filter((result) => result.status === 'fulfilled' && result.value)
-    .map((result) => result.value);
-}
-
-async function manifestPathToMarketplaceItem(path) {
-  const manifestUrl = `https://raw.githubusercontent.com/${CTOX_REPO}/${CTOX_BRANCH}/${path}`;
-  const manifestResponse = await fetch(manifestUrl, { cache: 'no-store' });
-  if (!manifestResponse.ok) return null;
-  const manifest = await manifestResponse.json();
-  const moduleId = sanitizeId(manifest.id || path.split('/').at(-2));
-  if (!moduleId || String(manifest.install_scope || '').trim().toLowerCase() !== 'store') return null;
-  const repoSourcePath = path.replace('/module.json', '');
-  return normalizeMarketplaceItem({
-    id: moduleId,
-    module_id: moduleId,
-    title: manifest.title || moduleId,
-    description: manifest.description || '',
-    category: manifest.category || 'CTOX',
-    version: manifest.version || CTOX_BRANCH,
-    developer: manifest.developer || 'CTOX',
-    license: manifest.license || 'AGPL-3.0-only',
-    repo: CTOX_REPO,
-    source: 'ctox-github',
-    source_path: repoSourcePath,
-    manifest_url: manifestUrl,
-    download_url: CTOX_DOWNLOAD_URL,
-    homepage: `https://github.com/${CTOX_REPO}/tree/${CTOX_BRANCH}/${path.replace('/module.json', '')}`,
-    permissions: manifest.collections || [],
-    install_scope: 'store',
-    store: manifest.store || {},
-    installable: manifest.store?.installable !== false,
-    updated_at: '',
-  });
 }
 
 function catalogItems() {
@@ -482,8 +426,6 @@ function catalogItems() {
 function rawCatalogItems() {
   const modules = Array.isArray(state.catalog?.modules) ? state.catalog.modules : [];
   const templates = Array.isArray(state.catalog?.templates) ? state.catalog.templates : [];
-  const moduleIds = new Set(modules.map((item) => item?.id).filter(Boolean));
-  const desktopApps = Array.isArray(state.ctx?.desktopApps) ? state.ctx.desktopApps : [];
 
   const scratchTemplate = {
     id: 'create-scratch',
@@ -509,9 +451,6 @@ function rawCatalogItems() {
       .filter(isLaunchableModule)
       .filter(canSeeModuleForAppVersion)
       .map((item) => normalizeItem(item, moduleKind(item))),
-    ...desktopApps
-      .filter((item) => item?.id && !moduleIds.has(item.id))
-      .map(normalizeDesktopAppItem),
   ];
   return items.filter(Boolean);
 }
@@ -633,45 +572,6 @@ function externalSourceBadgeHtml(item) {
   if (src.verified === true) return '';
   const where = kind === 'github' && src.repo ? ` · ${escapeHtml(String(src.repo))}` : '';
   return `<span class="ctox-badge is-warning" title="Aus externer Quelle installiert – noch nicht verifiziert. Externe Apps erhalten keine Datenrechte bis zum Data-Access-Review.">Externe Quelle · nicht verifiziert${where}</span>`;
-}
-
-function normalizeDesktopAppItem(item) {
-  return {
-    id: sanitizeId(item.id || ''),
-    kind: 'local',
-    status: 'local',
-    launch_kind: 'desktop-app',
-    title: item.title || item.id,
-    description: 'Packaged desktop utility available from the Business OS launcher.',
-    category: 'Desktop Apps',
-    version: 'v1',
-    developer: 'CTOX',
-    license: 'AGPL-3.0-only',
-    source: 'desktop-app',
-    repo: '',
-    download_url: '',
-    source_path: '',
-    manifest_url: '',
-    homepage: '',
-    icon_svg: item.layout?.icon_svg || item.icon_svg || '',
-    install_scope: '',
-    permissions: [],
-    installable: false,
-    module_class: 'maintained',
-    editable: false,
-    deletable: false,
-    manifest_sha256: '',
-    local_manifest_path: '',
-    installed_version: 'Installiert: Desktop',
-    available_version: 'Katalog: lokal',
-    update_available: false,
-    update_reason: '',
-    modification_status: 'clean',
-    modification_label: 'Unverändert',
-    version_state: null,
-    latest_release: null,
-    raw: item,
-  };
 }
 
 function statusForItem(item, kind) {
@@ -2373,14 +2273,6 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function mergeMarketplace(primary, fallback) {
-  const map = new Map();
-  for (const item of [...fallback, ...primary]) {
-    map.set(item.id, item);
-  }
-  return [...map.values()].sort((left, right) => left.title.localeCompare(right.title));
-}
-
 function sortItems(left, right) {
   const rank = { marketplace: 0, template: 1, installed: 2, local: 3, system: 4 };
   return (rank[left.kind] ?? 9) - (rank[right.kind] ?? 9)
@@ -2486,27 +2378,27 @@ function marketplaceStateLabel({
   availableCount = marketplaceCount,
   installedCount,
 }) {
-  if (status === 'loading') return message || `GitHub Discovery läuft. Installierte Apps bleiben sichtbar.`;
+  if (status === 'loading') return message || `Katalogprojektion wird neu geladen. Installierte Apps bleiben sichtbar.`;
   if (status === 'ready') {
-    const base = message || `${discoveredCount} GitHub Module gefunden.`;
+    const base = message || `${discoveredCount} Katalog-Apps projiziert.`;
     return `${base} ${availableCount} noch nicht lokal vorhanden. ${installedCount} installierte Apps lokal gezählt.`;
   }
-  if (status === 'empty') return message || 'Keine GitHub Module gefunden. Installierte Apps bleiben lokal verfügbar.';
-  if (status === 'stale') return `GitHub Sync fehlgeschlagen. Zeige letzten Stand: ${message || 'Unbekannter Fehler'}`;
-  if (status === 'error') return `GitHub Sync fehlgeschlagen: ${message || 'Unbekannter Fehler'}`;
-  return `GitHub modules are loaded from ${CTOX_REPO}/${CTOX_APP_ROOT}/modules. Installed: ${installedCount}.`;
+  if (status === 'empty') return message || 'Keine Katalog-Apps projiziert. Installierte Apps bleiben lokal verfügbar.';
+  if (status === 'stale') return `Katalog-Refresh fehlgeschlagen. Zeige letzten Stand: ${message || 'Unbekannter Fehler'}`;
+  if (status === 'error') return `Katalog-Refresh fehlgeschlagen: ${message || 'Unbekannter Fehler'}`;
+  return `Der offizielle Katalog kommt aus der Server-Projektion. Installed: ${installedCount}.`;
 }
 
 function emptyCatalogTitle(scope, query, marketplaceStatus) {
-  if (scope === 'marketplace' && marketplaceStatus === 'loading') return 'GitHub Discovery läuft';
-  if (scope === 'marketplace' && marketplaceStatus === 'error') return 'GitHub Discovery fehlgeschlagen';
+  if (scope === 'marketplace' && marketplaceStatus === 'loading') return 'Katalog wird aktualisiert';
+  if (scope === 'marketplace' && marketplaceStatus === 'error') return 'Katalog-Refresh fehlgeschlagen';
   if (query) return 'Keine Apps gefunden';
   return 'Keine Apps in dieser Kategorie';
 }
 
 function emptyCatalogBody(scope, query, marketplaceStatus, marketplaceMessage = '') {
-  if (scope === 'marketplace' && marketplaceStatus === 'loading') return 'Der Katalog wird gerade mit GitHub synchronisiert.';
-  if (scope === 'marketplace' && marketplaceStatus === 'error') return marketplaceMessage || 'Der letzte GitHub Refresh konnte nicht geladen werden.';
+  if (scope === 'marketplace' && marketplaceStatus === 'loading') return 'Der Katalog wird gerade aus der Server-Projektion neu geladen.';
+  if (scope === 'marketplace' && marketplaceStatus === 'error') return marketplaceMessage || 'Der letzte Katalog-Refresh konnte nicht geladen werden.';
   if (query) return `Kein Katalogeintrag passt zu "${query}".`;
   return 'Wechsle die Kategorie oder aktualisiere GitHub Discovery.';
 }
