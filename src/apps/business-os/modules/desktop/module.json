@@ -16,7 +16,7 @@
     "center": "desktop surface",
     "right": "agent context"
   },
-  "category": "workspace",
+  "category": "Workspace",
   "version": "1.0.1",
   "developer": "CTOX",
   "license": "AGPL-3.0-only",

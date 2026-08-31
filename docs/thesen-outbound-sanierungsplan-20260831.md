@@ -69,6 +69,32 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
 
 ## Ereignis-Log (fortgeschrieben)
 
+- 14:25 **SELLIFY-WEICHE OHNE BUILD GELÖST + KOMPLETT-E2E GRÜN** (App v1.0.62):
+  Statt des geplanten Rust-Patches deklariert das Modul `sellify_companies`
+  als Fremd-Collection (der Shell-Mechanismus dafür existiert seit 11.08.);
+  die Weiche entscheidet auf dem LOKALEN Replikat. Gemessen im Browser:
+  - „Neue Recherche" auf Carbosulf (im CRM): Abbruch „bereits in Sellify
+    geführt (contact_id 17622) — nur Nachrecherche möglich" (Treffer in
+    **19 ms**, warm; 8,3 s beim Erstsync).
+  - „Nachrecherche" auf E2E04-Testfirma (nicht im CRM): Abbruch „nicht
+    gefunden — nur Neue Recherche möglich".
+  - „Nachrecherche" auf Carbosulf: startet, Lead „Läuft", CRM-Vorwissen im
+    Auftrag.
+  - **Sellify-Kampagnen-Import E2E**: Suche „Welle 3 - 04.09.2025" → 4
+    Kampagnen mit Mitgliederzahlen → Import „Automatiktüren & Drehtüren D"
+    → Kampagne „Sellify: Automatiktüren…" mit 7 eindeutigen Firmen-Leads
+    (aus 16 Mitgliedszeilen; Rest Personen-/Doppelzeilen) in der Liste.
+  - Zwei-Prompt-Settings sichtbar: „Prompt: Neue Recherche" (aktiver
+    0–7-Prompt, 3320 Zeichen) + „Prompt: Nachrecherche" (leer=Fallback).
+  Der Command-Fallback bekam 90 s + 1 Retry (Terminal-Beobachtung über den
+  Sync-Kanal bleibt träge); der geplante native-Weiche-Rust-Patch ist damit
+  NICHT mehr nötig — von der Nächster-Build-Liste gestrichen.
+- 14:25 Verbleibende Build-Kandidaten (alle „wenn es geht"-verzichtbar,
+  OWNER entscheidet Zeitpunkt): Aux-Kanal-Priorisierung (RPCs vor Frames;
+  Wurzel der 20-s-Timeouts), P2.4 nativer Skript-Lesepfad, P2.5
+  Versionshistorie für Direkt-Deploys, split_name-Adelspartikel (liegt im
+  workjet-Repo, nicht in ctox), harte maschinelle Stop-Anweisungen.
+
 - 13:56 **ABNAHME-MESSUNG nach Deploy** (Release branch-main-20260831T122521Z
   aktiv seit 12:45; App v1.0.60/v32):
   - Token-Ablehnungen seit Deploy: **0** (vorher Dauerschleife). 404-Tode: **0**.

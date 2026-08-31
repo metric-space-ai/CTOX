@@ -419,32 +419,6 @@ async function refreshMarketplace({ force = false } = {}) {
   render();
 }
 
-
-// Kanonische Rubrik-Slugs (WORKJET_CATEGORY_IDS) -> Anzeigenamen.
-const CATEGORY_LABELS = {
-  workspace: 'Arbeitsplatz',
-  collaboration: 'Zusammenarbeit',
-  productivity: 'Produktivität',
-  development: 'Entwicklung',
-  engineering: 'Engineering',
-  knowledge: 'Wissen',
-  research: 'Recherche',
-  sales: 'Vertrieb',
-  recruiting: 'Recruiting',
-  finance: 'Finanzen',
-  operations: 'Betrieb',
-  governance: 'Governance',
-  security: 'Sicherheit',
-  analytics: 'Analytik',
-  system: 'System',
-  imported: 'Importiert',
-};
-
-function categoryLabel(value) {
-  const slug = String(value || '').trim().toLowerCase();
-  return CATEGORY_LABELS[slug] || String(value || '');
-}
-
 function catalogItems() {
   return uniqueCatalogItems(rawCatalogItems()).sort(sortItems);
 }
@@ -624,7 +598,7 @@ function syncCategoryOptions() {
   const current = [...els.categoryFilter.options].map((option) => option.value);
   if (wanted.join('|') !== current.join('|')) {
     els.categoryFilter.innerHTML = '<option value="all">Alle Kategorien</option>'
-      + categories.map((category) => `<option value="${escapeAttr(category)}">${escapeHtml(categoryLabel(category))}</option>`).join('');
+      + categories.map((category) => `<option value="${escapeAttr(category)}">${escapeHtml(category)}</option>`).join('');
   }
   const clamped = wanted.includes(state.categoryFilter) ? state.categoryFilter : 'all';
   els.categoryFilter.value = clamped;
@@ -1053,7 +1027,7 @@ function renderCard(item, { compact = false } = {}) {
   card.classList.toggle('is-operating', operation?.kind === 'running');
   card.tabIndex = 0;
   card.setAttribute('aria-selected', item.id === state.selectedId ? 'true' : 'false');
-  card.setAttribute('aria-label', `${item.title}. ${statusLabel(cardStatus)}. ${categoryLabel(item.category)}.`);
+  card.setAttribute('aria-label', `${item.title}. ${statusLabel(cardStatus)}. ${item.category}.`);
 
   if (compact) {
     // Maximum density: one line, title + one short meta. Nothing wraps, so
@@ -1100,7 +1074,7 @@ function shardMetaFor(item) {
   const version = item.installed_version && item.installed_version !== '-'
     ? item.installed_version
     : item.available_version;
-  return [categoryLabel(item.category), version]
+  return [item.category, version]
     .map((part) => String(part || '').trim())
     .filter((part) => part && part !== '-')
     .join(' · ');
@@ -1112,7 +1086,7 @@ function rowMetaFor(item, cardStatus, operation) {
   if (operation?.kind === 'running' || operation?.kind === 'error') {
     return statusLabel(cardStatus);
   }
-  return statusLabel(cardStatus) || categoryLabel(item.category) || '';
+  return statusLabel(cardStatus) || item.category || '';
 }
 
 function releaseProjectionBadgeHtml(item) {
@@ -1202,7 +1176,7 @@ function renderDetails() {
   if (els.detailIcon) els.detailIcon.innerHTML = iconMarkupForItem(item);
   if (els.detailTitle) els.detailTitle.textContent = item.title;
   if (els.detailVersion) els.detailVersion.textContent = item.lifecycle?.version || item.version;
-  if (els.detailCategory) els.detailCategory.textContent = categoryLabel(item.category);
+  if (els.detailCategory) els.detailCategory.textContent = item.category;
   if (els.detailDeveloper) els.detailDeveloper.textContent = item.developer;
   if (els.detailLicense) els.detailLicense.textContent = item.license;
   if (els.detailSource) els.detailSource.textContent = item.source;
@@ -2309,7 +2283,7 @@ function scopeTitle(scope) {
   const t = state.t;
   return {
     all: t('scopeTitleAll', 'Alle Anwendungen'),
-    marketplace: t('scopeTitleMarketplace', 'Offizieller Katalog'),
+    marketplace: t('scopeTitleMarketplace', 'GitHub Marketplace'),
     template: t('scopeTitleTemplate', 'Templates'),
     installed: t('scopeTitleInstalled', 'Installierte Apps'),
     system: t('scopeTitleSystem', 'System Apps'),

@@ -12,12 +12,7 @@
 
 import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-
-const { WORKJET_CATEGORY_IDS } = await import(
-  pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'shared', 'workjet-theme.js')).href
-);
-const CANONICAL_CATEGORIES = new Set(WORKJET_CATEGORY_IDS);
+import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -99,9 +94,6 @@ for (const id of coreScopeIds) {
 }
 for (const id of moduleDirs) {
   const m = manifests.get(id);
-  if (!CANONICAL_CATEGORIES.has(m.category)) {
-    fail(`module "${id}" category ${JSON.stringify(m.category)} is not a canonical rubric slug (see WORKJET_CATEGORY_IDS in shared/workjet-theme.js)`);
-  }
   if (!systemSet.has(id)) {
     if (m.install_scope === 'core' || m.install_scope === 'starter') fail(`non-system module "${id}" must not declare install_scope "${m.install_scope}"`);
     if (m.core === true) fail(`non-system module "${id}" must not declare core:true`);

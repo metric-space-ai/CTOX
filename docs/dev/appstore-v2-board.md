@@ -1,8 +1,7 @@
 # APPSTORE-V2 — Kampagnen-Board
 
-**Headline:** Phase 1 KOMPLETT (P1.1 9743d0262, P1.2 22c959be9+4ab89e374, P1.3
-93228b38a+23e7ed6a0), P5 komplett (14a347e6d), P6 Teil 1 gelandet (31016bf1b);
-kritischer Pfad = Sol-Lauf P2 (origin/repair/local-catalog) landet.
+**Headline:** P1.2 + P3A gelandet; kritischer Pfad = P1.1-Patch anwenden, sobald die
+Cargo-Baseline des (verschmutzten) Hauptbaums grün gemeldet ist.
 
 Zielbild (entscheidungsfrei bis auf OWNER-Karten unten):
 https://claude.ai/code/artifact/00f7ce23-1cb4-450d-bb26-a1f1f5fc2898
@@ -11,22 +10,6 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 ---
 
 ## Done
-
-- **[P1.3] Store liest nur noch die Server-Projektion** — GitHub-Discovery komplett raus
-  (api.github.com/raw-Fetches, mergeMarketplace, DESKTOP_APPS-Merge), Refresh lädt die
-  Projektion; Kopf/Locales „Offizieller Katalog"; Wächter auf neuen Vertrag. Visuell im
-  Geometrie-Labor nachgeprüft. Commits `93228b38a`, `72770889e`, `23e7ed6a0`.
-- **[P6 Teil 1] Rubrik-Slugs kanonisch** — 39 Manifeste auf die 16 Workjet-Slugs,
-  Generator erzwingt Slugs, Store zeigt lokalisierte Labels. Teil 2 (imported=origin:user)
-  wartet auf P2. Commit `31016bf1b`.
-- **[P5] Code-Modus ausgesprochen** — Mechanik existierte (integrierte Fenster-Modi
-  app|source|versions inkl. Agent-Panel); Titelmenü-Eintrag heißt jetzt „Code-Modus",
-  desktop-apps/README.md dokumentiert code-editor als Shell-Komponente. Labor 37/37.
-  Commit `14a347e6d`. OFFEN als Restlast: Klick-Durchstich auf laufender Instanz
-  (Labor mountet Apps einzeln, nicht das Titelmenü).
-- **BEFUND (Labor-Screenshot): explorer-Leerzustand** zeigt überlappende
-  Kopf-Fragmente („Geändert"/„Details") ohne Daten — Kosmetik im Sol-Port, App sonst OK.
-
 
 - **[P1.2b] explorer + file-viewer als Core-Module gelandet** — Sol-Port (Run
   `123104Z-d4712c24`, integrated) + Fable-Shell-Umbau: DESKTOP_APPS geleert (IDs stabil,
@@ -84,18 +67,30 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 
 ## Working
 
-- **[P2] origin + Core-Repair + local-catalog** — Sol · Completion, Workjet-Run
-  `135757Z-50418a77`, Launchpad appstore-v2-p2 (business_os-Stand nach P1.1 inkl.
-  Fremd-WIP als Baseline). Nach Landung: Import via commit-tree (Fremd-Hunks in
-  server.rs/mcp_channel/store_catalog_projections NICHT mitcommitten), cargo check,
-  dann Browser-Teil (origin-Badges, Repair-Knopf, install source_kind local-catalog)
-  und P6 Teil 2 (PUBLIC_DISTRIBUTIONS-Heuristik → origin).
+- **[P1.1 + P0.3] Loader-Patch anwenden** — Sol-Lauf `121437Z-2d73f775` COMPLETED und
+  importiert; Patch liegt in /Volumes/tmp/appstore-v2-p11-loader.patch (+324/−545, 4 Dateien:
+  neues module_manifest_loader.rs 298 Z., server.rs −325, store.rs −216, mod.rs +1).
+  Review erledigt: Semantik kanonisch (asset_revision, file plane, customer_apps-Gate,
+  Scope-Demotion), Kollisionen = Warnung + ModuleManifestLoad.collisions, Vorrang
+  source→installed→local erhalten, upsert_module_manifest_command als Alias erhalten.
+  WARTET auf: grüne Cargo-Baseline des Hauptbaums (läuft, Task bf0vrof2q, warmes Target
+  runtime/build/cargo-target 9.1G). Danach: git apply → cargo check → Commit (server.rs-
+  Vorbestand siehe Umgebungsfalle unten!).
 
 ## To-Do
+- **[P1.3] Store-UI-Katalogquellen auf Server-Projektion reduzieren** (app-store/index.js:468–508).
+  TRIGGER: nach P1.2.
+- **[P2] origin-Feld + Core-Repair + local-catalog-Install.** TRIGGER: nach P1.
 - **[P3] Store-Kanal V1** (CI-Publisher + nativer Client + Kimi-Cyber-Review). TRIGGER: nach P2;
   DNS appstore.ctox.dev = OWNER-Handgriff.
 - **[P4] Nutzer-Apps-Pipeline** (Zip/GitHub-Link als origin:user, Importer auf Kommando,
   Deinstallation). TRIGGER: nach P2, parallel zu P3 möglich.
+- **[P5] Code-Modus sichtbar + Agent-Panel integriert** — deutlich kleiner als geplant
+  (siehe P5-Messung): sichtbarer Modus-Umschalter am v2-Fenster (heute nur über
+  Titel-Klick-Menü erreichbar), Agent-Panel des eingebetteten Editors als Coding-Weg im
+  Fenster, coding-agents-Querstart bleibt. desktop-apps/code-editor bleibt als
+  Shell-Komponente (nicht App) — Doku entsprechend. Route: Fable direkt + Kimi-Pixelreview.
+  Geometrie-Labor + assert-shell-v2-contract Pflicht. TRIGGER: nach P1.2 (app.js-Konflikt).
 - **[P6] Rubriken kanonisieren** (16 Slugs, Mapping, PUBLIC_DISTRIBUTIONS raus). TRIGGER: nach P1.
 
 ## Backlog + Owner
