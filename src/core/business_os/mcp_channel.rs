@@ -4531,12 +4531,24 @@ pub fn propose_action(
         let scoped_record_id = record_id
             .as_deref()
             .context("person research action requires record_id")?;
+        validate_person_research_record_binding(
+            root,
+            context,
+            module_id,
+            scoped_record_id,
+            &payload,
+        )?;
         payload["writeback_contract"] = serde_json::json!({
             "collection": "outbound_lead_generation_leads",
             "allowed_collections": ["outbound_lead_generation_leads"],
             "record_ids": [scoped_record_id],
             "command_type": "web_stack.person_research",
-            "min_independent_sources": 2
+            "min_independent_sources": 2,
+            "status_field": "research_status",
+            "terminal_statuses": ["completed", "needs_review", "failed", "cancelled", "blocked"],
+            "review_required_status": "needs_review",
+            "result_fields": ["contacts", "evidence", "research_summary", "research_status"],
+            "workspace": &context.workspace
         });
     }
     if is_native_mcp_control_action(module_id, &action.action_id) {
@@ -4686,8 +4698,11 @@ pub fn execute_action(
         client_context["idempotency_key"] = serde_json::json!(key);
     }
     if is_native_mcp_control_action(module_id, action_id) {
-        let command_id =
-            native_mcp_control_command_id(context, module_id, action_id, &proposal.payload);
+        let command_id = if action_id == "web_stack.person_research" {
+            person_research_command_id(context, &proposal, arguments)?
+        } else {
+            native_mcp_control_command_id(context, module_id, action_id, &proposal.payload)
+        };
         let outcome = store::accept_rxdb_business_command(
             root,
             serde_json::json!({
@@ -7174,6 +7189,8 @@ fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescrip
         "required": ["record_id", "payload"],
         "properties": {
             "record_id": { "type": "string", "minLength": 1 },
+            "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "run_key": { "type": "string", "minLength": 1, "maxLength": 200 },
             "payload": {
                 "type": "object",
                 "required": ["operation_id", "company", "country", "mode"],
@@ -7298,6 +7315,180 @@ fn validate_person_research_action_arguments(
             &format!("payload.{field}"),
             format!("unsupported web_stack.person_research payload field `{field}`"),
         )));
+    }
+    Ok(())
+}
+
+fn person_research_idempotency_key(arguments: &Value, record_id: &str) -> anyhow::Result<String> {
+    let idempotency_key = optional_string_arg(arguments, "idempotency_key");
+    let run_key = optional_string_arg(arguments, "run_key");
+    if let (Some(idempotency_key), Some(run_key)) = (&idempotency_key, &run_key) {
+        anyhow::ensure!(
+            idempotency_key == run_key,
+            BusinessOsMcpError::validation(
+                "run_key",
+                "idempotency_key and run_key must match when both are supplied",
+            )
+        );
+    }
+    let value = idempotency_key
+        .or(run_key)
+        .unwrap_or_else(|| format!("operation:{record_id}"));
+    let value = value.trim();
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 200,
+        BusinessOsMcpError::validation(
+            "idempotency_key",
+            "idempotency_key must be a non-empty string of at most 200 characters",
+        )
+    );
+    Ok(value.to_string())
+}
+
+fn person_research_command_id(
+    context: &McpChannelRequestContext,
+    proposal: &BusinessOsActionProposal,
+    arguments: &Value,
+) -> anyhow::Result<String> {
+    let record_id = proposal
+        .record_id
+        .as_deref()
+        .context("person research action requires record_id")?;
+    let key = person_research_idempotency_key(arguments, record_id)?;
+    let material = format!(
+        "person-research:v1:{}:{}:{}:{}:{}:{}",
+        context.workspace, context.actor, proposal.module_id, proposal.command_type, record_id, key
+    );
+    Ok(format!(
+        "cmd_person_research_{}",
+        crate::mission::channels::stable_digest(&material)
+    ))
+}
+
+fn validate_person_research_record_binding(
+    root: &Path,
+    context: &McpChannelRequestContext,
+    module_id: &str,
+    record_id: &str,
+    payload: &Value,
+) -> anyhow::Result<()> {
+    const MODULE_ID: &str = "outbound-lead-generation";
+    const COLLECTION: &str = "outbound_lead_generation_leads";
+    anyhow::ensure!(
+        module_id == MODULE_ID,
+        BusinessOsMcpError::validation(
+            "module_id",
+            "web_stack.person_research is scoped to outbound-lead-generation",
+        )
+    );
+    let owning_modules = module_ids_for_collection(root, COLLECTION)?;
+    anyhow::ensure!(
+        owning_modules
+            .iter()
+            .any(|candidate| candidate == module_id),
+        BusinessOsMcpError::validation(
+            "collection",
+            "outbound_lead_generation_leads is not declared by the calling module",
+        )
+    );
+    let record = store::pull_collection_record(root, COLLECTION, record_id)?.ok_or_else(|| {
+        anyhow::Error::new(BusinessOsMcpError::not_found(
+            BusinessOsMcpErrorCode::RecordNotFound,
+            "the scoped Outbound Lead Generation record does not exist",
+        ))
+    })?;
+    let record_object = record.as_object().ok_or_else(|| {
+        anyhow::Error::new(BusinessOsMcpError::validation(
+            "record_id",
+            "the scoped lead record must be an object",
+        ))
+    })?;
+    for (field, expected) in [
+        ("module_id", MODULE_ID),
+        ("module", MODULE_ID),
+        ("collection", COLLECTION),
+    ] {
+        if let Some(actual) = record_object.get(field).and_then(Value::as_str) {
+            anyhow::ensure!(
+                actual == expected,
+                BusinessOsMcpError::validation(
+                    field,
+                    format!("lead record is not bound to {expected}")
+                )
+            );
+        }
+    }
+    for field in ["tenant_id", "tenant", "workspace", "workspace_id"] {
+        if let Some(actual) = record_object.get(field).and_then(Value::as_str) {
+            anyhow::ensure!(
+                actual == context.workspace,
+                BusinessOsMcpError::validation(
+                    field,
+                    "lead record is bound to a different tenant workspace",
+                )
+            );
+        }
+    }
+    let company = payload
+        .get("company")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let bound_company = record_object
+        .get("company")
+        .or_else(|| record_object.get("company_name"))
+        .or_else(|| record_object.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !bound_company.is_empty() && company == bound_company,
+        BusinessOsMcpError::validation(
+            "payload.company",
+            "payload.company must match the existing lead record",
+        )
+    );
+    let country = payload
+        .get("country")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let bound_country = record_object
+        .get("country")
+        .or_else(|| record_object.get("country_code"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !bound_country.is_empty() && country == bound_country,
+        BusinessOsMcpError::validation(
+            "payload.country",
+            "payload.country must match the existing lead record",
+        )
+    );
+    if let Some(bound_payload) = ["person_research_payload", "research_payload", "payload"]
+        .iter()
+        .find_map(|field| record_object.get(*field).and_then(Value::as_object))
+    {
+        for field in [
+            "operation_id",
+            "company",
+            "country",
+            "mode",
+            "fields",
+            "include_private",
+            "auto_browser_capture",
+        ] {
+            if let Some(expected) = bound_payload.get(field) {
+                anyhow::ensure!(
+                    payload.get(field) == Some(expected),
+                    BusinessOsMcpError::validation(
+                        &format!("payload.{field}"),
+                        "person research payload does not match the bound lead record",
+                    )
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -8078,19 +8269,6 @@ mod tests {
             &["customer_accounts", "business_users"],
         )?;
         seed_default_mcp_admin(root)?;
-        store::push_collection_records(
-            root,
-            serde_json::json!({
-                "collection": "thesen_outbound_leads",
-                "documents": [{
-                    "id": "lead_1",
-                    "company": "Acme GmbH",
-                    "country": "DE",
-                    "workspace": "test-workspace"
-                }]
-            }),
-        )?;
-
         let entities = list_entities(
             root,
             &test_context("business_os.list_entities"),
@@ -11854,6 +12032,18 @@ mod tests {
             Some(serde_json::json!({ "public": true })),
         )?;
         seed_default_mcp_admin(root)?;
+        store::push_collection_records(
+            root,
+            serde_json::json!({
+                "collection": "outbound_lead_generation_leads",
+                "documents": [{
+                    "id": "lead_1",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "workspace": "test-workspace"
+                }]
+            }),
+        )?;
 
         let actions = list_module_actions(
             root,
@@ -11887,6 +12077,13 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
+        assert_eq!(
+            research_action
+                .input_schema
+                .pointer("/properties/idempotency_key/type")
+                .and_then(Value::as_str),
+            Some("string")
+        );
 
         let payload = serde_json::json!({
             "operation_id": "lead_1",
@@ -11901,6 +12098,7 @@ mod tests {
             "web_stack.person_research",
             &serde_json::json!({
                 "record_id": "lead_1",
+                "idempotency_key": "research-1",
                 "payload": payload.clone()
             }),
         )?;
@@ -11917,8 +12115,17 @@ mod tests {
                 "allowed_collections": ["outbound_lead_generation_leads"],
                 "record_ids": ["lead_1"],
                 "command_type": "web_stack.person_research",
-                "min_independent_sources": 2
+                "min_independent_sources": 2,
+                "status_field": "research_status",
+                "terminal_statuses": ["completed", "needs_review", "failed", "cancelled", "blocked"],
+                "review_required_status": "needs_review",
+                "result_fields": ["contacts", "evidence", "research_summary", "research_status"],
+                "workspace": "test-workspace"
             })
+        );
+        assert_eq!(
+            proposal.client_context["writeback_contract"],
+            "person_research/native"
         );
         assert!(is_native_mcp_control_action(
             "outbound-lead-generation",
@@ -11967,6 +12174,123 @@ mod tests {
                 .pointer("/properties/payload/properties/auto_browser_capture/type")
                 .and_then(Value::as_str),
             Some("boolean")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn person_research_execute_is_idempotent_and_record_bound() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_installed_module(
+            root,
+            "outbound-lead-generation",
+            "Outbound Lead Generation",
+            "1.0.5",
+            &["outbound_lead_generation_leads"],
+            Some(serde_json::json!({ "public": true })),
+        )?;
+        seed_default_mcp_admin(root)?;
+        store::push_collection_records(
+            root,
+            serde_json::json!({
+                "collection": "outbound_lead_generation_leads",
+                "documents": [{
+                    "id": "lead_1",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "workspace": "test-workspace"
+                }]
+            }),
+        )?;
+        let args = serde_json::json!({
+            "record_id": "lead_1",
+            "idempotency_key": "research-1",
+            "payload": {
+                "operation_id": "lead_1",
+                "company": "Acme GmbH",
+                "country": "DE",
+                "mode": "update_person"
+            }
+        });
+        let context = test_context("business_os.execute_action");
+        let (first, replay) = std::thread::scope(|scope| {
+            let first_context = context.clone();
+            let first_args = args.clone();
+            let first = scope.spawn(move || {
+                execute_action(
+                    root,
+                    &first_context,
+                    "outbound-lead-generation",
+                    "web_stack.person_research",
+                    &first_args,
+                )
+            });
+            let replay_context = context.clone();
+            let replay_args = args.clone();
+            let replay = scope.spawn(move || {
+                execute_action(
+                    root,
+                    &replay_context,
+                    "outbound-lead-generation",
+                    "web_stack.person_research",
+                    &replay_args,
+                )
+            });
+            (
+                first.join().expect("first execute thread"),
+                replay.join().expect("replay execute thread"),
+            )
+        });
+        let first = first?;
+        let replay = replay?;
+        assert_eq!(first.command_id, replay.command_id);
+        assert_eq!(replay.client_context["idempotency_key"], "research-1");
+        assert_eq!(
+            replay.client_context["writeback_contract"],
+            "person_research/native"
+        );
+
+        let next = execute_action(
+            root,
+            &context,
+            "outbound-lead-generation",
+            "web_stack.person_research",
+            &serde_json::json!({
+                "record_id": "lead_1",
+                "run_key": "research-2",
+                "payload": {
+                    "operation_id": "lead_1",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "mode": "update_person"
+                }
+            }),
+        )?;
+        assert_ne!(first.command_id, next.command_id);
+
+        let missing = execute_action(
+            root,
+            &context,
+            "outbound-lead-generation",
+            "web_stack.person_research",
+            &serde_json::json!({
+                "record_id": "missing",
+                "idempotency_key": "missing-1",
+                "payload": {
+                    "operation_id": "missing",
+                    "company": "Acme GmbH",
+                    "country": "DE",
+                    "mode": "update_person"
+                }
+            }),
+        )
+        .expect_err("missing lead must be rejected before command acceptance");
+        assert_eq!(
+            missing
+                .downcast_ref::<BusinessOsMcpError>()
+                .map(|error| &error.code),
+            Some(&BusinessOsMcpErrorCode::RecordNotFound)
         );
         Ok(())
     }
