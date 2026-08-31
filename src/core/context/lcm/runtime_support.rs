@@ -67,6 +67,55 @@ pub fn run_recoverable_worker_attempt(
     engine.recoverable_worker_attempt(work_key)
 }
 
+pub fn run_record_task_execution_plan(
+    db_path: &Path,
+    input: TaskExecutionPlanUpdate<'_>,
+) -> Result<serde_json::Value> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.record_task_execution_plan(input)
+}
+
+pub fn run_record_task_execution_activity(
+    db_path: &Path,
+    input: TaskExecutionActivityInput<'_>,
+) -> Result<bool> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.record_task_execution_activity(input)
+}
+
+pub fn run_prepare_task_execution_review(
+    db_path: &Path,
+    work_key: &str,
+) -> Result<serde_json::Value> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.prepare_task_execution_review(work_key)
+}
+
+pub fn run_set_task_execution_review_status(
+    db_path: &Path,
+    work_key: &str,
+    review_status: &str,
+) -> Result<serde_json::Value> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.set_task_execution_review_status(work_key, review_status)
+}
+
+pub fn run_task_execution_progress(
+    db_path: &Path,
+    work_key: &str,
+) -> Result<Option<serde_json::Value>> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.task_execution_progress(work_key)
+}
+
+pub fn run_task_execution_progress_for_task(
+    db_path: &Path,
+    task_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.task_execution_progress_for_task(task_id)
+}
+
 pub fn run_ensure_worker_attempt_assistant_message(
     db_path: &Path,
     attempt_id: &str,

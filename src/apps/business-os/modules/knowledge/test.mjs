@@ -491,6 +491,8 @@ test('action dialogs require non-empty required fields before submit', () => {
 test('presentation follows compact Business OS knowledge contract', async () => {
   const css = await readFile(fileURLToPath(new URL('./index.css', import.meta.url)), 'utf8');
   const html = await readFile(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
+  const js = await readFile(fileURLToPath(new URL('./index.js', import.meta.url)), 'utf8');
+  const manifest = JSON.parse(await readFile(fileURLToPath(new URL('./module.json', import.meta.url)), 'utf8'));
 
   assert.doesNotMatch(html, /ctox-pane--glass/);
   assert.doesNotMatch(css, /border-(?:left|right):\s*(?:[2-9]|[0-9]{2,})px/);
@@ -514,6 +516,14 @@ test('presentation follows compact Business OS knowledge contract', async () => 
   // pane's tabs + second-level switcher are the only navigation into a group.
   assert.doesNotMatch(css, /bundle-caret|knowledge-bundle-items/);
   assert.match(css, /\.bundle-meta\s*\{/);
+  assert.match(css, /\.ctox-column-resizer::before[\s\S]*?left:\s*50%;[\s\S]*?top:\s*50%/);
+  assert.match(css, /@container business-app-window \(max-width:\s*559px\)/);
+  assert.match(css, /\.knowledge-app-overlay\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/);
+  assert.match(js, /function openKnowledgeOverlay/);
+  assert.doesNotMatch(js, /state\.ctx\.open(?:Left|Right|Bottom)Drawer/);
+  assert.match(js, /knowledge-detail-empty/);
+  assert.equal(manifest.layout.min_width, 360);
+  assert.equal(manifest.presentation.minimum_size.width, 360);
 });
 
 test('pane chrome follows the canonical data-pg-* grammar contract', async () => {

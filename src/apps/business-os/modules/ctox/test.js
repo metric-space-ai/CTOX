@@ -167,6 +167,8 @@ test('Presentation layer stays compact and shell-native', () => {
   assert.match(html, /class="ctox-column-resizer"[^>]*data-resizer-var="--ctox-left-width"/);
   assert.doesNotMatch(css, /\.ctox-column-resizer\s*\{/);
   assert.doesNotMatch(css, /grid-template-columns:\s*var\(--ctox-left-width\)/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.ctox-harness-app \.ctox-pane-header[\s\S]*grid-template-rows:/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.ctox-harness-app \.ctox-filterbar[\s\S]*flex-wrap: nowrap/);
   assert.match(manifest, /currentColor/);
 });
 

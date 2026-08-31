@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CTOX · Creature motion lab</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f2f5f7;
+      --muted: #8c99a3;
+      --faint: #56636d;
+      --canvas: #081015;
+      --surface: #101a20;
+      --surface-2: #14232b;
+      --line: rgba(210, 231, 240, .12);
+      --blue: #4e8cff;
+      --teal: #2dd5b3;
+      --amber: #f5bb62;
+      --red: #f17579;
+      --green: #62ddb1;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      background-image:
+        linear-gradient(rgba(117, 149, 164, .055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(117, 149, 164, .055) 1px, transparent 1px),
+        radial-gradient(circle at 50% 0%, rgba(50, 129, 172, .14), transparent 42rem);
+      background-size: 48px 48px, 48px 48px, auto;
+    }
+
+    .lab {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 42px 0 74px;
+    }
+
+    .masthead {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      padding-bottom: 30px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 9px;
+      color: var(--teal);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .2em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 5vw, 54px);
+      line-height: .98;
+      letter-spacing: -.055em;
+      font-weight: 720;
+    }
+
+    .intro {
+      max-width: 460px;
+      margin: 13px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .controls { display: flex; gap: 8px; flex: 0 0 auto; }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 10px 13px;
+      color: var(--ink);
+      background: rgba(255,255,255,.04);
+      font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+    }
+    button:hover, button:focus-visible { border-color: var(--blue); background: rgba(78,140,255,.13); outline: none; }
+    button[aria-pressed="true"] { border-color: var(--teal); color: var(--teal); background: rgba(45,213,179,.1); }
+
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin: 25px 0 18px;
+      color: var(--faint);
+      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .legend-item { display: inline-flex; align-items: center; gap: 7px; }
+    .legend-mark { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 12px currentColor; }
+    .legend-mark.is-static { background: #a4adb4; color: #a4adb4; }
+    .legend-mark.is-attention { background: var(--red); color: var(--red); }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 13px;
+    }
+
+    .state {
+      min-height: 232px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(160deg, rgba(22, 37, 45, .92), rgba(10, 18, 23, .98));
+    }
+    .state[data-family="active"] { border-color: rgba(78,140,255,.28); }
+    .state[data-family="review"] { border-color: rgba(245,187,98,.3); }
+    .state[data-family="error"] { border-color: rgba(241,117,121,.32); }
+
+    .state-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 16px 17px 0;
+    }
+    .state-name { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
+    .state-note { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .state-code { color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .specimens {
+      display: flex;
+      align-items: end;
+      justify-content: space-around;
+      min-height: 166px;
+      padding: 20px 12px 20px;
+    }
+
+    .specimen {
+      --creature-color: #57a9ff;
+      --creature-shadow: rgba(87,169,255,.36);
+      --size: 64px;
+      --duration: 4s;
+      --delay: 0s;
+      --lean: 0deg;
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 90px;
+      height: 118px;
+      contain: layout paint style;
+    }
+    .specimen::after {
+      content: "";
+      position: absolute;
+      bottom: 9px;
+      width: 42px;
+      height: 7px;
+      border-radius: 50%;
+      background: rgba(0,0,0,.28);
+      filter: blur(4px);
+      transform: scaleX(.75);
+    }
+    .creature {
+      position: relative;
+      z-index: 1;
+      width: var(--size);
+      height: var(--size);
+      border-radius: 0;
+      background: var(--creature-color);
+      box-shadow: 0 11px 25px var(--creature-shadow), inset 0 -3px 0 rgba(0,0,0,.1);
+      transform-origin: 50% 85%;
+      will-change: transform, clip-path;
+    }
+    .creature.geometry-pointed { transform-origin: 50% 78%; }
+    .creature.geometry-pointed .face { transform: translateY(10%) scale(.88); }
+    .face { position: absolute; inset: 0; }
+    .eye {
+      position: absolute;
+      top: 35%;
+      width: 6px;
+      height: 13px;
+      border-radius: 80% 80% 70% 70%;
+      background: #071014;
+      transform: rotate(var(--eye-tilt, -16deg));
+    }
+    .eye.left { left: 33%; }
+    .eye.right { right: 24%; --eye-tilt: -16deg; }
+    .mouth {
+      position: absolute;
+      left: 50%;
+      top: 57%;
+      width: 12px;
+      height: 5px;
+      border-bottom: 2px solid rgba(7,16,20,.7);
+      border-radius: 0 0 12px 12px;
+      transform: translateX(-50%);
+      opacity: .72;
+    }
+    .sleeping .eye { top: 40%; height: 5px; border-radius: 100% 100% 0 0; background: transparent; border-top: 2px solid #071014; transform: rotate(4deg); }
+    .sleeping .eye.right { transform: rotate(-4deg); }
+    .sleeping .mouth { top: 57%; width: 8px; height: 4px; opacity: .55; }
+    .blocked .eye { height: 7px; top: 39%; border-radius: 10px 10px 2px 2px; transform: rotate(8deg); }
+    .blocked .eye.right { transform: rotate(-8deg); }
+    .failed .creature {
+      clip-path: none !important;
+      border-radius: 48% 52% 34% 31% / 50% 48% 29% 26%;
+      transform-origin: 50% 100%;
+    }
+    .failed::before {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      bottom: 13px;
+      width: calc(var(--size) * 1.38);
+      height: 15px;
+      border-radius: 50% 46% 52% 44%;
+      background: color-mix(in srgb, var(--creature-color) 78%, #081014);
+      box-shadow: 0 5px 16px var(--creature-shadow);
+      opacity: .78;
+    }
+    .failed .face { display: none; }
+    .failed .mouth { display: none; }
+    .dead-eyes {
+      position: absolute;
+      z-index: 4;
+      left: 50%;
+      bottom: 40px;
+      display: none;
+      width: calc(var(--size) * .58);
+      height: 16px;
+      transform: translateX(-50%);
+      transform-origin: center;
+      pointer-events: none;
+    }
+    .failed .dead-eyes { display: block; }
+    .dead-eye {
+      position: absolute;
+      top: 6px;
+      width: 13px;
+      height: 3px;
+      border-radius: 1px;
+      background: #071014;
+      transform: rotate(45deg);
+    }
+    .dead-eye::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: #071014;
+      transform: rotate(90deg);
+    }
+    .dead-eye:first-child { left: 0; }
+    .dead-eye:last-child { right: 0; }
+
+    /* Motion and deformation come from deterministic continuous time fields. */
+    .review::before { content: ""; position: absolute; width: 82px; height: 82px; border: 1px solid rgba(245,187,98,.18); border-radius: 50%; transform: rotateX(64deg); }
+
+    .footer-note { margin-top: 20px; color: var(--faint); font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .motion-off *, .motion-off *::before, .motion-off *::after { animation-play-state: paused !important; transition-duration: 1ms !important; }
+    @media (max-width: 880px) { .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 570px) {
+      .lab { width: min(100% - 28px, 440px); padding-top: 25px; }
+      .masthead { display: block; }
+      .controls { margin-top: 20px; }
+      .gallery { grid-template-columns: 1fr; }
+      .legend { flex-wrap: wrap; gap: 9px 14px; }
+    }
+    /* This is an explicit motion-preview tool. Motion is controlled by the
+       button instead of inheriting an OS setting that can make the lab appear
+       broken. Production UI still honors prefers-reduced-motion. */
+  </style>
+</head>
+<body>
+  <main class="lab">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">CTOX / creature motion lab</p>
+        <h1>Jeder Status<br>hat eine Haltung.</h1>
+        <p class="intro">Prozedurale Wesen-Varianten für den Crew-Header. Form, Rhythmus und Phase werden pro Wesen aus seiner Identität abgeleitet.</p>
+      </div>
+      <div class="controls" aria-label="Galerie-Steuerung">
+        <button id="shuffle" type="button">↻ Neu variieren</button>
+        <button id="motion" type="button" aria-pressed="true">Bewegung an</button>
+      </div>
+    </header>
+
+    <div class="legend" aria-label="Legende">
+      <span class="legend-item"><i class="legend-mark"></i>aktiv</span>
+      <span class="legend-item"><i class="legend-mark is-static"></i>ruhig</span>
+      <span class="legend-item"><i class="legend-mark is-attention"></i>aufmerksamkeit</span>
+      <span id="seed-readout"></span>
+    </div>
+    <section id="gallery" class="gallery" aria-label="Status-Animationen"></section>
+    <p class="footer-note">Kontur und Bewegung werden deterministisch aus Seed und Zeitfeld berechnet. Überlagerte inkommensurable Frequenzen erzeugen keinen Wiederholungszyklus. Fehler taumeln einmal, zerfließen und bleiben in der X-X-Pose.</p>
+  </main>
+
+  <script>
+    (() => {
+      const statuses = [
+        { id: 'idle', label: 'Idle', note: 'schläft', mode: 'sleeping', family: 'quiet' },
+        { id: 'queued', label: 'Queued', note: 'wartet auf Start', mode: 'sleeping', family: 'quiet' },
+        { id: 'scheduled', label: 'Scheduled', note: 'wartet auf Zeitpunkt', mode: 'sleeping', family: 'quiet' },
+        { id: 'working', label: 'Working', note: 'arbeitet', mode: 'working', family: 'active' },
+        { id: 'thinking', label: 'Thinking', note: 'denkt nach', mode: 'thinking', family: 'active' },
+        { id: 'tool', label: 'Tool activity', note: 'führt Tool aus', mode: 'tool', family: 'active' },
+        { id: 'review', label: 'Review loop', note: 'prüft Ergebnis', mode: 'review', family: 'review' },
+        { id: 'blocked', label: 'Blocked', note: 'braucht Aufmerksamkeit', mode: 'blocked', family: 'error' },
+        { id: 'completed', label: 'Completed', note: 'fertig · schläft', mode: 'sleeping', family: 'quiet' },
+        { id: 'failed', label: 'Failed / Error', note: 'Fehler · bleibt stehen', mode: 'failed', family: 'error' }
+      ];
+      const colors = [
+        ['#4e96ee', 'rgba(78,150,238,.34)'], ['#27c6ae', 'rgba(39,198,174,.34)'],
+        ['#f3b565', 'rgba(243,181,101,.31)'], ['#9b9aa5', 'rgba(155,154,165,.28)'],
+        ['#e8797b', 'rgba(232,121,123,.32)'], ['#9685dd', 'rgba(150,133,221,.3)']
+      ];
+      const gallery = document.querySelector('#gallery');
+      const seedReadout = document.querySelector('#seed-readout');
+      let seed = 27183;
+      let motionEnabled = true;
+      let motionFrame = 0;
+      let lastMotionFrameAt = 0;
+      let motionStartedAt = 0;
+      let motionProfiles = [];
+      const shapeRegistry = new Map();
+
+      function hash(input) {
+        let value = 2166136261;
+        for (let i = 0; i < input.length; i += 1) {
+          value ^= input.charCodeAt(i);
+          value = Math.imul(value, 16777619);
+        }
+        return (value >>> 0) / 4294967296;
+      }
+      function pick(value, min, max) { return min + (max - min) * value; }
+      function unit(key, channel) { return hash(`${key}:${channel}`); }
+      function signedPower(value, power) {
+        return Math.sign(value) * Math.pow(Math.abs(value), power);
+      }
+      function toPolygon(points) {
+        return `polygon(${points.map(([x, y]) => `${x.toFixed(2)}% ${y.toFixed(2)}%`).join(',')})`;
+      }
+      function proceduralShape(key) {
+        const familySelector = unit(key, 'family');
+        const points = [];
+        let family = 'fourier';
+        if (familySelector < .38) {
+          const count = 28;
+          const rx = pick(unit(key, 'rx'), 39, 47);
+          const ry = pick(unit(key, 'ry'), 38, 47);
+          const harmonic2 = pick(unit(key, 'h2'), .025, .085);
+          const harmonic3 = pick(unit(key, 'h3'), .018, .06);
+          const phase2 = unit(key, 'p2') * Math.PI * 2;
+          const phase3 = unit(key, 'p3') * Math.PI * 2;
+          for (let index = 0; index < count; index += 1) {
+            const angle = (index / count) * Math.PI * 2;
+            const radius = 1
+              + harmonic2 * Math.sin(angle * 2 + phase2)
+              + harmonic3 * Math.sin(angle * 3 + phase3);
+            points.push([50 + Math.cos(angle) * rx * radius, 50 + Math.sin(angle) * ry * radius]);
+          }
+        } else if (familySelector < .78) {
+          family = 'superellipse';
+          const count = 28;
+          const exponent = pick(unit(key, 'exponent'), 2.5, 6.8);
+          const rx = pick(unit(key, 'rx'), 38, 47);
+          const ry = pick(unit(key, 'ry'), 38, 46);
+          const asymmetry = pick(unit(key, 'asymmetry'), -.045, .045);
+          for (let index = 0; index < count; index += 1) {
+            const angle = (index / count) * Math.PI * 2;
+            const local = 1 + asymmetry * Math.sin(angle * 3 + unit(key, 'phase') * Math.PI * 2);
+            points.push([
+              50 + signedPower(Math.cos(angle), 2 / exponent) * rx * local,
+              50 + signedPower(Math.sin(angle), 2 / exponent) * ry / local,
+            ]);
+          }
+        } else {
+          family = 'pointed';
+          const vertices = [[50, 5], [95, 91], [5, 91]];
+          const stepsPerEdge = 9;
+          for (let edge = 0; edge < vertices.length; edge += 1) {
+            const from = vertices[edge];
+            const to = vertices[(edge + 1) % vertices.length];
+            for (let step = 0; step < stepsPerEdge; step += 1) {
+              const ratio = step / stepsPerEdge;
+              const index = edge * stepsPerEdge + step;
+              const ripple = Math.sin(index * 1.73 + unit(key, 'edge-phase') * Math.PI * 2)
+                * pick(unit(key, `edge-${edge}`), .35, 1.45);
+              points.push([
+                from[0] + (to[0] - from[0]) * ratio + ripple,
+                from[1] + (to[1] - from[1]) * ratio + ripple * .45,
+              ]);
+            }
+          }
+        }
+        return { family, points };
+      }
+      function specimen(status, index) {
+        const key = `${seed}:${status.id}:${index}`;
+        const n3 = hash(`${key}:color`);
+        const color = colors[Math.floor(n3 * colors.length)];
+        const size = pick(n3, 54, 72).toFixed(0);
+        const geometry = proceduralShape(key);
+        shapeRegistry.set(key, geometry);
+        const geometryClass = geometry.family === 'pointed' ? ' geometry-pointed' : '';
+        const deadEyes = status.id === 'failed'
+          ? '<span class="dead-eyes" aria-hidden="true"><i class="dead-eye"></i><i class="dead-eye"></i></span>'
+          : '';
+        return `<div class="specimen ${status.mode}" data-motion="${status.id}" data-creature-key="${key}" style="--creature-color:${color[0]};--creature-shadow:${color[1]};--size:${size}px;--index:${index}" aria-label="${status.label} Variante ${index + 1}"><div class="creature${geometryClass}" data-shape="procedural-${geometry.family}" style="clip-path:${toPolygon(geometry.points)}"><span class="face"><i class="eye left"></i><i class="eye right"></i><i class="mouth"></i></span></div>${deadEyes}</div>`;
+      }
+
+      function clearMotion({ reset = true } = {}) {
+        if (motionFrame) cancelAnimationFrame(motionFrame);
+        motionFrame = 0;
+        motionProfiles = [];
+        if (reset) gallery.querySelectorAll('[data-creature-key]').forEach((specimenNode) => {
+          const node = specimenNode.querySelector('.creature');
+          const geometry = shapeRegistry.get(specimenNode.dataset.creatureKey);
+          node.style.transform = '';
+          specimenNode.querySelector('.dead-eyes')?.style.removeProperty('transform');
+          if (geometry && specimenNode.dataset.motion !== 'failed') node.style.clipPath = toPolygon(geometry.points);
+        });
+      }
+
+      function smoothstep(edge0, edge1, value) {
+        const ratio = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+        return ratio * ratio * (3 - 2 * ratio);
+      }
+
+      function bodyPolygon(profile, time, pulse) {
+        const mode = profile.mode;
+        const phaseA = time * profile.frequencyA + profile.phaseA;
+        const phaseB = time * profile.frequencyB + profile.phaseB;
+        let stretchX = 1;
+        let stretchY = 1;
+        let localAmplitude = .006;
+        if (mode === 'working') {
+          const squash = Math.sin(phaseA) * .08 + Math.sin(phaseB) * .026;
+          stretchX += squash;
+          stretchY -= squash * 1.15;
+          localAmplitude = .04;
+        } else if (mode === 'thinking') {
+          stretchX += Math.sin(phaseA) * .038;
+          stretchY += Math.sin(phaseB) * .052;
+          localAmplitude = .052;
+        } else if (mode === 'tool') {
+          stretchX += pulse * .22;
+          stretchY -= pulse * .25;
+          localAmplitude = .018 + pulse * .07;
+        } else if (mode === 'review') {
+          localAmplitude = .065;
+        }
+        return toPolygon(profile.geometry.points.map(([x, y]) => {
+          const angle = Math.atan2(y - 50, x - 50);
+          const contourWave = Math.sin(angle * 2 + phaseA) * localAmplitude
+            + Math.sin(angle * 3 - phaseB) * localAmplitude * .45;
+          const asymmetry = mode === 'thinking' ? Math.sin(angle + phaseA * .45) * .018 : 0;
+          const radial = 1 + contourWave + asymmetry;
+          return [
+            50 + (x - 50) * stretchX * radial,
+            50 + (y - 50) * stretchY * (1 - contourWave * .5),
+          ];
+        }));
+      }
+
+      function tickMotion(now) {
+        if (!motionEnabled) return;
+        if (now - lastMotionFrameAt < 33) {
+          motionFrame = requestAnimationFrame(tickMotion);
+          return;
+        }
+        lastMotionFrameAt = now;
+        const time = (now - motionStartedAt) / 1000;
+        motionProfiles.forEach((profile) => {
+          if (!profile.node.isConnected) return;
+          const phaseA = time * profile.frequencyA + profile.phaseA;
+          const phaseB = time * profile.frequencyB + profile.phaseB;
+          if (profile.mode === 'failed') {
+            const elapsed = Math.max(0, time - profile.delay);
+            const progress = Math.min(1, elapsed / 1.55);
+            if (progress < .48) {
+              const decay = 1 - progress / .48;
+              const shake = Math.sin(progress * Math.PI * 8) * 7 * decay;
+              profile.node.style.transform = `translate(${shake}px, ${progress * 5}px) rotate(${shake * .72}deg)`;
+              profile.deadEyes.style.transform = `translateX(-50%) translate(${shake}px, ${progress * 5}px) rotate(${shake * .72}deg)`;
+            } else {
+              const melt = smoothstep(.48, 1, progress);
+              const scaleX = 1 + melt * profile.meltX;
+              const scaleY = 1 - melt * profile.meltSquash;
+              profile.node.style.transform = `translateY(${melt * profile.meltY}px) scale(${scaleX}, ${scaleY}) rotate(${profile.meltTilt * melt}deg)`;
+              profile.deadEyes.style.transform = `translateX(-50%) translateY(${(melt * 13).toFixed(3)}px) rotate(${(profile.meltTilt * melt).toFixed(3)}deg)`;
+            }
+            return;
+          }
+          let x = 0;
+          let y = 0;
+          let rotation = 0;
+          let pulse = 0;
+          if (profile.mode === 'working') {
+            y = -6 + Math.sin(phaseA) * 7.5 + Math.sin(phaseB) * 2.2;
+            x = Math.sin(phaseB) * 2.4;
+            rotation = Math.sin(phaseA * .82) * 4.2;
+          } else if (profile.mode === 'thinking') {
+            x = Math.sin(phaseB * .66) * 4.2;
+            y = Math.sin(phaseA * .72) * 2.5;
+            rotation = Math.sin(phaseA * .74) * 10.5 + Math.sin(phaseB * .48) * 3;
+          } else if (profile.mode === 'tool') {
+            const carrier = (Math.sin(phaseA) + Math.sin(phaseB) + 2) / 4;
+            pulse = smoothstep(.58, .88, carrier);
+            x = profile.direction * pulse * 13;
+            y = -pulse * 6;
+            rotation = profile.direction * pulse * 9;
+          } else if (profile.mode === 'review') {
+            x = Math.sin(phaseA * .9) * 12;
+            y = -5 + Math.cos(phaseB * .72) * 7;
+            rotation = Math.sin(phaseA * .58 + phaseB * .31) * 6.5;
+          }
+          profile.node.style.transform = `translate(${x.toFixed(3)}px, ${y.toFixed(3)}px) rotate(${rotation.toFixed(3)}deg)`;
+          profile.node.style.clipPath = bodyPolygon(profile, time, pulse);
+        });
+        motionFrame = requestAnimationFrame(tickMotion);
+      }
+
+      function startMotion() {
+        clearMotion();
+        if (!motionEnabled) return;
+        motionProfiles = Array.from(gallery.querySelectorAll('[data-creature-key]')).flatMap((specimenNode, index) => {
+          const mode = specimenNode.dataset.motion;
+          if (!['working', 'thinking', 'tool', 'review', 'failed'].includes(mode)) return [];
+          const key = specimenNode.dataset.creatureKey;
+          const node = specimenNode.querySelector('.creature');
+          return [{
+            node,
+            deadEyes: specimenNode.querySelector('.dead-eyes'),
+            geometry: shapeRegistry.get(key),
+            mode,
+            phaseA: unit(key, 'motion-phase-a') * Math.PI * 2,
+            phaseB: unit(key, 'motion-phase-b') * Math.PI * 2,
+            frequencyA: pick(unit(key, 'motion-frequency-a'), .74, 1.16),
+            frequencyB: pick(unit(key, 'motion-frequency-b'), .74, 1.16) * Math.SQRT2,
+            direction: unit(key, 'motion-direction') > .5 ? 1 : -1,
+            delay: (index % 3) * .1,
+            meltY: pick(unit(key, 'melt-y'), 17, 22),
+            meltX: pick(unit(key, 'melt-x'), .38, .56),
+            meltSquash: pick(unit(key, 'melt-squash'), .39, .5),
+            meltTilt: pick(unit(key, 'melt-tilt'), -2.5, 2.5),
+          }];
+        });
+        motionStartedAt = performance.now();
+        lastMotionFrameAt = 0;
+        motionFrame = requestAnimationFrame(tickMotion);
+      }
+
+      function render() {
+        clearMotion();
+        shapeRegistry.clear();
+        gallery.innerHTML = statuses.map((status) => `<article class="state" data-family="${status.family}"><header class="state-head"><div><h2 class="state-name">${status.label}</h2><p class="state-note">${status.note}</p></div><span class="state-code">${status.id}</span></header><div class="specimens">${[0, 1, 2].map((index) => specimen(status, index)).join('')}</div></article>`).join('');
+        seedReadout.textContent = `seed ${seed}`;
+        startMotion();
+      }
+      document.querySelector('#shuffle').addEventListener('click', () => {
+        seed = ((seed * 1664525 + 1013904223) >>> 0) % 100000;
+        render();
+      });
+      document.querySelector('#motion').addEventListener('click', (event) => {
+        motionEnabled = !motionEnabled;
+        const off = !motionEnabled;
+        document.body.classList.toggle('motion-off', off);
+        event.currentTarget.setAttribute('aria-pressed', String(!off));
+        event.currentTarget.textContent = off ? 'Bewegung aus' : 'Bewegung an';
+        if (off) clearMotion(); else startMotion();
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>

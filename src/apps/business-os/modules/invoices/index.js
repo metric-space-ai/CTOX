@@ -612,7 +612,9 @@ function buildLeftGrammar(leftPane) {
     paneIcon(ICON.export, t('export'), { action: 'export' }));
 
   const header = createEl('header', 'ctox-pane-header ctox-pane-band');
-  add(header, buildTitleRow(t('kicker'), t('invoices'), actions));
+  const titleRow = buildTitleRow(t('kicker'), t('invoices'), actions);
+  titleRow.dataset.shellV2HeaderRow = '1';
+  add(header, titleRow);
 
   const filterbar = createEl('div', 'ctox-filterbar');
   const search = createEl('input', 'ctox-pane-search');
@@ -634,6 +636,7 @@ function buildLeftGrammar(leftPane) {
   filterToggle.setAttribute('data-pg-tray-toggle', '');
   filterToggle.setAttribute('aria-expanded', 'false');
   add(filterbar, search, viewToggle, filterToggle);
+  filterbar.dataset.shellV2HeaderRow = '2';
   add(header, filterbar);
 
   const tray = createEl('div', 'ctox-filter-tray');
@@ -681,6 +684,7 @@ function buildLeftGrammar(leftPane) {
     tabs.appendChild(tab);
     countEls[band] = count;
   }
+  nav.dataset.shellV2HeaderRow = '3';
   add(nav, tabs);
 
   const well = createEl('div', 'ctox-pane-body ctox-well');
@@ -910,7 +914,9 @@ function renderMain() {
     ? `${inv.invoice_number || t('draft')} · ${partyName(inv.party_id)}`
     : t('invoice');
   const header = createEl('header', 'ctox-pane-header ctox-pane-band');
-  add(header, buildTitleRow(kicker, title, actions, 'h1'));
+  const titleRow = buildTitleRow(kicker, title, actions, 'h1');
+  titleRow.dataset.shellV2HeaderRow = '1';
+  add(header, titleRow);
 
   let body;
   if (!inv || !reveal) {

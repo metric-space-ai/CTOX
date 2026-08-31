@@ -298,8 +298,10 @@ test('rail chrome is shell grammar: search, view toggle, tray, counted band, foo
   assert.match(html, /data-pg-count="feature"/);
   // Exactly two footers: rail (grammar-fed) + detail (module-fed).
   assert.equal(html.match(/data-pg-footer/g).length, 2);
-  // Active-filter dot CSS survives on the tray toggle class.
-  assert.match(css, /\.reports-filter-toggle\.has-active-filters::after/);
+  // The shared pane-grammar icon owns the compact filter trigger. Legacy
+  // report-specific shell controls must not leak back into the module.
+  assert.match(html, /class="ctox-pane-icon ctox-filter-toggle"/);
+  assert.doesNotMatch(css, /\.reports-(?:filterbar|view-toggle|filter-toggle|filter-advanced|filter-row|select|sort-dir|view-switch|well|footer)\b/);
 
   // Old hand-rolled filter markup is gone.
   assert.doesNotMatch(html, /data-report-search|data-report-view|data-toggle-report-filters|data-report-filter-advanced|data-reset-report-filters|data-report-status|data-report-kind=|data-count-kind-|data-reports-footer|data-report-detail-footer/);
@@ -336,6 +338,11 @@ test('rail chrome is shell grammar: search, view toggle, tray, counted band, foo
 
   // No web-storage state — filters live in module state, data in RxDB.
   assert.doesNotMatch(js, /localStorage|sessionStorage/);
+
+  // Context actions stay inside this mounted module instance.
+  assert.match(js, /const moduleHost = state\.ctx\?\.host/);
+  assert.match(js, /moduleHost\.append\(menu\)/);
+  assert.doesNotMatch(js, /document\.body\.append\(menu\)/);
 });
 
 let passed = 0;

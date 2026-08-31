@@ -7,7 +7,7 @@
        but opening data happens in the MAIN view, never inline. -->
   <aside class="ctox-pane iot-pane iot-left" aria-label="Assets & Signale" data-iot-left data-left-content>
     <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
+      <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-copy="kicker">CTOX IoT</span>
           <h2 class="ctox-pane-title" data-copy="listTitle">Assets &amp; Signale</h2>
@@ -18,7 +18,7 @@
           <button class="ctox-pane-icon" type="button" data-action="export" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
+      <div class="ctox-filterbar" data-shell-v2-header-row="2">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Assets suchen" />
         <!-- ONE button, not two (Betreiber-Direktive 31.08.2026): the control is
              an ACTION, not a state. The icon/label name the view it switches TO;
@@ -39,7 +39,7 @@
         </div>
       </div>
     </header>
-    <nav class="ctox-view-switch" aria-label="Ansichten">
+    <nav class="ctox-view-switch" aria-label="Ansichten" data-shell-v2-header-row="3">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-copy="bandAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="signals" aria-selected="false"><span data-copy="bandSignals">Signale</span><span class="view-count" data-pg-count="signals"></span></button>

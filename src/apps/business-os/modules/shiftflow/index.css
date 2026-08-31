@@ -1359,7 +1359,7 @@
   }
 
   .shiftflow-billing-date-selector {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 }
 

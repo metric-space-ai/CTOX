@@ -93,9 +93,10 @@ const bundledModule = await build({
   write: false,
 });
 
-const [{ text: bundledSource }] = bundledModule.outputFiles;
+const [{ text: bundledEntrypoint }] = bundledModule.outputFiles;
+const outboundSource = await fs.readFile(new URL('./index.js', import.meta.url), 'utf8');
 const { __outboundTestHooks: hooks } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
+  `data:text/javascript;base64,${Buffer.from(bundledEntrypoint).toString('base64')}`
 );
 
 test('presentation layer stays compact and shell-native', async () => {
@@ -266,12 +267,12 @@ test('research source URLs normalize aliases and disabled sources stay out of po
 });
 
 test('research source adapter lifecycle is command-bus based', () => {
-  assert.match(bundledSource, /outbound_research_adapters/);
-  assert.match(bundledSource, /outbound\.research_source\.generate_adapter/);
-  assert.match(bundledSource, /outbound\.research_source\.test/);
-  assert.match(bundledSource, /outbound\.research_source\.auth_assist/);
-  assert.match(bundledSource, /universal-scraping/);
-  assert.doesNotMatch(bundledSource, /\/api\/business-os\/research-source/);
+  assert.match(outboundSource, /outbound_research_adapters/);
+  assert.match(outboundSource, /outbound\.research_source\.generate_adapter/);
+  assert.match(outboundSource, /outbound\.research_source\.test/);
+  assert.match(outboundSource, /outbound\.research_source\.auth_assist/);
+  assert.match(outboundSource, /universal-scraping/);
+  assert.doesNotMatch(outboundSource, /\/api\/business-os\/research-source/);
 });
 
 test('research source adapter command result preserves server status', () => {
@@ -337,7 +338,7 @@ test('research auth assist opens the exact protected-source browser session with
   assert.equal(args.secret_value_in_rxdb, false);
   assert.equal(JSON.stringify(args).includes('credential_ref'), false);
   assert.equal(JSON.stringify(args).includes('password'), false);
-  assert.match(bundledSource, /openDesktopApp\?\.\("browser"/);
+  assert.match(outboundSource, /openDesktopApp\?\.\(['"]browser['"]/);
 });
 
 test('outbound import extracts company rows from uploaded Excel workbooks', async (t) => {
@@ -425,16 +426,16 @@ test('campaign briefing uses stored free text as the central campaign instructio
 });
 
 test('campaign briefing save opens the current CTOX Business Chat contract for the setup skill', () => {
-  assert.match(bundledSource, /openBusinessChat/);
-  assert.doesNotMatch(bundledSource, /ctox-business-os-chat-submit|window\.dispatchEvent/);
-  assert.match(bundledSource, /business-os-outbound-campaign-setup/);
-  assert.match(bundledSource, /outbound\.campaign\.briefing\.update/);
-  assert.match(bundledSource, /function dispatchOutboundPromptTask/);
-  assert.match(bundledSource, /action:\s*['"]context-chat['"]/);
-  assert.match(bundledSource, /reuseActive:\s*false/);
-  assert.match(bundledSource, /business_os\.chat\.task/);
-  assert.match(bundledSource, /outbound\.campaign\.apply_setup/);
-  assert.doesNotMatch(bundledSource, /\/api\/business-os\/commands/);
+  assert.match(outboundSource, /openBusinessChat/);
+  assert.doesNotMatch(outboundSource, /ctox-business-os-chat-submit|window\.dispatchEvent/);
+  assert.match(outboundSource, /business-os-outbound-campaign-setup/);
+  assert.match(outboundSource, /outbound\.campaign\.briefing\.update/);
+  assert.match(outboundSource, /function dispatchOutboundPromptTask/);
+  assert.match(outboundSource, /action:\s*['"]context-chat['"]/);
+  assert.match(outboundSource, /reuseActive:\s*false/);
+  assert.match(outboundSource, /business_os\.chat\.task/);
+  assert.match(outboundSource, /outbound\.campaign\.apply_setup/);
+  assert.doesNotMatch(outboundSource, /\/api\/business-os\/commands/);
 
   const prompt = hooks.campaignSetupPrompt(
     {
@@ -484,20 +485,29 @@ test('outbound prompt tasks use ctx.openBusinessChat with the context-chat contr
 });
 
 test('campaign editor keeps template briefing drafts across rerenders', () => {
-  assert.match(bundledSource, /campaignEditDrafts:\s*(?:\/\* @__PURE__ \*\/\s*)?new Map\(\)/);
-  assert.match(bundledSource, /function syncCampaignEditDraftFromEditor/);
-  assert.match(bundledSource, /state\.campaignEditDrafts\.get\(campaign\.id\)/);
-  assert.match(bundledSource, /data-campaign-idea-template/);
-  assert.match(bundledSource, /data-original-briefing=.*escapeHtml\d*\(originalBriefing\)/);
-  assert.match(bundledSource, /data-campaign-edit-save/);
-  assert.match(bundledSource, /saveButton\.disabled = !name \|\| !dirty/);
-  assert.match(bundledSource, /syncCampaignEditDraftFromEditor\(editor\);\s*updateCampaignEditSaveState\(editor\);/);
+  assert.match(outboundSource, /campaignEditDrafts:\s*(?:\/\* @__PURE__ \*\/\s*)?new Map\(\)/);
+  assert.match(outboundSource, /function syncCampaignEditDraftFromEditor/);
+  assert.match(outboundSource, /state\.campaignEditDrafts\.get\(campaign\.id\)/);
+  assert.match(outboundSource, /data-campaign-idea-template/);
+  assert.match(outboundSource, /data-original-briefing=.*escapeHtml\d*\(originalBriefing\)/);
+  assert.match(outboundSource, /data-campaign-edit-save/);
+  assert.match(outboundSource, /saveButton\.disabled = !name \|\| !dirty/);
+  assert.match(outboundSource, /syncCampaignEditDraftFromEditor\(editor\);\s*updateCampaignEditSaveState\(editor\);/);
 });
 
 test('campaign editor rerenders templates when shell language changes', () => {
-  assert.match(bundledSource, /function applyOutboundLanguage/);
-  assert.match(bundledSource, /ctox-business-os-preferences/);
-  assert.match(bundledSource, /ctox-business-os-language/);
-  assert.match(bundledSource, /syncCampaignEditDraftFromEditor\(editor\);\s*render\(true\);/);
-  assert.match(bundledSource, /campaignIdeaTemplates\(lang = state\.lang\)/);
+  assert.match(outboundSource, /function applyOutboundLanguage/);
+  assert.match(outboundSource, /ctox-business-os-preferences/);
+  assert.match(outboundSource, /ctox-business-os-language/);
+  assert.match(outboundSource, /syncCampaignEditDraftFromEditor\(editor\);\s*render\(true\);/);
+  assert.match(outboundSource, /campaignIdeaTemplates\(lang = state\.lang\)/);
+});
+
+test('outbound transient overlays remain scoped to the mounted module host', async () => {
+  const js = await fs.readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.match(js, /const moduleHost = state\.ctx\?\.host \|\| hostCell\?\.closest/);
+  assert.match(js, /moduleHost\.appendChild\(overlay\)/);
+  assert.match(js, /const panel = state\.ctx\?\.host\?\.querySelector/);
+  assert.match(js, /moduleHost\.appendChild\(panel\)/);
+  assert.doesNotMatch(js, /document\.body\.appendChild\((?:overlay|panel)\)/);
 });

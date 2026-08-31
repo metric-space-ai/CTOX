@@ -343,3 +343,42 @@
     min-height: 44px;
   }
 }
+
+/* Shared shell-v2 frame. The shell owns window title/close/maximize chrome;
+   this module only owns pane semantics and keeps its toolbar on one line. */
+.shell-window[data-shell-contract="v2"] .ats-interviews {
+  padding: 0;
+  background: var(--shell-v2-surface, var(--bg));
+}
+.shell-window[data-shell-contract="v2"] .ats-interviews .ctox-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+  box-shadow: none;
+}
+.shell-window[data-shell-contract="v2"] .ats-list-pane > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .ats-workbench-pane > .ctox-pane-header { padding: 0; background: var(--shell-v2-surface-alt, var(--surface)); }
+.shell-window[data-shell-contract="v2"] .ats-list-pane > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+}
+.shell-window[data-shell-contract="v2"] .ats-workbench-pane > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 62px 0 8px;
+}
+.shell-window[data-shell-contract="v2"] .ats-interviews [data-shell-v2-header-row="2"] {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+.shell-window[data-shell-contract="v2"] .ats-list-pane .ctox-pane-kicker { display: none; }
+.shell-window[data-shell-contract="v2"] .ats-interviews .ctox-pane-title-row { height: 100%; }
+.shell-window[data-shell-contract="v2"] .ats-interviews .ctox-pane-title { margin-top: 0; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .ats-interviews .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 37px));
+  height: min(26px, var(--shell-v2-header-row-size, 37px));
+}

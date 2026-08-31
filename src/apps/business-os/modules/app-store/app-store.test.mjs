@@ -719,7 +719,7 @@ test('chrome is shell-grammar plus header icons, never module-owned wiring', () 
   assert.match(html, /class="ctox-pane-icon" data-action="install-zip"/);
   assert.match(html, /class="ctox-pane-icon" data-export-catalog[^>]*aria-label="[^"]+"[^>]*title="[^"]+"/);
   assert.match(html, /class="ctox-pane-icon" data-refresh-marketplace/);
-  assert.match(js, /getActionIcon\?\.\('export'\)/);
+  assert.match(js, /function actionIcon\(name\)[\s\S]*getActionIcon\?\.\(name\)/);
   assert.match(js, /new Blob\(\[JSON\.stringify\(payload, null, 2\)\]/);
   assert.doesNotMatch(html, /btn-create-scratch|btn-install-github|btn-install-zip/);
   assert.doesNotMatch(html, /store-action-btn|store-refresh-btn/);
@@ -762,4 +762,12 @@ test('chrome is shell-grammar plus header icons, never module-owned wiring', () 
   // established inter-app channel (knowledge uses the same for cross-module
   // focus handoffs) and stays.
   assert.doesNotMatch(js, /localStorage/);
+});
+
+test('v2 overlays stay inside the app window and icons survive shell recovery', () => {
+  assert.match(source, /\(els\.root \|\| state\.ctx\?\.host\)\?\.append\(overlay\)/);
+  assert.doesNotMatch(source, /document\.body\.append\(overlay\)/);
+  assert.match(source, /function actionIcon\(name\)/);
+  assert.match(source, /const paths = \{[\s\S]*close:/);
+  assert.match(css, /\.app-store-module > \.ctox-modal \{ position: absolute; inset: 0;/);
 });

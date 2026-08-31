@@ -31,6 +31,10 @@ const compactCss = mediaRules(css)
   .filter(({ condition }) => /max-width:\s*(?:600|720|900)px/.test(condition))
   .map(({ body }) => body)
   .join('\n');
+const mobileCss = mediaRules(css)
+  .filter(({ condition }) => /max-width:\s*767px/.test(condition))
+  .map(({ body }) => body)
+  .join('\n');
 
 test('compact shell keeps start, app navigation, and account actions in one header row', () => {
   assert.match(compactCss, /grid-template-columns:\s*auto minmax\(0, 1fr\) auto/);
@@ -39,6 +43,14 @@ test('compact shell keeps start, app navigation, and account actions in one head
   assert.doesNotMatch(compactCss, /\.module-nav\s*\{[^}]*display:\s*none/);
   assert.doesNotMatch(compactCss, /grid-template-rows:\s*52px\s+42px/);
   assert.doesNotMatch(css, /grid-template-rows:\s*52px\s+42px/);
+});
+
+test('phone shell keeps open apps in the same row instead of growing a second header row', () => {
+  assert.match(mobileCss, /--ctox-shell-topbar-h:\s*56px/);
+  assert.match(mobileCss, /grid-template-rows:\s*48px/);
+  assert.match(mobileCss, /\.module-nav\s*\{[^}]*grid-column:\s*2[^}]*grid-row:\s*1/);
+  assert.match(mobileCss, /\.module-tabs\s*\{[^}]*flex-wrap:\s*nowrap[^}]*overflow-x:\s*auto/);
+  assert.doesNotMatch(mobileCss, /109px|grid-template-rows:\s*52px\s+48px/);
 });
 
 test('one topbar token positions shell chrome at every responsive width', () => {

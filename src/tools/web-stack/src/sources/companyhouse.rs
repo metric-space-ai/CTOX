@@ -76,7 +76,23 @@ impl SourceModule for Companyhouse {
         // den Namen aus dem Handelsregister sauber als Heading führt; das
         // ist nicht „in der Excel" als Primärquelle vergeben, aber durch
         // das Quellen-Modul nutzbar wenn der Orchestrator den Hit liefert.
-        &[FieldKey::PersonTitel]
+        &[
+            FieldKey::FirmaName,
+            FieldKey::FirmaFruehereNamen,
+            FieldKey::FirmaAktivitaetsstatus,
+            FieldKey::FirmaAnschrift,
+            FieldKey::FirmaPlz,
+            FieldKey::FirmaOrt,
+            FieldKey::FirmaLand,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaGeschaeftsfuehrung,
+            FieldKey::FirmaProkura,
+            FieldKey::PersonTitel,
+            FieldKey::PersonVorname,
+            FieldKey::PersonNachname,
+            FieldKey::PersonFunktion,
+            FieldKey::PersonPosition,
+        ]
     }
 
     /// Crawl-Pfad: Query mit Domain-Pin. DE-only — andere Länder bekommen

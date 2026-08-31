@@ -4463,7 +4463,7 @@ function initBuchhaltungContextMenu(state) {
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu buchhaltung-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  (state.els.root || state.ctx?.host)?.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {
@@ -4611,10 +4611,11 @@ function renderBuchhaltungContextMenu(state, context, x, y) {
   state.contextMenu.style.top = '0px';
   const rect = state.contextMenu.getBoundingClientRect();
   const clampNumber = (val, min, max) => Math.min(max, Math.max(min, val));
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  state.contextMenu.style.left = `${clampNumber(x, 8, maxLeft)}px`;
-  state.contextMenu.style.top = `${clampNumber(y, 8, maxTop)}px`;
+  const rootRect = state.els.root?.getBoundingClientRect?.() || { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  const maxLeft = Math.max(8, rootRect.width - rect.width - 8);
+  const maxTop = Math.max(8, rootRect.height - rect.height - 8);
+  state.contextMenu.style.left = `${clampNumber(x - rootRect.left, 8, maxLeft)}px`;
+  state.contextMenu.style.top = `${clampNumber(y - rootRect.top, 8, maxTop)}px`;
 
   const form = state.contextMenu.querySelector('[data-buchhaltung-context-chat-form]');
   const textarea = state.contextMenu.querySelector('[data-buchhaltung-context-message]');

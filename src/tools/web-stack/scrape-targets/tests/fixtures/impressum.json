@@ -11,6 +11,7 @@
     "firma_plz": "12345",
     "firma_ort": "Musterstadt",
     "firma_telefon": "+49 123 456789",
+    "firma_fax": "+49 123 456780",
     "firma_email": "info@beispiel-maschinenbau.de",
     "firma_domain": "beispiel-maschinenbau.de",
     "person_vorname": "Max",

@@ -6,6 +6,17 @@
    tracks/rows and styles the genuinely consent-specific bits: the shard
    selector rows, the auto-reveal detail card, and the gate result list. */
 
+/* Shell V2 compact pane headers: title/kicker share one baseline and the
+   consent filter strip never wraps into a second titlebar row. */
+.shell-window[data-shell-contract="v2"] .consent-module { padding: 0; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+
 /* Default track width for the shell-owned resizer (it writes inline
    --ctox-left-width onto the frame while dragging). */
 .consent-module { --ctox-left-width: 320px; }

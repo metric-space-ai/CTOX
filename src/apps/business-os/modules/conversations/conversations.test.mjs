@@ -349,3 +349,14 @@ test('selecting a conversation is an in-place class flip, never a list rebuild',
   // not trigger it.
   assert.doesNotMatch(selectFn[0], /renderList\(/);
 });
+
+test('v2 CTOX chat context form is bounded to the conversation window', async () => {
+  const [js, css] = await Promise.all([
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+    readFile(new URL('./index.css', import.meta.url), 'utf8'),
+  ]);
+  assert.match(js, /menu\.style\.position = 'absolute'/);
+  assert.match(js, /root\.append\(menu\)/);
+  assert.doesNotMatch(js, /menu\.style\.position = 'fixed'/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.conv-module \{ position: relative;/);
+});

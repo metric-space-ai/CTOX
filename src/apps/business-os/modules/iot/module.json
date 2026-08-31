@@ -17,10 +17,10 @@
     "iot_dashboards",
     "iot_widgets"
   ],
-  "source": "catalog",
-  "core": false,
+  "source": "core",
+  "core": true,
   "editable": true,
-  "deletable": true,
+  "deletable": false,
   "layout": {
     "shell": "windowed",
     "shell_contract": "v2",
@@ -45,12 +45,12 @@
     "summary": "Task CTOX in plain text (Wenn/Dann) to watch your signals and act. Each dashboard widget is a standing order CTOX programs in three parts (Rhai watcher · sandboxed render code · order prompt that spawns a chat on fire). Webhooks in & out; MQTT/HTTP/WS ingest; multi-realm isolation; sandboxed generated code.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/iot",
-    "installable": true,
-    "editable_after_install": true,
-    "distribution": "catalog-module"
+    "installable": false,
+    "editable_after_install": false,
+    "distribution": "system-module"
   },
-  "install_scope": "store",
-  "default_installed": false,
+  "install_scope": "core",
+  "default_installed": true,
   "launch_kind": "desktop-app",
   "presentation": {
     "default_mode": "window",

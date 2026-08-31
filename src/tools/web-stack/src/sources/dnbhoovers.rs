@@ -77,12 +77,7 @@ impl SourceModule for DnbHoovers {
     }
 
     fn authoritative_for(&self) -> &'static [FieldKey] {
-        &[
-            FieldKey::WzCode,
-            FieldKey::Umsatz,
-            FieldKey::Mitarbeiter,
-            FieldKey::FirmaEmail,
-        ]
+        &[FieldKey::WzCode, FieldKey::Umsatz, FieldKey::Mitarbeiter]
     }
 
     fn requires_credential(&self) -> Option<&'static str> {
@@ -806,12 +801,7 @@ mod tests {
         assert!(matches!(m.tier(), Tier::C));
         assert_eq!(m.countries(), &[Country::De, Country::At, Country::Ch]);
         assert_eq!(m.requires_credential(), Some(SECRET_NAME));
-        for required in [
-            FieldKey::WzCode,
-            FieldKey::Umsatz,
-            FieldKey::Mitarbeiter,
-            FieldKey::FirmaEmail,
-        ] {
+        for required in [FieldKey::WzCode, FieldKey::Umsatz, FieldKey::Mitarbeiter] {
             assert!(
                 m.authoritative_for().contains(&required),
                 "missing authoritative field: {required:?}"

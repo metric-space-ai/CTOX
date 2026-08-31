@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SANCTIONED = new Set([1024, 768]);
 // Die Shell-Oberflaeche selbst ist kein Fensterinhalt; Knowledge ist die Referenz.
-const SKIP = new Set(['desktop']);
+// kundenpipeline: Kundenapp, von origin nach modules/ verschoben - bis zur
+// Betreiber-Entscheidung vom Vertrag ausgenommen (Finger-weg-Regel 31.08.).
+const SKIP = new Set(['desktop', 'kundenpipeline']);
 
 function moduleDirs(base) {
   const dir = join(ROOT, base);

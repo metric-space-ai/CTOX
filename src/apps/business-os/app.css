@@ -5277,6 +5277,56 @@ body[data-auth-state="locked"] .topbar {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.shell-module-drawer-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2300;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: rgb(0 0 0 / 0.52);
+}
+
+.shell-module-drawer-panel {
+  width: min(460px, 100%);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-module-drawer-overlay--left .shell-module-drawer-panel {
+  width: min(460px, calc(100% - var(--shell-v2-icon-frame-span, 74px)));
+  margin-left: var(--shell-v2-icon-frame-span, 74px);
+}
+
+.shell-module-drawer-overlay--right {
+  justify-content: flex-end;
+}
+
+.shell-module-drawer-overlay--right .shell-module-drawer-panel {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.shell-module-drawer-overlay--bottom {
+  align-items: flex-end;
+}
+
+.shell-module-drawer-overlay--bottom .shell-module-drawer-panel {
+  width: 100%;
+  height: min(280px, 55%);
+  border-top: 1px solid var(--line);
+  border-right: 0;
 }
 
 .shell-window-module-pane {
@@ -5647,11 +5697,11 @@ body[data-auth-state="locked"] .topbar {
 .ctox-global-context-menu {
   position: fixed;
   z-index: 1200;
-  width: min(430px, calc(100vw - 16px));
+  width: min(360px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
   max-height: min(560px, calc(100vh - 16px));
   box-sizing: border-box;
-  padding: var(--space-3);
+  padding: 9px;
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
   background: var(--surface);
@@ -5667,7 +5717,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-chat-form {
   display: grid;
-  gap: var(--space-2);
+  gap: 7px;
 }
 
 .ctox-context-header {
@@ -5695,7 +5745,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-heading strong {
   color: var(--text-strong, var(--text));
-  font-size: var(--fs-base);
+  font-size: var(--fs-sm);
   font-weight: 800;
   line-height: var(--lh-tight);
   -webkit-line-clamp: 2;
@@ -5703,7 +5753,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-heading span {
   color: var(--text-muted, var(--muted));
-  font-size: var(--fs-meta);
+  font-size: var(--fs-micro);
   font-weight: 640;
   line-height: var(--lh-tight);
   -webkit-line-clamp: 2;
@@ -5713,14 +5763,14 @@ body[data-auth-state="locked"] .topbar {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--text-muted, var(--muted));
   font: inherit;
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
   transition: background-color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard);
@@ -5729,22 +5779,22 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
+  gap: 5px;
 }
 
 .ctox-context-mode label {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
   min-width: 0;
-  min-height: 34px;
+  min-height: 30px;
   box-sizing: border-box;
-  padding: var(--space-2) var(--space-2);
+  padding: 5px 7px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-2);
   color: var(--muted);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: 720;
   cursor: pointer;
   user-select: none;
@@ -5753,8 +5803,8 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode label::before {
   content: "";
   flex: 0 0 auto;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border: 1px solid currentColor;
   border-radius: 999px;
   opacity: 0.72;
@@ -5792,7 +5842,7 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode-help {
   margin: -2px 0 0;
   color: var(--text-muted, var(--muted));
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: 650;
   line-height: 1.3;
   overflow-wrap: anywhere;
@@ -5802,7 +5852,7 @@ body[data-auth-state="locked"] .topbar {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface-2) 82%, var(--surface));
-  padding: var(--space-2) var(--space-2);
+  padding: 7px 8px;
 }
 
 .ctox-agent-scope-title {
@@ -5810,7 +5860,7 @@ body[data-auth-state="locked"] .topbar {
   font-size: var(--fs-meta);
   font-weight: 800;
   line-height: var(--lh-tight);
-  margin-bottom: var(--space-2);
+  margin-bottom: 6px;
 }
 
 .ctox-agent-scope--compact > summary {
@@ -5820,7 +5870,7 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .ctox-agent-scope--compact:not([open]) {
-  padding-block: var(--space-2);
+  padding-block: 7px;
 }
 
 .ctox-agent-scope dl {
@@ -5889,10 +5939,10 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .ctox-context-textarea {
-  min-height: 78px;
-  max-height: 150px;
-  padding: var(--space-2);
-  font-size: var(--fs-sm);
+  min-height: 62px;
+  max-height: 124px;
+  padding: 8px;
+  font-size: var(--fs-meta);
   line-height: 1.35;
   resize: vertical;
 }
@@ -5919,7 +5969,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-submit-btn {
   flex: 0 0 auto;
-  height: 31px;
+  height: 29px;
   border: 1px solid var(--accent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
@@ -5927,7 +5977,7 @@ body[data-auth-state="locked"] .topbar {
   font-size: var(--fs-sm);
   font-weight: 740;
   cursor: pointer;
-  padding: 0 var(--space-4);
+  padding: 0 12px;
   transition: background-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard);
 }
 
@@ -8236,7 +8286,11 @@ button.shell-window-header-meta:focus-visible,
   --shell-v2-surface: #10151c;
   --shell-v2-surface-alt: #141b24;
   --shell-v2-accent: var(--shell-v2-frame-top-joint);
+  --shell-v2-content-accent: var(--shell-v2-frame-start);
+  --shell-v2-content-foreground: #071015;
+  --shell-v2-close-size: 44px;
   --shell-v2-icon-size: 80px;
+  --shell-v2-icon-frame-span: calc(var(--shell-v2-icon-size) - 6px);
   /* The window glyph is exactly the normal desktop glyph size. Because it
      replaces the outer top-left frame segment, the two module rows share the
      74px between the inner frame edge and the glyph's lower edge. */
@@ -8249,8 +8303,8 @@ button.shell-window-header-meta:focus-visible,
   border-radius: 0;
   background:
     linear-gradient(var(--shell-v2-surface), var(--shell-v2-surface)) padding-box,
-    linear-gradient(90deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-top-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
-    linear-gradient(180deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-left-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
+    linear-gradient(90deg, var(--shell-v2-frame-top-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
+    linear-gradient(180deg, var(--shell-v2-frame-left-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
     linear-gradient(var(--shell-v2-frame-end), var(--shell-v2-frame-end)) top right / 6px 100% no-repeat border-box,
     linear-gradient(90deg, var(--shell-v2-frame-left-joint), var(--shell-v2-frame-end)) bottom left / 100% 6px no-repeat border-box !important;
   box-shadow: 0 24px 72px rgb(0 0 0 / 0.62) !important;
@@ -8323,8 +8377,8 @@ button.shell-window-header-meta:focus-visible,
 .shell-window[data-shell-contract="v2"] .shell-window-control--close,
 :root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close {
   position: relative;
-  width: calc(var(--shell-v2-header-row-size) * 2);
-  height: calc(var(--shell-v2-header-row-size) * 2);
+  width: var(--shell-v2-close-size);
+  height: var(--shell-v2-close-size);
   border: 1px solid transparent;
   border-radius: 8px;
   background: #030507;
@@ -8338,8 +8392,8 @@ button.shell-window-header-meta:focus-visible,
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 22px;
-  height: 3px;
+  width: 18px;
+  height: 2px;
   border-radius: 1px;
   background: currentColor;
   transform-origin: center;
@@ -8404,18 +8458,34 @@ button.shell-window-header-meta:focus-visible,
   outline-offset: -3px;
 }
 
+.shell-window[data-shell-contract="v2"] {
+  --accent: var(--shell-v2-content-accent);
+  --app-accent: var(--shell-v2-content-accent);
+  --shell-category-accent: var(--shell-v2-content-accent);
+  --shell-category-foreground: var(--shell-v2-content-foreground);
+  --shell-category-soft: color-mix(in srgb, var(--shell-v2-content-accent) 16%, transparent);
+  --shell-category-border: color-mix(in srgb, var(--shell-v2-content-accent) 42%, transparent);
+}
+
+.shell-window[data-shell-contract="v2"] [data-workjet-category] {
+  --shell-category-accent: var(--shell-v2-content-accent) !important;
+  --shell-category-foreground: var(--shell-v2-content-foreground) !important;
+  --shell-category-soft: color-mix(in srgb, var(--shell-v2-content-accent) 16%, transparent) !important;
+  --shell-category-border: color-mix(in srgb, var(--shell-v2-content-accent) 42%, transparent) !important;
+}
+
 .shell-window[data-shell-contract="v2"] .ctox-pane-icon:hover,
 .shell-window[data-shell-contract="v2"] .ctox-pane-icon:focus-visible,
 .shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):hover,
 .shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):focus-visible,
 .shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger:hover,
 .shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger:focus-visible {
-  color: var(--shell-v2-local-accent, var(--shell-v2-accent));
+  color: var(--shell-v2-content-accent);
 }
 
 .shell-window[data-shell-contract="v2"] .ctox-pane-icon:hover,
 .shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):hover {
-  background: color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-accent)) 12%, transparent);
+  background: color-mix(in srgb, var(--shell-v2-content-accent) 12%, transparent);
 }
 
 .shell-v2-module-title-trigger {
@@ -8875,8 +8945,8 @@ button.shell-window-header-meta:focus-visible,
   border-radius: 0;
   background:
     linear-gradient(var(--shell-v2-surface), var(--shell-v2-surface)) padding-box,
-    linear-gradient(90deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-top-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
-    linear-gradient(180deg, var(--shell-v2-frame-start) 0, var(--shell-v2-frame-left-joint) var(--shell-v2-icon-size), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
+    linear-gradient(90deg, var(--shell-v2-frame-top-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
+    linear-gradient(180deg, var(--shell-v2-frame-left-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
     linear-gradient(var(--shell-v2-frame-end), var(--shell-v2-frame-end)) top right / 6px 100% no-repeat border-box,
     linear-gradient(90deg, var(--shell-v2-frame-left-joint), var(--shell-v2-frame-end)) bottom left / 100% 6px no-repeat border-box !important;
   box-shadow: 0 24px 72px rgb(0 0 0 / 0.62) !important;
@@ -8983,9 +9053,8 @@ button.shell-window-header-meta:focus-visible,
    boundary). Everything in this block is scoped to that media query, so
    desktop viewports (>= 768px, in particular >= 1024px) are untouched.
    Goals:
-   - Topbar wraps into two touch-friendly rows (>=44px tap targets) and keeps
-     the open-app tab strip reachable (it scrolls horizontally inside its own
-     row instead of hiding).
+   - Topbar stays in one touch-friendly row (>=44px tap targets); the open-app
+     tab strip scrolls horizontally in the flexible centre track.
    - Windowed apps (launchesInWindow) become fullscreen sheets: pinned
      geometry, no resize handles, 44px window controls, stacked module panes.
    - Chat dock ("Chat-Leiste"), date pill ("Verlauf-Leiste") and chat windows
@@ -8995,7 +9064,7 @@ button.shell-window-header-meta:focus-visible,
    (after this stylesheet), so those overrides need !important.
    ========================================================================== */
 @media (max-width: 767px) {
-  /* --- Shell frame: topbar grows to two rows, workspace takes the rest --- */
+  /* --- Shell frame: one compact row, workspace takes the rest --- */
   .app-shell {
     grid-template-rows: auto minmax(0, 1fr);
   }
@@ -9004,17 +9073,14 @@ button.shell-window-header-meta:focus-visible,
     grid-template-rows: auto auto minmax(0, 1fr);
   }
 
-  /* 52px action row + 48px tab row + 2x4px padding + 1px border = 109px.
-     --ctox-shell-topbar-h lives on :root so the window layer, the start menu
-     and the drawers (all siblings of the topbar, not descendants) line up
-     underneath it. */
+  /* One 48px control row plus 2x4px padding. */
   :root {
-    --ctox-shell-topbar-h: 109px;
+    --ctox-shell-topbar-h: 56px;
   }
 
   .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-rows: 52px 48px;
+    grid-template-rows: 48px;
     gap: 0 var(--space-2);
     min-height: 0;
     padding: var(--space-1) var(--space-2);
@@ -9053,23 +9119,24 @@ button.shell-window-header-meta:focus-visible,
   }
 
   .account-button span {
-    max-width: 28vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: none;
   }
 
-  /* Open-app tabs stay reachable on phones: second topbar row, internally
-     scrollable (overflow-x:auto on .module-tabs), never widening the page. */
+  /* Open-app tabs stay reachable in the centre track and never wrap. */
   .module-nav {
     display: grid;
-    grid-column: 1 / -1;
-    grid-row: 2;
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
     width: 100%;
   }
 
   .module-tabs {
     min-height: 44px;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 
   .module-tab {
@@ -9085,12 +9152,12 @@ button.shell-window-header-meta:focus-visible,
 
   /* --- Start menu: full-width sheet below the topbar --- */
   .shell-start-menu-panel {
-    top: var(--ctox-shell-topbar-h, 109px);
+    top: var(--ctox-shell-topbar-h, 56px);
     left: 0;
     right: 0;
     width: auto;
     max-width: none;
-    max-height: calc(100dvh - var(--ctox-shell-topbar-h, 109px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - var(--ctox-shell-topbar-h, 56px) - env(safe-area-inset-bottom, 0px));
     border-radius: 0;
   }
 
@@ -9101,7 +9168,7 @@ button.shell-window-header-meta:focus-visible,
      overridden; drag/resize gestures keep updating inline styles but cannot
      move the sheet. */
   .shell-window-layer {
-    inset: var(--ctox-shell-topbar-h, 109px) 0 0 0;
+    inset: var(--ctox-shell-topbar-h, 56px) 0 0 0;
     width: 100%;
     height: auto;
     min-width: 0;
@@ -9188,7 +9255,7 @@ button.shell-window-header-meta:focus-visible,
   .shell-window-layer > .shell-window .shell-window-module-root > .module-content {
     grid-row: 2;
     height: auto;
-    min-height: min(220px, calc(100dvh - var(--ctox-shell-topbar-h, 109px) - 104px));
+    min-height: min(220px, calc(100dvh - var(--ctox-shell-topbar-h, 56px) - 104px));
     overflow: auto;
   }
 
@@ -9208,14 +9275,14 @@ button.shell-window-header-meta:focus-visible,
   }
 
   .drawer-right.account-popover {
-    inset: calc(var(--ctox-shell-topbar-h, 109px) + 4px) 8px auto 8px !important;
+    inset: calc(var(--ctox-shell-topbar-h, 56px) + 4px) 8px auto 8px !important;
     width: auto !important;
     max-width: none !important;
-    max-height: calc(100svh - var(--ctox-shell-topbar-h, 109px) - 16px) !important;
+    max-height: calc(100svh - var(--ctox-shell-topbar-h, 56px) - 16px) !important;
   }
 
   .drawer-bottom {
-    inset: var(--ctox-shell-topbar-h, 109px) 0 0 !important;
+    inset: var(--ctox-shell-topbar-h, 56px) 0 0 !important;
     max-height: none !important;
     border-radius: 0 !important;
   }

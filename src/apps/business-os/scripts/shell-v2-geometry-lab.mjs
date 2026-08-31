@@ -30,7 +30,7 @@ function apps() {
     const dir = path.join(ROOT, base);
     if (!existsSync(dir)) continue;
     for (const id of readdirSync(dir)) {
-      if (id === 'desktop') continue;
+      if (id === 'desktop' || id === 'kundenpipeline') continue;
       if (!existsSync(path.join(dir, id, 'index.html'))) continue;
       list.push({ id, base });
     }

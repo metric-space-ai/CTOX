@@ -1831,6 +1831,147 @@ fn continuity_refresh_prompt_pins_the_conversation_id() {
 }
 
 #[test]
+fn durable_execution_progress_reserves_ten_percent_for_native_review() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let work_key = "queue:progress-one-step";
+    let running = [TaskExecutionPlanStepInput {
+        label: "Bericht erstellen".to_string(),
+        status: "in_progress".to_string(),
+    }];
+    let progress = engine.record_task_execution_plan(TaskExecutionPlanUpdate {
+        work_key,
+        task_id: "task-progress-one",
+        command_id: "cmd-progress-one",
+        attempt_id: "attempt-progress-one",
+        explanation: Some("Ein überprüfbarer Arbeitsschritt"),
+        steps: &running,
+    })?;
+    assert_eq!(progress["revision"], 1);
+    assert_eq!(progress["percent"], 0);
+    assert_eq!(progress["current_step"], 1);
+
+    let activity = TaskExecutionActivityInput {
+        activity_id: "attempt-progress-one:tool:1",
+        work_key,
+        task_id: "task-progress-one",
+        command_id: "cmd-progress-one",
+        attempt_id: "attempt-progress-one",
+        kind: "tool",
+        attribute_to_current_step: true,
+    };
+    assert!(engine.record_task_execution_activity(activity.clone())?);
+    assert!(!engine.record_task_execution_activity(activity)?);
+    let with_turn = engine.task_execution_progress(work_key)?.unwrap();
+    assert_eq!(with_turn["percent"], 0);
+    assert_eq!(with_turn["activity_turns"]["total"], 1);
+    assert_eq!(with_turn["steps"][0]["activity_turns"], 1);
+
+    let completed = [TaskExecutionPlanStepInput {
+        label: "Bericht erstellen".to_string(),
+        status: "completed".to_string(),
+    }];
+    let work_done = engine.record_task_execution_plan(TaskExecutionPlanUpdate {
+        work_key,
+        task_id: "task-progress-one",
+        command_id: "cmd-progress-one",
+        attempt_id: "attempt-progress-one",
+        explanation: None,
+        steps: &completed,
+    })?;
+    assert_eq!(work_done["revision"], 1);
+    assert_eq!(work_done["percent"], 90);
+    assert_eq!(work_done["phase"], "review");
+
+    let reviewing = engine.prepare_task_execution_review(work_key)?;
+    assert_eq!(reviewing["percent"], 90);
+    assert_eq!(reviewing["review"]["status"], "in_progress");
+    let validated = engine.set_task_execution_review_status(work_key, "completed")?;
+    assert_eq!(validated["percent"], 100);
+    assert_eq!(validated["phase"], "completed");
+
+    drop(engine);
+    let recovered = LcmEngine::open(&db_path, LcmConfig::default())?
+        .task_execution_progress(work_key)?
+        .unwrap();
+    assert_eq!(recovered["percent"], 100);
+    assert_eq!(recovered["activity_turns"]["total"], 1);
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
+fn execution_replanning_preserves_turn_total_and_recalculates_step_percent() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let work_key = "queue:progress-replan";
+    let initial = [
+        TaskExecutionPlanStepInput {
+            label: "Daten laden".to_string(),
+            status: "completed".to_string(),
+        },
+        TaskExecutionPlanStepInput {
+            label: "Daten prüfen".to_string(),
+            status: "in_progress".to_string(),
+        },
+        TaskExecutionPlanStepInput {
+            label: "Ergebnis schreiben".to_string(),
+            status: "pending".to_string(),
+        },
+    ];
+    let first = engine.record_task_execution_plan(TaskExecutionPlanUpdate {
+        work_key,
+        task_id: "task-progress-replan",
+        command_id: "cmd-progress-replan",
+        attempt_id: "attempt-progress-replan",
+        explanation: None,
+        steps: &initial,
+    })?;
+    assert_eq!(first["revision"], 1);
+    assert_eq!(first["percent"], 30);
+
+    engine.record_task_execution_activity(TaskExecutionActivityInput {
+        activity_id: "attempt-progress-replan:thinking:1",
+        work_key,
+        task_id: "task-progress-replan",
+        command_id: "cmd-progress-replan",
+        attempt_id: "attempt-progress-replan",
+        kind: "thinking",
+        attribute_to_current_step: true,
+    })?;
+    let replanned = [
+        initial[0].clone(),
+        initial[1].clone(),
+        TaskExecutionPlanStepInput {
+            label: "Ausnahmen klären".to_string(),
+            status: "pending".to_string(),
+        },
+        initial[2].clone(),
+    ];
+    let second = engine.record_task_execution_plan(TaskExecutionPlanUpdate {
+        work_key,
+        task_id: "task-progress-replan",
+        command_id: "cmd-progress-replan",
+        attempt_id: "attempt-progress-replan",
+        explanation: Some("Eine Ausnahme erfordert einen zusätzlichen Schritt"),
+        steps: &replanned,
+    })?;
+    assert_eq!(second["revision"], 2);
+    assert_eq!(second["percent"], 23);
+    assert_eq!(second["activity_turns"]["total"], 1);
+
+    let revisions: i64 = engine.conn.query_row(
+        "SELECT COUNT(*) FROM task_execution_plan_revisions WHERE work_key = ?1",
+        [work_key],
+        |row| row.get(0),
+    )?;
+    assert_eq!(revisions, 2);
+    drop(engine);
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
 fn closure_claim_count_fails_closed_when_claims_schema_is_missing() -> Result<()> {
     let bare = Connection::open_in_memory()?;
     let err = count_open_closure_blocking_claims(&bare, 1)

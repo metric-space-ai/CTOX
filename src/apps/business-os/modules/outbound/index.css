@@ -92,7 +92,13 @@
 }
 
 .outbound-center-tools {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.outbound-center-tools::-webkit-scrollbar {
+  display: none;
 }
 
 .outbound-campaign-list {

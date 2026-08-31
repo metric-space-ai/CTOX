@@ -91,11 +91,18 @@ impl SourceModule for Handelsregister {
         // die Firma-Stammdaten plus die Geschäftsführer/Vorstand-Namen.
         &[
             FieldKey::FirmaName,
+            FieldKey::FirmaFruehereNamen,
+            FieldKey::FirmaAktivitaetsstatus,
             FieldKey::FirmaAnschrift,
             FieldKey::FirmaPlz,
             FieldKey::FirmaOrt,
+            FieldKey::FirmaLand,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaGeschaeftsfuehrung,
+            FieldKey::FirmaProkura,
             FieldKey::PersonVorname,
             FieldKey::PersonNachname,
+            FieldKey::PersonFunktion,
         ]
     }
 

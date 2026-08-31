@@ -636,7 +636,7 @@ pub(super) fn refresh_queue_task_projection(
                 .and_then(Value::as_str)
                 .map(str::to_string)
         });
-    let payload = business_command_queue_task_payload(
+    let mut payload = business_command_queue_task_payload(
         command_id,
         command,
         &task,
@@ -644,6 +644,14 @@ pub(super) fn refresh_queue_task_projection(
         structured_status.as_deref(),
         updated_at_ms,
     );
+    if let Some(progress) = crate::lcm::run_task_execution_progress_for_task(
+        &crate::paths::core_db(root),
+        &task.message_key,
+    )? {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("execution_progress".to_string(), progress);
+        }
+    }
     upsert_business_record(
         conn,
         "ctox_queue_tasks",

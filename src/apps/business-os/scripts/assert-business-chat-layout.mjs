@@ -11,6 +11,12 @@ const dockRule = source.match(/\.ctox-chat-dock\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.
 const manyChatsDockRule = source.match(/\.ctox-chat-dock\.has-many-chats\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
 const oneChatStripRule = source.match(/\.ctox-chat-dock\.has-one-chat\s+\.ctox-chat-strip\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
 const fewChatsStripRule = source.match(/\.ctox-chat-dock\.has-few-chats\s+\.ctox-chat-strip\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
+const collapsedRootRules = [...source.matchAll(/\.ctox-chat-root\.is-collapsed\s*\{(?<body>[\s\S]*?)\n\s*\}/g)];
+const collapsedDockRules = [...source.matchAll(/\.ctox-chat-dock\.is-collapsed\s*\{(?<body>[\s\S]*?)\n\s*\}/g)];
+const expandedDockRule = source.match(/\.ctox-chat-dock:not\(\.is-collapsed\)\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
+const expandedVisibleRule = source.match(/\.ctox-chat-dock\.has-visible-chats:not\(\.is-collapsed\)\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
+const finalCollapsedRootRule = collapsedRootRules.at(-1)?.groups?.body || '';
+const finalCollapsedDockRule = collapsedDockRules.at(-1)?.groups?.body || '';
 const dateNavigationBlock = source.match(/root\.querySelector\('\[data-chat-date-prev\]'[\s\S]*?root\.querySelector\('\[data-chat-new\]'\)/)?.[0] || '';
 
 expect(dockRule, 'Missing .ctox-chat-dock CSS rule');
@@ -39,6 +45,18 @@ expectIncludes(oneChatStripRule, 'width: 148px;', 'One-chat strip must have stab
 expect(fewChatsStripRule, 'Missing few-chat strip rule');
 expectIncludes(fewChatsStripRule, 'max-width:', 'Few-chat strip must cap growth before many-chat mode');
 
+expect(finalCollapsedRootRule, 'Missing final collapsed root geometry');
+expectIncludes(finalCollapsedRootRule, 'width: max-content;', 'Collapsed Crew root must shrink to its visible controls');
+expectIncludes(finalCollapsedRootRule, 'max-width: max-content;', 'Collapsed Crew root must not inherit a viewport-sized maximum');
+expect(finalCollapsedDockRule, 'Missing final collapsed dock geometry');
+expectIncludes(finalCollapsedDockRule, 'justify-self: start;', 'Collapsed Crew dock must not stretch in its grid');
+expectIncludes(finalCollapsedDockRule, 'width: max-content !important;', 'Collapsed Crew dock must override responsive stretching');
+expect(expandedDockRule, 'Missing explicit expanded dock geometry');
+expectIncludes(expandedDockRule, 'width: max-content;', 'Zero/one-chat Crew dock must remain content-sized');
+expect(expandedVisibleRule, 'Missing expanded visible-chat grid');
+expectIncludes(source, '.ctox-chat-dock.has-few-chats:not(.is-collapsed),', 'Multi-member Crew dock needs an explicit expanded geometry');
+expectIncludes(source, 'justify-self: stretch;', 'Multi-member Crew dock must absorb the available desktop width');
+
 expectIncludes(source, 'const fitsSideBySide =', 'Chat windows need a side-by-side fit check');
 expectIncludes(source, 'const MANY_CHAT_THRESHOLD = 12;', 'Many-chat threshold must be explicit');
 expectIncludes(source, 'const MAX_RENDERED_CHAT_TABS = 12;', 'Rendered chat tabs must be capped for busy days');
@@ -63,11 +81,11 @@ expectIncludes(source, 'function updateChatStripOverflowState(root)', 'Scrollabl
 expectIncludes(source, '.ctox-chat-strip.is-scrollable::-webkit-scrollbar', 'Scrollable chat strips need a visible scrollbar hint');
 expectIncludes(source, '.ctox-chat-strip.is-scrollable:not(.is-at-start):not(.is-at-end)', 'Scrollable chat strips need edge overflow shadows');
 expectIncludes(source, 'chatDockClassName(chat, activeChat?.id, taskState)', 'Chat chips must use shared state classes during in-place updates');
-expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskState(chat))', 'Chat chips need user-facing status labels');
+expectIncludes(source, 'function chatDockStatusText(chat, taskState = getTaskState(chat))', 'Chat chips need status text for hover and accessibility hints');
 expectIncludes(source, '`is-task-${taskState}`', 'Chat chips must include task-state classes');
 expectIncludes(source, '.ctox-chat-chip.is-minimized:not(.is-task-idle)', 'Minimized non-idle chats must keep visible status styling');
 expectIncludes(source, 'function chatDateAriaLabel(dateStr, total = 0)', 'Date history control needs a clear accessible label');
-expectIncludes(source, "<span class=\"ctox-date-scope\">${chatUiIsGerman() ? 'Einsätze' : 'Missions'}</span>", 'Date control must visibly explain it contains crew missions');
+expectIncludes(source, 'title="${escapeAttr(chatDateAriaLabel(selectedDate, workload.total))}"', 'Date control must explain its scope on hover');
 expectIncludes(source, 'chatBusyPanel({ chats: openChats, selectedDate, state })', 'Busy days need a filterable list panel');
 expectIncludes(source, 'data-chat-list-filter="source"', 'Busy-day list must include source filtering');
 expectIncludes(source, 'data-chat-list-filter="group"', 'Busy-day list must include grouping control');
@@ -114,11 +132,10 @@ expectIncludes(source, 'renderAndPersistChatState', 'Interactive handlers must r
 rejectIncludes(source, "node.querySelector('[data-chat-new]')", 'Chat-window header must not expose a dead/new-chat plus button');
 expect(dateNavigationBlock, 'Missing date navigation handler block');
 rejectIncludes(dateNavigationBlock, 'ensureChat', 'Date navigation must not create phantom chats');
-expectIncludes(
-  source,
-  '.ctox-chat-window:not(.is-active) .ctox-chat-header-actions',
-  'Inactive window controls must be hidden instead of visibly dead'
-);
+expectIncludes(source, '.ctox-chat-window:not(.is-active) .ctox-chat-header-actions *,', 'Inactive window header controls must remain directly clickable');
+expectIncludes(source, 'pointer-events: auto !important;', 'Inactive window controls must not require an activation click');
+expectIncludes(source, 'bottom: -1px;', 'Header progress must run on the window-frame edge');
+expectIncludes(source, '.ctox-progress-visual:not(.is-reviewing) .ctox-progress-review.is-pending', 'Review progress must stay dormant until review starts');
 expectIncludes(
   source,
   '.ctox-chat-window:not(.is-active) {\n      opacity: 0.6;\n      visibility: visible;\n      pointer-events: auto;',

@@ -51,6 +51,8 @@ const CONTRACT_FIELDS = [
   'openBottomDrawer',
   'openBusinessChat',
   'openDesktopApp',
+  'openModuleSource',
+  'openModuleVersions',
   'openLeftDrawer',
   'openRightDrawer',
   'permissions',

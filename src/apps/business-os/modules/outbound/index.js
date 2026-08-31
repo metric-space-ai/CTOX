@@ -8463,12 +8463,16 @@ function closeMultiSelectOverlay() {
 function showMultiSelectOverlay(hostCell, { currentValues, allOptions, labelSingular, onSave }) {
   closeMultiSelectOverlay();
 
+  const moduleHost = state.ctx?.host || hostCell?.closest?.('[data-outbound-root]');
+  if (!moduleHost) return;
   const rect = hostCell.getBoundingClientRect();
   const overlay = document.createElement('div');
   overlay.className = 'multi-editor-overlay';
 
-  overlay.style.top = `${window.scrollY + rect.bottom + 4}px`;
-  overlay.style.left = `${window.scrollX + rect.left}px`;
+  // The overlay is position:fixed; keep it in viewport coordinates and inside
+  // this module host so a second Business OS window cannot see or close it.
+  overlay.style.top = `${rect.bottom + 4}px`;
+  overlay.style.left = `${rect.left}px`;
 
   const selectedSet = new Set(currentValues);
 
@@ -8499,7 +8503,7 @@ function showMultiSelectOverlay(hostCell, { currentValues, allOptions, labelSing
     </div>
   `;
 
-  document.body.appendChild(overlay);
+  moduleHost.appendChild(overlay);
   activeOverlay = overlay;
 
   const addInput = overlay.querySelector('.multi-editor-input');
@@ -8855,7 +8859,7 @@ export function toggleHiddenCompaniesPanel() {
 }
 
 export function closeHiddenCompaniesPanel() {
-  const panel = document.querySelector('.hidden-company-panel');
+  const panel = state.ctx?.host?.querySelector?.('.hidden-company-panel');
   if (panel) {
     panel.remove();
   }
@@ -8865,8 +8869,12 @@ export function closeHiddenCompaniesPanel() {
 export function buildHiddenCompaniesPanel() {
   closeHiddenCompaniesPanel();
 
+  const moduleHost = state.ctx?.host;
+  if (!moduleHost) return;
   const panel = document.createElement('div');
   panel.className = 'hidden-company-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', t('hiddenCompanies', 'Versteckte Firmen'));
 
   const header = document.createElement('div');
   header.className = 'hidden-company-header';
@@ -8941,7 +8949,7 @@ export function buildHiddenCompaniesPanel() {
     panel.appendChild(bulkRow);
   }
 
-  document.body.appendChild(panel);
+  moduleHost.appendChild(panel);
   hiddenCompaniesPanelOpen = true;
 }
 

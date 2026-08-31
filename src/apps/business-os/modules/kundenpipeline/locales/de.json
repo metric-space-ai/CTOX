@@ -1,0 +1,17 @@
+{
+  "decisionHub": "Decision Hub",
+  "kundenpipeline": "Kundenpipeline",
+  "open": "Offen",
+  "all": "Alle",
+  "search": "Entscheidungen suchen",
+  "approve": "Annehmen",
+  "reject": "Ablehnen",
+  "resolve": "Entscheidung speichern",
+  "syncing": "Entscheidungen werden synchronisiert …",
+  "noDecisions": "Keine passenden Entscheidungen.",
+  "noSelection": "Wähle eine Entscheidung aus.",
+  "actions": "Aktionen",
+  "audit": "Audit",
+  "inbound": "Eingang",
+  "mailHistory": "Mail-Verlauf"
+}

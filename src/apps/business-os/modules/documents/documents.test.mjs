@@ -907,7 +907,19 @@ test('Documents UI exposes resizable library and actions columns with a collapse
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.html'\)/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.css'\)/);
   assert.equal(moduleJson.title, 'Dokumente');
+  assert.equal(moduleJson.layout.shell_contract, 'v2');
   assert.equal(deMessages.documentsTitle, 'Dokumente');
+});
+
+test('Documents context menu stays inside the module shell', async () => {
+  const [css, source] = await Promise.all([
+    readFile(new URL('./index.css', import.meta.url), 'utf8'),
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(source, /const root = state\.ctx\.host\.querySelector\('\[data-documents-module\]'\) \|\| state\.ctx\.host/);
+  assert.match(source, /root\.append\(menu\)/);
+  assert.match(source, /const rootRect = state\.contextMenu\.parentElement\.getBoundingClientRect\(\)/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.documents-context-menu\s*\{[\s\S]*position:\s*absolute/);
 });
 
 test('new document validation requires title, runbook, and prompt', () => {

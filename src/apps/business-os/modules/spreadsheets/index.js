@@ -1874,10 +1874,12 @@ async function openManageDrawer(state, id) {
 
 function initSpreadsheetsContextMenu(state) {
   state.contextMenu?.remove();
+  const moduleHost = state.ctx?.host;
+  if (!moduleHost) return () => {};
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu spreadsheets-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  moduleHost.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {

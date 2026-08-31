@@ -64,11 +64,25 @@ test('every registry app is classified as a shared-window app or the one shell s
 });
 
 test('the tenant shell resolves every windowed app to shell v2', () => {
-  const v2Modules = registry.modules.filter((moduleDef) => moduleDef.layout?.shell_contract === 'v2');
+  const inventory = loadBusinessOsAppInventory();
+  // Assert the contract the tenant shell actually resolves, rather than a
+  // stale raw registry field. Older registry snapshots intentionally omit the
+  // explicit v2 marker while resolveShellWindowContract still fails closed to
+  // the current shared v2 contract.
+  const v2Modules = registry.modules.filter((moduleDef) => resolveShellWindowContract(moduleDef)?.contract === 'v2');
   const visibleWindowModules = registry.modules.filter((moduleDef) => (
     moduleDef.id !== SHELL_SURFACE_MODULE_ID && moduleDef.install_scope !== 'internal'
   ));
-  assert.equal(visibleWindowModules.length, 33, 'the release gate must cover every visible app');
+  const expectedVisibleWindowIds = inventory.sourceApps
+    .filter((app) => app.id !== SHELL_SURFACE_MODULE_ID && app.installScope !== 'internal')
+    .map((app) => app.id)
+    .sort();
+  assert.equal(visibleWindowModules.length, expectedVisibleWindowIds.length, 'the release gate must cover every visible app');
+  assert.deepEqual(
+    visibleWindowModules.map((moduleDef) => moduleDef.id).sort(),
+    expectedVisibleWindowIds,
+    'every non-internal source app must have one visible window entry',
+  );
   assert.deepEqual(
     v2Modules.map((moduleDef) => moduleDef.id).sort(),
     visibleWindowModules.map((moduleDef) => moduleDef.id).sort(),
@@ -78,8 +92,9 @@ test('the tenant shell resolves every windowed app to shell v2', () => {
       resolve(businessOsRoot, 'modules', moduleDef.id, 'module.json'),
       'utf8',
     ));
-    assert.equal(sourceManifest.layout?.shell_contract, 'v2', `${moduleDef.id} source manifest must declare v2`);
-    assert.ok(sourceManifest.layout?.shell_geometry_contract, `${moduleDef.id} source manifest needs v2 geometry`);
+    const sourceShell = resolveShellWindowContract(sourceManifest);
+    assert.equal(sourceShell?.contract, 'v2', `${moduleDef.id} source manifest must resolve to v2`);
+    assert.ok(sourceShell?.geometryContract, `${moduleDef.id} source manifest needs a v2 geometry resolution`);
   }
   const knowledge = v2Modules.find((moduleDef) => moduleDef.id === 'knowledge');
   assert.equal(SHELL_WINDOW_CONTRACT, 'v2');
@@ -124,12 +139,14 @@ test('the tenant shell resolves every windowed app to shell v2', () => {
   assert.doesNotMatch(appCss, /--shell-v2-accent:\s*#75d7c2/i);
   assert.match(windowManagerSource, /shellV2FramePaletteFromRgba/);
   assert.match(windowManagerSource, /dataset\.shellV2PaletteSource = 'icon'/);
-  assert.match(windowManagerSource, /\[data-shell-v2-accent\]/);
+  assert.doesNotMatch(windowManagerSource, /'\[data-shell-v2-accent\]'/, 'module content uses the icon-derived content palette, not spatial frame samples');
+  assert.match(windowManagerSource, /--shell-v2-content-accent/);
   assert.match(appCss, /--shell-v2-icon-size:\s*80px/);
   assert.match(appCss, /\.shell-window\[data-shell-contract="v2"\] \.shell-window-control--close::before/);
-  assert.match(appCss, /width:\s*22px;[\s\S]*?height:\s*3px;[\s\S]*?background:\s*currentColor/);
+  assert.match(appCss, /--shell-v2-close-size:\s*44px/);
+  assert.match(appCss, /width:\s*18px;[\s\S]*?height:\s*2px;[\s\S]*?background:\s*currentColor/);
   assert.match(appCss, /:root\[data-shell-style\] \.shell-window\[data-shell-contract="v2"\] \.shell-window-control--close:hover/);
-  assert.match(appCss, /width:\s*calc\(var\(--shell-v2-header-row-size\) \* 2\)/);
+  assert.match(appCss, /width:\s*var\(--shell-v2-close-size\)/);
   assert.match(appCss, /@media \(forced-colors: active\)[\s\S]*?shell-window-control--close[\s\S]*?background:\s*Canvas;[\s\S]*?color:\s*CanvasText/);
   assert.doesNotMatch(appCss, /\.desktop-icon\[data-target="knowledge"\][\s\S]*?\.desktop-icon-glyph\s*\{[\s\S]*?width:\s*128px/);
   assert.match(windowManagerSource, /shellV2RenderedIconSizeFromAnchor\(anchor\)/);
@@ -139,7 +156,10 @@ test('the tenant shell resolves every windowed app to shell v2', () => {
   assert.match(windowManagerSource, /bus\.emit\('window:closing', \{ id, ownerId: win\.ownerId \}\)/);
   assert.match(windowManagerSource, /addEventListener\('lostpointercapture', lost\)/);
   assert.match(windowManagerSource, /querySelectorAll\('\[data-window-drag-region\]'\)/);
-  assert.match(windowManagerSource, /handle\.matches\?\.\('\[data-window-header\]'\)[\s\S]*?button, a, input, select, textarea/);
+  assert.match(windowManagerSource, /const interactiveSelector = \[[\s\S]*?'button', 'a', 'input', 'select', 'textarea'/);
+  assert.match(windowManagerSource, /closest\?\.\('\[data-shell-v2-header-row="1"\]'\)[\s\S]*?beginDrag\(event, win\.element\)/);
+  assert.match(appCss, /--shell-v2-icon-frame-span:\s*calc\(var\(--shell-v2-icon-size\) - 6px\)/);
+  assert.match(appCss, /var\(--shell-v2-frame-top-joint\) 0 var\(--shell-v2-icon-frame-span\)/);
   assert.match(windowManagerSource, /addEventListener\('lostpointercapture', finish\)/);
   assert.match(appSource, /state\.windowManager\?\.finalizeDockRestore\?\.\(\)/);
   assert.match(appSource, /loadModules\(\{ timeoutMs: 20000, allowShellSeed: true \}\)/);
@@ -164,6 +184,11 @@ test('the tenant shell resolves every windowed app to shell v2', () => {
   assert.match(appSource, /leftResizer\.dataset\.resizerVar = '--shell-module-left-width'/);
   assert.match(appSource, /rightResizer\.dataset\.resizerVar = '--shell-module-right-width'/);
   assert.match(appSource, /scope:\s*root,[\s\S]*?resizers:\s*windowResizers/);
+  assert.match(appSource, /function createModuleDrawerController\(hostEl\)/);
+  assert.match(appSource, /closest\?\.\('\.shell-window-module-root'\)/);
+  assert.match(appSource, /openLeftDrawer:\s*\(content\) => moduleDrawers\.open\('left', content\)/);
+  assert.doesNotMatch(appSource, /openLeftDrawer:\s*\(content\) => openDrawer\('left', content\)/);
+  assert.match(appCss, /\.shell-module-drawer-overlay\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/);
   assert.match(appCss, /grid-template-columns:[\s\S]*?var\(--shell-module-left-width\)[\s\S]*?var\(--shell-module-right-width\)/);
   assert.match(appCss, /shell-window-module-pane--left:empty[\s\S]*?shell-window-module-column-resizer--left/);
   assert.match(windowManagerSource, /const resizeHandles = shellContract === 'v2' \? V2_RESIZE_HANDLES : RESIZE_HANDLES/);
@@ -249,11 +274,27 @@ test('all app launch routes converge on the shared window manager', () => {
   assert.match(appSource, /state\.windowManager\.create\(\{/);
   assert.match(appSource, /ownerId: `desktop-app:\$\{entry\.id\}`/);
   assert.match(appSource, /ownerId: `desktop-app:\$\{mod\.id\}`/);
-  for (const staticAppId of ['explorer', 'code-editor', 'file-viewer']) {
+  for (const staticAppId of ['explorer', 'file-viewer']) {
     assert.match(appSource, new RegExp(`id: '${staticAppId}'`));
   }
+  assert.doesNotMatch(appSource, /id:\s*'code-editor',[\s\S]*?title:\s*'Source Editor'/);
+  assert.match(appSource, /mountIntegratedModuleSource[\s\S]*?desktop-apps\/code-editor\/app\.js/);
   assert.match(appSource, /async function openDesktopApp[\s\S]*?shellContract:\s*'v2',[\s\S]*?state\.windowManager\.create/);
   assert.match(appSource, /if \(moduleLaunchesAsDesktopApp\(mod\)\) \{/);
   assert.doesNotMatch(appSource, /moduleLaunchesAsDesktopApp\(mod\) && !options\.asModule/);
   assert.match(appSource, /Every Business OS app is hosted by the shared window manager/);
+});
+
+test('desktop launchers stay desaturated for every open window, including minimized windows', () => {
+  const syncOpenIcons = appSource.match(/function syncDesktopOpenIconStates\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(syncOpenIcons, /ownerId\?\.startsWith\('desktop-app:'\)/);
+  assert.doesNotMatch(syncOpenIcons, /state\s*!==\s*'minimized'/);
+  assert.match(appCss, /\.desktop-icon\.is-app-open \.desktop-icon-glyph[\s\S]*?filter:\s*grayscale\(1\) saturate\(0\)/);
+});
+
+test('the global right-click handoff stays a compact shell popover', () => {
+  assert.match(appSource, /class="ctox-context-chat-form"/);
+  assert.match(appCss, /\.ctox-global-context-menu\s*\{[\s\S]*?width:\s*min\(360px, calc\(100vw - 16px\)\)/);
+  assert.match(appCss, /\.ctox-context-textarea\s*\{[\s\S]*?min-height:\s*62px[\s\S]*?max-height:\s*124px/);
+  assert.match(appCss, /\.ctox-context-mode\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
 });

@@ -463,9 +463,9 @@
         "summary": "Unified dashboard to manage, configure, license, and remotely run Antigravity, Claude, and Codex agents.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/coding-agents",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
       "install_scope": "core",
       "default_installed": true,
@@ -491,7 +491,7 @@
       "source": "core",
       "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "consent",
@@ -676,12 +676,12 @@
         "summary": "Eine Mail-Workbench für persönliche Postfächer, gemeinsame Accounts und gruppierte Kampagnenmails.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/mail",
-        "installable": false,
-        "editable_after_install": false,
-        "distribution": "system-module"
+        "installable": true,
+        "editable_after_install": true,
+        "distribution": "catalog-module"
       },
-      "install_scope": "core",
-      "default_installed": true,
+      "install_scope": "store",
+      "default_installed": false,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -701,10 +701,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "core",
-      "core": true,
+      "source": "catalog",
+      "core": false,
       "editable": true,
-      "deletable": false
+      "deletable": true
     },
     {
       "id": "importer",
@@ -1115,12 +1115,12 @@
         "summary": "DOCX and Markdown workspace with the CTOX Documents ESM fork, verified local roundtrip, versions, blob chunks, and automation runbooks.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/documents",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -1140,10 +1140,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "esign",
@@ -1154,10 +1154,10 @@
         "business_commands",
         "signature_requests"
       ],
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true,
+      "deletable": false,
       "layout": {
         "shell": "windowed",
         "shell_contract": "v2",
@@ -1445,10 +1445,10 @@
         "iot_dashboards",
         "iot_widgets"
       ],
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true,
+      "deletable": false,
       "layout": {
         "shell": "windowed",
         "shell_contract": "v2",
@@ -1478,12 +1478,12 @@
         "summary": "Task CTOX in plain text (Wenn/Dann) to watch your signals and act. Each dashboard widget is a standing order CTOX programs in three parts (Rhai watcher · sandboxed render code · order prompt that spawns a chat on fire). Webhooks in & out; MQTT/HTTP/WS ingest; multi-realm isolation; sandboxed generated code.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/iot",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -1545,7 +1545,7 @@
         },
         "default_width": 1200,
         "default_height": 720,
-        "min_width": 640,
+        "min_width": 360,
         "min_height": 480,
         "icon_asset_sha256": "257526ec6c932c287be864be47e7e7708f32d136d587ab2d17da6cc62629c220",
         "icon_selection_candidate": "candidate-01",
@@ -1584,7 +1584,7 @@
           "height": 720
         },
         "minimum_size": {
-          "width": 640,
+          "width": 360,
           "height": 480
         },
         "multi_instance": false,
@@ -1771,12 +1771,12 @@
         "summary": "Local-first markdown notes workspace with folder navigation and live preview.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/notes",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -1796,10 +1796,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "outbound",
@@ -2071,11 +2071,11 @@
         "summary": "Knowledge-backed web research with a live semantic graph, source scoring, and CTOX systematic-research handoff.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/research",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "internal",
+      "install_scope": "core",
       "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
@@ -2096,10 +2096,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "internal",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "shiftflow",
@@ -2222,12 +2222,12 @@
         "summary": "XLSX spreadsheet workspace with the CTOX Spreadsheets ESM fork, verified local roundtrip, versions, and automation runbooks.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/spreadsheets",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -2247,10 +2247,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "submissions",
@@ -2557,6 +2557,79 @@
         "initial_size": {
           "width": 1180,
           "height": 780
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "launch_kind": "desktop-app",
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "kundenpipeline",
+      "title": "Decision Hub",
+      "description": "Bounded customer decisions, triage proposals, approvals, and follow-up actions.",
+      "entry": "modules/kundenpipeline/index.html",
+      "collections": [
+        "kundenpipeline_vorgaenge",
+        "kundenpipeline_entscheidungen",
+        "kundenpipeline_projekte",
+        "business_commands"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_asset": "modules/kundenpipeline/assets/icon/decision-hub-256.png",
+        "icon_asset_srcset": "modules/kundenpipeline/assets/icon/decision-hub-256.png 1x",
+        "icon_asset_60": "modules/kundenpipeline/assets/icon/decision-hub-60.png",
+        "icon_provenance": "modules/kundenpipeline/assets/icon/provenance.json",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5 5.5h14v13H5z\" stroke=\"currentColor\" stroke-width=\"1.8\"/><path d=\"M8 9h8M8 12h5M8 15h7\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"18\" cy=\"18\" r=\"3\" fill=\"var(--surface)\" stroke=\"currentColor\" stroke-width=\"1.6\"/><path d=\"M18 16.7v1.5l1 0.6\" stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\"/></svg>",
+        "left": "Offene Entscheidungen und Vorgänge",
+        "center": "Entscheidungsdetails, Kontext und Audit",
+        "right": "Freigabe, Antwort und Übergabe",
+        "third_pane_justification": "Die Aktions-Spalte gehört zur ausgewählten Entscheidung und bleibt auf breiten Fenstern sichtbar; auf kleinen Fenstern wird sie über den Shell-Aktionen-Toggle erreichbar.",
+        "default_width": 1120,
+        "default_height": 760,
+        "min_width": 640,
+        "min_height": 480
+      },
+      "category": "Operations",
+      "version": "0.1.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "decision-hub",
+        "kundenpipeline",
+        "approvals",
+        "triage"
+      ],
+      "store": {
+        "summary": "Decision Hub for bounded owner decisions and customer pipeline follow-up.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/kundenpipeline",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1120,
+          "height": 760
         },
         "minimum_size": {
           "width": 640,

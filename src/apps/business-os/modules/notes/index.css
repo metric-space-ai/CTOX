@@ -86,6 +86,14 @@
   gap: 8px;
 }
 
+.notes-left .nn-title-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
 /* Date-bucket group labels inside the note list well. */
 .notes-group-header {
   font-size: 10px;
@@ -268,8 +276,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
   min-width: 0;
+}
+
+.nn-note-meta-left::-webkit-scrollbar {
+  display: none;
 }
 
 /* The back-to-list return path only exists in the stacked (narrow) layout. */
@@ -308,7 +322,7 @@
 }
 
 .nn-editor-controls {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 /* Favorite star keeps its warning fill on the kit is-active state. */
@@ -764,8 +778,14 @@
   border-radius: var(--kit-radius);
   border: 1px solid var(--hairline, var(--line));
   max-width: 100%;
-  overflow: visible;
-  flex-wrap: wrap;
+  overflow-x: auto;
+  overflow-y: visible;
+  flex-wrap: nowrap;
+  scrollbar-width: none;
+}
+
+.nn-editor-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .nn-format-wrapper {

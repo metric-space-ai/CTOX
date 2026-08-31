@@ -807,7 +807,7 @@ function renderList({ resetScroll = false } = {}) {
   // Counted view band (zeros included) + one-line footer.
   const searched = filterReportItems(normalizedReports(), { search: state.search, kind: 'all', status: state.status });
   syncGrammarSurfaces(allItems, searched);
-  const well = state.ctx.host.querySelector('.reports-well');
+  const well = state.ctx.host.querySelector('.ctox-well');
   const savedScrollTop = well ? well.scrollTop : 0;
   list.classList.toggle('is-list-view', state.viewMode === 'list');
   if (!items.length) {
@@ -1387,10 +1387,12 @@ function reportStoreEmptyMessage(prefix = '') {
 
 function initReportsContextMenu(state) {
   state.contextMenu?.remove();
+  const moduleHost = state.ctx?.host;
+  if (!moduleHost) return () => {};
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu reports-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  moduleHost.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {

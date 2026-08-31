@@ -2,17 +2,22 @@
   "schema": "ctox.business_os.system_apps.v1",
   "apps": [
     "desktop",
-    "ctox",
-    "tickets",
-    "threads",
-    "knowledge",
-    "browser",
-    "credentials",
-    "mail",
     "app-store",
-    "importer",
-    "reports",
     "appsec-pentest",
-    "coding-agents"
+    "browser",
+    "coding-agents",
+    "importer",
+    "credentials",
+    "ctox",
+    "documents",
+    "iot",
+    "knowledge",
+    "notes",
+    "reports",
+    "research",
+    "spreadsheets",
+    "threads",
+    "tickets",
+    "kundenpipeline"
   ]
 }

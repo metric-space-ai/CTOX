@@ -99,7 +99,17 @@ impl SourceModule for LinkedIn {
     }
 
     fn authoritative_for(&self) -> &'static [FieldKey] {
-        &[FieldKey::PersonFunktion, FieldKey::PersonLinkedin]
+        &[
+            // Gender may only be emitted when the profile contains an
+            // explicit value; the source must never infer it from names.
+            FieldKey::PersonGeschlecht,
+            FieldKey::PersonTitel,
+            FieldKey::PersonVorname,
+            FieldKey::PersonNachname,
+            FieldKey::PersonFunktion,
+            FieldKey::PersonPosition,
+            FieldKey::PersonLinkedin,
+        ]
     }
 
     fn requires_credential(&self) -> Option<&'static str> {

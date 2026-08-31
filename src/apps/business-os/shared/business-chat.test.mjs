@@ -38,6 +38,22 @@ test('business chat renders no agent scope panel without visible scope context',
   assert.equal(renderChatAgentScopeHtml({ client_context: { module: 'inventory' } }), '');
 });
 
+test('chat merge deduplicates the same tracked event across optimistic and RxDB ids', () => {
+  const shared = {
+    role: 'ctox',
+    text: 'Recherche wurde gestartet.',
+    taskId: 'task-42',
+    commandId: 'command-42',
+  };
+  const merged = __businessChatTestInternals.mergeChatMessages(
+    [{ ...shared, id: 'local-status', status: 'queued', createdAt: 10 }],
+    [{ ...shared, id: 'remote-projection', status: 'running', createdAt: 20 }],
+  );
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'remote-projection');
+  assert.equal(merged[0].status, 'running');
+});
+
 test('background control commands cannot steal focus when their result arrives', () => {
   assert.equal(__businessChatTestInternals.chatAllowsAutoFocus({
     contextMeta: {
@@ -74,7 +90,8 @@ test('crew creatures sleep when not working and use X eyes only for failures', (
   const idle = __businessChatTestInternals.crewCreatureHtml(chat, 'idle');
   const queued = __businessChatTestInternals.crewCreatureHtml(chat, 'queued');
   const scheduled = __businessChatTestInternals.crewCreatureHtml(chat, 'scheduled');
-  for (const markup of [idle, queued, scheduled]) {
+  const completed = __businessChatTestInternals.crewCreatureHtml(chat, 'success');
+  for (const markup of [idle, queued, scheduled, completed]) {
     assert.match(markup, /is-sleeping/);
     assert.match(markup, /ctox-crew-eyes-sleeping/);
     assert.doesNotMatch(markup, /ctox-crew-eyes-x/);
@@ -124,11 +141,31 @@ test('review progress selects a distinct creature mode with deterministic motion
 });
 
 test('crew motion CSS is work-only, review-specific, finite on failure, and reduced-motion safe', () => {
-  assert.match(businessChatSource, /\.ctox-crew-creature\.is-working[\s\S]*?animation: ctoxCrewWorkDrift/);
-  assert.match(businessChatSource, /\.ctox-crew-creature\.is-review[\s\S]*?animation: ctoxCrewReviewDrift/);
+  assert.match(businessChatSource, /function syncCrewProceduralMotion/);
+  assert.match(businessChatSource, /now - state\.lastFrameAt < 33/);
+  assert.match(businessChatSource, /\.slice\(0, 36\)/);
+  assert.match(businessChatSource, /document\.visibilityState === 'hidden'/);
+  assert.match(businessChatSource, /frequencyB: .*Math\.SQRT2/);
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-working[\s\S]*?animation: none/);
+  assert.match(businessChatSource, /\.ctox-crew-creature\.is-review[\s\S]*?animation: none/);
   assert.match(businessChatSource, /\.ctox-crew-creature\.is-failed[\s\S]*?animation: ctoxCrewOops 860ms[^;]* 1 both/);
   assert.match(businessChatSource, /\.ctox-crew-creature,\n\s+\.ctox-crew-creature \*/);
   assert.doesNotMatch(businessChatSource, /\.ctox-crew-creature\.is-(idle|queued|scheduled|success|blocked)[^}]*animation:/);
+});
+
+test('routine status updates cannot restart dock or window entry animations', () => {
+  assert.doesNotMatch(
+    businessChatSource,
+    /\.ctox-chat-chip\s*\{[^}]*animation:/,
+    'dock chips must not replay an entry animation after a reactive render',
+  );
+  assert.doesNotMatch(
+    businessChatSource,
+    /\.ctox-chat-window\s*\{[^}]*animation:/,
+    'chat windows must not replay an entry animation after a reactive render',
+  );
+  assert.match(businessChatSource, /forceDock:\s*false,\s*forceMessages:\s*true/);
+  assert.match(businessChatSource, /previousStripScrollLeft/);
 });
 
 test('business chat does not restore terminal task windows over app content', () => {

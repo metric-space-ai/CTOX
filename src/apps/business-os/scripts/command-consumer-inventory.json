@@ -22,6 +22,7 @@
     "modules/intake/index.js",
     "modules/invoices/index.js",
     "modules/knowledge/index.js",
+    "modules/kundenpipeline/index.js",
     "modules/mail/index.js",
     "modules/matching/ui/businessOsControls.js",
     "modules/matching/ui/ctoxCommandAdapter.js",

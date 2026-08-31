@@ -539,4 +539,11 @@ assert.match(indexSource, /subscribeCollectionReadiness/);
 assert.match(indexSource, /class="ctox-syncing" role="status" aria-live="polite"/);
 assert.match(html, /data-customers-account-syncing/);
 
+// V2 keeps the customer pane title/filter chrome compact and provides a
+// visible action glyph even while shell icon assets are recovering.
+assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.customers-module \{ padding: 0;/);
+assert.match(css, /\.customers-module \.ctox-pane-header \{ box-sizing: border-box;[\s\S]*grid-template-rows:/);
+assert.match(indexSource, /function actionIcon\(name\) \{[\s\S]*const paths = \{/);
+assert.doesNotMatch(indexSource, /return state\.ctx\?\.getActionIcon\?\.\(name\) \|\| ''/);
+
 console.log('customers schema and IA smoke OK');

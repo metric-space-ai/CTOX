@@ -9220,6 +9220,50 @@ pub fn complete_business_command_from_queue_reply(
             queue_task.as_ref(),
             Some(reply_text),
         )?
+    } else if super::store_outbound_commands::is_outbound_adapter_reconciliation_command(&command) {
+        let task_id = queue_task
+            .as_ref()
+            .map(|task| task.message_key.as_str())
+            .unwrap_or(task_id);
+        let typed_result =
+            match super::store_outbound_commands::apply_outbound_adapter_reconciliation_reply(
+                root,
+                &conn,
+                &command_id,
+                &command,
+                task_id,
+                reply_text,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = error.to_string();
+                    if let Err(writeback_error) =
+                        super::store_outbound_commands::mark_outbound_adapter_reconciliation_failed(
+                            root,
+                            &conn,
+                            &command,
+                            &command_id,
+                            task_id,
+                            &message,
+                        )
+                    {
+                        eprintln!(
+                            "[business-os] failed to project adapter reconciliation validation error for `{command_id}`: {writeback_error:#}"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+        let mut accepted = process_business_chat_reply(
+            root,
+            &conn,
+            &command_id,
+            &command,
+            queue_task.as_ref(),
+            reply_text,
+        )?;
+        accepted.result = Some(typed_result);
+        accepted
     } else if is_business_chat_command(&command) {
         process_business_chat_reply(
             root,
@@ -11655,6 +11699,20 @@ pub fn fail_business_command_from_queue_error(
     } else {
         "command_terminal_failure"
     };
+    if let Err(writeback_error) =
+        super::store_outbound_commands::mark_outbound_adapter_reconciliation_failed(
+            root,
+            &conn,
+            &command,
+            &command_id,
+            task_id,
+            error,
+        )
+    {
+        eprintln!(
+            "[business-os] failed to project adapter reconciliation queue error for `{command_id}`: {writeback_error:#}"
+        );
+    }
     channels::transition_business_command_for_task(
         root,
         task_id,
@@ -12344,9 +12402,9 @@ pub(super) fn handle_workspace_control_command(
                         .get("faux")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    // Delegate one bounded coding turn to the pi-sidecar owner. Errors
-                    // (e.g. sidecar not built, gateway unreachable) become an ok:false
-                    // outcome rather than a failed command.
+                    // Delegate one bounded coding turn to the pi-sidecar owner.
+                    // Transport, gateway, or agent failures are terminal command
+                    // failures; never present an ok:false result as completed.
                     let outcome = (|| -> anyhow::Result<Value> {
                         anyhow::ensure!(
                             command.payload.get("model").is_none(),
@@ -12370,18 +12428,23 @@ pub(super) fn handle_workspace_control_command(
                             faux,
                             model_override,
                         )
-                    })()
-                    .unwrap_or_else(
-                        |error| serde_json::json!({ "ok": false, "error": error.to_string() }),
-                    );
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    );
+                    })();
+                    return match outcome {
+                        Ok(outcome) => write_rxdb_control_command_outcome(
+                            root,
+                            &command,
+                            "completed",
+                            None,
+                            Some("completed"),
+                            outcome,
+                        ),
+                        Err(error) => write_rxdb_failed_control_command_outcome(
+                            root,
+                            &command,
+                            "coding_turn",
+                            error,
+                        ),
+                    };
                 },
             )?
             .into_outcome();
@@ -21817,6 +21880,8 @@ fn truncate_text_preserve(value: &str, max_chars: usize) -> String {
 fn suggested_skill_for_command(command: &BusinessCommand) -> Option<String> {
     if is_cv_print_parse_command(command) {
         Some("ctox-cv-print-parser".to_string())
+    } else if super::store_outbound_commands::is_outbound_adapter_reconciliation_command(command) {
+        Some("universal-scraping".to_string())
     } else if is_source_parse_command(&command.command_type) {
         Some("business-os-import-parser".to_string())
     } else if command.command_type == "outbound.pipeline.outreach_draft" {

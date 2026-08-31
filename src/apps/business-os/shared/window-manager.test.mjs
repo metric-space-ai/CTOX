@@ -27,6 +27,25 @@ test('derives the shell-v2 frame palette from raster pixels, not a category colo
   assert.notEqual(palette.start, palette.end);
 });
 
+test('continues the icon edge colours into the top and left frame joints', () => {
+  const width = 6;
+  const height = 6;
+  const pixels = [];
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let color = x < 3 ? [126, 54, 92, 255] : [48, 72, 112, 255];
+      if (y >= 4) color = [224, 184, 96, 255];
+      if (x >= 4) color = [54, 174, 142, 255];
+      pixels.push(...color);
+    }
+  }
+  const palette = shellV2FramePaletteFromRgba(new Uint8ClampedArray(pixels), width, height);
+  assert.equal(palette.top_joint, '#36ae8e');
+  assert.equal(palette.left_joint, '#e0b860');
+  assert.match(palette.content_accent, /^#[0-9a-f]{6}$/);
+  assert.match(palette.content_foreground, /^#[0-9a-f]{6}$/);
+});
+
 const viewport = {
   w: 1200,
   h: 900,

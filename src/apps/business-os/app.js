@@ -1,34 +1,34 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260831-shell-v2-unified-v322';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-shell-v2-unified-v322';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-shell-v2-unified-v322';
-import { createAppActions } from './shared/app-actions.js?v=20260831-shell-v2-unified-v322';
+import { CtoxResizer } from './shared/resizer.js?v=20260831-shell-v2-merged-v323';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-shell-v2-merged-v323';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-shell-v2-merged-v323';
+import { createAppActions } from './shared/app-actions.js?v=20260831-shell-v2-merged-v323';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260831-shell-v2-unified-v322';
+} from './shared/app-lifecycle.js?v=20260831-shell-v2-merged-v323';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260831-shell-v2-unified-v322';
+} from './shared/permissions.js?v=20260831-shell-v2-merged-v323';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260831-shell-v2-unified-v322';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-shell-v2-unified-v322';
+} from './shared/branding.js?v=20260831-shell-v2-merged-v323';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-shell-v2-merged-v323';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260831-shell-v2-unified-v322';
+} from './shared/presentation.js?v=20260831-shell-v2-merged-v323';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -39,9 +39,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260831-shell-v2-unified-v322';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-shell-v2-unified-v322';
-import { createDocumentsFacade } from './shared/documents.js?v=20260831-shell-v2-unified-v322';
+} from './shared/shell-permissions-ui.js?v=20260831-shell-v2-merged-v323';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-shell-v2-merged-v323';
+import { createDocumentsFacade } from './shared/documents.js?v=20260831-shell-v2-merged-v323';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -49,26 +49,26 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260831-shell-v2-unified-v322';
+} from './shared/maintenance-state.js?v=20260831-shell-v2-merged-v323';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260831-shell-v2-unified-v322';
+} from './shared/workspace-session.js?v=20260831-shell-v2-merged-v323';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260831-shell-v2-unified-v322';
+} from './shared/taskbar-pins.js?v=20260831-shell-v2-merged-v323';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260831-shell-v2-unified-v322';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-shell-v2-unified-v322';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-shell-v2-unified-v322';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-shell-v2-unified-v322';
+} from './shared/workjet-theme.js?v=20260831-shell-v2-merged-v323';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-shell-v2-merged-v323';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-shell-v2-merged-v323';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-shell-v2-merged-v323';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -83,7 +83,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260831-shell-v2-unified-v322';
+const APP_BUILD = '20260831-shell-v2-merged-v323';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -115,7 +115,7 @@ const BUSINESS_DB_NAME = 'ctox_business_os_v11';
 // Browser-local persistence generation. Advancing this creates a fresh local
 // replica without deleting the previous cache; authoritative Business OS data
 // is repopulated through the existing WebRTC/RxDB replication path.
-const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v4-demand-sync';
+const BUSINESS_DB_STORAGE_GENERATION = 'user-isolation-v5-live-catalog-recovery';
 const RXDB_BOOTSTRAP_VERSION = `${BUSINESS_DB_NAME}:storage-v1`;
 const CTOX_HEALTH_POLL_MS = 10000;
 const CTOX_MAINTENANCE_POLL_MS = 2000;
@@ -1941,7 +1941,9 @@ function desktopIconAnchorRect(appId) {
 function syncDesktopOpenIconStates() {
   const openAppIds = new Set(
     (state.windowManager?.listWindows?.() || [])
-      .filter((win) => win.state !== 'minimized' && win.ownerId?.startsWith('desktop-app:'))
+      // Minimized windows are still open. Their launchers stay desaturated so
+      // the desktop never suggests that a second instance can be launched.
+      .filter((win) => win.ownerId?.startsWith('desktop-app:'))
       .map((win) => win.ownerId.slice('desktop-app:'.length)),
   );
   const container = document.querySelector('[data-desktop-icons]');
@@ -4352,15 +4354,6 @@ const DESKTOP_APPS = [
     loader: () => import(`./desktop-apps/explorer/app.js?v=${APP_BUILD}`),
   },
   {
-    id: 'code-editor',
-    title: 'Source Editor',
-    glyph: '⌘',
-    category: 'development',
-    defaultWidth: 980,
-    defaultHeight: 640,
-    loader: () => import(`./desktop-apps/code-editor/app.js?v=${APP_BUILD}`),
-  },
-  {
     id: 'file-viewer',
     title: 'File Viewer',
     glyph: '◫',
@@ -6219,6 +6212,7 @@ function createModuleContext(mod, overrides = {}) {
     || els.host.querySelector('[data-module-root]');
   const ownerKey = overrides.ownerKey || `module:${mod.id}`;
   const moduleSync = createLiveSyncFacade({ host: hostEl });
+  const moduleDrawers = createModuleDrawerController(hostEl);
   // Dialoge des Moduls sollen im Modulfenster erscheinen, nicht auf Shell-Ebene.
   if (hostEl) {
     loadShellDialogsModule()
@@ -6325,6 +6319,8 @@ function createModuleContext(mod, overrides = {}) {
     getSvgIcon: getRegisteredSvgIcon,
     getActionIcon: getRegisteredActionIcon,
     openDesktopApp,
+    openModuleSource: (moduleId = mod.id) => openModuleSourceEditor(moduleId),
+    openModuleVersions: (moduleId = mod.id) => openIntegratedModuleLifecycle(moduleId),
     openBusinessChat,
     reportFileIntegrityError: (error, details = {}) => reportFileIntegrityError(ownerKey, error, {
       appId: mod.id,
@@ -6336,12 +6332,52 @@ function createModuleContext(mod, overrides = {}) {
     toggleTaskbarPin,
     canModifyModule: () => canModifyModule(mod),
     reportIssue: (details = {}) => reportCurrentModule({ module: mod, ...details }),
-    openLeftDrawer: (content) => openDrawer('left', content),
-    openRightDrawer: (content) => openDrawer('right', content),
-    openBottomDrawer: (content) => openDrawer('bottom', content),
-    closeDrawers,
+    openLeftDrawer: (content) => moduleDrawers.open('left', content),
+    openRightDrawer: (content) => moduleDrawers.open('right', content),
+    openBottomDrawer: (content) => moduleDrawers.open('bottom', content),
+    closeDrawers: moduleDrawers.close,
   };
   // CTX-CONTRACT-END business-os-module-context-v1
+}
+
+function createModuleDrawerController(hostEl) {
+  const scope = hostEl?.closest?.('.shell-window-module-root') || hostEl;
+  const close = () => scope?.querySelector?.('[data-module-drawer-overlay]')?.remove();
+  const open = (side, content) => {
+    if (!scope) return null;
+    close();
+    const placement = ['left', 'right', 'bottom'].includes(side) ? side : 'right';
+    const overlay = document.createElement('div');
+    overlay.className = `shell-module-drawer-overlay shell-module-drawer-overlay--${placement}`;
+    overlay.dataset.moduleDrawerOverlay = '';
+    overlay.setAttribute('role', 'presentation');
+    const panel = document.createElement('section');
+    panel.className = 'shell-module-drawer-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.tabIndex = -1;
+    if (typeof content === 'string') {
+      const temp = document.createElement('div');
+      temp.innerHTML = content;
+      panel.append(...temp.childNodes);
+    } else if (content) {
+      panel.append(content);
+    }
+    overlay.append(panel);
+    overlay.addEventListener('pointerdown', (event) => {
+      if (event.target === overlay) close();
+    });
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close();
+      }
+    });
+    scope.append(overlay);
+    requestAnimationFrame(() => panel.focus({ preventScroll: true }));
+    return panel;
+  };
+  return Object.freeze({ open, close });
 }
 
 function createRuntimeCapabilityFacade(mod) {
@@ -11134,7 +11170,7 @@ function getOfflineFallbackCatalog() {
         },
         "default_width": 1200,
         "default_height": 720,
-        "min_width": 640,
+        "min_width": 360,
         "min_height": 480
       },
       "category": "Knowledge",
@@ -11169,7 +11205,7 @@ function getOfflineFallbackCatalog() {
           "height": 720
         },
         "minimum_size": {
-          "width": 640,
+          "width": 360,
           "height": 480
         },
         "multi_instance": false,
@@ -12876,7 +12912,6 @@ function escapeHtml(value) {
 
 const DESKTOP_APP_SVGS = {
   explorer: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="svg-icon svg-explorer"><defs><linearGradient id="grad-explorer" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6" /><stop offset="100%" stop-color="#1d4ed8" /></linearGradient></defs><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" fill="url(#grad-explorer)" fill-opacity="0.15" stroke="url(#grad-explorer)"></path></svg>`,
-  'code-editor': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="svg-icon svg-code-editor"><defs><linearGradient id="grad-code-editor" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#06b6d4" /><stop offset="100%" stop-color="#0891b2" /></linearGradient></defs><polyline points="16 18 22 12 16 6" stroke="url(#grad-code-editor)"></polyline><polyline points="8 6 2 12 8 18" stroke="url(#grad-code-editor)"></polyline><line x1="14" y1="4" x2="10" y2="20" stroke="url(#grad-code-editor)"></line></svg>`,
   'file-viewer': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="svg-icon svg-file-viewer"><defs><linearGradient id="grad-file-viewer" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#10b981" /><stop offset="100%" stop-color="#047857" /></linearGradient></defs><rect x="3" y="3" width="18" height="18" rx="2" fill="url(#grad-file-viewer)" fill-opacity="0.15" stroke="url(#grad-file-viewer)"></rect><line x1="9" y1="3" x2="9" y2="21" stroke="url(#grad-file-viewer)"></line></svg>`,
   creator: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="svg-icon svg-creator"><defs><linearGradient id="grad-creator-start" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f59e0b" /><stop offset="100%" stop-color="#ea580c" /></linearGradient></defs><circle cx="12" cy="12" r="3" stroke="url(#grad-creator-start)"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="url(#grad-creator-start)"></path></svg>`
 };

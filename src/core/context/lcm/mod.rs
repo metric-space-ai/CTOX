@@ -23,9 +23,12 @@ pub use runtime_support::{
     run_continuity_rebuild, run_continuity_show, run_continuity_string_replace, run_describe,
     run_dump, run_ensure_worker_attempt_assistant_message, run_expand, run_fixture, run_grep,
     run_init, run_mark_worker_attempt_effects_completed,
-    run_mark_worker_attempt_recovery_effects_applied, run_record_worker_attempt_artifact_check,
-    run_recoverable_worker_attempt, run_refresh_continuity, run_secret_rewrite,
-    run_show_continuity, run_terminalize_worker_attempt, run_worker_attempt,
+    run_mark_worker_attempt_recovery_effects_applied, run_prepare_task_execution_review,
+    run_record_task_execution_activity, run_record_task_execution_plan,
+    run_record_worker_attempt_artifact_check, run_recoverable_worker_attempt,
+    run_refresh_continuity, run_secret_rewrite, run_set_task_execution_review_status,
+    run_show_continuity, run_task_execution_progress, run_task_execution_progress_for_task,
+    run_terminalize_worker_attempt, run_worker_attempt,
 };
 
 use anyhow::Context;
@@ -193,6 +196,37 @@ pub struct WorkerAttemptRecord {
     pub created_at: String,
     pub updated_at: String,
     pub terminal_at: Option<String>,
+}
+
+/// One user-visible step in the durable execution plan owned by CTOX.
+/// Labels are persisted, while model reasoning text is deliberately excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskExecutionPlanStepInput {
+    pub label: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskExecutionPlanUpdate<'a> {
+    pub work_key: &'a str,
+    pub task_id: &'a str,
+    pub command_id: &'a str,
+    pub attempt_id: &'a str,
+    pub explanation: Option<&'a str>,
+    pub steps: &'a [TaskExecutionPlanStepInput],
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskExecutionActivityInput<'a> {
+    pub activity_id: &'a str,
+    pub work_key: &'a str,
+    pub task_id: &'a str,
+    pub command_id: &'a str,
+    pub attempt_id: &'a str,
+    pub kind: &'a str,
+    /// `true` attributes the activity to the current in-progress step.
+    /// Planning tool calls intentionally remain task-level activity.
+    pub attribute_to_current_step: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1137,6 +1171,7 @@ impl LcmEngine {
         ))?;
         self.ensure_schema_upgrades()?;
         self.ensure_worker_attempt_finalization_schema()?;
+        self.ensure_task_execution_progress_schema()?;
         migrate_empty_mission_split_brain_with(&self.conn)?;
         Ok(())
     }
@@ -1279,6 +1314,79 @@ impl LcmEngine {
             "recovery_effects_applied_at",
             "TEXT",
         )?;
+        Ok(())
+    }
+
+    /// Durable, revisioned user-visible execution plans and idempotent
+    /// activity turns. This is authoritative task state; the harness-flow
+    /// ledger remains a best-effort forensic projection.
+    fn ensure_task_execution_progress_schema(&self) -> Result<()> {
+        const MIGRATION_ID: &str = "task-execution-progress-v1";
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin task execution progress schema migration")?;
+        let already_applied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lcm_data_migrations WHERE migration_id = ?1)",
+            [MIGRATION_ID],
+            |row| row.get(0),
+        )?;
+        if !already_applied {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS task_execution_plan_revisions (
+                    work_key TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    command_id TEXT NOT NULL DEFAULT '',
+                    attempt_id TEXT NOT NULL,
+                    plan_signature TEXT NOT NULL,
+                    explanation TEXT,
+                    steps_json TEXT NOT NULL,
+                    phase TEXT NOT NULL CHECK(phase IN ('working', 'review', 'completed', 'failed', 'blocked')),
+                    completed_steps INTEGER NOT NULL,
+                    total_steps INTEGER NOT NULL,
+                    percent INTEGER NOT NULL CHECK(percent BETWEEN 0 AND 100),
+                    review_status TEXT NOT NULL CHECK(review_status IN ('pending', 'in_progress', 'completed', 'failed')),
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY(work_key, revision)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_execution_plan_task
+                    ON task_execution_plan_revisions(task_id, revision DESC);
+                CREATE INDEX IF NOT EXISTS idx_task_execution_plan_command
+                    ON task_execution_plan_revisions(command_id, revision DESC);
+
+                CREATE TABLE IF NOT EXISTS task_execution_activity_turns (
+                    activity_id TEXT PRIMARY KEY,
+                    work_key TEXT NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    command_id TEXT NOT NULL DEFAULT '',
+                    attempt_id TEXT NOT NULL,
+                    plan_revision INTEGER,
+                    step_position INTEGER,
+                    kind TEXT NOT NULL CHECK(kind IN ('thinking', 'tool')),
+                    created_at_ms INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_execution_activity_work
+                    ON task_execution_activity_turns(work_key, created_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_task_execution_activity_step
+                    ON task_execution_activity_turns(work_key, plan_revision, step_position);
+                "#,
+            )?;
+            tx.execute(
+                "INSERT INTO lcm_data_migrations (migration_id, applied_at, details_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    MIGRATION_ID,
+                    iso_now(),
+                    r#"{"surface":"task_execution_progress","version":1}"#
+                ],
+            )?;
+        }
+        tx.commit()
+            .context("failed to commit task execution progress schema migration")?;
         Ok(())
     }
 
@@ -1503,6 +1611,346 @@ impl LcmEngine {
             )
             .optional()
             .context("failed to load recoverable worker attempt")
+    }
+
+    pub fn record_task_execution_plan(
+        &self,
+        input: TaskExecutionPlanUpdate<'_>,
+    ) -> Result<serde_json::Value> {
+        let (steps, completed_steps) = validate_task_execution_steps(input.steps)?;
+        let total_steps = i64::try_from(steps.len()).unwrap_or(i64::MAX);
+        let signature = task_execution_plan_signature(&steps);
+        let now_ms = epoch_millis_i64();
+        let steps_json = serde_json::to_string(&steps)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin task execution plan transaction")?;
+        let latest = tx
+            .query_row(
+                "SELECT revision, plan_signature, review_status, created_at_ms
+                 FROM task_execution_plan_revisions
+                 WHERE work_key = ?1
+                 ORDER BY revision DESC LIMIT 1",
+                [input.work_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (revision, review_status, created_at_ms) = match latest {
+            Some((revision, latest_signature, review_status, created_at_ms))
+                if latest_signature == signature =>
+            {
+                (revision, review_status, created_at_ms)
+            }
+            Some((revision, _, _, _)) => {
+                (revision.saturating_add(1), "pending".to_string(), now_ms)
+            }
+            None => (1, "pending".to_string(), now_ms),
+        };
+        let review_status = if completed_steps == total_steps {
+            review_status
+        } else {
+            "pending".to_string()
+        };
+        let percent = task_execution_percent(completed_steps, total_steps, &review_status);
+        let phase = task_execution_phase(completed_steps, total_steps, &review_status);
+        tx.execute(
+            "INSERT INTO task_execution_plan_revisions (
+                work_key, revision, task_id, command_id, attempt_id,
+                plan_signature, explanation, steps_json, phase,
+                completed_steps, total_steps, percent, review_status,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(work_key, revision) DO UPDATE SET
+                task_id = excluded.task_id,
+                command_id = excluded.command_id,
+                attempt_id = excluded.attempt_id,
+                explanation = excluded.explanation,
+                steps_json = excluded.steps_json,
+                phase = excluded.phase,
+                completed_steps = excluded.completed_steps,
+                total_steps = excluded.total_steps,
+                percent = excluded.percent,
+                review_status = excluded.review_status,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                input.work_key,
+                revision,
+                input.task_id,
+                input.command_id,
+                input.attempt_id,
+                signature,
+                input.explanation,
+                steps_json,
+                phase,
+                completed_steps,
+                total_steps,
+                percent,
+                review_status,
+                created_at_ms,
+                now_ms,
+            ],
+        )?;
+        tx.commit()
+            .context("failed to commit task execution plan")?;
+        self.task_execution_progress(input.work_key)?
+            .context("task execution plan vanished after commit")
+    }
+
+    pub fn record_task_execution_activity(
+        &self,
+        input: TaskExecutionActivityInput<'_>,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            matches!(input.kind, "thinking" | "tool"),
+            "task activity kind must be thinking or tool"
+        );
+        anyhow::ensure!(
+            !input.activity_id.trim().is_empty(),
+            "task activity id is required"
+        );
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin task activity transaction")?;
+        let current = tx
+            .query_row(
+                "SELECT revision, steps_json
+                 FROM task_execution_plan_revisions
+                 WHERE work_key = ?1
+                 ORDER BY revision DESC LIMIT 1",
+                [input.work_key],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let (revision, step_position) = if let Some((revision, steps_json)) = current {
+            let position = if input.attribute_to_current_step {
+                serde_json::from_str::<Vec<TaskExecutionPlanStepInput>>(&steps_json)?
+                    .iter()
+                    .position(|step| step.status == "in_progress")
+                    .and_then(|position| i64::try_from(position + 1).ok())
+            } else {
+                None
+            };
+            (Some(revision), position)
+        } else {
+            (None, None)
+        };
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO task_execution_activity_turns (
+                activity_id, work_key, task_id, command_id, attempt_id,
+                plan_revision, step_position, kind, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                input.activity_id,
+                input.work_key,
+                input.task_id,
+                input.command_id,
+                input.attempt_id,
+                revision,
+                step_position,
+                input.kind,
+                epoch_millis_i64(),
+            ],
+        )? > 0;
+        if inserted {
+            tx.execute(
+                "UPDATE task_execution_plan_revisions
+                 SET updated_at_ms = ?2
+                 WHERE work_key = ?1
+                   AND revision = (SELECT MAX(revision) FROM task_execution_plan_revisions WHERE work_key = ?1)",
+                params![input.work_key, epoch_millis_i64()],
+            )?;
+        }
+        tx.commit().context("failed to commit task activity")?;
+        Ok(inserted)
+    }
+
+    pub fn prepare_task_execution_review(&self, work_key: &str) -> Result<serde_json::Value> {
+        let latest = self
+            .task_execution_progress(work_key)?
+            .with_context(|| format!("task {work_key} has no durable execution plan"))?;
+        let completed = latest
+            .get("completed_steps")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let total = latest
+            .get("total_steps")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        anyhow::ensure!(
+            total > 0,
+            "task execution plan must contain at least one step"
+        );
+        anyhow::ensure!(
+            completed == total,
+            "task execution plan is incomplete ({completed}/{total} steps completed)"
+        );
+        self.set_task_execution_review_status(work_key, "in_progress")
+    }
+
+    pub fn set_task_execution_review_status(
+        &self,
+        work_key: &str,
+        review_status: &str,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!(
+            matches!(review_status, "in_progress" | "completed" | "failed"),
+            "invalid task review status {review_status}"
+        );
+        let (phase, percent) = if review_status == "completed" {
+            ("completed", 100)
+        } else {
+            ("review", 90)
+        };
+        let changed = self.conn.execute(
+            "UPDATE task_execution_plan_revisions
+             SET review_status = ?2, phase = ?3, percent = ?4, updated_at_ms = ?5
+             WHERE work_key = ?1
+               AND revision = (SELECT MAX(revision) FROM task_execution_plan_revisions WHERE work_key = ?1)",
+            params![work_key, review_status, phase, percent, epoch_millis_i64()],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "task {work_key} has no durable execution plan"
+        );
+        self.task_execution_progress(work_key)?
+            .context("task execution progress vanished after review update")
+    }
+
+    pub fn task_execution_progress(&self, work_key: &str) -> Result<Option<serde_json::Value>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT revision, task_id, command_id, explanation, steps_json,
+                        phase, completed_steps, total_steps, percent, review_status, updated_at_ms
+                 FROM task_execution_plan_revisions
+                 WHERE work_key = ?1
+                 ORDER BY revision DESC LIMIT 1",
+                [work_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, i64>(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            revision,
+            task_id,
+            command_id,
+            explanation,
+            steps_json,
+            phase,
+            completed_steps,
+            total_steps,
+            percent,
+            review_status,
+            updated_at_ms,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let steps = serde_json::from_str::<Vec<TaskExecutionPlanStepInput>>(&steps_json)?;
+        let mut rendered_steps = Vec::with_capacity(steps.len());
+        for (index, step) in steps.iter().enumerate() {
+            let position = i64::try_from(index + 1).unwrap_or(i64::MAX);
+            let activity_turns = self.conn.query_row(
+                "SELECT COUNT(*) FROM task_execution_activity_turns
+                 WHERE work_key = ?1 AND plan_revision = ?2 AND step_position = ?3",
+                params![work_key, revision, position],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rendered_steps.push(serde_json::json!({
+                "position": position,
+                "label": step.label,
+                "status": step.status,
+                "activity_turns": activity_turns,
+            }));
+        }
+        let (thinking_turns, tool_turns) = self.conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN kind = 'thinking' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'tool' THEN 1 ELSE 0 END), 0)
+             FROM task_execution_activity_turns WHERE work_key = ?1",
+            [work_key],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let last_activity_kind = self
+            .conn
+            .query_row(
+                "SELECT kind FROM task_execution_activity_turns
+                 WHERE work_key = ?1 ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                [work_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let current_step = rendered_steps
+            .iter()
+            .find(|step| {
+                step.get("status").and_then(serde_json::Value::as_str) == Some("in_progress")
+            })
+            .and_then(|step| step.get("position"))
+            .and_then(serde_json::Value::as_i64);
+        Ok(Some(serde_json::json!({
+            "version": 1,
+            "revision": revision,
+            "task_id": task_id,
+            "command_id": command_id,
+            "phase": phase,
+            "percent": percent,
+            "current_step": current_step,
+            "completed_steps": completed_steps,
+            "total_steps": total_steps,
+            "steps": rendered_steps,
+            "review": { "status": review_status },
+            "activity_turns": {
+                "total": thinking_turns + tool_turns,
+                "thinking": thinking_turns,
+                "tools": tool_turns,
+                "last_kind": last_activity_kind,
+            },
+            "explanation": explanation,
+            "updated_at_ms": updated_at_ms,
+        })))
+    }
+
+    pub fn task_execution_progress_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let work_key = self
+            .conn
+            .query_row(
+                "SELECT work_key FROM task_execution_plan_revisions
+                 WHERE task_id = ?1 ORDER BY updated_at_ms DESC, revision DESC LIMIT 1",
+                [task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match work_key {
+            Some(work_key) => self.task_execution_progress(&work_key),
+            None => Ok(None),
+        }
     }
 
     /// Insert the attempt's assistant row once and bind its id to the marker in
@@ -5297,6 +5745,87 @@ fn summary_id_for(conversation_id: i64, content: &str, depth: i64) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("sum_{prefix}")
+}
+
+fn validate_task_execution_steps(
+    input: &[TaskExecutionPlanStepInput],
+) -> Result<(Vec<TaskExecutionPlanStepInput>, i64)> {
+    anyhow::ensure!(
+        !input.is_empty(),
+        "task execution plan must contain at least one step"
+    );
+    let mut steps = Vec::with_capacity(input.len());
+    let mut completed = 0_i64;
+    let mut in_progress = 0_i64;
+    let mut last_rank = 0_i64;
+    for step in input {
+        let label = collapse_whitespace(&step.label);
+        anyhow::ensure!(!label.is_empty(), "task execution step label is required");
+        let status = step.status.trim().to_ascii_lowercase();
+        let rank = match status.as_str() {
+            "completed" => {
+                completed = completed.saturating_add(1);
+                0
+            }
+            "in_progress" => {
+                in_progress = in_progress.saturating_add(1);
+                1
+            }
+            "pending" => 2,
+            _ => anyhow::bail!("invalid task execution step status {}", step.status),
+        };
+        anyhow::ensure!(
+            rank >= last_rank,
+            "task execution steps must be a completed prefix, one active step, then pending steps"
+        );
+        last_rank = rank;
+        steps.push(TaskExecutionPlanStepInput { label, status });
+    }
+    anyhow::ensure!(
+        in_progress <= 1,
+        "task execution plan may contain at most one in-progress step"
+    );
+    anyhow::ensure!(
+        completed == i64::try_from(steps.len()).unwrap_or(i64::MAX) || in_progress == 1,
+        "an incomplete task execution plan must contain exactly one in-progress step"
+    );
+    Ok((steps, completed))
+}
+
+fn task_execution_plan_signature(steps: &[TaskExecutionPlanStepInput]) -> String {
+    let labels = steps
+        .iter()
+        .map(|step| step.label.as_str())
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_vec(&labels).unwrap_or_default();
+    let digest = Sha256::digest(encoded);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn task_execution_percent(completed: i64, total: i64, review_status: &str) -> i64 {
+    if review_status == "completed" {
+        return 100;
+    }
+    if total <= 0 {
+        return 0;
+    }
+    ((90_f64 * completed as f64 / total as f64).round() as i64).clamp(0, 90)
+}
+
+fn task_execution_phase(completed: i64, total: i64, review_status: &str) -> &'static str {
+    match review_status {
+        "completed" => "completed",
+        "in_progress" | "failed" => "review",
+        _ if total > 0 && completed == total => "review",
+        _ => "working",
+    }
+}
+
+fn epoch_millis_i64() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 fn iso_now() -> String {
