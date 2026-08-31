@@ -120,11 +120,24 @@
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  min-height: 38px;
-  padding: 4px 8px;
+  /* Shell V2 (docs/business-os-shell-v2-contract.md §3/§7): the centre column's
+     strip is a pane head of the top row and is therefore exactly one header
+     row high. */
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   box-sizing: border-box;
+}
+
+/* The window control is two header rows wide (74px) and sits flush in the top
+   right corner. As long as the actions drawer is closed the strip is the last
+   head of the top row and keeps that corner free; once the drawer is open its
+   own head carries the clearance. Derived from the token, never hard coded —
+   Knowledge gets away with 70px only because it shrinks the control to 64px. */
+.documents-module:not(.is-actions-open) .documents-document-strip {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
 .documents-strip-leading {
@@ -372,6 +385,28 @@
   flex: 0 0 auto;
 }
 
+/* Shell V2 pane heads (docs/business-os-shell-v2-contract.md §3/§7): every head
+   of the top row is exactly one header row high, the first one keeps the 80px
+   app icon free and the last one the 74px window control. Knowledge is the
+   reference implementation. */
+.documents-explorer > .ctox-pane-header,
+.documents-runbooks > .ctox-pane-header {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.documents-explorer > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.documents-runbooks > .ctox-pane-header {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
 /* Extras on top of .ctox-badge: capped width + uppercase document-type text. */
 .documents-runbook-state {
   max-width: 112px;
@@ -403,6 +438,12 @@
   max-width: 100%;
   box-sizing: border-box;
   overflow: hidden;
+  /* Own band below the pane head. The 80px app icon is two header rows tall,
+     so this second row keeps the same left inset as the head above it. */
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 6px 14px 8px calc(var(--shell-v2-icon-size, 80px) + 14px);
+  border-bottom: 1px solid var(--hairline, var(--line));
 }
 
 .documents-filter-bar .ctox-pane-search,
@@ -511,7 +552,7 @@
   outline: 2px solid var(--accent);
 }
 
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 768px) {
   .documents-filter-bar {
     grid-template-columns: minmax(0, 1fr);
     gap: 6px;
@@ -683,7 +724,11 @@
   position: fixed;
   z-index: 2400;
   width: min(560px, calc(100vw - 24px));
+  /* Body-mounted and viewport-positioned: it is capped against the viewport at
+     every size, so this needs no width media query (Shell V2 contract §6). */
+  max-height: calc(100dvh - 24px);
   overflow: hidden;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -1626,7 +1671,8 @@
 
 .documents-module.is-narrow .documents-document-strip {
   gap: 4px;
-  padding-inline: 5px;
+  /* padding-right stays reserved for the 74px window control. */
+  padding-left: 5px;
 }
 
 .documents-module.is-narrow .documents-series-label strong,
@@ -1760,15 +1806,9 @@
     width: 44px;
     min-width: 44px;
   }
-}
 
-@media (max-width: 767px) {
-  /* Fixed-position context menu never exceeds the phone viewport. */
-  .documents-context-menu {
-    max-height: calc(100dvh - 24px);
-    overflow-y: auto;
-  }
-
+  /* Was a 767px width media query; the tighter padding belongs to the touch
+     ergonomics of this block, not to a screen width. */
   .documents-context-chat {
     padding: 10px;
   }

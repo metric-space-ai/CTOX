@@ -69,12 +69,26 @@
           <button class="ctox-pane-icon" type="button" data-action="lock-app" title="Sperren" aria-label="Sperren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></button>
         </div>
       </div>
+    </header>
+    <!-- Shell-v2 head zone: the search row and the collapsed filter tray are
+         siblings of the pane head, so the head itself stays exactly one shell
+         header row high. The wrapper carries the app-icon clearance for both
+         rows; the rows themselves stay untouched kit chrome. -->
+    <div class="notes-head-rows">
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Notizen durchsuchen..." aria-label="Notizen durchsuchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- EIN Knopf, EINE Aktion (Betreiber-Direktive 31.08.2026): der
+             Karten/Listen-Umschalter ist ein einzelnes Bedienelement, kein
+             gedruecktes Paar. `data-pg-view` traegt weiterhin die AKTUELLE
+             Ansicht, damit die shell-verdrahtete Grammatik
+             (shared/pane-grammar.js) den wahren Zustand liest; index.js dreht
+             das Attribut in der Capture-Phase, bevor die Shell es ausliest.
+             Icon, aria-label und title benennen immer die Ansicht, zu der der
+             Klick WECHSELT - deshalb traegt der Knopf kein aria-pressed. -->
+        <button type="button" class="ctox-pane-icon notes-view-toggle" data-notes-view-toggle data-pg-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen">
+          <svg data-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+          <svg data-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>
+        </button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -95,7 +109,7 @@
           <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
         </div>
       </div>
-    </header>
+    </div>
     <nav class="ctox-view-switch" aria-label="Ansichten">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="notes" aria-selected="true"><span data-t-band-notes>Notizen</span><span class="view-count" data-pg-count="notes"></span></button>

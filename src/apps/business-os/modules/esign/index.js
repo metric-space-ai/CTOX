@@ -18,18 +18,26 @@ export const COPY = {
     kicker: 'E-SIGNATUR', listTitle: 'Anfragen', allKinds: 'Alle Typen', viewAll: 'Alle', viewOpen: 'Offen', viewDone: 'Abgeschlossen', composerKicker: 'NEUE ANFRAGE', composerTitle: 'Signatur anfordern', composerHint: 'Eintrag wählen oder neue Anfrage anlegen.', recordKicker: 'ANFRAGE', signersHead: 'Unterzeichner', noSigners: 'Keine Unterzeichner erfasst.', importDone: 'Import abgeschlossen.', exportDone: 'Export erstellt.', invalidFile: 'Datei konnte nicht gelesen werden (JSON erwartet).',
     statusCreated: 'angelegt', statusSent: 'gesendet', statusPartial: 'teilweise signiert', statusCompleted: 'abgeschlossen', statusDeclined: 'abgelehnt', statusExpired: 'abgelaufen',
     syncing: 'Daten werden synchronisiert.',
+    showAsList: 'Als Liste anzeigen', showAsCards: 'Als Karten anzeigen',
+    signedOf: 'signiert', updated: 'Aktualisiert', sent: 'Gesendet', expires: 'Läuft ab',
   },
   en: {
     document: 'Document ID', subjectKind: 'Agreement type', employment: 'Employment contract', placement: 'Placement agreement', staffing: 'Staffing agreement', signers: 'Signer IDs (comma-separated)', create: 'Create', entries: 'records', empty: 'No signature requests yet.', offlineService: 'Offline: command service unavailable.', offlineSend: 'Offline: command could not be sent.', signatureCaptured: 'Signature recorded.', request: 'Request', signer: 'Signer', status: 'Status', blocked: 'Blocked.', documentRequired: 'Document ID is required.', requestCreated: 'Signature request created.', sign: 'Sign', artifact: 'Artifact',
     kicker: 'E-SIGNATURE', listTitle: 'Requests', allKinds: 'All types', viewAll: 'All', viewOpen: 'Open', viewDone: 'Closed', composerKicker: 'NEW REQUEST', composerTitle: 'Request signature', composerHint: 'Select a record or start a new request.', recordKicker: 'REQUEST', signersHead: 'Signers', noSigners: 'No signers recorded.', importDone: 'Import complete.', exportDone: 'Export created.', invalidFile: 'File could not be read (JSON expected).',
     statusCreated: 'created', statusSent: 'sent', statusPartial: 'partially signed', statusCompleted: 'completed', statusDeclined: 'declined', statusExpired: 'expired',
     syncing: 'Syncing data.',
+    showAsList: 'Show as list', showAsCards: 'Show as cards',
+    signedOf: 'signed', updated: 'Updated', sent: 'Sent', expires: 'Expires',
   },
 };
 let text = COPY.de;
+// Datumsformat der Karten-Metazeilen folgt der Modulsprache (kein neuer Datenpfad,
+// nur Darstellung der bereits geladenen *_at_ms-Felder).
+let dateLocale = 'de-DE';
 
 export async function mount(ctx) {
   text = COPY[ctx.locale === 'en' ? 'en' : 'de'];
+  dateLocale = ctx.locale === 'en' ? 'en-GB' : 'de-DE';
   await ensureStyles();
   ctx.host.innerHTML = await loadMarkup();
   ctx.host.dataset.atsModule = MODULE_ID;
@@ -48,6 +56,7 @@ export async function mount(ctx) {
   const wbTitle = root?.querySelector('[data-esign-wb-title]');
   const wbFooter = root?.querySelector('[data-esign-wb-footer]');
   const collapseBtn = root?.querySelector('[data-esign-collapse]');
+  const viewToggle = root?.querySelector('[data-esign-view-toggle]');
   const newBtn = root?.querySelector('[data-action="new"]');
   const importBtn = root?.querySelector('[data-action="import"]');
   const exportBtn = root?.querySelector('[data-action="export"]');
@@ -175,10 +184,37 @@ export async function mount(ctx) {
   }
   listEl?.addEventListener('click', onListClick);
 
+  // ---- Ein-Knopf-Ansichtsumschalter ----------------------------------------
+  // `data-pg-view` traegt die AKTUELLE Ansicht; Beschriftung und Icon zeigen
+  // die Ansicht, in die der Klick wechselt. `aria-pressed` gehoert nicht dazu:
+  // die Shell-Grammatik setzt es beim Klick auf jeden Umschalter, hier wird es
+  // wieder entfernt, damit der Knopf eine Aktion bleibt und kein Zustand.
+  function syncViewToggle() {
+    if (!viewToggle) return;
+    viewToggle.removeAttribute('aria-pressed');
+    const label = viewToggle.dataset.pgView === 'list' ? text.showAsCards : text.showAsList;
+    viewToggle.setAttribute('aria-label', label);
+    viewToggle.setAttribute('title', label);
+  }
+  function onViewToggle() {
+    if (!viewToggle) return;
+    viewToggle.dataset.pgView = viewToggle.dataset.pgView === 'list' ? 'cards' : 'list';
+    syncViewToggle();
+    // Der Modulzustand wird immer aus dem DOM gelesen, damit der Umschalter
+    // unabhaengig von der Reihenfolge der Shell-Verdrahtung stimmt.
+    state.grammar = readGrammarState(listPane);
+    renderListRegion();
+  }
+  viewToggle?.addEventListener('click', onViewToggle);
+  syncViewToggle();
+
   // Re-render the list on any shell-wired grammar change (search/view/tray/band).
   function onGrammarChange(event) {
     if (!listPane || !listPane.contains(event.target)) return;
-    state.grammar = event.detail || readGrammarState(listPane);
+    // DOM-abgeleitet statt event.detail: die Shell meldet fuer den einzelnen
+    // Umschalter denselben Wert, aber nur das DOM ist in jedem Fall aktuell.
+    state.grammar = readGrammarState(listPane);
+    syncViewToggle();
     renderListRegion();
   }
   root?.addEventListener('ctox-pane-grammar-change', onGrammarChange);
@@ -452,40 +488,62 @@ function statusBadgeClass(status) {
   return '';
 }
 
-// A shard is a pure selector: title + ONE muted meta line.
+// Kurzdatum aus einem bereits geladenen *_at_ms-Feld. Kein neuer Datenpfad.
+function shortDate(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  try {
+    return new Date(n).toLocaleDateString(dateLocale, { day: '2-digit', month: '2-digit', year: 'numeric' });
+  } catch { return ''; }
+}
+
+// KARTE: Titel fett, darunter zwei Metazeilen mit den tragenden Detailfeldern
+// (Vertragstyp, Unterzeichner-Fortschritt, Datum, Artefakt). Bewusst
+// grosszuegiger als die Listenzeile — das ist der Unterschied der beiden
+// Ansichten (Betreiber-Direktive 31.08.).
 function shardCard(r, selectedId, t) {
   const key = recordKey(r);
   const status = String(r.status || 'created');
   const progress = signerProgress(r);
-  const meta = [t.kicker, r.subject_kind ? subjectLabel(r.subject_kind, t) : null,
-    progress.total ? `${progress.done}/${progress.total} ${t.sign.toLowerCase()}` : null]
-    .filter(Boolean).map(esc).join(' · ');
   const badge = ('ctox-badge ' + statusBadgeClass(status)).trim();
-  return rowShell(r, key, selectedId,
+  const metaPrimary = [
+    r.subject_kind ? subjectLabel(r.subject_kind, t) : null,
+    progress.total ? `${progress.done}/${progress.total} ${t.signedOf}` : null,
+  ].filter(Boolean).map(esc).join(' · ');
+  const stamp = shortDate(r.updated_at_ms) || shortDate(r.created_at_ms);
+  const metaSecondary = [
+    stamp ? `${t.updated} ${stamp}` : null,
+    r.expires_at_ms ? `${t.expires} ${shortDate(r.expires_at_ms)}` : null,
+    r.signed_artifact_id ? `${t.artifact} ${r.signed_artifact_id}` : null,
+  ].filter(Boolean).map(esc).join(' · ');
+  return rowShell(r, key, selectedId, 'cards',
     '<div class="esign-shard">'
     + '<div class="esign-shard-title">'
-    + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + `<strong>${esc(r.document_id || key || '—')}</strong>`
+    + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + '</div>'
-    + `<small class="esign-shard-meta">${meta}</small>`
+    + (metaPrimary ? `<small class="esign-shard-meta">${metaPrimary}</small>` : '')
+    + (metaSecondary ? `<small class="esign-shard-meta esign-shard-meta--secondary">${metaSecondary}</small>` : '')
     + '</div>');
 }
 
+// LISTE: genau EINE dichte Zeile — Titel plus ein einziges Kurz-Meta rechts.
 function shardCompact(r, selectedId, t) {
   const key = recordKey(r);
   const status = String(r.status || 'created');
   const badge = ('ctox-badge ' + statusBadgeClass(status)).trim();
-  return rowShell(r, key, selectedId,
+  return rowShell(r, key, selectedId, 'list',
     '<div class="esign-row-compact">'
     + `<span class="esign-compact-title">${esc(r.document_id || key || '—')}</span>`
     + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + '</div>');
 }
 
-function rowShell(r, key, selectedId, inner) {
+function rowShell(r, key, selectedId, view, inner) {
   const label = r.document_id || key || '—';
   const selected = key && key === selectedId;
-  return '<button type="button" class="ctox-list-item esign-row' + (selected ? ' is-selected' : '') + '"'
+  const variant = view === 'list' ? ' esign-row--list' : ' esign-row--card';
+  return '<button type="button" class="ctox-list-item esign-row' + variant + (selected ? ' is-selected' : '') + '"'
     + ` data-esign-row="${esc(key)}" aria-selected="${selected ? 'true' : 'false'}"`
     + ` data-context-record-id="${esc(key)}" data-context-record-type="signature_request"`
     + ` data-context-label="${esc(label)}">${inner}</button>`;
@@ -558,7 +616,10 @@ function renderBlocked(result, setGate) {
 function readGrammarState(pane) {
   if (!pane) return { search: '', view: 'cards', band: 'all', filters: {} };
   const search = pane.querySelector('[data-pg-search]');
-  const view = [...pane.querySelectorAll('[data-pg-view]')].find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.pgView || 'cards';
+  // Ein Umschalter, ein Wert: `data-pg-view` ist die aktuelle Ansicht. Das ist
+  // genau der Wert, den auch shared/pane-grammar.js liest (Fallback auf den
+  // ersten [data-pg-view]-Knopf, wenn kein aria-pressed gesetzt ist).
+  const view = pane.querySelector('[data-pg-view]')?.dataset.pgView === 'list' ? 'list' : 'cards';
   const band = [...pane.querySelectorAll('[data-pg-band]')].find((b) => b.getAttribute('aria-selected') === 'true')?.dataset.pgBand || 'all';
   const filters = {};
   pane.querySelectorAll('[data-pg-filter]').forEach((el) => { filters[el.dataset.pgName || el.name || 'filter'] = el.value; });

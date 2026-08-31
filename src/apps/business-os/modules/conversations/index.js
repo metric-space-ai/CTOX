@@ -444,6 +444,10 @@ export async function mount(ctx) {
   root.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
 
+  // Card/list switch: one button, module-owned (see syncViewToggle).
+  refs.viewToggle?.addEventListener('click', toggleListView);
+  syncViewToggle();
+
   root.querySelector('[data-action="import"]')?.addEventListener('click', importConversations);
   root.querySelector('[data-action="export"]')?.addEventListener('click', exportConversations);
 
@@ -934,7 +938,10 @@ export async function mount(ctx) {
     const state = event?.detail || pane?.__ctoxPaneGrammar?.state?.() || {};
     const filters = state.filters || {};
     view.search = String(state.search || '').trim().toLowerCase();
-    view.listView = state.view === 'list' ? 'list' : 'cards';
+    // The single view toggle is module-owned (operator directive 31.08.2026);
+    // the grammar reports it back through the pane's data-pg-default-view,
+    // which syncViewToggle() keeps in sync. Any other value is a stale echo.
+    if (state.view === 'list' || state.view === 'cards') view.listView = state.view;
     view.channel = state.band || 'all';
     view.account = filters.account || '';
     const nextDirection = filters.direction || 'any';
@@ -948,6 +955,35 @@ export async function mount(ctx) {
 
   function leftPane() {
     return root.querySelector('.conv-left');
+  }
+
+  // ONE button, an action rather than a state: it always shows the view it
+  // switches TO. The pane's data-pg-default-view carries the current view for
+  // the shell-wired grammar, which has no [data-pg-view] control to read here.
+  function syncViewToggle() {
+    const button = refs.viewToggle;
+    const pane = leftPane();
+    const isList = view.listView === 'list';
+    if (pane) pane.dataset.pgDefaultView = isList ? 'list' : 'cards';
+    if (!button) return;
+    const label = isList
+      ? t('viewShowCards', 'Als Karten anzeigen')
+      : t('viewShowList', 'Als Liste anzeigen');
+    button.dataset.convView = isList ? 'list' : 'cards';
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    // aria-pressed is deliberately absent: the control is not a state.
+    button.removeAttribute('aria-pressed');
+    for (const icon of button.querySelectorAll('[data-conv-view-icon]')) {
+      // Show the target view's icon, hide the current one.
+      icon.hidden = icon.dataset.convViewIcon === (isList ? 'list' : 'cards');
+    }
+  }
+
+  function toggleListView() {
+    view.listView = view.listView === 'list' ? 'cards' : 'list';
+    syncViewToggle();
+    renderList();
   }
 
   function writeBandCounts(counts) {
@@ -1153,6 +1189,10 @@ export async function mount(ctx) {
     const newestThread = newestThreadOf(bucket);
     const body = document.createElement('div');
     body.className = 'conv-thread-body';
+    // One markup, two densities (operator directive 31.08.2026): the SHARD view
+    // shows title + preview + a meta line built from fields the module already
+    // holds (channel dots, message count, CTOX account). The LIST view keeps
+    // exactly the title row — CSS drops preview and meta, nothing is re-rendered.
     body.innerHTML = `
       <div class="conv-thread-top">
         <span class="conv-thread-name"></span>
@@ -1162,7 +1202,9 @@ export async function mount(ctx) {
         <span class="conv-thread-dir"></span>
         <span></span>
       </div>
-      <div class="conv-thread-channels"></div>
+      <div class="conv-thread-meta">
+        <span class="conv-thread-channels"></span>
+      </div>
     `;
     body.querySelector('.conv-thread-name').textContent = bucket.displayName;
     body.querySelector('.conv-thread-time').textContent = formatTimeShort(bucket.lastMessageAt);
@@ -1170,6 +1212,7 @@ export async function mount(ctx) {
     dir.textContent = bucket.channels.size > 1 ? `${bucket.channels.size}×` : '·';
     dir.title = `${bucket.channels.size} ${t('threadCountSuffix', 'Threads')}`;
     body.querySelector('.conv-thread-preview span:last-child').textContent = newestThread?.subject || '';
+    const metaRow = body.querySelector('.conv-thread-meta');
     const channelsRow = body.querySelector('.conv-thread-channels');
     for (const channel of [...bucket.channels]) {
       const dot = document.createElement('span');
@@ -1178,15 +1221,37 @@ export async function mount(ctx) {
       dot.title = labelForChannel(channel, t);
       channelsRow.appendChild(dot);
     }
+    for (const text of bucketMetaFacts(bucket)) {
+      const fact = document.createElement('span');
+      fact.className = 'conv-thread-meta-fact';
+      fact.textContent = text;
+      metaRow.appendChild(fact);
+    }
+    if (!metaRow.querySelector('.conv-thread-meta-fact') && !bucket.channels.size) metaRow.hidden = true;
     if (bucket.unreadCount > 0) {
       const badge = document.createElement('span');
       badge.className = 'conv-unread-badge';
       badge.textContent = String(bucket.unreadCount);
-      body.querySelector('.conv-thread-top').appendChild(badge);
+      body.querySelector('.conv-thread-top').insertBefore(badge, body.querySelector('.conv-thread-time'));
     }
     btn.appendChild(body);
     btn.addEventListener('click', () => selectBucket(bucket.key));
     return btn;
+  }
+
+  // Meta facts for the shard view's second/third line. Only fields the module
+  // already loads — no new query, no new collection.
+  function bucketMetaFacts(bucket) {
+    const facts = [];
+    if (bucket.messageCount > 0) {
+      facts.push(`${bucket.messageCount} ${t('statMessages', 'Nachrichten')}`);
+    }
+    const accountKey = [...(bucket.accountKeys || [])][0];
+    if (accountKey) {
+      const account = view.accountsById.get(accountKey);
+      facts.push(account?.address || accountKey);
+    }
+    return facts;
   }
 
   function selectBucket(bucketKey) {
@@ -2633,6 +2698,7 @@ function collectRefs(root) {
   return {
     threadList: root.querySelector('[data-conv-thread-list]'),
     channelBand: root.querySelector('[data-conv-channel-band]'),
+    viewToggle: root.querySelector('[data-conv-view-toggle]'),
     footer: root.querySelector('[data-conv-footer]'),
     accountFilter: root.querySelector('[data-conv-account-filter]'),
     accountFilterStatus: root.querySelector('[data-conv-account-filter-status]'),

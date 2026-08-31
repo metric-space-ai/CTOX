@@ -51,13 +51,13 @@ const state = {
   status: null,
   operations: {},
   unsubscribe: null,
-  // The shelf is a continuously animated WebGL surface. Respect the platform
-  // reduced-motion preference from the first render so accessibility clients
-  // (and low-capability GPU environments) never initialize it just to switch
-  // straight back to the equivalent list representation.
+  // Two renderings, one toggle: 'cards' is the shard view (the WebGL retail
+  // shelf, or DOM shard cards when the shelf is unavailable), 'list' is the
+  // dense one-row-per-app list. The shelf is a continuously animated WebGL
+  // surface, so the platform reduced-motion preference starts on the list.
   viewMode: globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
     ? 'list'
-    : 'shelf',
+    : 'cards',
   drawerOpen: false,
   // Canonical grammar state + the retail-box shelf (vendor/store-shelf).
   centerBand: 'catalog',
@@ -163,7 +163,8 @@ function bindElements(root) {
   els.detailStatus = root.querySelector('[data-detail-status]');
   els.readme = root.querySelector('[data-readme-content]');
   els.closeDrawer = root.querySelector('[data-close-drawer]');
-  els.viewButtons = [...root.querySelectorAll('[data-pg-view]')];
+  els.viewToggle = root.querySelector('[data-store-view-toggle]');
+  els.viewGlyphs = [...root.querySelectorAll('[data-view-glyph]')];
   els.loading = root.querySelector('[data-loading-spinner]');
   els.loadingText = root.querySelector('[data-loading-text]');
   els.refresh = root.querySelector('[data-refresh-marketplace]');
@@ -249,6 +250,15 @@ function wireEvents() {
   // event and re-renders — the same contract knowledge/threads use.
   els.centerPane?.addEventListener('ctox-pane-grammar-change', onCenterGrammarChange);
 
+  // ONE view control (Betreiber-Direktive 31.08.2026): a single action button
+  // that flips between the shard/shelf rendering and the dense list. The shell
+  // grammar only wires the two-button [data-pg-view] radio pair, so this
+  // toggle is module-owned and state.viewMode is module state.
+  els.viewToggle?.addEventListener('click', () => {
+    state.viewMode = state.viewMode === 'list' ? 'cards' : 'list';
+    render({ resetScroll: true });
+  });
+
   els.refresh?.addEventListener('click', () => refreshMarketplace({ force: true }));
   els.exportCatalog?.addEventListener('click', exportVisibleCatalog);
 
@@ -278,9 +288,9 @@ function wireEvents() {
 function onCenterGrammarChange(event) {
   const detail = event?.detail || {};
   state.query = String(detail.search ?? '').trim().toLowerCase();
-  // Canonical pair is cards|list; the retail-box shelf IS this app's cards
-  // rendering (see the shelf section below).
-  state.viewMode = detail.view === 'list' ? 'list' : 'shelf';
+  // The view is NOT read back from the grammar event: the single toggle above
+  // owns state.viewMode, and the grammar reports its own 'cards' fallback for
+  // panes without a [data-pg-view] pair.
   if (detail.band) state.centerBand = detail.band;
   state.categoryFilter = String(detail.filters?.category ?? 'all') || 'all';
   state.sortKey = String(detail.filters?.sort ?? 'title') || 'title';
@@ -881,7 +891,11 @@ function render({ resetScroll = false } = {}) {
   syncGrammarSurfaces(items, searched);
   syncCategoryOptions();
 
-  const shelfMode = state.viewMode === 'shelf' && !state.shelfUnavailable;
+  // 'cards' renders as the WebGL retail shelf; when that surface is
+  // unavailable the same view falls back to DOM shard cards, so the toggle
+  // never loses a rendering.
+  const cardsMode = state.viewMode !== 'list';
+  const shelfMode = cardsMode && !state.shelfUnavailable;
   // Data re-renders never move the operator: preserve the well's scroll
   // offset across the list rebuild (intentional resets — search/view/band/
   // filter/scope — pass resetScroll because the content set changed). The
@@ -891,8 +905,8 @@ function render({ resetScroll = false } = {}) {
   if (els.grid) {
     els.grid.hidden = shelfMode;
     if (!shelfMode) {
-      els.grid.className = 'store-card-grid is-list-view';
-      els.grid.replaceChildren(...renderCatalogBody(items));
+      els.grid.className = cardsMode ? 'store-card-grid' : 'store-card-grid is-list-view';
+      els.grid.replaceChildren(...renderCatalogBody(items, { compact: !cardsMode }));
     }
   }
   if (els.well && !shelfMode) {
@@ -901,14 +915,7 @@ function render({ resetScroll = false } = {}) {
   }
   if (shelfMode) syncShelf(items);
 
-  // Mirror the shell-wired view toggle for programmatic state (shelf
-  // fallback forces list mode and locks the cards/shelf button).
-  for (const btn of els.viewButtons || []) {
-    const active = btn.dataset.pgView === (shelfMode ? 'cards' : 'list');
-    btn.classList.toggle('is-active', active);
-    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-    if (btn.dataset.pgView === 'cards') btn.disabled = state.shelfUnavailable;
-  }
+  syncViewToggle();
 
   if (state.selectedId && !items.some((item) => item.id === state.selectedId)) {
     state.selectedId = '';
@@ -917,9 +924,29 @@ function render({ resetScroll = false } = {}) {
   renderDetails();
 }
 
+// The single view control names the view it switches TO — glyph, title and
+// aria-label all describe the action. No aria-pressed: it is an action, not a
+// two-state control (Betreiber-Direktive 31.08.2026).
+function syncViewToggle() {
+  if (!els.viewToggle) return;
+  const listNow = state.viewMode === 'list';
+  const target = listNow ? 'cards' : 'list';
+  const label = listNow
+    ? state.t('viewShowCards', 'Als Karten anzeigen')
+    : state.t('viewShowList', 'Als Liste anzeigen');
+  els.viewToggle.dataset.viewMode = listNow ? 'list' : 'cards';
+  els.viewToggle.setAttribute('aria-label', label);
+  els.viewToggle.title = label;
+  els.viewToggle.removeAttribute('aria-pressed');
+  for (const glyph of els.viewGlyphs || []) {
+    glyph.hidden = glyph.dataset.viewGlyph !== target;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Retail-box shelf (vendor/store-shelf): the "cards" rendering of this app.
-// Load lazily; a WebGL/import failure falls back to the list rendering.
+// Load lazily; a WebGL/import failure falls back to DOM shard cards, so the
+// cards view keeps a rendering and the toggle keeps two real views.
 // ---------------------------------------------------------------------------
 async function ensureShelf() {
   if (state.shelf || state.shelfUnavailable) return state.shelf;
@@ -948,9 +975,10 @@ async function buildShelf() {
       },
     });
   } catch (err) {
-    console.warn('[app-store] shelf unavailable, falling back to list', err);
+    // The cards view stays the cards view: without the WebGL surface it
+    // renders as DOM shard cards, so the toggle keeps two real renderings.
+    console.warn('[app-store] shelf unavailable, falling back to DOM shard cards', err);
     state.shelfUnavailable = true;
-    state.viewMode = 'list';
   }
   return state.shelf;
 }
@@ -1000,8 +1028,8 @@ async function syncShelf(items) {
   if (els.shelfHint) els.shelfHint.hidden = state.drawerOpen || !apps.length;
 }
 
-function renderCatalogBody(items) {
-  if (items.length) return items.map(renderCard);
+function renderCatalogBody(items, { compact = false } = {}) {
+  if (items.length) return items.map((item) => renderCard(item, { compact }));
   return [renderEmptyCatalogState({
     title: emptyCatalogTitle(state.scope, state.query, state.marketplaceStatus),
     body: emptyCatalogBody(state.scope, state.query, state.marketplaceStatus, state.marketplaceMessage),
@@ -1062,11 +1090,19 @@ function cardActionsHtml(item, operation, cardStatus, { includeDetails = true } 
   return actionsHtml;
 }
 
-function renderCard(item) {
+// One entry, two shapes (Betreiber-Direktive 31.08.2026):
+//   compact=false — a shard: bold title, one meta line of the fields that
+//                   actually decide a store action, one state-badge meta line
+//                   (modification / release / lifecycle / unverified source),
+//                   then the action row. Generous padding. The description
+//                   and the full field list live in the detail panel.
+//   compact=true  — exactly ONE dense row: title left, one short meta right.
+//                   Actions live in the detail panel, which a row click opens.
+function renderCard(item, { compact = false } = {}) {
   const operation = operationForItem(item);
   const cardStatus = statusForCard(item, operation);
   const card = document.createElement('article');
-  card.className = 'app-card';
+  card.className = compact ? 'app-card app-card--row' : 'app-card app-card--shard';
   card.dataset.appId = item.id;
   card.dataset.contextModuleId = item.id;
   card.dataset.contextRecordId = item.id;
@@ -1079,6 +1115,17 @@ function renderCard(item) {
   card.setAttribute('aria-selected', item.id === state.selectedId ? 'true' : 'false');
   card.setAttribute('aria-label', `${item.title}. ${statusLabel(cardStatus)}. ${item.category}.`);
 
+  if (compact) {
+    // Maximum density: one line, title + one short meta. Nothing wraps, so
+    // every row keeps the same height whatever the catalog holds.
+    card.innerHTML = `
+      <span class="app-card-icon app-card-icon--row">${iconMarkupForItem(item)}</span>
+      <h3 class="app-card-title">${escapeHtml(item.title)}</h3>
+      <span class="app-card-rowmeta">${escapeHtml(rowMetaFor(item, cardStatus, operation))}</span>
+    `;
+    return card;
+  }
+
   const actionsHtml = cardActionsHtml(item, operation, cardStatus);
   const operationHtml = operationMessageHtml(operation);
 
@@ -1090,26 +1137,42 @@ function renderCard(item) {
       </div>
       <div class="app-card-meta">
         <h3 class="app-card-title">${escapeHtml(item.title)}</h3>
-        <span class="app-card-category">${escapeHtml(item.category)}</span>
+        <span class="app-card-metaline">${escapeHtml(shardMetaFor(item))}</span>
       </div>
+      <span class="ctox-badge ${statusBadgeClass(cardStatus)}">${escapeHtml(statusLabel(cardStatus))}</span>
     </div>
-    <p class="app-card-desc">${escapeHtml(item.description || item.source)}</p>
     <div class="app-card-version-row">
-      <span class="ctox-badge">${escapeHtml(item.installed_version)}</span>
-      <span class="ctox-badge">${escapeHtml(item.available_version)}</span>
-      ${item.lifecycle?.runtimeInstalled ? `<span class="ctox-badge ${lifecycleStateBadgeClass(item.lifecycle.state)}" data-state="${escapeHtml(item.lifecycle.state)}" title="${escapeAttr(item.lifecycle.title)}">${escapeHtml(item.lifecycle.version)} · ${escapeHtml(item.lifecycle.text)}</span>` : ''}
-      ${releaseProjectionBadgeHtml(item)}
       <span class="ctox-badge ${modStateBadgeClass(item.modification_status)}">${escapeHtml(item.modification_label)}</span>
+      ${releaseProjectionBadgeHtml(item)}
+      ${item.lifecycle?.runtimeInstalled ? `<span class="ctox-badge ${lifecycleStateBadgeClass(item.lifecycle.state)}" data-state="${escapeHtml(item.lifecycle.state)}" title="${escapeAttr(item.lifecycle.title)}">${escapeHtml(item.lifecycle.version)} · ${escapeHtml(item.lifecycle.text)}</span>` : ''}
       ${externalSourceBadgeHtml(item)}
     </div>
     ${actionsHtml}
     ${operationHtml}
-    <footer class="app-card-footer">
-      <span class="ctox-badge ${statusBadgeClass(cardStatus)}">${escapeHtml(statusLabel(cardStatus))}</span>
-      <span class="app-card-source">${escapeHtml(sourceShort(item))}</span>
-    </footer>
   `;
   return card;
+}
+
+// Shard meta line: category plus the version that is actually live. The
+// source stays off this line — the status badge next to the title already
+// names it, and a third segment only pushed the line into an ellipsis.
+function shardMetaFor(item) {
+  const version = item.installed_version && item.installed_version !== '-'
+    ? item.installed_version
+    : item.available_version;
+  return [item.category, version]
+    .map((part) => String(part || '').trim())
+    .filter((part) => part && part !== '-')
+    .join(' · ');
+}
+
+// List meta: ONE short right-hand field. A running or failed operation
+// outranks the resting status, because that is the state the row is in.
+function rowMetaFor(item, cardStatus, operation) {
+  if (operation?.kind === 'running' || operation?.kind === 'error') {
+    return statusLabel(cardStatus);
+  }
+  return statusLabel(cardStatus) || item.category || '';
 }
 
 function releaseProjectionBadgeHtml(item) {
@@ -2436,11 +2499,6 @@ function emptyCatalogBody(scope, query, marketplaceStatus, marketplaceMessage = 
 
 function externalLinkIcon() {
   return '<svg class="external-link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"></path><path d="M8 7h9v9"></path></svg>';
-}
-
-function sourceShort(item) {
-  if (item.repo) return item.repo.split('/').slice(-1)[0];
-  return item.source || item.kind;
 }
 
 function repoOwner(repo = '') {

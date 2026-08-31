@@ -2154,22 +2154,7 @@ function renderCenter() {
           </div>
           ${state.activeTab === 'sources' ? `
             <div class="ctox-pane-tabs research-view-toggle">
-              <button type="button"
-                      class="ctox-pane-tab${state.sourcesViewMode === 'table' ? ' is-active' : ''}"
-                      data-action="sources-view"
-                      data-view-mode="table"
-                      aria-label="${escapeHtml(state.t('tableView', 'Tabelle'))}"
-                      title="${escapeHtml(state.t('tableView', 'Tabelle'))}">
-                ${iconSvg('table')}
-              </button>
-              <button type="button"
-                      class="ctox-pane-tab${state.sourcesViewMode === 'shards' ? ' is-active' : ''}"
-                      data-action="sources-view"
-                      data-view-mode="shards"
-                      aria-label="${escapeHtml(state.t('shardsView', 'Karten'))}"
-                      title="${escapeHtml(state.t('shardsView', 'Karten'))}">
-                ${iconSvg('grid')}
-              </button>
+              ${sourcesViewToggleButton()}
             </div>
           ` : ''}
         </div>
@@ -3219,45 +3204,59 @@ function renderActiveTable(task) {
   return renderSourcesWorkbench(evidenceRankedSources());
 }
 
-function renderSourcesTable(filteredList = state.sourceModels) {
-  const task = selectedTask();
-  const axisPair = normalizedAxisPair(task);
-  const xAxis = axisPair.x;
-  const yAxis = axisPair.y;
+/* Listenansicht (Betreiber-Direktive 31.08.2026): genau EINE kompakte Zeile
+   je Quelle — Titel links, ein Kurz-Meta rechts (Grade · Score), enge
+   Zeilenhoehe, maximale Dichte. Die ausfuehrlichen Detailfelder gehoeren der
+   Kartenansicht; Achsen- und Klassenwerte stehen weiterhin in der
+   Quellen-Schublade. Der Kurz-Meta traegt den kanonischen Link, und zwar nur
+   fuer belegfaehige Quellen — Discovery-URLs erscheinen nie. */
+function renderSourcesList(filteredList = state.sourceModels) {
+  if (!filteredList.length) {
+    return `<div class="research-empty">${escapeHtml(state.t('noSources', 'Keine Quellen vorhanden.'))}</div>`;
+  }
   return `
-    <table class="ctox-table research-source-table">
-      <colgroup>
-        <col class="research-source-col-title" />
-        <col class="research-source-col-class" />
-        <col class="research-source-col-score" />
-        <col class="research-source-col-axis" />
-        <col class="research-source-col-axis" />
-        <col class="research-source-col-action" />
-      </colgroup>
-      <thead>
-        <tr>
-          <th>${escapeHtml(state.t('sourceLabel', 'Source'))}</th>
-          <th>${escapeHtml(state.t('classLabel', 'Class'))}</th>
-          <th class="is-num">${escapeHtml(state.t('scoreLabel', 'Score'))}</th>
-          <th class="is-num">${escapeHtml(axisLabel(yAxis, task))}</th>
-          <th class="is-num">${escapeHtml(axisLabel(xAxis, task))}</th>
-          <th class="is-num"></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${filteredList.map((source) => `
-          <tr class="${source.id === state.selectedSourceId ? 'is-selected' : ''}" data-source-id="${escapeHtml(source.id)}" data-evidence-status="${escapeHtml(source.evidenceStatus)}" aria-selected="${source.id === state.selectedSourceId}">
-            <td><button type="button" data-action="select-source" data-source-id="${escapeHtml(source.id)}"><strong>${escapeHtml(source.title)}</strong><span>${escapeHtml(source.id)} · ${escapeHtml(source.evidenceStatusLabel)}</span></button></td>
-            <td class="research-source-class" title="${escapeHtml(source.sourceClass)}">${escapeHtml(source.sourceClass)}</td>
-            <td class="is-num"><span class="ctox-badge ${gradeBadgeClass(source.grade)}">${escapeHtml(source.grade)}${source.evidenceEligible ? ` · ${formatPortfolioScore(source.score)}` : ''}</span></td>
-            <td class="is-num">${formatDimensionScore(source.dimensions[yAxis])}</td>
-            <td class="is-num">${formatDimensionScore(source.dimensions[xAxis])}</td>
-            <td class="is-num">${source.evidenceEligible && source.canonicalUrl ? `<a href="${escapeHtml(source.canonicalUrl)}" target="_blank" rel="noreferrer">${escapeHtml(state.t('openLabel', 'Open'))}</a>` : ''}</td>
-          </tr>
-        `).join('') || `<tr><td colspan="6">${escapeHtml(state.t('noSources', 'Keine Quellen vorhanden.'))}</td></tr>`}
-      </tbody>
-    </table>
+    <div class="research-source-list">
+      ${filteredList.map((source) => {
+        const selected = source.id === state.selectedSourceId;
+        const meta = `${escapeHtml(source.grade)}${source.evidenceEligible ? ` · ${formatPortfolioScore(source.score)}` : ''}`;
+        const openable = source.evidenceEligible && source.canonicalUrl;
+        return `
+        <div class="research-source-row${selected ? ' is-selected' : ''}" data-source-id="${escapeHtml(source.id)}" data-evidence-status="${escapeHtml(source.evidenceStatus)}">
+          <button type="button"
+                  class="research-source-row-title"
+                  data-action="select-source"
+                  data-source-id="${escapeHtml(source.id)}"
+                  aria-current="${selected}"
+                  title="${escapeHtml(source.title)}">${escapeHtml(source.title)}</button>
+          ${openable
+            ? `<a class="research-source-row-meta ${gradeBadgeClass(source.grade)}"
+                  href="${escapeHtml(source.canonicalUrl)}"
+                  target="_blank"
+                  rel="noreferrer"
+                  title="${escapeHtml(state.t('openLabel', 'Öffnen'))}">${meta}</a>`
+            : `<span class="research-source-row-meta ${gradeBadgeClass(source.grade)}">${meta}</span>`}
+        </div>`;
+      }).join('')}
+    </div>
   `;
+}
+
+/* Ein Bedienelement statt zweier nebeneinanderliegender Knoepfe
+   (Betreiber-Direktive 31.08.2026): der Knopf zeigt die Ansicht, in die er
+   wechselt. Er ist damit eine Aktion und kein Zustand — deshalb kein
+   aria-pressed und kein is-active. */
+function sourcesViewToggleButton() {
+  const showsCards = state.sourcesViewMode !== 'table';
+  const nextMode = showsCards ? 'table' : 'shards';
+  const label = showsCards
+    ? state.t('showAsList', 'Als Liste anzeigen')
+    : state.t('showAsCards', 'Als Karten anzeigen');
+  return `<button type="button"
+          class="ctox-pane-tab"
+          data-action="sources-view"
+          data-view-mode="${nextMode}"
+          aria-label="${escapeHtml(label)}"
+          title="${escapeHtml(label)}">${iconSvg(showsCards ? 'list' : 'grid')}</button>`;
 }
 
 function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candidates = false } = {}) {
@@ -3299,7 +3298,7 @@ function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candid
               </div>
             `}
           </div>
-        ` : renderSourcesTable(filtered)}
+        ` : renderSourcesList(filtered)}
       </div>
     </div>
   `;
@@ -3366,10 +3365,7 @@ function refreshWorkbenchForActiveTab() {
   if (state.activeTab === 'sources') {
     const toggle = document.createElement('div');
     toggle.className = 'ctox-pane-tabs research-view-toggle';
-    toggle.innerHTML = `
-      <button type="button" class="ctox-pane-tab${state.sourcesViewMode === 'table' ? ' is-active' : ''}" data-action="sources-view" data-view-mode="table" aria-label="${escapeHtml(state.t('tableView', 'Tabelle'))}" title="${escapeHtml(state.t('tableView', 'Tabelle'))}">${iconSvg('table')}</button>
-      <button type="button" class="ctox-pane-tab${state.sourcesViewMode === 'shards' ? ' is-active' : ''}" data-action="sources-view" data-view-mode="shards" aria-label="${escapeHtml(state.t('shardsView', 'Karten'))}" title="${escapeHtml(state.t('shardsView', 'Karten'))}">${iconSvg('grid')}</button>
-    `;
+    toggle.innerHTML = sourcesViewToggleButton();
     previousToggle?.replaceWith(toggle);
     if (!previousToggle) tabs.append(toggle);
   } else {
@@ -3442,53 +3438,41 @@ function restorePaneScroll(root, entries = []) {
   }
 }
 
+/* Kartenansicht (Betreiber-Direktive 31.08.2026): drei Zeilen je Quelle —
+   fetter Titel, eine Meta-Zeile mit Klasse, Belegstatus und Score, darunter
+   eine Zeile mit dem wichtigsten Detailfeld. Der vollstaendige Datensatz
+   (Nutzen, Luecke, Tags) bleibt der Quellen-Schublade vorbehalten. */
 function renderSourceCard(source) {
   const isSelected = source.id === state.selectedSourceId;
   const kind = source.sourceClass || 'Quelle';
-  const tags = sourceTags(source);
   const fields = sourceDataSummary(source);
-  const use = sourceContributionSummary(source);
-  const missing = sourceLimitationsSummary(source);
   const canonicalUrl = firstString(source.row, ['canonical_url']);
+  const meta = [
+    kind,
+    source.evidenceStatusLabel,
+    `${state.t('scoreLabel', 'Score')} ${source.evidenceEligible ? formatPortfolioScore(source.score) : '—'}`,
+  ].filter(Boolean);
 
   return `
     <div class="research-source-card${isSelected ? ' is-selected' : ''}"
          data-action="select-source"
-         data-source-id="${escapeHtml(source.id)}">
+         data-source-id="${escapeHtml(source.id)}"
+         data-evidence-status="${escapeHtml(source.evidenceStatus)}">
       <div class="research-source-card-top">
-        <div>
-          <h3 class="research-source-card-title">${escapeHtml(source.title)}</h3>
-          <div class="research-source-card-subtitle">${escapeHtml(kind)}</div>
-        </div>
+        <h3 class="research-source-card-title">${escapeHtml(source.title)}</h3>
         <span class="research-source-card-badge ${source.grade.toLowerCase()}">
           ${escapeHtml(gradeFullText(source.grade))}
         </span>
       </div>
-      <div class="research-source-card-status ${source.evidenceEligible ? 'is-verified' : 'is-discovery'}" data-evidence-status="${escapeHtml(source.evidenceStatus)}">
-        ${escapeHtml(source.evidenceStatusLabel)}${source.evidenceEligible ? ` · ${escapeHtml(formatPortfolioScore(source.score))}` : ' · Score —'}
-      </div>
-      <div class="research-source-card-chips">
-        ${tags.map(tag => `<span class="research-source-card-chip">${escapeHtml(tag)}</span>`).join('')}
-      </div>
-      <div class="research-source-card-kv">
-        <span class="k">Daten</span>
-        <span class="v">${escapeHtml(fields)}</span>
-        <span class="k">Nutzen</span>
-        <span class="v">${escapeHtml(use)}</span>
-        <span class="k">Lücke</span>
-        <span class="v">${escapeHtml(missing)}</span>
-      </div>
-      ${source.evidenceEligible && canonicalUrl ? `
-        <div class="research-source-card-actions">
-          <a href="${escapeHtml(canonicalUrl)}"
-             class="research-source-card-btn primary"
+      <div class="research-source-card-meta ${source.evidenceEligible ? 'is-verified' : 'is-discovery'}">
+        ${meta.map((part) => `<span>${escapeHtml(part)}</span>`).join('<span class="research-source-card-dot" aria-hidden="true">·</span>')}
+        ${source.evidenceEligible && canonicalUrl ? `<a href="${escapeHtml(canonicalUrl)}"
+             class="research-source-card-open"
              target="_blank"
              rel="noreferrer"
-             onclick="event.stopPropagation();">
-            ${escapeHtml(state.t('openLabel', 'Öffnen'))}
-          </a>
-        </div>
-      ` : ''}
+             onclick="event.stopPropagation();">${escapeHtml(state.t('openLabel', 'Öffnen'))}</a>` : ''}
+      </div>
+      ${fields ? `<div class="research-source-card-detail" title="${escapeHtml(fields)}">${escapeHtml(fields)}</div>` : ''}
     </div>
   `;
 }
@@ -3506,27 +3490,6 @@ function sourceDataSummary(source) {
   return bibliographic.length
     ? bibliographic.join(' · ')
     : `${type}; Originalinhalt und bibliografische Metadaten verfügbar.`;
-}
-
-function sourceContributionSummary(source) {
-  const row = source?.row || {};
-  const direct = firstString(row, ['contribution_note', 'contribution', 'use', 'verification_notes', 'evidence_note']);
-  if (direct) return direct;
-  const relevance = firstString(row, ['evidence_relevance_score', 'relevance_score']);
-  return relevance
-    ? `Evidence-Relevanz ${relevance}/100; Originalinhalt und Snapshot verifiziert.`
-    : 'Als verifizierte Primär- oder Fachquelle für die UAV-Lagerauslegung referenzierbar.';
-}
-
-function sourceLimitationsSummary(source) {
-  const row = source?.row || {};
-  return firstString(row, [
-    'evidence_gap',
-    'gap',
-    'limitations',
-    'uncertainty',
-    'independence_note',
-  ]) || 'Geltungsbereich und Übertragbarkeit müssen für den konkreten Betriebspunkt geprüft werden.';
 }
 
 function sourceTags(source) {
@@ -5322,7 +5285,7 @@ function relativeTime(ms) {
 // ctx.getActionIcon): monochrome stroke glyphs that inherit currentColor.
 // Legacy local names are mapped onto the shared glyph names.
 function iconSvg(name) {
-  const kitNames = { plus: 'add', table: 'columns', knowledge: 'knowledge' };
+  const kitNames = { plus: 'add', knowledge: 'knowledge' };
   return state.ctx?.getActionIcon?.(kitNames[name] || name, 16, 1.8) || '';
 }
 
@@ -6143,7 +6106,11 @@ export const __researchTestHooks = {
   latestEvidenceRunForTask,
   researchScoringContract,
   researchReportsForTask,
-  renderSourcesTable,
+  // Der Haken behaelt seinen Namen; die Ansicht ist seit dem 31.08.2026 eine
+  // kompakte Liste statt einer Tabelle.
+  renderSourcesTable: renderSourcesList,
+  renderSourceCard,
+  sourcesViewToggleButton,
   normalizeKnowledgeTableRows,
   renderNoTaskCenter,
   renderNoTasksEmpty,

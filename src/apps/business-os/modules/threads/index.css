@@ -52,6 +52,103 @@
   grid-template-rows: minmax(0, 1fr);
 }
 
+/* ----------------------------------------------------------------------------
+   Shell V2 head geometry. Reference: modules/knowledge/index.css.
+
+   `.shell-window-content` sits at inset: 0 and is NOT indented, so the app has
+   to keep the shell's three zones free itself:
+     - app icon        80px box at top: -6px / left: -6px, i.e. the top-left
+                       74 x 74 of the content box -> header rows 1 AND 2
+     - header band     var(--shell-v2-header-row-size) = (80 - 6) / 2 = 37px
+     - window control  2 x 37px = 74 x 74 at the top right -> rows 1 and 2
+
+   The timeline head carries only its title row and is exactly one band tall.
+   The queue head keeps the canonical grammar (title row + filterbar + tray)
+   inside ONE element, so the indent sits on the head BOX: its FIRST row is the
+   shell band and is held at exactly one --shell-v2-header-row-size, the
+   filterbar below it is row 2 and stays inside the icon's 74px column.
+   -------------------------------------------------------------------------- */
+/* First head: 80px icon + 14px air. Both title row and filterbar are exactly
+   one --shell-v2-header-row-size tall, so the closed head is exactly the
+   contract's 2 x 37px (§7 h1: every top-row head equal, total <= 74px). The
+   expandable filter tray still grows the head when opened — the contract
+   measures the resting state. */
+.shell-window[data-shell-contract="v2"] .threads-module .threads-left > .ctox-pane-header {
+  box-sizing: border-box;
+  padding: 0 14px 0 calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Last head: the close control is 74px wide, 70px is the contract floor. The
+   context pane carries no head, so the timeline head is the last one. It has
+   only a title row, but §7 h1 wants every top-row head the same height, so it
+   matches the queue head's 2 x 37px; the title row stays in band row 1, the
+   second band row is quiet surface (and aligns the timeline start with the
+   queue list start). */
+.shell-window[data-shell-contract="v2"] .threads-module .threads-center > .ctox-pane-header {
+  box-sizing: border-box;
+  height: calc(2 * var(--shell-v2-header-row-size, 37px));
+  min-height: calc(2 * var(--shell-v2-header-row-size, 37px));
+  padding: 0 70px 0 14px;
+}
+
+/* Row 2 of the queue head: the filterbar is exactly band row 2. The band's
+   1px hairline border-bottom counts toward the head's outer 74px, so the
+   filterbar row cedes that pixel. */
+.shell-window[data-shell-contract="v2"] .threads-module .threads-left > .ctox-pane-header > .threads-filterbar {
+  box-sizing: border-box;
+  height: calc(var(--shell-v2-header-row-size, 37px) - 1px);
+  min-height: calc(var(--shell-v2-header-row-size, 37px) - 1px);
+  padding: 0 0 3px;
+  align-items: center;
+}
+
+/* Row 1 of both heads is the shell header band: identical height. */
+.shell-window[data-shell-contract="v2"] .threads-module .ctox-pane > .ctox-pane-header > .ctox-pane-title-row {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+}
+
+/* One band is 37px, so kicker and title share the line instead of stacking.
+   The shell hangs its version menu on the FIRST .ctox-pane-header
+   .ctox-pane-title, so that title must stay hittable: the queue head drops the
+   redundant "Business OS" kicker (the shell frame already names the app, and
+   Knowledge's first head carries no kicker either) and every title keeps the
+   shell's 44px trigger minimum. */
+.shell-window[data-shell-contract="v2"] .threads-module .threads-left > .ctox-pane-header .ctox-pane-kicker {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .threads-module .ctox-pane > .ctox-pane-header .ctox-pane-titles {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .threads-module .ctox-pane > .ctox-pane-header .ctox-pane-kicker {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .threads-module .ctox-pane > .ctox-pane-header .ctox-pane-title {
+  flex: 0 1 auto;
+  min-width: 44px;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The action block never claims the title's width. */
+.shell-window[data-shell-contract="v2"] .threads-module .ctox-pane > .ctox-pane-header .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
 /* Row 2 — one dense filter row: [search][view-toggle][filter]. */
 .threads-filterbar {
   display: grid;
@@ -60,11 +157,12 @@
   gap: 6px;
   padding: 6px 0 0;
 }
-.threads-view-toggle { display: inline-flex; gap: 2px; }
-.threads-view-toggle .ctox-pane-icon[aria-pressed="true"] {
-  color: var(--accent);
-  background: var(--kit-fill-strong);
-}
+/* ONE control, not two (operator directive 31.08.). data-pg-view names the
+   view currently on screen; the glyph shows the OTHER one — the view the click
+   switches to. No pressed state: the button is an action. */
+.threads-view-toggle svg { display: none; }
+.threads-view-toggle[data-pg-view="cards"] svg[data-view-glyph="list"],
+.threads-view-toggle[data-pg-view="list"] svg[data-view-glyph="cards"] { display: block; }
 .threads-filter-toggle { position: relative; }
 .threads-filter-toggle.has-active-filters::after {
   content: "";
@@ -135,10 +233,8 @@
   color: var(--muted);
   font-size: var(--fs-micro);
 }
-/* Compact list mode: single-line rows (attention + preview hidden). */
-.threads-module.is-list-view .threads-attention,
-.threads-module.is-list-view .threads-list-preview { display: none; }
-.threads-module.is-list-view .threads-list-item { padding: 6px 8px; }
+/* The two list modes are defined together further down, in the shard-anatomy
+   section — see "Cards vs. list". */
 /* Element actions collected top-right of a card, as icons. */
 .threads-approval-card { position: relative; }
 .threads-card-actions {
@@ -186,9 +282,9 @@
   color: var(--text);
 }
 
-/* custom: attention reasons line (warning-colored priority hint) */
+/* custom: attention reason (warning-colored priority hint). It leads the meta
+   row and is only rendered when there IS a reason — no reserved empty line. */
 .threads-attention {
-  min-height: 16px;
   color: var(--warning);
   font-size: 11px;
   font-weight: 650;
@@ -325,7 +421,10 @@
   display: none;
 }
 
-@container business-app-window (max-width: 980px) {
+/* 3 -> 2 at the shell's own 1024px boundary: the context column and its
+   resizer fall away, so the timeline head is the column that reaches the
+   right window edge — it already carries the 70px control clearance. */
+@container business-app-window (max-width: 1024px) {
   .threads-module {
     grid-template-columns: var(--ctox-left-width, 240px) 12px minmax(0, 1fr);
   }
@@ -352,14 +451,24 @@
   }
 }
 
-/* custom: mobile list/detail switcher — up to the shell-wide 767px mobile
+/* custom: mobile list/detail switcher — 2 -> 1 at the shell-wide 768px mobile
    boundary threads becomes a single-pane app where JS swaps list, detail and
    context views via .is-mobile-detail/.is-context-open; the kit has no
    equivalent pattern */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .threads-module {
     display: block;
-    padding: 0 0 calc(52px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* The thumb bar is absolutely anchored to the bottom of the DETAIL pane, so
+     only that pane reserves its band — an absolutely positioned child measures
+     against the padding box, which puts the bar flush at the bottom while the
+     in-flow composer ends above it. The old blanket padding on the module
+     reserved the band in EVERY state: measured at 720px it left 58px of dead
+     strip under the queue list and still let the bar cover the composer by
+     57px. One reserve, on the pane that has the bar. */
+  .threads-center {
+    padding-bottom: calc(52px + env(safe-area-inset-bottom, 0px));
   }
 
   .threads-module > [data-resizer] {
@@ -401,10 +510,8 @@
     display: inline-flex;
   }
 
-  .threads-timeline {
-    padding-bottom: 84px;
-  }
-
+  /* No extra tail here any more: the pane's own reserve already keeps the
+     timeline clear of the thumb bar, so 84px would only lengthen the scroll. */
   .threads-message,
   .threads-approval-card {
     max-width: min(100%, 72ch);
@@ -443,6 +550,16 @@
     background: var(--kit-hover);
   }
 
+  /* Single column: whichever pane is on screen is BOTH the first and the last
+     head of the top row, so it has to clear the app icon on the left and the
+     window control on the right at the same time. */
+  .shell-window[data-shell-contract="v2"] .threads-module .threads-left > .ctox-pane-header {
+    padding-right: 70px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .threads-module .threads-center > .ctox-pane-header {
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  }
 }
 
 /* Actions/attention column is collapsible and hidden by default so reading a
@@ -477,20 +594,52 @@
   color: var(--muted);
 }
 
-/* Main-view toggle: timeline renders as message cards or as compact rows.
-   Compact mode flattens each message to a single dense block — meta inline,
-   tight padding, no card fills. */
+/* Main-view toggle: the timeline renders as message cards or as compact rows —
+   the same two densities as the queue rail (operator directive 31.08.).
+   CARDS: bubble with its own frame, author/time meta above a wrapping body.
+   LIST: exactly one line per message — author + time on the left, body
+   ellipsized on the right, no frames, no fills, tightest possible rhythm. */
+.threads-module.is-center-list-view .threads-timeline { gap: 0; padding: 4px 12px; }
 .threads-module.is-center-list-view .threads-message,
 .threads-module.is-center-list-view .threads-approval-card {
-  padding: 4px 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  align-self: stretch;
+  padding: 2px 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   border-bottom: 1px solid color-mix(in srgb, var(--hairline, var(--line)) 55%, transparent);
   max-width: none;
 }
-.threads-module.is-center-list-view .threads-message-meta { display: inline; margin-right: 6px; }
-.threads-module.is-center-list-view .threads-message-body { display: inline; }
+.threads-module.is-center-list-view .threads-message-meta {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+.threads-module.is-center-list-view .threads-message-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--fs-meta);
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* An approval card is a decision surface: in list mode it keeps its accent
+   hairline so it never disappears into the protocol stream. */
+.threads-module.is-center-list-view .threads-approval-card {
+  display: grid;
+  gap: 4px;
+  padding: 4px 0 6px;
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+}
+.threads-module.is-center-list-view .threads-card-actions,
+.threads-module.is-center-list-view .threads-card-actions.is-decide { position: static; }
 
 /* Standalone note: visible ONLY when the fragment is opened without the shell
    (file://) — inside Business OS this module stylesheet loads and hides it. */
@@ -562,19 +711,71 @@
   font-size: var(--fs-micro);
   font-variant-numeric: tabular-nums;
 }
-.threads-attention {
+/* Meta row of a shard: the attention reason (warning-toned, when there is one)
+   followed by the triage facts — status, assignee, origin, deadline. */
+.threads-list-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  line-height: 1.35;
+}
+.threads-list-meta:empty { display: none; }
+.threads-attention,
+.threads-meta-facts {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.threads-attention { flex: 0 1 auto; }
+.threads-meta-facts { flex: 1 1 auto; }
 .threads-list-preview {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .threads-list-preview b { font-weight: 600; color: var(--muted); }
-/* Compact list mode: line one only. */
-.threads-module.is-list-view .threads-item-avatar { display: none; }
+
+/* ----------------------------------------------------------------------------
+   Cards vs. list — two genuinely different densities, not two paddings
+   (operator directive 31.08.).
+
+   CARDS (shards): three lines per entry — bold title (up to two lines) with
+   its time, the meta row with the triage facts, then the foreign preview.
+   Generous padding, sender avatar visible.
+
+   LIST: exactly ONE line per entry — title plus the timestamp as the single
+   short meta on the right. Meta row, preview and avatar are gone, the title
+   stops clamping at two lines, and the row height collapses to the tightest
+   value the 13px type allows. Maximum density.
+   -------------------------------------------------------------------------- */
+.threads-list-item { padding: 10px 14px; }
+
+.threads-module.is-list-view .threads-list-item {
+  padding: 3px 10px;
+  grid-template-columns: 12px minmax(0, 1fr);
+  column-gap: 6px;
+  align-items: center;
+}
+.threads-module.is-list-view .threads-item-anchor { padding-top: 0; }
+.threads-module.is-list-view .threads-item-avatar,
+.threads-module.is-list-view .threads-list-meta,
+.threads-module.is-list-view .threads-list-preview { display: none; }
+.threads-module.is-list-view .threads-item-main { gap: 0; }
+.threads-module.is-list-view .threads-item-top { align-items: center; }
+.threads-module.is-list-view .threads-list-title {
+  display: block;
+  -webkit-line-clamp: none;
+  line-clamp: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  line-height: 1.5;
+}
 
 /* @-mention autocomplete: floats above the composer, kit fills, no frames. */
 .threads-composer { position: relative; }

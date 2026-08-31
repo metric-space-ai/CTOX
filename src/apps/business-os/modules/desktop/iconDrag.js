@@ -45,6 +45,7 @@ export function makeIconDraggable(iconEl, {
   onMoved,
   onDragToTopbar,
   onReorder,
+  normalizePosition,
 }) {
   if (!iconEl) throw new Error('makeIconDraggable: iconEl is required');
   const surfaceEl = surface || iconEl.parentElement;
@@ -145,8 +146,16 @@ export function makeIconDraggable(iconEl, {
       const offset = grid.offset ?? 24;
       const rawX = iconEl.offsetLeft;
       const rawY = iconEl.offsetTop;
-      const finalX = Math.max(offset, Math.min(Math.round(rawX), maxX));
-      const finalY = Math.max(offset, Math.min(Math.round(rawY), maxY));
+      const bounded = {
+        x: Math.max(offset, Math.min(Math.round(rawX), maxX)),
+        y: Math.max(offset, Math.min(Math.round(rawY), maxY)),
+      };
+      const normalized = normalizePosition?.(bounded, {
+        width: iconEl.offsetWidth,
+        height: iconEl.offsetHeight,
+      }) || bounded;
+      const finalX = Number.isFinite(normalized.x) ? normalized.x : bounded.x;
+      const finalY = Number.isFinite(normalized.y) ? normalized.y : bounded.y;
       iconEl.style.left = `${finalX}px`;
       iconEl.style.top = `${finalY}px`;
       onMoved?.(iconId, { x: finalX, y: finalY }, iconEl);

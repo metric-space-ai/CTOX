@@ -81,5 +81,7 @@
   "mailboxRequired": "Enter a valid email address and a password.",
   "mailboxCreated": "Mailbox created and assigned to the user.",
   "mailboxDeleted": "Mailbox deleted.",
-  "mailboxAdminDenied": "Only administrators may manage mailboxes."
+  "mailboxAdminDenied": "Only administrators may manage mailboxes.",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

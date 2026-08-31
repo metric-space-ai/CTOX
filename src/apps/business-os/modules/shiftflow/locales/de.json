@@ -158,6 +158,8 @@
   "searchShiftsAria": "Schichten suchen",
   "cardsView": "Kachelansicht",
   "listView": "Listenansicht",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen",
   "filterStatus": "Status filtern",
   "allStatuses": "Alle Status",
   "statusDraft": "Entwurf",

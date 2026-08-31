@@ -20,13 +20,17 @@
           </button>
         </div>
       </div>
-      <!-- Row 2: filter section — search + shard/list toggle + collapsed tray. -->
+      <!-- Row 2: filter section — search + shard/list toggle + collapsed tray.
+           The toggle is ONE control, not a two-state pair: it is an ACTION, so
+           it carries no aria-pressed. `data-ats-view-toggle` holds the view
+           currently shown; the visible icon and the label name the view it
+           switches TO. -->
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search data-i18n-placeholder="searchPlaceholder" placeholder="Suchen..." aria-label="Interviews suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" data-i18n-title="viewCards" title="Kachelansicht" aria-label="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" data-i18n-title="viewList" title="Listenansicht" aria-label="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <button type="button" class="ctox-pane-icon ats-view-toggle" data-ats-view-toggle="cards" data-i18n-title="viewAsList" title="Als Liste anzeigen" aria-label="Als Liste anzeigen">
+          <svg class="ats-view-icon ats-view-icon--list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+          <svg class="ats-view-icon ats-view-icon--cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>
+        </button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" data-i18n-title="filterLabel" title="Filter" aria-label="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -54,7 +58,7 @@
     </nav>
     <!-- Row 4: recessed well holding the shard/list. -->
     <div class="ctox-pane-body ctox-well">
-      <div class="ctox-list" data-ats-list></div>
+      <div class="ctox-list" data-ats-list data-ats-view="cards"></div>
     </div>
     <!-- Row 5: one-line footer. -->
     <footer class="ctox-pane-footer"><span data-pg-footer data-ats-footer></span></footer>

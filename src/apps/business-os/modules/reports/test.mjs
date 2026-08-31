@@ -225,10 +225,23 @@ test('presentation layer stays compact and shell-native', async () => {
   assert.match(css, /--ctox-right-width: 340px/);
   // Collapsed actions column is two-pane; resizers hide on narrow viewports.
   assert.match(css, /\.reports-module\.is-actions-hidden[\s\S]*grid-template-columns: var\(--ctox-left-width, 320px\) 12px minmax\(0, 1fr\)/);
-  assert.match(css, /@container business-app-window \(max-width: 1180px\)[\s\S]*\.reports-module,\s*\.reports-module\.is-actions-hidden\s*\{\s*grid-template-columns: minmax\(0, 1fr\)/);
-  assert.match(css, /\.reports-module[^\{]*\[data-resizer\][\s\S]*display: none !important/);
-  assert.match(css, /@container business-app-window \(max-width: 1180px\)/);
-  assert.match(css, /@container business-app-window \(max-width: 767px\)/);
+  // Shell-owned breakpoints, and ONLY those two (contract §6): 1024 three
+  // columns -> two, 768 two -> one. The column definition is reset at each
+  // step so no empty reserved track survives.
+  const containerBreakpoints = [...css.matchAll(/@container business-app-window \(max-width: (\d+)px\)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(containerBreakpoints)].sort(), ['1024', '768']);
+  assert.doesNotMatch(css, /@media \(max-width/);
+  const at1024 = css.split('@container business-app-window (max-width: 1024px)')[1].split('@container business-app-window (max-width: 768px)')[0];
+  assert.match(at1024, /\.reports-module,\s*\.reports-module\.is-actions-hidden\s*\{\s*grid-template-columns: var\(--ctox-left-width, 320px\) 12px minmax\(0, 1fr\)/);
+  assert.match(at1024, /\[data-resizer="right"\][\s\S]*display: none !important/);
+  const at768 = css.split('@container business-app-window (max-width: 768px)').slice(1).join('\n');
+  assert.match(at768, /\.reports-module,\s*\.reports-module\.is-actions-hidden\s*\{\s*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(at768, /grid-template-rows: none/);
+  assert.match(at768, /grid-auto-rows/);
+  assert.match(at768, /\[data-resizer\][\s\S]*display: none !important/);
+  // Stacked, the rail header is the ONLY head of the top row: it has to keep
+  // the icon zone (80px, left) and the window controls (74x74, right) free.
+  assert.match(at768, /\.reports-rail > \.ctox-pane-header,[\s\S]{0,120}?\.reports-rail > \.reports-filterbar \{\s*padding-right: 70px/);
   // Decorative helpers from the previous layout are gone — the icon button's
   // aria-label/title is the single source of the accessible name.
   assert.doesNotMatch(css, /\.reports-sr-only/);
@@ -243,8 +256,36 @@ test('rail chrome is shell grammar: search, view toggle, tray, counted band, foo
 
   // Canonical data-pg-* grammar markup on the rail pane.
   assert.match(html, /data-pg-search/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // ONE view control, not two (Betreiber-Direktive 31.08.2026). The button is
+  // an action: no aria-pressed, no two-button group; `data-pg-view` stays as
+  // the shell grammar's state channel and always holds the CURRENT view, and
+  // the module flips it plus icon/label on click.
+  assert.equal(html.match(/data-pg-view=/g).length, 1);
+  assert.match(html, /data-reports-view-toggle data-pg-view="cards"/);
+  assert.doesNotMatch(html, /data-pg-view="list"/);
+  const toggleTag = html.match(/<button[^>]*data-reports-view-toggle[^>]*>/)[0];
+  assert.doesNotMatch(toggleTag, /aria-pressed/);
+  assert.match(toggleTag, /aria-label="Als Liste anzeigen"/);
+  assert.match(toggleTag, /title="Als Liste anzeigen"/);
+  assert.doesNotMatch(html, /ctox-view-toggle/);
+  assert.match(js, /function syncViewToggleButton\(root\)/);
+  assert.match(js, /button\.removeAttribute\('aria-pressed'\)/);
+  assert.match(js, /showAsList/);
+  assert.match(js, /showAsCards/);
+  // The click is bound on the button, never delegated: the grammar listener
+  // re-renders the icon on the same click and a delegated handler would then
+  // see an already-detached SVG target.
+  assert.match(js, /root\.querySelector\('\[data-reports-view-toggle\]'\)\?\.addEventListener\('click'/);
+  assert.match(js, /state\.viewMode = state\.viewMode === 'list' \? 'cards' : 'list'/);
+  // Cards and list are genuinely different presentations, not one row style:
+  // shard = bold title + badge meta + module/date sub-line; list = one dense
+  // line with a single short meta.
+  assert.match(js, /class="ctox-list-item report-row .*\n\s*<strong class="report-row-title">/);
+  assert.match(js, /report-row-sub/);
+  assert.match(js, /reports-compact-meta/);
+  assert.doesNotMatch(js, /report-row-compact[\s\S]{0,400}reports-badges/);
+  assert.match(css, /\.reports-module \.report-row \{[^}]*padding: 12px 14px/);
+  assert.match(css, /\.report-row-compact \{[^}]*padding: 4px 14px/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray hidden/);
   assert.match(html, /data-pg-filter data-pg-name="status" data-pg-default="all"/);

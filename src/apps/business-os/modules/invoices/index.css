@@ -129,8 +129,95 @@
   font-size: 12px;
 }
 
-/* Narrow windows: stack the two panes and drop the resizer. */
-@container business-app-window (max-width: 760px) {
+/* ---------------------------------------------------------------------------
+   Shell V2 window contract (docs/business-os-shell-v2-contract.md).
+   `.shell-window-content` gets `inset: 0`, so the app itself must keep the
+   three overlaid shell zones free: the 80px app icon (top left, exactly two
+   header rows tall), the 37px header band, and the 74x74 window controls
+   (top right). Knowledge is the reference; these rules copy its solution.
+   Geometry only — nothing here changes what the panes render.
+   ------------------------------------------------------------------------- */
+
+/* Both pane heads: the band's own padding moves onto the individual header
+   rows so row 1 can be exactly one shell header row tall. */
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-header {
+  padding: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 14px;
+}
+
+/* The icon covers the rail's first TWO rows (80px = 2 x 37px), so the title
+   row and the filterbar below it are both indented past it. */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* Right-most head reserves the window controls. */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header > .ctox-pane-title-row {
+  padding-right: 70px;
+}
+
+/* The title slot is load-bearing: the shell mounts its version menu on the
+   first `.ctox-pane-header .ctox-pane-title`. It must never be crushed, and
+   the action block beside it must not claim the free space. */
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-titles {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* Header controls stay inside the 37px row (the coarse-pointer 44px rule
+   below must not inflate the reserved header band). */
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title-row .ctox-pane-icon,
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-filterbar .ctox-pane-icon {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+}
+
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-filterbar .ctox-pane-search {
+  min-height: 30px;
+  height: 30px;
+}
+
+/* Narrow windows: stack the two panes and drop the resizer. 768px is the
+   shell's own two-to-one column breakpoint; a window is not a screen, so the
+   query measures the window container. All wide tables (editable lines,
+   journal, payments, dunning) already sit in kit .ctox-table-wrap containers
+   that scroll horizontally inside the pane; the editable lines grid keeps a
+   usable minimum width so its columns never crush below thumb size. */
+@container business-app-window (max-width: 768px) {
   .invoices-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(200px, 40vh) minmax(320px, 1fr);
@@ -142,21 +229,24 @@
   .invoices-module > [data-resizer] { display: none !important; }
   .invoices-rail { grid-column: 1; }
   .invoices-main { grid-column: 1; }
-}
 
-/* Mobile operability (Phase 2). Pane stacking is handled by the @container
-   business-app-window rule above (760px); all wide tables (editable lines,
-   journal, payments, dunning) already sit in kit .ctox-table-wrap
-   containers that scroll horizontally inside the pane. On narrow panes the
-   editable lines grid keeps a usable minimum width so its columns never
-   crush below thumb size. */
-@container business-app-window (max-width: 767px) {
   .invoices-lines-table {
     min-width: 620px;
   }
 
   .invoices-payment-form {
     max-width: none;
+  }
+
+  /* Stacked: the rail is now the pane under the window controls, the main
+     pane is no longer. */
+  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-pane-title-row,
+  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
+    padding-right: 70px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header > .ctox-pane-title-row {
+    padding-right: 14px;
   }
 }
 

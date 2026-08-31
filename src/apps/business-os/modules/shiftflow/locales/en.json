@@ -158,6 +158,8 @@
   "searchShiftsAria": "Search shifts",
   "cardsView": "Card view",
   "listView": "List view",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards",
   "filterStatus": "Filter status",
   "allStatuses": "All statuses",
   "statusDraft": "Draft",

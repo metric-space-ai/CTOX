@@ -42,6 +42,16 @@ const labels = {
     import: 'Importieren',
     export: 'Exportieren',
     searchPlaceholder: 'Suchen...',
+    showAsList: 'Als Liste anzeigen',
+    showAsCards: 'Als Karten anzeigen',
+    visible: 'Sichtbar',
+    hidden: 'Ausgeblendet',
+    eventsCount: 'Termine',
+    minutesShort: 'Min',
+    internalActive: 'Intern aktiv',
+    internalInactive: 'Intern inaktiv',
+    notPublished: 'Nicht veröffentlicht',
+    noTimezone: 'Ohne Zeitzone',
     allStatus: 'Alle',
     active: 'Aktiv / Sichtbar',
     inactive: 'Inaktiv / Ausgeblendet',
@@ -76,6 +86,16 @@ const labels = {
     import: 'Import',
     export: 'Export',
     searchPlaceholder: 'Search...',
+    showAsList: 'Show as list',
+    showAsCards: 'Show as cards',
+    visible: 'Visible',
+    hidden: 'Hidden',
+    eventsCount: 'events',
+    minutesShort: 'min',
+    internalActive: 'Internally active',
+    internalInactive: 'Internally inactive',
+    notPublished: 'Not published',
+    noTimezone: 'No timezone',
     allStatus: 'All',
     active: 'Active / Visible',
     inactive: 'Inactive / Hidden',
@@ -197,6 +217,7 @@ export async function mount(ctx) {
   applyStaticLabels(ctx.host, state.t);
   bindElements(ctx.host);
   wireEvents();
+  syncViewToggle();
 
   // Column resizing is declarative: the shell (app.js setupModuleResizers)
   // wires the `.ctox-column-resizer[data-resizer-var]` handles from index.html.
@@ -396,6 +417,7 @@ function bindElements(host) {
   // Left grammar column (the band, filter tray and search are SHELL-wired).
   els.leftList = host.querySelector('[data-calendar-left-list]');
   els.leftEmpty = host.querySelector('[data-calendar-left-empty]');
+  els.viewToggle = host.querySelector('[data-calendar-view-toggle]');
   state.leftEmptyDefaultHtml = els.leftEmpty?.innerHTML ?? null;
 
   // Center
@@ -447,6 +469,15 @@ function wireEvents() {
       applyContextReveal();
     },
     grammarChange: (event) => onLeftGrammarChange(event),
+    // One button, one action. Capture phase on the root runs BEFORE the
+    // shell-wired grammar listener on the button itself, so the grammar reads
+    // the already-flipped data-pg-view and reports the new view exactly once.
+    viewToggleCapture: (event) => {
+      const button = event.target?.closest?.('[data-calendar-view-toggle]');
+      if (!button || !els.root?.contains(button)) return;
+      button.dataset.pgView = button.dataset.pgView === 'list' ? 'cards' : 'list';
+      syncViewToggle();
+    },
     viewBandClick: (event) => {
       const tab = event.target?.closest?.('[data-calendar-view]');
       if (!tab || !els.viewBand?.contains(tab)) return;
@@ -490,6 +521,7 @@ function wireEvents() {
   // The canonical column grammar reports search/toggle/tray/band changes via a
   // bubbling CustomEvent from the shell-wired pane.
   els.root?.addEventListener('ctox-pane-grammar-change', state.domHandlers.grammarChange);
+  els.root?.addEventListener('click', state.domHandlers.viewToggleCapture, true);
   document.addEventListener('keydown', state.domHandlers.keydown);
 }
 
@@ -510,6 +542,7 @@ function unbindEvents() {
   els.eventCalendarMount?.removeEventListener('click', handlers.renderedEventClick, true);
   els.closeDrawerBtn?.removeEventListener('click', handlers.closeDrawer);
   els.root?.removeEventListener('ctox-pane-grammar-change', handlers.grammarChange);
+  els.root?.removeEventListener('click', handlers.viewToggleCapture, true);
   document.removeEventListener('keydown', handlers.keydown);
   state.domHandlers = null;
 }
@@ -526,7 +559,26 @@ function onLeftGrammarChange(event) {
   state.listView = detail.view === 'list' ? 'list' : 'cards';
   state.leftBand = detail.band === 'pages' ? 'pages' : 'calendars';
   state.statusFilter = filters.status || 'all';
+  syncViewToggle();
   renderLeftList();
+}
+
+// The shard/list switch is ONE button and therefore an action, not a state:
+// icon and label name the view the next click produces. The shared grammar
+// wiring stamps aria-pressed on every [data-pg-view] button it sees; for a
+// single-button switch that attribute would claim a toggle state the control
+// does not have, so it is stripped again here.
+function syncViewToggle() {
+  const button = els.viewToggle;
+  if (!button) return;
+  const fallback = labels[state.lang] || labels.de;
+  const goesToList = button.dataset.pgView !== 'list';
+  const label = goesToList
+    ? state.t('showAsList', fallback.showAsList)
+    : state.t('showAsCards', fallback.showAsCards);
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.removeAttribute('aria-pressed');
 }
 
 function setCalendarView(view) {
@@ -855,9 +907,20 @@ function renderLeftList() {
   }
   if (els.leftEmpty) els.leftEmpty.hidden = true;
 
+  // Card meta uses only records this module already holds: no extra read, no
+  // schema change. The per-calendar event tally is one pass over state.events.
+  const eventCounts = new Map();
+  if (!isPages) {
+    for (const event of state.events) {
+      const id = event?.calendar_id;
+      if (!id) continue;
+      eventCounts.set(id, (eventCounts.get(id) || 0) + 1);
+    }
+  }
+
   const html = isPages
     ? rows.map(bookingPageRowHtml).join('')
-    : rows.map(calendarRowHtml).join('');
+    : rows.map((cal) => calendarRowHtml(cal, eventCounts.get(cal.id) || 0)).join('');
   // Booking-page selection is flipped in place after the write. Calendar
   // checkbox state belongs in the signature because it is the list content.
   const signature = JSON.stringify({
@@ -865,22 +928,37 @@ function renderLeftList() {
     view: state.listView,
     rows: isPages
       ? rows.map((bp) => ([bp.id, bp.title || '', bp.status || '', bp.duration_minutes || 0, bp.slug || '']))
-      : rows.map((cal) => ([cal.id, cal.title || '', cal.color || '', state.selectedCalendarIds.has(cal.id) ? 1 : 0])),
+      : rows.map((cal) => ([cal.id, cal.title || '', cal.color || '', cal.timezone || '', eventCounts.get(cal.id) || 0, state.selectedCalendarIds.has(cal.id) ? 1 : 0])),
   });
   renderHtmlIfChanged(els.leftList, html, { signature });
   if (isPages) markActiveBookingPage();
 }
 
-function calendarRowHtml(cal) {
+// Shards and list are two DENSITIES, not two paddings (Betreiber-Direktive
+// 31.08.): a shard carries the title plus the record's real detail fields on
+// its own meta lines, the list row carries the title plus at most one short
+// meta on the right. Both variants ship in the same markup and the active view
+// picks one in CSS, so flipping the switch never costs a data read.
+function calendarRowHtml(cal, eventCount = 0) {
   const checked = state.selectedCalendarIds.has(cal.id);
   const checkboxId = `calendar-toggle-${safeDomId(cal.id)}`;
+  const fallback = labels[state.lang] || labels.de;
+  const visibility = checked
+    ? state.t('visible', fallback.visible)
+    : state.t('hidden', fallback.hidden);
+  const timezone = cal.timezone || state.t('noTimezone', fallback.noTimezone);
+  const eventsLabel = `${eventCount} ${state.t('eventsCount', fallback.eventsCount)}`;
   return `
     <div class="ctox-list-item calendar-item" data-calendar-id="${escapeHtml(cal.id)}" data-context-record-id="${escapeHtml(cal.id)}" data-context-record-type="calendar_calendar" data-context-label="${escapeHtml(cal.title || cal.id)}">
       <div class="calendar-item-left">
         <input id="${checkboxId}" type="checkbox" class="calendar-item-checkbox" data-action="toggle-cal" data-id="${escapeHtml(cal.id)}" aria-label="${escapeHtml(cal.title || 'Kalender')} anzeigen" ${checked ? 'checked' : ''} />
         <span class="calendar-item-color-indicator" style="background-color: ${safeColor(cal.color)}"></span>
-        <span class="calendar-item-title" id="${checkboxId}-label">${escapeHtml(cal.title)}</span>
+        <div class="calendar-row-text">
+          <span class="calendar-item-title" id="${checkboxId}-label">${escapeHtml(cal.title)}</span>
+          <span class="calendar-row-meta">${escapeHtml(visibility)} · ${escapeHtml(timezone)} · ${escapeHtml(eventsLabel)}</span>
+        </div>
       </div>
+      <span class="calendar-row-brief">${escapeHtml(eventsLabel)}</span>
       <div class="calendar-item-actions">
         <button type="button" class="ctox-icon-button ctox-icon-button--sm" data-action="edit-cal" data-id="${escapeHtml(cal.id)}" title="Bearbeiten" aria-label="${escapeHtml(cal.title || 'Kalender')} bearbeiten">${actionIcon('edit')}</button>
       </div>
@@ -890,14 +968,24 @@ function calendarRowHtml(cal) {
 
 function bookingPageRowHtml(bp) {
   const isActive = bp.status === 'active';
+  const fallback = labels[state.lang] || labels.de;
+  const minutes = `${Number(bp.duration_minutes) || 0} ${state.t('minutesShort', fallback.minutesShort)}`;
+  const internal = isActive
+    ? state.t('internalActive', fallback.internalActive)
+    : state.t('internalInactive', fallback.internalInactive);
+  // Honest reach: a booking page has no public route in this build.
+  const reach = state.t('notPublished', 'Nicht veröffentlicht');
+  const slug = bp.slug ? `/${bp.slug}` : '—';
   return `
     <div class="ctox-list-item booking-page-item" data-action="select-bp" data-id="${escapeHtml(bp.id)}" data-context-record-id="${escapeHtml(bp.id)}" data-context-record-type="calendar_booking_page" data-context-label="${escapeHtml(bp.title || bp.id)}" role="button" tabindex="0" aria-pressed="false">
       <div class="booking-page-item-left">
-        <div class="booking-page-item-title">
-          <span>${escapeHtml(bp.title)}</span>
-          <small>${Number(bp.duration_minutes) || 0} Min · ${isActive ? 'Intern aktiv' : 'Intern inaktiv'} · Nicht veröffentlicht</small>
+        <div class="calendar-row-text">
+          <span class="booking-page-item-title">${escapeHtml(bp.title)}</span>
+          <span class="calendar-row-meta">${escapeHtml(minutes)} · ${escapeHtml(internal)}</span>
+          <span class="calendar-row-meta">${escapeHtml(slug)} · ${escapeHtml(reach)}</span>
         </div>
       </div>
+      <span class="calendar-row-brief">${escapeHtml(minutes)}</span>
       <div class="booking-page-item-actions">
         <button type="button" class="ctox-icon-button ctox-icon-button--sm" data-action="edit-bp" data-id="${escapeHtml(bp.id)}" title="Bearbeiten" aria-label="${escapeHtml(bp.title || 'Buchungsseite')} bearbeiten">${actionIcon('edit')}</button>
       </div>

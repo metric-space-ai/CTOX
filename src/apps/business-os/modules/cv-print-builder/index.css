@@ -5,20 +5,41 @@
    record card, the dashed "new CV" affordance, the original/print split
    stage, and the printable qualification-profile document. */
 
+/* 344px, not 332: the V2 head is ONE 37px row that already gives up 94px to the
+   app icon and carries four action icons, so a narrower default column left the
+   version-menu title ellipsized at 76px against an 84px word (measured). */
 .cv-print-builder {
-  --ctox-left-width: 332px;
+  --ctox-left-width: 344px;
 }
 
 .cv-hidden-input {
   display: none;
 }
 
-/* Left column follows the canonical grammar grid: header, counted view band,
-   the recessed well, and the one-line footer. The chrome itself is shell-owned
+/* Left column follows the canonical grammar grid: header band, filterbar,
+   filter tray, counted view band, the recessed well, and the one-line footer.
+   Header band, filterbar and tray are siblings because shell-v2 gives the pane
+   head exactly one 37px row. The chrome itself is shell-owned
    (base.css .ctox-filterbar / .ctox-view-switch / .ctox-well /
    .ctox-pane-footer) — this module writes no chrome CSS. */
 .cv-sidebar {
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+}
+
+/* Explicit rows: the tray is `hidden` most of the time and would otherwise
+   pull the well out of the 1fr track. */
+.cv-sidebar > .ctox-pane-header { grid-row: 1; }
+.cv-sidebar > .ctox-filterbar { grid-row: 2; }
+.cv-sidebar > .ctox-filter-tray { grid-row: 3; }
+.cv-sidebar > .ctox-view-switch { grid-row: 4; }
+.cv-sidebar > .ctox-pane-body { grid-row: 5; }
+.cv-sidebar > .ctox-pane-footer { grid-row: 6; }
+
+/* custom: the card/list switch is ONE control, so it is a plain filterbar icon
+   and not a .ctox-view-toggle group. It carries no aria-pressed — the kit's
+   pressed fill would read as state on what is an action. */
+.cv-view-toggle {
+  flex: 0 0 auto;
 }
 
 .cv-candidate-list {
@@ -28,21 +49,24 @@
   padding: 6px;
 }
 
+/* List view = maximum density: no gap between rows, minimal well padding, so
+   the rows read as one continuous ledger instead of a stack of cards. */
 .cv-candidate-list.is-compact {
-  gap: 2px;
-  padding: 4px 6px;
+  gap: 0;
+  padding: 2px 4px;
 }
 
-/* Shard = pure selector: avatar + name + one muted meta line. Selection is an
-   accent fill plus a flat 2px ::before bar (no inset shadow — kit guard). */
+/* Shard = pure selector: avatar + bold name + two muted meta lines. Roomier
+   than the list row on purpose (scanning vs. density). Selection is an accent
+   fill plus a flat 2px ::before bar (no inset shadow — kit guard). */
 .cv-card {
   position: relative;
   width: 100%;
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr);
-  gap: 9px;
+  gap: 10px;
   align-items: center;
-  padding: 8px 9px;
+  padding: 11px 12px;
   border: 1px solid var(--hairline, var(--line));
   border-radius: var(--panel-radius);
   background: var(--surface);
@@ -75,7 +99,7 @@
 }
 
 .cv-card-name {
-  margin: 0;
+  margin: 0 0 3px;
   overflow: hidden;
   color: var(--text);
   font-size: 13.5px;
@@ -85,31 +109,54 @@
   white-space: nowrap;
 }
 
+/* Two meta lines: the workflow status line carries the record's weight, the
+   sub line (template · location · last change) recedes. */
 .cv-card-meta {
-  margin-top: 2px;
   overflow: hidden;
   color: var(--muted);
   font-size: 11.5px;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Compact row variant (list view toggle) — single line, same selection bar. */
+.cv-card-meta--phase {
+  color: color-mix(in srgb, var(--text) 72%, var(--muted));
+  font-weight: 620;
+}
+
+.cv-card-meta--sub {
+  margin-top: 1px;
+  font-size: 11px;
+  opacity: 0.82;
+}
+
+/* Compact row variant (list view toggle) — exactly ONE dense line: name plus a
+   single short meta flush right. Tight leading, no card fill, no border radius;
+   hairline separators make the run of rows read as a ledger. Same 2px accent
+   selection bar as the shard. */
 .cv-row {
   position: relative;
   width: 100%;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  padding: 6px 9px;
+  gap: 10px;
+  min-height: 0;
+  padding: 3px 8px;
   border: 0;
-  border-radius: var(--control-radius);
+  border-bottom: 1px solid color-mix(in srgb, var(--hairline, var(--line)) 55%, transparent);
+  border-radius: 0;
   background: transparent;
   color: inherit;
   font: inherit;
+  line-height: 1.25;
   text-align: left;
   cursor: pointer;
+}
+
+.cv-row:last-child {
+  border-bottom: 0;
 }
 
 .cv-row:hover {
@@ -134,6 +181,7 @@
   color: var(--text);
   font-size: 12.5px;
   font-weight: 650;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -142,6 +190,7 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-size: 11px;
+  line-height: 1.25;
 }
 
 /* custom: inline pill linking a parsing card to its CTOX flow task. */
@@ -184,14 +233,24 @@
    view-switch/template controls) that only exists with a revealed selection,
    over the stage body. */
 .cv-workbench {
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
+
+/* Head band / controls / stage — explicit, because head and controls are
+   hidden together whenever no CV is revealed. */
+.cv-workbench > .ctox-pane-header { grid-row: 1; }
+.cv-workbench > .cv-stage-controls { grid-row: 2; }
+.cv-workbench > .cv-stage { grid-row: 3; }
 
 .cv-stage-head[hidden] {
   display: none;
 }
 
-.cv-stage-head .cv-stage-controls {
+.cv-stage-head[hidden] + .cv-stage-controls {
+  display: none;
+}
+
+.cv-print-builder > .cv-workbench > .cv-stage-controls {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1013,43 +1072,10 @@
   background: #eef8f5;
 }
 
-/* custom: narrow windows stack sidebar (horizontal card strip) above the
-   stage; the kit resizer disappears and the split view goes vertical. */
-@container business-app-window (max-width: 920px) {
-  .cv-print-builder {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .cv-sidebar {
-    grid-column: 1;
-    grid-row: 1;
-    max-height: 244px;
-    border-bottom: 1px solid var(--hairline, var(--line));
-  }
-
-  .cv-workbench {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .cv-print-builder > .ctox-column-resizer {
-    display: none;
-  }
-
-  .cv-candidate-list {
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(270px, 310px);
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .cv-candidate-list.is-compact {
-    grid-auto-flow: row;
-    grid-auto-columns: auto;
-    overflow-x: hidden;
-  }
-
+/* custom: inside the stage the original/print split turns vertical and the
+   document columns collapse once the window is narrow. Shell breakpoint, not
+   an app-owned one — the shell collapses three columns to two at 1024px. */
+@container business-app-window (max-width: 1024px) {
   .cv-view-grid.is-split {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
@@ -1075,6 +1101,64 @@
   }
 }
 
+/* custom: the shell folds two columns into one at 768px — the sidebar becomes
+   a horizontal card strip above the stage and the kit resizer disappears. */
+@container business-app-window (max-width: 768px) {
+  /* Edge-to-edge when stacked (same as the knowledge reference). base.css
+     narrows the workspace inset to 6px here, which puts the pane's own painted
+     edge at x=12 — inside the shell's 80x74 icon zone. Dropping the inset moves
+     the pane under the frame border, where the icon overlay owns the corner and
+     the pane's first rows (header band + filterbar) keep their 94px indent. */
+  .cv-print-builder {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    padding: 0;
+  }
+
+  /* The cap belongs on the WELL, not on the rail: capping the whole rail at
+     244px left the well ~80px (the rail's own chrome — 37px head, filterbar,
+     view band, footer — already eats ~154px), which squeezed the list to two
+     rows. Capping the well instead keeps the rail content-sized (a one-card
+     strip stays a strip) while the list scrolls at a useful height. */
+  .cv-sidebar {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: 0;
+    border-bottom: 1px solid var(--hairline, var(--line));
+  }
+
+  .cv-sidebar > .ctox-pane-body {
+    max-height: 216px;
+  }
+
+  .cv-workbench {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .cv-print-builder > .ctox-column-resizer {
+    display: none;
+  }
+
+  .cv-candidate-list {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(270px, 310px);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  /* List mode is never a horizontal strip: it stacks and lets the recessed well
+     (.ctox-well, overflow-y:auto) do the scrolling. Without restoring
+     overflow-y the strip's `hidden` clipped the rows and the grid squeezed them
+     to 16px inside the 244px-capped rail. */
+  .cv-candidate-list.is-compact {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow-x: hidden;
+    overflow-y: visible;
+  }
+}
+
 @media print {
   body * {
     visibility: hidden;
@@ -1095,7 +1179,7 @@
   }
 }
 
-/* Phone sheet (container <= 767px): the <= 920px block already stacks the
+/* Phone sheet (container <= 768px): the stacking block above already puts the
    sidebar card strip above the stage and turns the split vertical. What
    remains for touch operability: >=44px tap targets, the correction-field
    editor rail goes full-width above the document (its 286-330px side column
@@ -1103,7 +1187,7 @@
    the viewport, and the print document's fixed mm columns (46mm avatar,
    38/42mm fact columns) reflow so the A4 preview never forces sideways
    scrolling of the whole pane. */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .cv-print-builder .ctox-button,
   .cv-print-builder .ctox-run-control,
   .cv-print-builder .ctox-pane-icon,
@@ -1114,6 +1198,13 @@
   }
 
   .cv-print-builder .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  /* The list row stays the densest view, but a 23px tap target is not
+     operable on a phone — it keeps one line and grows to the 44px floor. */
+  .cv-row {
+    align-items: center;
     min-height: 44px;
   }
 
@@ -1224,5 +1315,102 @@
 
   .cv-print-name {
     font-size: 24px;
+  }
+}
+
+/* ==========================================================================
+   Shell V2 header zones.
+   The shell paints three fixed zones over the app content — .shell-window-content
+   is `inset: 0` and never indented — so the pane heads have to keep them free:
+     · app icon       80x80 top left   (--shell-v2-icon-size)
+     · header band    37px tall        (--shell-v2-header-row-size, (80-6)/2)
+     · window control 74x74 top right  (2 * header row)
+   Geometry only; no new chrome, no colour. Reference: modules/knowledge/index.css.
+   Scoped with `>` so the document pane heads inside the stage (.cv-pane-head,
+   .cv-field-editor-head — they reuse .ctox-pane-header for typography) keep
+   their own geometry.
+   ========================================================================== */
+.shell-window[data-shell-contract="v2"] .cv-print-builder > .ctox-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .cv-print-builder > .ctox-pane > .ctox-pane-header .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+/* Kicker and title share the single band row instead of stacking, and the
+   title may shrink so long labels ellipsize instead of being squeezed to a few
+   pixels — it carries the shell's version menu. The action block keeps its
+   intrinsic width (never flex: 1). */
+.shell-window[data-shell-contract="v2"] .cv-print-builder > .ctox-pane > .ctox-pane-header .ctox-pane-titles {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+/* The kicker absorbs (almost) all the shrink, so a narrow left column eats the
+   kicker before it eats the title. Contract §4: the title IS the window's
+   version-menu trigger; squeezing it to a few pixels destroys its hit area, so
+   it keeps the shell's guaranteed 44px minimum and ellipsizes instead. */
+.shell-window[data-shell-contract="v2"] .cv-print-builder > .ctox-pane > .ctox-pane-header .ctox-pane-kicker {
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .cv-print-builder > .ctox-pane > .ctox-pane-header .ctox-pane-title {
+  flex: 0 1 auto;
+  margin-top: 0;
+  min-width: 44px;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .cv-print-builder > .ctox-pane > .ctox-pane-header .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* First head of the top row: clear the app icon. Row 2 (filterbar) still sits
+   beside the 80px icon, so it keeps the same indent and a min-height that lets
+   the tray in row 3 start below the icon. */
+.shell-window[data-shell-contract="v2"] .cv-sidebar > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .cv-sidebar > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .cv-sidebar > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: calc(var(--shell-v2-icon-size, 80px) - var(--shell-v2-header-row-size, 37px));
+}
+
+/* Last head of the top row: clear the window control. */
+.shell-window[data-shell-contract="v2"] .cv-workbench > .ctox-pane-header {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
+/* Stacked (single column): the candidate head is the whole top row, so it —
+   and the filterbar below it, still inside the icon's two rows — clear the
+   window control, and the stage head no longer needs the reservation. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .cv-sidebar > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .cv-sidebar > .ctox-filterbar {
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
+
+  .shell-window[data-shell-contract="v2"] .cv-workbench > .ctox-pane-header {
+    padding-right: 14px;
   }
 }

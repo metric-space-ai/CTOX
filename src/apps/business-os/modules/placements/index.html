@@ -2,7 +2,7 @@
   <!-- LEFT: record list (persistence/selector column) — canonical column
        grammar (data-pg-*). The shell auto-wires search/tray/reset/active-dot/
        view-toggle/band; this module writes only markup + counts/footer. -->
-  <aside class="ctox-pane placements-left" aria-label="Vermittlungen" data-placements-list-pane data-left-content>
+  <aside class="ctox-pane placements-left" aria-label="Vermittlungen" data-placements-list-pane data-left-content data-pg-default-view="cards">
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
@@ -17,10 +17,20 @@
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Vermittlungen suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.2026). Hier standen
+             zwei nebeneinanderliegende Schaltflaechen in einer
+             .ctox-view-toggle: EIN Umschalt-Knopf (Betreiber-Direktive 31.08.2026);
+             data-pg-view traegt die aktuelle Ansicht, das sichtbare Icon die Ziel-Ansicht.
+             Ersetzt durch EIN Bedienelement: das Icon zeigt die Ansicht, zu
+             der gewechselt wird, aria-label/title sagen dasselbe, und
+             aria-pressed entfaellt - der Knopf ist eine Aktion, kein Zustand.
+             Er ist modul-verdrahtet (data-placements-view-toggle), nicht
+             shell-verdrahtet: shared/pane-grammar.js leitet `view` aus
+             aria-pressed ueber mehrere Knoepfe ab, was ein einzelner
+             Aktionsknopf nicht ausdruecken kann. index.js haelt dafuer
+             data-pg-default-view der Spalte aktuell, damit das
+             Grammar-Ereignis weiter die wahre Ansicht meldet. -->
+        <button type="button" class="ctox-pane-icon placements-view-toggle" data-placements-view-toggle data-placements-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>

@@ -24,6 +24,7 @@ const COPY = {
     title: 'Nachweise', kicker: 'ATS', listTitle: 'Nachweise', newTitle: 'Neuer Nachweis',
     actionsLabel: 'Prüfung & Sign-off', newAction: 'Neuer Nachweis', importAction: 'Importieren', exportAction: 'Exportieren',
     searchPlaceholder: 'Suchen...', closeDetail: 'Details schließen', deployCheckRow: 'Einsatz prüfen',
+    showAsList: 'Als Liste anzeigen', showAsCards: 'Als Karten anzeigen',
     bandAll: 'Alle', bandValid: 'Gültig', bandExpiring: 'Ablaufend', bandCritical: 'Kritisch',
     statusAll: 'Alle Status', entries: 'Einträge', emptyFiltered: 'Kein Nachweis passt zum Filter.',
     imported: 'Importiert', importInvalid: 'Ungültige JSON-Datei.', importEmpty: 'Keine Datensätze in der Datei.',
@@ -49,6 +50,7 @@ const COPY = {
     title: 'Credentials', kicker: 'ATS', listTitle: 'Credentials', newTitle: 'New credential',
     actionsLabel: 'Checks & sign-off', newAction: 'New credential', importAction: 'Import', exportAction: 'Export',
     searchPlaceholder: 'Search...', closeDetail: 'Close details', deployCheckRow: 'Check deployment',
+    showAsList: 'Show as list', showAsCards: 'Show as cards',
     bandAll: 'All', bandValid: 'Valid', bandExpiring: 'Expiring', bandCritical: 'Critical',
     statusAll: 'All statuses', entries: 'records', emptyFiltered: 'No credential matches the filter.',
     imported: 'Imported', importInvalid: 'Invalid JSON file.', importEmpty: 'No records in the file.',
@@ -132,8 +134,28 @@ export function filterRows(rows, { band = 'all', status = 'all', search = '' } =
   });
 }
 
-// A shard is a pure selector: title + ONE muted meta line. No inline expansion,
-// no per-row buttons (design-guide "Canonical Column Grammar").
+// Absolute expiry date of a credential in the module locale, or '' when the
+// record carries none. Used by the shard view, which shows the hard date next
+// to the derived remaining-days figure.
+export function expiryDate(r, loc = locale) {
+  const ms = Number(r?.valid_until_ms);
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  try { return new Date(ms).toLocaleDateString(loc === 'en' ? 'en-GB' : 'de-DE'); }
+  catch { return ''; }
+}
+
+// The two views are deliberately DIFFERENT shapes, not two paddings of the same
+// row (Betreiber-Direktive 31.08.):
+//
+//   cards / shards — 3 lines: bold title + status, then the two meta lines that
+//                    actually decide a credential (Subjekt/Aussteller and
+//                    Gültig-bis/Restlaufzeit), on generous padding.
+//   list           — exactly ONE dense line: "Typ · Subjekt" as the title, one
+//                    short meta (the status badge) hard right, nothing else.
+//
+// Both stay pure selectors: no inline expansion, no per-row buttons
+// (design-guide "Canonical Column Grammar"). Fields come from the records the
+// module already loads — no new data path.
 export function credentialRow(r, opts = {}) {
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selected = Boolean(opts.selected);
@@ -149,16 +171,26 @@ export function credentialRow(r, opts = {}) {
     + ' data-context-record-type="nachweis"'
     + ' data-context-label="' + esc((title + ' · ' + subject) || id) + '"';
   if (view === 'list') {
-    return '<div' + attrs + '><span class="nachweise-row-title">' + esc(title) + '</span>' + badge + '</div>';
+    // One line: the identity ("Typ · Subjekt") plus a single short meta right.
+    return '<div' + attrs + '>'
+      + '<span class="nachweise-row-title">' + esc(title + ' · ' + subject) + '</span>'
+      + badge
+      + '</div>';
   }
   const days = daysUntilExpiry(r, now);
   const daysLabel = Number.isFinite(days)
     ? (days < 0 ? text.expiredAgo + ' ' + Math.abs(days) + ' ' + text.days : text.daysRemaining + ' ' + days + ' ' + text.days)
     : text.noExpiry;
-  const metaBits = [esc(text.kicker), esc(text.subject + ': ' + subject), esc(daysLabel)];
+  const date = expiryDate(r);
+  const primary = [text.subject + ': ' + subject];
+  if (r.issuer) primary.push(text.issuer + ': ' + r.issuer);
+  // Line 2 stays at two facts: the hard date and the derived distance to it.
+  // Verifier and record id belong to the detail card, not to a selector row.
+  const secondary = [text.validUntilLabel + ': ' + (date || '—'), daysLabel];
   return '<div' + attrs + '>'
     + '<div class="nachweise-row-head"><span class="nachweise-row-title">' + esc(title) + '</span>' + badge + '</div>'
-    + '<div class="nachweise-row-meta">' + metaBits.join(' · ') + '</div>'
+    + '<div class="nachweise-row-meta">' + esc(primary.join(' · ')) + '</div>'
+    + '<div class="nachweise-row-meta">' + esc(secondary.join(' · ')) + '</div>'
     + '</div>';
 }
 
@@ -268,6 +300,7 @@ export async function mount(ctx) {
   const titleEl = root?.querySelector('[data-ats-title]');
   const subEl = root?.querySelector('[data-ats-sub]');
   const toggleActionsEl = root?.querySelector('[data-toggle-actions]');
+  const viewToggleEl = root?.querySelector('[data-ats-view-toggle]');
   const typeSelect = root?.querySelector('[data-credential-type]');
   if (subEl) subEl.textContent = ctx.manifest?.description || '';
   if (typeSelect) {
@@ -303,14 +336,49 @@ export async function mount(ctx) {
     gateEl.hidden = !html;
   }
 
-  // Read the SHELL-wired grammar state straight from the pane DOM.
+  // Read the SHELL-wired grammar state straight from the pane DOM. The view is
+  // the ONE piece the shell no longer owns: with a single toggle button there
+  // is no pressed/unpressed pair to read, so the current view lives on the pane
+  // as [data-pg-default-view] — the same attribute the shell's own
+  // wirePaneGrammar() falls back to, so declarative consumers stay in sync.
   function readGrammar() {
     return {
       search: (rail?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-      view: rail?.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards',
+      view: rail?.dataset.pgDefaultView === 'list' ? 'list' : 'cards',
       band: rail?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all',
       status: rail?.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'all',
     };
+  }
+
+  // One button, one action. The icon and the label always name the view the
+  // click switches TO; the button carries no aria-pressed because it is not a
+  // state control (Betreiber-Direktive 31.08.).
+  function applyViewToggle() {
+    if (!viewToggleEl) return;
+    const next = readGrammar().view === 'list' ? 'cards' : 'list';
+    const label = next === 'list' ? t('showAsList') : t('showAsCards');
+    viewToggleEl.setAttribute('aria-label', label);
+    viewToggleEl.title = label;
+    viewToggleEl.removeAttribute('aria-pressed');
+    viewToggleEl.querySelectorAll('[data-ats-view-icon]').forEach((icon) => {
+      // toggleAttribute, not `.hidden`: these are SVG elements, and SVGElement
+      // does not implement the HTMLElement `hidden` IDL property — assigning it
+      // sets a JS expando the stylesheet never sees, so the icon would silently
+      // never swap.
+      icon.toggleAttribute('hidden', icon.dataset.atsViewIcon !== next);
+    });
+  }
+
+  function onViewToggle() {
+    if (!rail) return;
+    rail.dataset.pgDefaultView = readGrammar().view === 'list' ? 'cards' : 'list';
+    applyViewToggle();
+    // Reuse the shell's own change channel: it clears the recorded scroll
+    // offsets (a view switch is an intentional reset) and drives render()
+    // through the already-bound onGrammarChange listener.
+    try {
+      rail.dispatchEvent(new CustomEvent('ctox-pane-grammar-change', { detail: readGrammar(), bubbles: true }));
+    } catch { render(); }
   }
 
   // Counts/footer via the shell handle when it has wired the pane, else plain
@@ -665,6 +733,8 @@ export async function mount(ctx) {
     toggleActionsEl?.setAttribute('aria-pressed', hidden ? 'false' : 'true');
   }
   toggleActionsEl?.addEventListener('click', onToggleActions);
+  viewToggleEl?.addEventListener('click', onViewToggle);
+  applyViewToggle();
 
   // Re-render when the shell reports a grammar change (search / view / tray /
   // band). The event bubbles from the wired pane.
@@ -700,6 +770,7 @@ export async function mount(ctx) {
     gateFormEl?.removeEventListener('submit', onGateCheck);
     signoffFormEl?.removeEventListener('submit', onSignoff);
     toggleActionsEl?.removeEventListener('click', onToggleActions);
+    viewToggleEl?.removeEventListener('click', onViewToggle);
     listEl?.removeEventListener('click', onListClick);
     listEl?.removeEventListener('keydown', onListKey);
     root?.removeEventListener('click', onAction);

@@ -132,6 +132,8 @@ const labels = {
     noNotes: 'Keine Notizen vorhanden',
     syncingNotes: 'Notizen werden synchronisiert.',
     readTime: 'Min. Lesezeit',
+    showAsList: 'Als Liste anzeigen',
+    showAsCards: 'Als Karten anzeigen',
   },
   en: {
     allNotes: 'All Notes',
@@ -159,6 +161,8 @@ const labels = {
     noNotes: 'No notes available',
     syncingNotes: 'Syncing notes.',
     readTime: 'min read',
+    showAsList: 'Show as list',
+    showAsCards: 'Show as cards',
   }
 };
 
@@ -459,6 +463,7 @@ function bindElements(host) {
   // toggle / tray / band / footer) is shell-wired from data-pg-*; the module
   // only binds its own header actions, the tray scope selects, and the list.
   els.leftPane = host.querySelector('.notes-left');
+  els.viewToggle = host.querySelector('[data-notes-view-toggle]');
   els.notesList = host.querySelector('[data-notes-list]');
   els.createNotebookBtn = host.querySelector('[data-action="create-notebook"]');
   els.createTagBtn = host.querySelector('[data-action="create-tag"]');
@@ -528,6 +533,11 @@ function wireEvents() {
   // event; re-render (with a list rebuild — an intentional reset).
   els.leftPane?.addEventListener('ctox-pane-grammar-change', handleGrammarChange);
 
+  // One button, one action: the capture-phase listener on the module root runs
+  // BEFORE the shell-wired grammar listener that sits on the button itself, so
+  // the grammar reads the already-flipped data-pg-view and reports the new view.
+  els.root?.addEventListener('click', handleViewToggleCapture, true);
+
   // Note selection is delegated on the list so a re-render never re-binds rows;
   // selection is an in-place class flip (see selectNote / applyListSelection).
   els.notesList?.addEventListener('click', handleNoteListClick);
@@ -589,6 +599,7 @@ function unbindEvents() {
   els.exportBtn?.removeEventListener('click', handleExportClick);
   els.backToListBtn?.removeEventListener('click', handleBackToListClick);
   els.leftPane?.removeEventListener('ctox-pane-grammar-change', handleGrammarChange);
+  els.root?.removeEventListener('click', handleViewToggleCapture, true);
   els.notesList?.removeEventListener('click', handleNoteListClick);
   els.notesList?.removeEventListener('keydown', handleNoteListKeydown);
   els.notebookSelectBtn?.removeEventListener('click', handleNotebookSelectBtnClick);
@@ -1073,6 +1084,7 @@ function renderNotesList() {
             ${note.is_favorite ? '<svg class="nn-card-icon starred" viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>' : ''}
             ${note.is_locked ? '<svg class="nn-card-icon locked" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>' : ''}
           </div>
+          <span class="notes-card-listmeta">${escapeHtml(dateStr)}</span>
         </div>
         <div class="notes-card-meta">
           <span class="notes-card-date">${dateStr}</span>
@@ -1344,6 +1356,7 @@ function handleGrammarChange(event) {
   state.activeNotebook = filters.notebook && filters.notebook !== 'all' ? filters.notebook : '';
   state.activeTag = filters.tag && filters.tag !== 'all' ? filters.tag : '';
   state.sortMode = filters.sort || 'updated';
+  syncViewToggle();
 
   // Keep the selection valid within the new scope; auto-select the first note so
   // the editor never strands on an out-of-scope note.
@@ -1354,13 +1367,42 @@ function handleGrammarChange(event) {
   scheduleRender();
 }
 
+// The shard/list switch is ONE button, so it is an action and not a state: the
+// click flips the view it carries, and icon + labels then name the view the
+// NEXT click produces. Nothing here is aria-pressed.
+function handleViewToggleCapture(event) {
+  const button = event.target?.closest?.('[data-notes-view-toggle]');
+  if (!button || !els.root?.contains(button)) return;
+  const next = button.dataset.pgView === 'list' ? 'cards' : 'list';
+  button.dataset.pgView = next;
+  state.viewMode = next;
+  syncViewToggle();
+  // The shell re-reports the same value on the bubbling grammar event; doing
+  // the render here keeps the toggle working even without shell wiring.
+  scheduleRender();
+}
+
+function syncViewToggle() {
+  const button = els.viewToggle;
+  if (!button) return;
+  const fallback = labels[state.lang] || labels.de;
+  const goesToList = button.dataset.pgView !== 'list';
+  const label = goesToList
+    ? state.t('showAsList', fallback.showAsList)
+    : state.t('showAsCards', fallback.showAsCards);
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.removeAttribute('aria-pressed');
+}
+
 // Seed the module's mirror of the grammar state from the DOM defaults before the
 // shell fires its first change event (the shell wires the pane asynchronously).
 function seedGrammarState() {
   const pane = els.leftPane;
   if (!pane) return;
   state.searchQuery = pane.querySelector('[data-pg-search]')?.value || '';
-  state.viewMode = pane.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards';
+  state.viewMode = pane.querySelector('[data-pg-view]')?.dataset.pgView || 'cards';
+  syncViewToggle();
   state.activeCategory = pane.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'notes';
   const nb = els.notebookFilter?.value || 'all';
   const tg = els.tagFilter?.value || 'all';

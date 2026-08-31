@@ -34,6 +34,12 @@ const labels = {
     queueFailed: 'Command konnte nicht angelegt werden',
     edit: 'Bearbeiten',
     closeEditor: 'Editor schließen',
+    showAsList: 'Als Liste anzeigen',
+    showAsCards: 'Als Karten anzeigen',
+    scopeUser: 'User',
+    scopeSystem: 'System',
+    scopeMixed: 'User + System',
+    neverEdited: 'Noch nicht bearbeitet',
   },
   en: {
     sources: 'Sources',
@@ -56,6 +62,12 @@ const labels = {
     queueFailed: 'Could not queue command',
     edit: 'Edit',
     closeEditor: 'Close editor',
+    showAsList: 'Show as list',
+    showAsCards: 'Show as cards',
+    scopeUser: 'User',
+    scopeSystem: 'System',
+    scopeMixed: 'User + System',
+    neverEdited: 'Never edited',
   },
 };
 
@@ -190,6 +202,7 @@ function bindElements(root) {
   els.leftPane = root.querySelector('.knowledge-left');
   els.centerPane = root.querySelector('.knowledge-center');
   els.list = root.querySelector('[data-knowledge-list]');
+  els.viewToggle = root.querySelector('[data-knowledge-view-toggle]');
   els.selectedKind = root.querySelector('[data-selected-kind]');
   els.selectedTitle = root.querySelector('[data-selected-title]');
   els.markdownView = root.querySelector('[data-markdown-view]');
@@ -219,6 +232,16 @@ function wireEvents() {
   // hang on the pane elements (persistent), never on the rebuilt list well.
   els.leftPane?.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   els.centerPane?.addEventListener('ctox-pane-grammar-change', onCenterGrammarChange);
+  // ONE view control, not two (Betreiber-Direktive 31.08.2026). It is an
+  // action, so it flips the view instead of selecting one of two states; the
+  // shell grammar cannot express that (it reads aria-pressed across several
+  // [data-pg-view] buttons), hence the module wiring.
+  els.viewToggle?.addEventListener('click', () => {
+    state.listView = !state.listView;
+    syncViewToggle();
+    renderKnowledgeList({ resetScroll: true });
+  });
+  syncViewToggle();
   state.ctx.host.querySelector('[data-action="prev-rows"]').addEventListener('click', () => pageTable(-1));
   state.ctx.host.querySelector('[data-action="next-rows"]').addEventListener('click', () => pageTable(1));
   state.ctx.host.querySelector('[data-action="export-table-csv"]')?.addEventListener('click', exportActiveTableCsv);
@@ -290,10 +313,42 @@ function wireEvents() {
   });
 }
 
+// The icon names the view the operator switches TO — an action label, never a
+// state indicator, so the button carries no aria-pressed.
+const VIEW_TOGGLE_ICONS = Object.freeze({
+  // switch-to-list: three rules
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+  // switch-to-cards: two shards
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+});
+
+function syncViewToggle() {
+  const view = state.listView ? 'list' : 'cards';
+  els.root?.classList.toggle('is-list-view', state.listView);
+  // shared/pane-grammar.js falls back to the pane's default view when no
+  // [data-pg-view] button exists. Keep that fallback truthful so the
+  // grammar-change event still reports the view the operator actually sees.
+  if (els.leftPane) els.leftPane.dataset.pgDefaultView = view;
+  const button = els.viewToggle;
+  if (!button) return;
+  const next = state.listView ? 'cards' : 'list';
+  const copy = state.messages || labels[state.lang];
+  const label = next === 'list'
+    ? (copy.showAsList || labels.de.showAsList)
+    : (copy.showAsCards || labels.de.showAsCards);
+  button.dataset.knowledgeView = view;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.removeAttribute('aria-pressed');
+  const icon = VIEW_TOGGLE_ICONS[next];
+  if (icon && button.innerHTML !== icon) button.innerHTML = icon;
+}
+
 function onLeftGrammarChange(event) {
   const detail = event?.detail || {};
   state.searchTerm = String(detail.search ?? '');
-  state.listView = detail.view === 'list';
+  // The view belongs to the module-wired toggle, not to the grammar: the
+  // grammar would only echo back the data-pg-default-view we just wrote.
   state.sourceScope = ['system', 'user', 'all'].includes(detail.filters?.scope) ? detail.filters.scope : 'all';
   state.sortMode = detail.filters?.sort || 'recent';
   els.root?.classList.toggle('is-list-view', state.listView);
@@ -614,10 +669,8 @@ function renderEmptyKnowledgeSelection() {
   state.selectedRunbookId = '';
   state.editing = false;
   state.activeTab = 'skill';
-  // Right-column header is the detail-view, not a second "Knowledge" heading.
-  // When no item is selected, show a neutral kicker/title that does not duplicate
-  // the left-column "Knowledge" heading.
-  els.selectedKind.textContent = copy.selected || 'Selected';
+  // Right-column header is the detail-view, not a second category label.
+  if (els.selectedKind) els.selectedKind.textContent = copy.selected || 'Selected';
   els.selectedTitle.textContent = copy.noSelection || (state.lang === 'en' ? 'No entry selected' : 'Kein Eintrag ausgewählt');
   els.markdownEditor.hidden = true;
   els.markdownView.hidden = false;
@@ -653,7 +706,12 @@ function buildKnowledgeBundles(items, runbooks, tables) {
   const skillbookItems = allItems.filter((item) => item.kind === 'skillbook');
   const skillItems = allItems.filter((item) => item.kind === 'skill');
   const resourceItems = allItems.filter((item) => item.kind === 'resource');
+  const externalRunbooks = uniqueById((Array.isArray(runbooks) ? runbooks : []).map((runbook) => ({
+    ...runbook,
+    id: runbook?.id || runbook?.runbook_id || '',
+  })));
   const used = new Set();
+  const assignedExternalRunbookIds = new Set();
 
   const makeGroup = (config) => {
     const entries = uniqueById(config.entries || []).filter(Boolean);
@@ -697,6 +755,10 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     || linkedDroneRunbookIds.has(normaliseRunbookId(runbookIdForItem(entry)))
     || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))
   ));
+  const externalDroneRunbooks = externalRunbooks.filter(isDroneBearingKnowledge);
+  for (const runbook of externalDroneRunbooks) {
+    assignedExternalRunbookIds.add(normaliseRunbookId(runbookIdForItem(runbook)));
+  }
   const droneEntries = uniqueById([
     ...skillItems.filter((entry) => isDroneBearingKnowledge(entry) || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))),
     ...droneSkillbooks,
@@ -721,10 +783,28 @@ function buildKnowledgeBundles(items, runbooks, tables) {
       entries: droneEntries,
       runbookIds: uniqueStrings([
         ...linkedDroneRunbooks.map(runbookIdForItem),
-        ...runbooks.filter(isDroneBearingKnowledge).map((runbook) => runbook.id),
+        ...externalDroneRunbooks.map(runbookIdForItem),
       ]),
       primaryItemId: droneEntries.find((entry) => entry.kind === 'skillbook')?.id || droneEntries[0]?.id,
     }));
+  }
+
+  const externalRunbookOwners = new Map();
+  const ordinarySkillbooks = skillbookItems.filter((skillbook) => !used.has(skillbook.id));
+  for (const runbook of externalRunbooks) {
+    const runbookId = normaliseRunbookId(runbookIdForItem(runbook));
+    if (!runbookId || assignedExternalRunbookIds.has(runbookId)) continue;
+    let bestOwner = null;
+    let bestScore = 0;
+    for (const skillbook of ordinarySkillbooks) {
+      const linkedIds = new Set(extractRunbookIds(skillbook.linked_runbook_ids ?? skillbook.linked_runbooks_json ?? skillbook.linked_runbooks).map(normaliseRunbookId));
+      const score = runbookSkillbookMatchScore(skillbook, runbook, linkedIds);
+      if (score > bestScore) {
+        bestOwner = skillbook.id;
+        bestScore = score;
+      }
+    }
+    if (bestOwner) externalRunbookOwners.set(runbookId, bestOwner);
   }
 
   for (const skillbook of skillbookItems) {
@@ -738,6 +818,10 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     const relatedTables = tableItems.filter((item) => tokenOverlap(skillbook, item) >= 2);
     const relatedSkills = skillItems.filter((item) => tokenOverlap(skillbook, item) >= 2);
     const relatedResources = resourceItems.filter((item) => item.skillbook_id === bareKnowledgeId(skillbook.id));
+    const relatedExternalRunbooks = externalRunbooks.filter((runbook) => {
+      const id = normaliseRunbookId(runbookIdForItem(runbook));
+      return externalRunbookOwners.get(id) === skillbook.id;
+    });
     groups.push(makeGroup({
       id: `bundle/${base}`,
       title: skillbook.title || titleFromSlug(base),
@@ -745,6 +829,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
       domain: base,
       summary: skillbook.summary || '',
       entries: [skillbook, ...relatedSkills, ...relatedRunbooks, ...relatedResources, ...relatedTables],
+      runbookIds: relatedExternalRunbooks.map(runbookIdForItem),
       primaryItemId: skillbook.id,
     }));
   }
@@ -1009,6 +1094,60 @@ function runbookIdForItem(item) {
     || '';
 }
 
+function associationValues(item, fields) {
+  const payload = item?.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+    ? item.payload
+    : {};
+  return uniqueStrings(fields.flatMap((field) => {
+    const value = item?.[field] ?? payload[field];
+    return Array.isArray(value) ? value : [value];
+  }).map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function associationPath(value) {
+  const parts = String(value || '')
+    .replace(/^[a-z]+:/i, '')
+    .replaceAll('\\', '/')
+    .split('/')
+    .filter(Boolean);
+  if (!parts.length) return '';
+  const branchIndex = parts.findIndex((part) => ['runbooks', 'resources', 'sources'].includes(part.toLowerCase()));
+  if (branchIndex > 0) parts.splice(branchIndex);
+  else if (/\.[a-z0-9]+$/i.test(parts[parts.length - 1])) parts.pop();
+  return normaliseName(parts.join('/'));
+}
+
+function runbookSkillbookMatchScore(skillbook, runbook, linkedRunbookIds = new Set()) {
+  const runbookId = normaliseRunbookId(runbookIdForItem(runbook));
+  if (linkedRunbookIds.has(runbookId)) return 4;
+
+  const skillbookIds = new Set(associationValues(skillbook, ['id', 'skillbook_id', 'skillbookId'])
+    .map(bareKnowledgeId)
+    .map(normaliseName)
+    .filter(Boolean));
+  const runbookSkillbookIds = associationValues(runbook, ['skillbook_id', 'skillbookId', 'knowledge_skillbook_id'])
+    .map(bareKnowledgeId)
+    .map(normaliseName)
+    .filter(Boolean);
+  if (runbookSkillbookIds.some((id) => skillbookIds.has(id))) return 3;
+
+  const skillbookDomains = new Set(associationValues(skillbook, ['domain', 'problem_domain', 'knowledge_domain'])
+    .map(normaliseName)
+    .filter(Boolean));
+  const runbookDomains = associationValues(runbook, ['domain', 'problem_domain', 'knowledge_domain'])
+    .map(normaliseName)
+    .filter(Boolean);
+  if (runbookDomains.some((domain) => skillbookDomains.has(domain))) return 2;
+
+  const skillbookPaths = new Set(associationValues(skillbook, ['source_path', 'path', 'skillbook_path'])
+    .map(associationPath)
+    .filter(Boolean));
+  const runbookPaths = associationValues(runbook, ['source_path', 'path', 'skillbook_path'])
+    .map(associationPath)
+    .filter(Boolean);
+  return runbookPaths.some((path) => skillbookPaths.has(path)) ? 1 : 0;
+}
+
 function bareId(id) {
   return String(id || '').replace(/^[^:]+:/, '');
 }
@@ -1084,8 +1223,12 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
   // Sources and tables are domain assets. They must not disappear merely
   // because a user selected one of several explanatory Knowledge Books.
   const tables = uniqueById(group.entries.filter((entry) => entry.has_table));
-  const resources = uniqueById(group.entries.filter((entry) => entry.kind === 'resource'));
+  const resources = knowledgeResourcesForEntries(group.entries);
   return { skillbook: skillbookEntry || null, entries, skill, runbookItems, runbooks, resources, tables };
+}
+
+function knowledgeResourcesForEntries(entries = []) {
+  return uniqueById(entries.filter((entry) => entry?.kind === 'resource' || entry?.source_path));
 }
 
 function relatedToSkillbook(skillbook, entry) {
@@ -1173,6 +1316,9 @@ function renderKnowledgeList({ resetScroll = false } = {}) {
     if (resetScroll) els.list.scrollTop = 0;
   } else {
     const signature = JSON.stringify({
+      // The view is part of the signature: cards and list are two different
+      // markups, so a view switch must actually rewrite the well.
+      view: state.listView ? 'list' : 'cards',
       scope: state.sourceScope,
       term,
       sortMode: state.sortMode,
@@ -1190,7 +1336,7 @@ function renderKnowledgeList({ resetScroll = false } = {}) {
     });
     replaceChildrenIfChanged(
       els.list,
-      visibleGroups.map((group) => renderKnowledgeBundle(group)),
+      visibleGroups.map((group) => renderKnowledgeBundle(group, state.listView ? 'list' : 'cards')),
       { signature, preserveScroll: !resetScroll },
     );
     if (resetScroll) els.list.scrollTop = 0;
@@ -1266,7 +1412,34 @@ function bundleCountsHtml(skillbooks, runbooks, tables) {
   return [part(skillbooks, 'Skillbooks'), part(runbooks, 'Runbooks'), part(tables, 'Tabellen')].join(' · ');
 }
 
-function renderKnowledgeBundle(group) {
+// Short absolute day for the shard meta line. Deliberately not a relative
+// phrase ("vor 3 Tagen"): a shard meta must stay stable while the list is open.
+function shortDay(ms, lang) {
+  const t = Number(ms) || 0;
+  if (!t) return '';
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(lang === 'en' ? 'en-GB' : 'de-DE', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+  });
+}
+
+// Where the group's entries come from — the one fact the operator needs before
+// touching a skillbook (a system copy is not editable like a user one).
+function groupScopeLabel(group, copy) {
+  const scopes = new Set((group.entries || []).map((entry) => sourceScopeFor(entry)));
+  if (scopes.size > 1) return copy.scopeMixed || labels.de.scopeMixed;
+  if (scopes.has('system')) return copy.scopeSystem || labels.de.scopeSystem;
+  return copy.scopeUser || labels.de.scopeUser;
+}
+
+// The two views are genuinely different densities, not one row with a class on
+// it (Betreiber-Direktive 31.08.2026):
+//   cards -> bold title + TWO meta lines (kicker/scope, counts/last edit),
+//            generous padding
+//   list  -> exactly ONE line: title left, one short kicker right, max density
+// Both read fields the module already loads — no new data path, no new schema.
+function renderKnowledgeBundle(group, view = 'cards') {
   const section = document.createElement('section');
   // Selection is applied after the write via applyKnowledgeSelection.
   section.className = 'knowledge-bundle';
@@ -1281,16 +1454,31 @@ function renderKnowledgeBundle(group) {
   const tableCount = group.tableIds.length;
   const runbookCount = group.runbookIds.length;
   const skillbookCount = skillbooksForGroup(group).length;
-  // The shard is a pure SELECTOR: title + one meta line. No inline expansion —
-  // the content pane's tabs and second-level switcher are the one and only
-  // navigation into skillbooks/runbooks/tables. Expanding here would duplicate
-  // that navigation inside the list.
-  section.innerHTML = `
-    <button class="bundle-select" type="button">
+  const copy = state.messages || labels[state.lang];
+  const domain = group.domainLabel || 'Knowledge';
+  const fullTitle = escapeHtml(`${domain} · Skillbooks (${skillbookCount}) · Runbooks (${runbookCount}) · Tabellen (${tableCount})`);
+  // The shard is a pure SELECTOR: no inline expansion — the content pane's tabs
+  // and second-level switcher are the one and only navigation into
+  // skillbooks/runbooks/tables. Expanding here would duplicate that navigation
+  // inside the list.
+  if (view === 'list') {
+    section.classList.add('is-compact');
+    section.innerHTML = `
+    <button class="bundle-select" type="button" title="${fullTitle}">
       <strong>${escapeHtml(group.title)}</strong>
-      <small class="bundle-meta" title="${escapeHtml(`${group.domainLabel || 'Knowledge'} · Skillbooks (${skillbookCount}) · Runbooks (${runbookCount}) · Tabellen (${tableCount})`)}"><span class="bundle-domain">${escapeHtml(group.domainLabel || 'Knowledge')}</span><span class="bundle-counts"> · ${bundleCountsHtml(skillbookCount, runbookCount, tableCount)}</span></small>
+      <small class="bundle-tag">${escapeHtml(domain)}</small>
     </button>
   `;
+  } else {
+    const edited = shortDay(groupRecency(group), state.lang) || (copy.neverEdited || labels.de.neverEdited);
+    section.innerHTML = `
+    <button class="bundle-select" type="button" title="${fullTitle}">
+      <strong>${escapeHtml(group.title)}</strong>
+      <small class="bundle-meta"><span class="bundle-domain">${escapeHtml(domain)}</span> · <span class="bundle-scope">${escapeHtml(groupScopeLabel(group, copy))}</span></small>
+      <small class="bundle-meta"><span class="bundle-counts">${bundleCountsHtml(skillbookCount, runbookCount, tableCount)}</span> · <span class="bundle-edited">${escapeHtml(edited)}</span></small>
+    </button>
+  `;
+  }
   section.querySelector('.bundle-select').addEventListener('click', () => {
     state.selectedGroupId = group.id;
     const skillbook = selectedSkillbookForGroup(group);
@@ -1352,7 +1540,7 @@ async function selectKnowledge(id) {
   state.tableOffset = 0;
   state.editing = false;
   const item = state.items.find((entry) => entry.id === id);
-  els.selectedKind.textContent = groupLabel(item?.kind || 'knowledge');
+  if (els.selectedKind) els.selectedKind.textContent = groupLabel(item?.kind || 'knowledge');
   els.selectedTitle.textContent = item?.title || 'Knowledge';
   // Selection is an in-place class flip, never a list rebuild — a rebuild
   // resets the scroll position under the operator's pointer.
@@ -1550,7 +1738,7 @@ function renderSelectionHeader() {
   const context = skillbookContext(group, state.selectedSkillbookId);
   const item = state.items.find((entry) => entry.id === state.selectedId) || context.skill;
   const isProceduralSkill = context.skill?.kind === 'skill';
-  els.selectedKind.textContent = isProceduralSkill ? 'Skill' : 'Knowledge Book';
+  if (els.selectedKind) els.selectedKind.textContent = isProceduralSkill ? 'Skill' : 'Knowledge Book';
   els.selectedTitle.textContent = context.skill?.title || context.skillbook?.title || item?.title || group?.title || 'Knowledge';
   syncMarkdownEditControls();
 }
@@ -1559,7 +1747,7 @@ async function renderRunbookWorkspace() {
   const copy = state.messages || labels[state.lang];
   const context = skillbookContext();
   const visibleRunbooks = context.runbooks;
-  els.selectedKind.textContent = 'Runbooks';
+  if (els.selectedKind) els.selectedKind.textContent = 'Runbooks';
   els.selectedTitle.textContent = context.skillbook?.title || activeGroup()?.title || 'Knowledge';
   if (!visibleRunbooks.length) {
     els.runbookSwitcher.hidden = true;
@@ -1616,7 +1804,7 @@ async function renderResourceWorkspace() {
   const copy = state.messages || labels[state.lang];
   const context = skillbookContext();
   const resources = context.resources;
-  els.selectedKind.textContent = 'Quellen';
+  if (els.selectedKind) els.selectedKind.textContent = 'Quellen';
   els.selectedTitle.textContent = context.skillbook?.title || activeGroup()?.title || 'Knowledge';
   if (!resources.length) {
     els.resourceSwitcher.hidden = true;
@@ -1643,7 +1831,11 @@ async function renderResourceWorkspace() {
   }));
   const resource = resources.find((entry) => entry.id === state.selectedResourceId) || resources[0];
   const doc = await loadKnowledgeDocument(resource.id);
-  els.resourceView.innerHTML = markdownToHtml(doc.markdown || '');
+  const sourcePath = String(resource.source_path || '').trim();
+  const sourcePathHtml = sourcePath
+    ? `<p class="knowledge-resource-path"><strong>Quelle</strong><code>${escapeHtml(sourcePath)}</code></p>`
+    : '';
+  els.resourceView.innerHTML = `${sourcePathHtml}${markdownToHtml(doc.markdown || '')}`;
 }
 
 function runbookDetailsHtml(runbook) {
@@ -1722,7 +1914,7 @@ async function renderTable() {
   const item = state.items.find((entry) => entry.id === tableId);
   const tableRecord = tableForItem(item || { id: tableId }, state.tables);
   const tableSource = mergeKnowledgeTableData(item, tableRecord);
-  els.selectedKind.textContent = 'Data';
+  if (els.selectedKind) els.selectedKind.textContent = 'Data';
   els.selectedTitle.textContent = tableSource?.title || skillbookContext().skillbook?.title || 'DataFrame';
   if (!tableSource?.has_table) {
     els.tableTitle.textContent = 'DataFrame';
@@ -3347,6 +3539,9 @@ function isKnowledgeActionFormReady(values, requiredFields = []) {
 }
 
 export const __knowledgeTestHooks = {
+  renderKnowledgeBundle,
+  groupScopeLabel,
+  shortDay,
   buildKnowledgeBundles,
   isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
@@ -3370,6 +3565,7 @@ export const __knowledgeTestHooks = {
   formatCell,
   normalizeStoredKnowledgeRecord,
   normalizeColumns,
+  knowledgeResourcesForEntries,
   sourceScopeFor,
   sortKnowledgeRecords,
   valueForColumn,

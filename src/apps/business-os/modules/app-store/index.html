@@ -1,10 +1,13 @@
 <main class="ctox-workspace ctox-workspace--two-pane app-store-module" data-app-store-root data-resize-frame>
   <!-- The pane chrome below is the canonical data-pg-* grammar — the SHELL
-       wires search / view toggle / tray / reset / active-dot / band / counts /
-       footer (autoWirePaneGrammar); the module only renders lists and listens
-       to ctox-pane-grammar-change. This file is the single source of truth for
-       the module markup: index.js fetches it with the JS cache-buster
-       (loadModuleMarkup), like ctox/coding-agents/knowledge/threads. -->
+       wires search / tray / reset / active-dot / band / counts / footer
+       (autoWirePaneGrammar); the module only renders lists and listens to
+       ctox-pane-grammar-change. The ONE exception is the view toggle: since
+       31.08.2026 it is a single action button, not the grammar's two-button
+       [data-pg-view] radio pair, so the module owns it. This file is the
+       single source of truth for the module markup: index.js fetches it with
+       the JS cache-buster (loadModuleMarkup), like
+       ctox/coding-agents/knowledge/threads. -->
   <aside class="ctox-pane store-left" aria-label="Store Navigation">
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
@@ -104,14 +107,22 @@
           <button type="button" class="ctox-pane-icon" data-refresh-marketplace aria-label="GitHub aktualisieren" title="GitHub aktualisieren" data-t-title="refreshMarketplace" data-t-aria="refreshMarketplace"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"/></svg></button>
         </div>
       </div>
-      <!-- Row 2: filter section — search + shelf/list toggle + collapsed tray.
-           data-pg-* attributes are wired by the shell grammar. -->
+      <!-- Row 2: filter section — search + the single view toggle + collapsed
+           tray. The data-pg-* attributes are wired by the shell grammar; the
+           view toggle is module-owned (see below). -->
       <div class="store-filterbar">
         <input class="ctox-pane-search" data-pg-search type="search" placeholder="Module, Templates, Apps suchen..." data-t-placeholder="searchPlaceholder" aria-label="App Store durchsuchen" data-t-aria="searchAria" />
-        <div class="store-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Regal-Ansicht" title="Regal-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- ONE control, not two (Betreiber-Direktive 31.08.2026): the glyph
+             shows the view the click switches TO, aria-label/title say the same
+             thing, and there is no aria-pressed — the button is an action, not
+             a state. The shell grammar's [data-pg-view] pair is a two-button
+             radio contract, so this single toggle is module-owned; the module
+             also owns state.viewMode instead of reading it back from the
+             grammar event. -->
+        <button type="button" class="ctox-pane-icon store-view-toggle" data-store-view-toggle data-view-mode="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen">
+          <span class="store-view-glyph" data-view-glyph="list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></span>
+          <span class="store-view-glyph" data-view-glyph="cards" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></span>
+        </button>
         <button type="button" class="ctox-pane-icon store-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="store-filter-advanced" data-pg-tray hidden>

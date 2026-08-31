@@ -46,5 +46,7 @@
   "newTagPrompt": "Name for the new tag:",
   "importInvalid": "Invalid JSON file.",
   "importEmpty": "No notes in the file.",
-  "imported": "{n} notes imported."
+  "imported": "{n} notes imported.",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

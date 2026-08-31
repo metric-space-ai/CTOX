@@ -91,7 +91,7 @@
    it in a narrow window instead of collapsing the main view to 0. */
 .calendar-app {
   grid-template-columns:
-    var(--ctox-left-width, 320px)
+    var(--ctox-left-width, 340px)
     12px
     minmax(320px, 1fr)
     12px
@@ -104,30 +104,36 @@
 .calendar-app > [data-resizer="right"] { grid-column: 4; }
 .calendar-right { grid-column: 5; }
 
-/* Grammar column rows: header / view band / recessed well / footer. The well
-   stays pinned to the 1fr track so it always fills the space. */
+/* Grammar column rows: header band / filterbar / tray / view band / recessed
+   well / footer. The header band is its own row because the shell-v2 chrome
+   claims exactly one band row across the top; filterbar and tray follow below
+   it. The well stays pinned to the 1fr track so it always fills the space. */
 .calendar-left {
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
 }
 .calendar-left > .ctox-pane-header { grid-row: 1; }
-.calendar-left > [data-calendar-left-band] { grid-row: 2; }
-.calendar-left-body { grid-row: 3; }
-.calendar-left > .ctox-pane-footer { grid-row: 4; }
+.calendar-left > .ctox-filterbar { grid-row: 2; }
+.calendar-left > .ctox-filter-tray { grid-row: 3; }
+.calendar-left > [data-calendar-left-band] { grid-row: 4; }
+.calendar-left-body { grid-row: 5; }
+.calendar-left > .ctox-pane-footer { grid-row: 6; }
 
 /* Center rows: header / view band / calendar grid. */
 .calendar-center {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 
+/* Right rows: header band / context body. The head keeps its own auto row so
+   the fixed shell-v2 band height does not push the body out of the pane. */
 .calendar-right {
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 /* Third pane hidden by default; auto-reveals on selection. Collapsed = the
    center grid takes the freed width. */
 .calendar-app.is-context-hidden {
   grid-template-columns:
-    var(--ctox-left-width, 320px)
+    var(--ctox-left-width, 340px)
     12px
     minmax(320px, 1fr);
 }
@@ -142,13 +148,94 @@
   color: color-mix(in srgb, var(--accent) 78%, var(--text));
 }
 
-/* Left list: a compact single-line variant when the list view toggle is on. */
-.calendar-left-list.is-list-view .calendar-item-actions,
-.calendar-left-list.is-list-view .booking-page-item-actions {
-  opacity: 1;
-}
-.calendar-left-list.is-list-view .booking-page-item small {
+/* custom: the shard/list switch is ONE button that names the view it produces;
+   the two glyphs live in the same button and the current view picks one. */
+.calendar-view-toggle > [data-view-icon] {
   display: none;
+}
+
+.calendar-view-toggle[data-pg-view="cards"] > [data-view-icon="list"],
+.calendar-view-toggle[data-pg-view="list"] > [data-view-icon="cards"] {
+  display: block;
+}
+
+/* -------------------------------------------------------------
+   custom: shards vs list — two densities, not two paddings.
+   KARTEN: bold title over meta line(s) carrying the record's real detail
+   fields, generous padding. LISTE: exactly one line per record, title plus a
+   single short meta on the right, tight leading. Both variants are in the
+   markup; the active view decides which one is painted.
+   ------------------------------------------------------------- */
+.calendar-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.calendar-row-meta {
+  color: var(--muted);
+  font-size: var(--fs-xs, 11px);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The short meta belongs to the list row only. */
+.calendar-row-brief {
+  display: none;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--fs-xs, 11px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* KARTEN (default view). */
+.calendar-left-list .ctox-list-item {
+  padding: 10px 14px;
+}
+
+.calendar-left-list .calendar-item-title,
+.calendar-left-list .booking-page-item-title {
+  font-weight: 600;
+}
+
+/* LISTE: one row, one line. */
+.calendar-left-list.is-list-view .ctox-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 14px;
+  min-height: 28px;
+}
+
+.calendar-left-list.is-list-view .calendar-row-text {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 0;
+}
+
+.calendar-left-list.is-list-view .calendar-row-meta {
+  display: none;
+}
+
+/* Title takes the slack so the short meta sits flush right on every row. */
+.calendar-left-list.is-list-view .calendar-item-left,
+.calendar-left-list.is-list-view .booking-page-item-left {
+  flex: 1 1 auto;
+}
+
+.calendar-left-list.is-list-view .calendar-row-brief {
+  display: inline;
+  margin-left: auto;
+}
+
+.calendar-left-list.is-list-view .calendar-item-title,
+.calendar-left-list.is-list-view .booking-page-item-title {
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 /* Left empty state stacks a title over a muted hint line. */
@@ -237,14 +324,6 @@
 .booking-page-item-title {
   min-width: 0;
   font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.booking-page-item small {
-  display: block;
-  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -443,41 +522,80 @@
   margin-top: 4px;
 }
 
-/* custom: responsive stacking — the week grid needs more width than the kit's
-   default 760px breakpoint assumes, so this module stacks its panes earlier
-   and gives the calendar grid a real minimum height. */
+/* =========================================================================
+   Responsive steps. The two breakpoints belong to the SHELL (contract §6):
+   1024px turns three columns into two, 768px turns two into one. This module
+   defines no other width boundary, and each step REWRITES grid-template-columns
+   instead of only re-flowing panes — a leftover track would otherwise stay
+   reserved and empty.
+   ========================================================================= */
+
+/* 1024px — three columns become two: calendar sources and the calendar surface
+   share the top row, the booking context moves into a full-width second row.
+   Both rows keep their own pane heads. */
 @container business-app-window (max-width: 1024px) {
   .calendar-app[data-calendar-root],
   .calendar-app.is-context-hidden {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(200px, 30vh) minmax(360px, 1fr) minmax(200px, 32vh);
-    height: auto;
-    min-height: 100%;
-    overflow-y: auto;
-    gap: 8px;
+    grid-template-columns: minmax(260px, var(--ctox-left-width, 340px)) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(180px, 34%);
+    column-gap: 12px;
+    row-gap: 8px;
   }
-  /* Stacked single column: panes flow by source order, not the wide grid pins. */
-  .calendar-left,
-  .calendar-center,
+
+  .calendar-left {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .calendar-center {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
   .calendar-right {
-    grid-column: auto;
-    height: auto;
-    min-height: 220px;
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
+
+  /* No resize channel in the collapsed forms: the handles would keep an empty
+     12px track alive. */
   .calendar-app[data-calendar-root] [data-resizer] {
     display: none !important;
   }
-  /* In compact mode the context pane stays reachable (stacked) even when the
-     wide-mode auto-reveal has it collapsed. */
+
+  /* In the collapsed forms the context pane stays reachable even when the
+     wide-mode auto-reveal has it hidden. */
   .calendar-app.is-context-hidden .calendar-right {
     display: flex;
   }
 }
 
+/* 768px — two columns become one: the panes stack in source order and the
+   sheet scrolls as a whole. */
 @container business-app-window (max-width: 768px) {
-  .calendar-app[data-calendar-root] {
-    grid-template-rows: auto minmax(380px, 1fr) auto;
-    padding: 6px;
+  .calendar-app[data-calendar-root],
+  .calendar-app.is-context-hidden {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(260px, auto) minmax(360px, 1fr) minmax(200px, auto);
+    height: auto;
+    min-height: 100%;
+    overflow-y: auto;
+    column-gap: 0;
+    row-gap: 8px;
+    /* Stacked, the left pane is the full window width and its head carries the
+       icon reservation. The kit's narrow 6px frame would push that head's box
+       into the icon zone instead, so the sheet drops the outer padding — same
+       geometry as the accepted knowledge reference. */
+    padding: 0;
+  }
+
+  .calendar-left,
+  .calendar-center,
+  .calendar-right {
+    grid-column: 1;
+    grid-row: auto;
+    height: auto;
+    min-height: 220px;
   }
 
   .ctox-bottom-drawer {
@@ -506,7 +624,7 @@
    covers what those breakpoints do not: horizontal-scroll safety for the
    EventCalendar time grids and full-width drawer geometry.
    ------------------------------------------------------------- */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   /* Week/day time grids crush below ~520px. Give the vendor widget a real
      floor and let .calendar-grid-container (overflow: auto) scroll it
      horizontally inside the pane — never the whole sheet. Month/list views
@@ -577,5 +695,114 @@
   .calendar-item-actions,
   .booking-page-item-actions {
     opacity: 1;
+  }
+}
+
+/* ==========================================================================
+   Shell V2 header zones.
+   The shell paints three fixed zones over the app content — .shell-window-content
+   is `inset: 0` and never indented — so the pane heads have to keep them free:
+     · app icon      80x80 top left   (--shell-v2-icon-size)
+     · header band   37px tall        (--shell-v2-header-row-size, (80-6)/2)
+     · window control 74x74 top right (2 * header row)
+   Geometry only; no new chrome, no colour. Reference: modules/knowledge/index.css.
+   ========================================================================== */
+.shell-window[data-shell-contract="v2"] .calendar-app > .ctox-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .calendar-app .ctox-pane-header .ctox-pane-title-row {
+  height: 100%;
+}
+
+/* Kicker and title share the single band row instead of stacking, and the
+   title is allowed to shrink so long labels ellipsize instead of squeezing to
+   a few pixels. The action block keeps its intrinsic width (never flex: 1). */
+.shell-window[data-shell-contract="v2"] .calendar-app .ctox-pane-header .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .calendar-app .ctox-pane-header .ctox-pane-title {
+  margin-top: 0;
+  min-width: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .calendar-app .ctox-pane-header .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* First head of the top row: clear the app icon. Row 2 (filterbar) still sits
+   beside the 80px icon, so it keeps the same indent and a min-height that lets
+   the tray in row 3 start below the icon. */
+.shell-window[data-shell-contract="v2"] .calendar-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .calendar-left > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* That head loses 94px to the icon and still carries three actions. In a 320px
+   column a kicker beside the title squeezes the title — and with it the shell's
+   version-menu trigger — down to a few pixels (contract §4). The kicker steps
+   aside; the pane's own band below still names Kalender / Buchungsseiten. */
+.shell-window[data-shell-contract="v2"] .calendar-left > .ctox-pane-header .ctox-pane-kicker {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .calendar-left > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: calc(var(--shell-v2-icon-size, 80px) - var(--shell-v2-header-row-size, 37px));
+}
+
+/* Last head of the top row: clear the window control. Which pane that is
+   depends on the collapsed context column. */
+.shell-window[data-shell-contract="v2"] .calendar-app.is-context-hidden .calendar-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .calendar-app:not(.is-context-hidden) .calendar-right > .ctox-pane-header {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
+/* Two columns (<= 1024px): the context pane drops to the second row, so the
+   calendar surface is now the last head of the top row and owns the window
+   control reservation; the context head hands it back. Both context states are
+   spelled out so these rules match the specificity of the wide-mode pair above
+   and win by source order. */
+@container business-app-window (max-width: 1024px) {
+  .shell-window[data-shell-contract="v2"] .calendar-app.is-context-hidden .calendar-center > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .calendar-app:not(.is-context-hidden) .calendar-center > .ctox-pane-header {
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
+
+  .shell-window[data-shell-contract="v2"] .calendar-app.is-context-hidden .calendar-right > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .calendar-app:not(.is-context-hidden) .calendar-right > .ctox-pane-header {
+    padding-right: 14px;
+  }
+}
+
+/* One column (<= 768px): the left head IS the whole top row, so it clears the
+   icon on the left and the window control on the right. Its filterbar sits in
+   the second row, still inside the 74px control zone, and clears it too. The
+   panes below the fold need no reservation any more. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .calendar-left > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .calendar-left > .ctox-filterbar {
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
+
+  .shell-window[data-shell-contract="v2"] .calendar-app.is-context-hidden .calendar-center > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .calendar-app:not(.is-context-hidden) .calendar-center > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .calendar-app.is-context-hidden .calendar-right > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .calendar-app:not(.is-context-hidden) .calendar-right > .ctox-pane-header {
+    padding-right: 14px;
   }
 }

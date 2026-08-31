@@ -7,10 +7,10 @@
        bubbling ctox-pane-grammar-change event and writes counts/footer via
        pane.__ctoxPaneGrammar (null-guarded) or plain textContent. -->
   <aside class="ctox-pane browser-sessions" data-left-content aria-label="Browser-Sitzungen">
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker" data-t="sessionsKicker">CTOX Computer</span>
+          <span class="ctox-pane-kicker" data-shell-v2-accent data-t="sessionsKicker">CTOX Computer</span>
           <h2 class="ctox-pane-title" data-t="sessionsTitle">Sitzungen</h2>
         </div>
         <div class="ctox-pane-actions">
@@ -19,25 +19,34 @@
           <button type="button" class="ctox-pane-icon" data-action="export" aria-label="Sitzungen exportieren" data-t-aria="sessionsExport" title="Sitzungen exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
-        <input class="ctox-pane-search" type="search" data-pg-search placeholder="Sitzung suchen..." aria-label="Sitzung suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
-        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
-      </div>
-      <div class="ctox-filter-tray" data-pg-tray hidden>
-        <div class="ctox-filter-row">
-          <select class="ctox-select" data-pg-filter data-pg-name="profile" data-pg-default="all" aria-label="Profil filtern">
-            <option value="all" data-t="filterProfileAll">Alle Profile</option>
-            <option value="persistent" data-t="filterProfilePersistent">Persönlich</option>
-            <option value="private" data-t="filterProfilePrivate">Privat</option>
-          </select>
-          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
-        </div>
-      </div>
     </header>
+    <div class="ctox-filterbar" data-shell-v2-header-row="2">
+      <input class="ctox-pane-search" type="search" data-pg-search placeholder="Sitzung suchen..." aria-label="Sitzung suchen" />
+      <!-- EIN Umschalter statt zweier Knoepfe (Betreiber-Direktive 31.08.2026).
+           Der Knopf ist eine AKTION, kein Zustand: kein aria-pressed, und Icon,
+           aria-label und title benennen die Ansicht, zu der gewechselt WIRD.
+           data-pg-view traegt weiter die AKTUELLE Ansicht, damit die
+           Shell-Grammatik (shared/pane-grammar.js) unveraendert den richtigen
+           Zustand liest — index.js dreht das Attribut beim Klick, das passende
+           Icon blendet index.css darueber ein. -->
+      <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
+        <button type="button" class="ctox-pane-icon browser-view-toggle" data-browser-view-toggle data-pg-view="cards" aria-label="Als Liste anzeigen" data-t-aria="viewShowList" title="Als Liste anzeigen">
+          <svg data-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>
+          <svg data-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+        </button>
+      </div>
+      <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
+    </div>
+    <div class="ctox-filter-tray" data-pg-tray data-shell-v2-header-row="3" hidden>
+      <div class="ctox-filter-row">
+        <select class="ctox-select" data-pg-filter data-pg-name="profile" data-pg-default="all" aria-label="Profil filtern">
+          <option value="all" data-t="filterProfileAll">Alle Profile</option>
+          <option value="persistent" data-t="filterProfilePersistent">Persönlich</option>
+          <option value="private" data-t="filterProfilePrivate">Privat</option>
+        </select>
+        <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
+      </div>
+    </div>
     <nav class="ctox-view-switch" aria-label="Sitzungsansichten">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-t="bandAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
@@ -59,12 +68,32 @@
        the remote/CDP session flow (address bar, navigation, controller lease,
        input streaming, frame rendering, auth assist, downloads) is unchanged. -->
   <section class="ctox-pane browser-canvas" aria-label="Browser Inhalt">
+    <header class="ctox-pane-header ctox-pane-band browser-canvas-head" data-shell-v2-header-row="1">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-shell-v2-accent>Browser</span>
+          <h2 class="ctox-pane-title" data-browser-status-title data-t="noWindowOpen">Kein Browser-Fenster geoeffnet</h2>
+        </div>
+        <div class="ctox-pane-actions">
+          <span class="ctox-badge" data-browser-status-chip data-t="statusDisconnected">Nicht verbunden</span>
+          <button type="button" class="ctox-pane-icon browser-toggle-advanced" data-browser-toggle-advanced aria-label="Erweiterte Aktionen" title="Erweiterte Aktionen" aria-pressed="false">⋯</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="ctox-view-switch browser-canvas-switch" data-shell-v2-header-row="2">
+      <div class="ctox-pane-tabs browser-view-switch" role="tablist" aria-label="Ansicht">
+        <button type="button" class="ctox-pane-tab is-active" data-browser-view="live" role="tab" aria-selected="true" data-t="viewLive">Ansicht</button>
+        <button type="button" class="ctox-pane-tab" data-browser-view="script" role="tab" aria-selected="false" data-t="viewScript">Skript</button>
+      </div>
+      <div class="browser-session-list ctox-pane-tabs" data-browser-session-list aria-label="Browser Tabs"></div>
+      <span class="browser-view-path" data-browser-script-path></span>
+    </div>
+
     <div class="browser-chrome" aria-label="Browser Steuerung">
-      <div class="browser-tabbar">
+      <div class="browser-auth-row">
         <div class="ctox-callout" data-browser-auth-assist hidden></div>
-        <div class="browser-session-list ctox-pane-tabs" data-browser-session-list aria-label="Browser Tabs"></div>
         <div class="browser-notice" data-browser-notice hidden aria-live="polite"></div>
-        <button type="button" class="ctox-pane-icon browser-toggle-advanced" data-browser-toggle-advanced aria-label="Erweiterte Aktionen" title="Erweiterte Aktionen" aria-pressed="false">⋯</button>
       </div>
 
       <!-- Erweiterte Aktionen + Diagnose. Standardmäßig eingeklappt (is-advanced-hidden);
@@ -108,7 +137,6 @@
       </div>
 
       <header class="browser-toolbar ctox-toolbar">
-        <button type="button" class="ctox-icon-button browser-sessions-toggle" data-browser-sessions-toggle aria-label="Sitzungen anzeigen" title="Sitzungen anzeigen" aria-expanded="false">☰</button>
         <div class="browser-nav-actions" aria-label="Navigation">
           <button type="button" class="ctox-icon-button" data-browser-back aria-label="Zurueck" data-t-aria="navBack">‹</button>
           <button type="button" class="ctox-icon-button" data-browser-forward aria-label="Vor" data-t-aria="navForward">›</button>
@@ -118,10 +146,6 @@
           <input class="ctox-input" data-browser-address type="url" placeholder="https://example.com" autocomplete="off">
           <button type="submit" class="ctox-icon-button is-primary" data-browser-go aria-label="Adresse öffnen" title="Adresse öffnen">→</button>
         </form>
-        <div class="browser-status-strip" aria-label="Browser Status" aria-live="polite">
-          <span class="ctox-badge" data-browser-status-chip data-t="statusDisconnected">Nicht verbunden</span>
-          <span data-browser-status-title data-t="noWindowOpen">Kein Browser-Fenster geoeffnet</span>
-        </div>
       </header>
       <div class="browser-download-strip" data-browser-downloads hidden></div>
     </div>
@@ -130,11 +154,6 @@
       <!-- custom: Tab-Leiste der fernen Sitzung. Der Runner fuehrt seit je
            mehrere Tabs; sichtbar waren sie bisher nur als Zaehler. -->
       <div class="browser-tabstrip" data-browser-tabstrip role="tablist" aria-label="Browser-Tabs" hidden></div>
-      <div class="browser-view-switch" role="tablist" aria-label="Ansicht">
-        <button type="button" class="ctox-btn ctox-btn-ghost is-active" data-browser-view="live" role="tab" aria-selected="true" data-t="viewLive">Ansicht</button>
-        <button type="button" class="ctox-btn ctox-btn-ghost" data-browser-view="script" role="tab" aria-selected="false" data-t="viewScript">Skript</button>
-        <span class="browser-view-path" data-browser-script-path></span>
-      </div>
       <!-- no-ctox-context: ueber der Buehne gehoert der Rechtsklick der
            fernen Seite, nicht dem CTOX-Kontextmenue der Shell. Die Klasse
            ist der dafuer vorgesehene Ausweg (isCtoxContextMenuBypassTarget

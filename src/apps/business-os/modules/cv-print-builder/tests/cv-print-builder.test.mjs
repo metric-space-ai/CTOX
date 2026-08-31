@@ -141,8 +141,6 @@ const css = read('index.css');
 
 // Canonical column grammar — shell-wired data-pg-* chrome, no bespoke chrome.
 assert.match(markup, /data-pg-search/);
-assert.match(markup, /data-pg-view="cards"/);
-assert.match(markup, /data-pg-view="list"/);
 assert.match(markup, /data-pg-tray-toggle/);
 assert.match(markup, /data-pg-tray\b/);
 assert.match(markup, /data-pg-reset/);
@@ -151,6 +149,34 @@ assert.match(markup, /class="ctox-view-switch"/);
 assert.match(markup, /ctox-pane-body ctox-well/);
 assert.match(markup, /class="ctox-pane-footer"/);
 assert.match(markup, /data-pg-footer/);
+
+// Card/list switch = ONE control, an action and not a state (operator directive
+// 31.08.2026). It replaces the shell's two-button [data-pg-view] group, so the
+// module owns the flip: the icon/labels name the view it switches TO and there
+// is no aria-pressed anywhere on it.
+const viewToggles = markup.match(/data-cv-view-toggle/g) || [];
+assert.equal(viewToggles.length, 1, 'exactly one card/list control');
+assert.doesNotMatch(markup, /data-pg-view/);
+assert.doesNotMatch(markup, /class="ctox-view-toggle"/);
+const toggleTag = markup.match(/<button[^>]*data-cv-view-toggle[^>]*>/)[0];
+assert.doesNotMatch(toggleTag, /aria-pressed/);
+assert.match(toggleTag, /data-cv-list-view="cards"/);
+assert.match(toggleTag, /aria-label="Als Liste anzeigen"/);
+assert.match(source, /function setViewToggle\(state,\s*view\)/);
+assert.match(source, /function toggleListView\(state,\s*button\)/);
+assert.match(source, /button\.removeAttribute\('aria-pressed'\)/);
+assert.match(source, /Als Liste anzeigen/);
+assert.match(source, /Als Karten anzeigen/);
+assert.match(source, /\[data-cv-view-toggle\]'\)\?\.dataset\.cvListView === 'list' \? 'list' : 'cards'/);
+
+// The two views are different SHAPES, not two paddings of the same row:
+// cards carry a second meta line, the list row stays a single line.
+assert.match(source, /class="cv-card-meta cv-card-meta--phase"/);
+assert.match(source, /class="cv-card-meta cv-card-meta--sub"/);
+assert.match(source, /function shortStamp\(ms\)/);
+const rowMarkup = source.slice(source.indexOf('class="cv-row'), source.indexOf('class="cv-row') + 260);
+assert.equal((rowMarkup.match(/<span/g) || []).length, 2, 'list row is title + one short meta');
+assert.match(css, /\.cv-candidate-list\.is-compact \{\n\s*gap: 0;/);
 
 // Standing header actions include create + import + export (JSON round-trip).
 assert.match(markup, /data-action="new"/);

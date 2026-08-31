@@ -8,6 +8,8 @@
   "importInvalid": "Invalid JSON file.",
   "importEmpty": "No records in the file.",
   "search": "Search...",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards",
   "allStatus": "All status",
   "open": "Open",
   "pending": "Pending",

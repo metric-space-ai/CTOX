@@ -17,10 +17,11 @@
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Bereiche suchen…" aria-label="Bereiche suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"></button>
-        </div>
+        <!-- One control, not two: the button is an action that switches the
+             view, so it carries no aria-pressed. `data-pg-view` stays on it as
+             the shell grammar's state channel and always holds the CURRENT
+             view; icon and label announce the view it switches TO. -->
+        <button type="button" class="ctox-pane-icon ctox-view-mode-toggle" data-mail-view-toggle data-pg-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -69,10 +70,7 @@
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search data-mail-search placeholder="Mails durchsuchen…" aria-label="Mails durchsuchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"></button>
-        </div>
+        <button type="button" class="ctox-pane-icon ctox-view-mode-toggle" data-mail-view-toggle data-pg-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -112,9 +110,13 @@
       </div>
     </div>
     <div class="ctox-pane-body ctox-well mail-list-body">
+      <!-- Both views share one row grammar: select box, title track, one short
+           meta on the right. The card view adds meta lines inside the title
+           track, so the head only ever labels these three. -->
       <div class="mail-table-head" role="row">
         <label class="mail-table-check"><input type="checkbox" data-mail-select-page aria-label="Sichtbare Seite auswählen" /></label>
-        <span>Absender</span><span>Betreff und Fortschritt</span><span>Zeit</span>
+        <span class="mail-table-head-subject" data-mail-head-subject>Betreff</span>
+        <span class="mail-table-head-time" data-mail-head-time>Zeit</span>
       </div>
       <div class="mail-record-list" data-mail-record-list role="listbox" aria-label="E-Mails"></div>
       <div class="ctox-empty mail-list-empty" data-mail-list-empty>

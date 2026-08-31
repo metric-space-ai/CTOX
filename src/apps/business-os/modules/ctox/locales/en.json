@@ -99,6 +99,8 @@
   "taskSearch": "Search tasks",
   "cardsView": "Card view",
   "compactFlowView": "Compact live flow",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards",
   "filters": "Filters",
   "resetFilters": "Reset filters",
   "allSources": "All sources",

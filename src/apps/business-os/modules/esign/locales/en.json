@@ -12,5 +12,7 @@
   "viewOpen": "Open",
   "viewDone": "Closed",
   "composerTitle": "Request signature",
-  "signersHead": "Signers"
+  "signersHead": "Signers",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

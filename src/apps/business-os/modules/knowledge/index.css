@@ -43,6 +43,9 @@
 
 /* Shell-v2 pilot: the module surface reaches the single 6px outer frame.
    Color stays in the frame/icon; all working surfaces are opaque and deep. */
+/* Pilot-Override (128px-Icon / 64px-Zeilen) am 31.08.2026 nach visueller
+   Abnahme durch den Betreiber entfernt: Referenzmass ist die geteilte
+   80px/37px-Geometrie der Shell. */
 .shell-window[data-shell-contract="v2"] .knowledge-module {
   --knowledge-bg: var(--shell-v2-surface, #10151c);
   --knowledge-surface: var(--shell-v2-surface-alt, #141b24);
@@ -79,9 +82,7 @@
   background: var(--knowledge-surface);
 }
 
-/* A 64px window glyph leaves two 29px inner header rows next to the 6px
-   frame. Keep the semantic kicker and title, but place them on one baseline
-   so neither row clips or wastes vertical space. */
+/* Keep the title vertically centered inside the first 64px row. */
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-title-row {
   height: 100%;
   gap: 8px;
@@ -95,31 +96,32 @@
   overflow: hidden;
 }
 
-.shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-kicker {
-  flex: 0 0 auto;
-  line-height: 1;
-}
-
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-title {
   margin-top: 0;
   line-height: 1.1;
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-icon {
-  width: min(26px, var(--shell-v2-header-row-size, 29px));
-  height: min(26px, var(--shell-v2-header-row-size, 29px));
+  width: min(36px, var(--shell-v2-header-row-size, 64px));
+  height: min(36px, var(--shell-v2-header-row-size, 64px));
   border-radius: 5px;
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-left > .ctox-pane-header {
-  padding-left: calc(var(--shell-v2-icon-size, 64px) + 14px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 8px);
   padding-top: 0;
   padding-bottom: 0;
   padding-right: 8px;
 }
 
-.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .ctox-pane-header {
-  padding-right: 70px;
+/* Reserved zone 3 (contract §3): the 74x74 window control sits over the top
+   right corner and is two header rows TALL. Both rows of the pane that reaches
+   the window's right edge have to step aside — not just row 1. Before
+   31.08.2026 only row 1 did, and the "Tabellen" tab of the row-2 band ran
+   underneath the close button at every window width. */
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .knowledge-view-switch {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar,
@@ -130,14 +132,24 @@
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-filterbar {
-  padding-left: calc(var(--shell-v2-icon-size, 64px) + 14px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 8px);
   padding-right: 8px;
   gap: 5px;
+  /* Icon-Zone (Vertrag §7, iconZone): die 80x74-Ecke oben links gehoert dem
+     Shell-Icon. padding rueckt nur den Inhalt ein — die Flaeche selbst darf
+     dort ebenfalls nicht gemalt sein. Der harte Verlauf laesst die ersten
+     80px der zweiten Kopfzeile wirklich unbemalt und beginnt die
+     Surface-Flaeche exakt an der Icon-Kante. */
+  background: linear-gradient(
+    to right,
+    transparent var(--shell-v2-icon-size, 80px),
+    var(--knowledge-surface) var(--shell-v2-icon-size, 80px)
+  );
 }
 
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-pane-search {
-  min-height: min(24px, var(--shell-v2-header-row-size, 29px));
-  height: min(24px, var(--shell-v2-header-row-size, 29px));
+  min-height: min(40px, var(--shell-v2-header-row-size, 64px));
+  height: min(40px, var(--shell-v2-header-row-size, 64px));
   padding-block: 0;
   border-radius: 5px;
 }
@@ -154,13 +166,13 @@
   content: '';
   position: absolute;
   left: 50%;
-  top: 50%;
-  width: 3px;
-  height: 48px;
-  border-radius: 999px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  border-radius: 0;
   background: var(--shell-v2-local-accent, var(--shell-v2-frame-left-joint));
   opacity: 0.5;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   transition: opacity 150ms ease, background-color 150ms ease, filter 150ms ease;
 }
 
@@ -171,7 +183,7 @@
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer:hover::before,
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer:focus-visible::before,
 .shell-window[data-shell-contract="v2"] .knowledge-module .ctox-column-resizer.is-active::before {
-  width: 4px;
+  width: 6px;
   background: var(--shell-v2-local-accent, var(--shell-v2-frame-left-joint));
   opacity: 1;
   filter: brightness(1.2);
@@ -525,6 +537,18 @@
   line-height: 1.16;
 }
 
+.knowledge-module .knowledge-resource-path {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  color: var(--knowledge-muted);
+}
+
+.knowledge-module .knowledge-resource-path code {
+  overflow-wrap: anywhere;
+  color: var(--knowledge-text);
+}
+
 .knowledge-module .runbook-document h2,
 .knowledge-module .runbook-document h3 {
   line-height: 1.16;
@@ -865,51 +889,24 @@
   font-size: 11px;
 }
 
-@container business-app-window (max-width: 1120px) {
-  .knowledge-module {
-    grid-template-columns: minmax(280px, var(--knowledge-left-width, 340px)) 10px minmax(0, 1fr);
-    padding: 10px;
-  }
-}
+/* Shell breakpoint 1 (contract §6): three columns -> two. Knowledge only ever
+   had two, so this stage just narrows the list track.
 
-@container business-app-window (max-width: 760px) {
-  .knowledge-module {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(240px, 42vh) minmax(360px, 1fr);
-    gap: 8px;
-    overflow: auto;
-  }
+   The selector is doubled on purpose. `.knowledge-module` alone loses to the
+   V2 skin above (`.shell-window[data-shell-contract="v2"] .knowledge-module`,
+   specificity 0-2-1): a container query changes WHEN a rule applies, never how
+   strongly it applies. Until 31.08.2026 that made the whole responsive layer
+   dead inside a V2 window — measured at 720px container width the grid still
+   read `500px 12px 196px`, i.e. a 196px wide, empty, reserved track next to a
+   list that refused to grow (the same defect the contract records for
+   outbound-lead-generation). Both stages must therefore carry at least the
+   skin's specificity.
 
-  .knowledge-module .knowledge-left,
-  .knowledge-module .knowledge-center {
-    grid-column: 1;
-  }
-
-  .knowledge-module .knowledge-left {
-    grid-row: 1;
-  }
-
-  .knowledge-module .knowledge-center {
-    grid-row: 2;
-  }
-
-  .knowledge-module .ctox-column-resizer {
-    display: none;
-  }
-
-  .knowledge-module .knowledge-center-head .ctox-pane-title-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .knowledge-module .knowledge-center-head .ctox-pane-tabs {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    width: 100%;
-  }
-
-  .knowledge-module .knowledge-center-head .ctox-pane-tab {
-    min-width: 0;
+   The only breakpoints in this file are the two the shell owns: 1024 and 768. */
+@container business-app-window (max-width: 1024px) {
+  .knowledge-module,
+  .shell-window[data-shell-contract="v2"] .knowledge-module {
+    grid-template-columns: minmax(260px, var(--knowledge-left-width, 340px)) 12px minmax(0, 1fr);
   }
 }
 
@@ -940,8 +937,9 @@
 /* Row 2 — filter section: search input + a gear that expands advanced filters. */
 .knowledge-module .knowledge-filterbar {
   display: grid;
-  /* One dense row: [search][view-toggle][filter] — never wrap controls into
-     extra rows, that wastes a full band of vertical space. */
+  /* One dense row: [search][view][filter] — never wrap controls into
+     extra rows, that wastes a full band of vertical space. The view control
+     is ONE button, so it costs one auto track, not a segmented group. */
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 6px;
@@ -1296,29 +1294,64 @@
    content full-width with a back button — no cramped stacking, no wasted space.
    ========================================================================== */
 .knowledge-module .knowledge-mobile-back { display: none; }
-/* Mobile boundary = the shell-wide 767px (same convention as threads phase 1).
-   The JS toggles .is-detail unconditionally; only CSS gates the single-pane
-   master-detail, so widening the container query is a pure CSS change. */
-@container business-app-window (max-width: 767px) {
-  .knowledge-module {
+/* Shell breakpoint 2 (contract §6): two columns -> one. One column here means
+   master-detail, not a squeezed stack: the list owns the whole window, picking
+   an entry swaps in the document pane with a back arrow. Every section that is
+   visible keeps its own .ctox-pane-header, so the first head still holds the
+   icon zone free and the window title slot survives the collapse.
+   The JS toggles .is-detail unconditionally; only CSS gates the swap.
+
+   Same specificity doubling as the 1024 stage — see the note there. Without it
+   the single track never took effect and an empty second track stayed
+   reserved next to the list. */
+@container business-app-window (max-width: 768px) {
+  .knowledge-module,
+  .shell-window[data-shell-contract="v2"] .knowledge-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
     padding: 0;
     gap: 0;
+    /* No horizontal escape hatch: a single track must never scroll sideways. */
+    overflow-x: hidden;
   }
   .knowledge-module .knowledge-left,
-  .knowledge-module .knowledge-center { grid-column: 1; grid-row: 1; }
+  .knowledge-module .knowledge-center { grid-column: 1; grid-row: 1; min-width: 0; }
   .knowledge-module .ctox-column-resizer { display: none; }
+  /* One column means the LIST now reaches the right edge, so its two header
+     rows inherit the duty the detail pane carries in the wide layouts:
+     keep the 74x74 window control free (contract §3 / §7.3). */
+  .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-left > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-left > .knowledge-filterbar {
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
   .knowledge-module .knowledge-center { display: none; }
   .knowledge-module.is-detail .knowledge-left { display: none; }
   .knowledge-module.is-detail .knowledge-center { display: flex; }
   .knowledge-module.is-detail .knowledge-mobile-back { display: inline-flex; }
-  /* tap-friendly rows, no wasted chrome */
-  .knowledge-module .knowledge-bundle { padding: 12px; margin-bottom: 8px; }
-  .knowledge-module .bundle-select { padding: 8px 6px; }
+  /* In .is-detail the DOCUMENT pane is the first column, so its two header
+     rows inherit the icon duty as well: 80px icon + 14px, exactly the
+     reference value the contract records for Knowledge's list head. Without
+     this the title read "ein Eintrag ausgewählt" — clipped by the icon — and
+     the back arrow sat underneath it entirely. */
+  .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-center > .knowledge-view-switch {
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  }
+  /* Four equal, ellipsised tabs on ONE row. Wrapping them into a second row
+     overflowed the two-row header budget and bled into the document. */
+  .knowledge-module .knowledge-center .ctox-pane-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: 100%;
+  }
+  .knowledge-module .knowledge-center .ctox-pane-tab {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .knowledge-module .knowledge-item { min-height: 44px; }
 }
-
 /* ============================================================================
    Filter clarity + view modes (list vs. shard) + consistent second-level
    switchers.
@@ -1345,27 +1378,95 @@
    at the end of the dropdown row instead of floating in its own band. */
 .knowledge-module .knowledge-filter-reset { color: var(--knowledge-muted); }
 .knowledge-module .knowledge-filter-reset:hover { color: var(--knowledge-surface); }
-/* View toggle (shard cards vs. compact list) in the filterbar. */
-.knowledge-module .knowledge-view-toggle { display: inline-flex; gap: 2px; }
-.knowledge-module .knowledge-view-toggle .ctox-pane-icon[aria-pressed="true"] {
-  color: var(--shell-v2-local-accent, var(--knowledge-accent));
-  background: var(--kit-fill-strong);
+/* ============================================================================
+   Two views, two DENSITIES (Betreiber-Direktive 31.08.2026). Before this the
+   shard and the list row were the same markup with a class on it, so the
+   toggle changed almost nothing visible. They are now different shapes:
+
+     cards  three lines — bold title, kicker/scope, counts/last edit — on a
+            raised surface with generous padding
+     list   exactly one line — title left, one short kicker right — hairline
+            separated, maximum density
+
+   The selectors carry the V2 skin's specificity because the skin above sets
+   .knowledge-bundle padding-inline itself.
+   ========================================================================== */
+
+/* --- cards --------------------------------------------------------------- */
+.knowledge-module .knowledge-bundle,
+.shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-bundle {
+  padding: 9px 12px;
+  margin-bottom: 4px;
 }
-/* Compact list mode: flat one-line rows, no card fills, hairline separators. */
-.knowledge-module.is-list-view .knowledge-bundle {
+.knowledge-module .knowledge-bundle .bundle-select {
+  display: grid;
+  gap: 3px;
+  padding: 0;
+}
+.knowledge-module .knowledge-bundle .bundle-meta + .bundle-meta { margin-top: 0; }
+.knowledge-module .bundle-scope,
+.knowledge-module .bundle-edited { white-space: nowrap; }
+
+/* --- list ---------------------------------------------------------------- */
+.knowledge-module.is-list-view .knowledge-bundle,
+.shell-window[data-shell-contract="v2"] .knowledge-module.is-list-view .knowledge-bundle {
   margin-bottom: 0;
-  padding: 6px 8px;
+  padding: 0 12px;
   border-radius: 0;
   background: transparent;
   border-bottom: 1px solid color-mix(in srgb, var(--knowledge-line) 55%, transparent);
 }
 .knowledge-module.is-list-view .knowledge-bundle:hover { background: var(--kit-hover); }
 .knowledge-module.is-list-view .knowledge-bundle.is-selected {
-  background: color-mix(in srgb, var(--knowledge-accent) 10%, transparent);
+  background: color-mix(in srgb, var(--shell-v2-local-accent, var(--knowledge-accent)) 12%, transparent);
 }
-.knowledge-module.is-list-view .bundle-counts { display: none; }
+/* ONE line: title takes the remaining width, the kicker is the only meta and
+   it sits right. Fixed row height is what makes the density readable as a
+   deliberate mode rather than as a slightly tighter card. */
+.knowledge-module.is-list-view .knowledge-bundle .bundle-select {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 26px;
+  padding: 0;
+  line-height: 1.15;
+}
+.knowledge-module.is-list-view .bundle-select strong { font-weight: 600; }
+.knowledge-module .bundle-tag {
+  /* A ch cap, not a percentage: a percentage max-width inside an `auto` grid
+     track resolves against an indefinite containing block and collapsed the
+     kicker to "EN…" while the title still had room. */
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--knowledge-muted);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
 /* Zero counts stay readable but recede. */
 .knowledge-module .kb-count.kb-zero { opacity: 0.45; }
+
+/* Single-column stage: raise the touch target without re-flattening the two
+   views into one. Placed after the density rules on purpose — a container
+   query changes when a rule applies, never how strongly. */
+@container business-app-window (max-width: 768px) {
+  .knowledge-module .knowledge-bundle,
+  .shell-window[data-shell-contract="v2"] .knowledge-module .knowledge-bundle {
+    padding: 12px;
+    margin-bottom: 6px;
+  }
+  .knowledge-module.is-list-view .knowledge-bundle,
+  .shell-window[data-shell-contract="v2"] .knowledge-module.is-list-view .knowledge-bundle {
+    padding: 0 12px;
+    margin-bottom: 0;
+  }
+  .knowledge-module.is-list-view .knowledge-bundle .bundle-select { min-height: 44px; }
+}
 /* Second-level switchers (tables / runbooks): one consistent grammar — equal
    segments on a fill track, smaller type, ellipsis, accent fill when current.
    Never a raised lone button. */

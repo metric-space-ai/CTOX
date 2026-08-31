@@ -2806,6 +2806,8 @@ function campaignColumnMarkup() {
           <input type="file" accept="application/json,.json" data-campaign-record-import hidden />
         </div>
       </div>
+    </header>
+    <div class="outbound-pane-toolbelt">
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search value="${escapeHtml(state.campaignSearch)}" placeholder="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}" aria-label="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}">
         <div class="ctox-view-toggle" role="group" aria-label="${escapeHtml(t('view', 'Darstellung'))}">
@@ -2833,12 +2835,12 @@ function campaignColumnMarkup() {
           <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="${escapeHtml(t('resetFilters', 'Filter zurücksetzen'))}" title="${escapeHtml(t('resetFilters', 'Filter zurücksetzen'))}">${resetIcon()}</button>
         </div>
       </div>
-    </header>
-    <nav class="ctox-view-switch" aria-label="${escapeHtml(t('campaignStatusViews', 'Campaign-Status'))}">
-      <div class="ctox-pane-tabs" role="tablist">
-        ${['all', 'active', 'planning', 'done'].map((key) => `<button type="button" class="ctox-pane-tab${state.campaignBand === key ? ' is-active' : ''}" role="tab" data-pg-band="${key}" aria-selected="${state.campaignBand === key}">${escapeHtml(campaignBandLabel(key))}<span class="view-count" data-pg-count="${key}"> (${counts[key]})</span></button>`).join('')}
-      </div>
-    </nav>
+      <nav class="ctox-view-switch" aria-label="${escapeHtml(t('campaignStatusViews', 'Campaign-Status'))}">
+        <div class="ctox-pane-tabs" role="tablist">
+          ${['all', 'active', 'planning', 'done'].map((key) => `<button type="button" class="ctox-pane-tab${state.campaignBand === key ? ' is-active' : ''}" role="tab" data-pg-band="${key}" aria-selected="${state.campaignBand === key}">${escapeHtml(campaignBandLabel(key))}<span class="view-count" data-pg-count="${key}"> (${counts[key]})</span></button>`).join('')}
+        </div>
+      </nav>
+    </div>
     <div class="ctox-pane-body ctox-well">
       <div class="ctox-list outbound-campaign-list${cards ? ' is-cards' : ' is-list'}" role="listbox" data-campaign-list></div>
     </div>
@@ -3182,9 +3184,13 @@ function renderOutreachCenterShell(campaign) {
           <button class="ctox-pane-icon" type="button" data-action="ao-audit-export" title="${escapeHtml(t('auditExport', 'Audit-Export'))}" aria-label="${escapeHtml(t('auditExport', 'Audit-Export'))}">${actionIcon('export')}</button>
         </div>
       </div>
-      ${renderWorkbenchModeSwitch()}
     </header>
-    <div class="ctox-pane-body outbound-outreach-host" data-outbound-outreach-host>${renderActiveOutreachShell(campaign)}</div>
+    <div class="outbound-center-stack">
+      <div class="outbound-pane-toolbelt">
+        ${renderWorkbenchModeSwitch()}
+      </div>
+      <div class="ctox-pane-body outbound-outreach-host" data-outbound-outreach-host>${renderActiveOutreachShell(campaign)}</div>
+    </div>
   `;
 }
 
@@ -3366,6 +3372,9 @@ function renderCenter(force = false) {
           >${actionIcon('settings')}</button>
         </div>
       </div>
+    </header>
+    <div class="outbound-center-stack">
+      <div class="outbound-pane-toolbelt">
       ${renderWorkbenchModeSwitch()}
       <div class="ctox-pane-tools outbound-center-tools">
         <div class="ctox-pane-tabs outbound-funnel-tabs" role="tablist" aria-label="${escapeHtml(t('campaignFunnel', 'Campaign-Funnel'))}">
@@ -3403,8 +3412,9 @@ function renderCenter(force = false) {
           <span>${hiddenCount}</span>
         </button>
       </div>
-    </header>
-    <div class="outbound-center-content">${renderQualificationCenterContent(campaign)}</div>
+      </div>
+      <div class="outbound-center-content">${renderQualificationCenterContent(campaign)}</div>
+    </div>
   `;
 
   // Restore scroll & focus states

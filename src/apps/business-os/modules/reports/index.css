@@ -49,14 +49,28 @@
   border-color: color-mix(in srgb, var(--reports-feature) 30%, transparent);
 }
 
-/* custom: record-row content — badge row, title and meta line stacked inside
-   the standard .ctox-list-item button. */
+/* custom: SHARD row (cards view) — title first and bold, below it the meta
+   lines that decide triage (type/status/severity badges, then module · date).
+   Roomier padding than the kit default so the shard reads as a card, not a
+   list line. Counterpart: .report-row-compact below (one dense line). */
 .reports-module .report-row {
   display: grid;
-  gap: 4px;
+  gap: 5px;
+  padding: 12px 14px;
 }
 
-.reports-module .report-row strong {
+.reports-module .report-row .report-row-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reports-module .report-row .report-row-sub {
+  font-size: 11px;
+  line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -125,35 +139,26 @@
   justify-self: start;
 }
 
-/* custom: narrow windows stack the three panes vertically so the detail
-   keeps a readable width without horizontal squeezing. */
-@container business-app-window (max-width: 1180px) {
-  /* Match the higher-specificity desktop collapse rule as well. Without the
-     second selector, `.reports-module.is-actions-hidden` keeps the desktop
-     three-column template while the resizers below are removed from layout.
-     The detail pane then falls into the 12px resizer column and looks empty. */
+/* Die Shell besitzt genau zwei Haltepunkte (Vertrag §6): 1024px drei Spalten
+   -> zwei, 768px zwei Spalten -> eine. Die App definiert keine eigenen.
+
+   1024px — drei Spuren auf zwei: die dritte Spur (Aktionen) faellt weg, ihr
+   Resizer ebenfalls. Die Spaltendefinition wird MITGESETZT, damit keine
+   reservierte, leere Spur zurueckbleibt (der Fehler aus Vertrag §6). Beide
+   Selektoren, weil `.is-actions-hidden` sonst die Desktop-Definition behaelt. */
+@container business-app-window (max-width: 1024px) {
   .reports-module,
   .reports-module.is-actions-hidden {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(200px, 34vh) minmax(380px, 1fr) minmax(220px, 36vh);
-    height: auto;
-    min-height: 100%;
-    overflow-y: auto;
-    gap: 8px;
+    grid-template-columns: var(--ctox-left-width, 320px) 12px minmax(0, 1fr);
   }
 
-  .reports-module > [data-resizer] {
+  .reports-module > [data-resizer="right"] {
     display: none !important;
   }
 
-  .reports-detail,
-  .reports-actions {
-    min-height: 220px;
-  }
-
-  /* The actions pane is hidden by default; below the narrow breakpoint the
-     detail stays visible and the actions column drops out unless explicitly
-     re-revealed by the toggle (mobile uses the same column). */
+  /* Die Aktionsspalte ist standardmaessig ausgeblendet; eingeblendet uebernimmt
+     sie in der Zwei-Spalten-Form die Stelle des Details (eine Spur, ein
+     Inhalt) — dieselbe Umschaltung wie zuvor, nur ohne dritte Spur. */
   .reports-module:not(.is-actions-hidden) .reports-detail {
     display: none;
   }
@@ -164,9 +169,41 @@
   }
 }
 
-@container business-app-window (max-width: 767px) {
-  .reports-module {
-    grid-template-rows: minmax(220px, 38vh) minmax(420px, 1fr) minmax(260px, 42vh);
+/* 768px — zwei Spalten auf eine: gestapelt. Die Zeilenspuren entstehen
+   IMPLIZIT (grid-auto-rows), damit eine ausgeblendete Sektion keine leere
+   Spur reserviert; `align-content: stretch` verteilt den Rest auf die
+   auto-Spuren. */
+@container business-app-window (max-width: 768px) {
+  .reports-module,
+  .reports-module.is-actions-hidden {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-flow: row;
+    grid-auto-rows: minmax(min-content, auto);
+    align-content: stretch;
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    gap: 8px;
+    /* Schmale Kontexte verlieren den 6px-Fensterrahmen; ohne ihn liefe die
+       Pane-Flaeche der ersten Spalte bis an die Fensterkante und damit unter
+       das Icon. Der Innenabstand haelt denselben Randstreifen frei, den der
+       Rahmen sonst beitraegt (Messpunkt der Icon-Zone: x = 12). */
+    padding: 12px 14px;
+  }
+
+  .reports-module > [data-resizer] {
+    display: none !important;
+  }
+
+  .reports-rail {
+    min-height: 300px;
+  }
+
+  .reports-detail,
+  .reports-actions {
+    min-height: 260px;
   }
 }
 
@@ -215,11 +252,9 @@
   padding: 0 12px 8px;
 }
 .reports-filterbar .ctox-pane-search { flex: 1 1 auto; min-width: 0; }
-.reports-view-toggle { display: flex; gap: 2px; flex: 0 0 auto; }
-.reports-view-toggle .ctox-pane-icon[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
+/* One control, not two (Betreiber-Direktive 31.08.2026): the view switch is an
+   action button, so it carries no pressed state and needs no group chrome. */
+.reports-view-toggle { flex: 0 0 auto; }
 .reports-filter-toggle { position: relative; flex: 0 0 auto; }
 .reports-filter-toggle.has-active-filters::after {
   content: '';
@@ -264,22 +299,39 @@
   color: var(--muted);
   font-size: 10px;
 }
-.reports-rail { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+/* Explizite Grammatik-Zeilen: Titel · Filter · optionale Filterablage ·
+   gezaehltes Band · Well (fuellt) · Footer. Band, Well und Footer sind fest
+   platziert, damit die ausgeblendete Filterablage die Spuren nicht verschiebt
+   (ein [hidden] Kind ist kein Grid-Item mehr). */
+.reports-rail { grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; }
+.reports-rail > .reports-view-switch { grid-row: 4; }
+.reports-rail > .reports-well { grid-row: 5; }
+.reports-rail > .reports-footer { grid-row: 6; }
 .reports-detail { grid-template-rows: auto minmax(0, 1fr) auto; }
-/* Compact list rendering (canonical counterpart of the shard rows). */
+/* LIST rendering — exactly one dense line per entry: title plus a single short
+   meta on the right. Tight line-height, small type, no badges; the deliberate
+   counterpart of the roomier .report-row shard above. */
 .report-row-compact {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 5px 12px;
+  gap: 10px;
+  padding: 4px 14px;
+  line-height: 1.3;
+  font-size: 12px;
 }
 .reports-compact-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
+  font-weight: 500;
+}
+.reports-compact-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 /* Delegation status line + dialog body. */
 .reports-delegation-status {
@@ -294,3 +346,90 @@
 .reports-delegation-link:hover { text-decoration: underline; }
 .reports-delegate-body { display: flex; flex-direction: column; gap: 6px; }
 .reports-delegate-hint { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+
+/* ============================================================================
+   Shell-v2-Kopfgeometrie. Die Shell legt drei Zonen UEBER den App-Inhalt
+   (`.shell-window-content` bekommt `inset: 0` und wird NICHT eingerueckt):
+   App-Icon 80x80 oben links, Header-Band 37px ueber die volle Breite,
+   Fenstersteuerung 74x74 oben rechts. Referenz ist Knowledge; die kompakte
+   Auspraegung entspricht dem bereits migrierten Browser-Modul.
+   Beide Koepfe der obersten Zeile sind exakt eine Header-Zeile hoch; der linke
+   Kopf haelt die Icon-Spalte frei, der rechte die Fenstersteuerung. Die zweite
+   Zeile liegt noch innerhalb beider Zonen (2 x 37px = 74px = 80px - 6px
+   Rahmen) und wird deshalb gleich behandelt.
+   ========================================================================== */
+.shell-window[data-shell-contract="v2"] .reports-module .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .reports-module .reports-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .reports-module .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+/* Kicker + Titel bleiben gestapelt: 14px Kicker + 17px Titel passen in die
+   37px-Zeile, und der Titel behaelt die volle Spaltenbreite. Der Titel ist
+   zugleich der Ausloeser des Shell-Versionsmenues (wireShellV2ModuleTitle
+   sucht genau `.ctox-pane-header .ctox-pane-title`) und darf deshalb nicht
+   auf wenige Pixel zusammengedrueckt werden. */
+.shell-window[data-shell-contract="v2"] .reports-module .ctox-pane-titles {
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .reports-module .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Linke Spalte: Icon-Zone (80px) freihalten — Titelzeile UND Filterzeile. */
+.shell-window[data-shell-contract="v2"] .reports-module .reports-rail > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .reports-module .reports-rail > .reports-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 14px;
+}
+
+/* Rechte Spalte: Fenstersteuerung (74x74) freihalten. */
+.shell-window[data-shell-contract="v2"] .reports-module .reports-detail > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+/* Die Aktionsspalte hat keinen eigenen Kopf. Eingeblendet wird sie zur letzten
+   Spalte der obersten Zeile und liefe sonst unter die Fenstersteuerung. */
+.shell-window[data-shell-contract="v2"] .reports-module:not(.is-actions-hidden) .reports-actions > .reports-actions-scroll {
+  padding-top: calc(var(--shell-v2-header-row-size, 37px) + 14px);
+}
+
+/* Zwei-Spalten-Form: die Aktionsspalte steht an der Stelle des Details und ist
+   damit die letzte Spalte der obersten Zeile — sie liefe weiterhin unter die
+   Fenstersteuerung, der Vorschub bleibt also. Gestapelt (unter 768px) liegt
+   sie nicht mehr oben rechts; dort gilt wieder der normale Innenabstand. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .reports-module:not(.is-actions-hidden) .reports-actions > .reports-actions-scroll {
+    padding-top: 14px;
+  }
+
+  /* Gestapelt ist der Rail-Kopf der EINZIGE Kopf der obersten Zeile: er haelt
+     links die Icon-Zone (80px) und rechts die Fenstersteuerung (74x74) frei.
+     Die Filterzeile liegt noch in der Icon-Zone (2 x 37px = 74px), aber nicht
+     mehr unter der Steuerung — sie behaelt ihren rechten Regelabstand. */
+  .shell-window[data-shell-contract="v2"] .reports-module .reports-rail > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .reports-module .reports-rail > .reports-filterbar {
+    padding-right: 70px;
+  }
+
+  /* Das Detail steht gestapelt in Zeile 2 und liegt damit unter beiden
+     Shell-Zonen — der Vorschub fuer die Fenstersteuerung entfaellt. */
+  .shell-window[data-shell-contract="v2"] .reports-module .reports-detail > .ctox-pane-header {
+    padding-right: 14px;
+  }
+}

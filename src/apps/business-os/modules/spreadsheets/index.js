@@ -888,10 +888,13 @@ function renderLeft(state) {
           <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewählte Tabelle exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewählte Tabelle exportieren'))}" data-spreadsheets-export ${selected ? '' : 'disabled'}>${actionIcon(state, 'export')}</button>
         </div>
       </div>
-      <div class="ctox-pane-tools">
+    </header>
+    <!-- Shell V2: the pane head is exactly one shell header row tall, so the
+         search and filter strips are siblings below it, not header rows. -->
+    <div class="ctox-pane-tools spreadsheets-search-bar">
         <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Tabelle suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Tabellen suchen'))}" data-spreadsheets-search value="${escapeHtml(state.searchQuery)}">
-      </div>
-      <div class="ctox-pane-tools spreadsheets-filter-bar">
+    </div>
+    <div class="ctox-pane-tools spreadsheets-filter-bar">
         <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('sortLabel', 'Tabellen sortieren'))}" data-spreadsheets-sort>
           <option value="updated_desc" ${state.sortBy === 'updated_desc' ? 'selected' : ''}>${escapeHtml(state.t('sortByNewest', 'Neueste zuerst'))}</option>
           <option value="updated_asc" ${state.sortBy === 'updated_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByOldest', 'Älteste zuerst'))}</option>
@@ -908,8 +911,7 @@ function renderLeft(state) {
         <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('tagFilterLabel', 'Tabellen-Tags filtern'))}" data-spreadsheets-tag>
           ${tagFilterOptions(state)}
         </select>
-      </div>
-    </header>
+    </div>
   `;
 
   const list = document.createElement('div');
@@ -1184,7 +1186,18 @@ async function renderCenter(state) {
 
   if (!record) {
     const hasFilters = hasActiveListFilters(state);
+    // The pane head stays even without a selection: shell V2 hangs the version
+    // menu on `.ctox-pane-header .ctox-pane-title` of the module host, so the
+    // empty state must not drop the head or the app loses version history and
+    // source access.
     shell.innerHTML = `
+      <header class="ctox-pane-header ctox-pane-band spreadsheets-editor-header">
+        <div class="ctox-pane-title-row">
+          <div class="ctox-pane-titles">
+            <h2 class="ctox-pane-title">${escapeHtml(state.t('spreadsheetsTitle', 'CTOX Spreadsheets'))}</h2>
+          </div>
+        </div>
+      </header>
       <div class="ctox-empty">
         <strong>${escapeHtml(hasFilters ? state.t('noMatches', 'Keine Treffer') : state.t('noDocumentSelected', 'Keine Tabelle ausgewählt.'))}</strong>
         <span>${escapeHtml(hasFilters ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('noDocumentSelectedPrompt', 'Links eine Tabelle importieren oder auswählen.'))}</span>

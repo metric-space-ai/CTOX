@@ -67,6 +67,30 @@
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+/* Row 2 of a pane: the filter / mode strip that used to sit inside the pane
+   header. It is a sibling now so the header itself is exactly one shell header
+   row high (Shell V2 block at the end of this file). Both panes keep their
+   grid tracks: the left strip swallows the view switch, the center strip
+   shares the second track with the workbench. */
+.outbound-pane-toolbelt {
+  min-width: 0;
+}
+
+.outbound-center-stack {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The center strip keeps the inset and the closing hairline the pane header
+   used to give it; the left strip ends in .ctox-view-switch, which has both. */
+.outbound-center-stack > .outbound-pane-toolbelt {
+  padding: 0 14px 10px;
+  border-bottom: 1px solid var(--hairline, var(--line));
+}
+
 .outbound-center-tools {
   flex-wrap: wrap;
 }
@@ -1441,7 +1465,7 @@
   gap: 8px;
 }
 
-@container business-app-window (max-width: 1100px) {
+@container business-app-window (max-width: 1024px) {
   .outbound-column-settings-grid {
     grid-template-columns: 1fr;
   }
@@ -2169,7 +2193,7 @@
    Narrow window: the kit collapses the frame to one column and hides the
    resizer; the left pane only needs a height cap.
    -------------------------------------------------------------------------- */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .outbound-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(180px, 42vh) minmax(360px, 1fr);
@@ -2187,13 +2211,13 @@
 }
 
 /* ----------------------------------------------------------------------------
-   Phone layout (≤767px container): the JS collapses the inner split to a
+   Phone layout (≤768px container): the JS collapses the inner split to a
    single track below 720px (handle hidden), so the detail pane becomes a
    stacked section under the table and the workbench scrolls vertically.
    The CRM grid keeps its fixed column widths and scrolls horizontally inside
    its own container (.outbound-table-scroll-unified) — never the page.
    -------------------------------------------------------------------------- */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .outbound-split-workbench,
   .outbound-split-workbench.is-detail-hidden {
     grid-template-columns: minmax(0, 1fr);
@@ -2318,5 +2342,102 @@
   .outbound-toggle-label input {
     width: 22px;
     height: 22px;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   Shell V2 window contract — docs/business-os-shell-v2-contract.md.
+
+   The shell gives up its own title bar and hands the app the whole window
+   (`.shell-window-content` gets `inset: 0`, no indent). It takes three zones
+   back by overlay, and keeping them free is the app's job:
+
+     app icon         80x80  top left    (--shell-v2-icon-size)
+     header band      37px   full width  (--shell-v2-header-row-size)
+     window controls  74x74  top right
+
+   The icon is by definition exactly two header rows high, so pane rows 1 and 2
+   both stay clear of it. Reference implementation: modules/knowledge.
+   -------------------------------------------------------------------------- */
+.shell-window[data-shell-contract="v2"] .outbound-module {
+  padding: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane {
+  border: 0;
+  border-radius: 0;
+}
+
+/* 1. Both headers of the top row are exactly one shell header row high. */
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane > .ctox-pane-header > .ctox-pane-title-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Kicker and title share the single row. The title carries the shell's version
+   menu, so it keeps min-width: 0 plus ellipsis and the kicker yields first. */
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane > .ctox-pane-header .ctox-pane-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane > .ctox-pane-header .ctox-pane-kicker {
+  flex: 0 1 auto;
+}
+
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane > .ctox-pane-header .ctox-pane-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+}
+
+/* The action block never claims the title's width. */
+.shell-window[data-shell-contract="v2"] .outbound-module > .ctox-pane > .ctox-pane-header .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* 2. Icon zone: 80px icon + 14px gutter on the first header. */
+.shell-window[data-shell-contract="v2"] .outbound-module > .outbound-left > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* 3. Control zone: 74px controls, 70px reserved on the last header. */
+.shell-window[data-shell-contract="v2"] .outbound-module > .outbound-center > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+/* Row 2 still lies under the icon; the icon ends after two header rows, so
+   row 2 must not fall below one. */
+.shell-window[data-shell-contract="v2"] .outbound-module .outbound-pane-toolbelt {
+  min-height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* Only the first row of the strip still lies beside the icon; the filter tray
+   and the view switch below it keep the kit's own 12px inset. */
+.shell-window[data-shell-contract="v2"] .outbound-module > .outbound-left > .outbound-pane-toolbelt > :first-child {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* One column: the left header is then the only header in the top row and has
+   to clear the window controls as well. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .outbound-module > .outbound-left > .ctox-pane-header {
+    padding-right: 70px;
   }
 }

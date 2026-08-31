@@ -7,18 +7,110 @@
    selector rows, the auto-reveal detail card, and the gate result rows. */
 
 /* Default track width for the shell-owned resizer (it writes inline
-   --ctox-left-width onto the frame while dragging). */
-.nachweise-module { --ctox-left-width: 320px; }
+   --ctox-left-width onto the frame while dragging). The shell-v2 app icon
+   claims the first 80px of the rail head, so the default track carries that
+   reservation; otherwise the pane title truncates to "Nachw…" at rest. */
+.nachweise-module { --ctox-left-width: 400px; }
 
 /* Explicit column pins so the center pane never slides onto the resizer track
-   when the kit hides resizers on narrow windows. Pane grid rows:
-   auto [band] minmax(0,1fr) [well] auto [footer]. */
-.nachweise-rail { grid-column: 1; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+   when the kit hides resizers on narrow windows. Row 1 of both panes is the
+   shell-v2 header row (the shell paints its icon, header band and window
+   controls over it); the app-owned chrome starts in row 2. */
+.nachweise-rail {
+  grid-column: 1;
+  grid-template-rows: var(--shell-v2-header-row-size, 37px) auto auto minmax(0, 1fr) auto;
+}
 .nachweise-module > [data-resizer="left"] { grid-column: 2; }
-.nachweise-main { grid-column: 3; grid-template-rows: auto minmax(0, 1fr); }
+.nachweise-main {
+  grid-column: 3;
+  grid-template-rows: var(--shell-v2-header-row-size, 37px) auto minmax(0, 1fr);
+}
+
+/* ---------------------------------------------------------------------------
+   Shell V2 header contract (docs/business-os-shell-v2-contract.md, §3/§7).
+   `.shell-window-content` is inset:0, so the app must keep the three shell
+   zones free itself: 80x80 icon top left, a 37px header band across the
+   width, and the 74x74 window controls top right. Knowledge is the reference.
+   ------------------------------------------------------------------------ */
+.nachweise-module .ctox-pane-header {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* Row 1 is only 37px high: the kicker sits beside the title instead of above
+   it, and both truncate rather than push the action block out of the row. */
+.nachweise-module .ctox-pane-header .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+  gap: 8px;
+}
+
+.nachweise-module .ctox-pane-header .ctox-pane-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.nachweise-module .ctox-pane-header .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The version menu hangs off this title (wireShellV2ModuleTitle); the action
+   block must never claim the free space and shrink its hit area. */
+.nachweise-module .ctox-pane-header .ctox-pane-actions { flex: 0 0 auto; }
+
+.nachweise-module .ctox-pane-header .ctox-pane-icon {
+  width: min(30px, var(--shell-v2-header-row-size, 37px));
+  height: min(30px, var(--shell-v2-header-row-size, 37px));
+}
+
+/* First head: keep the 80px app icon clear. Last head: keep the 74px window
+   controls clear. */
+.nachweise-rail > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 14px;
+}
+
+.nachweise-main > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+/* Second header row: same icon-zone inset as the title row above it. The
+   80x74 top-left corner belongs to the shell icon (contract §7, iconZone), so
+   the filterbar is indented past it and stays unpainted there; the row is one
+   header row tall so title row + tool row = 2 x 37px. The filter tray opens
+   below the 74px zone and keeps the normal inset. */
+.nachweise-rail-tools { min-width: 0; padding-top: 0; }
+.nachweise-rail-tools > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+  padding: 0 14px 0 calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
 
 /* Main workbench: header subtitle + scroll rhythm. */
-.nachweise-main .nachweise-sub { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.nachweise-main > .nachweise-sub {
+  margin: 0;
+  padding: 6px 70px 8px 14px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nachweise-main > .nachweise-sub:empty { display: none; }
 .nachweise-workbench {
   display: flex;
   flex-direction: column;
@@ -53,17 +145,64 @@
 }
 .nachweise-detail .ats-tag { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
 
-/* Shard / compact selector rows (both are the kit .ctox-list-item button). */
-.nachweise-row { display: grid; gap: 4px; }
+/* The single card/list switch: one button, no pressed state (the icon names the
+   view it switches TO). Sits in the filterbar next to search and filter. */
+.nachweise-view-toggle { flex: 0 0 auto; }
+
+/* ---------------------------------------------------------------------------
+   Two genuinely different row shapes, not one row at two paddings
+   (Betreiber-Direktive 31.08.). Both are the kit .ctox-list-item.
+   ------------------------------------------------------------------------ */
+
+/* KARTEN (Shards): three lines on generous padding — title + status, then the
+   two meta lines that decide a credential. */
+.nachweise-row--cards {
+  display: grid;
+  gap: 4px;
+  padding: 11px 14px;
+  line-height: 1.35;
+}
+.nachweise-row--cards .nachweise-row-title {
+  font-size: var(--fs-base, 13px);
+  font-weight: 650;
+  color: var(--text-strong, var(--text));
+}
+.nachweise-row--cards .nachweise-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* LISTE: exactly one dense line — identity left, one short meta right. */
 .nachweise-row--list {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding: 3px 14px;
+  min-height: 26px;
+  line-height: 1.2;
 }
-.nachweise-row-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.nachweise-row--list .nachweise-row-title {
+  font-size: var(--fs-sm, 12px);
+  font-weight: 500;
+}
+/* Density: the badge is the single meta, so it recedes to a compact chip. */
+.nachweise-row--list .ctox-badge {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.nachweise-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.nachweise-row-head .ctox-badge { flex: 0 0 auto; }
 .nachweise-row-title {
   min-width: 0;
   overflow: hidden;
@@ -83,27 +222,56 @@
 .nachweise-main .ats-blockers { margin: 6px 0 0; padding-left: 18px; }
 .nachweise-main .ats-blockers li { font-size: 12px; margin: 2px 0; }
 
-/* Narrow windows: stack the two panes and drop the resizer. */
-@container business-app-window (max-width: 760px) {
+/* ---------------------------------------------------------------------------
+   Responsive stages. The two breakpoints belong to the SHELL (contract §6):
+   1024px = three columns -> two, 768px = two -> one. No other boundary appears
+   in this file, and no @media at all — a window shell measures the window,
+   never the screen.
+
+   Breakpoint 1 (1024px) has nothing to collapse here: this app is two-column
+   by construction, so it stays a deliberate no-op. Measured, not assumed —
+   trimming the rail track at 1024px was tried and reverted: at 320px the pane
+   title truncates to "Nachw…" and the version-menu trigger that hangs off it
+   (contract §4) shrinks with it. The two-column form at 1000px is therefore
+   the same form as at 1180px, with the same header rules.
+   ------------------------------------------------------------------------ */
+
+/* Shell breakpoint 2 (§6): two columns -> one. The panes stack and the resizer
+   goes away. `padding: 0` is load-bearing, not cosmetic: with the workspace's
+   narrow 6px inset the rail's own surface begins INSIDE the shell's 80x74
+   icon zone and becomes the topmost painted box there (contract §7,
+   iconZone). Flush against the window frame the rail starts at the content
+   origin, the opaque app icon covers the corner completely, and the app's own
+   chrome stays indented past it — the Knowledge reference behaviour.
+   The same block carries the touch sizing, because below it the module is a
+   single column on a phone-sized window. */
+@container business-app-window (max-width: 768px) {
   .nachweise-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(200px, 40vh) minmax(320px, 1fr);
     height: auto;
     min-height: 100%;
+    padding: 0;
     overflow-y: auto;
-    gap: 8px;
+    /* A single track must never scroll sideways. */
+    overflow-x: hidden;
+    gap: 6px;
   }
   .nachweise-module > [data-resizer] { display: none !important; }
-  .nachweise-rail { grid-column: 1; }
-  .nachweise-main { grid-column: 1; }
-}
+  .nachweise-rail { grid-column: 1; min-width: 0; }
+  .nachweise-main { grid-column: 1; min-width: 0; }
 
-/* Phone sheet (container <= 767px): the <= 760px block already stacks the
-   rail above the workbench, and the kit collapses .ctox-compact-form to
-   2/1 columns. What remains for touch operability: >=44px tap targets on
-   every control and a wrapping detail header so the record actions never
-   push past the viewport edge. */
-@container business-app-window (max-width: 767px) {
+  /* Stacked: the rail head is now both the first and the last head of the
+     top row, so it must clear the window controls as well. */
+  .nachweise-rail > .ctox-pane-header { padding-right: 70px; }
+
+  /* Same reservation for the second header row underneath it: the icon zone is
+     74px tall, so the tool row still runs under the icon. */
+  .nachweise-rail-tools > .ctox-filterbar { padding-right: 70px; }
+
+  /* Touch operability: >=44px tap targets on every control and a wrapping
+     detail header so the record actions never push past the window edge.
+     Header icons stay inside the 37px shell row and are exempt. */
   .nachweise-module .ctox-button,
   .nachweise-module .ctox-run-control,
   .nachweise-module .ctox-pane-icon,
@@ -111,6 +279,15 @@
   .nachweise-module .ctox-sort-dir {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  /* ...except inside the 37px shell header row, which the app must not
+     outgrow; those two icon buttons keep their row-sized box. */
+  .nachweise-module .ctox-pane-header .ctox-pane-icon {
+    min-width: 0;
+    min-height: 0;
+    width: min(30px, var(--shell-v2-header-row-size, 37px));
+    height: min(30px, var(--shell-v2-header-row-size, 37px));
   }
 
   .nachweise-module .ctox-pane-tab {

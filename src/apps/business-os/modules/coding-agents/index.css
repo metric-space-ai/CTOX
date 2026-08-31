@@ -68,6 +68,10 @@
   gap: 8px;
   padding: 6px;
 }
+/* Shard (card) rendering: icon tile, bold title, its own meta line — the two
+   modes differ in structure and density, not only in padding. */
+.coding-agents-app-item .coding-agents-app-title { font-weight: 600; font-size: 13px; line-height: 1.3; }
+.coding-agents-app-item .coding-agents-app-id { line-height: 1.3; }
 .coding-agents-app-icon {
   position: relative;
   display: flex;
@@ -106,13 +110,22 @@
   text-overflow: ellipsis;
 }
 @container coding-agents-rail (min-width: 150px) {
-  .coding-agents-app-item { justify-content: flex-start; }
+  /* Cards: roomier padding, two lines of content per entry. */
+  .coding-agents-app-item { justify-content: flex-start; padding: 9px 12px; gap: 10px; }
   .coding-agents-app-row { display: flex; }
-  /* List mode: compact one-line rows — no icon tile, title only. */
+  /* List: exactly ONE dense line — no icon tile, title left, the module id as
+     the single short meta on the right. */
   .is-list-view .coding-agents-app-icon { display: none; }
-  .is-list-view .coding-agents-app-item { padding: 4px 10px; }
-  .is-list-view .coding-agents-app-row { flex-direction: row; align-items: baseline; gap: 8px; }
-  .is-list-view .coding-agents-app-id { flex: 0 1 auto; }
+  .is-list-view .coding-agents-app-item { padding: 2px 12px; gap: 8px; }
+  .is-list-view .coding-agents-app-row {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 10px;
+    width: 100%;
+    line-height: 1.25;
+  }
+  .is-list-view .coding-agents-app-title { flex: 0 1 auto; font-weight: 500; font-size: 12px; line-height: 1.25; }
+  .is-list-view .coding-agents-app-id { flex: 0 0 auto; margin-left: auto; line-height: 1.25; }
 }
 /* hidden must always win — the chat/turns/tray classes set display values. */
 .coding-agents-chat[hidden],
@@ -125,6 +138,30 @@
 @container coding-agents-rail (min-width: 150px) {
   .coding-agents-left .coding-agents-filterbar[data-rail-wide] { display: flex; }
   .coding-agents-left .coding-agents-filter-advanced { display: block; }
+}
+/* Narrow rail: the 24px kit padding leaves 8px of text width, so the well's
+   loading/empty state was clipped to a single letter. Wrap it instead, and
+   drop the secondary hint line the way the rail drops its title and footer. */
+.coding-agents-left .ctox-empty {
+  grid-template-columns: minmax(0, 1fr);
+  place-content: start stretch;
+  padding: 12px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: break-word;
+}
+.coding-agents-left .ctox-empty strong { font-size: 11px; line-height: 1.35; }
+.coding-agents-left .ctox-empty span { display: none; }
+@container coding-agents-rail (min-width: 150px) {
+  .coding-agents-left .ctox-empty {
+    grid-template-columns: auto;
+    place-content: center;
+    padding: 24px;
+    font-size: var(--fs-sm);
+    line-height: 1.55;
+  }
+  .coding-agents-left .ctox-empty strong { font-size: var(--fs-base); line-height: inherit; }
+  .coding-agents-left .ctox-empty span { display: block; }
 }
 /* Rail header: only the glyph fits at 56px; kicker/title return when wide. */
 .coding-agents-rail-mark {
@@ -178,26 +215,46 @@
 .coding-agents-turn-row:hover { background: transparent; }
 .coding-agents-turn-row-main {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 10px;
+  width: 100%;
 }
 .coding-agents-turn-row-prompt {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .coding-agents-turn-row-meta {
+  display: block;
   margin-top: 2px;
   color: var(--muted);
   font-size: 11px;
+}
+/* Delegations, card rendering: bold title over its own meta line. */
+.coding-agents-turns .coding-agents-turn-row { padding: 10px 14px; }
+.coding-agents-turns .coding-agents-turn-row-prompt { font-weight: 600; line-height: 1.35; }
+/* Delegations, list rendering: one dense line, short meta right. */
+.coding-agents-turns.is-list-view .coding-agents-turn-row { padding: 2px 12px; }
+.coding-agents-turns.is-list-view .coding-agents-turn-row-prompt {
+  flex: 1 1 auto;
+  font-weight: 500;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.coding-agents-turns.is-list-view .coding-agents-turn-row-meta {
+  flex: 0 0 auto;
+  margin-top: 0;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 .coding-agents-session-banner { cursor: default; }
 .coding-agents-session-banner:hover { background: transparent; }
 .coding-agents-session-banner .coding-agents-turn-row-prompt { font-weight: 600; }
 
-@container business-app-window (max-width: 720px) {
+@container business-app-window (max-width: 768px) {
   .coding-agents-turn-controls { flex-wrap: wrap; }
   .coding-agents-turn-controls .ctox-pane-filter { flex: 1 1 100%; }
 }
@@ -212,11 +269,19 @@
      widens it into a labelled list. */
   grid-template-columns: minmax(56px, var(--ctox-left-width, 56px)) 12px minmax(300px, 1fr) 12px minmax(220px, var(--ctox-right-width, 380px));
 }
-@container business-app-window (max-width: 860px) {
+@container business-app-window (max-width: 1024px) {
   .coding-agents-module { grid-template-columns: 56px 12px minmax(0, 1fr); }
   .coding-agents-right,
   .coding-agents-module > [data-resizer="right"] { display: none; }
 }
+/* The kit pane leaves its single grid column `auto`, i.e. max-content: the
+   56px icon rail's own header content sized that column to 168px and every
+   row below it (list, empty state) was laid out at 168px and then clipped by
+   the pane's overflow. Pin the column to the pane width so content wraps
+   instead of being cut off. */
+.coding-agents-left,
+.coding-agents-center,
+.coding-agents-right { grid-template-columns: minmax(0, 1fr); }
 .coding-agents-left { grid-column: 1; grid-row: 1; grid-template-rows: auto minmax(0, 1fr) auto; }
 .coding-agents-module > [data-resizer="left"] { grid-column: 2; grid-row: 1; }
 .coding-agents-center { grid-column: 3; grid-row: 1; grid-template-rows: auto auto minmax(0, 1fr) auto auto auto; }
@@ -243,11 +308,9 @@
   border-radius: 50%;
   background: var(--accent);
 }
-.coding-agents-view-toggle { display: flex; gap: 2px; flex: 0 0 auto; }
-.coding-agents-view-toggle .ctox-pane-icon[aria-pressed="true"] {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
+/* ONE button, not a pair: it is an action ("show as list"), so it carries no
+   pressed state and never renders as selected chrome. */
+.coding-agents-view-toggle { flex: 0 0 auto; }
 .coding-agents-filter-advanced { padding: 0 12px 8px; }
 .coding-agents-filter-row { display: flex; align-items: center; gap: 6px; }
 .coding-agents-select { flex: 1 1 auto; min-width: 0; height: 28px; font-size: 12px; }
@@ -279,13 +342,15 @@
   background: color-mix(in srgb, var(--text) 6%, var(--surface));
 }
 .coding-agents-turns { overflow: auto; min-height: 0; }
+/* Transcript, list rendering: maximum density — exactly one line per event. */
 .coding-agents-proto-row {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 5px 12px;
+  padding: 2px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
   font-size: 12px;
+  line-height: 1.35;
 }
 .coding-agents-proto-role { flex: 0 0 56px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .coding-agents-proto-row[data-role="user"] .coding-agents-proto-role { color: var(--accent); }
@@ -359,23 +424,35 @@
 .ctox-standalone-note { display: none; }
 
 /* ============================================================================
-   Phone layout (Phase-1-Breakpoint 767px): the 12px resizer column goes away
-   (no touch-workable drag target), the 56px icon rail and the chat column
-   share the width directly. The right artifact pane is already hidden by the
-   860px rule above. Grid tracks are re-pinned so the center never lands on
-   an implicit track.
+   Single-column step (shell breakpoint 768px): two columns become ONE, stacked.
+   The 12px resizer columns go away (no touch-workable drag target) and the
+   projects column moves above the chat instead of shrinking beside it. Grid
+   tracks are re-pinned explicitly so nothing lands on an implicit track and no
+   reserved-but-empty track survives the collapse.
    ========================================================================== */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .coding-agents-module {
-    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(120px, 0.42fr) minmax(0, 1fr);
+    row-gap: 12px;
+  }
+
+  /* The kit shrinks the workspace gutter to 6px at this step. This app keeps
+     the 12px fuge: the shell's reserved 80x74 icon corner must not be filled
+     by bare pane surface, and the stacked step then carries the same frame
+     rhythm as the two- and three-column steps. */
+  .coding-agents-module.ctox-workspace {
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-bottom: 12px;
   }
 
   .coding-agents-module > [data-resizer] {
     display: none !important;
   }
 
-  .coding-agents-left { grid-column: 1; }
-  .coding-agents-center { grid-column: 2; }
+  .coding-agents-left { grid-column: 1; grid-row: 1; }
+  .coding-agents-center { grid-column: 1; grid-row: 2; }
 
   .coding-agents-composer {
     padding: 8px;
@@ -418,5 +495,167 @@
 
   .coding-agents-module .coding-agents-app-item {
     min-height: 44px;
+  }
+}
+
+/* ============================================================================
+   Shell v2 header contract.
+   The v2 shell lays three zones over the app surface and does NOT indent
+   .shell-window-content (it is inset: 0):
+     · app icon      80x80 top-left   (--shell-v2-icon-size, z-index 35)
+     · header band   37px full width  (--shell-v2-header-row-size)
+     · window controls 74x74 top-right
+   The app therefore keeps its top pane row exactly one band row high and pads
+   the two reserved corners away. Reference: modules/knowledge/index.css.
+   Everything below is scoped to the v2 window, so the standalone/file:// and
+   legacy renderings keep their current geometry.
+   ========================================================================== */
+.shell-window[data-shell-contract="v2"] .coding-agents-module {
+  /* Row 1 of every pane must line up with the shell band, so the workspace
+     cannot start 12px lower. Side and bottom gutters stay untouched. */
+  padding-top: 0;
+}
+
+/* The pane head keeps its band chrome; the title row inside it is the shell
+   header row and owns the whole geometry. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-head {
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .coding-agents-module .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 12px;
+  overflow: hidden;
+}
+
+/* One 37px row fits a single line only: kicker and title sit side by side
+   instead of stacked, and both stay ellipsised rather than squeezed. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+  gap: 8px;
+}
+
+.shell-window[data-shell-contract="v2"] .coding-agents-module .ctox-pane-titles {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+/* The title IS the window title and the version-menu trigger (contract §4):
+   when the row runs out of width the kicker gives way first, never the title. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .ctox-pane-kicker {
+  flex: 0 200 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .coding-agents-module .ctox-pane-title {
+  flex: 1 1 auto;
+  margin-top: 0;
+  min-width: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The action block never competes with the title for width. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .ctox-pane-actions {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* The rail spacer row exists only for the v2 shell: legacy/standalone
+   renderings keep their single-row rail head. */
+.coding-agents-rail-spacer { display: none; }
+
+/* Icon zone (0..80 x 0..74): the 56px rail sits entirely under the shell's
+   80x80 app icon, so its head reserves the full two-row band (2 x 37px)
+   before any list content starts, and the left resizer begins below the
+   icon square instead of running through it. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-rail-spacer {
+  display: block;
+}
+
+.shell-window[data-shell-contract="v2"] .coding-agents-module > [data-resizer="left"] {
+  margin-top: calc(2 * var(--shell-v2-header-row-size, 37px));
+}
+
+/* First head of the top row: clear the 80px app icon. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-left > .coding-agents-head > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 8px;
+}
+
+/* The chat column starts right at the icon's edge (12px workspace gutter +
+   56px rail + 12px resizer); keep the 14px clearance in front of its title. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-center > .coding-agents-head > .ctox-pane-header {
+  padding-left: 14px;
+}
+
+/* Last head of the top row: clear the 74px window controls. */
+.shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-right > .coding-agents-head > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+/* Artifact column hidden (shell step 1024px): the chat head becomes last, so
+   it — and its filter row, which still lies inside the 74px-tall control
+   square — must clear the window controls. */
+@container business-app-window (max-width: 1024px) {
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-center > .coding-agents-head > .ctox-pane-header {
+    padding-right: 70px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-center .coding-agents-filterbar {
+    padding-right: 70px;
+  }
+}
+
+/* Single-column step (768px): the projects column is now the ONLY pane in the
+   top row, so its first head owns both reserved corners at once — the 80px
+   icon on the left and the 74px window controls on the right. Its second row
+   (the filter bar) still lies inside the 74px-tall icon square, so it starts
+   right of the icon too; the two-row rail spacer is no longer needed because
+   the filter bar itself fills that row. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-rail-spacer {
+    display: none;
+  }
+
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-left > .coding-agents-head > .ctox-pane-header {
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+    padding-right: 70px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-left .coding-agents-filterbar {
+    /* Row 2 still lies inside the 74px-tall reserved corners: clear the icon
+       on the left and the window controls on the right. */
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+    padding-right: 70px;
+  }
+
+  /* The chat column dropped into the second row: no reserved corner sits above
+     it any more, so it keeps the plain pane gutter on both sides. */
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-center > .coding-agents-head > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .coding-agents-module .coding-agents-center .coding-agents-filterbar {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  /* Resizers are gone at this step; the icon-clearance offset goes with them. */
+  .shell-window[data-shell-contract="v2"] .coding-agents-module > [data-resizer="left"] {
+    margin-top: 0;
   }
 }

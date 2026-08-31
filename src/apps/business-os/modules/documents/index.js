@@ -1242,7 +1242,10 @@ function renderLeft(state) {
           <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" data-documents-export ${canExportDocument(state) ? '' : 'disabled aria-disabled="true"'}>${actionIcon(state, 'export')}</button>
         </div>
       </div>
-      <div class="ctox-pane-tools documents-filter-bar">
+    </header>
+    <!-- Shell V2: the pane head is exactly one 37px header row, so the filter
+         tools form their own band below it (see Knowledge as the reference). -->
+    <div class="ctox-pane-tools documents-filter-bar">
         <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Dokument suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Dokumente suchen'))}" data-documents-search value="${escapeHtml(state.searchQuery)}">
         <div class="documents-filter-summary">
           <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sortLabel', 'Dokumente sortieren'))}" data-documents-sort>
@@ -1279,8 +1282,7 @@ function renderLeft(state) {
           </button>
         </div>
         ${renderActiveDocumentFilters(state)}
-      </div>
-    </header>
+    </div>
   `;
   const list = document.createElement('div');
   list.className = 'documents-list';

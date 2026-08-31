@@ -154,7 +154,9 @@ test('left column follows the canonical shell-wired column grammar', async () =>
   // Filterbar: search + shard/list toggle + collapsed filter tray with reset.
   assert.match(html, /data-pg-search/);
   assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+// Betreiber-Direktive 31.08.2026: EIN Umschalt-Knopf statt Knopfpaar.
+  // data-pg-view traegt die aktuelle Ansicht; beide Ziel-Icons stecken im Knopf.
+  assert.equal((html.match(/data-pg-view=/g) || []).length, 1);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);

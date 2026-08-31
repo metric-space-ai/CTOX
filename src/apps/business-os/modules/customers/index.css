@@ -11,18 +11,38 @@
 .customers-module > [data-resizer="left"] { grid-column: 2; }
 .customers-main { grid-column: 3; }
 
-/* Explicit grammar and workbench rows keep the primary track stable. */
+/* Explicit grammar and workbench rows keep the primary track stable.
+
+   The single implicit COLUMN must be pinned too: a grid column sized `auto`
+   grows to the widest item's min-content, so one nowrap row — the lifecycle
+   tab strip, whose real labels ("Alle Kunden (6)" ...) are far wider than the
+   placeholders in the static markup — silently widened the track past the
+   pane and pushed the head's action icons out of the 400px column. Pinning
+   the column to minmax(0, 1fr) and giving every row min-width: 0 makes the
+   pane width authoritative; rows that are genuinely too wide scroll inside
+   themselves instead of stretching their neighbours. */
 .customers-left {
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.customers-left > * {
+  min-width: 0;
+}
+
+.customers-left > .ctox-view-switch {
+  overflow-x: auto;
 }
 
 .customers-main {
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
 }
 
+/* Head (title row + tabs row in ONE element), scroll, footer. */
 .customers-main > [data-customers-main] {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
 }
@@ -31,15 +51,157 @@
   grid-template-rows: auto minmax(0, 1fr);
 }
 
-.customers-account-list.is-list-view .customers-account-meta {
+/* ---------------------------------------------------------------------------
+   Shell V2 head geometry. Reference: modules/knowledge/index.css.
+
+   `.shell-window-content` sits at inset: 0 and is NOT indented, so the app has
+   to keep the shell's three zones free itself:
+     - app icon        80px box at top: -6px / left: -6px, i.e. the top-left
+                       74 x 74 of the content box -> header rows 1 AND 2
+     - header band     var(--shell-v2-header-row-size) = (80 - 6) / 2 = 37px
+     - window control  2 x 37px = 74 x 74 at the top right -> rows 1 and 2
+
+   The workbench head carries its title row plus the workbench tabs row and is
+   exactly two bands tall — the same total as the left head. The left head
+   keeps the canonical grammar (title row + filterbar + tray) inside ONE
+   element because the four grid rows of .customers-left are pinned by
+   customers.test.mjs; its FIRST row is the shell band and is held at exactly
+   one --shell-v2-header-row-size, the filterbar below it is row 2 and keeps
+   the same icon clearance.
+   -------------------------------------------------------------------------- */
+/* The icon reservation takes 94px out of the selector column. At the old 312px
+   default the head has 312 - 94 - 14 - 138 (four icon actions) = 66px left and
+   "Kundenkonten" measured 56px wide, i.e. truncated to "Kund…" — and that title
+   is the shell's version-menu trigger. The v2 default column is therefore wide
+   enough to pay the reservation; the resizer (250-480px) still overrides it. */
+.shell-window[data-shell-contract="v2"] .customers-module {
+  --customers-left-width: 400px;
+}
+
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header {
+  box-sizing: border-box;
+  padding: 0 0 0 calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Both heads are one element of exactly two shell bands: the left head is
+   title row + filterbar, the workbench head is title row + tabs row. The
+   left head's height is auto (2 x band + 1px band border); the workbench
+   head pins the identical total so every pane head measures the same.
+
+   The 74px window control overlaps header rows 1 AND 2 of the LAST head, so
+   the clearance belongs on the head ELEMENT, not on its inner rows: contract
+   §7.3 measures `last.right + last.padR >= 74`, i.e. the padding of the
+   .ctox-pane-header box itself. Padding on .ctox-pane-title-row looks
+   identical but measures 0 and fails the abnahme. */
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header {
+  box-sizing: border-box;
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2 + 1px);
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2 + 1px);
+  padding: 0 80px 0 0;
+}
+
+/* Tabs row = band 2 of the workbench head: exactly one band tall, no own
+   band chrome (the head element already carries padding logic and the
+   bottom hairline). The right clearance comes from the head element. */
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header > .customers-workbench-tabs {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 0 0 14px;
+  border-bottom: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* Row 1 of both heads is the shell header band: identical height. */
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header > .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header > .ctox-pane-title-row {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* First head: 80px icon + 14px air on the HEAD element itself, so rows 1+2
+   (and the tray) all inherit the icon clearance and the head's measured
+   padding-left pays the 80px contract floor. Row 2 (filterbar) is exactly one
+   band tall; with row 1 the head totals 2 x var(--shell-v2-header-row-size). */
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header > .ctox-filterbar {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 12px 0 0;
+}
+
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header > .ctox-pane-title-row {
+  padding-right: 14px;
+}
+
+/* Last head: the 80px right clearance sits on the head element above; the
+   title row only pays the left air. */
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header > .ctox-pane-title-row {
+  padding-left: 14px;
+  padding-right: 0;
+}
+
+/* One band is 37px, so kicker, title and account subtitle share the line
+   instead of stacking. The shell hangs its version menu on the first
+   .ctox-pane-header .ctox-pane-title, so that title must stay hittable: the
+   left head drops the redundant "CRM" kicker (the shell already names the app,
+   and Knowledge's first head carries no kicker either) and every title keeps
+   the shell's own 44px trigger minimum. */
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header .ctox-pane-kicker {
   display: none;
 }
 
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header .ctox-pane-titles,
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header .ctox-pane-titles {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header .ctox-pane-title,
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header .ctox-pane-title {
+  flex: 0 1 auto;
+  min-width: 44px;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header .customers-detail-subtitle {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The action block never claims the title's width. */
+.shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header .ctox-pane-actions,
+.shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* Account records come in two genuinely different densities. KARTEN (shards)
+   are the reading view: bold title plus two meta lines, generous padding.
+   LISTE is the scanning view: exactly one line per record, title left, one
+   short meta right, tight line height. index.js renders the matching markup
+   per view; this sheet owns the density. */
 .customers-account-shard {
   position: relative;
   display: grid;
   gap: 3px;
   min-width: 0;
+  padding: 12px 14px;
+  line-height: 1.35;
 }
 
 .customers-account-shard::before {
@@ -56,7 +218,8 @@
 }
 
 .customers-account-title,
-.customers-account-meta {
+.customers-account-meta,
+.customers-account-tag {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -71,6 +234,35 @@
 .customers-account-meta {
   color: var(--muted);
   font-size: 11px;
+}
+
+/* LISTE: one row, one line. Both markers are load-bearing — `.is-list-view`
+   on the well is the app-wide view marker (same convention as calendar,
+   matching and app-store), `.is-compact` on the row says the row was rendered
+   with the compact markup (title + one tag, not title + two meta lines), so
+   the dense rules can never land on a card-shaped row. */
+.customers-account-list.is-list-view .customers-account-shard.is-compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 14px;
+  min-height: 26px;
+  line-height: 1.2;
+}
+
+.customers-account-list.is-list-view .customers-account-shard.is-compact .customers-account-title {
+  flex: 1 1 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.customers-account-list.is-list-view .customers-account-shard.is-compact .customers-account-tag {
+  flex: 0 0 auto;
+  max-width: 40%;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
 }
 
 .customers-workbench-scroll {
@@ -614,32 +806,63 @@
 }
 
 /* Compact windows and the mobile sheet keep both master and workbench
-   reachable in one vertical flow. The workspace owns the only outer scroll. */
-@container business-app-window (max-width: 820px) {
+   reachable in one vertical flow. The workspace owns the only outer scroll.
+   The app is a two-pane surface, so it stacks on the shell's own 2 -> 1
+   breakpoint (768px); the former module-private 820/600 pair is merged here. */
+@container business-app-window (max-width: 768px) {
+  /* Single column, both panes stacked. NO outer padding: the shell content box
+     sits at inset 0 and the app icon overlays its top-left 80x74. Any padding
+     here pushes the first pane inward, so the icon zone is filled by the pane's
+     own border/background instead of by the head that reserves it — the
+     abnahme reads that as an iconZone intrusion. The first head keeps the zone
+     free through its own 94px padding-left, so the pane must start flush. */
   .customers-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(220px, 34svh) minmax(420px, 1fr);
+    grid-template-rows: minmax(210px, 32svh) minmax(440px, 1fr);
     height: auto;
     min-height: 100%;
+    overflow-x: hidden;
     overflow-y: auto;
     gap: 8px;
+    padding: 0;
   }
 
   .customers-left,
   .customers-main {
     grid-column: auto;
+    min-width: 0;
     min-height: 220px;
   }
 
   .customers-module > [data-resizer] {
     display: none !important;
   }
-}
 
-@container business-app-window (max-width: 600px) {
-  .customers-module {
-    grid-template-rows: minmax(210px, 32svh) minmax(440px, 1fr);
-    padding: 6px;
+  /* Stacked, the left head is the FIRST and the LAST head of the top row, so
+     it pays both reservations: 94px icon clearance (inherited from the wide
+     rule) and 80px for the window control. Both belong on the head element —
+     §7.2/§7.3 measure the header box's own padding. */
+  .shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header {
+    padding-right: 80px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header > .ctox-pane-title-row {
+    padding-right: 0;
+  }
+
+  .shell-window[data-shell-contract="v2"] .customers-module .customers-left > .ctox-pane-header > .ctox-filterbar {
+    padding-right: 0;
+  }
+
+  /* Stacked, the workbench head sits BELOW the window control and no longer
+     pays for it — the 80px go back to the tab row, which is the narrowest
+     thing in this app. */
+  .shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header {
+    padding-right: 0;
+  }
+
+  .shell-window[data-shell-contract="v2"] .customers-module [data-customers-main] > .ctox-pane-header > .customers-workbench-tabs {
+    padding-right: 14px;
   }
 
   .customers-detail-block {
@@ -669,7 +892,7 @@
    reaches the 44px minimum, icon-only pane buttons in both dimensions; the
    dense inline stage select and the clickable mini rows grow to finger
    height. Pane stacking and the board's narrow columns are handled by the
-   @container business-app-window rules above (820px/600px); wide tables and
+   @container business-app-window rule above (768px); wide tables and
    the pipeline board scroll horizontally inside their own kit wrappers
    (.ctox-table-wrap / .customers-workbench-scroll). */
 @media (pointer: coarse) {

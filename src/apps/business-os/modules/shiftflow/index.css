@@ -933,7 +933,7 @@
   gap: 8px;
 }
 
-@container business-app-window (max-width: 720px) {
+@container business-app-window (max-width: 768px) {
   .shiftflow-scheduler-grid-header,
   .scheduler-row {
     grid-template-columns: 140px repeat(7, minmax(92px, 1fr));
@@ -965,6 +965,7 @@
 .shiftflow-left-pane {
   grid-column: 1;
   grid-row: 1;
+  /* Kopf | Band (Suche, Filter-Tray, Ansichts-Tabs) | Liste | Fuss */
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
 }
@@ -981,14 +982,116 @@
   min-width: 360px;
 }
 
+/* ==========================================================================
+   Shell-V2-Fenstervertrag (docs/business-os-shell-v2-contract.md §3, §7).
+   Die Shell rueckt den App-Inhalt NICHT ein (`.shell-window-content` bekommt
+   `inset: 0`) und legt drei Zonen darueber: App-Icon 80x80 oben links,
+   Header-Band 37px ueber die Breite, Fenstersteuerung 74x74 oben rechts.
+   Diese Zonen freizuhalten ist Bringschuld der App.
+
+   Nur die oberste Kopfzeile ist betroffen. Der Kopf der Detail-Schublade im
+   Board (.shiftflow-board-detail > .ctox-pane-header) liegt tief im Inhalt
+   und behaelt seine Kit-Geometrie.
+   ========================================================================== */
+.shiftflow-left-pane > .ctox-pane-header,
+.shiftflow-center-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+/* Erster Kopf: Icon-Zone oben links freihalten (80px Icon + 14px Luft). */
+.shiftflow-left-pane > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 8px;
+}
+
+/* Das Icon ist zwei Header-Zeilen hoch und reicht damit bis in die
+   Suchzeile — sie wird genauso eingerueckt. */
+.shiftflow-list-band > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 12px);
+  padding-top: 6px;
+}
+
+/* Letzter Kopf: Platz fuer die 74px-Fenstersteuerung oben rechts. */
+.shiftflow-center-pane > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+.shiftflow-left-pane > .ctox-pane-header > .ctox-pane-title-row,
+.shiftflow-center-pane > .ctox-pane-header > .ctox-pane-title-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Kicker (10px/1.4) + Titel (15px/1.25) = 33px und passen ohne die
+   Kit-Innenabstaende in die 37px-Zeile. */
+.shiftflow-left-pane > .ctox-pane-header .ctox-pane-titles,
+.shiftflow-center-pane > .ctox-pane-header .ctox-pane-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+/* Der Titel ist der Fenstertitel: wireShellV2ModuleTitle haengt Versions-
+   menue und Quelltext-Zugang an das erste `.ctox-pane-header
+   .ctox-pane-title`. Er darf nicht zusammengedrueckt werden. */
+.shiftflow-left-pane > .ctox-pane-header .ctox-pane-title,
+.shiftflow-center-pane > .ctox-pane-header .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Der Aktionsblock beansprucht kein `flex: 1` neben dem Titel. */
+.shiftflow-left-pane > .ctox-pane-header .ctox-pane-actions,
+.shiftflow-center-pane > .ctox-pane-header .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* Ein-Knopf-Umschalter: EIN Bedienelement statt zweier nebeneinander liegender
+   Knoepfe. Sichtbar ist das Icon der ZIEL-Ansicht - bei Karten das Listen-
+   Symbol, bei Liste das Karten-Symbol. Der Knopf ist eine Aktion, kein
+   Zustand; er traegt darum keinen aria-pressed-Anstrich. */
+.shiftflow-view-toggle > [data-shift-view-icon] {
+  display: none;
+}
+
+.shiftflow-view-toggle[data-shift-view="cards"] > [data-shift-view-icon="list"],
+.shiftflow-view-toggle[data-shift-view="list"] > [data-shift-view-icon="cards"] {
+  display: block;
+}
+
+/* ==========================================================================
+   Karten- und Listenform der Schichtliste (Betreiber-Direktive 31.08.2026).
+   Es sind zwei Dichten, nicht zwei Dekorationen:
+
+     KARTEN  Titel (fett) + zwei Meta-Zeilen (Wann / Wer + Projekt + Status),
+             grosszuegiges Padding, Karten durch Abstand getrennt.
+     LISTE   genau EINE Zeile je Eintrag: Titel links, ein Kurz-Meta rechts,
+             enge Zeilenhoehe, Hairline statt Abstand.
+
+   Beide Meta-Saetze stehen im Markup (renderShiftListItem); hier entscheidet
+   sich, welcher sichtbar ist. Keine neuen Datenfelder.
+   ========================================================================== */
 .shiftflow-shift-list {
   display: flex;
   flex-direction: column;
+}
+
+.shiftflow-shift-list.is-cards {
   gap: 4px;
 }
 
 .shiftflow-shift-list.is-list {
-  gap: 1px;
+  gap: 0;
 }
 
 .shiftflow-shift-item {
@@ -997,6 +1100,20 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-width: 0;
+  /* Der Auswahlknopf traegt das Padding, damit die Listenform wirklich
+     kompakt werden kann; das Kit-Padding der Zeile faellt weg. */
+  padding: 0;
+}
+
+/* Karte: eigene Flaeche auf dem Well-Grund, durch Abstand getrennt. Die
+   Auswahlfarbe des Kits (.ctox-list-item.is-selected) bleibt staerker. */
+.shiftflow-shift-list.is-cards .shiftflow-shift-item {
+  border-bottom: 0;
+  border-radius: var(--control-radius, 6px);
+}
+
+.shiftflow-shift-list.is-cards .shiftflow-shift-item:not(.is-selected) {
+  background: var(--surface);
 }
 
 .shiftflow-shift-item::before {
@@ -1014,9 +1131,7 @@
 
 .shiftflow-shift-select {
   display: grid;
-  gap: 2px;
   min-width: 0;
-  padding: 8px 10px;
   border: 0;
   background: transparent;
   color: var(--text);
@@ -1044,9 +1159,86 @@
   font-variant-numeric: tabular-nums;
 }
 
-.shiftflow-shift-list.is-list .shiftflow-shift-select {
+/* --- Karten: Titel + zwei Meta-Zeilen, grosszuegiges Padding --------------- */
+.shiftflow-shift-list.is-cards .shiftflow-shift-select {
   grid-template-columns: minmax(0, 1fr);
-  padding-block: 6px;
+  gap: 3px;
+  padding: 10px 12px;
+  line-height: 1.35;
+}
+
+.shiftflow-shift-list.is-cards [data-shift-meta="brief"] {
+  display: none;
+}
+
+/* Wer + Projekt kuerzen, der Status-Marker bleibt immer vollstaendig. */
+.shiftflow-shift-select [data-shift-meta="who"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.shiftflow-shift-who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shiftflow-shift-status {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+  text-transform: uppercase;
+}
+
+.shiftflow-shift-status[data-shift-status="published"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* --- Liste: genau eine kompakte Zeile, Kurz-Meta rechts ------------------- */
+.shiftflow-shift-list.is-list .shiftflow-shift-select {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 10px;
+  padding: 3px 10px;
+  line-height: 1.5;
+}
+
+.shiftflow-shift-list.is-list [data-shift-meta="when"],
+.shiftflow-shift-list.is-list [data-shift-meta="who"] {
+  display: none;
+}
+
+.shiftflow-shift-list.is-list [data-shift-meta="brief"] {
+  justify-self: end;
+  font-size: 10px;
+}
+
+/* Der Trenner steht zwischen Zeilen, nicht hinter der letzten. */
+.shiftflow-shift-list.is-list .shiftflow-shift-item:last-child {
+  border-bottom: 0;
+}
+
+.shiftflow-shift-list.is-list .shiftflow-shift-select strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* In der Listenform bestimmt der Bearbeiten-Knopf sonst die Zeilenhoehe. */
+.shiftflow-shift-list.is-list .shiftflow-shift-item .ctox-pane-icon {
+  width: 24px;
+  height: 24px;
 }
 
 .shiftflow-shift-item .ctox-pane-icon {
@@ -1100,7 +1292,7 @@
   font-weight: 800;
 }
 
-@container business-app-window (max-width: 820px) {
+@container business-app-window (max-width: 768px) {
   .shiftflow-app {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(420px, 1fr) minmax(260px, 44vh);
@@ -1134,9 +1326,34 @@
     width: min(320px, 88%);
     border: 1px solid var(--line);
   }
+
+  /* Gestapelt steht der Planungskopf oben: die Icon-Zone wandert mit ihm,
+     der Schichtenkopf darunter braucht sie nicht mehr. */
+  .shiftflow-center-pane > .ctox-pane-header {
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  }
+
+  /* Das App-Icon ist zwei Header-Zeilen hoch (80px) und reicht damit unter den
+     37px-Kopf hinein - gestapelt liegt dort der Ansichts-Umschalter des
+     Planungspanes. Er raeumt die Icon-Zone per `margin-left`, nicht per
+     `padding-left`: die Zone muss vom Element FREI sein, ein bis unter das
+     Icon reichender Kasten mit Innenabstand haelt sie nicht frei. Mit dem
+     12px-Innenabstand des Kits stehen die Tabs bei 94px und damit exakt unter
+     dem Titel des Kopfes. */
+  .shiftflow-center-pane > .shiftflow-main-view-switch {
+    margin-left: calc(var(--shell-v2-icon-size, 80px) + 2px);
+  }
+
+  .shiftflow-left-pane > .ctox-pane-header {
+    padding-left: 14px;
+  }
+
+  .shiftflow-list-band > .ctox-filterbar {
+    padding-left: 12px;
+  }
 }
 
-@container business-app-window (max-width: 520px) {
+@container business-app-window (max-width: 768px) {
   .shiftflow-main-view-switch .ctox-pane-tabs {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1147,13 +1364,14 @@
 }
 
 /* ----------------------------------------------------------------------------
-   Phone layout (≤767px container): the 820px collapse above already stacks
-   panes, hides the resizer and turns the detail inspector into an overlay;
+   Phone layout (≤768px container — the shell-owned 2->1 breakpoint): the
+   collapse above already stacks panes, hides the resizer and turns the
+   detail inspector into an overlay;
    this block stacks the drawer form rows and keeps action rows wrappable.
    The week grid keeps its 784px min-width and scrolls horizontally inside
    .shiftflow-scheduler-container — never the page.
    -------------------------------------------------------------------------- */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .shiftflow-drawer-form .form-row,
   .shiftflow-drawer-actions,
   .shiftflow-drawer-actions.has-danger {

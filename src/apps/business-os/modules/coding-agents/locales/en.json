@@ -28,5 +28,7 @@
   "recentEmpty": "No turns for this app yet.",
   "statusCompleted": "completed",
   "statusFailed": "failed",
-  "statusRunning": "running"
+  "statusRunning": "running",
+  "viewShowList": "Show as list",
+  "viewShowCards": "Show as cards"
 }

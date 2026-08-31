@@ -2,9 +2,10 @@
   <!-- LEFT: consent record list — canonical column grammar. All chrome
        behaviour (search / view-toggle / tray / reset / active-dot / band) is
        SHELL-wired from the data-pg-* attributes; this module writes no chrome
-       JS/CSS. Pane grid rows: auto auto minmax(0,1fr) auto. -->
+       JS/CSS. Shell-v2-Kopfzeilen: Titel (1) · Filterleiste (2) · optionale
+       Filterablage (3); danach das gezaehlte Band, das Well und der Footer. -->
   <aside class="ctox-pane consent-rail" aria-label="Einwilligungen" data-left-content>
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-i18n="kicker">ATS</span>
@@ -16,27 +17,29 @@
           <button type="button" class="ctox-pane-icon" data-action="export" data-i18n-title="exportAction" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
-        <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." data-i18n-placeholder="searchPlaceholder" aria-label="Einwilligungen suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
-        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
-      </div>
-      <div class="ctox-filter-tray" data-pg-tray hidden>
-        <div class="ctox-filter-row">
-          <select class="ctox-select" data-pg-filter data-pg-name="status" data-pg-default="all" aria-label="Status filtern">
-            <option value="all" data-i18n="statusAll">Alle Status</option>
-            <option value="active" data-i18n="valid">gültig</option>
-            <option value="pending" data-i18n="open">offen</option>
-            <option value="withdrawn" data-i18n="withdrawn">widerrufen</option>
-            <option value="expired" data-i18n="expired">abgelaufen</option>
-          </select>
-          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
-        </div>
-      </div>
     </header>
+    <div class="ctox-filterbar" data-shell-v2-header-row="2">
+      <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." data-i18n-placeholder="searchPlaceholder" aria-label="Einwilligungen suchen" />
+      <!-- EIN Umschalter (Betreiber-Direktive 31.08.): kein Zustandspaar, sondern
+           eine Aktion. data-pg-view traegt die AKTUELLE Ansicht, data-pg-view-alt
+           die Gegenansicht; Icon und Beschriftung zeigen stets das Ziel des
+           Klicks. Kein aria-pressed — ein Knopf, der etwas tut, hat keinen
+           Gedrueckt-Zustand. index.js tauscht beide Werte und das Icon. -->
+      <button type="button" class="ctox-pane-icon consent-view-toggle" data-pg-view="cards" data-pg-view-alt="list" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+      <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
+    </div>
+    <div class="ctox-filter-tray" data-pg-tray data-shell-v2-header-row="3" hidden>
+      <div class="ctox-filter-row">
+        <select class="ctox-select" data-pg-filter data-pg-name="status" data-pg-default="all" aria-label="Status filtern">
+          <option value="all" data-i18n="statusAll">Alle Status</option>
+          <option value="active" data-i18n="valid">gültig</option>
+          <option value="pending" data-i18n="open">offen</option>
+          <option value="withdrawn" data-i18n="withdrawn">widerrufen</option>
+          <option value="expired" data-i18n="expired">abgelaufen</option>
+        </select>
+        <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
+      </div>
+    </div>
     <nav class="ctox-view-switch" aria-label="Ansichten">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-i18n="bandAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
@@ -60,7 +63,7 @@
        forms stay EXACTLY as they were; rights stay hidden behind the header
        toggle. -->
   <section class="ctox-pane consent-main" aria-label="Einwilligungsprüfung" data-ats-main>
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-ats-sub></span>

@@ -2,9 +2,9 @@
   <!-- LEFT: credential record list — canonical column grammar. All chrome
        behaviour (search / view-toggle / tray / reset / active-dot / band) is
        SHELL-wired from the data-pg-* attributes; this module writes no chrome
-       JS/CSS. Pane grid rows: auto auto minmax(0,1fr) auto. -->
-  <aside class="ctox-pane nachweise-rail" aria-label="Nachweise" data-left-content>
-    <header class="ctox-pane-header ctox-pane-band">
+       JS/CSS. Pane grid rows: header(37px) tools nav well footer. -->
+  <aside class="ctox-pane nachweise-rail" aria-label="Nachweise" data-left-content data-pg-default-view="cards">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-i18n="kicker">ATS</span>
@@ -16,12 +16,15 @@
           <button type="button" class="ctox-pane-icon" data-action="export" data-i18n-title="exportAction" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
+    </header>
+    <div class="nachweise-rail-tools" data-shell-v2-header-row="2">
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." data-i18n-placeholder="searchPlaceholder" aria-label="Nachweise suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- ONE control, not two (Betreiber-Direktive 31.08.): the button is an
+             ACTION ("switch to the other view"), not a state — so no
+             aria-pressed. The icon shows the view it switches TO; the module
+             flips [data-pg-default-view] on the pane and swaps icon + label. -->
+        <button type="button" class="ctox-pane-icon nachweise-view-toggle" data-ats-view-toggle aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg data-ats-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg data-ats-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -37,7 +40,7 @@
           <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
         </div>
       </div>
-    </header>
+    </div>
     <nav class="ctox-view-switch" aria-label="Ansichten">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-i18n="bandAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
@@ -60,7 +63,7 @@
        The Einsatz-Gate and Entleiher-Sign-off command forms stay EXACTLY as
        they were, hidden behind the header toggle. -->
   <section class="ctox-pane nachweise-main" aria-label="Nachweis-Erfassung" data-ats-main>
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-i18n="kicker">ATS</span>
@@ -72,8 +75,8 @@
           </button>
         </div>
       </div>
-      <p class="nachweise-sub" data-ats-sub></p>
     </header>
+    <p class="nachweise-sub" data-ats-sub data-shell-v2-header-row="2"></p>
     <div class="ctox-pane-scroll nachweise-workbench">
       <article class="ctox-card nachweise-detail" data-ats-detail hidden></article>
 

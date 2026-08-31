@@ -11,11 +11,74 @@
 .consent-module { --ctox-left-width: 320px; }
 
 /* Explicit column pins so the center pane never slides onto the resizer track
-   when the kit hides resizers on narrow windows. Pane grid rows:
-   auto [band] minmax(0,1fr) [well] auto [footer]. */
-.consent-rail { grid-column: 1; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+   when the kit hides resizers on narrow windows. Linke Spur (Shell-v2-Zeilen):
+   Titel · Filterleiste · Filterablage · gezaehltes Band · Well (fuellt) ·
+   Footer. Die Zeilen sind explizit zugewiesen, weil die Filterablage
+   [hidden] (display:none) ist und die automatische Platzierung sonst alle
+   nachfolgenden Kinder eine Spur nach oben zoege. */
+.consent-rail { grid-column: 1; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; }
+.consent-rail > .ctox-pane-header { grid-row: 1; }
+.consent-rail > .ctox-filterbar { grid-row: 2; }
+.consent-rail > .ctox-filter-tray { grid-row: 3; }
+.consent-rail > .ctox-view-switch { grid-row: 4; }
+.consent-rail > .ctox-pane-body { grid-row: 5; }
+.consent-rail > .ctox-pane-footer { grid-row: 6; }
 .consent-module > [data-resizer="left"] { grid-column: 2; }
 .consent-main { grid-column: 3; grid-template-rows: auto minmax(0, 1fr); }
+
+/* custom: Shell-v2-Kopfgeometrie. Die Shell legt drei Zonen UEBER den
+   App-Inhalt (`.shell-window-content` bekommt `inset: 0` und wird NICHT
+   eingerueckt): App-Icon 80x80 oben links, Header-Band 37px ueber die volle
+   Breite, Fenstersteuerung 74x74 oben rechts. Referenz ist Knowledge.
+   Beide Koepfe der obersten Zeile sind exakt eine Header-Zeile hoch; der
+   linke Kopf haelt die Icon-Spalte frei, der rechte die Fenstersteuerung.
+   Die zweite Zeile liegt noch in der Icon-Zone (2 x 37px = 74px = 80px - 6px
+   Rahmen) und wird deshalb gleich eingerueckt. */
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+/* In 37px passt kein gestapelter Kicker + Titel: beide teilen sich eine
+   Grundlinie (identisch zur Knowledge-Referenz). Der Titel traegt das
+   Versionsmenue der Shell und darf deshalb nicht zerquetscht werden. */
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Linke Spalte: Icon-Zone (80px) freihalten — Titelzeile UND Filterleiste. */
+.shell-window[data-shell-contract="v2"] .consent-module .consent-rail > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .consent-module .consent-rail > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 14px;
+}
+
+/* Rechte Spalte: Fenstersteuerung (74x74) freihalten. */
+.shell-window[data-shell-contract="v2"] .consent-module .consent-main > .ctox-pane-header {
+  padding-right: 70px;
+}
 
 /* Main workbench scroll rhythm. */
 .consent-workbench {
@@ -52,16 +115,46 @@
 }
 .consent-detail .ats-tag { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
 
-/* Shard / compact selector rows (both are the kit .ctox-list-item button). */
-.consent-row { display: grid; gap: 4px; }
+/* Shard / compact selector rows (both are the kit .ctox-list-item button).
+   Die beiden Ansichten unterscheiden sich in der DICHTE, nicht nur im Detail
+   (Betreiber-Direktive 31.08.):
+     KARTE  drei Zeilen, grosszuegiges Padding, fetter Titel.
+     LISTE  genau eine Zeile, enge Zeilenhoehe, ein Kurz-Meta rechts. */
+.consent-row { display: grid; gap: 3px; }
+
+/* --- Karten (Shards) ---------------------------------------------------- */
+.consent-row--cards {
+  padding-top: 11px;
+  padding-bottom: 11px;
+  line-height: 1.45;
+}
+.consent-row--cards .consent-row-title { font-weight: 700; }
+
+/* --- Liste: exakt eine Zeile -------------------------------------------- */
 .consent-row--list {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  line-height: 1.25;
 }
+.consent-row--list .consent-row-title { font-weight: 500; }
+/* Ein einziges Kurz-Meta rechts; es darf nie umbrechen oder den Titel
+   verdraengen. */
+.consent-row--list .consent-row-side {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.consent-row--list .ctox-badge {
+  padding-block: 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .consent-row-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .consent-row-title {
   min-width: 0;
@@ -70,7 +163,17 @@
   white-space: nowrap;
   font-weight: 600;
 }
-.consent-row-meta { color: var(--muted); font-size: 11px; }
+.consent-row-meta {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.consent-row-meta--dates { color: color-mix(in srgb, var(--muted) 80%, transparent); }
+
+/* Ein-Knopf-Umschalter: darf in der Filterleiste nie schrumpfen. */
+.consent-module .consent-view-toggle { flex: 0 0 auto; }
 
 /* The kit callout has no :empty collapse; the gate starts empty and is cleared
    between runs, so hide it until JS fills it. */
@@ -81,26 +184,48 @@
 .consent-main .ats-blockers { margin: 6px 0 0; padding-left: 18px; }
 .consent-main .ats-blockers li { font-size: 12px; margin: 2px 0; }
 
-/* Narrow windows: stack the two panes and drop the resizer. */
-@container business-app-window (max-width: 760px) {
-  .consent-module {
+/* Narrow windows: stack the two panes and drop the resizer. Grenze = die
+   shell-eigene 2-auf-1-Marke (Vertrag §6: erlaubt sind ausschliesslich 1024px
+   und 768px). Consent hat nur zwei Spalten, die 3-auf-2-Marke bei 1024px
+   aendert an dieser App nichts und bleibt deshalb ungeschrieben. */
+@container business-app-window (max-width: 768px) {
+  .ctox-workspace.consent-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(200px, 40vh) minmax(320px, 1fr);
+    /* Fensterrelativ, nicht bildschirmrelativ (Vertrag §6): die Spur teilte
+       sich frueher mit 40vh nach der BILDSCHIRMhoehe auf — in einem flachen
+       Fenster ergab das eine Spur, die hoeher als das Fenster selbst ist.
+       Bruchteile messen den Rahmen; die Mindestmasse halten die Spuren in
+       einem sehr flachen Fenster bedienbar, der Rest scrollt. */
+    grid-template-rows: minmax(200px, 2fr) minmax(320px, 3fr);
     height: auto;
     min-height: 100%;
     overflow-y: auto;
     gap: 8px;
+    /* base.css zieht das Workspace-Polster im schmalen Fenster auf 6px. Damit
+       liegt die linke Pane-Kante exakt unter dem 80x80-App-Icon. Das
+       12px-Polster der Breitform haelt die Icon-Zone frei — das ist die
+       Bringschuld der App (Vertrag §3), nicht Kosmetik. */
+    padding: 12px;
   }
   .consent-module > [data-resizer] { display: none !important; }
-  .consent-rail { grid-column: 1; }
-  .consent-main { grid-column: 1; }
+  .consent-rail { grid-column: 1; grid-row: 1; }
+  .consent-main { grid-column: 1; grid-row: 2; }
+
+  /* Einspaltig steht die LINKE Spur ganz oben: ihre beiden Kopfzeilen liegen
+     jetzt zugleich unter dem Icon (links) UND unter der 74x74-Fenster-
+     steuerung (rechts). Beide Zonen muessen deshalb hier freigehalten werden
+     — im Breitmodus tut das die rechte Spalte. */
+  .shell-window[data-shell-contract="v2"] .consent-module .consent-rail > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .consent-module .consent-rail > .ctox-filterbar {
+    padding-right: 70px;
+  }
 }
 
 /* Touch targets on coarse pointers (phone/tablet): every interactive control
    reaches the 44px minimum, icon-only pane buttons in both dimensions, and
    consent rows keep a full finger-height hit area. The narrow-viewport pane
    stacking itself is handled by the @container business-app-window rule
-   above (760px); compact-form action rows are kit-owned (base.css). */
+   above (768px); compact-form action rows are kit-owned (base.css). */
 @media (pointer: coarse) {
   .consent-module button,
   .consent-module input,

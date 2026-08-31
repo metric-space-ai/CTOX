@@ -41,6 +41,115 @@
   background: var(--accent-soft);
 }
 
+/* ---------------------------------------------------------------------------
+   Shell V2 header geometry (reference: modules/knowledge). The v2 shell lays
+   three zones over the app content without indenting `.shell-window-content`:
+   the app icon at the top left (80px, 74px of it reach into the content), the
+   header band across the full width (one 37px row) and the 74x74 window
+   control at the top right. The app has to keep those zones free itself.
+   Geometry only — colours, typography and pane content stay as above.
+   -------------------------------------------------------------------------- */
+.shell-window[data-shell-contract="v2"] .tickets-module {
+  /* The window control is exactly two header rows wide and high. */
+  --tickets-v2-control-inset: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding: 0;
+}
+
+/* The v2 frame already draws the window edge; the pane borders would push the
+   first header row one pixel out of the shell band. */
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-pane {
+  border: 0;
+  border-radius: 0;
+}
+
+/* Every pane head starts flush at the top so its first row lines up with the
+   shell band. The left head keeps its filterbar and filter tray below it. */
+.shell-window[data-shell-contract="v2"] .tickets-module .ctox-pane-header.ctox-pane-band {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* Top row of every pane head: exactly one shell header row. */
+.shell-window[data-shell-contract="v2"] .tickets-module .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* Kicker and title share the single row instead of stacking; the title keeps
+   the ellipsis so a long ticket subject never squeezes to zero width. */
+.shell-window[data-shell-contract="v2"] .tickets-module .ctox-pane-titles {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .tickets-module .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.1;
+}
+
+.shell-window[data-shell-contract="v2"] .tickets-module .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* Left head is the first head: keep the app icon zone free. The header's own
+   inset already indents the filterbar and tray, so they drop their local one. */
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-left > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-left .ctox-filterbar,
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-left .ctox-filter-tray {
+  padding-inline: 0;
+}
+
+/* Second row of the left head: the filterbar is exactly one shell header row,
+   so title row + filterbar together fill the two-row shell band (2 x 37px). */
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-left .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+/* Right-most head of the top row: keep the window control free. With the
+   on-demand operations pane hidden that is the center head, otherwise the
+   operations head. The state class sits in :where() so the narrow-window
+   overrides further down keep the same specificity and win by source order. */
+.shell-window[data-shell-contract="v2"] .tickets-module:where(.is-ops-hidden) .tickets-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .tickets-module:where(:not(.is-ops-hidden)) .tickets-right > .ctox-pane-header {
+  padding-right: var(--tickets-v2-control-inset);
+}
+
+/* Center/ops heads are static markup and visible in EVERY state (empty state
+   included). They match the left head's two-row height (title row + filterbar
+   row) so all top-row heads measure identically. */
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .tickets-module .tickets-right > .ctox-pane-header {
+  /* content-box: two content rows + the kit's 1px band border, exactly like
+     the left head's natural title-row + filterbar flow. */
+  box-sizing: content-box;
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
+/* Pane body below the static head hosts the JS-rendered scroller, empty or
+   loading state and hands it the full remaining pane height. */
+.tickets-pane-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
 /* Empty/loading states are injected as a pane's only child: span both pane grid
    rows so .ctox-empty fills the whole column. */
 .tickets-pane > .ctox-empty {
@@ -81,19 +190,44 @@
   gap: 4px;
 }
 
-/* custom: shard / compact selector rows inside the kit .ctox-list-item. */
+/* custom: the shard/list switch is ONE button that names the view it produces;
+   both glyphs live in the same button and the current view picks one. */
+.tickets-view-toggle > [data-view-icon] {
+  display: none;
+}
+
+.tickets-view-toggle[data-pg-view="cards"] > [data-view-icon="list"],
+.tickets-view-toggle[data-pg-view="list"] > [data-view-icon="cards"] {
+  display: block;
+}
+
+/* custom: shard / compact selector rows inside the kit .ctox-list-item.
+   KARTEN und LISTE sind zwei Dichten, nicht zwei Paddings (Betreiber-Direktive
+   31.08.): die Karte traegt einen fetten Titel ueber zwei Meta-Zeilen mit den
+   echten Ticket-Detailfeldern (Schluessel, Quelle, Zuordnung, Aktualisierung)
+   und grosszuegigem Padding; die Liste genau EINE kompakte Zeile aus Titel und
+   einem kurzen Meta rechts. */
 .ticket-row {
   display: grid;
   gap: 4px;
 }
 
+/* KARTEN: 2-3 Zeilen je Eintrag, grosszuegiges Padding. */
+.ticket-row--cards {
+  gap: 3px;
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+
+/* LISTE: eine Zeile, maximale Dichte. */
 .ticket-row--list {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  min-height: 26px;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 
 .ticket-row-head {
@@ -115,6 +249,18 @@
   line-height: 1.35;
 }
 
+/* Der Listentitel traegt keine Karten-Emphase und nimmt den Schlupf, damit das
+   Kurz-Meta auf jeder Zeile buendig rechts sitzt. */
+.ticket-row--list .ticket-row-title {
+  flex: 1 1 auto;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.ticket-row--list > .ctox-badge {
+  flex: 0 0 auto;
+}
+
 .ticket-row-meta,
 .tickets-context-item-meta {
   overflow: hidden;
@@ -122,6 +268,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
+}
+
+/* Zweite Meta-Zeile der Karte: Zuordnung und Aktualisierung, eine Stufe leiser. */
+.ticket-row-meta--sub {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
 }
 
 .tickets-context-item-meta {
@@ -208,55 +360,99 @@
   font-size: 12px;
 }
 
-/* custom: narrow windows stack the panes vertically (earlier than the kit's
-   760px collapse, because ticket triage needs the columns readable without
-   horizontal squeezing). The on-demand ops pane keeps its is-ops-hidden state. */
-@container business-app-window (max-width: 1160px) {
+/* Three columns → two: the on-demand ops pane moves under the two working
+   columns instead of squeezing the timeline. 1024px is the shell's own
+   breakpoint; the module adds none of its own. */
+@container business-app-window (max-width: 1024px) {
+  .tickets-module,
+  .tickets-module.is-ops-hidden {
+    grid-template-columns: var(--ctox-left-width, 340px) 12px minmax(0, 1fr);
+  }
+
+  /* Ops shown → the timeline row plus a full-width ops row; ops hidden → the
+     list + timeline row only. The rows are fractions of the WINDOW (fr against
+     the module's own height), never of the screen: `vh` would measure the
+     display while the app sits in a window of any size (Vertrag §6). */
+  .tickets-module {
+    grid-template-rows: minmax(0, 1.6fr) minmax(240px, 1fr);
+  }
+  .tickets-module.is-ops-hidden {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .tickets-left { grid-column: 1; grid-row: 1; }
+  .tickets-module > [data-resizer="left"] { grid-column: 2; grid-row: 1; }
+  .tickets-center { grid-column: 3; grid-row: 1; }
+  .tickets-right { grid-column: 1 / -1; grid-row: 2; }
+
+  .tickets-module > [data-resizer="right"] {
+    display: none !important;
+  }
+
+  /* The center head is now the right-most head of the top row; the ops head
+     runs full width below the window control. */
+  .shell-window[data-shell-contract="v2"] .tickets-module .tickets-center > .ctox-pane-header {
+    padding-right: var(--tickets-v2-control-inset);
+  }
+  .shell-window[data-shell-contract="v2"] .tickets-module .tickets-right > .ctox-pane-header {
+    padding-right: 14px;
+  }
+}
+
+/* Two columns → one: the panes stack vertically. The on-demand ops pane keeps
+   its is-ops-hidden state. */
+@container business-app-window (max-width: 768px) {
   .tickets-module,
   .tickets-module.is-ops-hidden {
     grid-template-columns: minmax(0, 1fr);
-    height: auto;
-    min-height: 100%;
+    height: 100%;
+    min-height: 0;
+    /* Each stacked pane keeps an honest minimum; when the window is too short
+       for their sum the module — not the desktop — scrolls. */
     overflow-y: auto;
     gap: 8px;
   }
 
-  /* Ops shown → three stacked rows; ops hidden → the timeline + list only. */
+  /* Ops shown → three stacked rows; ops hidden → the list + timeline only.
+     Shares of the WINDOW height (fr), never `vh`: the app measures its window,
+     not the screen (Vertrag §6). */
   .tickets-module {
-    grid-template-rows: minmax(220px, 34vh) minmax(420px, 1fr) minmax(260px, 38vh);
+    grid-template-rows: minmax(180px, 1fr) minmax(240px, 1.4fr) minmax(200px, 1fr);
   }
   .tickets-module.is-ops-hidden {
-    grid-template-rows: minmax(220px, 34vh) minmax(420px, 1fr);
+    grid-template-rows: minmax(200px, 1fr) minmax(260px, 1.4fr);
   }
 
   .tickets-module > [data-resizer] {
     display: none !important;
   }
 
-  .tickets-left { grid-column: 1; }
-  .tickets-center { grid-column: 1; }
-  .tickets-right { grid-column: 1; }
+  .tickets-left { grid-column: 1; grid-row: 1; }
+  .tickets-center { grid-column: 1; grid-row: 2; }
+  .tickets-right { grid-column: 1; grid-row: 3; }
 
   .tickets-left,
   .tickets-center,
   .tickets-right {
     min-height: 220px;
   }
-}
 
-@container business-app-window (max-width: 640px) {
-  .tickets-module {
-    grid-template-rows: minmax(220px, 38vh) minmax(380px, 1fr) minmax(240px, 42vh);
+  /* Stacked: the left head is the only head in the top row, so it carries both
+     the icon and the window-control inset. */
+  .shell-window[data-shell-contract="v2"] .tickets-module .tickets-left > .ctox-pane-header {
+    padding-right: var(--tickets-v2-control-inset);
   }
-  .tickets-module.is-ops-hidden {
-    grid-template-rows: minmax(220px, 38vh) minmax(380px, 1fr);
+  .shell-window[data-shell-contract="v2"] .tickets-module .tickets-center > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .tickets-module .tickets-right > .ctox-pane-header {
+    padding-right: 14px;
   }
 }
 
 /* Touch targets on coarse pointers (phone/tablet): every interactive control
    reaches the 44px minimum, icon-only pane buttons in both dimensions. The
-   narrow-viewport pane stacking itself is handled by the @container
-   business-app-window rules above (1160px/640px). */
+   narrow-window pane stacking itself is handled by the @container
+   business-app-window rules above, and only at the shell's own two
+   breakpoints (1024px / 768px). */
 @media (pointer: coarse) {
   .tickets-module button,
   .tickets-module input,
@@ -269,4 +465,14 @@
     width: 44px;
     min-width: 44px;
   }
+}
+
+/* Kopf/Koerper-Trennung (UI-Review 31.08.2026, Befund 11): eine Hairline unter
+   jedem Spaltenkopf-Band, damit Kopfzone und Arbeitsflaeche auch im
+   Leerzustand ablesbar getrennt sind - in allen drei Spalten identisch. */
+.tickets-module .ctox-pane > .ctox-pane-header {
+  border-bottom: 1px solid var(--line);
+}
+.tickets-module .ctox-view-switch {
+  border-bottom: 1px solid var(--line);
 }

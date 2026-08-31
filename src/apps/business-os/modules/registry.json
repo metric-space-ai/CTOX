@@ -232,7 +232,9 @@
       "layout": {
         "shell": "windowed",
         "shell_contract": "v2",
-        "shell_geometry_contract": "business-os-v2-global-1",
+        "shell_geometry_contract": "browser-v2-reference-1",
+        "shell_header_rows": 2,
+        "shell_icon_rows": 2,
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
@@ -241,13 +243,15 @@
         "top": "browser tabs and address bar",
         "center": "web page",
         "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
+        "icon_asset_srcset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg 1x",
+        "icon_provenance": "shared/assets/workjet-icons/operator-selection-v1/manifest.json",
         "icon_asset_sha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11",
         "icon_selection_candidate": "candidate-01",
         "icon_asset_kind": "raster-reference",
         "icon_selection_sha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11"
       },
       "category": "Workspace",
-      "version": "v0.2.4",
+      "version": "v0.2.5",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -1514,7 +1518,7 @@
       "layout": {
         "shell": "windowed",
         "shell_contract": "v2",
-        "shell_geometry_contract": "knowledge-v2-reference-3",
+        "shell_geometry_contract": "knowledge-v2-reference-4",
         "shell_header_rows": 2,
         "shell_icon_rows": 2,
         "icon_asset": "modules/knowledge/assets/icon/knowledge-256.png",
@@ -1549,7 +1553,7 @@
         "icon_selection_sha256": "6aaaac3c849a444f1bc8af3e4f019eb4eded5ad64ac70ec85eee5c54cdb06e3b"
       },
       "category": "Knowledge",
-      "version": "1.1.6",
+      "version": "1.1.7",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [

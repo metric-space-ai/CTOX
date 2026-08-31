@@ -142,8 +142,19 @@ test('iot: IA-Karte — left selector + main dashboard, no third column', () => 
 
 test('iot: left column carries the canonical grammar markup pins', () => {
   assert.match(indexHtml, /data-pg-search/, 'grammar search input');
-  assert.match(indexHtml, /data-pg-view="cards"/, 'tree/shard view toggle');
-  assert.match(indexHtml, /data-pg-view="list"/, 'list view toggle');
+  // Betreiber-Direktive 31.08.2026: the shard/list switch is ONE button, not a
+  // pair. It carries the CURRENT view in data-pg-view (what the shell's pane
+  // grammar falls back to on every other emit) and never aria-pressed, because
+  // it is an action, not a state.
+  const viewToggles = indexHtml.match(/data-pg-view="(?:cards|list)"/g) || [];
+  assert.equal(viewToggles.length, 1, 'exactly one view-toggle button, not two');
+  const toggleTag = indexHtml.match(/<button[^>]*data-iot-view-toggle[^>]*>/)?.[0] || '';
+  assert.ok(toggleTag, 'the single toggle is module-wired via data-iot-view-toggle');
+  assert.doesNotMatch(toggleTag, /aria-pressed/, 'the toggle is an action, not a state');
+  assert.match(toggleTag, /aria-label="[^"]+"/, 'the toggle names the view it switches to');
+  // The MAIN dashboard toggle follows the same one-button rule.
+  assert.doesNotMatch(indexJs, /data-view="(?:cards|list)"/, 'no two-button dashboard toggle');
+  assert.match(indexJs, /viewToggleTarget\(state\.mainView\)/, 'dashboard toggle flips the view');
   assert.match(indexHtml, /data-pg-tray-toggle/, 'filter tray toggle');
   assert.match(indexHtml, /data-pg-tray\b/, 'collapsed tray');
   assert.match(indexHtml, /data-pg-reset/, 'tray reset control');

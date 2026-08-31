@@ -49,7 +49,7 @@ export async function mount(ctx) {
     sessionCard: root.querySelector('[data-browser-session-card]'),
     sessionList: root.querySelector('[data-browser-session-list]'),
     sessionsPane: root.querySelector('.browser-sessions'),
-    sessionsToggle: root.querySelector('[data-browser-sessions-toggle]'),
+    viewToggle: root.querySelector('[data-browser-view-toggle]'),
     sessions: root.querySelector('[data-browser-sessions]'),
     sessionsEmpty: root.querySelector('[data-browser-sessions-empty]'),
     sessionsImport: root.querySelector('[data-action="import"]'),
@@ -280,6 +280,10 @@ export async function mount(ctx) {
       band: detail.band || 'all',
       filters: detail.filters || {},
     };
+    // Der Umschalter ist eine AKTION: die Shell stempelt aria-pressed auf jeden
+    // [data-pg-view]-Knopf und emittiert danach dieses Ereignis — hier faellt
+    // das Attribut wieder weg, und Symbol/Beschriftung folgen der Ansicht.
+    syncViewToggle(refs, state.leftView.view);
     renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
   };
@@ -293,12 +297,20 @@ export async function mount(ctx) {
   });
   refs.sessionsImport?.addEventListener('click', () => importBrowserSessions(ctx, state, refs));
   refs.sessionsExport?.addEventListener('click', () => exportBrowserSessions(state, refs));
-  refs.sessionsToggle?.addEventListener('click', () => {
-    const open = refs.root.classList.toggle('is-sessions-open');
-    refs.sessionsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    refs.sessionsToggle.setAttribute('aria-label', open ? 'Sitzungen ausblenden' : 'Sitzungen anzeigen');
-    refs.sessionsToggle.title = open ? 'Sitzungen ausblenden' : 'Sitzungen anzeigen';
+  // EIN Umschalter Karten/Liste (Betreiber-Direktive 31.08.2026). Der Knopf
+  // dreht data-pg-view auf sich selbst; die Shell-Grammatik liest daraus
+  // weiterhin die AKTUELLE Ansicht (viewButtons[0].dataset.pgView) und meldet
+  // sie ueber ctox-pane-grammar-change zurueck. mount() laeuft vor
+  // autoWirePaneGrammar, dieser Listener also vor dem der Shell — sie sieht
+  // beim Emittieren schon den gedrehten Wert. Das eigene Rendern hier haelt den
+  // Umschalter auch dann funktionsfaehig, wenn die Shell nicht verdrahtet ist.
+  refs.viewToggle?.addEventListener('click', () => {
+    const next = refs.viewToggle.dataset.pgView === 'list' ? 'cards' : 'list';
+    syncViewToggle(refs, next);
+    state.leftView = { ...state.leftView, view: next };
+    renderLeftRail(ctx, refs, state);
   });
+  syncViewToggle(refs, state.leftView.view);
   refs.toggleAdvanced?.addEventListener('click', () => {
     if (!refs.advanced) return;
     const hidden = refs.advanced.classList.toggle('is-advanced-hidden');
@@ -589,8 +601,6 @@ export async function mount(ctx) {
     state.latestFrame = null;
     state.latestDirectFrame = null;
     state.latestTab = null;
-    refs.root.classList.remove('is-sessions-open');
-    refs.sessionsToggle?.setAttribute('aria-expanded', 'false');
     markActiveSession(refs, sessionId);
     safeLoadAndRender();
   });
@@ -2653,7 +2663,7 @@ function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}
   if (refs.sessions.dataset.sig !== signature) {
     refs.sessions.dataset.sig = signature;
     refs.sessions.innerHTML = filtered
-      .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0, ctx))
+      .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0, ctx, listView))
       .join('');
   }
   if (refs.sessionsEmpty) refs.sessionsEmpty.hidden = filtered.length > 0;
@@ -2679,15 +2689,19 @@ function markActiveSession(refs, sessionId) {
   }
 }
 
-function sessionShardMarkup(session, tabCount, ctx = null) {
+// Karten und Liste sind zwei verschiedene Dichten, keine zwei Innenabstaende
+// (Betreiber-Direktive 31.08.2026):
+//   KARTEN = fetter Titel + Betriebs-Meta + Detailzeile (drei Zeilen),
+//   LISTE  = genau eine Zeile, Titel links und EIN Kurz-Meta rechts.
+// Beide Formen leben von Feldern, die die App ohnehin geladen hat.
+function sessionShardMarkup(session, tabCount, ctx = null, listView = 'cards') {
   const url = session.current_url || session.payload?.target_url || '';
   const title = browserDisplayTitle(null, session, url);
-  const meta = browserSessionShardMeta(session, tabCount, ctx);
   const importedClass = session.__imported ? ' browser-session--imported' : '';
   // Das Symbol traegt den Zustand, nicht nur der Text: bei 34 Sitzungen findet
   // man "Eingriff noetig" sonst nicht, ohne jede Zeile zu lesen.
   const z = browserSitzungZustand(session, ctx);
-  return `
+  const open = `
     <div class="ctox-list-item browser-session${importedClass} ${z.klasse}" role="option" aria-selected="false" tabindex="0"
       data-browser-session-id="${escapeHtml(session.id)}"
       data-browser-zustand="${escapeHtml(z.klasse)}"
@@ -2695,8 +2709,18 @@ function sessionShardMarkup(session, tabCount, ctx = null) {
       data-context-record-type="browser_session"
       data-context-label="${escapeHtml(title)}">
       <span class="browser-session-zustand" title="${escapeHtml(z.text)}" aria-label="${escapeHtml(z.text)}">${z.symbol}</span>
-      <span class="browser-session-title">${escapeHtml(title)}</span>
+      <span class="browser-session-title">${escapeHtml(title)}</span>`;
+  if (listView === 'list') {
+    const brief = browserSessionListMeta(session, tabCount, ctx);
+    return `${open}
+      <span class="browser-session-brief" title="${escapeHtml(brief)}">${escapeHtml(brief)}</span>
+    </div>`;
+  }
+  const meta = browserSessionShardMeta(session, tabCount, ctx);
+  const detail = browserSessionShardDetail(session, url);
+  return `${open}
       <span class="browser-session-meta" title="${escapeHtml(meta)}">${escapeHtml(meta)}</span>
+      <span class="browser-session-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
     </div>`;
 }
 
@@ -2753,6 +2777,49 @@ function browserSessionShardMeta(session, tabCount = 0, ctx = null) {
   if (error) parts.push(error);
   if (session.__imported) parts.push('Import');
   return parts.join(' · ');
+}
+
+// Dritte Kartenzeile: wo die Sitzung steht und wann sie sich zuletzt gemeldet
+// hat. Reine Anzeige aus bereits geladenen Feldern — kein neuer Datenpfad.
+// `updated_at_ms` steht in sessionListSignature, die Zeile veraltet also nicht.
+function browserSessionShardDetail(session, url = '') {
+  const target = url || session?.current_url || session?.payload?.target_url || '';
+  const parts = [];
+  if (target) parts.push(browserUrlLabel(target));
+  const seen = Number(session?.updated_at_ms || session?.created_at_ms || 0);
+  if (seen > 0) {
+    parts.push(new Date(seen).toLocaleString(undefined, {
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+    }));
+  }
+  if (session?.__imported) parts.push(t('shardImported', 'Import'));
+  return parts.join(' · ');
+}
+
+// Listenzeile: EIN Kurz-Meta rechts. Der Betriebszustand ist das, wonach in
+// einer dichten Liste gesucht wird — Profil, Fehlertext und Adresse stehen in
+// der Kartenansicht und im Titel-Tooltip.
+function browserSessionListMeta(session, tabCount = 0, ctx = null) {
+  const zustand = browserSitzungZustand(session, ctx);
+  const count = Number(tabCount || 0);
+  return count > 0 ? `${zustand.text} · ${count}` : zustand.text;
+}
+
+// EIN Umschalter Karten/Liste. `data-pg-view` traegt die AKTUELLE Ansicht (die
+// Shell-Grammatik liest sie dort), Symbol und Beschriftung benennen die ZIEL-
+// Ansicht. aria-pressed entfaellt: der Knopf ist eine Aktion, kein Zustand —
+// die Shell stempelt es auf [data-pg-view], hier faellt es wieder weg.
+function syncViewToggle(refs, view) {
+  const button = refs?.viewToggle;
+  if (!button) return;
+  const current = view === 'list' ? 'list' : 'cards';
+  button.dataset.pgView = current;
+  const label = current === 'list'
+    ? t('viewShowCards', 'Als Karten anzeigen')
+    : t('viewShowList', 'Als Liste anzeigen');
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.removeAttribute('aria-pressed');
 }
 
 function browserSessionBand(session) {
@@ -3713,6 +3780,10 @@ export const __browserTestHooks = {
   sessionListSignature,
   browserWorkbenchVisible,
   browserSessionShardMeta,
+  browserSessionShardDetail,
+  browserSessionListMeta,
+  sessionShardMarkup,
+  syncViewToggle,
   buildBrowserSessionsExport,
   parseBrowserSessionsImport,
   sessionRenderList,

@@ -109,5 +109,8 @@
   "left.newAssetLabel": "Create asset",
   "center.title": "Dashboards",
   "center.viewLabel": "View",
-  "ed.title": "Edit widget"
+  "ed.title": "Edit widget",
+  "view.showList": "Show as list",
+  "view.showCards": "Show as cards",
+  "alarmWord": "open alarm"
 }

@@ -125,6 +125,8 @@ const labels = {
     sync: 'Abgleich',
     savedViews: 'Ansichten',
     saveView: 'Ansicht speichern',
+    showAsList: 'Als Liste anzeigen',
+    showAsCards: 'Als Karten anzeigen',
     toggleInspector: 'Inspector ausblenden',
     showInspector: 'Inspector einblenden',
     allAccounts: 'Alle Kunden',
@@ -289,6 +291,8 @@ const labels = {
     sync: 'Sync',
     savedViews: 'Views',
     saveView: 'Save view',
+    showAsList: 'Show as list',
+    showAsCards: 'Show as cards',
     toggleInspector: 'Hide inspector',
     showInspector: 'Show inspector',
     allAccounts: 'All customers',
@@ -709,6 +713,12 @@ function wireUi(root) {
         state.diagnostics.commandState = state.t('commandFailed', labels.de.commandFailed, error?.message || String(error));
         renderRight();
       });
+      return;
+    }
+    if (target?.closest('[data-customers-view-toggle]')) {
+      state.accountView = state.accountView === 'list' ? 'cards' : 'list';
+      syncViewToggle();
+      renderAccountList();
       return;
     }
     const sortField = target?.closest('[data-customers-sort]')?.getAttribute('data-customers-sort');
@@ -1175,7 +1185,11 @@ function onAccountGrammarChange(event) {
   const detail = event?.detail || pane?.__ctoxPaneGrammar?.state?.() || {};
   const filters = detail.filters || {};
   state.search = String(detail.search || '').trim().toLowerCase();
-  state.accountView = detail.view === 'list' ? 'list' : 'cards';
+  // accountView is owned by the module's own one-button toggle, not by the
+  // shell grammar (which models the view as N aria-pressed buttons). We only
+  // adopt detail.view when it actually differs from what we published through
+  // data-pg-default-view, so a stale/absent value can never reset the view.
+  if (detail.view === 'list' || detail.view === 'cards') state.accountView = detail.view;
   state.accountBand = ['active', 'renewal', 'risk'].includes(detail.band) ? detail.band : 'all';
   state.stage = filters.stage || 'all';
   state.health = filters.health || 'all';
@@ -1192,9 +1206,41 @@ function customersLeftPane() {
   return state.ctx?.host?.querySelector('.customers-left') || null;
 }
 
+// One control, two states. The icon always shows the view the click LEADS TO,
+// so it is an action label, not a state indicator — hence no aria-pressed.
+const VIEW_TOGGLE_ICONS = Object.freeze({
+  // switch-to-list: three rules
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+  // switch-to-cards: two shards
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+});
+
+function syncViewToggle() {
+  const pane = customersLeftPane();
+  if (!pane) return;
+  const view = state.accountView === 'list' ? 'list' : 'cards';
+  // shared/pane-grammar.js falls back to the pane's default view when no
+  // [data-pg-view] button exists, so keep that fallback truthful; the
+  // grammar-change event then still reports the view the operator sees.
+  pane.dataset.pgDefaultView = view;
+  const button = pane.querySelector('[data-customers-view-toggle]');
+  if (!button) return;
+  const next = view === 'list' ? 'cards' : 'list';
+  const label = next === 'list'
+    ? state.t('showAsList', labels.de.showAsList)
+    : state.t('showAsCards', labels.de.showAsCards);
+  button.dataset.customersView = view;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.removeAttribute('aria-pressed');
+  const icon = VIEW_TOGGLE_ICONS[next];
+  if (icon && button.innerHTML !== icon) button.innerHTML = icon;
+}
+
 function syncGrammarControlsFromState() {
   const pane = customersLeftPane();
   if (!pane) return;
+  syncViewToggle();
   const search = pane.querySelector('[data-pg-search]');
   if (search) search.value = state.search || '';
   const values = {
@@ -1365,6 +1411,7 @@ function render() {
   const root = state.ctx?.host?.querySelector('[data-customers-root]');
   if (!root) return;
   syncPresence();
+  syncViewToggle();
   renderAccountList();
   renderMain();
   applyInspectorVisibility(root);
@@ -1461,22 +1508,44 @@ function accountListSignature(accounts = [], view = 'cards') {
   });
 }
 
-function accountShardMarkup(account) {
-  const related = relatedRecords(account.id, state.collections);
-  const meta = [
-    labelFor(STAGE_LABELS, account.customer_stage),
-    `${related.contacts.length} ${state.t('contacts', labels.de.contacts)}`,
-    `${related.opportunities.length} ${state.t('opportunities', labels.de.opportunities)}`,
-  ].join(' · ');
-  return `
-    <button type="button" class="ctox-list-item customers-account-shard" data-customers-selectable data-customers-account-id="${escapeAttribute(account.id)}"
+// The two views are genuinely different densities, not the same row with a
+// class on it (Betreiber-Direktive 31.08.2026):
+//   cards -> shard: bold title + two meta lines, generous padding
+//   list  -> exactly ONE line: title left, one short meta right, max density
+// Both use fields the module already loads; no new data path, no new schema.
+function accountShardMarkup(account, view = 'cards') {
+  const name = account.name || account.id;
+  const stage = labelFor(STAGE_LABELS, account.customer_stage);
+  const attrs = `data-customers-selectable data-customers-account-id="${escapeAttribute(account.id)}"
       data-context-record-id="${escapeAttribute(account.id)}"
       data-context-record-type="customer_account"
-      data-context-label="${escapeAttribute(account.name || account.id)}"
+      data-context-label="${escapeAttribute(name)}"
       role="option" tabindex="0" aria-selected="false"
-      aria-label="${escapeAttribute(state.t('selectAccount', labels.de.selectAccount, account.name || account.id))}">
-      <span class="customers-account-title">${escapeHtml(account.name || account.id)}</span>
-      <span class="customers-account-meta">${escapeHtml(meta)}</span>
+      aria-label="${escapeAttribute(state.t('selectAccount', labels.de.selectAccount, name))}"`;
+  if (view === 'list') {
+    return `
+    <button type="button" class="ctox-list-item customers-account-shard is-compact" ${attrs}>
+      <span class="customers-account-title">${escapeHtml(name)}</span>
+      <span class="customers-account-tag">${escapeHtml(stage)}</span>
+    </button>
+  `;
+  }
+  const related = relatedRecords(account.id, state.collections);
+  const primary = [
+    stage,
+    labelFor(HEALTH_LABELS, account.health_status),
+    account.domain,
+  ].filter(Boolean).join(' · ');
+  const secondary = [
+    `${related.contacts.length} ${state.t('contacts', labels.de.contacts)}`,
+    `${related.opportunities.length} ${state.t('opportunities', labels.de.opportunities)}`,
+    formatDate(account.last_activity_at_ms, state.lang),
+  ].filter(Boolean).join(' · ');
+  return `
+    <button type="button" class="ctox-list-item customers-account-shard" ${attrs}>
+      <span class="customers-account-title">${escapeHtml(name)}</span>
+      <span class="customers-account-meta">${escapeHtml(primary)}</span>
+      <span class="customers-account-meta">${escapeHtml(secondary)}</span>
     </button>
   `;
 }
@@ -1562,11 +1631,13 @@ function renderAccountList() {
   }[state.accountBand] || state.t('allAccounts', labels.de.allAccounts);
   writeAccountGrammarFooter(`${accounts.length} ${state.t('entries', 'Einträge')} · ${bandLabel}`);
   syncSavedViewOptions();
-  list.classList.toggle('is-list-view', state.accountView === 'list');
-  const signature = accountListSignature(accounts, state.accountView);
+  const view = state.accountView === 'list' ? 'list' : 'cards';
+  list.classList.toggle('is-list-view', view === 'list');
+  const signature = accountListSignature(accounts, view);
   if (list.dataset.sig !== signature) {
     list.dataset.sig = signature;
-    list.innerHTML = accounts.map(accountShardMarkup).join('');
+    // Explicit arrow: Array#map would pass the index as the `view` argument.
+    list.innerHTML = accounts.map((account) => accountShardMarkup(account, view)).join('');
   }
   const empty = pane.querySelector('[data-customers-account-empty]');
   const syncingNode = pane.querySelector('[data-customers-account-syncing]');
@@ -1635,21 +1706,21 @@ function renderMain() {
         </div>
         ${renderMainHeaderActions(account)}
       </div>
+      <nav class="ctox-pane-band customers-workbench-tabs" aria-label="${escapeAttribute(state.t('workbench', labels.de.workbench))}">
+        <div class="ctox-pane-tabs" role="tablist">
+          ${workbenchTabButton('overview', state.t('overview', labels.de.overview))}
+          ${workbenchTabButton('contacts', state.t('contacts', labels.de.contacts))}
+          ${workbenchTabButton('opportunities', state.t('opportunities', labels.de.opportunities))}
+          ${workbenchTabButton('timeline', state.t('activities', labels.de.activities))}
+          ${workbenchTabButton('tasks', state.t('tasks', labels.de.tasks))}
+          ${workbenchTabButton('notes', state.t('notes', labels.de.notes))}
+          ${workbenchTabButton('files', state.t('files', labels.de.files))}
+          ${workbenchTabButton('apps', state.t('apps', labels.de.apps))}
+          ${workbenchTabButton('handoff', state.t('handoff', labels.de.handoff))}
+          ${workbenchTabButton('dedupe', state.t('dedupe', labels.de.dedupe))}
+        </div>
+      </nav>
     </header>
-    <nav class="ctox-pane-band customers-workbench-tabs" aria-label="${escapeAttribute(state.t('workbench', labels.de.workbench))}">
-      <div class="ctox-pane-tabs" role="tablist">
-        ${workbenchTabButton('overview', state.t('overview', labels.de.overview))}
-        ${workbenchTabButton('contacts', state.t('contacts', labels.de.contacts))}
-        ${workbenchTabButton('opportunities', state.t('opportunities', labels.de.opportunities))}
-        ${workbenchTabButton('timeline', state.t('activities', labels.de.activities))}
-        ${workbenchTabButton('tasks', state.t('tasks', labels.de.tasks))}
-        ${workbenchTabButton('notes', state.t('notes', labels.de.notes))}
-        ${workbenchTabButton('files', state.t('files', labels.de.files))}
-        ${workbenchTabButton('apps', state.t('apps', labels.de.apps))}
-        ${workbenchTabButton('handoff', state.t('handoff', labels.de.handoff))}
-        ${workbenchTabButton('dedupe', state.t('dedupe', labels.de.dedupe))}
-      </div>
-    </nav>
     <div class="ctox-pane-scroll customers-workbench-scroll">
       ${renderPermissionNotice()}
       ${visible ? `<div data-customers-record-inspector>${renderActiveRecordInspectorMarkup()}</div>${renderWorkbenchTabContent()}` : `

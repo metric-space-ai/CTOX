@@ -10,5 +10,7 @@
   "bandValid": "Valid",
   "bandExpiring": "Expiring",
   "bandCritical": "Critical",
-  "syncing": "Syncing data."
+  "syncing": "Syncing data.",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

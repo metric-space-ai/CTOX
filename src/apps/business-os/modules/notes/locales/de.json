@@ -46,5 +46,7 @@
   "newTagPrompt": "Name für den neuen Tag:",
   "importInvalid": "Ungültige JSON-Datei.",
   "importEmpty": "Keine Notizen in der Datei.",
-  "imported": "{n} Notizen importiert."
+  "imported": "{n} Notizen importiert.",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen"
 }

@@ -353,6 +353,20 @@ export async function mount(ctx) {
       renderList();
     });
 
+    // One-button view switch. Bound on the button itself, never delegated: the
+    // shell grammar re-renders the icon on the same click, which detaches the
+    // <svg> the click originated in, so `event.target.closest()` would find
+    // nothing by the time the event reached the module root.
+    refs.leftPane?.querySelector('[data-mail-view-toggle]')?.addEventListener('click', () => {
+      view.leftGrammar = { ...view.leftGrammar, view: view.leftGrammar.view === 'list' ? 'cards' : 'list' };
+      renderNavigation();
+    });
+    refs.listPane?.querySelector('[data-mail-view-toggle]')?.addEventListener('click', () => {
+      view.listGrammar = { ...view.listGrammar, view: view.listGrammar.view === 'list' ? 'cards' : 'list' };
+      view.page = 0;
+      renderList();
+    });
+
     root.addEventListener('click', async (event) => {
       const recordSelector = event.target.closest('[data-mail-select-record]');
       if (recordSelector) {
@@ -529,6 +543,7 @@ export async function mount(ctx) {
     });
     writePaneCounts(refs.leftPane, { queues: queueRows.length, campaigns: visibleGroups.length });
     refs.leftPane.dataset.mailView = view.leftGrammar.view;
+    syncViewToggleButton(ctx, refs.leftPane, view.leftGrammar.view, t);
     const search = view.leftGrammar.search;
     const sort = view.leftGrammar.filters.sort || 'recent';
     const sources = view.leftGrammar.band === 'campaigns'
@@ -551,10 +566,15 @@ export async function mount(ctx) {
       : sort === 'count'
         ? b.count - a.count
         : Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+    // Shards carry title plus meta line; the list is one dense line per entry
+    // with a single short meta on the right.
+    const scopeAsList = view.leftGrammar.view === 'list';
     refs.scopeList.innerHTML = rows.length ? rows.map((item) => {
       const scopeType = view.leftGrammar.band === 'campaigns' ? 'campaign' : 'queue';
-      return `<button class="mail-scope-card${view.scopeType === scopeType && view.scopeId === item.id ? ' is-active' : ''}" type="button" data-mail-scope="${scopeType}" data-mail-scope-id="${escapeAttribute(item.id)}" data-context-record-id="${escapeAttribute(item.id)}" data-context-record-type="${scopeType}" data-context-record-label="${escapeAttribute(item.title)}" data-context-label="${escapeAttribute(item.title)}">
-        <span class="mail-scope-title">${escapeHtml(item.title)}</span><span class="mail-scope-meta">${escapeHtml(item.meta)}</span><span class="mail-scope-count">${escapeHtml(item.countLabel ?? item.count)}</span>
+      const shape = scopeAsList ? 'mail-scope-card--line' : 'mail-scope-card--shard';
+      const meta = scopeAsList ? '' : `<span class="mail-scope-meta">${escapeHtml(item.meta)}</span>`;
+      return `<button class="mail-scope-card ${shape}${view.scopeType === scopeType && view.scopeId === item.id ? ' is-active' : ''}" type="button" data-mail-scope="${scopeType}" data-mail-scope-id="${escapeAttribute(item.id)}" data-context-record-id="${escapeAttribute(item.id)}" data-context-record-type="${scopeType}" data-context-record-label="${escapeAttribute(item.title)}" data-context-label="${escapeAttribute(item.title)}">
+        <span class="mail-scope-title">${escapeHtml(item.title)}</span>${meta}<span class="mail-scope-count">${escapeHtml(item.countLabel ?? item.count)}</span>
       </button>`;
     }).join('') : `<div class="ctox-empty"><span>${escapeHtml(view.leftGrammar.band === 'campaigns' ? t('noGroups', 'Noch keine E-Mail-Gruppen') : t('noResults', 'Keine passenden Queues'))}</span></div>`;
     renderNavigationSelection();
@@ -586,6 +606,7 @@ export async function mount(ctx) {
     refs.listKicker.textContent = view.scopeType === 'campaign' ? t('campaign', 'Kampagne') : t('mailbox', 'Postfach');
     refs.listTitle.textContent = scopeLabel;
     refs.listPane.dataset.mailView = view.listGrammar.view;
+    syncViewToggleButton(ctx, refs.listPane, view.listGrammar.view, t);
     writePaneCounts(refs.listPane, counts);
     const range = allRows.length ? `${pageStart + 1}–${pageStart + rows.length} / ${allRows.length}` : '0';
     const footer = `${range} ${t('messages', 'Nachrichten')} · ${view.accountKey ? accountLabel(view.accountKey) : t('allMailboxes', 'alle Postfächer')}`;
@@ -605,7 +626,13 @@ export async function mount(ctx) {
     }
   }
 
+  // Two genuinely different shapes for the same record:
+  //   shard - bold subject plus one or two meta lines (sender, status, group,
+  //           delivery progress) and generous padding;
+  //   line  - exactly one dense row: subject and a single short meta (time).
   function renderRecordRow(record) {
+    const asList = view.listGrammar.view === 'list';
+    const shape = asList ? 'mail-record-row--line' : 'mail-record-row--shard';
     if (record.__kind === 'thread') {
       const latest = latestMessageForThread(record.thread_key, view.communicationMessages);
       const sender = latest?.direction === 'outbound'
@@ -617,11 +644,19 @@ export async function mount(ctx) {
       const route = routeCommandForRecord(record, view.commands);
       const unread = Number(record.unread_count || 0);
       const status = route ? routeTargetLabel(route) : (unread ? `${unread} neu` : t('inbound', 'Eingang'));
-      return `<div class="mail-record-row${unread > 0 ? ' is-unread' : ''}" role="option" tabindex="0" data-mail-record-kind="thread" data-mail-record-id="${escapeAttribute(record.thread_key)}" data-context-record-id="${escapeAttribute(record.thread_key)}" data-context-record-type="communication_thread" data-context-record-label="${escapeAttribute(subject)}" data-context-label="${escapeAttribute(subject)}">
-        <input class="mail-record-select" type="checkbox" data-mail-select-record="${escapeAttribute(selectionKey)}" aria-label="${escapeAttribute(subject)} auswählen" ${view.selectedRecords.has(selectionKey) ? 'checked' : ''} />
-        <span class="mail-record-sender">${escapeHtml(sender || '—')}</span>
-        <span class="mail-record-copy"><span class="mail-record-subject">${escapeHtml(subject)}</span><span class="mail-record-preview">${escapeHtml(compact(preview))} · ${escapeHtml(status)}</span></span>
-        <span class="mail-record-time">${escapeHtml(formatRecordTime(record.last_message_at))}</span>
+      const open = `<div class="mail-record-row ${shape}${unread > 0 ? ' is-unread' : ''}" role="option" tabindex="0" data-mail-record-kind="thread" data-mail-record-id="${escapeAttribute(record.thread_key)}" data-context-record-id="${escapeAttribute(record.thread_key)}" data-context-record-type="communication_thread" data-context-record-label="${escapeAttribute(subject)}" data-context-label="${escapeAttribute(subject)}">
+        <input class="mail-record-select" type="checkbox" data-mail-select-record="${escapeAttribute(selectionKey)}" aria-label="${escapeAttribute(subject)} auswählen" ${view.selectedRecords.has(selectionKey) ? 'checked' : ''} />`;
+      const time = `<span class="mail-record-time">${escapeHtml(formatRecordTime(record.last_message_at))}</span>`;
+      if (asList) {
+        return `${open}
+        <span class="mail-record-subject">${escapeHtml(subject)}</span>
+        ${time}
+      </div>`;
+      }
+      const previewLine = compact(preview);
+      return `${open}
+        <span class="mail-record-copy"><span class="mail-record-subject">${escapeHtml(subject)}</span><span class="mail-record-meta">${escapeHtml(sender || '—')} · ${escapeHtml(status)}</span>${previewLine ? `<span class="mail-record-preview">${escapeHtml(previewLine)}</span>` : ''}</span>
+        ${time}
       </div>`;
     }
     const campaign = view.campaigns.find((item) => item.id === record.campaign_id);
@@ -630,13 +665,22 @@ export async function mount(ctx) {
     const selectionKey = mailRecordKey(record);
     const route = routeCommandForRecord(record, view.commands);
     const displayStatus = route ? routeTargetLabel(route) : status;
+    const subject = record.subject || '(Kein Betreff)';
+    const open = `<div class="mail-record-row ${shape}" role="option" tabindex="0" data-mail-record-kind="outbound" data-mail-record-id="${escapeAttribute(record.id)}" data-context-record-id="${escapeAttribute(record.id)}" data-context-record-type="outbound_message" data-context-record-label="${escapeAttribute(record.subject || recipient)}" data-context-label="${escapeAttribute(record.subject || recipient)}">
+      <input class="mail-record-select" type="checkbox" data-mail-select-record="${escapeAttribute(selectionKey)}" aria-label="${escapeAttribute(record.subject || recipient)} auswählen" ${view.selectedRecords.has(selectionKey) ? 'checked' : ''} />`;
+    const time = `<span class="mail-record-time">${escapeHtml(formatRecordTime(record.updated_at_ms || record.created_at_ms))}</span>`;
+    if (asList) {
+      return `${open}
+      <span class="mail-record-subject">${escapeHtml(subject)}</span>
+      ${time}
+    </div>`;
+    }
     const progress = messageProgressModel(record);
     const progressIcons = progress.steps.map((step) => `<span class="mail-progress-step is-${escapeAttribute(step.state)}" title="${escapeAttribute(step.label)}" aria-label="${escapeAttribute(step.label)}">${ctx.getActionIcon?.(step.icon, 11, 1.9) || ''}</span>`).join('');
-    return `<div class="mail-record-row" role="option" tabindex="0" data-mail-record-kind="outbound" data-mail-record-id="${escapeAttribute(record.id)}" data-context-record-id="${escapeAttribute(record.id)}" data-context-record-type="outbound_message" data-context-record-label="${escapeAttribute(record.subject || recipient)}" data-context-label="${escapeAttribute(record.subject || recipient)}">
-      <input class="mail-record-select" type="checkbox" data-mail-select-record="${escapeAttribute(selectionKey)}" aria-label="${escapeAttribute(record.subject || recipient)} auswählen" ${view.selectedRecords.has(selectionKey) ? 'checked' : ''} />
-      <span class="mail-record-sender">${escapeHtml(recipient)}</span>
-      <span class="mail-record-copy"><span class="mail-record-subject">${escapeHtml(record.subject || '(Kein Betreff)')}</span><span class="mail-record-preview">${escapeHtml(campaign?.name || status)}</span><span class="mail-record-progress" role="img" aria-label="${escapeAttribute(progress.ariaLabel)}"><span class="mail-progress-track"><i style="width:${progress.percent}%"></i></span><span class="mail-progress-steps">${progressIcons}</span><span class="mail-progress-label">${escapeHtml(displayStatus)}</span></span></span>
-      <span class="mail-record-time">${escapeHtml(formatRecordTime(record.updated_at_ms || record.created_at_ms))}</span>
+    const group = campaign?.name ? `${escapeHtml(campaign.name)} · ` : '';
+    return `${open}
+      <span class="mail-record-copy"><span class="mail-record-subject">${escapeHtml(subject)}</span><span class="mail-record-meta">${escapeHtml(recipient)} · ${group}${escapeHtml(status)}</span><span class="mail-record-progress" role="img" aria-label="${escapeAttribute(progress.ariaLabel)}"><span class="mail-progress-track"><i style="width:${progress.percent}%"></i></span><span class="mail-progress-steps">${progressIcons}</span><span class="mail-progress-label">${escapeHtml(displayStatus)}</span></span></span>
+      ${time}
     </div>`;
   }
 
@@ -1978,15 +2022,37 @@ function renderActionIcons(ctx, refs) {
   ];
   refs.importButtons.forEach((button) => assignments.push([button, 'download']));
   refs.exportButtons.forEach((button) => assignments.push([button, 'export']));
-  refs.leftPane?.querySelectorAll('[data-pg-view="cards"]').forEach((button) => assignments.push([button, 'grid']));
-  refs.listPane?.querySelectorAll('[data-pg-view="cards"]').forEach((button) => assignments.push([button, 'grid']));
-  refs.leftPane?.querySelectorAll('[data-pg-view="list"]').forEach((button) => assignments.push([button, 'list']));
-  refs.listPane?.querySelectorAll('[data-pg-view="list"]').forEach((button) => assignments.push([button, 'list']));
   refs.leftPane?.querySelectorAll('[data-pg-tray-toggle]').forEach((button) => assignments.push([button, 'filter']));
   refs.listPane?.querySelectorAll('[data-pg-tray-toggle]').forEach((button) => assignments.push([button, 'filter']));
   refs.leftPane?.querySelectorAll('[data-pg-reset]').forEach((button) => assignments.push([button, 'refresh']));
   refs.listPane?.querySelectorAll('[data-pg-reset]').forEach((button) => assignments.push([button, 'refresh']));
   assignments.forEach(([button, name]) => { if (button) button.innerHTML = icon(name); });
+}
+
+// One-button view switch (operator directive, 31.08.2026). The button is an
+// action, not a state, so it carries no aria-pressed; icon, aria-label and
+// title always describe the view it switches TO. `data-pg-view` stays on it
+// because shared/pane-grammar.js reads a pane's view from there - it must
+// always hold the CURRENT view, otherwise an unrelated grammar emit (a search
+// keystroke, a tray filter, a band tab) would flip the mode as a side effect.
+function viewToggleLabel(currentView, t) {
+  return currentView === 'list'
+    ? t('showAsCards', 'Als Karten anzeigen')
+    : t('showAsList', 'Als Liste anzeigen');
+}
+
+function syncViewToggleButton(ctx, pane, currentView, t) {
+  const button = pane?.querySelector?.('[data-mail-view-toggle]');
+  if (!button) return;
+  const cards = currentView !== 'list';
+  const label = viewToggleLabel(currentView, t);
+  button.setAttribute('data-pg-view', cards ? 'cards' : 'list');
+  // The shell's generic view-button wiring stamps aria-pressed on click; a
+  // single toggle is an action, so the state attribute is removed again.
+  button.removeAttribute('aria-pressed');
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.innerHTML = ctx.getActionIcon?.(cards ? 'list' : 'grid') || '';
 }
 
 function normalizePaneGrammar(detail, fallback) {

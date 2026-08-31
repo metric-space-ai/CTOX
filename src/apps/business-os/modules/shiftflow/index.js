@@ -134,6 +134,7 @@ export async function mount(ctx) {
     viewConflictsTabBtn: ctx.host.querySelector('#viewConflictsTabBtn'),
     viewTimesheetsTabBtn: ctx.host.querySelector('#viewTimesheetsTabBtn'),
     viewBillingTabBtn: ctx.host.querySelector('#viewBillingTabBtn'),
+    viewToggleBtn: ctx.host.querySelector('[data-shift-view-toggle]'),
   };
 
   applyActionIcons(ctx, els);
@@ -153,6 +154,7 @@ export async function mount(ctx) {
   selectedEmployeeId = null;
   detailUserCollapsed = false;
   shiftListState = { search: '', view: 'cards', band: 'week', filters: { department: 'all', status: 'all' } };
+  applyShiftViewToggle(els);
   latestEmployees = [];
   latestProjects = [];
   latestShifts = [];
@@ -833,6 +835,21 @@ function visibleShiftListRecords() {
     .sort((a, b) => Number(a.start_time || 0) - Number(b.start_time || 0));
 }
 
+// Ein-Knopf-Umschalter: der Knopf ist eine Aktion, kein Zustand. Beschriftung
+// und Icon benennen deshalb die ZIEL-Ansicht; `aria-pressed` gibt es nicht.
+function applyShiftViewToggle(els) {
+  const button = els?.viewToggleBtn;
+  if (!button) return;
+  const isList = shiftListState.view === 'list';
+  const label = isList
+    ? t('showAsCards', 'Als Karten anzeigen')
+    : t('showAsList', 'Als Liste anzeigen');
+  button.dataset.shiftView = isList ? 'list' : 'cards';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.removeAttribute('aria-pressed');
+}
+
 function renderShiftList(els) {
   if (!els.shiftList || !els.leftPane) return;
   const records = visibleShiftListRecords();
@@ -845,6 +862,12 @@ function renderShiftList(els) {
   renderShiftListCountsAndFooter(els.leftPane, records.length);
 }
 
+// Karten- und Listenform sind zwei verschiedene Dichten derselben Daten
+// (Betreiber-Direktive 31.08.2026): die Karte traegt Titel plus zwei Meta-
+// Zeilen (Wann / Wer + Projekt + Status), die Liste genau EINE Zeile mit Titel
+// und einem Kurz-Meta rechts. Beide Meta-Saetze stehen im Markup; welche Form
+// sichtbar ist, entscheidet `.is-cards` / `.is-list` in index.css. Es kommen
+// nur Felder vor, die die Liste ohnehin laedt - kein neuer Datenpfad.
 function renderShiftListItem(shift) {
   const employee = latestEmployees.find((item) => item.id === shift.employee_id);
   const project = latestProjects.find((item) => item.id === shift.project_id);
@@ -853,13 +876,20 @@ function renderShiftListItem(shift) {
   const locale = lang === 'en' ? 'en-US' : 'de-DE';
   const date = start.toLocaleDateString(locale, { weekday: 'short', day: '2-digit', month: '2-digit' });
   const title = shift.title || project?.name || t('shift', 'Dienst');
-  const meta = `${date} · ${formatTime(start)}–${formatTime(end)} · ${employee?.name || t('unassigned', 'Unbesetzt')} · ${project?.name || shift.location || t('noProject', 'Ohne Projekt')}`;
+  const status = shift.status === 'published'
+    ? t('statusPublished', 'Veröffentlicht')
+    : t('statusDraft', 'Entwurf');
+  const cardWhen = `${date} · ${formatTime(start)}–${formatTime(end)}`;
+  const cardWho = `${employee?.name || t('unassigned', 'Unbesetzt')} · ${project?.name || shift.location || t('noProject', 'Ohne Projekt')}`;
+  const listBrief = `${date} · ${formatTime(start)}`;
   const selected = shift.id === selectedShiftId;
   return `
     <article class="ctox-list-item shiftflow-shift-item${selected ? ' is-selected' : ''}" role="option" aria-selected="${selected}" data-shift-list-id="${escapeHtml(shift.id)}" data-context-record-id="${escapeHtml(shift.id)}" data-context-record-type="planning_shift" data-context-label="${escapeHtml(title)}">
-      <button type="button" class="shiftflow-shift-select" data-select-shift-id="${escapeHtml(shift.id)}" aria-label="${escapeHtml(`${t('openShift', 'Schicht öffnen')}: ${title}`)}">
+      <button type="button" class="shiftflow-shift-select" data-select-shift-id="${escapeHtml(shift.id)}" aria-label="${escapeHtml(`${t('openShift', 'Schicht öffnen')}: ${title} — ${cardWhen} — ${cardWho} — ${status}`)}">
         <strong>${escapeHtml(title)}</strong>
-        <span>${escapeHtml(meta)}</span>
+        <span class="shiftflow-shift-meta" data-shift-meta="when">${escapeHtml(cardWhen)}</span>
+        <span class="shiftflow-shift-meta" data-shift-meta="who"><span class="shiftflow-shift-who">${escapeHtml(cardWho)}</span><em class="shiftflow-shift-status" data-shift-status="${shift.status === 'published' ? 'published' : 'draft'}">${escapeHtml(status)}</em></span>
+        <span class="shiftflow-shift-meta" data-shift-meta="brief">${escapeHtml(listBrief)}</span>
       </button>
       <button type="button" class="ctox-pane-icon" data-edit-shift-id="${escapeHtml(shift.id)}" title="${escapeHtml(t('edit', 'Bearbeiten'))}" aria-label="${escapeHtml(`${t('edit', 'Bearbeiten')}: ${title}`)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4l11-11-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>
     </article>
@@ -2513,11 +2543,20 @@ function bindEventListeners(ctx, els) {
     renderSchedulerGrid(latestEmployees, latestProjects, latestShifts, els, ctx);
   });
 
+  els.viewToggleBtn?.addEventListener('click', () => {
+    shiftListState = { ...shiftListState, view: shiftListState.view === 'list' ? 'cards' : 'list' };
+    applyShiftViewToggle(els);
+    renderShiftList(els);
+  });
+
   els.leftPane.addEventListener('ctox-pane-grammar-change', (event) => {
     const detail = event.detail || {};
     shiftListState = {
       search: String(detail.search || ''),
-      view: detail.view === 'list' ? 'list' : 'cards',
+      // Die Ansicht gehoert dem Ein-Knopf-Umschalter, nicht der Pane-Grammar:
+      // ohne [data-pg-view] meldet sie immer 'cards' zurueck und wuerde die
+      // Listenform bei jeder Suche/Filteraenderung stillschweigend kippen.
+      view: shiftListState.view === 'list' ? 'list' : 'cards',
       band: detail.band === 'drafts' ? 'drafts' : 'week',
       filters: {
         department: detail.filters?.department || 'all',
@@ -2912,6 +2951,7 @@ function setShiftflowReadinessForTests(name, snapshot) {
 }
 
 export const __shiftflowTestHooks = {
+  renderShiftListItem,
   filterShiftflowEmployeesForPlanner,
   getShiftflowPressedState,
   getWeekBoundsMs,

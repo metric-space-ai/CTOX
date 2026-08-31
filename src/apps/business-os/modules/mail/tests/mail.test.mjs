@@ -280,12 +280,16 @@ test('mail surface provides a progressive inspector workbench and responsive com
   assert.match(html, /data-mail-settings/);
   assert.match(html, /data-mail-import/);
   assert.match(html, /data-mail-export/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // One-button view switch (operator directive, 31.08.2026): a single toggle
+  // that carries the CURRENT view in data-pg-view and no aria-pressed.
+  assert.doesNotMatch(html, /ctox-view-toggle/, 'no two-button toggle group');
+  assert.match(html, /data-mail-view-toggle data-pg-view="cards"/);
+  assert.doesNotMatch(html, /data-mail-view-toggle[^>]*aria-pressed/);
+  assert.match(html, /data-mail-view-toggle[^>]*aria-label="Als Liste anzeigen"/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-band="campaigns"/);
   assert.match(html, /data-mail-mailbox-password[^>]+type="password"|type="password"[^>]+data-mail-mailbox-password/);
-  assert.match(css, /@media \(max-width: 767px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
   assert.match(css, /\.mail-module\.is-inspector-open/);
   assert.equal(manifest.default_installed, true);
   assert.equal(manifest.core, true);

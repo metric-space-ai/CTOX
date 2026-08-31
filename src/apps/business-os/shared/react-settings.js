@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260831-unified-v322';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260831-unified-v322';
+import { showBusinessConfirm } from './dialogs.js?v=20260831-shell-v2-unified-v322';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260831-shell-v2-unified-v322';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260831-unified-v322';
+} from './permissions.js?v=20260831-shell-v2-unified-v322';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260831-unified-v322';
+} from './branding.js?v=20260831-shell-v2-unified-v322';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260831-unified-v322';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260831-unified-v322';
+} from './roles.js?v=20260831-shell-v2-unified-v322';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260831-shell-v2-unified-v322';
 
 const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
   codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),

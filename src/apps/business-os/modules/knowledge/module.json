@@ -12,7 +12,7 @@
   "layout": {
     "shell": "windowed",
     "shell_contract": "v2",
-    "shell_geometry_contract": "knowledge-v2-reference-3",
+    "shell_geometry_contract": "knowledge-v2-reference-4",
     "shell_header_rows": 2,
     "shell_icon_rows": 2,
     "icon_asset": "modules/knowledge/assets/icon/knowledge-256.png",
@@ -43,7 +43,7 @@
     "min_height": 480
   },
   "category": "Knowledge",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "developer": "CTOX",
   "license": "AGPL-3.0-only",
   "tags": [

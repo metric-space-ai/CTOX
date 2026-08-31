@@ -54,7 +54,9 @@
 .mail-content-surface-header .ctox-pane-titles { flex: 0 1 190px; }
 .mail-content-surface-controls {
   display: flex;
-  flex: 1 1 auto;
+  /* Shell V2: the action strip in a pane head must not claim the free space -
+     with `flex: 1` it starved the title next to it. */
+  flex: 0 1 auto;
   justify-content: center;
   min-width: 0;
   overflow: hidden;
@@ -128,15 +130,22 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Shard: title over a meta line, generous padding. */
+.mail-scope-card--shard { gap: 3px 8px; min-height: 50px; padding: 9px 10px; }
+
+/* Line: one dense row, title plus the count as the only meta. */
 .mail-sidebar[data-mail-view="list"] .mail-scope-list { gap: 0; }
-.mail-sidebar[data-mail-view="list"] .mail-scope-card {
-  min-height: 36px;
-  padding-block: 5px;
+.mail-scope-card--line {
+  align-items: center;
+  gap: 0 8px;
+  min-height: 28px;
+  padding: 3px 10px;
   border-width: 0 0 1px;
   border-color: var(--line);
   border-radius: 0;
 }
-.mail-sidebar[data-mail-view="list"] .mail-scope-meta { display: none; }
+.mail-scope-card--line .mail-scope-title { font-weight: 560; line-height: 1.2; }
+.mail-scope-card--line .mail-scope-count { grid-row: 1; }
 
 .mail-new-group-row {
   width: 100%;
@@ -161,10 +170,12 @@
   background: var(--surface);
 }
 
+/* Both shapes share one row grammar - select box, title track, one short meta
+   on the right - so the sticky head labels stay true in either view. */
 .mail-table-head,
 .mail-record-row {
   display: grid;
-  grid-template-columns: 22px minmax(128px, .38fr) minmax(280px, 1fr) 58px;
+  grid-template-columns: 22px minmax(0, 1fr) 58px;
   gap: 10px;
   align-items: center;
 }
@@ -174,7 +185,7 @@
   z-index: 4;
   top: 0;
   min-height: 31px;
-  padding: 0 10px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--muted);
@@ -182,6 +193,8 @@
   font-weight: 650;
   letter-spacing: .02em;
 }
+.mail-table-head-subject,
+.mail-table-head-time { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .mail-table-check { display: inline-flex; align-items: center; justify-content: center; }
 .mail-table-check input,
@@ -192,8 +205,6 @@
 
 .mail-record-row {
   position: relative;
-  min-height: 68px;
-  padding: 7px 10px 8px;
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
@@ -202,6 +213,26 @@
   cursor: pointer;
   transition: background 150ms cubic-bezier(.25, 1, .5, 1);
 }
+
+/* Shard: bold subject over one or two meta lines, generous padding. */
+.mail-record-row--shard {
+  align-items: start;
+  gap: 3px 10px;
+  min-height: 62px;
+  padding: 10px 12px 11px;
+}
+.mail-record-row--shard .mail-record-select { margin-top: 3px; }
+.mail-record-row--shard .mail-record-time { align-self: start; margin-top: 1px; }
+
+/* Line: exactly one dense row, subject plus the time as the only meta. */
+.mail-record-row--line {
+  align-items: center;
+  gap: 0 10px;
+  min-height: 26px;
+  padding: 3px 12px;
+  line-height: 1.3;
+}
+.mail-record-row--line .mail-record-subject { font-weight: 560; }
 
 .mail-record-row:hover { background: var(--surface-2); }
 .mail-record-row:focus-visible { outline: 2px solid var(--focus-ring, var(--accent)); outline-offset: -2px; }
@@ -212,20 +243,20 @@
   outline-offset: -1px;
 }
 
-.mail-record-sender,
 .mail-record-copy { min-width: 0; }
-.mail-record-sender,
 .mail-record-subject,
+.mail-record-meta,
 .mail-record-preview {
   overflow: hidden;
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mail-record-sender { color: var(--text); font-size: 12px; }
 .mail-record-copy { display: grid; gap: 2px; }
 .mail-record-subject { color: var(--text-strong, var(--text)); font-size: 12px; font-weight: 620; }
+.mail-record-meta { color: var(--muted); font-size: 11px; }
 .mail-record-preview { color: var(--muted); font-size: 10.5px; }
-.mail-record-row.is-unread .mail-record-sender,
+.mail-record-row.is-unread .mail-record-meta,
 .mail-record-row.is-unread .mail-record-subject { font-weight: 720; }
 .mail-record-time { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
 .mail-record-time { text-align: right; font-variant-numeric: tabular-nums; }
@@ -267,8 +298,6 @@
 .mail-progress-step.is-failed { border-color: var(--danger); background: var(--danger); color: var(--accent-contrast, var(--surface)); }
 .mail-progress-label { overflow: hidden; color: var(--muted); font-size: 9.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 
-.mail-list-pane[data-mail-view="list"] .mail-record-row { min-height: 54px; padding-block: 5px; }
-.mail-list-pane[data-mail-view="list"] .mail-record-preview { display: none; }
 
 .mail-bulkbar {
   display: flex;
@@ -489,7 +518,9 @@
   to { opacity: 1; transform: translateX(0); }
 }
 
-@media (max-width: 1100px) {
+/* A window is not a screen: the pane layout follows the app window width and
+   uses the breakpoints the shell itself owns (1024px: 3 -> 2, 768px: 2 -> 1). */
+@container business-app-window (max-width: 1024px) {
   .mail-module,
   .mail-module.is-inspector-open { grid-template-columns: minmax(210px, 238px) 8px minmax(380px, 1fr); }
   .mail-list-pane { grid-column: 3; }
@@ -511,7 +542,7 @@
   .mail-content-surface-header .ctox-pane-titles { flex-basis: 128px; }
 }
 
-@media (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .mail-module,
   .mail-module.is-inspector-open { grid-template-columns: minmax(0, 1fr); }
   .mail-sidebar { display: none; }
@@ -530,13 +561,10 @@
   .mail-module > [data-resizer],
   .mail-module.is-inspector-open > [data-resizer] { display: none; }
   .mail-table-head,
-  .mail-record-row { grid-template-columns: 22px minmax(0, 1fr) 52px; gap: 8px; }
-  .mail-table-head > :nth-child(2),
-  .mail-record-sender { display: none; }
-  .mail-table-head > :nth-child(3) { grid-column: 2; }
-  .mail-table-head > :nth-child(4) { grid-column: 3; }
-  .mail-record-copy { grid-column: 2; }
-  .mail-record-time { grid-column: 3; }
+  .mail-record-row { grid-template-columns: 22px minmax(0, 1fr) 52px; column-gap: 8px; }
+  .mail-record-row--shard { padding-inline: 10px; }
+  .mail-record-row--line,
+  .mail-table-head { padding-inline: 10px; }
   .mail-bulkbar { align-items: flex-start; flex-direction: column; }
   .mail-bulk-selection,
   .mail-bulk-actions { box-sizing: border-box; width: 100%; max-width: 100%; }
@@ -563,12 +591,14 @@
 }
 
 @media (pointer: coarse) {
+  /* The dense line shape keeps the 44px tap minimum; the shard stays taller. */
   .mail-scope-card { min-height: 44px; }
-  .mail-record-row { min-height: 68px; }
+  .mail-record-row--line { min-height: 44px; }
+  .mail-record-row--shard { min-height: 68px; }
 
-  /* 44px touch minimum for every interactive control (the mail module uses
-     viewport @media breakpoints, so this coarse-pointer block carries the
-     tap-target work). */
+  /* 44px touch minimum for every interactive control (the pane layout follows
+     the app window through @container queries, so this coarse-pointer block
+     carries the tap-target work). */
   .mail-module button,
   .mail-module input,
   .mail-module select,
@@ -616,3 +646,133 @@
 .mail-external-account-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 .mail-external-account-status { font-size: 12px; color: var(--muted); }
 .mail-external-account-status.is-error { color: var(--danger); }
+
+/* ---------------------------------------------------------------------------
+   Shell V2 header zones.
+
+   The shell paints three regions on top of the app; `.shell-window-content`
+   keeps `inset: 0` and is never indented, so the app has to keep them free:
+
+     app icon        80x80 at the top left   (--shell-v2-icon-size, z-index 35)
+     header band     37px across the width   (--shell-v2-header-row-size)
+     window control  74x74 at the top right  (2 x header row)
+
+   Mail carries the search/filter strip inside the pane head, so a head is two
+   header rows of 37px: the title row and the filterbar. Every pane head of the
+   top row spans those two rows - 74px, the full height of the window control -
+   so no body content ends up under the close button.
+
+   Contract section 7 measures the HEAD's own `padding-left` / `padding-right`
+   (h2: left + padding-left >= 80, h3: right + padding-right >= 74), so both
+   offsets sit on the head itself and never on its rows. Which head carries
+   which offset changes with the two shell breakpoints, so the offsets are two
+   inherited custom properties: the rows subtract them from their own 12px so
+   the indents never stack, and the filter tray - which expands BELOW the icon
+   and keeps the full column width - pulls itself back to the column edge by
+   exactly the same amount. Geometry copied from the reference app,
+   modules/knowledge.
+   ------------------------------------------------------------------------ */
+.shell-window[data-shell-contract="v2"] .mail-module > .ctox-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  /* Two header rows plus the 1px hairline every head carries, so a one-row
+     head (detail, routing) is exactly as tall as a two-row head - contract
+     section 7 h1 wants ONE height across the whole top row. */
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2 + var(--mail-head-hairline, 1px));
+  padding-block: 0;
+  padding-left: var(--mail-head-inset-left, 0px);
+  padding-right: var(--mail-head-inset-right, 0px);
+}
+
+/* The routing drawer opens as the right-hand column and has a single-row head;
+   it spans the same two rows so its body clears the window control. Its own
+   12px gutter and the reserved zone are one padding, not two. */
+.shell-window[data-shell-contract="v2"] .mail-module .mail-route-header {
+  box-sizing: border-box;
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2 + var(--mail-head-hairline, 1px));
+  padding-block: 0;
+  padding-left: max(12px, var(--mail-head-inset-left, 0px));
+  padding-right: max(12px, var(--mail-head-inset-right, 0px));
+}
+
+/* Row 1 (title) and row 2 (filterbar) are exactly one header row each. They
+   keep a 12px gutter only on the side the head does not already hold free. */
+.shell-window[data-shell-contract="v2"] .mail-module > .ctox-pane > .ctox-pane-header > .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .mail-module > .ctox-pane > .ctox-pane-header > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+  padding-left: max(0px, calc(12px - var(--mail-head-inset-left, 0px)));
+  padding-right: max(0px, calc(12px - var(--mail-head-inset-right, 0px)));
+}
+
+/* The tray expands below the reserved zones and keeps the full column width. */
+.shell-window[data-shell-contract="v2"] .mail-module > .ctox-pane > .ctox-pane-header > .ctox-filter-tray {
+  margin-left: calc(-1 * var(--mail-head-inset-left, 0px));
+  margin-right: calc(-1 * var(--mail-head-inset-right, 0px));
+}
+
+/* Titles keep the row: kicker over title has to fit 37px, and neither the
+   title nor any of its flex parents may collapse to zero. */
+.shell-window[data-shell-contract="v2"] .mail-module .ctox-pane-header .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .mail-module .mail-route-header {
+  align-items: center;
+  min-width: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .mail-module .ctox-pane-header .ctox-pane-titles,
+.shell-window[data-shell-contract="v2"] .mail-module .mail-route-header > div {
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .mail-module .ctox-pane-header .ctox-pane-title,
+.shell-window[data-shell-contract="v2"] .mail-module .mail-route-header h3 {
+  margin-top: 0;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Left: the first head of the top row clears the 80px app icon. Above 768px
+   that is always the sidebar. */
+.shell-window[data-shell-contract="v2"] .mail-module .mail-sidebar > .ctox-pane-header {
+  --mail-head-inset-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Right: whichever head ends at the window edge clears the 74px control.
+   Above 1024px that is the detail column when the inspector is open, the
+   routing drawer while it is open, and the list column otherwise. */
+.shell-window[data-shell-contract="v2"] .mail-module:not(.is-inspector-open):not(.is-route-open) .mail-list-pane > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .mail-module.is-inspector-open .mail-detail-pane > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .mail-module.is-route-open .mail-route-header,
+.shell-window[data-shell-contract="v2"] .mail-module .mail-content-surface-header {
+  --mail-head-inset-right: 70px;
+}
+
+/* The group-content surface starts at the top edge as well; it is a
+   `.ctox-pane`, so it inherits the head geometry above and only needs a title
+   that stays readable next to the editor strip. */
+.shell-window[data-shell-contract="v2"] .mail-module .mail-content-surface-header .ctox-pane-titles {
+  min-width: 96px;
+}
+
+@container business-app-window (max-width: 1024px) {
+  /* Two columns: detail and routing become floating overlays, so the list
+     column is the one that reaches the right window edge. */
+  .shell-window[data-shell-contract="v2"] .mail-module .mail-list-pane > .ctox-pane-header {
+    --mail-head-inset-right: 70px;
+  }
+}
+
+@container business-app-window (max-width: 768px) {
+  /* One column: the list pane takes the sidebar's place under the icon, and
+     the group-content surface covers the whole window. */
+  .shell-window[data-shell-contract="v2"] .mail-module .mail-list-pane > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .mail-module .mail-content-surface-header {
+    --mail-head-inset-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  }
+}

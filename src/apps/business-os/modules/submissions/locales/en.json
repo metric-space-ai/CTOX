@@ -17,5 +17,7 @@
   "composerTitle": "Present candidate",
   "recordKicker": "SUBMISSION",
   "importDone": "Import complete.",
-  "exportDone": "Export created."
+  "exportDone": "Export created.",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

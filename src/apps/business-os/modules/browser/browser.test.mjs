@@ -238,6 +238,8 @@ assert.equal(
 const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+const moduleDefinition = JSON.parse(await readFile(new URL('./module.json', import.meta.url), 'utf8'));
+const moduleRegistry = JSON.parse(await readFile(new URL('../registry.json', import.meta.url), 'utf8'));
 const desktopWrapperJs = await readFile(new URL('../../desktop-apps/browser/app.js', import.meta.url), 'utf8').catch(() => '');
 const syncJs = await readFile(new URL('../../shared/sync.js', import.meta.url), 'utf8');
 const source = `${css}\n${html}`;
@@ -247,21 +249,53 @@ assert.doesNotMatch(source, forbiddenSurfacePattern);
 assert.doesNotMatch(source, /border-(?:left|right)\s*:\s*(?:[2-9]|[0-9]{2,})px/);
 assert.doesNotMatch(source, /border-radius:\s*(?:10|12|14|16|18|20|24)px/);
 assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
+assert.equal(moduleDefinition.layout.shell_contract, 'v2');
+assert.equal(moduleDefinition.layout.shell_geometry_contract, 'browser-v2-reference-1');
+assert.equal(moduleDefinition.layout.shell_header_rows, 2);
+assert.equal(moduleDefinition.layout.shell_icon_rows, 2);
+assert.equal(
+  moduleDefinition.layout.icon_asset,
+  'shared/assets/workjet-icons/operator-selection-v1/browser.jpg',
+  'Shell V2 must receive the approved large Browser raster icon',
+);
+assert.equal(moduleDefinition.version, 'v0.2.5');
+const registeredBrowser = moduleRegistry.modules.find((module) => module.id === 'browser');
+assert.ok(registeredBrowser, 'Browser must remain present in the immutable module registry');
+assert.equal(registeredBrowser.layout.shell_geometry_contract, moduleDefinition.layout.shell_geometry_contract);
+assert.equal(registeredBrowser.layout.shell_header_rows, moduleDefinition.layout.shell_header_rows);
+assert.equal(registeredBrowser.layout.shell_icon_rows, moduleDefinition.layout.shell_icon_rows);
+assert.equal(registeredBrowser.layout.icon_asset, moduleDefinition.layout.icon_asset);
+assert.equal(registeredBrowser.version, moduleDefinition.version);
 // 640 -> 767: der Mobile-Umbau (mobile usability phase 2) hat den
 // Schmal-Breakpoint bewusst verschoben; der Waechter prueft die Absicht
 // (es gibt eine Schmal-Variante), nicht die alte Zahl.
-assert.match(css, /@container business-app-window \(max-width: 767px\)/);
+assert.match(css, /@container business-app-window \(max-width: 768px\)/);
 assert.match(css, /\.browser-session-list[\s\S]*overflow-x: auto/);
 assert.match(html, /data-browser-start/);
+assert.equal(
+  (html.match(/data-shell-v2-header-row="1"/g) || []).length,
+  2,
+  'Browser uses one canonical Shell-v2 title row for the session pane and one for the canvas pane',
+);
+assert.match(html, /class="ctox-filterbar" data-shell-v2-header-row="2"/);
+assert.match(html, /class="ctox-pane-header ctox-pane-band browser-canvas-head" data-shell-v2-header-row="1"/);
+assert.match(html, /class="ctox-pane-title" data-browser-status-title/);
+assert.match(html, /class="ctox-view-switch browser-canvas-switch" data-shell-v2-header-row="2"/);
+assert.match(html, /class="ctox-pane-tabs browser-view-switch"/);
+assert.doesNotMatch(
+  html.match(/<header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">[\s\S]*?<\/header>/)?.[0] || '',
+  /ctox-filterbar/,
+  'the session filter row must remain a Shell-v2 sibling instead of being nested into the title header',
+);
 assert.match(html, /data-browser-private/);
 assert.match(html, /data-browser-viewport/);
 assert.match(html, /data-browser-new-tab/);
 assert.match(html, /data-browser-go/);
 assert.doesNotMatch(html, />Los<\/button>/, 'the address action must stay a compact icon control');
-assert.match(html, /data-browser-sessions-toggle/);
+// Off-Canvas-Drawer am 31.08.2026 durch die Shell-Haltepunkte 1024/768 ersetzt.
 assert.match(css, /grid-template-columns:\s*minmax\(120px, 1fr\) 30px 34px/);
-assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions/);
-assert.match(css, /\.browser-module\.is-sessions-open \.browser-sessions-toggle[\s\S]*z-index:\s*21/);
+
+
 assert.match(html, /data-browser-upload/);
 assert.match(html, /data-browser-automation-overlay/);
 assert.match(html, /data-browser-automation-code/);
@@ -372,7 +406,8 @@ assert.match(html, /ctox-workspace--two-pane/);
 assert.match(html, /class="ctox-pane browser-sessions"/);
 assert.match(html, /data-pg-search/);
 assert.match(html, /data-pg-view="cards"/);
-assert.match(html, /data-pg-view="list"/);
+// Betreiber-Direktive 31.08.2026: EIN Umschalt-Knopf statt Knopfpaar.
+assert.equal((html.match(/data-pg-view=/g) || []).length, 1);
 assert.match(html, /data-pg-tray-toggle/);
 assert.match(html, /data-pg-reset/);
 assert.match(html, /data-pg-footer/);
@@ -398,7 +433,7 @@ assert.match(html, /data-browser-frame-shell/);
 // Explicit pane grid rows + grid-column pins (primary column keeps priority).
 assert.match(css, /\.browser-sessions\s*\{[^}]*grid-column:\s*1/);
 assert.match(css, /\.browser-canvas\s*\{[^}]*grid-column:\s*3/);
-assert.match(css, /\.browser-sessions\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto/);
+assert.match(css, /\.browser-sessions\s*\{[^}]*grid-template-rows:\s*auto auto auto auto minmax\(0, 1fr\) auto/);
 
 // Grammar re-renders reactively on the shell event; no chrome wiring here.
 assert.match(js, /addEventListener\('ctox-pane-grammar-change', onLeftGrammarChange\)/);

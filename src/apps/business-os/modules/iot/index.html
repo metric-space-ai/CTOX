@@ -20,9 +20,13 @@
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Assets suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Baum-Ansicht" title="Baum-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+        <!-- ONE button, not two (Betreiber-Direktive 31.08.2026): the control is
+             an ACTION, not a state. The icon/label name the view it switches TO;
+             `data-pg-view` always carries the CURRENT view, because that is what
+             the shell's pane grammar reads for every other emit (search, tray,
+             band). index.js flips both on click and never writes aria-pressed. -->
+        <div class="ctox-view-toggle">
+          <button type="button" class="ctox-pane-icon" data-pg-view="cards" data-iot-view-toggle aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         </div>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
@@ -53,5 +57,22 @@
   <!-- MAIN: dashboard of automation widgets (standing orders to CTOX) for the
        selected asset/signal — the unique work surface. Filled by index.js on
        selection; no third column. -->
-  <section class="ctox-pane iot-pane iot-center" aria-label="Dashboard" data-iot-center></section>
+  <section class="ctox-pane iot-pane iot-center" aria-label="Dashboard" data-iot-center>
+    <!-- Static column head: exists in EVERY state (empty, syncing, selection).
+         index.js re-renders the pane wholesale and always emits a
+         .ctox-pane-header as the first child (mainHeader() when a selection
+         exists, centerRestHeader() otherwise), so this markup is replaced,
+         never duplicated. -->
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-copy="centerKicker">CTOX IoT</span>
+          <h2 class="ctox-pane-title" data-copy="centerTitle">Dashboard</h2>
+        </div>
+        <div class="ctox-pane-actions"></div>
+      </div>
+      <div class="ctox-filterbar iot-main-tools"></div>
+    </header>
+    <div class="ctox-pane-body"></div>
+  </section>
 </main>

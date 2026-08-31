@@ -25,8 +25,15 @@ test('credentials: schema declares its owned collection', () => {
 test('credentials: left column carries the canonical grammar markup pins', () => {
   // Search + shard/list toggle + collapsed tray with reset + footer target.
   assert.match(html, /data-pg-search/, 'grammar search input');
-  assert.match(html, /data-pg-view="cards"/, 'shard view toggle');
-  assert.match(html, /data-pg-view="list"/, 'list view toggle');
+  // Shard/list switching is ONE button, not a pressed/unpressed pair
+  // (Betreiber-Direktive 31.08.): the current view lives on the pane as
+  // [data-pg-default-view] — the attribute the shell's own wirePaneGrammar()
+  // falls back to — and the button is an action, so it carries no
+  // aria-pressed and no per-view data-pg-view twin.
+  assert.match(html, /data-pg-default-view="cards"/, 'pane carries the current view');
+  assert.equal((html.match(/data-ats-view-toggle/g) || []).length, 1, 'exactly one view toggle control');
+  assert.equal((html.match(/data-pg-view=/g) || []).length, 0, 'no two-button view toggle left');
+  assert.match(html, /data-ats-view-icon="list"[\s\S]*data-ats-view-icon="cards"/, 'toggle carries both target icons');
   assert.match(html, /data-pg-tray-toggle/, 'filter tray toggle');
   assert.match(html, /data-pg-tray\b/, 'collapsed tray');
   assert.match(html, /data-pg-reset/, 'tray reset control');
@@ -61,6 +68,12 @@ test('credentials: import/export/new/collapse handlers are wired in index.js', (
   assert.match(indexJs, /type = 'file'/, 'import creates a file input');
   assert.match(indexJs, /\.upsert\(/, 'import upserts records');
   assert.match(indexJs, /prepareImport\(/, 'import normalizes via the record helper');
+  // The single view toggle: it swaps SVG icons, and SVGElement has no `hidden`
+  // IDL property — assigning `.hidden` sets a JS expando the stylesheet never
+  // sees and the icon silently stops swapping. Attributes only.
+  assert.match(indexJs, /toggleAttribute\('hidden'/, 'view icons swap via the hidden attribute');
+  assert.ok(!/\bicon\.hidden\s*=/.test(indexJs), 'view icons never use the .hidden property');
+  assert.match(indexJs, /removeAttribute\('aria-pressed'\)/, 'the view toggle is an action, not a state');
 });
 
 test('credentials: existing command flows are untouched', () => {
@@ -96,6 +109,32 @@ test('credentials: record list renders selector rows from a stub doc array', asy
 
   const empty = mod.renderRecordList([], { view: 'cards', nowMs: now });
   assert.match(empty, /ctox-empty/, 'empty state renders the kit empty class');
+});
+
+test('credentials: card and list views are different shapes, not two paddings', async () => {
+  const mod = await import('../index.js');
+  const now = 1_781_990_000_000;
+  const rows = [{
+    id: 'c1', subject_id: 'cand-1', credential_type: 'staplerschein', issuer: 'TÜV Nord',
+    verified: true, valid_until_ms: now + 365 * 24 * 3600 * 1000,
+  }];
+  const cards = mod.renderRecordList(rows, { view: 'cards', nowMs: now });
+  const list = mod.renderRecordList(rows, { view: 'list', nowMs: now });
+
+  // Cards: 2 meta lines under the title = a 3-line shard, with the fields that
+  // decide a credential (subject, issuer, expiry date, remaining days).
+  assert.equal((cards.match(/nachweise-row-meta/g) || []).length, 2, 'shard carries two meta lines');
+  assert.match(cards, /cand-1/, 'shard names the subject');
+  assert.match(cards, /TÜV Nord/, 'shard names the issuer');
+  assert.match(cards, /nachweise-row-head/, 'shard separates title row from meta');
+
+  // List: exactly one line — no meta rows, no head wrapper, identity in the
+  // title and one short meta (the status badge) right.
+  assert.equal((list.match(/nachweise-row-meta/g) || []).length, 0, 'list row has no meta lines');
+  assert.ok(!/nachweise-row-head/.test(list), 'list row is a single flat line');
+  assert.equal((list.match(/ctox-badge/g) || []).length, 1, 'list row carries exactly one short meta');
+  assert.match(list, /nachweise-row-title">[^<]*·[^<]*cand-1/, 'list title carries type and subject');
+  assert.ok(list.length < cards.length, 'the list row is the denser of the two');
 });
 
 test('credentials: empty list follows collection readiness (syncing vs empty)', async () => {

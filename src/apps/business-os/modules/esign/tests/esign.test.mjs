@@ -38,8 +38,21 @@ test('esign: left column carries the canonical grammar markup pins', () => {
   assert.match(html, /data-pg-search/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);
+  // ONE view control, not a pressed/unpressed pair (Betreiber-Direktive
+  // 31.08.2026): the single button toggles, `data-pg-view` carries the CURRENT
+  // view for the shell grammar, and the label names the TARGET view. A button
+  // that is an action must not advertise `aria-pressed`.
+  const viewControls = (html.match(/data-pg-view=/g) || []).length;
+  assert.equal(viewControls, 1, `expected exactly one view control, found ${viewControls}`);
   assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  assert.match(html, /data-esign-view-toggle/);
+  const toggleTag = html.match(/<button[^>]*data-esign-view-toggle[^>]*>/)[0];
+  assert.ok(!/aria-pressed/.test(toggleTag), 'the single view toggle must not carry aria-pressed');
+  assert.match(toggleTag, /aria-label="Als Liste anzeigen"/);
+  assert.match(toggleTag, /title="Als Liste anzeigen"/);
+  // Both icons live inside that one button; CSS shows the target view's icon.
+  assert.match(html, /data-esign-view-icon="list"/);
+  assert.match(html, /data-esign-view-icon="cards"/);
   // Footer target.
   assert.match(html, /data-pg-footer/);
   // Counted view band with >= 2 real views (bands with a single tab are a
@@ -88,6 +101,31 @@ test('esign: renders a shard list from a stub doc array with the context trio', 
   assert.match(listHtml, /esign-row-compact/);
   // Empty state.
   assert.match(renderList([], { view: 'cards' }), /ctox-empty/);
+});
+
+test('esign: cards and list are genuinely different renderings', () => {
+  const docs = [{
+    id: 'r1', document_id: 'DOC-1', subject_kind: 'arbeitsvertrag', status: 'sent',
+    signers: [{ id: 's1', state: 'signed' }, { id: 's2', state: 'pending' }],
+    created_at_ms: 1756000000000, updated_at_ms: 1756600000000,
+  }];
+  const cardsHtml = renderList(docs, { view: 'cards' });
+  const listHtml = renderList(docs, { view: 'list' });
+  // Rows carry their variant so the stylesheet can give each its own density.
+  assert.match(cardsHtml, /esign-row--card/);
+  assert.match(listHtml, /esign-row--list/);
+  assert.ok(!/esign-row--list/.test(cardsHtml));
+  assert.ok(!/esign-row--card/.test(listHtml));
+  // Card = title + meta lines carrying the record's own detail fields.
+  const cardMetaLines = (cardsHtml.match(/esign-shard-meta/g) || []).length;
+  assert.ok(cardMetaLines >= 2, `expected >= 2 card meta lines, found ${cardMetaLines}`);
+  assert.match(cardsHtml, /Arbeitsvertrag/);
+  assert.match(cardsHtml, /1\/2 signiert/);
+  assert.match(cardsHtml, /Aktualisiert/);
+  // List = exactly one dense line: title + one short meta, no meta stack.
+  assert.ok(!/esign-shard-meta/.test(listHtml));
+  assert.ok(!/Aktualisiert/.test(listHtml));
+  assert.ok(listHtml.length < cardsHtml.length, 'the list row must be leaner than the card');
 });
 
 test('esign: empty source list follows collection readiness', () => {

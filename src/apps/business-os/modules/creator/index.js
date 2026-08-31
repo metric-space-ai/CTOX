@@ -28,6 +28,15 @@ const state = {
   isDeploying: false
 };
 
+// Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.): Icon und Beschriftung
+// zeigen immer die Ansicht, in die der Klick wechselt - nie den Ist-Zustand.
+const VIEW_ICON = {
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+};
+const VIEW_ACTION_KEY = { cards: 'libViewToCards', list: 'libViewToList' };
+const VIEW_ACTION_FALLBACK = { cards: 'Als Karten anzeigen', list: 'Als Liste anzeigen' };
+
 export const CREATOR_PROMPT_EXAMPLES = Object.freeze([
   {
     id: 'crm',
@@ -431,11 +440,13 @@ function libraryRail(host) {
 }
 
 // Read the SHELL-wired grammar state straight from the pane DOM (band default
-// is Apps). Mirrors the consent/reports reference modules.
+// is Apps). Mirrors the consent/reports reference modules. Die Ansicht steht
+// auf dem EINEN Umschalter (data-pg-view = AKTUELLE Ansicht), nicht auf einem
+// aria-pressed-Paar.
 function readLibraryGrammar(rail) {
   return {
     search: (rail?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-    view: rail?.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards',
+    view: rail?.querySelector('[data-creator-view-toggle]')?.dataset.pgView === 'list' ? 'list' : 'cards',
     band: rail?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'apps',
     status: rail?.querySelector('[data-creator-status-filter]')?.value || 'all',
   };
@@ -523,40 +534,80 @@ function renderLibrary(host) {
   writeLibraryFooter(rail, `${items.length} ${state.t('libEntries', 'Einträge')} · ${bandLabel}`);
 }
 
-// A shard is a pure selector: title + ONE muted meta line, no per-row buttons.
+// Ein Shard ist ein reiner Selektor (keine Zeilenknöpfe). Die beiden Ansichten
+// sind bewusst VERSCHIEDEN (Betreiber-Direktive 31.08.):
+//   KARTE — Titel fett plus zwei Meta-Zeilen aus den Feldern, die die App
+//           ohnehin lädt (Kategorie/Version/Beschreibung bzw. Status/Datum/
+//           Auftragstext). Grosszügiges Padding.
+//   LISTE — genau EINE Zeile: Titel plus höchstens ein Kurz-Meta rechts.
 function renderLibraryShard(item, view) {
   return item.kind === 'request' ? renderRequestShard(item, view) : renderAppShard(item, view);
 }
 
-function renderAppShard(app, view) {
-  const selected = state.selectedLibraryKind === 'app' && state.selectedLibraryId === app.id;
-  const meta = [state.t('rightKicker', 'Deine Apps'), app.category, app.version].filter(Boolean).join(' · ');
-  const attrs = `class="ctox-list-item creator-shard creator-shard--${view === 'list' ? 'list' : 'cards'}${selected ? ' is-selected' : ''}"`
+// Kurzes Datum aus updated_at_ms; 0/ungültig ergibt '' (Meta-Zeile fällt weg).
+function creatorShardDate(ms) {
+  const value = Number(ms) || 0;
+  if (!value) return '';
+  try {
+    return new Date(value).toLocaleDateString(state.ctx?.locale === 'en' ? 'en-GB' : 'de-DE', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+  } catch { return ''; }
+}
+
+// Einzeiliger Auszug für die zweite Meta-Zeile der Karte.
+function creatorShardExcerpt(text, limit = 120) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+function shardAttrs(kind, id, label, view, selected, recordType) {
+  return `class="ctox-list-item creator-shard creator-shard--${view === 'list' ? 'list' : 'cards'}${selected ? ' is-selected' : ''}"`
     + ' role="button" tabindex="0"'
     + ` aria-selected="${selected ? 'true' : 'false'}"`
-    + ` data-creator-library-kind="app" data-creator-library-id="${escapeHtml(app.id)}"`
-    + ` data-context-record-id="${escapeHtml(app.id)}" data-context-record-type="application" data-context-label="${escapeHtml(app.title || app.id)}"`;
+    + ` data-creator-library-kind="${kind}" data-creator-library-id="${escapeHtml(id)}"`
+    + ` data-context-record-id="${escapeHtml(id)}" data-context-record-type="${recordType}" data-context-label="${escapeHtml(label)}"`;
+}
+
+function renderAppShard(app, view) {
+  const selected = state.selectedLibraryKind === 'app' && state.selectedLibraryId === app.id;
+  const attrs = shardAttrs('app', app.id, app.title || app.id, view, selected, 'application');
   if (view === 'list') {
-    return `<div ${attrs}><span class="creator-shard-title">${escapeHtml(app.title)}</span></div>`;
+    // LISTE: eine kompakte Zeile — Titel plus die Version als Kurz-Meta rechts.
+    const short = app.version ? `v${app.version}` : '';
+    return `<div ${attrs}><span class="creator-shard-title">${escapeHtml(app.title)}</span>`
+      + (short ? `<span class="creator-shard-side">${escapeHtml(short)}</span>` : '')
+      + '</div>';
   }
+  // KARTE: Titel plus Zuordnung/Version und, wenn vorhanden, die Beschreibung.
+  const meta = [state.t('rightKicker', 'Deine Apps'), app.category, app.version ? `v${app.version}` : '']
+    .filter(Boolean).join(' · ');
+  const sub = creatorShardExcerpt(app.description);
   return `<div ${attrs}><div class="creator-shard-head"><span class="creator-shard-title">${escapeHtml(app.title)}</span></div>`
-    + `<div class="creator-shard-meta">${escapeHtml(meta)}</div></div>`;
+    + `<div class="creator-shard-meta">${escapeHtml(meta)}</div>`
+    + (sub ? `<div class="creator-shard-meta creator-shard-sub">${escapeHtml(sub)}</div>` : '')
+    + '</div>';
 }
 
 function renderRequestShard(item, view) {
   const selected = state.selectedLibraryKind === 'request' && state.selectedLibraryId === item.id;
-  const badge = `<span class="ctox-badge">${escapeHtml(creatorStatusLabel(item.status))}</span>`;
-  const meta = [state.t('requestKicker', 'Auftrag'), item.imported ? state.t('status_lokal', 'lokal') : creatorStatusLabel(item.status)].filter(Boolean).join(' · ');
-  const attrs = `class="ctox-list-item creator-shard creator-shard--${view === 'list' ? 'list' : 'cards'}${selected ? ' is-selected' : ''}"`
-    + ' role="button" tabindex="0"'
-    + ` aria-selected="${selected ? 'true' : 'false'}"`
-    + ` data-creator-library-kind="request" data-creator-library-id="${escapeHtml(item.id)}"`
-    + ` data-context-record-id="${escapeHtml(item.id)}" data-context-record-type="app-request" data-context-label="${escapeHtml(item.title || item.id)}"`;
+  const statusLabel = item.imported ? state.t('status_lokal', 'lokal') : creatorStatusLabel(item.status);
+  const attrs = shardAttrs('request', item.id, item.title || item.id, view, selected, 'app-request');
   if (view === 'list') {
-    return `<div ${attrs}><span class="creator-shard-title">${escapeHtml(item.title)}</span>${badge}</div>`;
+    // LISTE: eine kompakte Zeile — Titel plus der Status als Kurz-Meta rechts.
+    return `<div ${attrs}><span class="creator-shard-title">${escapeHtml(item.title)}</span>`
+      + `<span class="creator-shard-side">${escapeHtml(statusLabel)}</span></div>`;
   }
+  // KARTE: Titel mit Status-Badge, darunter Zuordnung/Status/Datum und der
+  // Auftragstext als zweite Meta-Zeile.
+  const badge = `<span class="ctox-badge">${escapeHtml(creatorStatusLabel(item.status))}</span>`;
+  const meta = [state.t('requestKicker', 'Auftrag'), statusLabel, creatorShardDate(item.updated_at_ms)]
+    .filter(Boolean).join(' · ');
+  const sub = creatorShardExcerpt(item.request);
   return `<div ${attrs}><div class="creator-shard-head"><span class="creator-shard-title">${escapeHtml(item.title)}</span>${badge}</div>`
-    + `<div class="creator-shard-meta">${escapeHtml(meta)}</div></div>`;
+    + `<div class="creator-shard-meta">${escapeHtml(meta)}</div>`
+    + (sub ? `<div class="creator-shard-meta creator-shard-sub">${escapeHtml(sub)}</div>` : '')
+    + '</div>';
 }
 
 // Selection is an in-place class flip across existing rows — never a list
@@ -611,6 +662,34 @@ function wireLibrary(host) {
     if (btn.dataset.action === 'import') importCreatorRequests(host);
     else if (btn.dataset.action === 'export') exportCreatorRequests();
   });
+
+  // EIN Umschalter statt zweier Zustandsknöpfe: der Klick TUT etwas, er meldet
+  // keinen Zustand. data-pg-view trägt die aktuelle Ansicht, data-pg-view-alt
+  // die Gegenansicht; Icon, Titel und aria-label zeigen stets das Klickziel.
+  const viewToggleEl = rail.querySelector('[data-creator-view-toggle]');
+  function syncViewToggle() {
+    if (!viewToggleEl) return;
+    const next = viewToggleEl.dataset.pgViewAlt === 'cards' ? 'cards' : 'list';
+    const label = state.t(VIEW_ACTION_KEY[next], VIEW_ACTION_FALLBACK[next]);
+    viewToggleEl.innerHTML = VIEW_ICON[next];
+    viewToggleEl.setAttribute('aria-label', label);
+    viewToggleEl.setAttribute('title', label);
+    viewToggleEl.removeAttribute('aria-pressed');
+  }
+  viewToggleEl?.addEventListener('click', () => {
+    const current = viewToggleEl.dataset.pgView === 'list' ? 'list' : 'cards';
+    viewToggleEl.dataset.pgView = current === 'list' ? 'cards' : 'list';
+    viewToggleEl.dataset.pgViewAlt = current;
+    syncViewToggle();
+    renderLibrary(host);
+  });
+  // Die generische Shell-Verdrahtung (shared/pane-grammar.js) setzt auf JEDEN
+  // [data-pg-view]-Knopf ein aria-pressed="true". Für einen Aktionsknopf ist
+  // das die falsche Semantik. Dieser Listener hängt an der SPALTE, läuft in der
+  // Bubble-Phase also garantiert nach dem Knopf-Listener und räumt es ab —
+  // ohne Timer und ohne Annahme über die Registrierungsreihenfolge.
+  rail.addEventListener('click', () => viewToggleEl?.removeAttribute('aria-pressed'));
+  syncViewToggle();
 
   // Re-render the well when the shell reports a grammar change (search / view /
   // tray / band). The event bubbles from the wired pane.

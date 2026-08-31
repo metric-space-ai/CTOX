@@ -1,6 +1,6 @@
 import { renderListOrState } from '../../shared/list-state.js';
 
-const MOD_BUILD = '20260727-readiness';
+const MOD_BUILD = '20260831-shell-v2';
 const MODULE_ID = 'submissions';
 const PRIMARY = 'submissions';
 const PRESENT_COMMAND = 'ats.submission.present';
@@ -17,12 +17,14 @@ export const COPY = {
     kicker: 'VORSTELLUNGEN', listTitle: 'Kandidaten', allStatus: 'Alle Status', viewAll: 'Alle', viewOpen: 'Offen', viewDone: 'Erledigt', composerKicker: 'NEUE VORSTELLUNG', composerTitle: 'Kandidat vorstellen', composerHint: 'Eintrag wählen oder neue Vorstellung anlegen.', recordKicker: 'VORSTELLUNG', importDone: 'Import abgeschlossen.', exportDone: 'Export erstellt.', invalidFile: 'Datei konnte nicht gelesen werden (JSON erwartet).',
     statusSent: 'gesendet', statusHired: 'eingestellt', statusWithdrawn: 'zurückgezogen', statusRejected: 'abgelehnt',
     syncing: 'Daten werden synchronisiert.',
+    showAsList: 'Als Liste anzeigen', showAsCards: 'Als Karten anzeigen', localeTag: 'de-DE',
   },
   en: {
     candidate: 'Candidate ID', client: 'Client account ID', more: 'More details', present: 'Present candidate', entries: 'records', empty: 'No submissions yet.', idCopied: 'ID copied', offlineService: 'Offline: command service unavailable.', blocked: 'Blocked.', idsRequired: 'Candidate ID and client account ID are required.', offlineSend: 'Offline: command could not be sent.', presented: 'Candidate presented.', submission: 'Submission', vacancyLabel: 'Vacancy', contactLabel: 'Contact', consent: 'Consent', feedback: 'Feedback', sent: 'Sent', copyId: 'Copy ID', unknown: 'unknown', conflict: 'Conflict', status: 'Status',
     kicker: 'SUBMISSIONS', listTitle: 'Candidates', allStatus: 'All statuses', viewAll: 'All', viewOpen: 'Open', viewDone: 'Closed', composerKicker: 'NEW SUBMISSION', composerTitle: 'Present candidate', composerHint: 'Select a record or start a new submission.', recordKicker: 'SUBMISSION', importDone: 'Import complete.', exportDone: 'Export created.', invalidFile: 'File could not be read (JSON expected).',
     statusSent: 'sent', statusHired: 'hired', statusWithdrawn: 'withdrawn', statusRejected: 'rejected',
     syncing: 'Syncing data.',
+    showAsList: 'Show as list', showAsCards: 'Show as cards', localeTag: 'en-GB',
   },
 };
 let text = COPY.de;
@@ -83,8 +85,14 @@ export async function mount(ctx) {
   function renderListRegion() {
     const counts = bandCounts(state.records);
     state.visible = filterRecords(state.records, state.grammar);
+    const view = state.grammar.view === 'list' ? 'list' : 'cards';
+    // Two load-bearing markers, same convention as placements/customers:
+    // `.is-list-view` on the well is the app-wide view marker, `.is-compact`
+    // on the row (set in renderList) says the row carries the one-line compact
+    // markup, so the dense rules can never land on a card-shaped row.
+    listEl?.classList.toggle('is-list-view', view === 'list');
     if (listEl) listEl.innerHTML = renderList(state.visible, {
-      view: state.grammar.view,
+      view,
       selectedId: state.selectedId,
       sourceEmpty: state.records.length === 0,
       readiness: submissionReadiness,
@@ -180,10 +188,27 @@ export async function mount(ctx) {
   }
   listEl?.addEventListener('click', onListClick);
 
+  // ---- View: ONE button, one action (Betreiber-Direktive 31.08.2026) --------
+  // The shell grammar models the view as N aria-pressed buttons, which a single
+  // action button cannot express, so the module owns the flip and republishes
+  // it through the pane's data-pg-default-view.
+  const viewToggleBtn = root?.querySelector('[data-subs-view-toggle]');
+  function onViewToggle() {
+    state.grammar = { ...state.grammar, view: state.grammar.view === 'list' ? 'cards' : 'list' };
+    syncViewToggle(listPane, state.grammar.view, text);
+    renderListRegion();
+  }
+  viewToggleBtn?.addEventListener('click', onViewToggle);
+  syncViewToggle(listPane, state.grammar.view, text);
+
   // Re-render the list on any shell-wired grammar change (search/view/tray/band).
   function onGrammarChange(event) {
     if (!listPane || !listPane.contains(event.target)) return;
-    state.grammar = event.detail || readGrammarState(listPane);
+    const detail = event.detail || readGrammarState(listPane);
+    // The grammar's `view` comes from the pane default we keep in sync above;
+    // never let an absent/stale value reset the operator's chosen view.
+    const view = detail.view === 'list' || detail.view === 'cards' ? detail.view : state.grammar.view;
+    state.grammar = { ...detail, view };
     renderListRegion();
   }
   root?.addEventListener('ctox-pane-grammar-change', onGrammarChange);
@@ -348,6 +373,7 @@ export async function mount(ctx) {
     try { readinessUnsub?.(); } catch {}
     formEl?.removeEventListener('submit', onSubmit);
     listEl?.removeEventListener('click', onListClick);
+    viewToggleBtn?.removeEventListener('click', onViewToggle);
     detailEl?.removeEventListener('click', onDetailClick);
     root?.removeEventListener('ctox-pane-grammar-change', onGrammarChange);
     ctx.host.replaceChildren();
@@ -448,39 +474,53 @@ function statusBadgeClass(status) {
   return '';
 }
 
-// A shard is a pure selector: title + ONE muted meta line.
+// KARTEN: 2 to 3 lines — a bold title line carrying the status badge, then up
+// to two muted meta lines built from the record's own detail fields (client,
+// vacancy, contact, sent date, client feedback). Roomier padding, so a record
+// can be read without selecting it (Betreiber-Direktive 31.08.2026).
 function shardCard(r, selectedId, t) {
   const key = recordKey(r);
   const status = String(r.status || 'sent');
   const outcome = r.feedback && typeof r.feedback === 'object' ? r.feedback.outcome : '';
-  const meta = [t.kicker, r.client_account_id ? r.client_account_id : null, outcome ? `${t.feedback}: ${outcome}` : null]
-    .filter(Boolean).map(esc).join(' · ');
+  // The account id is self-describing (ACC-…), so it carries no label; the
+  // selector column is 380px and a labelled chip would ellipsis the vacancy.
+  const primary = [
+    r.client_account_id || null,
+    r.vacancy_id ? `${t.vacancyLabel}: ${r.vacancy_id}` : null,
+  ].filter(Boolean).map(esc).join(' · ');
+  const secondary = [
+    fmtDay(r.sent_at_ms || r.created_at_ms) ? `${t.sent}: ${fmtDay(r.sent_at_ms || r.created_at_ms)}` : null,
+    outcome ? `${t.feedback}: ${outcome}` : null,
+    r.client_contact_id ? `${t.contactLabel}: ${r.client_contact_id}` : null,
+  ].filter(Boolean).map(esc).join(' · ');
   const badge = ('ctox-badge ' + statusBadgeClass(status)).trim();
-  return rowShell(r, key, selectedId,
+  return rowShell(r, key, selectedId, false,
     '<div class="subs-shard">'
     + '<div class="subs-shard-title">'
     + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + `<strong>${esc(r.candidate_id || key || '—')}</strong>`
     + '</div>'
-    + `<small class="subs-shard-meta">${meta}</small>`
+    + (primary ? `<small class="subs-shard-meta">${primary}</small>` : '')
+    + (secondary ? `<small class="subs-shard-meta">${secondary}</small>` : '')
     + '</div>');
 }
 
+// LISTE: exactly ONE dense line per record — title left, one short meta on the
+// right. No badge, no second line; the density is the point.
 function shardCompact(r, selectedId, t) {
   const key = recordKey(r);
   const status = String(r.status || 'sent');
-  const badge = ('ctox-badge ' + statusBadgeClass(status)).trim();
-  return rowShell(r, key, selectedId,
+  return rowShell(r, key, selectedId, true,
     '<div class="subs-row-compact">'
     + `<span class="subs-compact-title">${esc(r.candidate_id || key || '—')}</span>`
-    + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
+    + `<span class="subs-compact-tag" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + '</div>');
 }
 
-function rowShell(r, key, selectedId, inner) {
+function rowShell(r, key, selectedId, compact, inner) {
   const label = r.candidate_id || key || '—';
   const selected = key && key === selectedId;
-  return '<button type="button" class="ctox-list-item subs-row' + (selected ? ' is-selected' : '') + '"'
+  return '<button type="button" class="ctox-list-item subs-row' + (selected ? ' is-selected' : '') + (compact ? ' is-compact' : '') + '"'
     + ` data-subs-row="${esc(key)}" aria-selected="${selected ? 'true' : 'false'}"`
     + ` data-context-record-id="${esc(key)}" data-context-record-type="submission"`
     + ` data-context-label="${esc(label)}">${inner}</button>`;
@@ -539,12 +579,49 @@ function fmtTime(ms) {
   try { return new Date(n).toLocaleString(locale === 'en' ? 'en' : 'de'); } catch { return ''; }
 }
 
+// Card meta lines carry the day only — a full timestamp would wrap the line.
+function fmtDay(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  try { return new Date(n).toLocaleDateString(locale === 'en' ? 'en-GB' : 'de-DE'); } catch { return ''; }
+}
+
+// Ein-Knopf-Umschalter: das Icon zeigt die Ansicht, zu der gewechselt wird.
+// Kein aria-pressed - der Knopf ist eine Aktion, kein Zustand.
+const VIEW_TOGGLE_ICONS = Object.freeze({
+  // Ziel "Liste": drei Zeilen.
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+  // Ziel "Karten": zwei Shards.
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+});
+
+// Publishes the module-owned view back onto the pane so the shell grammar's
+// `data-pg-default-view` fallback keeps reporting the view the operator sees,
+// and repaints the single toggle for the view it switches TO.
+function syncViewToggle(pane, view, t) {
+  if (!pane) return;
+  const current = view === 'list' ? 'list' : 'cards';
+  pane.dataset.pgDefaultView = current;
+  const button = pane.querySelector('[data-subs-view-toggle]');
+  if (!button) return;
+  const next = current === 'list' ? 'cards' : 'list';
+  const label = next === 'list' ? t.showAsList : t.showAsCards;
+  button.dataset.subsView = current;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.removeAttribute('aria-pressed');
+  const icon = VIEW_TOGGLE_ICONS[next];
+  if (icon && button.innerHTML !== icon) button.innerHTML = icon;
+}
+
 // Read the current grammar state straight from the DOM so the module never
 // depends on the shell having wired __ctoxPaneGrammar yet.
 function readGrammarState(pane) {
   if (!pane) return { search: '', view: 'cards', band: 'all', filters: {} };
   const search = pane.querySelector('[data-pg-search]');
-  const view = [...pane.querySelectorAll('[data-pg-view]')].find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.pgView || 'cards';
+  // The view belongs to the module's one-button toggle; `data-pg-default-view`
+  // on the pane is the single place both sides read it from.
+  const view = pane.dataset.pgDefaultView === 'list' ? 'list' : 'cards';
   const band = [...pane.querySelectorAll('[data-pg-band]')].find((b) => b.getAttribute('aria-selected') === 'true')?.dataset.pgBand || 'all';
   const filters = {};
   pane.querySelectorAll('[data-pg-filter]').forEach((el) => { filters[el.dataset.pgName || el.name || 'filter'] = el.value; });

@@ -477,7 +477,7 @@
   border-radius: 10px;
 }
 
-@media (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .importer-module { grid-template-columns: 1fr; }
   .imp-rail {
     display: grid;
@@ -501,7 +501,7 @@
   .imp-workspace { padding: 26px 18px; }
 }
 
-@media (max-width: 560px) {
+@container business-app-window (max-width: 768px) {
   .imp-input-row { display: grid; }
   .imp-input-icon { top: 13px; }
   .imp-submit { width: 100%; }
@@ -515,7 +515,7 @@
 /* Mobile operability (Phase 2): the review action row wraps instead of
    clipping on narrow phones, and coarse pointers get the 44px tap-target
    minimum (rail stacking lives in the 767px/560px queries above). */
-@media (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .imp-actions {
     flex-wrap: wrap;
   }

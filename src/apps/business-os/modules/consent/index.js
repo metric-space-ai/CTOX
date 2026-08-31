@@ -29,6 +29,7 @@ const COPY = {
     deletedRecords: 'Gelöschte Datensätze', affectedRecords: 'Betroffene Datensätze', auditEntries: 'Audit-Einträge',
     exportLabel: 'Auskunft (Art. 15)', valid: 'gültig', withdrawn: 'widerrufen', expired: 'abgelaufen', open: 'offen',
     legalBasis: 'Rechtsgrundlage', validUntil: 'gültig bis', granted: 'erteilt', exportShort: 'Auskunft', eraseShort: 'Löschen',
+    viewToList: 'Als Liste anzeigen', viewToCards: 'Als Karten anzeigen',
   },
   en: {
     title: 'Consent', kicker: 'ATS', listTitle: 'Consent', newTitle: 'New check',
@@ -53,10 +54,19 @@ const COPY = {
     deletedRecords: 'Deleted records', affectedRecords: 'Affected records', auditEntries: 'Audit entries',
     exportLabel: 'Access request (Art. 15)', valid: 'valid', withdrawn: 'withdrawn', expired: 'expired', open: 'pending',
     legalBasis: 'Legal basis', validUntil: 'valid until', granted: 'granted', exportShort: 'Access', eraseShort: 'Erase',
+    viewToList: 'Show as list', viewToCards: 'Show as cards',
   },
 };
 let text = COPY.de;
 let locale = 'de';
+
+// Ein-Knopf-Umschalter: das Icon zeigt IMMER die Ansicht, zu der der Klick
+// wechselt (Kacheln <-> Liste), nie die aktuelle.
+const VIEW_ICON = {
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+};
+const VIEW_ACTION_KEY = { cards: 'viewToCards', list: 'viewToList' };
 
 // ---------------------------------------------------------------------------
 // Pure record helpers (exported for tests — no DOM, no RxDB).
@@ -123,8 +133,17 @@ export function filterRows(rows, { band = 'all', status = 'all', search = '' } =
   });
 }
 
-// A shard is a pure selector: title + ONE muted meta line. No inline expansion,
-// no per-row buttons (design-guide "Canonical Column Grammar").
+// Beide Ansichten sind reine Selektoren (kein Inline-Aufklappen, keine
+// Zeilenknoepfe — design-guide "Canonical Column Grammar"), unterscheiden sich
+// aber in der Informationsdichte (Betreiber-Direktive 31.08.):
+//
+//   KARTE  drei Zeilen — fetter Titel + Status, darunter Zuordnung
+//          (Subjekt · Rechtsgrundlage) und die Fristen (erteilt · gueltig bis
+//          [· widerrufen]); grosszuegiges Padding.
+//   LISTE  genau EINE Zeile — Titel und rechts ein einziges Kurz-Meta (der
+//          Status); enge Zeilenhoehe, maximale Dichte.
+//
+// Beide lesen ausschliesslich Felder, die die App ohnehin laedt.
 export function consentRow(r, opts = {}) {
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selected = Boolean(opts.selected);
@@ -140,12 +159,20 @@ export function consentRow(r, opts = {}) {
     + ' data-context-record-type="consent"'
     + ' data-context-label="' + esc((title + ' · ' + subject) || id) + '"';
   if (view === 'list') {
-    return '<div' + attrs + '><span class="consent-row-title">' + esc(title) + '</span>' + badge + '</div>';
+    return '<div' + attrs + '>'
+      + '<span class="consent-row-title">' + esc(title) + '</span>'
+      + '<span class="consent-row-side">' + badge + '</span>'
+      + '</div>';
   }
-  const metaBits = [esc(text.kicker), esc(text.subject + ': ' + subject), esc(text.legalBasis + ': ' + (r.legal_basis || 'consent'))];
+  const assignment = [text.subject + ': ' + subject, text.legalBasis + ': ' + (r.legal_basis || 'consent')];
+  const dates = [text.granted + ': ' + fmtDate(r.granted_at_ms), text.validUntil + ': ' + fmtValidUntil(r.expires_at_ms)];
+  if (Number.isFinite(Number(r.withdrawn_at_ms)) && Number(r.withdrawn_at_ms) > 0) {
+    dates.push(text.withdrawn + ': ' + fmtDate(r.withdrawn_at_ms));
+  }
   return '<div' + attrs + '>'
     + '<div class="consent-row-head"><span class="consent-row-title">' + esc(title) + '</span>' + badge + '</div>'
-    + '<div class="consent-row-meta">' + metaBits.join(' · ') + '</div>'
+    + '<div class="consent-row-meta">' + esc(assignment.join(' · ')) + '</div>'
+    + '<div class="consent-row-meta consent-row-meta--dates">' + esc(dates.join(' · ')) + '</div>'
     + '</div>';
 }
 
@@ -256,6 +283,7 @@ export async function mount(ctx) {
   const titleEl = root?.querySelector('[data-ats-title]');
   const subEl = root?.querySelector('[data-ats-sub]');
   const toggleRightsEl = root?.querySelector('[data-toggle-rights]');
+  const viewToggleEl = rail?.querySelector('.consent-view-toggle');
   if (titleEl) titleEl.textContent = locale === 'en' ? t('title') : (ctx.manifest?.title || t('title'));
   if (subEl) subEl.textContent = ctx.manifest?.description || '';
 
@@ -298,11 +326,13 @@ export async function mount(ctx) {
     gateEl.innerHTML = html || '';
   }
 
-  // Read the SHELL-wired grammar state straight from the pane DOM.
+  // Read the SHELL-wired grammar state straight from the pane DOM. Die Ansicht
+  // steht auf dem EINEN Umschalter (data-pg-view = aktuelle Ansicht), nicht auf
+  // einem gedrueckten Knopf eines Paares.
   function readGrammar() {
     return {
       search: (rail?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-      view: rail?.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards',
+      view: rail?.querySelector('[data-pg-view]')?.dataset.pgView === 'list' ? 'list' : 'cards',
       band: rail?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all',
       status: rail?.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'all',
     };
@@ -615,6 +645,43 @@ export async function mount(ctx) {
   }
   toggleRightsEl?.addEventListener('click', onToggleRights);
 
+  // Ein-Knopf-Umschalter Karten <-> Liste. Der Knopf ist eine AKTION: Icon,
+  // aria-label und title benennen das Ziel des Klicks, einen Gedrueckt-Zustand
+  // gibt es nicht.
+  function syncViewToggle() {
+    if (!viewToggleEl) return;
+    const next = viewToggleEl.dataset.pgViewAlt === 'cards' ? 'cards' : 'list';
+    const label = t(VIEW_ACTION_KEY[next]);
+    viewToggleEl.innerHTML = VIEW_ICON[next];
+    viewToggleEl.setAttribute('aria-label', label);
+    viewToggleEl.setAttribute('title', label);
+    viewToggleEl.removeAttribute('aria-pressed');
+  }
+  function onViewToggle() {
+    if (!viewToggleEl) return;
+    const current = viewToggleEl.dataset.pgView === 'list' ? 'list' : 'cards';
+    viewToggleEl.dataset.pgView = current === 'list' ? 'cards' : 'list';
+    viewToggleEl.dataset.pgViewAlt = current;
+    syncViewToggle();
+    render();
+  }
+  viewToggleEl?.addEventListener('click', onViewToggle);
+
+  // Die generische Shell-Verdrahtung (shared/pane-grammar.js) setzt auf JEDEN
+  // [data-pg-view]-Knopf ein aria-pressed="true". Fuer einen Aktionsknopf ist
+  // das falsche Semantik (Screenreader melden einen Umschalter im Zustand
+  // "gedrueckt"). Dieser Listener haengt an der SPALTE, laeuft also in der
+  // Bubble-Phase garantiert nach beiden Knopf-Listenern, und raeumt es ab —
+  // ohne Timer und ohne Annahme ueber die Registrierungsreihenfolge. Das
+  // Klickziel wird bewusst NICHT geprueft: der Icon-Tausch ersetzt das
+  // getroffene <svg>, das Ereignisziel haengt danach an keinem Elternknoten
+  // mehr. Der Knopf darf das Attribut ohnehin nie tragen.
+  function stripViewTogglePressed() {
+    viewToggleEl?.removeAttribute('aria-pressed');
+  }
+  rail?.addEventListener('click', stripViewTogglePressed);
+  syncViewToggle();
+
   // Re-render when the shell reports a grammar change (search / view / tray /
   // band). The event bubbles from the wired pane.
   const onGrammarChange = () => { render(); };
@@ -636,6 +703,8 @@ export async function mount(ctx) {
     formEl?.removeEventListener('submit', onCheckSubmit);
     subjectFormEl?.removeEventListener('submit', onSubjectSubmit);
     toggleRightsEl?.removeEventListener('click', onToggleRights);
+    viewToggleEl?.removeEventListener('click', onViewToggle);
+    rail?.removeEventListener('click', stripViewTogglePressed);
     listEl?.removeEventListener('click', onListClick);
     listEl?.removeEventListener('keydown', onListKey);
     root?.removeEventListener('click', onAction);

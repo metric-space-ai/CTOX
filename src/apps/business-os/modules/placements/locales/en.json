@@ -12,5 +12,7 @@
   "viewActive": "Active",
   "viewEnded": "Ended",
   "composerTitle": "Create placement",
-  "earlyLeave": "Early leave"
+  "earlyLeave": "Early leave",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

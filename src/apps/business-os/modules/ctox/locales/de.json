@@ -99,6 +99,8 @@
   "taskSearch": "Tasks suchen",
   "cardsView": "Kachelansicht",
   "compactFlowView": "Kompakter Live Flow",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen",
   "filters": "Filter",
   "resetFilters": "Filter zurücksetzen",
   "allSources": "Alle Quellen",

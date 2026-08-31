@@ -25,6 +25,8 @@ const collections = schemaDocument.collections || {};
 const css = readFileSync(resolve(moduleDir, 'index.css'), 'utf8');
 const html = readFileSync(resolve(moduleDir, 'index.html'), 'utf8');
 const indexJs = readFileSync(resolve(moduleDir, 'index.js'), 'utf8');
+const de = JSON.parse(readFileSync(resolve(moduleDir, 'locales/de.json'), 'utf8'));
+const en = JSON.parse(readFileSync(resolve(moduleDir, 'locales/en.json'), 'utf8'));
 const source = `${css}\n${html}`;
 const forbiddenSurfacePattern = new RegExp(['ctox-pane--gla' + 'ss', 'Prem' + 'ium', 'gla' + 'ss'].join('|'), 'i');
 
@@ -46,8 +48,8 @@ assert.doesNotMatch(source, forbiddenSurfacePattern);
 assert.doesNotMatch(source, /border-(?:left|right)\s*:\s*(?:[2-9]|[0-9]{2,})px/);
 assert.doesNotMatch(source, /border-radius:\s*(?:10|12|14|16|18|20|24)px/);
 assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
-assert.match(css, /@container business-app-window \(max-width: 1180px\)/);
-assert.match(css, /@container business-app-window \(max-width: 760px\)/);
+assert.match(css, /@container business-app-window \(max-width: 1024px\)/);
+assert.match(css, /@container business-app-window \(max-width: 768px\)/);
 assert.match(html, /ctox-workspace[^"]*support-module/);
 assert.match(html, /data-resize-frame/);
 assert.match(html, /ctox-column-resizer[^>]*data-resizer-var="--ctox-left-width"/);
@@ -122,11 +124,17 @@ test('left column carries the full shell-wired grammar (data-pg-*)', () => {
   // Row 1: header actions collected top-right — Import + Export are standing.
   assert.match(html, /data-support-import/);
   assert.match(html, /data-support-export/);
-  // Row 2: search + shard/list toggle + collapsed tray with reset.
+  // Row 2: search + ONE shard/list toggle + collapsed tray with reset.
   assert.match(html, /class="ctox-filterbar"/);
   assert.match(html, /data-pg-search/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // Betreiber-Direktive 31.08.: one action button, not a two-button state pair.
+  assert.match(html, /data-support-view-toggle/);
+  assert.equal((html.match(/data-support-view-toggle/g) || []).length, 1, 'exactly one view toggle button');
+  assert.equal((html.match(/data-pg-view=/g) || []).length, 0, 'no two-button view toggle left');
+  assert.doesNotMatch(html, /ctox-view-toggle/);
+  // The current view lives on the pane, where the shell's wirePaneGrammar()
+  // reads it when no [data-pg-view] pair exists.
+  assert.match(html, /data-pg-default-view="cards"/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);
@@ -251,6 +259,61 @@ test('auto-reveal: context visible only with a selection that is not collapsed',
   // (hidden by default until an explicit selection reveals it).
   assert.match(indexJs, /is-context-hidden/);
   assert.match(indexJs, /contextCollapsed:\s*true/);
+});
+
+test('the view toggle is one action button, never a state control', () => {
+  // Label/icon name the view the click switches TO; no aria-pressed anywhere
+  // on it, and the flip writes [data-pg-default-view] back onto the pane.
+  const apply = indexJs.match(/function applyViewToggle\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(apply, 'applyViewToggle present');
+  assert.match(apply[0], /removeAttribute\('aria-pressed'\)/);
+  assert.match(apply[0], /showAsList/);
+  assert.match(apply[0], /showAsCards/);
+  assert.match(apply[0], /setAttribute\('aria-label'/);
+  assert.match(apply[0], /setAttribute\('title'/);
+  const flip = indexJs.match(/function toggleViewMode\(\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(flip, 'toggleViewMode present');
+  assert.match(flip[0], /pgDefaultView/);
+  assert.match(flip[0], /ctox-pane-grammar-change/);
+  assert.doesNotMatch(html, /data-support-view-toggle[^>]*aria-pressed/);
+  for (const key of ['showAsList', 'showAsCards']) {
+    assert.ok(Object.hasOwn(de, key), `de locale carries ${key}`);
+    assert.ok(Object.hasOwn(en, key), `en locale carries ${key}`);
+  }
+});
+
+test('cards and list are two different row shapes, not two paddings', () => {
+  const row = indexJs.match(/function renderConversationRow\(item, viewMode[^)]*\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(row, 'renderConversationRow present');
+  const body = row[0];
+  // Row class carries the variant, and the two branches are separate shapes.
+  assert.match(body, /support-conversation-row--\$\{view\}/);
+  assert.match(body, /if \(view === 'list'\)/);
+  // List: exactly one line — title + a single short meta, nothing else.
+  assert.match(body, /support-row-tail/);
+  assert.doesNotMatch(body.split("if (view === 'list')")[1].split('}')[0], /support-row-meta/);
+  // Cards: bold title + badges, then two meta lines built from fields the
+  // module already loads (status/priority/inbox, assignee/last activity).
+  assert.match(body, /support-row-head/);
+  assert.match(body, /support-row-badges/);
+  assert.match(body, /const primary = \[/);
+  assert.match(body, /const secondary = \[/);
+  assert.match(body, /assignee_id/);
+  assert.match(body, /last_activity_at_ms/);
+  // The variants must be styled apart, and the old container-class view is gone.
+  assert.match(css, /\.support-conversation-row--cards\s*\{/);
+  assert.match(css, /\.support-conversation-row--list\s*\{/);
+  assert.doesNotMatch(css, /is-list-view/);
+  assert.doesNotMatch(indexJs, /is-list-view/);
+});
+
+test('stacked view keeps the shell icon zone free (contract §7 iconZone)', () => {
+  // At <=768px the shell-owned 6px workspace inset would start the queue pane
+  // INSIDE the 80x74 icon zone; padding: 0 puts it back at the content origin.
+  const narrow = css.match(/@container business-app-window \(max-width: 768px\)\s*\{[\s\S]*/);
+  assert.ok(narrow, 'narrow container block present');
+  assert.match(narrow[0], /padding:\s*0;/);
+  assert.match(narrow[0], /overflow-x:\s*hidden;/);
 });
 
 test('queue list gates the data-driven empty state on collection readiness', () => {

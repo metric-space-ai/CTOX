@@ -8,7 +8,12 @@
        event and writes counts/footer via pane.__ctoxPaneGrammar (null-guarded)
        or plain textContent. -->
   <aside class="ctox-pane calendar-left" id="calendar-left" aria-label="Kalender und Buchungsseiten">
-    <header class="ctox-pane-header ctox-pane-band">
+    <!-- Shell-v2 header band = row 1 and ONLY row 1: the shell paints the app
+         icon (80px, top left), a 37px header band and the window control
+         (74px, top right) on top of the app content, so the pane head must
+         stay exactly one band row. Filterbar and tray are siblings below it
+         (rows 2/3) — same structure as the knowledge reference. -->
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-t="calendar">Kalender</span>
@@ -26,25 +31,31 @@
           </button>
         </div>
       </div>
-      <div class="ctox-filterbar">
-        <input class="ctox-pane-search" type="search" data-pg-search data-t-placeholder="searchPlaceholder" placeholder="Suchen..." aria-label="Kalender und Buchungsseiten suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
-        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
-      </div>
-      <div class="ctox-filter-tray" data-pg-tray hidden>
-        <div class="ctox-filter-row">
-          <select class="ctox-select" data-pg-filter data-pg-name="status" data-pg-default="all" data-calendar-status-filter aria-label="Status filtern">
-            <option value="all" data-t="allStatus">Alle</option>
-            <option value="active" data-t="active">Aktiv / Sichtbar</option>
-            <option value="inactive" data-t="inactive">Inaktiv / Ausgeblendet</option>
-          </select>
-          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
-        </div>
-      </div>
     </header>
+    <div class="ctox-filterbar" data-shell-v2-header-row="2">
+      <input class="ctox-pane-search" type="search" data-pg-search data-t-placeholder="searchPlaceholder" placeholder="Suchen..." aria-label="Kalender und Buchungsseiten suchen" />
+      <!-- ONE control, one action (Betreiber-Direktive 31.08.): the shard/list
+           switch is a single button, not a pressed pair. `data-pg-view` carries
+           the CURRENT view for the shell-wired grammar; index.js flips it in the
+           capture phase, so the grammar still reads the truthful value back.
+           Icon and label always name the view the click switches TO, therefore
+           the button carries no aria-pressed — it is an action, not a state. -->
+      <button type="button" class="ctox-pane-icon calendar-view-toggle" data-calendar-view-toggle data-pg-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen">
+        <svg data-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+        <svg data-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>
+      </button>
+      <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
+    </div>
+    <div class="ctox-filter-tray" data-pg-tray data-shell-v2-header-row="3" hidden>
+      <div class="ctox-filter-row">
+        <select class="ctox-select" data-pg-filter data-pg-name="status" data-pg-default="all" data-calendar-status-filter aria-label="Status filtern">
+          <option value="all" data-t="allStatus">Alle</option>
+          <option value="active" data-t="active">Aktiv / Sichtbar</option>
+          <option value="inactive" data-t="inactive">Inaktiv / Ausgeblendet</option>
+        </select>
+        <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
+      </div>
+    </div>
     <nav class="ctox-view-switch" data-calendar-left-band aria-label="Kalender oder Buchungsseiten">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="calendars" aria-selected="true"><span data-t="calendars">Kalender</span><span class="view-count" data-pg-count="calendars"></span></button>
@@ -69,7 +80,7 @@
        list selection). The calendar engine and one-click book/claim/release
        flows are unchanged. -->
   <section class="ctox-pane calendar-center" id="calendar-center" aria-label="Kalenderansicht">
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <h2 class="ctox-pane-title" data-t="calendar">Kalender</h2>
@@ -118,7 +129,7 @@
        default; auto-reveals on selection (visible = hasSelection &&
        !userCollapsed) and can be re-collapsed from the center header toggle. -->
   <aside class="ctox-pane calendar-right" id="calendar-right" aria-label="Buchungen und Holds" data-right-content>
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-t="bookings">Buchungen</span>
@@ -159,7 +170,9 @@
   <!-- Sliding Details Drawer (Inspector) for creating/editing events, calendars, and booking pages -->
   <div class="ctox-bottom-drawer" id="calendarInspectorDrawer" data-detail-drawer role="dialog" aria-modal="false" aria-labelledby="drawerTitle" tabindex="-1">
     <div class="ctox-drawer-handle"><div class="ctox-drawer-handle-bar"></div></div>
-    <header class="ctox-drawer-header">
+    <!-- The drawer is pane-sized in the workspace, so its permanent head carries
+         the canonical .ctox-pane-header grammar (kicker + title, never hidden). -->
+    <header class="ctox-drawer-header ctox-pane-header">
       <div class="ctox-drawer-header-left">
         <span class="ctox-pane-kicker" id="drawerKicker">Kalender</span>
         <h3 class="ctox-pane-title" id="drawerTitle">Details</h3>

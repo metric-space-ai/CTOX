@@ -28,7 +28,10 @@
   grid-template-columns: var(--ctox-left-width, 300px) 12px minmax(320px, 1fr);
 }
 
-.notes-left { grid-column: 1; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+/* Head, chrome rows (search + tray), counted band, list well, footer. The
+   chrome rows sit outside the head so the head keeps the exact shell-v2
+   header-row height; the well is the only flexible track. */
+.notes-left { grid-column: 1; grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
 .notes-module > [data-resizer="left"] { grid-column: 2; }
 .notes-center { grid-column: 3; }
 
@@ -37,6 +40,25 @@
 .ctox-pane.notes-center {
   display: flex;
   flex-direction: column;
+}
+
+/* custom: der Karten/Listen-Umschalter ist EIN Knopf, der die Ansicht benennt,
+   zu der er wechselt; beide Glyphen liegen im selben Knopf und die aktuelle
+   Ansicht (data-pg-view) blendet die passende ein. Der Knopf ist eine Aktion,
+   kein Zustand — die aria-pressed-Fuellung des Kits gilt hier deshalb nicht,
+   auch wenn die Shell das Attribut beim Klick stempelt. */
+.notes-view-toggle > [data-view-icon] {
+  display: none;
+}
+
+.notes-view-toggle[data-pg-view="cards"] > [data-view-icon="list"],
+.notes-view-toggle[data-pg-view="list"] > [data-view-icon="cards"] {
+  display: block;
+}
+
+.notes-view-toggle[aria-pressed="true"] {
+  background: none;
+  color: inherit;
 }
 
 /* Brand logo chip next to the grammar column title. */
@@ -93,19 +115,38 @@
 }
 
 /* --- Note Cards / rows (list well) ---
-   Rows are kit .ctox-list-item (padding, hover, .is-selected incl. accent
-   bar); this is only the card content layout. */
+   Rows are kit .ctox-list-item (hover, .is-selected incl. accent bar); this is
+   only the card content layout. The two views are deliberately NOT a padding
+   variant of each other (Betreiber-Direktive 31.08.2026):
+     KARTEN = zwei bis drei Zeilen — fetter Titel, Meta-Zeile (Datum + Auszug),
+              Zuordnungs-Badges (Notizbuch/Tags), grosszuegiges Padding;
+     LISTE  = genau eine dichte Zeile — Titel plus ein Kurz-Meta (Datum) rechts,
+              enge Zeilenhoehe, keine Luecken zwischen den Eintraegen.
+   Beide Varianten stehen im Markup; die aktive Ansicht entscheidet. */
 .notes-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
+  padding: 10px 12px;
+  line-height: 1.35;
 }
 
-/* Compact list view: one dense line per note. */
+/* Kurz-Meta gehoert allein der Liste. */
+.notes-card-listmeta {
+  display: none;
+}
+
+/* LISTE: eine Zeile, maximale Dichte. */
+.nn-cards-scroll.is-list {
+  gap: 0;
+  padding: 0;
+}
+
 .nn-cards-scroll.is-list .notes-card {
   flex-direction: row;
   align-items: center;
   gap: 8px;
+  padding: 3px 12px;
 }
 
 .nn-cards-scroll.is-list .notes-card-meta,
@@ -115,6 +156,29 @@
 
 .nn-cards-scroll.is-list .nn-card-row {
   flex: 1;
+}
+
+.nn-cards-scroll.is-list .notes-card-title {
+  font-weight: 500;
+}
+
+.nn-cards-scroll.is-list .notes-card-listmeta {
+  display: block;
+  flex: 0 0 auto;
+  max-width: 7rem;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nn-cards-scroll.is-list .notes-group-header {
+  margin: 6px 4px 2px 12px;
+}
+
+.nn-cards-scroll.is-list .notes-group-header:first-child {
+  margin-top: 4px;
 }
 
 .nn-card-row {
@@ -745,7 +809,7 @@
   font-weight: 600;
 }
 
-@container business-app-window (max-width: 1120px) {
+@container business-app-window (max-width: 1024px) {
   .nn-editor-head {
     align-items: flex-start;
   }
@@ -1046,7 +1110,7 @@
    The two columns collapse into a single scroll owner. The note list owns the
    stack until a note is selected (auto-reveal); then the editor owns it and the
    back button returns to the list. */
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 768px) {
   .notes-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -1144,7 +1208,7 @@
    The 760px stack above owns the layout switch; this only keeps absolutely
    positioned popover menus inside the narrow sheet (they anchor to their
    trigger and could otherwise bleed past the right edge). */
-@container business-app-window (max-width: 767px) {
+@container business-app-window (max-width: 768px) {
   .nn-dropdown-menu,
   .nn-toolbar-dropdown {
     max-width: calc(100cqw - 24px);
@@ -1194,5 +1258,133 @@
   .notes-module .notes-todo-checkbox {
     width: 22px;
     height: 22px;
+  }
+}
+
+/* ============================================================================
+   Shell V2 — pane head geometry.
+
+   The v2 shell paints three zones over an app whose `.shell-window-content` is
+   NOT indented, so the module has to keep them free itself:
+     - the app icon, 80px (`--shell-v2-icon-size`), covering the first 74px of
+       the content box in both axes at the top left,
+     - the header band, 37px (`--shell-v2-header-row-size`), full width,
+     - the window control, 74px, at the top right.
+   Geometry only — no colors, no typography, no behaviour. The head markup and
+   every chrome row stay exactly as the kit defines them. Reference app:
+   modules/knowledge/index.css.
+   ========================================================================== */
+
+/* The grammar column has to carry the 94px icon clearance plus the standing
+   head actions (210px). At the 300px default the title is squeezed to zero;
+   420px is the column's own resizer maximum and leaves kicker and title
+   untruncated. The shell resizer still persists the user's own width. */
+.shell-window[data-shell-contract="v2"] .notes-module {
+  --ctox-left-width: 420px;
+}
+
+/* Both heads of the top pane row are exactly one shell header row high. */
+.shell-window[data-shell-contract="v2"] .notes-module .notes-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .notes-module .notes-center > .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* First head: clear the app icon. */
+.shell-window[data-shell-contract="v2"] .notes-module .notes-left > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* The chrome rows are the second half of the icon zone and keep the same
+   clearance. The clearance sits on the kit rows themselves (replacing their
+   own 12px inline padding), not on the wrapper: the wrapper carries the
+   tray's option labels as text content, which counts as paint inside the
+   icon zone, while the bare rows hold only inputs and icon buttons. The kit
+   rows stay unnamed (guard: no chrome selectors in module CSS); the search
+   box still lines up with the title. */
+.shell-window[data-shell-contract="v2"] .notes-module .notes-head-rows > div {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Last head: clear the 74px window control. */
+.shell-window[data-shell-contract="v2"] .notes-module .notes-center > .ctox-pane-header {
+  padding-right: 78px;
+}
+
+/* The head row fills its 37px track; the title keeps its own room and the
+   standing actions never claim the row. */
+.shell-window[data-shell-contract="v2"] .notes-module .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .notes-module .ctox-pane-titles {
+  min-width: 0;
+  padding-top: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .notes-module .ctox-pane-title,
+.shell-window[data-shell-contract="v2"] .notes-module .ctox-pane-kicker {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .notes-module .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* The shell already paints the app icon 14px to the left of this row, so the
+   module's own shield chip would only repeat it — and it costs the title the
+   28px it needs to stay readable. */
+.shell-window[data-shell-contract="v2"] .notes-module .nn-logo-container {
+  display: none;
+}
+
+/* Stacked layout (the shell's own 768px boundary, mirrored by the stack rules
+   above): whichever pane owns the stack sits under both shell zones. */
+@container business-app-window (max-width: 768px) {
+  /* The kit narrows the workspace frame to 6px on a single column. That pulls
+     the owning pane's own top-left corner (border + background) into the 80px
+     icon zone, where nothing but the shell's icon may paint. The module keeps
+     its wide-layout 12px frame instead, so the icon clearance is identical at
+     every window width. */
+  .shell-window[data-shell-contract="v2"] .notes-module {
+    padding: 12px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .notes-module .notes-left > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .notes-module .notes-center > .ctox-pane-header {
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+    padding-right: 78px;
+  }
+
+  /* Reserved zone 3 (contract §3): the 74x74 window control is two header rows
+     TALL, so in the stacked layout — where the grammar column itself reaches the
+     window's right edge — the second head row has to step aside as well. Without
+     this the shard/list toggle sat underneath the close button at 720px. The
+     wide layout needs no such rule: there the editor, not the grammar column,
+     owns the right edge. Selector stays structural (first head row), so the
+     module still names no kit chrome class. */
+  .shell-window[data-shell-contract="v2"] .notes-module .notes-head-rows > div:first-child {
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
+
+  /* The head of whichever pane owns the stack stays exactly one shell header
+     row: the editor's meta controls keep their single row inside the icon and
+     window-control clearance instead of stacking into a second band. */
+  .shell-window[data-shell-contract="v2"] .notes-module .nn-editor-head {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .shell-window[data-shell-contract="v2"] .notes-module .nn-note-meta-left,
+  .shell-window[data-shell-contract="v2"] .notes-module .nn-editor-controls {
+    width: auto;
+    flex-wrap: nowrap;
   }
 }

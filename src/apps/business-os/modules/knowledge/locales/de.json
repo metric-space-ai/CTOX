@@ -10,5 +10,11 @@
   "queued": "Command angelegt",
   "queueFailed": "Command konnte nicht angelegt werden",
   "edit": "Bearbeiten",
-  "closeEditor": "Editor schließen"
+  "closeEditor": "Editor schließen",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen",
+  "scopeUser": "User",
+  "scopeSystem": "System",
+  "scopeMixed": "User + System",
+  "neverEdited": "Noch nicht bearbeitet"
 }

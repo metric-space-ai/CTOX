@@ -27,10 +27,12 @@
            collapsed tray, primary views in the switcher band below. -->
       <div class="threads-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Threads suchen" aria-label="Threads suchen">
-        <div class="threads-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- ONE control, not two: the toggle is an ACTION, not a state pair
+             (operator directive 31.08.). data-pg-view carries the CURRENT view
+             so the shell-wired grammar keeps reporting it; the glyph and the
+             label name the view the click switches TO. No aria-pressed — a
+             button that performs a switch is not a state. -->
+        <button type="button" class="ctox-pane-icon threads-view-toggle" data-pg-view="cards" data-threads-view-toggle aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg data-view-glyph="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg data-view-glyph="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
         <button type="button" class="ctox-pane-icon threads-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="threads-filter-advanced" data-pg-tray hidden>
@@ -81,12 +83,8 @@
           <h2 class="ctox-pane-title" data-thread-title>Kein Thread ausgewählt</h2>
         </div>
         <div class="ctox-pane-actions">
-          <!-- View toggle for the timeline (cards vs. compact list) — shell-wired
-               pane grammar (data-pg-view) like the left rail. -->
-          <div class="threads-view-toggle" role="group" aria-label="Timeline-Darstellung">
-            <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Karten-Ansicht" title="Karten-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-            <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-          </div>
+          <!-- Timeline view: same one-button law as the left rail. -->
+          <button type="button" class="ctox-pane-icon threads-view-toggle" data-pg-view="cards" data-threads-view-toggle aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg data-view-glyph="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg data-view-glyph="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
           <button type="button" class="ctox-pane-icon" data-thread-delegate title="An Teammitglied übergeben" aria-label="An Teammitglied übergeben">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM3.5 19.5a5.5 5.5 0 0 1 11 0"/><path d="M16 8h5M18.5 5.5 21 8l-2.5 2.5"/></svg>
           </button>
