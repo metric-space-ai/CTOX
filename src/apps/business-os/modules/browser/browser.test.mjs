@@ -258,7 +258,7 @@ assert.equal(
   'shared/assets/workjet-icons/operator-selection-v1/browser.jpg',
   'Shell V2 must receive the approved large Browser raster icon',
 );
-assert.equal(moduleDefinition.version, 'v0.2.5');
+assert.equal(moduleDefinition.version, 'v0.2.6');
 const registeredBrowser = moduleRegistry.modules.find((module) => module.id === 'browser');
 assert.ok(registeredBrowser, 'Browser must remain present in the immutable module registry');
 assert.equal(registeredBrowser.layout.shell_geometry_contract, moduleDefinition.layout.shell_geometry_contract);
@@ -360,6 +360,11 @@ assert.match(
   js.match(/const pump = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '',
   /events: \[\]/,
   'the JPEG polling lane must not hold browser input while waiting for a frame',
+);
+assert.match(
+  js.match(/const pump = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '',
+  /response && response\.ok === false[\s\S]*?renderNotice\(refs, state\.notice\)[\s\S]*?const screenshot = response\?\.screenshot/,
+  'an ok:false live response must surface its error before the screenshot check — am 31.08.2026 verschluckte der Pump "unknown op live" wortlos und die Buehne blieb fuer immer auf "Browser-Inhalt wird geladen"',
 );
 assert.match(
   js.match(/async function requestBrowserControllerLease[\s\S]*?\n\}/)?.[0] || '',

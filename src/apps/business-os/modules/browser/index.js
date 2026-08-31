@@ -138,6 +138,9 @@ export async function mount(ctx) {
     importedSessions: [],
     directLiveEnabled: typeof ctx.sync?.requestNative === 'function',
     directLiveFailures: 0,
+    // Letzte ok:false-Begruendung des Live-Kanals; steuert Einmal-Logging und
+    // das Aufraeumen der Statuszeile, sobald wieder Bilder kommen.
+    lastLiveRejection: '',
     directInputFailures: 0,
     directInputQueue: [],
     directFrameSeq: 0,
@@ -347,6 +350,7 @@ export async function mount(ctx) {
     state.controllerLeaseId = newBrowserControllerLeaseId();
     state.directLiveEnabled = typeof ctx.sync?.requestNative === 'function';
     state.directLiveFailures = 0;
+    state.lastLiveRejection = '';
     state.directInputFailures = 0;
     state.directInputQueue.length = 0;
     state.notice = 'Browser wird mit CTOX verbunden …';
@@ -588,6 +592,7 @@ export async function mount(ctx) {
     state.requestedSessionId = '';
     state.directLiveEnabled = typeof ctx.sync?.requestNative === 'function';
     state.directLiveFailures = 0;
+    state.lastLiveRejection = '';
     state.directInputFailures = 0;
     state.directInputQueue.length = 0;
     // Bind the work surface synchronously to the clicked row.  Waiting for a
@@ -2099,8 +2104,37 @@ function startDirectBrowserLive(ctx, refs, state, isMounted, scheduleRefresh) {
         schedule(0);
         return;
       }
+      // Eine Antwort mit ok:false ist KEIN Nicht-Ereignis. Am 31.08.2026 lief
+      // jeder Bildabruf in "unknown op live" (Runner aus einem workjet-Pin
+      // ohne die live-Operation), und diese Schleife hat die Fehlerantwort
+      // wortlos verschluckt: kein Zaehler, keine Meldung, die Buehne blieb
+      // fuer immer auf "Browser-Inhalt wird geladen". Der Fehlertext gehoert
+      // dorthin, wo der Nutzer hinsieht — auf die Buehne und in die Statuszeile.
+      if (response && response.ok === false) {
+        state.directLiveFailures += 1;
+        const grund = String(response.error || 'Der Browser-Dienst hat den Bildabruf abgelehnt.');
+        if (state.lastLiveRejection !== grund) {
+          console.warn('[browser] direct live request rejected', { session_id: directSessionId, error: grund });
+        }
+        state.lastLiveRejection = grund;
+        state.notice = grund;
+        renderNotice(refs, state.notice);
+        if (refs.empty && state.ansicht !== 'script' && !state.latestDirectFrame) {
+          refs.empty.hidden = false;
+          refs.empty.textContent = grund;
+        }
+        schedule(1_000);
+        return;
+      }
       const recoveredDirectLive = state.directLiveFailures > 0;
       state.directLiveFailures = 0;
+      if (state.lastLiveRejection) {
+        if (state.notice === state.lastLiveRejection) {
+          state.notice = '';
+          renderNotice(refs, '');
+        }
+        state.lastLiveRejection = '';
+      }
       if (recoveredDirectLive
         && state.notice === 'Direkter Browser-Datenkanal wird wieder verbunden …') {
         state.notice = '';
