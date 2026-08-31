@@ -17,7 +17,10 @@ describe('Explorer module contract', () => {
     assert.match(explorerSource, /const container = ctx\.host/);
     assert.doesNotMatch(explorerSource, /export const manifest/);
     assert.doesNotMatch(explorerSource, /desktop-apps\//);
-    assert.match(explorerHtml, /^<main class="ctox-workspace app-explorer"/);
+    // Single-Column-Workspace: ohne --single erbt die Root die 5-Spuren-
+    // Spalten aus base.css (.ctox-workspace) und die drei gestapelten Zeilen
+    // kollidieren mit dem Spaltenmodell (Befund 31.08.2026).
+    assert.match(explorerHtml, /^<main class="ctox-workspace ctox-workspace--single app-explorer"/);
     assert.doesNotMatch(explorerHtml, /<!doctype|<(?:html|head|script|style)\b/i);
   });
 

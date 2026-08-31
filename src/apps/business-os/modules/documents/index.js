@@ -123,11 +123,20 @@ const SYSTEMATIC_REPORT_RUNBOOKS = [
 // markup is written here once, right after mount() injects the file — the head
 // itself is never rebuilt afterwards.
 function applyStaticLabels(host, t) {
-  for (const placeholder of host.querySelectorAll('[data-documents-list-placeholder], .documents-editor-shell > .ctox-empty')) {
+  // Liste und Editor bekommen bewusst UNTERSCHIEDLICHE Lade-Texte: zwei
+  // identische "Workspace wird geladen."-Karten nebeneinander wirkten wie ein
+  // Render-Duplikat (Befund 31.08.2026, Geometry-Lab-Screenshot).
+  for (const placeholder of host.querySelectorAll('[data-documents-list-placeholder]')) {
     const title = placeholder.querySelector('strong');
     if (title) title.textContent = t('documentsTitle', 'Dokumente');
     const copy = placeholder.querySelector('span');
-    if (copy) copy.textContent = t('workspaceLoading', 'Workspace wird geladen.');
+    if (copy) copy.textContent = t('listLoading', 'Dokumente werden geladen.');
+  }
+  for (const placeholder of host.querySelectorAll('.documents-editor-shell > .ctox-empty')) {
+    const title = placeholder.querySelector('strong');
+    if (title) title.textContent = t('documentsTitle', 'Dokumente');
+    const copy = placeholder.querySelector('span');
+    if (copy) copy.textContent = t('documentPreparing', 'Dokument wird vorbereitet.');
   }
   const title = host.querySelector('[data-documents-title]');
   if (title) title.textContent = t('documentsTitle', 'Dokumente');

@@ -178,5 +178,6 @@
   "documentError": "Dokumentfehler",
   "allTags": "Alle Tags",
   "untagged": "Ohne Tags",
-  "documentLoadFailed": "Dokument konnte nicht geladen werden:"
+  "documentLoadFailed": "Dokument konnte nicht geladen werden:",
+  "listLoading": "Dokumente werden geladen."
 }

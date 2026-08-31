@@ -523,6 +523,11 @@ button.app-explorer-grid-head { cursor: pointer; }
 .shell-window[data-shell-contract="v2"] .app-explorer-commandbar {
   height: var(--shell-v2-header-row-size, 37px);
   min-height: var(--shell-v2-header-row-size, 37px);
-  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  /* Zeile 2 beginnt erst hinter der 80px-Icon-Platte: margin statt padding,
+     damit weder Flaeche noch Inhalt die reservierte Icon-Zone erreichen
+     (Vertrag §3; Referenz: knowledge-Filterleiste, file-viewer-Metazeile). */
+  margin-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-left: 0;
   padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  background: transparent;
 }

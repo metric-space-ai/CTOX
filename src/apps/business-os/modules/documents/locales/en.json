@@ -178,5 +178,6 @@
   "documentError": "Document error",
   "allTags": "All tags",
   "untagged": "Untagged",
-  "documentLoadFailed": "Could not load document:"
+  "documentLoadFailed": "Could not load document:",
+  "listLoading": "Loading documents."
 }
