@@ -10,7 +10,7 @@ const end = html.indexOf('<div class="module-nav">', start);
 assert.ok(start >= 0 && end > start, 'topbar status region must exist');
 const region = html.slice(start, end);
 
-assert.match(region, /data-shell-version-label>v—</);
+assert.match(region, /data-shell-version-label(?:\s[^>]*)?>v—</);
 assert.equal((region.match(/data-shell-release-status/g) || []).length, 1);
 assert.doesNotMatch(region, /business-os-shell-v|RxDB\/WebRTC wird|source_commit|commit/i);
 assert.ok(
