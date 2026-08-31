@@ -143,6 +143,12 @@
     </div>
   </div>
 
+  <!-- Slide-over-Ebene: die Clip-Huelle (overflow:hidden) haelt die geschlossenen,
+       wegtransformierten Panels aus dem Scroll-Ueberlauf der Fensterbühne heraus
+       (Shell-V2-Geometrie: hscroll). position:fixed waere hier falsch - der
+       business-app-window-Container ist der Containing-Block, also wuerden die
+       Panels die Buehne um ihre eigene Breite nach rechts aufdehnen. -->
+  <div class="matching-overlays">
   <!-- Objekt Slide-over (rechts) -->
   <aside class="object" id="objectPanel" aria-hidden="true">
     <header class="ctox-pane-header ctox-pane-band">
@@ -178,6 +184,7 @@
     </header>
     <div class="jp-body" id="jpBody"></div>
   </aside>
+  </div>
 
     <!-- Modal: Kontaktstatus (Quelle/Objekt) -->
   <div class="ctox-modal" id="relModal" hidden role="dialog" aria-modal="true" aria-labelledby="relTitle" aria-hidden="true">

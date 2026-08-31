@@ -6,7 +6,15 @@
   /* Standard two-pane frame: library rail left, composer canvas right.
      The rail width is a custom property so the shell-owned declarative
      resizer ([data-resizer-var="--ctox-left-width"]) works without module JS. */
-  --ctox-left-width: 290px;
+  /* 300: gestapelte Titel ("Weiterarbeiten" 109px) + zwei Aktionen (66px) +
+     94 Icon-Zone + Fugen - 290px schnitt den Titel auf "Weiterarbeit…". */
+  --ctox-left-width: 300px;
+  /* Betreiber-Regel "nichts ausserhalb der App": das Wurzelelement ist der
+     Bezugsrahmen fuer JEDE Overlay-Ebene dieses Moduls. Die Dialogebene liegt
+     absolut mit inset:0 darin und kann das Fenster nicht verlassen; ohne
+     dieses `relative` fiele sie an den naechsten positionierten Vorfahren
+     oder den Viewport zurueck. */
+  position: relative;
 }
 
 /* Die Bibliotheksspalte hat VIER Zeilen: Kopf, Ansichtsband, Well, Fuss. Das

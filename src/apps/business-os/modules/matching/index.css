@@ -805,20 +805,39 @@
 /* ---------------------------------------------------------------------------
    custom: Slide-over-Panels (Objekt rechts, Anforderung links) — die
    Record-Detailansicht des Moduls, bewusst Overlay statt eigener Pane.
+   Die Panels liegen in .matching-overlays (absolute Clip-Huelle ueber der
+   Arbeitsflaeche): geschlossen sind sie wegtransformiert und werden dort
+   geclippt, statt die Fensterbuehne seitlich aufzudehnen (hscroll im
+   Shell-V2-Geometrie-Labor). Die Breite misst sich in cqw (Fenster), nicht
+   vw (Viewport) — das Fenster ist kein Screen.
    -------------------------------------------------------------------------- */
+.module-root[data-module-root="matching"] .matching-app {
+  position: relative;
+}
+
+.module-root[data-module-root="matching"] .matching-overlays {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* 50 wie die Panels bisher: unter dem Notiz-Modal (60) und der
+     Match-Bar (70), ueber den Spalten. */
+  z-index: 50;
+}
+
 .module-root[data-module-root="matching"] .object,
 .module-root[data-module-root="matching"] .jp {
-  position: fixed;
+  position: absolute;
   top: 0;
-  height: 100vh;
-  width: var(--matching-overlay-col-width, clamp(260px, 33.333vw, 520px));
-  max-width: 100vw;
+  bottom: 0;
+  width: var(--matching-overlay-col-width, clamp(260px, 33.333cqw, 520px));
+  max-width: 100%;
   min-width: 260px;
   background: var(--surface);
   transition: transform 0.25s ease;
   display: flex;
   flex-direction: column;
-  z-index: 50;
+  pointer-events: auto;
 }
 
 .module-root[data-module-root="matching"] .object {
@@ -986,7 +1005,7 @@
 /* Etwas freundlichere Overlays auf kleinen Screens. */
 @container business-app-window (max-width: 1024px) {
   .module-root[data-module-root="matching"] {
-    --matching-overlay-col-width: min(100vw, 520px);
+    --matching-overlay-col-width: min(100cqw, 520px);
   }
 
   .module-root[data-module-root="matching"] .jp,
@@ -1861,7 +1880,9 @@ body > #sync-feedback-host-matching-view .sync-feedback-progress-bar.is-indeterm
    Klasse, zu der es bisher keine geladene Regel gab, weshalb die Spur immer
    reserviert blieb. Verborgen heisst: keine Spalte, keine Fuge, kein Resizer. */
 .module-root[data-module-root="matching"] .matching-app.is-objects-hidden {
-  grid-template-columns: var(--ctox-left-width, 320px) 12px minmax(0, 1fr);
+  /* 340: Titelzeile = 94 Icon-Zone + Titel ("Anforderungen" 111px) + drei
+     Aktionen (102px) + Fugen - 320px schnitt den Titel auf "Anforderun…". */
+  grid-template-columns: var(--ctox-left-width, 340px) 12px minmax(0, 1fr);
 }
 
 .module-root[data-module-root="matching"] .matching-app.is-objects-hidden > [data-resizer="right"],
@@ -1876,7 +1897,7 @@ body > #sync-feedback-host-matching-view .sync-feedback-progress-bar.is-indeterm
 @container business-app-window (max-width: 1024px) {
   .module-root[data-module-root="matching"] .matching-app,
   .module-root[data-module-root="matching"] .matching-app.is-objects-hidden {
-    grid-template-columns: minmax(0, var(--ctox-left-width, 300px)) 12px minmax(0, 1fr);
+    grid-template-columns: minmax(0, var(--ctox-left-width, 340px)) 12px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
 

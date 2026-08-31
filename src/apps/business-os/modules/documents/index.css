@@ -580,6 +580,14 @@
 }
 
 @container business-app-window (max-width: 768px) {
+  /* Die 480px-Mindestbreite der Werkbank sprengt schmale Fenster (720px:
+     Bibliothek 300 + Fuge + 480 = 788 > Fenster), damit rutschte der letzte
+     Kopf unter die 74px-Fenstersteuerung (h3_ctrlClear im Geometrie-Labor).
+     Live uebernimmt dort ohnehin die is-compact-Overlay-Logik des Moduls. */
+  .documents-module:not(.is-compact) .documents-workbench {
+    min-width: 0;
+  }
+
   .documents-filter-bar {
     gap: 4px;
   }

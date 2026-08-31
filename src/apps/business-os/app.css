@@ -2163,6 +2163,21 @@ body[data-auth-state="locked"] .topbar {
   text-overflow: ellipsis;
 }
 
+/* V2-Ein-Band-Titelzeile: die Module stellen .ctox-pane-titles dafuer auf
+   flex-direction: row (Kicker und Titel teilen eine 37px-Zeile). Bei
+   Platzmangel weicht ZUERST der Kicker — er ist Ergaenzung, keine Identitaet —
+   mit Ellipse bis auf null, bevor der Pane-Titel selbst beschnitten wird
+   (UI-Review 31.08./01.09.: "Con…", "Weiterarbeit…", "Zugangsdat…"). */
+.shell-window[data-shell-contract="v2"] .ctox-pane-titles > .ctox-pane-kicker {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-pane-titles > .ctox-pane-title {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+
 .empty-state {
   display: grid;
   gap: var(--space-2);
@@ -2209,6 +2224,16 @@ body[data-auth-state="locked"] .topbar {
 
 .module-loading-shell-matching {
   grid-template-columns: minmax(260px, 0.7fr) minmax(320px, 1.6fr) minmax(260px, 0.7fr);
+}
+
+/* V2-Buehne: surface und surface-2 liegen im dunklen Fenster fast aufeinander,
+   dadurch waren die Skeleton-Balken praktisch unsichtbar und wirkten wie
+   Bildschmutz (UI-Review 01.09.). Die Balkenfarbe bekommt auf der V2-Buehne
+   einen sichtbaren, aber ruhigen Hell-Anteil. */
+.shell-window[data-shell-contract="v2"] .module-loading-shell {
+  --loading-bg: var(--shell-v2-surface, var(--bg));
+  --loading-surface: var(--shell-v2-surface-alt, var(--surface));
+  --loading-surface-muted: color-mix(in srgb, var(--text) 16%, var(--shell-v2-surface-alt, var(--surface-2)));
 }
 
 .module-loading-panel,

@@ -50,6 +50,7 @@ const COPY = {
     cardsView: 'Kachelansicht', listView: 'Listenansicht', filter: 'Filter', allTypes: 'Alle Typen', filterType: 'Typ',
     resetFilters: 'Filter zurücksetzen',
     emptyHint: 'Wähle eine Rechnung aus der Liste oder erstelle einen neuen Entwurf.', invoice: 'Rechnung', draft: 'Entwurf',
+    listEmpty: 'Noch keine Rechnungen vorhanden.',
     customer: 'Kunde', chooseCustomer: '— bitte Kunde wählen —', invoiceDate: 'Rechnungsdatum', type: 'Typ',
     lines: 'Positionen', addLine: '+ Position', net: 'Netto', tax: 'USt', gross: 'Brutto',
     saveDraft: 'Entwurf speichern', deleteDraft: 'Entwurf löschen', post: 'Buchen (GoBD-post)', missingBeforePost: 'Vor dem Buchen fehlt',
@@ -74,6 +75,7 @@ const COPY = {
     cardsView: 'Card view', listView: 'List view', filter: 'Filter', allTypes: 'All types', filterType: 'Type',
     resetFilters: 'Reset filters',
     emptyHint: 'Select an invoice from the list or create a new draft.', invoice: 'Invoice', draft: 'Draft',
+    listEmpty: 'No invoices yet.',
     customer: 'Customer', chooseCustomer: '— select customer —', invoiceDate: 'Invoice date', type: 'Type',
     lines: 'Line items', addLine: '+ Line item', net: 'Net', tax: 'VAT', gross: 'Gross',
     saveDraft: 'Save draft', deleteDraft: 'Delete draft', post: 'Post (GoBD)', missingBeforePost: 'Required before posting',
@@ -305,7 +307,10 @@ export function renderInvoiceListMarkup(rows, opts = {}) {
   // syncing shell; filter/search empties keep the plain empty hint.
   return renderListOrState(Array.isArray(rows) ? rows : [], opts.readiness ?? null, {
     renderRows: (list) => list.map((inv) => renderInvoiceRow(inv, { view: opts.view, selected: inv.id === selectedId })).join(''),
-    empty: opts.emptyText || t('emptyHint'),
+    // Die Liste bekommt ihren eigenen Leer-Text: der Auswahl-Hinweis
+    // (emptyHint) gehoert auf die Buehne, nicht in die Liste — sonst steht
+    // derselbe Satz in beiden Panes (UI-Review: Amateurhaeftigkeit).
+    empty: opts.emptyText || t('listEmpty'),
     syncing: opts.syncingText || t('syncingHint'),
   });
 }

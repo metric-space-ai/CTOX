@@ -953,7 +953,9 @@
 /* IA-Karte finishing pass: canonical shift/plan selector + one primary board.
    All repeating pane chrome remains shell-owned through data-pg-* markup. */
 .shiftflow-app {
-  --ctox-left-width: 300px;
+  /* 350: Titelzeile = 94 Icon-Zone + Titel ("Schichten & Pläne" 132px) + drei
+     Aktionen (102px) + Fugen - 300px schnitt den Titel auf "Schichte…". */
+  --ctox-left-width: 350px;
   display: grid;
   grid-template-columns: var(--ctox-left-width) 12px minmax(360px, 1fr);
   grid-template-rows: minmax(0, 1fr);

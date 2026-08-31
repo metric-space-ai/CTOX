@@ -11,14 +11,20 @@
 .shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
 .shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
 .shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
-.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-kicker { flex: 0 1 auto; min-width: 0; line-height: 1; }
 .shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
 .shell-window[data-shell-contract="v2"] .fibu-module .ctox-filterbar,
 .shell-window[data-shell-contract="v2"] .fibu-module .fibu-workbench-tools { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
 .shell-window[data-shell-contract="v2"] .fibu-module .fibu-panel-toolbar { flex-wrap: nowrap; overflow-x: auto; }
 
 .fibu-module {
-  --ctox-left-width: var(--fibu-left-width, 300px);
+  /* Bezugsrahmen fuer modul-eigene Overlays (Dialogebene, inset:0). Ohne diese
+     Positionierung verankert sich die Ebene am naechsten Vorfahren ausserhalb
+     der App. */
+  position: relative;
+  /* 366: Titelzeile = 94 Icon-Zone + Titel ("Belege & Buchungen" 151px) +
+     drei Aktionen (102px) + Fugen - 300px schnitt den Titel ab ("Belege & …"). */
+  --ctox-left-width: var(--fibu-left-width, 366px);
   --ctox-right-width: var(--fibu-right-width, 340px);
   --fibu-info: var(--accent);
   --fibu-terminal-bg: var(--surface-2);

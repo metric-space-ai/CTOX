@@ -521,8 +521,10 @@
 /* A window is not a screen: the pane layout follows the app window width and
    uses the breakpoints the shell itself owns (1024px: 3 -> 2, 768px: 2 -> 1). */
 @container business-app-window (max-width: 1024px) {
+  /* 284: Titelzeile = 94 Icon-Zone + Zeileninnenraum + Titel ("E-Mail-Queues"
+     109px) + zwei Aktionen (58px) - die 238px-Kappe schnitt den Titel ab. */
   .mail-module,
-  .mail-module.is-inspector-open { grid-template-columns: minmax(210px, 238px) 8px minmax(380px, 1fr); }
+  .mail-module.is-inspector-open { grid-template-columns: minmax(210px, 284px) 8px minmax(380px, 1fr); }
   .mail-list-pane { grid-column: 3; }
   .mail-module > [data-resizer="right"],
   .mail-module.is-inspector-open > [data-resizer="right"] { display: none; }
