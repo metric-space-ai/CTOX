@@ -1,0 +1,171 @@
+# THESEN Outbound Lead Generation — Sanierungsplan (Stand 31.08.2026, 01:10 UTC)
+
+**Headline / kritischer Pfad:** Ein einziger Shell-Defekt (P0: `business_commands`-Kanal
+stirbt beim Service-Neustart und erholt sich im lebenden Tab nie) erzeugt fast alle
+„toten Buttons". Erst P0 fixen, dann Button-Sweep und Recherche-E2E; der Rust-Batch
+(P2) räumt die native Restliste ab.
+
+Arbeits-Checkout App: `~/Documents/ctox-dev/output/outbound-lead-generation-runtime-root-fix/2026-08-29/outbound-lead-generation/` (NICHT in Git — siehe P3).
+Deploy: `~/Documents/ctox-dev/output/deploy-olg-1.0.51-v2-ui.ts` (SSH, SHA-geprüft, Backup+Rollback).
+Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z`.
+
+---
+
+## DONE (selbst verifiziert, nicht nur behauptet)
+
+- **Recherche-Ergebnisverlust behoben** (App 1.0.50): `source_policy` schickt nur noch
+  Quellen mit HTTP(S)-URL; vorher tötete die eingebaute Quelle `impressum` (url='',
+  angelegt 30.08. 21:16 durch seedSources) JEDEN Lauf NACH getaner Arbeit mit
+  „invalid runtime source URL" (`person_research_command.rs:889`, Commit ccd84bbd3).
+  Beweis: lead_1kthlyz 23:13 completed (27 Belege), lead_qxx4u1 00:06 completed
+  (39 Belege, 10 Felder, dnbhoovers+leadfeeder als Quellen sichtbar in der UI).
+- **Boot-Gate entschärft** (1.0.50): App wartete auf Readiness `live`, die ein
+  Follower-Tab nie meldet (readiness `catching-up` = Sammeleimer; Listener feuert
+  nur bei Wechsel). Jetzt nicht-fatal. App rendert mit Daten trotz „(0/5)".
+- **Shell-V2-Umbau** (1.0.51, Style-Builds v2…v17, alle live deployt):
+  - Ein Header-System nach Knowledge-Muster: `data-shell-v2-header-row` 1/2, alle
+    drei Spalten identische Zeilengeometrie (gemessen y=185/y=222, je 37px),
+    Icon-Block-Freiraum links, Fensterknöpfe-Freiraum rechts.
+  - Statisches Skelett; Renders schreiben nur Scroll-Körper → kein Scroll-Springen,
+    keine Animations-Neustarts; `<details>`-Zustand überlebt Renders (Detail + Center).
+  - Kompakte Feldzeilen 46px (vorher 87/200; Ursache: `.leadgen-review-badge
+    { grid-column: 1/-1 }` erzwang eigene Grid-Zeilen).
+  - Personen-Slots nach Priorität, Name+Position, „offen" sichtbar; seit v16 die
+    8 Owner-Kategorien (GF/Gesamtverantwortung, Prokura, Finanzen, Einkauf,
+    Supply Chain, Operations, Technik, Entwicklung) + „Weitere".
+  - Tab „Entscheidung" entfernt; Aktions-Buttons und Sellify-Empfängerauswahl in
+    der Übersicht; Pflegefelder unter Einordnung.
+  - Filter/Sortier-Tray im Knowledge-Stil (Select+Richtung+Reset, Status-Chips),
+    einklappbar; Fortschrittsleiste nur bei aktivem Lauf; Sync-Status als Fußzeile;
+    Buch-Icon entfernt; Quellen-Dialog feste Größe (kein Springen bei Tab-Wechsel).
+  - Farbwelt: `--accent` = Frame-Palette (Orange) statt Shell-Blau (40 Verwendungen).
+  - Quellen-Einstellungsdialog: URL + Zugang (Secret-Store, nur Referenz) +
+    **Freitext-Anweisungen je Quelle** → `operator_instructions` in allen drei
+    Verträgen (scrapeContract, Reconcile-Snapshot, source_policy; serde toleriert
+    Zusatzfelder — geprüft: kein deny_unknown_fields).
+  - Responsive: Container-Tiers mit V2-Spezifität am Dateiende (Ursache: Zeile-15-
+    Regel schlug per Spezifität jedes `@container`-Tier). Gemessen: 988px → 2 Spalten,
+    Überlauf 0; 628px → 1 Spalte, Kampagnen als Chip-Leiste; breit → 3 Spalten.
+  - Einzel-Nachrecherche öffnet sofort das Chatfenster (`open: options.openChat`),
+    Bulk bleibt still. Policy-Save-Button vom Reconcile-Pending entkoppelt.
+  - Ehrliche Texte: „21 Kontakte zur Prüfung zurückgestellt – Sellify-Abgleich
+    ausstehend" statt „ausgeschlossen"; Adapter-Inspector sagt, dass Skripte in der
+    nativen Registry liegen.
+- **Neuer Recherche-Prompt** formuliert (Owner-Struktur 0–7, ALLE 32 RESEARCH_FIELDS
+  namentlich abgedeckt — maschinell geprüft): `docs/thesen-outbound-recherche-prompt-20260831.txt`.
+  Als DEFAULT_RESEARCH_POLICY in App v16 eingebaut. **NOCH NICHT im gespeicherten
+  Policy-Record** (dort 2475-Zeichen-Rohentwurf, updated 00:28) — blockiert durch P0.
+- **Harness/Queue lebt wieder**: `ctox prompt worker start/end source=queue` im Minutentakt
+  (Wiederbelebung durch Service-Neustarts). ABER: Reconcile-Task dreht im Kreis (→ P2.6).
+- **Adapter-Inventar** (31.08. 00:5x, `scrape_target` × letzter Lauf):
+  - 15/22 grün mit Skript + letztem Erfolg: bundesanzeiger(22), dnbhoovers(25), evi(2),
+    firmenabc(23), handelsregister(25), impressum(11), justizonline(2), moneyhouse(25),
+    shab(2), xing(23), zefix(28) + heute erfolgreich impressum/handelsregister/bundesanzeiger.
+  - 4 blockiert (Provider-Challenge): google-de(28), companyhouse-de(25),
+    maps-google-com(25), rocketreach-com(23) → brauchen Unlock/Login (P2.4, OWNER).
+  - 3 transient: northdata(31), leadfeeder(23), linkedin(3, zusätzl. auth_required).
+  - 2 portal_drift (Skript kaputt): mailtester-com(1), experte-de(26) → P1.4.
+  - 2 E2E-Dummies ohne Skript (abnahme-e2e07*) — erwartbar.
+
+## P0 — Der eine Bruch, der alles tötet (Glied 3 der Kette)
+
+**Befund:** Lokale App-Writes gelingen (Trace `write ok`), aber `business_commands`-
+Kanal ist nach Service-Neustart `cancelled` und wird im lebenden Tab nie neu
+aufgebaut. Symptome: Recherche-Start „Command konnte nicht an CTOX übergeben …
+was cancelled", Crew-Karten FEHLGESCHLAGEN, Policy-Save kommt nie am Server an,
+Toggles/Löschen wirken tot. `sync.js` L799–821 ersetzt cancelled Bridges bei
+`startCollection` — aber niemand ruft es erneut auf.
+
+**Fix-Ansatz:** Dispatch-/Write-Pfad: bei `was cancelled` einmal Kanal re-akquirieren
+(startCollection/restartCollection) und Operation wiederholen; Crew-Ack-Timeout-
+Meldung nur zeigen, wenn der Command wirklich fehlt (nicht bei später Quittung).
+
+**FALLE (zuerst klären!):** Die servierte `shared/sync.js` ist NICHT die Release-Datei
+(md5 served f11d9437… ≠ Release c03e7537…). Die Shell kommt aus einer anderen Quelle
+(Kandidaten: `~/.local/state/ctox/business-os-source-snapshots/`, Stage-Verzeichnisse,
+eingebettete Assets im Binary). VOR jedem Shell-Patch die wahre Quelle finden,
+sonst patchen wir ins Leere. → allererster Schritt.
+
+**Bis zum Fix (Workaround):** Seite neu laden stellt den Kanal her; frisch geladene
+Tabs dispatchen nachweislich (23:08, 00:06 completed).
+
+## P1 — Nach P0: sichtbare Funktion herstellen (Reihenfolge)
+
+1. **Neuen Prompt speichern** (über die UI, testet zugleich den Save-Button) und
+   serverseitig verifizieren (`research_policies` len/Marker).
+2. **Systematischer Button-Sweep** im Browser: jede `data-action` einmal auslösen,
+   Wirkung serverseitig/DOM verifizieren; destruktive nur auf E2E-Daten; Ergebnis
+   als Matrix in diesem Dokument.
+3. **Recherche-E2E mit neuem Prompt**: echter Lead (kein Phantom!), Chat öffnet,
+   Lauf completed, Felder+Belege+Personen-Slots gefüllt, 8 Kategorien angestrebt.
+4. **mailtester-com + experte-de reparieren** (portal_drift): Skripte auf
+   Live-Portale nachziehen, `register-script`, `execute` grün. (E-Mail-Validierung
+   ist Prompt-Punkt 4 — ohne sie fehlt person_email_validation.)
+5. **northdata/leadfeeder/linkedin transient**: erneut ausführen, bei Wiederholung
+   Ursache (Rate-Limit? DNS?) messen statt raten.
+6. **Dialog-Z-Index** (Lösch-Popup hinter Chat) + Restpunkte visuell bestätigen.
+
+## P2 — Rust/main-Batch (ein Build, eine Auslieferung)
+
+1. `person_research_command.rs:889`: `continue` für eingebaute Quellen VOR den
+   URL-Parse (Defense-in-Depth zum App-Filter).
+2. Auth-Assist: Intake lehnt Harness-Commands ab („a valid capability token is
+   required", `service/business_os.rs:4601`-Pfad) → Token für native Worker-Requests
+   ausstellen. Ohne das bleibt Unlock für die 4 Challenge-Targets tot.
+3. Sellify-Evidenz: Lookup-Treffer als Feld-Belege schreiben (heute 1 Beleg im
+   ganzen Bestand) — Prompt-Punkt 0/5 verlangt Sellify als Quelle.
+4. Adapter-Skript-Lesebefehl (typed command) für die App; Inspector zeigt echte
+   Revision aus `scrape_script_revision` (Skripte existieren, Browser kann sie
+   nicht lesen).
+5. Modul-Lifecycle: Direkt-Deploys erzeugen keine Versionseinträge → Versionshistorie/
+   Source-Editor leer. Entweder Deploy über Lifecycle-Kommando oder Importpfad bauen.
+6. Reconcile-Kreisel: Review lehnt ab („contractual ctox scrape upsert-target …
+   blocked" = Worker darf CLI nicht ausführen), Task requeued endlos → Worker-Rechte
+   oder Vertrag ändern; offene Tasks stoppen.
+7. Kleinkram: Personen-Namenszerlegung („Johannes von"/"Cossel"), Mitarbeiter-Einheit
+   („71 M"), leerer Lead `lead_fresh_wittenstein…` (Name leer) reparieren/löschen.
+8. Shell: P0-Fix ordentlich in `shared/sync.js` + Guard-Test; Dialog-Z-Index;
+   Andock-Sensitivität; Hintergrund-Fenster-Transparenz; Morph-Cleanup bei
+   `el.isConnected`-Ausfall.
+
+**OWNER-Entscheidungen (offen):**
+- main-Update im Haupt-Checkout freigeben (52 der 88 offenen Dateien überlappen
+  mit den 12 eingehenden origin/main-Commits) — Voraussetzung für P2.
+- Shell-Hotpatch auf dem Tenant erlaubt (an Release vorbei, dokumentiert), oder P0
+  nur über den P2-Release-Weg?
+- Zugangsdaten für rocketreach/linkedin (und Entscheidung zu google/companyhouse-
+  Unlock) — ohne Logins bleiben 4 Adapter blockiert.
+
+## P3 — Ordnung
+
+1. App-Quelle in Git (durables Launchpad, z. B. `~/.local/state/workjet-launchpads/…`
+   oder eigenes Repo); die 17 Deploy-Backups liegen nur als Tenant-Tars unter
+   `~/.local/state/ctox/backups/outbound-lead-generation-before-*`.
+2. Deploy-Disziplin: Batches statt Stakkato — JEDER Service-Restart reißt Kanäle
+   (P0-Kaskade) und invalidiert Tabs.
+3. Dieses Dokument bei jedem Ereignis fortschreiben (Kanban-Pflicht).
+
+## Umgebungsfallen (in dieser Sitzung real bezahlt)
+
+- Served Shell ≠ Release-Datei (md5-Differenz) — Quelle VOR Patch klären.
+- Bash-Mehrzeiler: Zeilen laufen einzeln weiter, wenn ein Heredoc-Python scheitert;
+  zweimal lief dadurch sed+Deploy mit inkonsistentem Stand (Rollback griff sauber).
+- Tab-Cache: Modul-Buster hängt an der replizierten Modulversion; nach Deploy 1–2
+  Reloads + Wartezeit; „App geht nicht" erst nach Buster-Prüfung diagnostizieren.
+- Verstecktes Browser-Pane: WAAPI-Animationen eingefroren (`is-shell-v2-morphing`
+  bleibt), lange JS-Schleifen >45s timeouten.
+- Multi-Tab: User-Tab ist Leader, mein Pane Follower; Leases überleben tote Kontexte.
+- Maintenance-Gate („Recovery exportieren") nach Restarts; „Erneut prüfen" löst es.
+- E2E-Phantomfirmen erzeugen ehrliche portal_drifts — kein Adapterfehler.
+- Modul-Guards des Repos prüfen `local-modules` NICHT — die App kann jeden Vertrag
+  brechen, ohne dass etwas rot wird.
+
+## Evidenzkarte
+
+- Messskripte (alle rein lesend außer Deploys): `~/Documents/ctox-dev/output/claude-*.ts`
+- Deploy-Skript: `~/Documents/ctox-dev/output/deploy-olg-1.0.51-v2-ui.ts` (erwartet v17)
+- App-Quelle: `~/Documents/ctox-dev/output/outbound-lead-generation-runtime-root-fix/2026-08-29/outbound-lead-generation/`
+- Tenant-Backups: `~/.local/state/ctox/backups/outbound-lead-generation-before-*`
+- Neuer Prompt: `docs/thesen-outbound-recherche-prompt-20260831.txt` (kanonisch)
+- Kettenbeweise: business_commands (SQLite `business-os.sqlite3`), Läufe
+  (`ctox.sqlite3`: scrape_run/scrape_script_revision), Leads (`business-os-rxdb.sqlite3`)
