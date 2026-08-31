@@ -146,6 +146,7 @@ async function loadModuleMarkup() {
 }
 
 function bindElements(root) {
+  els.root = root;
   els.leftPane = root.querySelector('.store-left');
   els.centerPane = root.querySelector('.store-center');
   els.well = root.querySelector('.store-well');
@@ -183,10 +184,23 @@ function bindElements(root) {
   els.detailCaptureImg = root.querySelector('[data-detail-capture-img]');
 }
 
+// Header-/Modal-Icons kommen aus der Shell-Registry; die lokalen Pfade sind
+// der Wiederanlauf-Fallback, damit Icons eine Shell-Recovery überleben.
+function actionIcon(name) {
+  const fromShell = state.ctx?.getActionIcon?.(name);
+  if (fromShell) return fromShell;
+  const paths = {
+    close: 'M6 6l12 12M18 6 6 18',
+    export: 'M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7',
+  };
+  const d = paths[name];
+  if (!d) return '';
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"></path></svg>`;
+}
+
 function applyHeaderActionIcons() {
   if (!els.exportCatalog) return;
-  els.exportCatalog.innerHTML = state.ctx?.getActionIcon?.('export')
-    || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7"></path></svg>';
+  els.exportCatalog.innerHTML = actionIcon('export');
 }
 
 function wireEvents() {
@@ -1669,7 +1683,7 @@ async function openVersionsDialog(item) {
     <div class="ctox-modal-card" role="dialog" aria-modal="true" aria-label="Versionen von ${escapeHtml(item.title)}">
       <header class="ctox-modal-header">
         <h3 class="ctox-modal-title">Versionen – ${escapeHtml(item.title)}</h3>
-        <button type="button" class="ctox-pane-icon" data-version-close aria-label="Schließen" title="Schließen">${state.ctx?.getActionIcon?.('close') || ''}</button>
+        <button type="button" class="ctox-pane-icon" data-version-close aria-label="Schließen" title="Schließen">${actionIcon('close')}</button>
       </header>
       <div class="ctox-modal-body">
         <ul class="app-version-list">${rows}</ul>
@@ -1696,7 +1710,7 @@ async function openVersionsDialog(item) {
   });
 
   window.addEventListener('keydown', onEscape);
-  document.body.append(overlay);
+  (els.root || state.ctx?.host)?.append(overlay);
 }
 
 async function rollbackToVersion(item, versionId) {
@@ -1739,7 +1753,7 @@ async function openReleaseDialog(item) {
     <form class="ctox-modal-card ctox-modal-card--wide app-release-dialog" role="dialog" aria-modal="true" aria-label="Freigabe von ${escapeAttr(item.title)}">
       <header class="ctox-modal-header">
         <h3 class="ctox-modal-title">Freigabe vorbereiten - ${escapeHtml(item.title)}</h3>
-        <button type="button" class="ctox-pane-icon" data-release-close aria-label="Schließen" title="Schließen">${state.ctx?.getActionIcon?.('close') || ''}</button>
+        <button type="button" class="ctox-pane-icon" data-release-close aria-label="Schließen" title="Schließen">${actionIcon('close')}</button>
       </header>
       <div class="ctox-modal-body app-release-form">
         <label>
@@ -1796,7 +1810,7 @@ async function openReleaseDialog(item) {
     await releaseModule(item, payload);
   });
   window.addEventListener('keydown', onEscape);
-  document.body.append(overlay);
+  (els.root || state.ctx?.host)?.append(overlay);
 }
 
 async function moduleBundleVersionsFor(moduleId, fallbackState = null, item = null) {
