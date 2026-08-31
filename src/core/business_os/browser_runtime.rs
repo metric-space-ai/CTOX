@@ -143,6 +143,11 @@ pub struct BrowserSessionAutomationRequest {
     pub dir: Option<PathBuf>,
     pub timeout_ms: Option<u64>,
     pub source: String,
+    /// Profile owner for the automated session. Web-stack auth automation must
+    /// run in the SAME persistent profile the owning user unlocks manually —
+    /// the profile key includes the owner, so a machine-actor default here
+    /// split the login cookies away from the automation that needed them.
+    pub profile_owner: Option<String>,
 }
 
 impl BrowserRuntimeManager {

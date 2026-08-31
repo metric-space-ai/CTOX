@@ -3041,6 +3041,7 @@ fn execute_appsec_web_cli_command(
                         dir: arg_value(args, "--dir").map(PathBuf::from),
                         timeout_ms: parse_optional_u64_arg(args, "--timeout-ms")?,
                         source,
+                        profile_owner: None,
                     },
                 );
             }

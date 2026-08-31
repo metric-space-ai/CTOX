@@ -288,6 +288,13 @@ pub(super) async fn browser_session_automation_with_database(
     anyhow::ensure!(!source.is_empty(), "browser automation source is empty");
     let timeout_ms = request.timeout_ms.unwrap_or(30_000).clamp(1_000, 300_000);
     let command_created_at_ms = now_ms() as u64;
+    let profile_owner = request
+        .profile_owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ctox")
+        .to_string();
     let manager = browser_runtime_manager();
     let session = manager
         .ensure_session(
@@ -296,7 +303,7 @@ pub(super) async fn browser_session_automation_with_database(
             &session_id,
             1920,
             947,
-            "ctox",
+            &profile_owner,
             false,
             false,
         )

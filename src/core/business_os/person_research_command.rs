@@ -875,6 +875,20 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
         persist_workspace: true,
     };
     let mut result = ctox_web_stack::run_ctox_person_research_tool(root, &research_request)?;
+    // Sellify is the contractual baseline of every lead research: the CRM
+    // record is consulted first and its values must appear as visible
+    // evidence candidates, not as invisible pre-knowledge. A lookup failure
+    // must not fail the research run.
+    match merge_sellify_baseline_evidence(root, &mut result, company) {
+        Ok(added) if added > 0 => {}
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!(
+                "[person-research] sellify baseline evidence merge failed for `{company}`: \
+                 {error:#}"
+            );
+        }
+    }
     let ctox_bin = ctox_web_stack::sources::scrape_bridge::default_ctox_bin();
     for runtime_source in request.source_policy.sources {
         let source_id = runtime_source.id.trim();
@@ -885,17 +899,21 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
                 && safe_runtime_source_identifier(target_key, 128),
             "invalid runtime research source identifier"
         );
+        // Compile-time modules already ran through the normal research plan.
+        // This path exists for truly dynamic/manual/discovered adapters.
+        // The skip must happen BEFORE URL validation: builtin policy entries
+        // carry symbolic ids instead of URLs (`impressum`), and validating
+        // them first aborted the whole research run over a source that was
+        // never going to be fetched through this path.
+        if ctox_web_stack::sources::find(source_id).is_some() {
+            continue;
+        }
         let parsed_url = url::Url::parse(source_url)
             .with_context(|| format!("invalid runtime source URL for `{source_id}`"))?;
         anyhow::ensure!(
             matches!(parsed_url.scheme(), "http" | "https") && parsed_url.host_str().is_some(),
             "runtime source URL for `{source_id}` must be HTTP(S)"
         );
-        // Compile-time modules already ran through the normal research plan.
-        // This path exists for truly dynamic/manual/discovered adapters.
-        if ctox_web_stack::sources::find(source_id).is_some() {
-            continue;
-        }
         let mut target_fields = parse_requested_fields(&runtime_source.field_keys)?;
         target_fields.retain(|field| {
             research_request.fields.is_empty() || research_request.fields.contains(field)
@@ -1043,9 +1061,191 @@ fn safe_workspace_segment(value: &str) -> String {
     }
 }
 
+fn merge_sellify_baseline_evidence(
+    root: &Path,
+    payload: &mut Value,
+    company: &str,
+) -> anyhow::Result<usize> {
+    let company = company.trim();
+    if company.is_empty() {
+        return Ok(0);
+    }
+    let lookup = super::store_outbound_commands::outbound_sellify_lookup(
+        root,
+        &serde_json::json!({
+            "entity": "company",
+            "selectors": [
+                { "field": "name", "value": company },
+                { "field": "company_name", "value": company }
+            ],
+            "limit": 3
+        }),
+    )?;
+    let Some(record) = lookup
+        .get("records")
+        .and_then(Value::as_array)
+        .and_then(|records| records.first())
+        .cloned()
+    else {
+        return Ok(0);
+    };
+    Ok(inject_sellify_candidates(payload, &record))
+}
+
+/// Pushes the CRM record's values as `sellify` evidence candidates and fills
+/// fields that no other source answered. Existing web evidence keeps its top
+/// spot; the CRM value stays visible as a candidate either way.
+fn inject_sellify_candidates(payload: &mut Value, record: &Value) -> usize {
+    let record_data = record.get("data").filter(|value| value.is_object());
+    let record_field = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|key| {
+            record
+                .get(key)
+                .or_else(|| record_data.and_then(|data| data.get(key)))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    };
+    let mappings: [(&str, Option<String>); 5] = [
+        ("firma_name", record_field(&["name", "company_name"])),
+        ("firma_domain", record_field(&["website"])),
+        ("firma_email", record_field(&["email"])),
+        ("firma_telefon", record_field(&["phone"])),
+        ("crm_record_number", record_field(&["contact_id", "id"])),
+    ];
+    let Some(fields) = payload.get_mut("fields").and_then(Value::as_object_mut) else {
+        return 0;
+    };
+    let mut added = 0_usize;
+    for (field_key, value) in mappings {
+        let Some(value) = value else {
+            continue;
+        };
+        let Some(field_result) = fields.get_mut(field_key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let candidate = serde_json::json!({
+            "value": value,
+            "confidence": "high",
+            "source_id": "sellify",
+            "source_url": Value::Null,
+            "tier": "baseline",
+            "via": "sellify_crm",
+            "note": "Sellify CRM Stammdatensatz",
+        });
+        let candidates = match field_result
+            .entry("candidates")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+        {
+            Some(candidates) => candidates,
+            None => continue,
+        };
+        if candidates.iter().any(|existing| {
+            existing.get("value") == candidate.get("value")
+                && existing.get("source_id") == candidate.get("source_id")
+        }) {
+            continue;
+        }
+        candidates.push(candidate.clone());
+        let current_missing = field_result
+            .get("value")
+            .map(|value| value.is_null())
+            .unwrap_or(true)
+            || field_result.get("confidence").and_then(Value::as_str) == Some("missing");
+        if current_missing {
+            for key in [
+                "value",
+                "confidence",
+                "source_id",
+                "source_url",
+                "tier",
+                "note",
+            ] {
+                field_result.insert(
+                    key.to_string(),
+                    candidate.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        added += 1;
+    }
+    if added > 0 {
+        if let Some(plan) = payload.get_mut("plan").and_then(Value::as_array_mut) {
+            if !plan
+                .iter()
+                .any(|entry| entry.get("source_id").and_then(Value::as_str) == Some("sellify"))
+            {
+                plan.push(serde_json::json!({
+                    "source_id": "sellify",
+                    "tier": "baseline",
+                    "api_path": false,
+                    "target_key": "sellify_companies",
+                    "target_fields": ["firma_name", "firma_domain", "firma_email", "firma_telefon", "crm_record_number"],
+                }));
+            }
+        }
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sellify_candidates_fill_missing_fields_and_stay_visible_on_filled_ones() {
+        let mut payload = serde_json::json!({
+            "fields": {
+                "firma_name": {
+                    "value": "Example AG",
+                    "confidence": "high",
+                    "source_id": "web",
+                    "candidates": [
+                        {"value": "Example AG", "confidence": "high", "source_id": "web"}
+                    ]
+                },
+                "firma_domain": { "value": null, "confidence": "missing", "candidates": [] },
+                "crm_record_number": { "value": null, "confidence": "missing", "candidates": [] }
+            },
+            "plan": []
+        });
+        let record = serde_json::json!({
+            "id": "crm-42",
+            "name": "Example AG",
+            "website": "https://example.test",
+            "contact_id": "42"
+        });
+
+        let added = inject_sellify_candidates(&mut payload, &record);
+
+        assert_eq!(added, 3);
+        // Missing fields are answered by the CRM baseline...
+        assert_eq!(
+            payload["fields"]["firma_domain"]["value"],
+            "https://example.test"
+        );
+        assert_eq!(payload["fields"]["firma_domain"]["source_id"], "sellify");
+        assert_eq!(payload["fields"]["crm_record_number"]["value"], "42");
+        // ...while web evidence keeps its top spot but the CRM candidate is
+        // still listed as visible evidence.
+        assert_eq!(payload["fields"]["firma_name"]["source_id"], "web");
+        assert!(payload["fields"]["firma_name"]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["source_id"] == "sellify"));
+        assert!(payload["plan"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["source_id"] == "sellify"));
+
+        // Re-injection stays idempotent.
+        assert_eq!(inject_sellify_candidates(&mut payload, &record), 0);
+    }
 
     #[test]
     fn active_worker_deduplication_is_scoped_to_the_ctox_root() {

@@ -2017,7 +2017,10 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
         "ctox_web_auth_assist_login",
         owner_user_id.as_deref(),
         false,
-        false,
+        // Native CLI intake is trusted-local; enqueueing the request as a
+        // plain replicated document made the later intake demand a capability
+        // token the daemon does not have and reject its own auth request.
+        true,
     )?;
     let session_id = auth_assist
         .get("session_id")
@@ -2069,6 +2072,10 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
             dir: browser_dir,
             timeout_ms: Some(timeout_ms),
             source: automation_source,
+            profile_owner: auth_assist
+                .get("owner_user_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         },
     )?;
     redact_secret_value_from_json(&mut automation, &secret_value);
@@ -2291,6 +2298,10 @@ fn run_business_os_web_stack_source_capture_with_browser_authorization(
             dir: browser_dir,
             timeout_ms: Some(timeout_ms),
             source,
+            profile_owner: browser_assist
+                .get("owner_user_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         },
     )?;
     let result = automation
@@ -2844,7 +2855,9 @@ fn run_business_os_web_stack_auth_assist_signup(
         "ctox_web_auth_assist_signup",
         None,
         false,
-        false,
+        // Trusted-local for the same reason as auth-assist-login: the daemon
+        // itself files this request and owns the intake decision.
+        true,
     )?;
     let session_id = auth_assist
         .get("session_id")
@@ -2909,6 +2922,10 @@ fn run_business_os_web_stack_auth_assist_signup(
             dir: browser_dir,
             timeout_ms: Some(timeout_ms),
             source: automation_source,
+            profile_owner: auth_assist
+                .get("owner_user_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         },
     )?;
     redact_secret_value_from_json(&mut automation, &secret_value);
@@ -4555,10 +4572,22 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         .or_else(|| module.and_then(|module| module.requires_credential()))
         .or_else(|| source_defaults.map(|defaults| defaults.secret_name))
         .unwrap_or_default();
-    let owner_user_id = owner_user_id
+    // The session owner must be the human who requested the research. A
+    // worker-owned session (`ctox_harness`) is invisible in the requesting
+    // user's Browser app, so the unlock view had nothing to render and the
+    // login the research was waiting for could never happen. Callers that do
+    // not know the owner fall back to the requesting task's actor here.
+    let resolved_owner_user_id = owner_user_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(source_module);
+        .map(str::to_string)
+        .or_else(|| {
+            web_stack_auth_owner_from_task(root, requesting_task_id)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(|| source_module.to_string());
+    let owner_user_id = resolved_owner_user_id.as_str();
     let source_slug = rxdb_id_slug(source_id);
     // Authentication state belongs to a user/source pair, not to one research
     // command. A task-scoped session id left every completed capture alive and
@@ -4697,6 +4726,22 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
     } else {
         crate::business_os::enqueue_business_command_document(root, document)?
     };
+    // Make the unlock target visible immediately: project session + tab so
+    // the Browser app can render the request and auto-start the session. A
+    // projection failure must not fail the auth request itself.
+    if let Err(error) = crate::business_os::store::project_web_stack_auth_session_placeholder(
+        root,
+        &session_id,
+        &tab_id,
+        owner_user_id,
+        &target_url,
+        source_id,
+    ) {
+        eprintln!(
+            "[business-os] web-stack auth-assist session projection failed \
+             session_id={session_id}: {error:#}"
+        );
+    }
     let status = stored
         .get("status")
         .and_then(serde_json::Value::as_str)
@@ -4781,6 +4826,16 @@ fn resolve_web_stack_auth_owner_user_id(
     {
         return Ok(Some(owner.to_string()));
     }
+    web_stack_auth_owner_from_task(root, requesting_task_id)
+}
+
+/// Resolves the human owner behind a research task so browser auth sessions
+/// are attributed to the user who asked for the research, not to the harness
+/// worker executing it.
+fn web_stack_auth_owner_from_task(
+    root: &Path,
+    requesting_task_id: &str,
+) -> anyhow::Result<Option<String>> {
     if requesting_task_id.trim().is_empty() {
         return Ok(None);
     }
