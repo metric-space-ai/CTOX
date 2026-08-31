@@ -1070,17 +1070,21 @@ fn merge_sellify_baseline_evidence(
     if company.is_empty() {
         return Ok(0);
     }
-    let lookup = super::store_outbound_commands::outbound_sellify_lookup(
-        root,
-        &serde_json::json!({
-            "entity": "company",
-            "selectors": [
-                { "field": "name", "value": company },
-                { "field": "company_name", "value": company }
-            ],
-            "limit": 3
-        }),
-    )?;
+    let mut lookup_payload = serde_json::json!({
+        "entity": "company",
+        "selectors": [
+            { "field": "name", "value": company },
+            { "field": "company_name", "value": company }
+        ],
+        "limit": 3
+    });
+    // Company names drift between research input and CRM ("BNT Chemicals"
+    // vs "BNT Chemicals GmbH"); probe by the legal-form-free core name too.
+    if let Some(probe) = sellify_fuzzy_company_probe(company) {
+        lookup_payload["fuzzy_selectors"] =
+            serde_json::json!([{ "field": "name", "value": probe }]);
+    }
+    let lookup = super::store_outbound_commands::outbound_sellify_lookup(root, &lookup_payload)?;
     let Some(record) = lookup
         .get("records")
         .and_then(Value::as_array)
@@ -1090,6 +1094,29 @@ fn merge_sellify_baseline_evidence(
         return Ok(0);
     };
     Ok(inject_sellify_candidates(payload, &record))
+}
+
+/// Legal-form-free core of a company name, used as a containment probe for
+/// CRM matching. Returns None when nothing distinctive remains.
+fn sellify_fuzzy_company_probe(company: &str) -> Option<String> {
+    const LEGAL_TOKENS: &[&str] = &[
+        "gmbh", "mbh", "ag", "se", "kg", "kgaa", "ohg", "ug", "co", "cokg", "ev", "eg", "inc",
+        "ltd", "llc", "sa", "srl", "bv", "nv",
+    ];
+    let core = company
+        .split_whitespace()
+        .filter(|token| {
+            let normalized: String = token
+                .chars()
+                .filter(|ch| ch.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase();
+            !normalized.is_empty() && !LEGAL_TOKENS.contains(&normalized.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let core = core.trim();
+    (core.len() >= 3 && core != company.trim()).then(|| core.to_string())
 }
 
 /// Pushes the CRM record's values as `sellify` evidence candidates and fills

@@ -10354,6 +10354,70 @@ pub(super) fn find_rxdb_collection_records_by_string_field(
         .collect()
 }
 
+/// Case-insensitive containment search over a JSON string field. Exists for
+/// CRM company matching, where names drift over time (legal-form suffixes,
+/// renames): the browser must not scan 17k replicated documents itself, so
+/// the LIKE scan runs natively over the SQLite store instead.
+pub(super) fn find_rxdb_collection_records_by_string_field_contains(
+    root: &Path,
+    collection: &str,
+    field: &str,
+    needle: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    if !is_safe_rxdb_collection_name(collection) {
+        anyhow::bail!("invalid collection name `{collection}`");
+    }
+    if !field
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        anyhow::bail!("invalid RxDB JSON field `{field}`");
+    }
+    let needle = needle.trim();
+    if limit == 0 || needle.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let path = rxdb_store_path(root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&path)?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())?;
+    let Some(table) = rxdb_collection_table_name(&path, &conn, collection) else {
+        return Ok(Vec::new());
+    };
+    let json_path = format!("$.{field}");
+    let escaped = needle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, data
+         FROM {table}
+         WHERE CAST(json_extract(data, ?1) AS TEXT) LIKE ?2 ESCAPE '\\'
+         ORDER BY CAST(COALESCE(json_extract(data, '$.updated_at_ms'), 0) AS INTEGER) DESC, id DESC
+         LIMIT ?3"
+    ))?;
+    let rows = stmt
+        .query_map(params![json_path, pattern, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, raw)| {
+            let mut record: Value = serde_json::from_str(&raw)?;
+            if let Some(object) = record.as_object_mut() {
+                object
+                    .entry("id".to_string())
+                    .or_insert_with(|| Value::String(id.clone()));
+            }
+            Ok((id, record))
+        })
+        .collect()
+}
+
 pub(super) fn upsert_rxdb_collection_record(
     root: &Path,
     collection: &str,

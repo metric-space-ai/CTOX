@@ -442,8 +442,10 @@ mod tests {
     fn signature_and_instance_are_bound_fail_closed() -> Result<()> {
         let (root, module_dir, manifest) = fixture()?;
         let random = SystemRandom::new();
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random)?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())?;
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random)
+            .map_err(|error| anyhow::anyhow!("generate test key: {error:?}"))?;
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|error| anyhow::anyhow!("load test key: {error:?}"))?;
         let payload = CustomerAppBindingPayload {
             r#type: CUSTOMER_APP_BINDING_TYPE.to_owned(),
             customer_id: "customer-opaque".to_owned(),

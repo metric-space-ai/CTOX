@@ -4,8 +4,9 @@
 use super::backup_restore::file_sha256;
 use super::store::{
     find_rxdb_collection_record_by_string_field, find_rxdb_collection_records_by_string_field,
-    insert_business_event, is_safe_rxdb_collection_name, load_rxdb_collection_record, now_ms,
-    open_store, outbound_first_string, outbound_id_from_command, outbound_load_record,
+    find_rxdb_collection_records_by_string_field_contains, insert_business_event,
+    is_safe_rxdb_collection_name, load_rxdb_collection_record, now_ms, open_store,
+    outbound_first_string, outbound_id_from_command, outbound_load_record,
     outbound_load_records_by_string_field, outbound_load_required, outbound_merge_fields,
     outbound_object_payload, outbound_put_default_i64, outbound_put_default_object,
     outbound_put_default_string, outbound_put_i64, outbound_put_string,
@@ -1188,8 +1189,25 @@ pub(super) fn outbound_sellify_lookup(root: &Path, payload: &Value) -> anyhow::R
                 "name",
                 "company_name",
                 "website",
+                // The projection stores the URL as `website_url`; `website`
+                // stays allowed for callers written against the older shape.
+                "website_url",
                 "email",
                 "phone",
+            ],
+        ),
+        // Campaign membership rows (one row per campaign x contact). Enables
+        // importing an old Sellify campaign as the seed of a follow-up
+        // research run.
+        "campaign" => (
+            "sellify_campaigns",
+            &[
+                "name",
+                "title",
+                "contact_id",
+                "company_id",
+                "person_id",
+                "selection_id",
             ],
         ),
         "person" => (
@@ -1207,11 +1225,14 @@ pub(super) fn outbound_sellify_lookup(root: &Path, payload: &Value) -> anyhow::R
         ),
         _ => anyhow::bail!("entity must be company or person"),
     };
+    // Campaign imports must see the FULL membership of one campaign; the
+    // usual dedupe/lookup cap of 100 would silently truncate it.
+    let limit_cap = if entity == "campaign" { 2000 } else { 100 };
     let limit = payload
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(25)
-        .clamp(1, 100) as usize;
+        .clamp(1, limit_cap) as usize;
     let mut records = Vec::new();
     let mut seen = BTreeSet::new();
     if let Some(ids) = payload.get("ids").and_then(Value::as_array) {
@@ -1258,6 +1279,44 @@ pub(super) fn outbound_sellify_lookup(root: &Path, payload: &Value) -> anyhow::R
                 collection,
                 field,
                 expected,
+                limit.saturating_sub(records.len()),
+            )? {
+                if seen.insert(id) {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    // Containment probes for CRM matching: company names drift (legal-form
+    // suffixes, renames, umlauts), so callers pass normalized fragments and
+    // the scan runs natively instead of in the browser.
+    if let Some(selectors) = payload.get("fuzzy_selectors").and_then(Value::as_array) {
+        for selector in selectors {
+            if records.len() >= limit {
+                break;
+            }
+            let field = selector
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let needle = selector
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            anyhow::ensure!(
+                allowed_fields.contains(&field),
+                "unsupported {entity} lookup field `{field}`"
+            );
+            if needle.is_empty() {
+                continue;
+            }
+            for (id, record) in find_rxdb_collection_records_by_string_field_contains(
+                root,
+                collection,
+                field,
+                needle,
                 limit.saturating_sub(records.len()),
             )? {
                 if seen.insert(id) {
