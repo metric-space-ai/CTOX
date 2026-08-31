@@ -13,6 +13,41 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
 
 ## DONE (selbst verifiziert, nicht nur behauptet)
 
+### Build-Vermeidung als Arbeitsprinzip (Owner-Direktive 31.08. Nachmittag)
+
+Direktive: „abarbeiten und auf teure upgrades verzichten, wenn es geht." Teuer =
+Tenant-Rust-Build (`ctox upgrade --dev`, ~40 Min, killt laufende Sitzungen).
+Jede Sanierung dieses Nachmittags wurde bewusst auf einen build-freien Weg
+umgeplant; der Rust-Batch bleibt geparkt, bis nur noch Punkte übrig sind, die
+wirklich Rust brauchen:
+
+- **Sellify-Weiche ohne Build gelöst** (statt Rust-Latenzfix am Kanal): App
+  1.0.61 deklariert `sellify_companies` als Fremd-Collection; die Shell
+  repliziert sie (vorgesehener Mechanismus, app.js:5915ff). Weiche entscheidet
+  lokal in **19 ms** (warm) statt 60-s-Kanal-Rundreise mit fail-closed-Abbruch.
+  Beweis: Carbosulf „bereits in Sellify … nur Nachrecherche" / Gueltig Eins
+  „nicht gefunden … nur Neue Recherche" / Nachrecherche Carbosulf startet („Läuft").
+- **Queue-Stau operativ geheilt** (statt sofortigem Harness-Build): 20
+  crash-loopende Aufgaben abgeräumt (5 sofort, 15 geschützte lösen sich nach
+  Token-Fix); Wurzelursache (Gateway verliert Response-Ketten → 404-Schleife)
+  diagnostiziert und als Harness-Selbstheilung (Retry ohne Kette) im geparkten
+  Rust-Batch implementiert + kompiliert — Auslieferung gebündelt, nicht einzeln.
+- **Klick-Blocker per App-Hotdeploy** (1.0.62/1.0.63, Minuten statt Build):
+  gestapelte `document.body`-Dialogschichten → in `ctx.host`, Singleton,
+  Escape/Backdrop; Quellen-Dialog-Rewrites gedrosselt (5 s / Zeigerkontakt-Sperre).
+- **Browser-App über den Asset-Release-Kanal** (statt Binary): Shell 0.1.21 via
+  Git-Tag `business-os-shell-v0.1.21` → GitHub-Action baut+signiert (Ed25519,
+  54 s) → `shell-update stage/activate` auf dem Tenant. Kein Rust-Build nötig.
+  Inhalt: Präzise Eingabe (Klickpunkt → lokales Textfeld → click/type am Punkt;
+  Runner konnte `click` links/rechts + `keyboard.type` schon), einklappbare
+  Sitzungsleiste, kompakte Anmeldezeile, ⌘V-Paste auf die Bühne. Live
+  verifiziert: Toggle klappt, Overlay öffnet, „Punkt 640×360 gewählt".
+- **Noch offen und WIRKLICH buildpflichtig** (geparkt als Stash `rust-batch-wip`
+  im Launchpad ~/.local/state/workjet-launchpads/ctox-rustfix, kompiliert grün):
+  Harness-404-Selbstheilung, auth_assist-Nutzeridentität + Sofort-Tab,
+  Token-Intake (2 Stellen), SQLite busy_timeout, URL-Parse-Skip. Auslieferung
+  als EIN Batch, wenn der Owner den 40-Min-Build freigibt.
+
 - **Recherche-Ergebnisverlust behoben** (App 1.0.50): `source_policy` schickt nur noch
   Quellen mit HTTP(S)-URL; vorher tötete die eingebaute Quelle `impressum` (url='',
   angelegt 30.08. 21:16 durch seedSources) JEDEN Lauf NACH getaner Arbeit mit
