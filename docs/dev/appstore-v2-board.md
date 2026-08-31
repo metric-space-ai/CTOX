@@ -90,7 +90,9 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 
 ## Evidenzkarte
 
-- Board: diese Datei (docs/appstore-v2-board.md, committed) + Artifact-URL (stabil, siehe unten).
+- Board: diese Datei (docs/dev/appstore-v2-board.md, committed) + stabile Artifact-URL:
+  https://claude.ai/code/artifact/e9ffba86-1126-4663-ad64-0213db76ceb3
+  (Rendering via Scratchpad-Skript render-board.mjs; bei Board-Updates neu publizieren).
 - Zielbild-Artifact: https://claude.ai/code/artifact/00f7ce23-1cb4-450d-bb26-a1f1f5fc2898
 - Codekarte (18 Befunde A–R): Explorer-Report, kondensiert im Zielbild §2.
 - Wächterlauf P0.1: lokal reproduzierbar via assert-standard-app-bundle.mjs.
