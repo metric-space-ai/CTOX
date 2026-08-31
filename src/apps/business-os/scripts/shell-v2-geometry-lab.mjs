@@ -150,7 +150,7 @@ async function main() {
           if (!top) continue;
           if (top.closest('.ctox-pane-header')) continue;
           const cls = String(top.className || top.tagName);
-          if (/module-root|module-content|layout|workspace|-module|-pane$|scroll/.test(cls) === false || top.children.length === 0) {
+          if (/module-root|module-content|module-loading-shell|layout|workspace|-module|-pane$|-editor$|scroll/.test(cls) === false || top.children.length === 0) {
             const cs2 = getComputedStyle(top);
             const painted = cs2.backgroundColor !== 'rgba(0, 0, 0, 0)' || top.textContent.trim().length > 0 || top.matches('img,svg,button,input');
             if (painted) intruderSet.add((cls.split(' ')[0] || top.tagName).slice(0, 30));

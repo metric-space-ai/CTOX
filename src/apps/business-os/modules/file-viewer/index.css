@@ -1,6 +1,6 @@
 .file-viewer {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 37px 37px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   background: var(--surface);
@@ -13,33 +13,32 @@
 .file-viewer-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
   border-bottom: 1px solid var(--hairline, var(--line));
   background: color-mix(in srgb, var(--surface) 90%, var(--surface-2));
-  padding: 8px 10px 8px 12px;
+  padding: 0 10px 0 12px;
 }
-.file-viewer-toolbar > div {
-  display: grid;
-  gap: 1px;
+.file-viewer-toolbar .ctox-pane-title-row,
+.file-viewer-toolbar .ctox-pane-titles,
+.file-viewer-toolbar .ctox-pane-title {
   min-width: 0;
 }
-.file-viewer-toolbar strong,
-.file-viewer-toolbar span {
+.file-viewer-toolbar .ctox-pane-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.file-viewer-toolbar span { color: var(--muted); font-size: 11px; }
-.file-viewer-toolbar button {
-  min-height: 28px;
-  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--surface) 78%, var(--surface-2));
-  color: var(--accent);
-  padding: 0 10px;
-  font-weight: 730;
+.file-viewer-metadata {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--hairline, var(--line));
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .file-viewer-content {
   display: grid;
@@ -101,27 +100,25 @@
 
 @container business-app-window (max-width: 768px) {
   .file-viewer {
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .file-viewer-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .file-viewer-toolbar button {
-    align-self: flex-end;
+    grid-template-rows: 37px 37px minmax(0, 1fr);
   }
 }
 
 /* Shell-v2 reserves the top-left app icon and top-right window control. */
 .shell-window[data-shell-contract="v2"] .file-viewer {
-  grid-template-rows: minmax(calc(var(--shell-v2-header-row-size, 37px) * 2), auto) minmax(0, 1fr);
+  grid-template-rows: var(--shell-v2-header-row-size, 37px) var(--shell-v2-header-row-size, 37px) minmax(0, 1fr);
 }
 
 .shell-window[data-shell-contract="v2"] .file-viewer-toolbar {
-  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
   padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
-  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2 + 4px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
+.shell-window[data-shell-contract="v2"] .file-viewer-metadata {
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}

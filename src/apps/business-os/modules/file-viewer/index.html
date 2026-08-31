@@ -1,11 +1,15 @@
 <main class="ctox-workspace file-viewer" data-file-viewer-root>
-  <header class="file-viewer-toolbar">
-    <div>
-      <strong data-file-title>Datei</strong>
-      <span data-file-metadata></span>
+  <header class="file-viewer-toolbar ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
+    <div class="ctox-pane-title-row">
+      <div class="ctox-pane-titles">
+        <h2 class="ctox-pane-title" data-file-title>Datei</h2>
+      </div>
+      <div class="ctox-pane-actions">
+        <button class="ctox-pane-icon" type="button" data-file-download aria-label="Herunterladen" title="Herunterladen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M8 11l4 4 4-4M5 19h14"/></svg></button>
+      </div>
     </div>
-    <button type="button" data-file-download>Download</button>
   </header>
+  <div class="file-viewer-metadata" data-file-metadata data-shell-v2-header-row="2"></div>
   <section class="file-viewer-content" data-file-content>
     <p>Lade Datei...</p>
   </section>

@@ -3387,6 +3387,11 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         // Do not reveal whether a customer package exists on this instance.
         return respond_status(request, 404, "not found");
     }
+    if let Some((requested, active)) =
+        business_os_shell_generation_mismatch(app_root, rel, request.url())?
+    {
+        return respond_shell_generation_mismatch(request, &requested, &active);
+    }
     let file = resolve_business_os_static_file(root, app_root, rel);
     let target = if file.is_dir() {
         file.join("index.html")
@@ -3450,6 +3455,95 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         respond_static_success(request, &bytes, mime, cache_control, None)?;
     }
     Ok(())
+}
+
+fn business_os_shell_generation_mismatch(
+    app_root: &Path,
+    rel: &str,
+    request_url: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    if !business_os_shell_generation_guarded_asset(rel) {
+        return Ok(None);
+    }
+    let Some(requested) = parse_query(request_url).get("v").cloned() else {
+        return Ok(None);
+    };
+    // Asset-specific revisions (schema hashes, icon revisions, browser-sync
+    // guards, etc.) deliberately coexist with the shell generation. Treating
+    // every `v=` value as a shell build would reject the active shell's own
+    // shared imports. Only explicit shell-v2 generation tokens participate in
+    // the atomic release boundary.
+    if !business_os_shell_generation_token(&requested) {
+        return Ok(None);
+    }
+    let app_js = fs::read_to_string(app_root.join("app.js"))
+        .context("failed to read the active Business OS shell generation")?;
+    let active = business_os_shell_build_from_app_js(&app_js)
+        .context("active Business OS app.js does not declare APP_BUILD")?;
+    let suffix = requested.strip_prefix(&active);
+    let matches = suffix.is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('_'));
+    Ok((!matches).then_some((requested, active)))
+}
+
+fn business_os_shell_generation_token(value: &str) -> bool {
+    value.contains("-shell-v2-")
+}
+
+fn business_os_shell_generation_guarded_asset(rel: &str) -> bool {
+    matches!(
+        rel,
+        "app.js" | "app.css" | "mobile-host.js" | "mobile-host.css" | "system-apps.json"
+    ) || [
+        "shared/",
+        "modules/",
+        "desktop-apps/",
+        "installed-modules/",
+        "local-modules/",
+        "themes/",
+    ]
+    .iter()
+    .any(|prefix| rel.starts_with(prefix))
+}
+
+fn business_os_shell_build_from_app_js(source: &str) -> Option<String> {
+    ["const APP_BUILD = '", "const APP_BUILD = \""]
+        .into_iter()
+        .find_map(|marker| {
+            let tail = source.split_once(marker)?.1;
+            let quote = marker.chars().last()?;
+            let build = tail.split_once(quote)?.0.trim();
+            (!build.is_empty()).then(|| build.to_owned())
+        })
+}
+
+fn respond_shell_generation_mismatch(
+    request: Request,
+    requested: &str,
+    active: &str,
+) -> anyhow::Result<()> {
+    request.respond(shell_generation_mismatch_response(requested, active))?;
+    Ok(())
+}
+
+fn shell_generation_mismatch_response(
+    requested: &str,
+    active: &str,
+) -> Response<io::Cursor<Vec<u8>>> {
+    let body = serde_json::json!({
+        "error": "shell_generation_mismatch",
+        "requested": requested,
+        "active": active,
+    })
+    .to_string();
+    let mut response = Response::from_string(body).with_status_code(409);
+    response
+        .add_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
+    response.add_header(Header::from_bytes("Cache-Control", "no-store, max-age=0").unwrap());
+    response.add_header(Header::from_bytes("X-CTOX-Shell-Generation", active).unwrap());
+    response.add_header(Header::from_bytes("X-CTOX-Shell-Generation-Mismatch", "1").unwrap());
+    add_cors_headers(&mut response);
+    add_common_response_headers(&mut response);
+    response
 }
 
 fn runtime_module_static_authorized(root: &Path, rel: &str) -> bool {
@@ -3549,11 +3643,9 @@ fn business_os_static_cache_control(is_index: bool, rel: &str, request_url: &str
         return "no-cache, must-revalidate";
     }
 
-    // Release query keys remain useful for cache partitioning, but they are
-    // not a correctness boundary. A missed manual key bump must never leave a
-    // managed instance executing an old shell or module bundle after upgrade.
-    // Revalidate versioned packaged assets on navigation so the server's
-    // active release remains authoritative.
+    // The generation gate above rejects a stale query before bytes from the
+    // active release can be returned under an older URL. Revalidation remains
+    // useful for non-shell assets and defense in depth.
     if request_url.contains("?v=") || request_url.contains("&v=") {
         "no-cache, must-revalidate"
     } else {
@@ -4557,6 +4649,91 @@ mod tests {
             ),
             "no-cache, must-revalidate"
         );
+    }
+
+    #[test]
+    fn shell_generation_guard_rejects_old_assets_without_mixing_releases() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::write(
+            root.path().join("app.js"),
+            "const APP_BUILD = '20260831-shell-v2-atomic-v304';\n",
+        )?;
+
+        assert_eq!(
+            business_os_shell_generation_mismatch(
+                root.path(),
+                "modules/knowledge/index.html",
+                "/modules/knowledge/index.html?v=20260830-shell-v2-consolidated-v302_knowledge-7"
+            )?,
+            Some((
+                "20260830-shell-v2-consolidated-v302_knowledge-7".to_owned(),
+                "20260831-shell-v2-atomic-v304".to_owned(),
+            ))
+        );
+        assert_eq!(
+            business_os_shell_generation_mismatch(
+                root.path(),
+                "modules/knowledge/index.js",
+                "/modules/knowledge/index.js?v=20260831-shell-v2-atomic-v304_knowledge-8"
+            )?,
+            None
+        );
+        assert_eq!(
+            business_os_shell_generation_mismatch(
+                root.path(),
+                "shared/resizer.js",
+                "/shared/resizer.js?v=20260816-browser-sync-guards-v141"
+            )?,
+            None,
+            "asset revisions are not shell generations"
+        );
+        assert_eq!(
+            business_os_shell_generation_mismatch(
+                root.path(),
+                "assets/ctox-app-icon.png",
+                "/assets/ctox-app-icon.png?v=legacy-icon-revision"
+            )?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shell_generation_mismatch_response_is_409_and_never_cacheable() -> anyhow::Result<()> {
+        use std::io::Read as _;
+
+        let response = shell_generation_mismatch_response(
+            "20260830-shell-v2-consolidated-v302",
+            "20260831-shell-v2-atomic-v304",
+        );
+        assert_eq!(response.status_code().0, 409);
+        let header = |name: &str| {
+            response
+                .headers()
+                .iter()
+                .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(name))
+                .map(|header| header.value.as_str().to_owned())
+        };
+        assert_eq!(
+            header("X-CTOX-Shell-Generation-Mismatch").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            header("X-CTOX-Shell-Generation").as_deref(),
+            Some("20260831-shell-v2-atomic-v304")
+        );
+        assert_eq!(
+            header("Cache-Control").as_deref(),
+            Some("no-store, max-age=0")
+        );
+
+        let mut body = String::new();
+        response.into_reader().read_to_string(&mut body)?;
+        let payload: Value = serde_json::from_str(&body)?;
+        assert_eq!(payload["error"], "shell_generation_mismatch");
+        assert_eq!(payload["requested"], "20260830-shell-v2-consolidated-v302");
+        assert_eq!(payload["active"], "20260831-shell-v2-atomic-v304");
+        Ok(())
     }
 
     #[test]

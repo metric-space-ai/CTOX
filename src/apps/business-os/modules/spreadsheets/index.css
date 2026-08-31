@@ -27,9 +27,24 @@
 
 /* Loading skeleton: shell-provided .module-loading-* parts, centered. */
 .spreadsheets-loading-shell {
-  min-height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
   place-content: center;
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-loading-header {
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
+.spreadsheets-loading-reserved-row {
+  flex: 0 0 var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  background: transparent;
+  pointer-events: none;
 }
 
 /* Right-pane toggle (in the center editor header). Pressed = panel visible;

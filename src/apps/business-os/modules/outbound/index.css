@@ -2425,7 +2425,7 @@
 
 /* 3. Control zone: 74px controls, 70px reserved on the last header. */
 .shell-window[data-shell-contract="v2"] .outbound-module > .outbound-center > .ctox-pane-header {
-  padding-right: 70px;
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
 /* Row 2 still lies under the icon; the icon ends after two header rows, so
@@ -2444,6 +2444,6 @@
    to clear the window controls as well. */
 @container business-app-window (max-width: 768px) {
   .shell-window[data-shell-contract="v2"] .outbound-module > .outbound-left > .ctox-pane-header {
-    padding-right: 70px;
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
   }
 }

@@ -69,6 +69,36 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
 
 ## Ereignis-Log (fortgeschrieben)
 
+- 13:56 **ABNAHME-MESSUNG nach Deploy** (Release branch-main-20260831T122521Z
+  aktiv seit 12:45; App v1.0.60/v32):
+  - Token-Ablehnungen seit Deploy: **0** (vorher Dauerschleife). 404-Tode: **0**.
+  - **WITTENSTEIN SE: Nachrecherche completed** (aus der Queue, durch den
+    Harness, mit Adaptern). Beiersdorf Manufacturing: needs_review, 10/32
+    Felder + Belege, 2 Quellen fordern Browser-Autorisierung. BNT: 14/32.
+  - Unlock-Fenster zeigt echten Seiteninhalt (FirmenABC, Zugangsdaten-Leiste).
+  - Queue: Auth-Assist-Duplikate weg; Rest sind Repair-Tasks in Abarbeitung.
+- 13:05–13:51 App v1.0.52→v1.0.60 (8 Iterationen, alle visuell verifiziert):
+  zwei Buttons „Neue Recherche"/„Nachrecherche" + harte Sellify-Weiche
+  (fail-closed), Sellify-Kampagnen-Import (Icon+Dialog, native campaign-
+  Entity), Zwei-Prompt-Settings (instructions/followup_instructions, Auswahl
+  nach Modus), Fuzzy-/Domain-Dublettensuche, Schutzschalter gegen den toten
+  Direkt-RPC, sequenzielle statt paralleler Proben (parallel = Selbst-DoS:
+  STREAM_LIMIT_EXCEEDED gemessen).
+- 13:50 **OFFENER KERNBEFUND — Sync-Leitung**: Die Browser↔Server-Rundreise
+  eines Sellify-Lookups dauert ~50–60 s (nativ <1 s; Command completed
+  serverseitig in Sekunden, die Terminal-Beobachtung im Browser verhungert
+  hinter Live-Frames/Chat-Streams auf dem Aux-Kanal; Direkt-RPC 20-s-Timeout,
+  shell-seitig nicht konfigurierbar). Folge: die Sellify-Weiche blockiert
+  derzeit oft fail-closed („Abgleich fehlgeschlagen … erneut versuchen") statt
+  zu entscheiden. SAUBERER FIX (nächster Build, OWNER-Freigabe nötig):
+  Weiche in den nativen person_research-Intake verlagern (variant im Payload,
+  Lookup nativ, Abbruch als Command-Fehler mit Klartext). Zweiter Kandidat:
+  Aux-Kanal-Priorisierung (RPCs vor Frames) — Shell/Server-Thema.
+- 13:45 Stale-Modul-Falle dokumentiert: Die Shell serviert Module aus dem
+  Cache („fetch:stale-served") — nach einem Deploy braucht es ZWEI Reloads,
+  bis der neue Stand ausgeführt wird. Für jede Browser-Messung Pflicht:
+  Ressourcen-Log auf die tatsächlich AUSGEFÜHRTE Version prüfen.
+
 - 12:25 **P2-Batch gepusht und Server-Build gestartet** (origin/main `c8d9e3e20`,
   Log `upgrade-outbound-heilung-c8d9e3e20-20260831T122521Z.log`, pid 598199).
   Owner-Ansage: EIN Upgrade-Lauf, danach keiner mehr. Inhalt (2 Commits, lokal

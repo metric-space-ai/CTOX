@@ -1912,17 +1912,23 @@ fn apply_update(
     })?;
     let mut manifest = load_install_manifest(&layout.install_manifest_path())?
         .context("managed install manifest missing; run `ctox update adopt` first")?;
-    let previous_release = manifest.current_release.clone();
-    let previous_release_root = current_link
+    let linked_release_root = current_link
         .read_link()
         .ok()
         .map(|entry| absolutize_link_target(&current_link, &entry))
-        .transpose()?
-        .or_else(|| {
-            previous_release
-                .as_ref()
-                .map(|name| releases_dir.join(name))
-        });
+        .transpose()?;
+    // The symlink is the runtime authority. A manual recovery may have moved
+    // `current` while an older manifest survived; using only the manifest here
+    // makes a successful update record and later roll back to the wrong build.
+    let previous_release = linked_release_root
+        .as_deref()
+        .and_then(|root| managed_release_name(&releases_dir, root))
+        .or_else(|| manifest.current_release.clone());
+    let previous_release_root = linked_release_root.or_else(|| {
+        previous_release
+            .as_ref()
+            .map(|name| releases_dir.join(name))
+    });
     let backup_path = backup_state_root(&layout.state_root)?;
     progress_step(format!("state backup created: {}", backup_path.display()));
     // Direkt nach dem Anlegen aufraeumen, nicht erst am Ende des Erfolgspfads.
@@ -4511,6 +4517,14 @@ fn absolutize_link_target(link_path: &Path, target: &Path) -> Result<PathBuf> {
     Ok(parent.join(target))
 }
 
+fn managed_release_name(releases_dir: &Path, release_root: &Path) -> Option<String> {
+    let relative = release_root.strip_prefix(releases_dir).ok()?;
+    if relative.components().count() != 1 {
+        return None;
+    }
+    relative.file_name()?.to_str().map(str::to_owned)
+}
+
 #[cfg(unix)]
 fn create_symlink(target: &Path, link_path: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
@@ -4573,6 +4587,27 @@ mod tests {
             Some("ctox-macos-arm64.tar.gz")
         );
         assert_eq!(target_bundle_asset_name_for("windows", "aarch64"), None);
+    }
+
+    #[test]
+    fn active_symlink_release_name_overrides_stale_manifest_identity() {
+        let releases = Path::new("/opt/ctox/releases");
+        assert_eq!(
+            managed_release_name(
+                releases,
+                Path::new("/opt/ctox/releases/shell-v2-project-flow-20260830T183200Z")
+            )
+            .as_deref(),
+            Some("shell-v2-project-flow-20260830T183200Z")
+        );
+        assert_eq!(
+            managed_release_name(releases, Path::new("/tmp/manual-recovery")),
+            None
+        );
+        assert_eq!(
+            managed_release_name(releases, Path::new("/opt/ctox/releases/nested/release")),
+            None
+        );
     }
 
     #[test]

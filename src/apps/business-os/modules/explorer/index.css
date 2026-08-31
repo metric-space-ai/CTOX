@@ -1,7 +1,7 @@
 .app-explorer {
   position: relative;
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 37px 37px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   background: var(--surface);
@@ -26,11 +26,37 @@
   pointer-events: none;
 }
 .app-explorer-toolbar {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.app-explorer-toolbar .ctox-pane-title-row {
+  width: 100%;
+  min-width: 0;
+}
+.app-explorer-toolbar .ctox-pane-titles {
+  min-width: 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+.app-explorer-toolbar .ctox-pane-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-explorer-count {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.app-explorer-commandbar {
   display: grid;
-  grid-template-columns: auto minmax(190px, 1fr) auto minmax(150px, 240px);
+  grid-template-columns: auto minmax(190px, 1fr) minmax(150px, 240px);
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  min-height: 37px;
+  padding: 3px 10px;
   border-bottom: 1px solid var(--hairline, var(--line));
   background: color-mix(in srgb, var(--surface) 92%, var(--surface-2));
 }
@@ -439,23 +465,14 @@ button.app-explorer-grid-head { cursor: pointer; }
 @container business-app-window (max-width: 1024px) {
   .app-explorer-body { grid-template-columns: 180px minmax(0, 1fr); }
   .app-explorer-preview { display: none; }
-  .app-explorer-toolbar { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .app-explorer-search { grid-column: 1 / -1; }
+  .app-explorer-commandbar { grid-template-columns: auto minmax(0, 1fr) minmax(130px, 210px); }
 }
 @container business-app-window (max-width: 768px) {
   .app-explorer {
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: 37px 37px minmax(0, 1fr);
   }
-  .app-explorer-toolbar {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-  .app-explorer-actions,
-  .app-explorer-search {
-    grid-column: 1 / -1;
-  }
-  .app-explorer-actions button {
-    flex: 1 1 0;
-  }
+  .app-explorer-commandbar { grid-template-columns: auto minmax(0, 1fr) minmax(110px, 1fr); }
+  .app-explorer-address span { display: none; }
   .app-explorer-body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
@@ -493,12 +510,19 @@ button.app-explorer-grid-head { cursor: pointer; }
 
 /* Shell-v2 reserves the top-left app icon and top-right window control. */
 .shell-window[data-shell-contract="v2"] .app-explorer {
-  grid-template-rows: minmax(calc(var(--shell-v2-header-row-size, 37px) * 2), auto) minmax(0, 1fr);
+  grid-template-rows: var(--shell-v2-header-row-size, 37px) var(--shell-v2-header-row-size, 37px) minmax(0, 1fr);
 }
 
 .shell-window[data-shell-contract="v2"] .app-explorer-toolbar {
-  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
   padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
-  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2 + 4px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
+.shell-window[data-shell-contract="v2"] .app-explorer-commandbar {
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
