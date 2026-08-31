@@ -1,6 +1,7 @@
 # APPSTORE-V2 — Kampagnen-Board
 
-**Headline:** Phase 0 komplett; kritischer Pfad = Sol-Lauf P1.1 (Loader-Vereinigung) landet, danach P1.2/P2.
+**Headline:** P1.2 + P3A gelandet; kritischer Pfad = P1.1-Patch anwenden, sobald die
+Cargo-Baseline des (verschmutzten) Hauptbaums grün gemeldet ist.
 
 Zielbild (entscheidungsfrei bis auf OWNER-Karten unten):
 https://claude.ai/code/artifact/00f7ce23-1cb4-450d-bb26-a1f1f5fc2898
@@ -10,6 +11,20 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 
 ## Done
 
+- **[P1.2b] explorer + file-viewer als Core-Module gelandet** — Sol-Port (Run
+  `123104Z-d4712c24`, integrated) + Fable-Shell-Umbau: DESKTOP_APPS geleert (IDs stabil,
+  Auflösung über Modulkatalog), 21 System-Apps, Schema-Direktimporte der Eigentümer (9/9
+  byte-identisch nachgemessen), Tests 17+6 grün, Shell-V2 37/37 OK. Legacy desktop-apps/
+  bleibt (browser_rust_smoke.js importiert file-viewer in 4 Smokes — Löschmessung hat
+  Entfernung gestoppt). APP_BUILD → v328. DEPLOY-PFLICHT: Binary + Slot zusammen (include_str).
+  Commit `4ab89e374`.
+- **[P3A] Appstore-Publisher gelandet** — build-appstore-index.mjs + Testsuite (Sol-Run
+  `122315Z-09c728d1`, integrated): 18 signierbare per-App-Bundles, Index v1, Determinismus
+  und Signatur-Roundtrip im Hauptbaum verifiziert (5/5 Tests, Proof 37 Dateien).
+  Commit `3b434daf5`.
+- **[P1.3a] Store-Overlays ins Fenster + actionIcon-Fallback** — 2 vorbestehend rote
+  app-store-Wächter grün gemacht (echte Defekte: Modals auf document.body). 27/27 Tests.
+  Commit `8475b65e5`.
 - **[P0.1] Bundle-Wächter grün** — `coding-agents` Manifest: `deletable=false`, Store-Block auf
   `installable:false / editable_after_install:false / distribution:system-module` (wie registry
   und alle System-Apps). Verifiziert: `node src/apps/business-os/scripts/assert-standard-app-bundle.mjs`
@@ -52,34 +67,17 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 
 ## Working
 
-- **[P1.1 + P0.3] Loader-Vereinigung + Kollisionsdiagnose** — Sol · Completion, Workjet-Run
-  `local-2026-08-31T121437Z-2d73f775-d971-4baa-8ce6-0fab405b222c`, gestartet 12:14Z aus
-  Launchpad ~/.local/state/workjet-launchpads/appstore-v2 (business_os-Subtree, Baseline
-  9f618cb; Voll-Repo-Archiv 408 MB > 64-MiB-Limit). Brief: eine gemeinsame Loader-/Upsert-
-  Implementierung, store.rs-Semantik kanonisch; ID-Kollision = laute Diagnose + erhaltener
-  Vorrang, KEIN Bail (Tenant-Altbestand darf nicht sterben). Kein cargo im Workspace (kann
-  dort nicht bauen) — Fable kompiliert den Diff im Hauptbaum. Fertig = Diff importiert,
-  cargo check grün, eine Definition je Funktion.
-- **[P1.2b] explorer + file-viewer als Module** — Sol · Completion (3. Parallellauf,
-  OpenAI-Pool damit 3/3 — keinen weiteren Sol/Terra-Lauf starten!), Workjet-Run
-  `local-2026-08-31T123104Z-d4712c24-67a7-402a-9c7c-50d65cffe724`, gestartet 12:31Z aus
-  Launchpad ~/.local/state/workjet-launchpads/appstore-v2-ports (19 MB, Baseline 22c959be9).
-  Nur NEUE Verzeichnisse modules/explorer + modules/file-viewer; Schema-Kopien byte-identisch
-  aus Eigentümer-Modulen; app.js-Umschaltung (DESKTOP_APPS raus) macht Fable nach Import.
-  Fertig = Tests grün, Shell-V2-Wächter ohne neue Befunde, Schema-Diff-Beweis.
-- **[P3A] Statischer Appstore-Publisher** — Sol · Completion, Workjet-Run
-  `local-2026-08-31T122315Z-09c728d1-3802-4cfc-b628-23036c22b7c3`, gestartet 12:23Z aus
-  Launchpad ~/.local/state/workjet-launchpads/appstore-v2-publisher (13 MB, Baseline von
-  393ba88ce). Liefert build-appstore-index.mjs + node:test-Suite: deterministische Zips,
-  Ed25519-Signaturen, index.json v1, 18 Store-Apps. Fertig = Tests grün im Hauptbaum,
-  Proof-Lauf mit 18 Apps.
+- **[P1.1 + P0.3] Loader-Patch anwenden** — Sol-Lauf `121437Z-2d73f775` COMPLETED und
+  importiert; Patch liegt in /Volumes/tmp/appstore-v2-p11-loader.patch (+324/−545, 4 Dateien:
+  neues module_manifest_loader.rs 298 Z., server.rs −325, store.rs −216, mod.rs +1).
+  Review erledigt: Semantik kanonisch (asset_revision, file plane, customer_apps-Gate,
+  Scope-Demotion), Kollisionen = Warnung + ModuleManifestLoad.collisions, Vorrang
+  source→installed→local erhalten, upsert_module_manifest_command als Alias erhalten.
+  WARTET auf: grüne Cargo-Baseline des Hauptbaums (läuft, Task bf0vrof2q, warmes Target
+  runtime/build/cargo-target 9.1G). Danach: git apply → cargo check → Commit (server.rs-
+  Vorbestand siehe Umgebungsfalle unten!).
 
 ## To-Do
-- **[P1.2] explorer/file-viewer/creator als echte Module** — explorer+file-viewer aus
-  DESKTOP_APPS (app.js:4346) zu modules/<id>/ portieren (mount(container,ctx) →
-  mount(ctx)-Vertrag), creator aus desktop-apps/ als Modul wiederbeleben (App-Store-Pfad
-  `openApp('creator')` ist tot — erst messen). System-Apps-Listen + Registry-Generator
-  laufen automatisch mit. TRIGGER: nach P1.1-Import (Loader-Landung).
 - **[P1.3] Store-UI-Katalogquellen auf Server-Projektion reduzieren** (app-store/index.js:468–508).
   TRIGGER: nach P1.2.
 - **[P2] origin-Feld + Core-Repair + local-catalog-Install.** TRIGGER: nach P1.
@@ -113,6 +111,15 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 ---
 
 ## Umgebungsfallen
+
+- **PARALLELE SITZUNG IM BAUM (seit ~14:42):** jemand editiert live modules/calendar
+  (calendar-view-adapter.js, index.js) und modules/importer (index.css/html/js, Kopfband-
+  Umbau). Diese Dateien NICHT anfassen, NIE mitcommitten. Ihre Arbeit hat nebenbei die
+  zwei alten Shell-V2-Befunde (calendar hardcoded-accent, importer media-query) behoben.
+- **Vorbestand im Baum (seit Sitzungsstart, unkommittiert):** server.rs (+203,
+  Shell-Generation-Wächter), mcp_channel.rs (+201), store_catalog_projections.rs (+7),
+  pi_sidecar.rs, install/mod.rs, skills/, AGENTS.md u.a. — vor jedem Commit auf diesen
+  Pfaden Hunks strikt trennen; ggf. Vorbestand als eigenen, beschrifteten Commit übernehmen.
 
 - Worker-Worktrees können kein Rust bauen (gitignorierte Artefakte fehlen) → Diffs selbst im
   Hauptbaum kompilieren.
