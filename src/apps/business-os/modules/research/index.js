@@ -581,7 +581,7 @@ async function waitForReplicationBridge(bridge, collection, timeoutMs = 20000) {
   await Promise.race([
     wait(),
     new Promise((_, reject) => {
-      window.setTimeout(() => reject(new Error(`${collection} replication did not become ready in time`)), timeoutMs);
+      window.setTimeout(() => reject(new Error(`${collection} data sync did not become ready in time`)), timeoutMs);
     }),
   ]);
 }
@@ -4517,7 +4517,7 @@ function researchScoringContract(scoringDimensions) {
     dimensions: scoringDimensions,
     weights: scoringWeights(scoringDimensions),
     total_field: 'weighted_total',
-    rule: 'Only score rows passing the UI evidence gate and native receipt lineage: source_id, verification flags, HTTP 2xx, snapshot_id, snapshot_path, byte-hash-shaped snapshot_hash, canonical_url, evidence_id or claim_id, retrieved_at, allowed url_role/content_scope, evidence_eligible=true, and non-aggregated source_tier. Raw, legacy, metadata-only, off-topic, rejected, empty, or aggregated discovery candidates stay unscored.',
+    rule: 'Only score rows passing the UI evidence gate and durable receipt lineage: source_id, verification flags, HTTP 2xx, snapshot_id, snapshot_path, byte-hash-shaped snapshot_hash, canonical_url, evidence_id or claim_id, retrieved_at, allowed url_role/content_scope, evidence_eligible=true, and non-aggregated source_tier. Raw, legacy, metadata-only, off-topic, rejected, empty, or aggregated discovery candidates stay unscored.',
     required_source_fields: ['source_id', 'verification_status', 'transport_verified', 'content_extracted', 'actual_full_text_or_data', 'evidence_relevance_score', 'http_status', 'snapshot_id', 'snapshot_path', 'snapshot_hash', 'canonical_url', 'evidence_id_or_claim_id', 'retrieved_at', 'url_role', 'content_scope', 'evidence_eligible', 'source_tier'],
     required_audits: ['source', 'data', 'claim'],
   };
@@ -5986,7 +5986,7 @@ async function loadReportContentFromRxdb(filename) {
   const documents = readableCollection('documents');
   if (!documents) {
     throw new Error(canReadCollection('documents')
-      ? 'RxDB-Dokumente nicht verfügbar'
+      ? 'Dokumente sind noch nicht verfügbar'
       : 'Keine Datenfreigabe für Dokumente');
   }
   const matches = await documents.find({ selector: { filename } }).exec();
@@ -6004,7 +6004,7 @@ async function loadReportContentFromRxdb(filename) {
   const versionId = json.current_version_id;
   if (!versions || !blobChunks) {
     throw new Error(canReadCollection('document_versions') && canReadCollection('document_blob_chunks')
-      ? 'RxDB-Dokumentversionen nicht verfügbar'
+      ? 'Dokumentversionen sind noch nicht verfügbar'
       : 'Keine Datenfreigabe für Dokumentinhalte');
   }
   if (versionId) {
