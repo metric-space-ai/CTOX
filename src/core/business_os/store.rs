@@ -10354,6 +10354,70 @@ pub(super) fn find_rxdb_collection_records_by_string_field(
         .collect()
 }
 
+/// Case-insensitive containment search over a JSON string field. Exists for
+/// CRM company matching, where names drift over time (legal-form suffixes,
+/// renames): the browser must not scan 17k replicated documents itself, so
+/// the LIKE scan runs natively over the SQLite store instead.
+pub(super) fn find_rxdb_collection_records_by_string_field_contains(
+    root: &Path,
+    collection: &str,
+    field: &str,
+    needle: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    if !is_safe_rxdb_collection_name(collection) {
+        anyhow::bail!("invalid collection name `{collection}`");
+    }
+    if !field
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        anyhow::bail!("invalid RxDB JSON field `{field}`");
+    }
+    let needle = needle.trim();
+    if limit == 0 || needle.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let path = rxdb_store_path(root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&path)?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())?;
+    let Some(table) = rxdb_collection_table_name(&path, &conn, collection) else {
+        return Ok(Vec::new());
+    };
+    let json_path = format!("$.{field}");
+    let escaped = needle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, data
+         FROM {table}
+         WHERE CAST(json_extract(data, ?1) AS TEXT) LIKE ?2 ESCAPE '\\'
+         ORDER BY CAST(COALESCE(json_extract(data, '$.updated_at_ms'), 0) AS INTEGER) DESC, id DESC
+         LIMIT ?3"
+    ))?;
+    let rows = stmt
+        .query_map(params![json_path, pattern, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, raw)| {
+            let mut record: Value = serde_json::from_str(&raw)?;
+            if let Some(object) = record.as_object_mut() {
+                object
+                    .entry("id".to_string())
+                    .or_insert_with(|| Value::String(id.clone()));
+            }
+            Ok((id, record))
+        })
+        .collect()
+}
+
 pub(super) fn upsert_rxdb_collection_record(
     root: &Path,
     collection: &str,
@@ -10363,6 +10427,125 @@ pub(super) fn upsert_rxdb_collection_record(
 ) -> anyhow::Result<()> {
     if let Some(mut writer) = RxdbCollectionWriter::open(root, collection)? {
         writer.upsert(record_id, updated_at_ms, payload)?;
+    }
+    Ok(())
+}
+
+/// Projects a visible browser session and tab for a freshly accepted
+/// web-stack auth-assist request. Without this projection the requesting
+/// user's Browser app had nothing to render until some runtime command
+/// touched the session: the unlock view spun forever with zero tabs, and the
+/// interactive login the research was waiting for could never happen.
+pub(crate) fn project_web_stack_auth_session_placeholder(
+    root: &Path,
+    session_id: &str,
+    tab_id: &str,
+    owner_user_id: &str,
+    target_url: &str,
+    title: &str,
+) -> anyhow::Result<()> {
+    let now = now_ms().min(i64::MAX as u128) as i64;
+    let tenant_id = sync_config(root)
+        .map(|config| config.instance_id)
+        .unwrap_or_default();
+    let Some(mut sessions) = RxdbCollectionWriter::open(root, "browser_sessions")? else {
+        return Ok(());
+    };
+    match sessions.read(session_id)? {
+        Some(doc) if doc.get("_deleted").and_then(Value::as_bool) != Some(true) => {
+            // A live session keeps its runtime state; only heal a missing or
+            // machine-actor owner so the requesting user can see and adopt
+            // the session in the Browser app.
+            let current_owner = doc
+                .get("owner_user_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if matches!(
+                current_owner,
+                "" | "ctox" | "ctox_harness" | "ctox_web_stack"
+            ) && !owner_user_id.is_empty()
+                && current_owner != owner_user_id
+            {
+                sessions.upsert(
+                    session_id,
+                    now,
+                    serde_json::json!({ "owner_user_id": owner_user_id }),
+                )?;
+            }
+        }
+        _ => {
+            sessions.upsert(
+                session_id,
+                now,
+                serde_json::json!({
+                    "id": session_id,
+                    "tenant_id": tenant_id,
+                    "owner_user_id": owner_user_id,
+                    "controller_user_id": "",
+                    "controller_lease_id": "",
+                    "controller_lease_expires_at_ms": 0,
+                    "status": "requested",
+                    "runtime_status": "requested",
+                    "current_tab_id": tab_id,
+                    "current_url": target_url,
+                    "title": title,
+                    "viewport_w": 1280,
+                    "viewport_h": 720,
+                    "device_scale_factor": 1,
+                    "frame_rate_target": 15,
+                    "active_frame_id": "",
+                    "last_frame_seq": 0,
+                    "last_input_seq": 0,
+                    "pending_input_count": 0,
+                    "error": "",
+                    "payload": {
+                        "browser_stream": "rxdb",
+                        "runtime": "ctox-web-stack",
+                        "updated_by": "native-auth-assist",
+                        "target_url": target_url,
+                    },
+                    "created_at_ms": now,
+                    "updated_at_ms": now
+                }),
+            )?;
+        }
+    }
+    let Some(mut tabs) = RxdbCollectionWriter::open(root, "browser_tabs")? else {
+        return Ok(());
+    };
+    let tab_missing = match tabs.read(tab_id)? {
+        Some(doc) => doc.get("_deleted").and_then(Value::as_bool) == Some(true),
+        None => true,
+    };
+    if tab_missing {
+        tabs.upsert(
+            tab_id,
+            now,
+            serde_json::json!({
+                "id": tab_id,
+                "tenant_id": tenant_id,
+                "owner_user_id": owner_user_id,
+                "controller_user_id": "",
+                "session_id": session_id,
+                "title": title,
+                "url": target_url,
+                "status": "active",
+                "loading": false,
+                "active": true,
+                "can_go_back": false,
+                "can_go_forward": false,
+                "frame_seq": 0,
+                "last_frame_id": "",
+                "last_frame_at_ms": 0,
+                "error": "",
+                "payload": {
+                    "browser_stream": "rxdb",
+                    "updated_by": "native-auth-assist"
+                },
+                "created_at_ms": now,
+                "updated_at_ms": now
+            }),
+        )?;
     }
     Ok(())
 }
@@ -10575,6 +10758,21 @@ impl RxdbCollectionWriter {
         )?;
         self.notify_committed_change();
         Ok(())
+    }
+
+    fn read(&self, record_id: &str) -> anyhow::Result<Option<Value>> {
+        let Some(raw) = self
+            .conn
+            .query_row(
+                &format!("SELECT data FROM {} WHERE id = ?1", self.table),
+                [record_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_str::<Value>(&raw).ok())
     }
 
     fn upsert_source_projection(

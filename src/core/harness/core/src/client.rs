@@ -1363,6 +1363,7 @@ impl ModelClientSession {
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
         let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut retry_without_response_chain = false;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = ReqwestTransport::new(build_reqwest_client());
@@ -1398,11 +1399,12 @@ impl ModelClientSession {
                 .map(CodexAuth::auth_mode)
                 .map(|m| matches!(m, AuthMode::Chatgpt))
                 .unwrap_or(false);
-            let wire_request = if is_chatgpt_subscription {
+            let wire_request = if is_chatgpt_subscription || retry_without_response_chain {
                 request.clone()
             } else {
                 self.prepare_http_request(&request)
             };
+            let wire_has_response_chain = wire_request.previous_response_id.is_some();
             self.log_responses_request_payload_metrics("responses_http", &wire_request);
             let client = ApiResponsesClient::new(
                 transport,
@@ -1432,6 +1434,30 @@ impl ModelClientSession {
                         )
                         .await?,
                     );
+                    continue;
+                }
+                Err(ApiError::Transport(TransportError::Http {
+                    status, ref body, ..
+                })) if status == StatusCode::NOT_FOUND
+                    && wire_has_response_chain
+                    && !retry_without_response_chain
+                    && body.as_deref().is_some_and(|body| {
+                        body.contains("previous_response_id") || body.contains("was not found")
+                    }) =>
+                {
+                    // The gateway no longer stores the chained response (its
+                    // stream completed client-side but was never durably
+                    // persisted). Failing the turn here crash-loops queue
+                    // tasks on every resume; resending the full history once
+                    // heals the turn in place.
+                    warn!(
+                        "responses previous_response_id is no longer stored upstream; \
+                         retrying once with full history"
+                    );
+                    retry_without_response_chain = true;
+                    self.websocket_session.last_request = None;
+                    self.websocket_session.last_response = None;
+                    self.websocket_session.last_response_rx = None;
                     continue;
                 }
                 Err(err) => return Err(map_api_error(err)),

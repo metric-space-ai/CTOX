@@ -33,7 +33,11 @@ pub(crate) fn sqlite_concurrent_reader_error() -> RxError {
     )
 }
 
-const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+// 10s lost real user writes: a credential-save command raced a long
+// replication checkpoint on the shared store and surfaced "database is
+// locked" in the app. 30s matches the daemon-wide timeout in
+// `crate::persistence::sqlite_busy_timeout_duration`.
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const SQLITE_EXTERNAL_DATABASE_POLL_ACTIVE_INTERVAL: Duration = Duration::from_secs(1);
 const SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const SQLITE_EXTERNAL_DATABASE_POLL_BACKOFF_AFTER_IDLE_READS: u32 = 3;
@@ -98,7 +102,7 @@ impl RxStorageSqlite {
                 .execute_batch(
                     r#"
                 PRAGMA journal_mode = WAL;
-                PRAGMA busy_timeout = 10000;
+                PRAGMA busy_timeout = 30000;
                 PRAGMA synchronous = NORMAL;
                 PRAGMA foreign_keys = ON;
                 "#,
